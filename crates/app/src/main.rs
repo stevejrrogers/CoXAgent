@@ -72,6 +72,10 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
                 Ok(changelog)
             }
         }
+        Command::Serve { port } => {
+            coxagent_presentation::serve(store, port).await?;
+            Ok(String::new())
+        }
         Command::Run {
             work_dir,
             context,

@@ -5,8 +5,10 @@
 //! application ports without touching domain/application.
 
 pub mod cli;
+pub mod server;
 
 pub use cli::{parse, Cli, Command};
+pub use server::serve;
 
 use coxagent_application::state::ProjectState;
 use coxagent_domain::ticket::Status;

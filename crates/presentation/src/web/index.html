@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>CoXAgent</title>
+<style>
+  :root{
+    --bg:#0D1117; --surf:#161B22; --surf2:#1C2128; --border:#30363D; --border2:#21262D;
+    --text:#E6EDF3; --muted:#7D8590; --dim:#484F58;
+    --blue:#58A6FF; --green:#3FB950; --amber:#E3B341; --red:#F85149;
+    --purple:#BC8CFF; --teal:#39D353; --orange:#F0883E;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;font-size:14px}
+  a{color:var(--blue);text-decoration:none}
+  .header{display:flex;align-items:center;gap:12px;padding:12px 20px;
+    background:var(--surf);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:5}
+  .logo{width:34px;height:34px;border-radius:8px;flex-shrink:0;
+    background:linear-gradient(135deg,var(--blue),var(--purple));
+    display:flex;align-items:center;justify-content:center;font-size:18px}
+  .title{font-weight:700;font-size:16px}
+  .sub{font-size:12px;color:var(--muted)}
+  .spacer{flex:1}
+  .pill{padding:4px 10px;border-radius:20px;background:var(--surf2);
+    border:1px solid var(--border);font-size:12px;color:var(--muted)}
+  .pill b{color:var(--text)}
+  .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--green);
+    margin-right:5px;vertical-align:middle;animation:pulse 2s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+  .wrap{padding:18px 20px;max-width:1400px;margin:0 auto}
+  h2{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);
+    margin:22px 0 10px;font-weight:600}
+  /* agents */
+  .agents{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+  .agent{background:var(--surf);border:1px solid var(--border);border-radius:10px;padding:12px 14px}
+  .agent .role{font-size:13px;font-weight:600;margin-bottom:2px}
+  .agent .st{font-size:11px;color:var(--muted)}
+  .agent .st.run{color:var(--green)}
+  .agent .desc{font-size:11px;color:var(--dim);margin-top:6px;line-height:1.4}
+  /* board */
+  .layout{display:grid;grid-template-columns:1fr 300px;gap:20px;align-items:start}
+  .cols{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px}
+  .col{background:var(--surf);border:1px solid var(--border);border-radius:10px;
+    padding:10px;min-height:80px}
+  .col h3{margin:0 0 8px;font-size:12px;display:flex;align-items:center;gap:6px}
+  .col h3 .n{margin-left:auto;background:var(--surf2);border-radius:10px;
+    padding:1px 7px;font-size:11px;color:var(--muted)}
+  .card{background:var(--surf2);border:1px solid var(--border2);border-radius:8px;
+    padding:9px 10px;margin-bottom:8px;border-left:2px solid var(--dim)}
+  .card .cid{font-size:11px;color:var(--muted);font-family:ui-monospace,monospace}
+  .card .ct{font-size:13px;margin:3px 0 6px;line-height:1.35}
+  .badges{display:flex;gap:5px;flex-wrap:wrap}
+  .b{font-size:10px;padding:1px 7px;border-radius:10px;font-weight:600}
+  .b.high{background:rgba(248,81,73,.15);color:var(--red)}
+  .b.medium{background:rgba(227,179,65,.15);color:var(--amber)}
+  .b.low{background:rgba(125,133,144,.15);color:var(--muted)}
+  .b.ui{background:rgba(188,140,255,.15);color:var(--purple)}
+  .b.bug{background:rgba(248,81,73,.15);color:var(--red)}
+  .empty{color:var(--dim);font-size:12px;text-align:center;padding:14px 0}
+  /* changelog */
+  .side{background:var(--surf);border:1px solid var(--border);border-radius:10px;padding:14px}
+  .rel{border-left:2px solid var(--border);padding:0 0 14px 12px;margin-left:4px;position:relative}
+  .rel:before{content:"";position:absolute;left:-5px;top:3px;width:8px;height:8px;
+    border-radius:50%;background:var(--green)}
+  .rel .v{font-weight:600;font-size:13px}
+  .rel .d{font-size:11px;color:var(--muted)}
+  .rel .t{font-size:12px;color:var(--muted);margin-top:2px}
+  .foot{color:var(--dim);font-size:11px;text-align:center;padding:20px}
+</style>
+</head>
+<body>
+  <div class="header">
+    <div class="logo">🤖</div>
+    <div>
+      <div class="title">CoXAgent</div>
+      <div class="sub" id="sub">autonomous software team</div>
+    </div>
+    <div class="spacer"></div>
+    <div class="pill"><span class="dot"></span>live</div>
+    <div class="pill">version <b id="ver">—</b></div>
+    <div class="pill">tickets <b id="tc">0</b></div>
+  </div>
+
+  <div class="wrap">
+    <h2>Team</h2>
+    <div class="agents" id="agents"></div>
+
+    <div class="layout">
+      <div>
+        <h2>Feature board</h2>
+        <div class="cols" id="features"></div>
+        <h2>Bugs</h2>
+        <div class="cols" id="bugs"></div>
+      </div>
+      <div>
+        <h2>Changelog</h2>
+        <div class="side" id="changelog"></div>
+      </div>
+    </div>
+    <div class="foot" id="foot">connecting…</div>
+  </div>
+
+<script>
+const AGENTS = [
+  ["BA","proposes features"],["PO","owns priority"],["SM","runs the process"],
+  ["SA","designs the how"],["PD","owns UX"],["DEV-BUG","fixes bugs"],
+  ["DEV-FEATURE","builds features"],["TEST","verifies + finds bugs"],["DOCS","writes guides"]
+];
+const FCOLS = [
+  ["pending","Pending","var(--muted)"],["ready","Ready","var(--blue)"],
+  ["in_progress","In progress","var(--amber)"],["done","Done","var(--green)"],
+  ["documented","Documented","var(--teal)"]
+];
+const BCOLS = [
+  ["open","Open","var(--red)"],["fixed","Fixed","var(--amber)"],["verified","Verified","var(--green)"]
+];
+const esc = s => (s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+
+function card(t){
+  const ui = t.has_ui ? '<span class="b ui">UI</span>' : '';
+  const bug = t.type==="bug" ? '<span class="b bug">bug</span>' : '';
+  return `<div class="card"><div class="cid">${esc(t.id)}</div>
+    <div class="ct">${esc(t.title)}</div>
+    <div class="badges"><span class="b ${t.priority}">${t.priority}</span>${ui}${bug}</div></div>`;
+}
+function column([key,label,color],tickets){
+  const items = tickets.filter(t=>t.status===key);
+  const body = items.length ? items.map(card).join("") : '<div class="empty">—</div>';
+  return `<div class="col"><h3><span style="color:${color}">●</span>${label}
+    <span class="n">${items.length}</span></h3>${body}</div>`;
+}
+function render(s){
+  document.getElementById("ver").textContent = s.current_version;
+  document.getElementById("tc").textContent = s.tickets.length;
+  const active = s.tickets.filter(t=>t.status==="in_progress");
+  document.getElementById("agents").innerHTML = AGENTS.map(([r,d])=>{
+    const running = active.length && (r==="DEV-FEATURE"||r==="DEV-BUG");
+    return `<div class="agent"><div class="role">${r}</div>
+      <div class="st ${running?'run':''}">${running?'● working':'○ standby'}</div>
+      <div class="desc">${d}</div></div>`;
+  }).join("");
+  const feats = s.tickets.filter(t=>t.type!=="bug");
+  const bugs  = s.tickets.filter(t=>t.type==="bug");
+  document.getElementById("features").innerHTML = FCOLS.map(c=>column(c,feats)).join("");
+  document.getElementById("bugs").innerHTML = BCOLS.map(c=>column(c,bugs)).join("");
+  const h = s.history||[];
+  document.getElementById("changelog").innerHTML = h.length
+    ? [...h].reverse().map(r=>`<div class="rel"><div class="v">v${esc(r.version)}</div>
+        <div class="d">${esc((r.at||"").split("T")[0])}</div>
+        <div class="t">${esc(r.title)} <span style="color:var(--dim)">(${esc(r.ticket)})</span></div></div>`).join("")
+    : '<div class="empty">no releases yet</div>';
+  document.getElementById("foot").textContent = "updated " + new Date().toLocaleTimeString();
+}
+async function tick(){
+  try{
+    const r = await fetch("/api/state"); const s = await r.json();
+    render(s);
+  }catch(e){ document.getElementById("foot").textContent = "disconnected — retrying…"; }
+}
+tick(); setInterval(tick, 3000);
+</script>
+</body>
+</html>

@@ -55,6 +55,12 @@ pub enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Serve the web dashboard.
+    Serve {
+        /// Port to listen on.
+        #[arg(long, default_value_t = 4000)]
+        port: u16,
+    },
 }
 
 /// Parse process arguments into a [`Cli`].
