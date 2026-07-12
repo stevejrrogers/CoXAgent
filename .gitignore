@@ -1,0 +1,10 @@
+/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# Runtime workspace artifacts (managed projects live elsewhere)
+/state/
+/logs/
+/codebase/
+
+.DS_Store

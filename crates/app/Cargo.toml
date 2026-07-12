@@ -1,0 +1,20 @@
+[package]
+name = "coxagent-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "coxagent"
+path = "src/main.rs"
+
+[dependencies]
+coxagent-domain.workspace = true
+coxagent-application.workspace = true
+coxagent-infrastructure.workspace = true
+coxagent-presentation.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

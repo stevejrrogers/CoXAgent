@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/domain",
+    "crates/application",
+    "crates/infrastructure",
+    "crates/presentation",
+    "crates/app",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+repository = "https://github.com/org/coxagent"
+
+[workspace.dependencies]
+# Internal crates
+coxagent-domain = { path = "crates/domain" }
+coxagent-application = { path = "crates/application" }
+coxagent-infrastructure = { path = "crates/infrastructure" }
+coxagent-presentation = { path = "crates/presentation" }
+
+# External
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "sync", "time"] }
+time = { version = "0.3", features = ["serde", "formatting", "parsing", "macros"] }
+semver = { version = "1", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+fs4 = { version = "0.13", features = ["sync"] }
+tracing = "0.1"
+tempfile = "3"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+warnings = "deny"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+module_name_repetitions = "allow"
+# "CoXAgent" is a CamelCase product name that appears throughout doc comments;
+# doc_markdown would flag every mention as a missing-backtick code item.
+doc_markdown = "allow"
