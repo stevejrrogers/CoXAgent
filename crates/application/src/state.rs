@@ -47,6 +47,14 @@ pub struct Spend {
     pub by_role: std::collections::BTreeMap<String, f64>,
 }
 
+/// The last deployment outcome, surfaced on the dashboard.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeployStatus {
+    pub at: String,
+    pub ok: bool,
+    pub summary: String,
+}
+
 /// A sprint (scrum mode): a fixed window of cycles with a goal and a committed
 /// set of tickets. Kanban mode leaves this `None`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,6 +84,8 @@ pub struct ProjectState {
     pub spend: Spend,
     #[serde(default)]
     pub sprint: Option<Sprint>,
+    #[serde(default)]
+    pub deploy: Option<DeployStatus>,
 }
 
 impl Default for ProjectState {
@@ -89,6 +99,7 @@ impl Default for ProjectState {
             activity: Vec::new(),
             spend: Spend::default(),
             sprint: None,
+            deploy: None,
         }
     }
 }
@@ -109,7 +120,7 @@ impl ProjectState {
     }
 }
 
-fn now_rfc3339() -> String {
+pub(crate) fn now_rfc3339() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default()

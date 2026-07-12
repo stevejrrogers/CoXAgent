@@ -20,12 +20,26 @@ pub fn advance(state: &mut ProjectState, cycle: u64, length: u64) -> Option<u32>
     let committed = open_backlog(state);
     state.sprint = Some(Sprint {
         number,
-        goal: format!("Sprint {number}"),
+        goal: goal_from(state, &committed),
         started_cycle: cycle,
         length_cycles: length,
         committed,
     });
     Some(number)
+}
+
+/// A readable goal from the first few committed ticket titles.
+fn goal_from(state: &ProjectState, committed: &[TicketId]) -> String {
+    let titles: Vec<&str> = committed
+        .iter()
+        .filter_map(|id| state.ticket(id).map(coxagent_domain::Ticket::title))
+        .take(3)
+        .collect();
+    if titles.is_empty() {
+        "Stabilise and polish".to_owned()
+    } else {
+        format!("Ship {}", titles.join(", "))
+    }
 }
 
 /// Feature/chore tickets not yet shipped — the work a sprint commits to.

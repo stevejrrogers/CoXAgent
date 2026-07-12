@@ -164,7 +164,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         if (report.feature_done.is_some() || report.bug_fixed.is_some()) && self.deploy.is_some() {
             if let Some(deploy) = &self.deploy {
                 match deploy.deploy(&self.work_dir).await {
-                    Ok(r) if r.deployed => self.log("DEPLOY", &r.summary, None).await,
+                    Ok(r) if r.deployed => self.record_deploy(r.success, &r.summary).await,
                     Ok(_) => {}
                     Err(e) => report.errors.push(format!("DEPLOY: {e}")),
                 }
@@ -191,10 +191,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         report
     }
 
-    /// Append a single activity entry. Best-effort.
-    async fn log(&self, agent: &str, action: &str, ticket: Option<String>) {
+    /// Record a deploy outcome (activity + dashboard status). Best-effort.
+    async fn record_deploy(&self, ok: bool, summary: &str) {
         if let Ok(mut state) = self.store.load().await {
-            state.log_activity(agent, action, ticket);
+            let at = crate::state::now_rfc3339();
+            state.log_activity("DEPLOY", summary, None);
+            state.deploy = Some(crate::state::DeployStatus {
+                at,
+                ok,
+                summary: summary.to_owned(),
+            });
             let _ = self.store.save(&state).await;
         }
     }

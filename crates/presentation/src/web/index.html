@@ -130,6 +130,7 @@
     <div class="content">
       <div class="view on" id="view-overview">
         <div class="kpis" id="kpis"></div>
+        <div id="ov-deploy"></div>
         <div class="row2">
           <div class="panel"><h4><i class="ti ti-activity" style="color:var(--accent2)"></i> Recent activity <span class="mo" onclick="nav('activity')">view all</span></h4><div id="ov-activity"></div></div>
           <div class="panel"><h4><i class="ti ti-history" style="color:var(--accent2)"></i> Releases</h4><div id="ov-changelog"></div></div>
@@ -221,6 +222,7 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
         <div style="font-size:17px;font-weight:600;margin:12px 0 4px">Ready to build</div>
         <div style="color:var(--muted);font-size:13px;max-width:440px;margin:0 auto 6px">The team is standing by. Press <b style="color:var(--text)">Resume</b> to start the loop — BA proposes features, SA designs them, DEV builds, TEST verifies, DOCS writes guides.</div>
         <div style="color:var(--dim);font-size:12px">Set engines and workflow in <a onclick="nav('settings')" style="color:var(--accent2);cursor:pointer">Settings</a>.</div></div>`;
+      document.getElementById("ov-deploy").innerHTML='';
       document.getElementById("ov-activity").innerHTML='<div class="empty">activity appears as agents work</div>';
       document.getElementById("ov-changelog").innerHTML='<div class="empty">no releases yet</div>';
       return;
@@ -228,6 +230,11 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
     const m=metricsFrom(s);
     const spend=s.spend||{};
     document.getElementById("kpis").innerHTML=[kpi("Shipped",m.shipped),kpi("In flight",m.inflight),kpi("Open bugs",m.openBugs),kpi("Documented",m.docd),kpi("Releases",m.releases),kpi("Cost",money(spend.total_cost_usd))].join("");
+    const dp=s.deploy;
+    document.getElementById("ov-deploy").innerHTML=dp?`<div class="panel" style="margin-top:16px;display:flex;align-items:center;gap:13px">
+      <div class="av" style="width:36px;height:36px;background:${dp.ok?'var(--green)':'var(--red)'}22;color:${dp.ok?'var(--green)':'var(--red)'}"><i class="ti ti-${dp.ok?'cloud-check':'cloud-x'}"></i></div>
+      <div style="flex:1"><div style="font-size:13px;font-weight:600">Deployment ${dp.ok?'healthy':'failed'}</div><div style="font-size:12px;color:var(--muted)">${esc(dp.summary)}</div></div>
+      <div style="font-size:11px;color:var(--dim)">${esc((dp.at||"").slice(0,16).replace("T"," "))}</div></div>`:"";
     const act=[...(s.activity||[])].reverse().slice(0,7);
     document.getElementById("ov-activity").innerHTML=act.length?act.map(actItem).join(""):'<div class="empty">no activity yet</div>';
     const h=s.history||[];
