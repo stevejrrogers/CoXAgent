@@ -1,0 +1,215 @@
+//! `RunBaUseCase` — the first agent slice. Composes the BA prompt, runs the
+//! engine, parses the proposed features, and adds them to the backlog through
+//! the same guarded `AddTicket` path. The agent proposes; code writes state.
+
+use crate::config::Config;
+use crate::error::AppError;
+use crate::ports::outbound::{AgentEnginePort, AgentRequest, StateStorePort};
+use crate::prompts;
+use crate::use_cases::{AddTicketInput, AddTicketUseCase};
+use coxagent_domain::{Complexity, Priority, Role, TicketId, TicketType};
+use serde::Deserialize;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+/// A feature proposed by the BA. Deserialized from the engine's JSON output.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProposedFeature {
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    pub priority: Priority,
+    pub complexity: Complexity,
+    #[serde(default)]
+    pub has_ui: bool,
+}
+
+/// Runs the BA agent and appends its proposals to the backlog.
+pub struct RunBaUseCase<S: StateStorePort, E: AgentEnginePort> {
+    store: Arc<S>,
+    engine: Arc<E>,
+    config: Config,
+    work_dir: PathBuf,
+    context: String,
+}
+
+impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
+    pub fn new(
+        store: Arc<S>,
+        engine: Arc<E>,
+        config: Config,
+        work_dir: PathBuf,
+        context: String,
+    ) -> Self {
+        Self {
+            store,
+            engine,
+            config,
+            work_dir,
+            context,
+        }
+    }
+
+    /// Execute the BA cycle, returning the ids of the tickets created.
+    ///
+    /// # Errors
+    /// - [`AppError::Port`] when the engine fails or returns unparseable output.
+    /// - [`AppError::Domain`] when a proposed feature is invalid.
+    pub async fn execute(&self) -> Result<Vec<TicketId>, AppError> {
+        let _choice = self.config.engine.resolve(Role::Ba);
+        let request = AgentRequest {
+            role: Role::Ba,
+            system_prompt: prompts::system_prompt(prompts::BA),
+            task_prompt: format!(
+                "Product context and current backlog:\n{}\n\nPropose new features now.",
+                self.context
+            ),
+            work_dir: self.work_dir.clone(),
+            timeout: Duration::from_secs(600),
+        };
+
+        let outcome = self.engine.run(request).await?;
+        if !outcome.succeeded() {
+            return Err(crate::error::PortError::Backend(format!(
+                "BA engine exited with {:?}: {}",
+                outcome.exit_code,
+                outcome.stderr.trim()
+            ))
+            .into());
+        }
+
+        let proposals = parse_proposals(&outcome.stdout)
+            .map_err(|e| crate::error::PortError::Corrupt(format!("BA output: {e}")))?;
+
+        let adder = AddTicketUseCase::new(Arc::clone(&self.store));
+        let mut created = Vec::with_capacity(proposals.len());
+        for p in proposals {
+            let id = adder
+                .execute(AddTicketInput {
+                    ticket_type: TicketType::Feature,
+                    title: p.title,
+                    description: p.description,
+                    priority: p.priority,
+                    complexity: p.complexity,
+                    has_ui: p.has_ui,
+                })
+                .await?;
+            created.push(id);
+        }
+        Ok(created)
+    }
+}
+
+/// Parse the engine output into proposals, tolerating surrounding prose by
+/// extracting the outermost JSON array.
+fn parse_proposals(raw: &str) -> Result<Vec<ProposedFeature>, String> {
+    let start = raw.find('[').ok_or("no JSON array found")?;
+    let end = raw.rfind(']').ok_or("no closing bracket")?;
+    if end < start {
+        return Err("malformed array bounds".to_owned());
+    }
+    serde_json::from_str(&raw[start..=end]).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ports::outbound::AgentOutcome;
+    use crate::state::ProjectState;
+    use crate::PortError;
+    use async_trait::async_trait;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct MemStore {
+        state: Mutex<ProjectState>,
+    }
+
+    #[async_trait]
+    impl StateStorePort for MemStore {
+        async fn load(&self) -> Result<ProjectState, PortError> {
+            Ok(self.state.lock().expect("lock").clone())
+        }
+        async fn save(&self, state: &ProjectState) -> Result<(), PortError> {
+            state.validate().map_err(PortError::Corrupt)?;
+            *self.state.lock().expect("lock") = state.clone();
+            Ok(())
+        }
+    }
+
+    struct CannedEngine {
+        stdout: String,
+        code: i32,
+    }
+
+    #[async_trait]
+    impl AgentEnginePort for CannedEngine {
+        fn id(&self) -> &'static str {
+            "canned"
+        }
+        async fn run(&self, _req: AgentRequest) -> Result<AgentOutcome, PortError> {
+            Ok(AgentOutcome {
+                stdout: self.stdout.clone(),
+                stderr: String::new(),
+                exit_code: Some(self.code),
+            })
+        }
+    }
+
+    fn run(
+        store: Arc<MemStore>,
+        engine: Arc<CannedEngine>,
+    ) -> RunBaUseCase<MemStore, CannedEngine> {
+        RunBaUseCase::new(
+            store,
+            engine,
+            Config::default(),
+            PathBuf::from("/tmp"),
+            "goal: a todo app".to_owned(),
+        )
+    }
+
+    #[tokio::test]
+    async fn ba_adds_proposed_features_to_backlog() {
+        let store = Arc::new(MemStore::default());
+        let engine = Arc::new(CannedEngine {
+            stdout: r#"Here are ideas:
+                [
+                  {"title":"Login","description":"auth","priority":"high","complexity":"medium","has_ui":true},
+                  {"title":"Export CSV","priority":"low","complexity":"small","has_ui":false}
+                ]"#
+            .to_owned(),
+            code: 0,
+        });
+        let created = run(Arc::clone(&store), engine)
+            .execute()
+            .await
+            .expect("run");
+        assert_eq!(created.len(), 2);
+        let state = store.load().await.expect("load");
+        assert_eq!(state.tickets.len(), 2);
+        assert_eq!(state.tickets[0].title(), "Login");
+        assert!(state.tickets[0].has_ui());
+    }
+
+    #[tokio::test]
+    async fn ba_errors_when_engine_fails() {
+        let store = Arc::new(MemStore::default());
+        let engine = Arc::new(CannedEngine {
+            stdout: String::new(),
+            code: 1,
+        });
+        assert!(run(store, engine).execute().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn ba_errors_on_unparseable_output() {
+        let store = Arc::new(MemStore::default());
+        let engine = Arc::new(CannedEngine {
+            stdout: "sorry, no JSON here".to_owned(),
+            code: 0,
+        });
+        assert!(run(store, engine).execute().await.is_err());
+    }
+}

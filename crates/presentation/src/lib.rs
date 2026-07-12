@@ -4,6 +4,10 @@
 //! later milestones. Presentation is swappable — a native shell reuses the same
 //! application ports without touching domain/application.
 
+pub mod cli;
+
+pub use cli::{parse, Cli, Command};
+
 use coxagent_application::state::ProjectState;
 use coxagent_domain::ticket::Status;
 use std::fmt::Write as _;
