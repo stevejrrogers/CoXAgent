@@ -4,6 +4,22 @@
 > (Python orchestrator + opencode CLI engine + state JSON + Docker deploy).
 > CoXAgent = bản Rust, sửa các điểm yếu của thiết kế gốc, thêm dashboard UI.
 
+## ✅ Trạng thái triển khai (v1 — done)
+
+**Đã xây và chạy được** (63 tests, clippy pedantic + fmt sạch): 5-crate clean architecture;
+6-agent loop BA→SA(design gate)→DEV-BUG→DEV-FEATURE→**deploy (docker)**→TEST→DOCS→governance;
+claim/release + crash recovery + per-agent error isolation; `JsonStateStore`
+(atomic+lock+backup+auto-repair) + contract test; engines claude/opencode/scripted/mock
+sau 1 port + metering; ticket alias `CXC-F001`; architecture governance (prompt-inject +
+conformance checker); **scrum** (sprint + retro); **FinOps** (token/cost per-role + budget cap);
+`DeployPort` + docker-compose adapter (verified: cycle → running container → curl OK);
+CLI (onboard/serve/run/check/changelog/discover); launchd; **dashboard SPA 7 view**
+(Overview/Team/Board/Sprint/Activity/Cost/Settings, cyan, live SSE, controllable runner,
+model-per-role, audit export).
+
+**Chưa làm (v2):** hub multi-tenant + Postgres + RBAC/SSO (M8), discussion threads + SM
+chat (M6), enterprise compliance/policy (M9–M11). Các mục dưới là thiết kế đầy đủ cho v2.
+
 ## 1. Mục tiêu
 
 Một daemon chạy 24/7, tự động phát triển một dự án phần mềm theo vòng lặp:
