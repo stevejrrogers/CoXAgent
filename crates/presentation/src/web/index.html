@@ -156,6 +156,17 @@ const AGENTS=[["BA","proposes features","--blue"],["PO","owns priority","--amber
 const FCOLS=[["pending","Pending","--muted"],["ready","Ready","--blue"],["in_progress","In progress","--amber"],["done","Done","--green"],["documented","Documented","--teal"]];
 const BCOLS=[["open","Open","--red"],["fixed","Fixed","--amber"],["verified","Verified","--green"]];
 const ROLES=["ba","po","sm","sa","pd","dev_bug","dev_feature","test","docs"];
+const MODELS={claude:["sonnet","opus","haiku"],scripted:["n/a"],mock:["n/a"],opencode:null};
+function modelControl(eng,cur,sid){
+  if(!eng)return `<input id="mdl-${sid}" value="" placeholder="uses default model" disabled style="flex:1;opacity:.45"/>`;
+  const list=MODELS[eng];
+  if(!list)return `<input id="mdl-${sid}" value="${esc(cur)}" placeholder="provider/model" style="flex:1"/>`;
+  const opts=[...list]; if(cur&&!opts.includes(cur))opts.unshift(cur);
+  return `<select id="mdl-${sid}" style="flex:1">${opts.map(m=>`<option ${m===cur?'selected':''}>${esc(m)}</option>`).join("")}</select>`;
+}
+function onEngine(sid){const eng=document.getElementById("eng-"+sid).value;
+  const list=MODELS[eng];const def=(list&&list.length)?list[0]:"";
+  document.getElementById("mc-"+sid).innerHTML=modelControl(eng,def,sid);}
 const KPI_IC={Shipped:"ti-rocket","In flight":"ti-plane-tilt","Open bugs":"ti-bug",Documented:"ti-book",Releases:"ti-versions"};
 const AC={BA:"--blue","DEV-FEATURE":"--green","DEV-BUG":"--red",SA:"--purple",TEST:"--teal",DOCS:"--blue",PO:"--amber",SM:"--teal",PD:"--purple"};
 const TITLES={overview:["Overview","project health at a glance"],team:["Team","nine agents, one loop"],board:["Board","every ticket, every stage"],activity:["Activity","what the agents are doing"],settings:["Settings","engines, models, workflow"]};
@@ -238,11 +249,11 @@ function showTicket(id){const t=(STATE.tickets||[]).find(x=>x.id===id);if(!t)ret
 async function loadSettings(){let cfg={};try{cfg=await(await fetch("/api/config")).json();}catch(e){}window._cfg=cfg;
   const def=cfg.engine&&cfg.engine.default||{engine:"claude",model:"sonnet"},per=cfg.engine&&cfg.engine.per_role||{},wf=cfg.workflow||{};
   const eng=["opencode","claude","scripted","mock"],opt=(s)=>eng.map(e=>`<option ${e===s?'selected':''}>${e}</option>`).join("");
-  let rows=`<div class="fr"><span class="lbl">Default engine</span><select id="eng-default">${opt(def.engine)}</select>
-    <input id="mdl-default" value="${esc(def.model)}" placeholder="model" style="flex:1"/></div>`;
-  rows+=ROLES.map(r=>`<div class="fr"><span class="lbl">${r}</span>
-    <select id="eng-${r}"><option value="">(default)</option>${eng.map(e=>`<option ${(per[r]||{}).engine===e?'selected':''}>${e}</option>`).join("")}</select>
-    <input id="mdl-${r}" value="${esc((per[r]||{}).model||'')}" placeholder="model override" style="flex:1"/></div>`).join("");
+  let rows=`<div class="fr"><span class="lbl">Default engine</span><select id="eng-default" onchange="onEngine('default')">${opt(def.engine)}</select>
+    <span id="mc-default" style="flex:1;display:flex">${modelControl(def.engine,def.model,'default')}</span></div>`;
+  rows+=ROLES.map(r=>{const c=per[r]||{};return `<div class="fr"><span class="lbl">${r}</span>
+    <select id="eng-${r}" onchange="onEngine('${r}')"><option value="">(default)</option>${eng.map(e=>`<option ${c.engine===e?'selected':''}>${e}</option>`).join("")}</select>
+    <span id="mc-${r}" style="flex:1;display:flex">${modelControl(c.engine||"",c.model||"",r)}</span></div>`;}).join("");
   document.getElementById("settings-body").innerHTML=`
     <div class="sec">Engines &amp; models</div>
     <div class="panel frm">${rows}</div>
