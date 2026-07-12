@@ -51,6 +51,7 @@ pub async fn serve(
         .route("/api/config", get(get_config).put(put_config))
         .route("/api/control/:action", post(control))
         .route("/api/ticket/:id/priority", post(set_priority))
+        .route("/api/ticket/:id/reject", post(reject_ticket))
         .route("/api/events", get(events))
         .with_state(AppState {
             store,
@@ -162,6 +163,30 @@ async fn set_priority(
 #[derive(serde::Deserialize)]
 struct PriorityReq {
     priority: coxagent_domain::Priority,
+}
+
+/// Reject a ticket from the dashboard (super-PO). Valid only from pending/open.
+async fn reject_ticket(State(app): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let Ok(tid) = coxagent_domain::TicketId::new(id.clone()) else {
+        return (axum::http::StatusCode::BAD_REQUEST, "bad id").into_response();
+    };
+    let Ok(mut state) = app.store.load().await else {
+        return internal_error("load failed");
+    };
+    let Some(ticket) = state.ticket_mut(&tid) else {
+        return (axum::http::StatusCode::NOT_FOUND, "no such ticket").into_response();
+    };
+    if let Err(e) = ticket.transition_to(
+        coxagent_domain::Role::User,
+        coxagent_domain::Status::Rejected,
+    ) {
+        return (axum::http::StatusCode::CONFLICT, e.to_string()).into_response();
+    }
+    state.log_activity("USER", "rejected ticket", Some(id));
+    match app.store.save(&state).await {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
 }
 
 /// Drive the runner. `action` is one of resume | pause | step | stop.

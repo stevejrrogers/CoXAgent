@@ -339,7 +339,9 @@ function showTicket(id){const t=(STATE.tickets||[]).find(x=>x.id===id);if(!t)ret
     <div class="mrow" style="display:block"><span class="lbl">Description</span><div style="margin-top:7px;color:var(--muted);line-height:1.6">${esc(t.description)||'—'}</div></div>`;
   if(tech)h+=`<div class="mrow" style="display:block;border:none"><span class="lbl">Technical design</span><pre>${esc(tech.approach)}\nfiles: ${esc((tech.files||[]).join(", "))}\napi: ${esc(tech.api_contract)}\ntest: ${esc(tech.test_plan)}</pre></div>`;
   if(ux)h+=`<div class="mrow" style="display:block;border:none"><span class="lbl">UX design</span><pre>${esc(ux.user_flow)}\nscreens: ${esc((ux.screens||[]).join(", "))}</pre></div>`;
+  if(t.status==="pending"||t.status==="open")h+=`<button onclick="rejectTicket('${t.id}')" style="margin-top:14px;background:transparent;color:var(--red);border:1px solid var(--red);border-radius:9px;padding:8px 15px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit"><i class="ti ti-ban" style="font-size:14px"></i> Reject ticket</button>`;
   document.getElementById("ticket-body").innerHTML=h;document.getElementById("ov-ticket").classList.add("open");}
+async function rejectTicket(id){try{await fetch("/api/ticket/"+id+"/reject",{method:"POST"});close_("ov-ticket");}catch(e){}}
 async function loadSettings(){let cfg={};try{cfg=await(await fetch("/api/config")).json();}catch(e){}window._cfg=cfg;
   const def=cfg.engine&&cfg.engine.default||{engine:"claude",model:"sonnet"},per=cfg.engine&&cfg.engine.per_role||{},wf=cfg.workflow||{};
   const eng=["opencode","claude","scripted","mock"],opt=(s)=>eng.map(e=>`<option ${e===s?'selected':''}>${e}</option>`).join("");
