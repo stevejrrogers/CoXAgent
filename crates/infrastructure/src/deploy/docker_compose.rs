@@ -17,6 +17,24 @@ const COMPOSE_FILES: &[&str] = &[
 ];
 const DEPLOY_TIMEOUT: Duration = Duration::from_secs(900);
 
+/// Names of currently-running compose services (best-effort; empty on error).
+async fn running_services(work_dir: &Path) -> Vec<String> {
+    let Ok(out) = Command::new("docker")
+        .args(["compose", "ps", "--services", "--status", "running"])
+        .current_dir(work_dir)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 /// Deploys via the `docker` CLI.
 #[derive(Default)]
 pub struct DockerComposeDeploy;
@@ -55,7 +73,10 @@ impl DeployPort for DockerComposeDeploy {
 
         let success = output.status.success();
         let summary = if success {
-            "docker compose up -d --build succeeded".to_owned()
+            match running_services(work_dir).await {
+                services if !services.is_empty() => format!("running: {}", services.join(", ")),
+                _ => "docker compose up -d --build succeeded".to_owned(),
+            }
         } else {
             let err = String::from_utf8_lossy(&output.stderr);
             format!(
