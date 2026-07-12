@@ -66,6 +66,16 @@ pub struct Sprint {
     pub committed: Vec<TicketId>,
 }
 
+/// A closed sprint's outcome — the velocity history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SprintRecord {
+    pub number: u32,
+    pub goal: String,
+    pub committed: usize,
+    pub done: usize,
+    pub at: String,
+}
+
 /// The whole state of one managed project.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectState {
@@ -85,6 +95,8 @@ pub struct ProjectState {
     #[serde(default)]
     pub sprint: Option<Sprint>,
     #[serde(default)]
+    pub sprints: Vec<SprintRecord>,
+    #[serde(default)]
     pub deploy: Option<DeployStatus>,
 }
 
@@ -99,6 +111,7 @@ impl Default for ProjectState {
             activity: Vec::new(),
             spend: Spend::default(),
             sprint: None,
+            sprints: Vec::new(),
             deploy: None,
         }
     }

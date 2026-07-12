@@ -16,6 +16,18 @@ pub fn advance(state: &mut ProjectState, cycle: u64, length: u64) -> Option<u32>
     if !need_open {
         return None;
     }
+    // Archive the closing sprint's outcome for the velocity history.
+    if let Some(closing) = &state.sprint {
+        let done = done_count(state);
+        let record = crate::state::SprintRecord {
+            number: closing.number,
+            goal: closing.goal.clone(),
+            committed: closing.committed.len(),
+            done,
+            at: crate::state::now_rfc3339(),
+        };
+        state.sprints.push(record);
+    }
     let number = state.sprint.as_ref().map_or(0, |s| s.number) + 1;
     let committed = open_backlog(state);
     state.sprint = Some(Sprint {

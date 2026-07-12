@@ -129,6 +129,7 @@
       <div class="chip"><span class="dot off" id="conn"></span><span id="connlbl">connecting</span></div></div>
     <div class="content">
       <div class="view on" id="view-overview">
+        <div id="ov-alerts"></div>
         <div class="kpis" id="kpis"></div>
         <div id="ov-deploy"></div>
         <div class="row2">
@@ -198,6 +199,30 @@ function metricsFrom(s){const t=s.tickets||[],h=s.history||[],isF=x=>x.type!=="b
     openBugs:t.filter(x=>x.type==="bug"&&x.status==="open").length,
     docd:t.filter(x=>x.status==="documented").length,releases:h.length};}
 function kpi(k,v){return `<div class="kpi"><div class="ic"><i class="ti ${KPI_IC[k]||'ti-point'}"></i></div><div class="v">${v}</div><div class="k">${k}</div></div>`;}
+function alertsHtml(s,m,spend){
+  const al=[];
+  if(s.deploy&&!s.deploy.ok)al.push(["red","cloud-x","Last deployment failed",esc(s.deploy.summary)]);
+  const bud=window._budget;
+  if(bud&&spend.total_cost_usd>=bud)al.push(["red","alert-triangle","Budget cap reached",money(spend.total_cost_usd)+" of "+money(bud)+" — loop paused"]);
+  else if(bud&&spend.total_cost_usd>=bud*0.8)al.push(["amber","alert-triangle","Budget nearly reached",Math.round(spend.total_cost_usd/bud*100)+"% of "+money(bud)]);
+  if(m.openBugs>=5)al.push(["amber","bug",m.openBugs+" open bugs","DEV-BUG is prioritising fixes over features"]);
+  if(!al.length)return "";
+  return al.map(([c,ic,t,d])=>`<div class="panel" style="margin-bottom:12px;display:flex;align-items:center;gap:12px;border-color:var(--${c})">
+    <i class="ti ti-${ic}" style="font-size:20px;color:var(--${c})"></i>
+    <div><div style="font-size:13px;font-weight:600">${t}</div><div style="font-size:12px;color:var(--muted)">${d}</div></div></div>`).join("");
+}
+function velocityHtml(sprints){
+  if(!sprints.length)return "";
+  const max=Math.max(...sprints.map(s=>s.committed),1);
+  const bars=sprints.slice(-10).map(s=>{const h=Math.max(6,Math.round(s.done/max*90));const hc=Math.max(6,Math.round(s.committed/max*90));
+    return `<div style="display:flex;flex-direction:column;align-items:center;gap:6px;flex:1">
+      <div style="position:relative;height:96px;width:26px;display:flex;align-items:flex-end">
+        <div style="position:absolute;bottom:0;width:100%;height:${hc}px;background:var(--card2);border-radius:4px"></div>
+        <div style="position:absolute;bottom:0;width:100%;height:${h}px;background:var(--accent2);border-radius:4px"></div></div>
+      <div style="font-size:10px;color:var(--dim)">#${s.number}</div></div>`;}).join("");
+  return `<div class="sec">Velocity</div><div class="panel"><div style="display:flex;gap:10px;align-items:flex-end">${bars}</div>
+    <div style="color:var(--dim);font-size:11px;margin-top:10px">shipped (cyan) vs committed (grey) per closed sprint</div></div>`;
+}
 function actItem(a){const col=cvar(AC[a.agent]||"--muted");
   return `<div class="act"><div class="ad" style="background:${col}22;color:${col}">${initials(a.agent)}</div>
     <div class="atx"><span class="who">${esc(a.agent)}</span> ${esc(a.action)} ${a.ticket?`<span class="tk">${esc(a.ticket)}</span>`:''}</div>
@@ -222,6 +247,7 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
         <div style="font-size:17px;font-weight:600;margin:12px 0 4px">Ready to build</div>
         <div style="color:var(--muted);font-size:13px;max-width:440px;margin:0 auto 6px">The team is standing by. Press <b style="color:var(--text)">Resume</b> to start the loop — BA proposes features, SA designs them, DEV builds, TEST verifies, DOCS writes guides.</div>
         <div style="color:var(--dim);font-size:12px">Set engines and workflow in <a onclick="nav('settings')" style="color:var(--accent2);cursor:pointer">Settings</a>.</div></div>`;
+      document.getElementById("ov-alerts").innerHTML='';
       document.getElementById("ov-deploy").innerHTML='';
       document.getElementById("ov-activity").innerHTML='<div class="empty">activity appears as agents work</div>';
       document.getElementById("ov-changelog").innerHTML='<div class="empty">no releases yet</div>';
@@ -229,6 +255,7 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
     }
     const m=metricsFrom(s);
     const spend=s.spend||{};
+    document.getElementById("ov-alerts").innerHTML=alertsHtml(s,m,spend);
     document.getElementById("kpis").innerHTML=[kpi("Shipped",m.shipped),kpi("In flight",m.inflight),kpi("Open bugs",m.openBugs),kpi("Documented",m.docd),kpi("Releases",m.releases),kpi("Cost",money(spend.total_cost_usd))].join("");
     const dp=s.deploy;
     document.getElementById("ov-deploy").innerHTML=dp?`<div class="panel" style="margin-top:16px;display:flex;align-items:center;gap:13px">
@@ -279,7 +306,8 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
         <div class="panel"><div style="background:var(--card2);border-radius:8px;height:12px;overflow:hidden;margin-bottom:6px"><div style="width:${pct}%;height:100%;background:var(--accent2)"></div></div>
           <div style="color:var(--dim);font-size:11px">${done.length} of ${total} committed tickets shipped this sprint</div></div>
         <div class="sec">Committed tickets</div>
-        <div class="panel">${rows||'<div class="empty">nothing committed</div>'}</div>`;
+        <div class="panel">${rows||'<div class="empty">nothing committed</div>'}</div>
+        ${velocityHtml(s.sprints||[])}`;
     }
   }else if(CUR==="insights"){
     const sp=s.spend||{by_role:{}};const tok=(sp.input_tokens||0)+(sp.output_tokens||0);
