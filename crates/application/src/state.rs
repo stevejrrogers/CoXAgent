@@ -47,6 +47,17 @@ pub struct Spend {
     pub by_role: std::collections::BTreeMap<String, f64>,
 }
 
+/// A sprint (scrum mode): a fixed window of cycles with a goal and a committed
+/// set of tickets. Kanban mode leaves this `None`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Sprint {
+    pub number: u32,
+    pub goal: String,
+    pub started_cycle: u64,
+    pub length_cycles: u64,
+    pub committed: Vec<TicketId>,
+}
+
 /// The whole state of one managed project.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectState {
@@ -63,6 +74,8 @@ pub struct ProjectState {
     pub activity: Vec<ActivityEntry>,
     #[serde(default)]
     pub spend: Spend,
+    #[serde(default)]
+    pub sprint: Option<Sprint>,
 }
 
 impl Default for ProjectState {
@@ -75,6 +88,7 @@ impl Default for ProjectState {
             history: Vec::new(),
             activity: Vec::new(),
             spend: Spend::default(),
+            sprint: None,
         }
     }
 }

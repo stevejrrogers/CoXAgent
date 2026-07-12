@@ -112,6 +112,7 @@
       <a data-v="overview" class="on" onclick="nav('overview')"><i class="ti ti-layout-dashboard"></i> Overview</a>
       <a data-v="team" onclick="nav('team')"><i class="ti ti-users"></i> Team</a>
       <a data-v="board" onclick="nav('board')"><i class="ti ti-columns"></i> Board</a>
+      <a data-v="sprint" onclick="nav('sprint')"><i class="ti ti-run"></i> Sprint</a>
       <a data-v="activity" onclick="nav('activity')"><i class="ti ti-activity"></i> Activity</a>
       <a data-v="insights" onclick="nav('insights')"><i class="ti ti-coin"></i> Cost</a>
       <a data-v="settings" onclick="nav('settings')"><i class="ti ti-settings"></i> Settings</a>
@@ -144,6 +145,7 @@
         <div class="filters"><span style="font-size:12px;color:var(--muted)">Filter</span><select class="sel" id="act-filter" onchange="renderActive()"><option value="">all agents</option></select></div>
         <div class="panel"><div id="activity-full"></div></div>
       </div>
+      <div class="view" id="view-sprint"><div id="sprint-body"></div></div>
       <div class="view" id="view-insights"><div class="kpis" id="cost-kpis"></div>
         <div class="sec">Cost by agent</div><div class="panel" id="cost-roles"></div>
         <div class="sec">Budget</div><div class="panel" id="cost-budget"></div></div>
@@ -175,7 +177,7 @@ const KPI_IC={Shipped:"ti-rocket","In flight":"ti-plane-tilt","Open bugs":"ti-bu
 const money=n=>"$"+(Number(n)||0).toFixed(2);
 const fmtK=n=>{n=Number(n)||0;return n>=1000?(n/1000).toFixed(1)+"k":String(n);};
 const AC={BA:"--blue","DEV-FEATURE":"--green","DEV-BUG":"--red",SA:"--purple",TEST:"--teal",DOCS:"--blue",PO:"--amber",SM:"--teal",PD:"--purple"};
-const TITLES={overview:["Overview","project health at a glance"],team:["Team","nine agents, one loop"],board:["Board","every ticket, every stage"],activity:["Activity","what the agents are doing"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
+const TITLES={overview:["Overview","project health at a glance"],team:["Team","nine agents, one loop"],board:["Board","every ticket, every stage"],activity:["Activity","what the agents are doing"],sprint:["Sprint","the current scrum window"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
 const esc=s=>(s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 const cvar=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim()||"#888";
 let STATE={}, CUR="overview", BF="all", INIT_ACT=false;
@@ -241,6 +243,26 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
       sel.innerHTML='<option value="">all agents</option>'+agents.map(a=>`<option>${esc(a)}</option>`).join("");INIT_ACT=true;}
     const f=sel.value;let act=[...(s.activity||[])].reverse();if(f)act=act.filter(a=>a.agent===f);
     document.getElementById("activity-full").innerHTML=act.length?act.map(actItem).join(""):'<div class="empty">no activity</div>';
+  }else if(CUR==="sprint"){
+    const sp=s.sprint;
+    if(!sp){document.getElementById("sprint-body").innerHTML='<div class="panel"><div class="empty">Kanban mode — no sprints. Switch to scrum in Settings.</div></div>';}
+    else{
+      const done=(sp.committed||[]).filter(id=>{const t=(s.tickets||[]).find(x=>x.id===id);return t&&(t.status==="done"||t.status==="documented");});
+      const total=(sp.committed||[]).length,pct=total?Math.round(done.length/total*100):0;
+      const rows=(sp.committed||[]).map(id=>{const t=(s.tickets||[]).find(x=>x.id===id)||{id,title:"(removed)",status:"?"};
+        const shipped=t.status==="done"||t.status==="documented";
+        return `<div class="act"><div class="ad" style="background:${shipped?'var(--green)':'var(--dim)'}22;color:${shipped?'var(--green)':'var(--muted)'}"><i class="ti ti-${shipped?'check':'circle'}" style="font-size:13px"></i></div>
+          <div class="atx"><span class="tk">${esc(t.id)}</span> ${esc(t.title)}</div><span class="tm">${esc(t.status)}</span></div>`;}).join("");
+      document.getElementById("sprint-body").innerHTML=`
+        <div class="kpis"><div class="kpi"><div class="ic"><i class="ti ti-flag"></i></div><div class="v">#${sp.number}</div><div class="k">${esc(sp.goal)}</div></div>
+          <div class="kpi"><div class="ic"><i class="ti ti-checkbox"></i></div><div class="v">${done.length}/${total}</div><div class="k">committed shipped</div></div>
+          <div class="kpi"><div class="ic"><i class="ti ti-percentage"></i></div><div class="v">${pct}%</div><div class="k">sprint progress</div></div></div>
+        <div class="sec">Progress</div>
+        <div class="panel"><div style="background:var(--card2);border-radius:8px;height:12px;overflow:hidden;margin-bottom:6px"><div style="width:${pct}%;height:100%;background:var(--accent2)"></div></div>
+          <div style="color:var(--dim);font-size:11px">${done.length} of ${total} committed tickets shipped this sprint</div></div>
+        <div class="sec">Committed tickets</div>
+        <div class="panel">${rows||'<div class="empty">nothing committed</div>'}</div>`;
+    }
   }else if(CUR==="insights"){
     const sp=s.spend||{by_role:{}};const tok=(sp.input_tokens||0)+(sp.output_tokens||0);
     document.getElementById("cost-kpis").innerHTML=[kpi("Total spend",money(sp.total_cost_usd)),kpi("Tokens",fmtK(tok)),kpi("Runs",sp.runs||0)].join("");
@@ -282,9 +304,12 @@ async function loadSettings(){let cfg={};try{cfg=await(await fetch("/api/config"
     <div class="panel frm">${rows}</div>
     <div class="sec">Workflow</div>
     <div class="panel frm">
+      <div class="fr"><span class="lbl">Mode</span><select id="wf-mode"><option value="kanban" ${wf.mode!=='scrum'?'selected':''}>kanban</option><option value="scrum" ${wf.mode==='scrum'?'selected':''}>scrum</option></select><span class="hint">scrum groups cycles into sprints</span></div>
+      <div class="fr"><span class="lbl">Sprint length</span><input id="wf-sp" type="number" min="1" value="${wf.sprint_length_cycles??10}" style="width:90px"/><span class="hint">cycles per sprint</span></div>
       <div class="fr"><span class="lbl">BA every N cycles</span><input id="wf-ba" type="number" min="0" value="${wf.ba_every_n_cycles??4}" style="width:90px"/><span class="hint">0 disables BA</span></div>
       <div class="fr"><span class="lbl">Feature dev</span><select id="wf-fd"><option value="true" ${wf.feature_dev_enabled!==false?'selected':''}>enabled</option><option value="false" ${wf.feature_dev_enabled===false?'selected':''}>disabled</option></select></div>
       <div class="fr"><span class="lbl">Sleep seconds</span><input id="wf-sl" type="number" min="0" value="${wf.sleep_seconds??30}" style="width:90px"/><span class="hint">between cycles</span></div>
+      <div class="fr"><span class="lbl">Budget (USD)</span><input id="wf-bg" type="number" min="0" step="0.5" value="${wf.budget_usd??''}" placeholder="none" style="width:90px"/><span class="hint">loop pauses at cap</span></div>
     </div>
     <button class="save" onclick="saveSettings()">Save changes</button>
     <span id="save-note" style="margin-left:12px;color:var(--muted);font-size:12px"></span>
@@ -292,9 +317,12 @@ async function loadSettings(){let cfg={};try{cfg=await(await fetch("/api/config"
 async function saveSettings(){const cfg=window._cfg||{engine:{},workflow:{}};cfg.engine=cfg.engine||{};cfg.workflow=cfg.workflow||{};
   cfg.engine.default={engine:val("eng-default"),model:val("mdl-default")};
   const per={};ROLES.forEach(r=>{const e=val("eng-"+r),m=val("mdl-"+r);if(e)per[r]={engine:e,model:m||"sonnet"};});cfg.engine.per_role=per;
+  cfg.workflow.mode=val("wf-mode");
+  cfg.workflow.sprint_length_cycles=parseInt(val("wf-sp")||"10",10);
   cfg.workflow.ba_every_n_cycles=parseInt(val("wf-ba")||"4",10);
   cfg.workflow.feature_dev_enabled=val("wf-fd")==="true";
   cfg.workflow.sleep_seconds=parseInt(val("wf-sl")||"30",10);
+  const bg=val("wf-bg");cfg.workflow.budget_usd=bg?parseFloat(bg):null;
   try{const res=await(await fetch("/api/config",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(cfg)})).json();
     document.getElementById("save-note").textContent=res.ok?"saved · restart to apply":"error";}catch(e){document.getElementById("save-note").textContent="error";}}
 function val(id){return document.getElementById(id).value;}

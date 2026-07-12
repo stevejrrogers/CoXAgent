@@ -72,6 +72,15 @@ impl EngineMapping {
     }
 }
 
+/// Delivery mode: continuous flow, or fixed sprint windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mode {
+    #[default]
+    Kanban,
+    Scrum,
+}
+
 /// Loop tuning.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkflowConfig {
@@ -84,6 +93,16 @@ pub struct WorkflowConfig {
     /// Optional spend cap in USD; the loop pauses when total spend reaches it.
     #[serde(default)]
     pub budget_usd: Option<f64>,
+    /// Delivery mode (kanban = continuous, scrum = sprint windows).
+    #[serde(default)]
+    pub mode: Mode,
+    /// Cycles per sprint in scrum mode.
+    #[serde(default = "default_sprint_len")]
+    pub sprint_length_cycles: u64,
+}
+
+fn default_sprint_len() -> u64 {
+    10
 }
 
 impl Default for WorkflowConfig {
@@ -93,6 +112,8 @@ impl Default for WorkflowConfig {
             feature_dev_enabled: true,
             sleep_seconds: 30,
             budget_usd: None,
+            mode: Mode::Kanban,
+            sprint_length_cycles: default_sprint_len(),
         }
     }
 }

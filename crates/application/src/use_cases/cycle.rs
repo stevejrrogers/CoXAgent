@@ -98,6 +98,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             ..CycleReport::default()
         };
 
+        // Scrum: open/roll over the sprint at the start of the cycle.
+        if self.config.workflow.mode == crate::config::Mode::Scrum {
+            if let Ok(mut state) = self.store.load().await {
+                let len = self.config.workflow.sprint_length_cycles;
+                if let Some(n) = crate::sprint::advance(&mut state, cycle, len) {
+                    state.log_activity("SM", "opened sprint", Some(format!("sprint {n}")));
+                    let _ = self.store.save(&state).await;
+                }
+            }
+        }
+
         // BA runs on the first cycle of each period. `(cycle-1) % n == 0` is
         // correct for every n including 1 (unlike `cycle % n == 1`).
         let ba_every = self.config.workflow.ba_every_n_cycles;
