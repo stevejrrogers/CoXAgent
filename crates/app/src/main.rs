@@ -72,8 +72,8 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
                 Ok(changelog)
             }
         }
-        Command::Serve { port } => {
-            coxagent_presentation::serve(store, port).await?;
+        Command::Serve { port, work_dir } => {
+            serve_with_runner(store, &args.state_dir, work_dir, port).await?;
             Ok(String::new())
         }
         Command::Run {
@@ -99,6 +99,38 @@ fn load_config(state_dir: &Path) -> Config {
         },
         Err(_) => Config::default(),
     }
+}
+
+/// Serve the dashboard while hosting the cycle runner in the background. The
+/// runner starts paused — the operator resumes/steps it from the dashboard, so
+/// hosting the loop never burns engine calls unattended.
+async fn serve_with_runner(
+    store: Arc<JsonStateStore>,
+    state_dir: &Path,
+    work_dir: PathBuf,
+    port: u16,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use coxagent_application::use_cases::{run_forever, RunCycleUseCase, RunnerHandle};
+
+    let config = load_config(state_dir);
+    let engine = build_engine(&config)?;
+    let sleep = std::time::Duration::from_secs(config.workflow.sleep_seconds);
+
+    // Recover orphaned claims before hosting the loop.
+    let recovered = RecoverUseCase::new(Arc::clone(&store)).execute().await?;
+    if !recovered.is_empty() {
+        tracing::info!("recovered {} orphaned claim(s)", recovered.len());
+    }
+
+    let context = std::fs::read_to_string(state_dir.join("project_context.md")).unwrap_or_default();
+    let cycle_uc = RunCycleUseCase::new(Arc::clone(&store), engine, config, work_dir, context);
+    let handle = Arc::new(RunnerHandle::new());
+
+    let loop_handle = Arc::clone(&handle);
+    tokio::spawn(async move { run_forever(loop_handle, cycle_uc, sleep).await });
+
+    coxagent_presentation::serve(store, handle, port).await?;
+    Ok(())
 }
 
 /// Build the engine named by the default choice in config.

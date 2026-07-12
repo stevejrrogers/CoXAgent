@@ -28,6 +28,12 @@
   .dot{width:7px;height:7px;border-radius:50%;background:var(--green)}
   .dot.live{animation:pulse 1.8s infinite}
   .dot.off{background:var(--red);animation:none}
+  .dot.paused{background:var(--amber);animation:none}
+  .ctrl{display:flex;gap:6px}
+  .ctrl button{background:var(--surf2);color:var(--text);border:1px solid var(--border);
+    border-radius:8px;padding:6px 11px;font-size:12px;cursor:pointer;font-weight:500}
+  .ctrl button:hover{border-color:var(--blue);color:var(--blue)}
+  .ctrl button:active{transform:translateY(1px)}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
   .wrap{padding:20px 22px;max-width:1440px;margin:0 auto}
   h2{font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:var(--dim);
@@ -86,6 +92,12 @@
       <div class="sub">autonomous software team</div>
     </div>
     <div class="spacer"></div>
+    <div class="ctrl">
+      <button id="btn-resume" onclick="ctl('resume')">▶ Resume</button>
+      <button id="btn-step" onclick="ctl('step')">⏭ Step</button>
+      <button id="btn-pause" onclick="ctl('pause')">⏸ Pause</button>
+    </div>
+    <div class="pill"><span class="dot off" id="runmode"></span><span id="runlbl">—</span></div>
     <div class="pill"><span class="dot off" id="conn"></span><span id="connlbl">connecting</span></div>
     <div class="pill">version <b id="ver">—</b></div>
   </div>
@@ -193,13 +205,25 @@ function setConn(on){
   document.getElementById("conn").className="dot "+(on?"live":"off");
   document.getElementById("connlbl").textContent=on?"live":"reconnecting";
 }
+function renderRunner(r){
+  if(!r)return;
+  const cls=r.mode==="running"?"live":(r.mode==="paused"?"paused":"off");
+  document.getElementById("runmode").className="dot "+cls;
+  document.getElementById("runlbl").textContent=r.mode+" · cycle "+r.cycle;
+  document.getElementById("footer").textContent=r.last_summary||"idle";
+}
+async function ctl(action){
+  try{ const r=await fetch("/api/control/"+action,{method:"POST"}); renderRunner(await r.json()); }catch(e){}
+}
 // Prefer SSE; fall back to polling if the stream drops.
 let poll=null;
+function handle(msg){ if(msg.state)render(msg.state); renderRunner(msg.runner); setConn(true); }
 function startPoll(){ if(poll)return; poll=setInterval(async()=>{
-  try{const r=await fetch("/api/state");render(await r.json());setConn(false);}catch(e){} },3000); }
+  try{const s=await(await fetch("/api/state")).json();const rn=await(await fetch("/api/runner")).json();
+    render(s);renderRunner(rn);setConn(false);}catch(e){} },3000); }
 function connect(){
   const es=new EventSource("/api/events");
-  es.onmessage=e=>{ try{render(JSON.parse(e.data));setConn(true);if(poll){clearInterval(poll);poll=null;}}catch(_){} };
+  es.onmessage=e=>{ try{handle(JSON.parse(e.data));if(poll){clearInterval(poll);poll=null;}}catch(_){} };
   es.onerror=()=>{ setConn(false); startPoll(); };
 }
 connect();

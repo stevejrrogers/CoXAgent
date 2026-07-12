@@ -1,15 +1,15 @@
-//! HTTP server (inbound adapter) — serves the embedded dashboard and a JSON
-//! API over the project state, plus a Server-Sent Events stream for live
-//! updates. Read-only in M5; control endpoints (pause, trigger, chat) land with
-//! the teamwork milestone.
+//! HTTP server (inbound adapter) — serves the embedded dashboard, a JSON API
+//! over the project state, an SSE stream for live updates, and control
+//! endpoints that drive the hosted cycle runner (resume / pause / step / stop).
 
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Json};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use coxagent_application::metrics;
 use coxagent_application::ports::outbound::StateStorePort;
+use coxagent_application::use_cases::RunnerHandle;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,25 +20,32 @@ use tokio_stream::{Stream, StreamExt};
 const INDEX_HTML: &str = include_str!("web/index.html");
 
 /// How often the SSE stream pushes a fresh snapshot.
-const STREAM_INTERVAL: Duration = Duration::from_secs(2);
+const STREAM_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Clone)]
 struct AppState {
     store: Arc<dyn StateStorePort>,
+    runner: Arc<RunnerHandle>,
 }
 
-/// Serve the dashboard and API on `port` until the process ends.
+/// Serve the dashboard and API on `port`, driving the given runner.
 ///
 /// # Errors
 /// Returns an IO error if the port cannot be bound.
-pub async fn serve(store: Arc<dyn StateStorePort>, port: u16) -> std::io::Result<()> {
+pub async fn serve(
+    store: Arc<dyn StateStorePort>,
+    runner: Arc<RunnerHandle>,
+    port: u16,
+) -> std::io::Result<()> {
     let app = Router::new()
         .route("/", get(index))
         .route("/api/health", get(health))
         .route("/api/state", get(state))
         .route("/api/metrics", get(metrics_endpoint))
+        .route("/api/runner", get(runner_status))
+        .route("/api/control/:action", post(control))
         .route("/api/events", get(events))
-        .with_state(AppState { store });
+        .with_state(AppState { store, runner });
 
     let addr = format!("127.0.0.1:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -68,17 +75,39 @@ async fn metrics_endpoint(State(app): State<AppState>) -> impl IntoResponse {
     }
 }
 
-/// SSE stream that pushes the full state as a JSON `Event` every couple seconds.
+async fn runner_status(State(app): State<AppState>) -> impl IntoResponse {
+    Json(app.runner.snapshot())
+}
+
+/// Drive the runner. `action` is one of resume | pause | step | stop.
+async fn control(State(app): State<AppState>, Path(action): Path<String>) -> impl IntoResponse {
+    match action.as_str() {
+        "resume" => app.runner.resume(),
+        "pause" => app.runner.pause(),
+        "step" => app.runner.step(),
+        "stop" => app.runner.stop(),
+        other => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": format!("unknown action {other}") })),
+            )
+                .into_response()
+        }
+    }
+    Json(app.runner.snapshot()).into_response()
+}
+
+/// SSE stream: pushes `{state, runner}` every second.
 async fn events(State(app): State<AppState>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let store = app.store;
     let stream = IntervalStream::new(tokio::time::interval(STREAM_INTERVAL)).then(move |_| {
-        let store = store.clone();
+        let app = app.clone();
         async move {
-            let data = match store.load().await {
-                Ok(s) => serde_json::to_string(&s).unwrap_or_else(|_| "{}".to_owned()),
-                Err(_) => "{}".to_owned(),
-            };
-            Ok(Event::default().data(data))
+            let state = app.store.load().await.ok();
+            let payload = serde_json::json!({
+                "state": state,
+                "runner": app.runner.snapshot(),
+            });
+            Ok(Event::default().data(payload.to_string()))
         }
     });
     Sse::new(stream).keep_alive(KeepAlive::default())

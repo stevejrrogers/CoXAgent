@@ -55,11 +55,14 @@ pub enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
-    /// Serve the web dashboard.
+    /// Serve the web dashboard and host the controllable cycle runner.
     Serve {
         /// Port to listen on.
         #[arg(long, default_value_t = 4000)]
         port: u16,
+        /// Managed codebase directory the agents work in.
+        #[arg(long, default_value = ".")]
+        work_dir: PathBuf,
     },
 }
 
