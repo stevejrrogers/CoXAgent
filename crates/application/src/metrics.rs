@@ -64,8 +64,7 @@ pub fn compute(state: &ProjectState) -> Metrics {
     for rec in &state.history {
         let day = rec.at.split('T').next().unwrap_or(&rec.at).to_owned();
         *day_map.entry(day).or_default() += 1;
-        // Ids look like `FEAT-001` or `CXC-FEAT-001`; match the type segment.
-        if rec.ticket.as_str().contains("FEAT") || rec.ticket.as_str().contains("CHORE") {
+        if is_feature_id(rec.ticket.as_str()) {
             feature_deploys += 1;
         }
     }
@@ -92,6 +91,14 @@ pub fn compute(state: &ProjectState) -> Metrics {
         deploys_by_day,
         feature_ratio_pct,
     }
+}
+
+/// Whether a ticket id denotes a feature or chore. Ids are `F001` / `C001` or
+/// alias-prefixed `CXC-F001`; the type code is the first char of the last
+/// dash-segment.
+fn is_feature_id(id: &str) -> bool {
+    let seg = id.rsplit('-').next().unwrap_or(id);
+    matches!(seg.chars().next(), Some('F' | 'C'))
 }
 
 fn status_key(s: Status) -> &'static str {
@@ -137,14 +144,14 @@ mod tests {
         let state = ProjectState {
             current_version: SemVer::new(1, 0, 0),
             tickets: vec![
-                ticket("FEAT-001", TicketType::Feature, Status::Done),
-                ticket("FEAT-002", TicketType::Feature, Status::InProgress),
-                ticket("BUG-001", TicketType::Bug, Status::Open),
-                ticket("BUG-002", TicketType::Bug, Status::Verified),
+                ticket("F001", TicketType::Feature, Status::Done),
+                ticket("F002", TicketType::Feature, Status::InProgress),
+                ticket("B001", TicketType::Bug, Status::Open),
+                ticket("B002", TicketType::Bug, Status::Verified),
             ],
             history: vec![DeployRecord {
                 version: SemVer::new(1, 0, 0),
-                ticket: TicketId::new("FEAT-001").expect("id"),
+                ticket: TicketId::new("F001").expect("id"),
                 title: "t".to_owned(),
                 at: "2026-07-12T10:00:00Z".to_owned(),
             }],

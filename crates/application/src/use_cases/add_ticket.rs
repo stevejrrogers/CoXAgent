@@ -61,16 +61,17 @@ fn mint_id(
     ticket_type: TicketType,
     state: &crate::state::ProjectState,
 ) -> Result<TicketId, AppError> {
-    let kind = match ticket_type {
-        TicketType::Feature => "FEAT",
-        TicketType::Bug => "BUG",
-        TicketType::Chore => "CHORE",
+    // One-letter type code: F(eature), B(ug), C(hore).
+    let code = match ticket_type {
+        TicketType::Feature => 'F',
+        TicketType::Bug => 'B',
+        TicketType::Chore => 'C',
     };
-    // Prefix with the project alias when set: `CXC-FEAT-001`, else `FEAT-001`.
+    // Ids read `CXC-F001` with an alias, or `F001` without one.
     let prefix = if state.alias.is_empty() {
-        kind.to_owned()
+        code.to_string()
     } else {
-        format!("{}-{kind}", state.alias)
+        format!("{}-{code}", state.alias)
     };
     let next = state
         .tickets
@@ -78,7 +79,7 @@ fn mint_id(
         .filter(|t| t.id().as_str().starts_with(&prefix))
         .count()
         + 1;
-    Ok(TicketId::new(format!("{prefix}-{next:03}"))?)
+    Ok(TicketId::new(format!("{prefix}{next:03}"))?)
 }
 
 #[cfg(test)]
@@ -132,9 +133,9 @@ mod tests {
         let b = uc.execute(input(TicketType::Feature)).await.expect("b");
         let c = uc.execute(input(TicketType::Bug)).await.expect("c");
 
-        assert_eq!(a.as_str(), "FEAT-001");
-        assert_eq!(b.as_str(), "FEAT-002");
-        assert_eq!(c.as_str(), "BUG-001");
+        assert_eq!(a.as_str(), "F001");
+        assert_eq!(b.as_str(), "F002");
+        assert_eq!(c.as_str(), "B001");
         assert_eq!(store.load().await.expect("load").tickets.len(), 3);
     }
 
