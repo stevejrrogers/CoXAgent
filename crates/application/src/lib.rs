@@ -5,6 +5,7 @@
 
 pub mod config;
 pub mod error;
+pub mod metrics;
 pub mod parsing;
 pub mod ports;
 pub mod prompts;
