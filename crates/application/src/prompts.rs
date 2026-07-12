@@ -41,8 +41,36 @@ Respond with ONLY a JSON array, no prose, each item exactly:\n\
 \"complexity\": \"small\"|\"medium\"|\"large\", \"has_ui\": boolean}\n\
 If everything passes, respond with an empty array: []";
 
+/// Tech Writer — documents ONE verified feature for end users.
+pub const DOCS: &str = "\
+You are a Tech Writer. Write a concise end-user guide for the given feature and \
+save it to `docs/<ticket-id>.md` in the working directory (what it does, where \
+to find it, a short usage example). Then print a one-line summary.";
+
 /// Compose a full system prompt for a role from the base and role sections.
 #[must_use]
 pub fn system_prompt(role_section: &str) -> String {
     format!("{BASE}\n\n{role_section}")
+}
+
+/// Render architecture stack rules as prompt constraints, so DEV/SA follow the
+/// stack proactively (governance also enforces it reactively).
+#[must_use]
+pub fn stack_constraints(rules: &[crate::conformance::StackRule]) -> String {
+    use std::fmt::Write as _;
+    if rules.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from("\n\nARCHITECTURE CONSTRAINTS (mandatory):\n");
+    for r in rules {
+        let _ = write!(s, "- `{}` MUST be {}", r.area, r.language);
+        if !r.require_any.is_empty() {
+            let _ = write!(s, " (include {})", r.require_any.join("/"));
+        }
+        if !r.forbid_ext.is_empty() {
+            let _ = write!(s, "; never use {} files here", r.forbid_ext.join("/"));
+        }
+        s.push('\n');
+    }
+    s
 }

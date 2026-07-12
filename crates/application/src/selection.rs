@@ -25,6 +25,15 @@ pub fn next_feature_needing_design(state: &ProjectState) -> Option<TicketId> {
     })
 }
 
+/// Highest-priority feature/chore in `Done` awaiting documentation.
+#[must_use]
+pub fn next_documentable(state: &ProjectState) -> Option<TicketId> {
+    best(state, |t| {
+        matches!(t.ticket_type(), TicketType::Feature | TicketType::Chore)
+            && t.status() == Status::Done
+    })
+}
+
 /// Highest-priority `ready` feature whose dependencies are all satisfied.
 #[must_use]
 pub fn next_ready_feature(state: &ProjectState) -> Option<TicketId> {

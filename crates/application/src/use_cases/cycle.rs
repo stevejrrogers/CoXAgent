@@ -6,7 +6,8 @@ use crate::config::Config;
 use crate::ports::outbound::{AgentEnginePort, StateStorePort};
 use crate::use_cases::run_dev::DevMode;
 use crate::use_cases::{
-    RunBaUseCase, RunConformanceUseCase, RunDevUseCase, RunSaUseCase, RunTestUseCase,
+    RunBaUseCase, RunConformanceUseCase, RunDevUseCase, RunDocsUseCase, RunSaUseCase,
+    RunTestUseCase,
 };
 use coxagent_domain::TicketId;
 use std::fmt::Write as _;
@@ -21,6 +22,7 @@ pub struct CycleReport {
     pub sa_readied: Option<TicketId>,
     pub bug_fixed: Option<TicketId>,
     pub feature_done: Option<TicketId>,
+    pub documented: Option<TicketId>,
     pub bugs_filed: Vec<TicketId>,
     pub errors: Vec<String>,
 }
@@ -38,6 +40,9 @@ impl CycleReport {
         }
         if let Some(f) = &self.feature_done {
             let _ = write!(s, " done {f}");
+        }
+        if let Some(d) = &self.documented {
+            let _ = write!(s, " docs {d}");
         }
         let _ = write!(s, " bugs+{}", self.bugs_filed.len());
         if !self.errors.is_empty() {
@@ -113,6 +118,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             Err(e) => report.errors.push(format!("TEST: {e}")),
         }
 
+        match self.docs().execute().await {
+            Ok(id) => report.documented = id,
+            Err(e) => report.errors.push(format!("DOCS: {e}")),
+        }
+
         // Governance: architecture-conformance drift becomes tracked bugs.
         match self.conformance().execute().await {
             Ok(mut ids) => report.bugs_filed.append(&mut ids),
@@ -153,6 +163,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
 
     fn test(&self) -> RunTestUseCase<S, E> {
         RunTestUseCase::new(
+            Arc::clone(&self.store),
+            Arc::clone(&self.engine),
+            self.config.clone(),
+            self.work_dir.clone(),
+        )
+    }
+
+    fn docs(&self) -> RunDocsUseCase<S, E> {
+        RunDocsUseCase::new(
             Arc::clone(&self.store),
             Arc::clone(&self.engine),
             self.config.clone(),
@@ -242,9 +261,10 @@ mod tests {
         assert_eq!(report.ba_created.len(), 1, "BA proposed a feature");
         assert!(report.sa_readied.is_some(), "SA readied it");
         assert!(report.feature_done.is_some(), "DEV completed it same cycle");
+        assert!(report.documented.is_some(), "DOCS documented it same cycle");
 
         let state = store.load().await.expect("load");
-        assert_eq!(state.tickets[0].status(), Status::Done);
+        assert_eq!(state.tickets[0].status(), Status::Documented);
         assert_eq!(state.current_version.to_string(), "0.1.0");
     }
 }

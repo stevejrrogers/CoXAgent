@@ -59,6 +59,13 @@ impl AgentEnginePort for ScriptedEngine {
             return Ok(Self::ok("[]".to_owned()));
         }
 
+        if sp.contains("Tech Writer") {
+            let dir = request.work_dir.join("docs");
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(dir.join("guide.md"), "# Feature guide\n\nUsage docs.\n");
+            return Ok(Self::ok("Wrote docs/guide.md".to_owned()));
+        }
+
         if sp.contains("Senior Developer") {
             // Materialise a real, runnable Quotes API into the codebase, then
             // report what changed. Idempotent: always writes the current best

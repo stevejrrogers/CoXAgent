@@ -133,9 +133,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
     fn build_request(&self, state: &ProjectState, id: &TicketId) -> AgentRequest {
         let title = state.ticket(id).map_or("", coxagent_domain::Ticket::title);
         let _choice = self.config.engine.resolve(self.mode.role());
+        let stack = prompts::stack_constraints(&self.config.architecture);
         AgentRequest {
             role: self.mode.role(),
-            system_prompt: prompts::system_prompt(prompts::DEV),
+            system_prompt: format!("{}{stack}", prompts::system_prompt(prompts::DEV)),
             task_prompt: format!("Ticket {id}: {title}\n\nImplement it now."),
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(3600),
