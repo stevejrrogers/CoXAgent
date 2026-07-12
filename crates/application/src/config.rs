@@ -16,6 +16,8 @@ pub enum EngineKind {
     Hermes,
     Gemini,
     Codex,
+    /// Deterministic offline engine for demos/tests (writes real code, no LLM).
+    Scripted,
 }
 
 impl EngineKind {
@@ -28,6 +30,7 @@ impl EngineKind {
             EngineKind::Hermes => "hermes",
             EngineKind::Gemini => "gemini",
             EngineKind::Codex => "codex",
+            EngineKind::Scripted => "scripted",
         }
     }
 

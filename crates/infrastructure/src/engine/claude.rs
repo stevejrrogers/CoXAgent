@@ -1,32 +1,31 @@
-//! `OpencodeEngine` — runs the `opencode` CLI as the agent engine.
+//! `ClaudeEngine` — runs the `claude` CLI (Claude Code) in headless print mode
+//! as the agent engine. The second engine behind `AgentEnginePort`, proving the
+//! Strategy boundary: swapping opencode for claude touches no use case.
 //!
-//! Mirrors the reference workflow: `opencode run --model provider/model
-//! --dangerously-skip-permissions --dir <workdir> <prompt>`, with the composed
-//! prompt passed as a single argument. Times out and captures stdout/stderr.
+//! Invocation: `claude -p <prompt> --model <model> --dangerously-skip-permissions`
+//! with the working directory set to the managed codebase.
 
 use async_trait::async_trait;
 use coxagent_application::ports::outbound::{AgentEnginePort, AgentOutcome, AgentRequest};
 use coxagent_application::PortError;
 use tokio::process::Command;
 
-/// Adapter over the `opencode` binary for one engine/model selection.
-pub struct OpencodeEngine {
-    /// Full `provider/model` string passed to `--model`.
+/// Adapter over the `claude` binary for one model selection.
+pub struct ClaudeEngine {
+    /// Model alias or full name (e.g. `sonnet`, `opus`, `claude-sonnet-4-6`).
     model: String,
-    /// Binary name or path (defaults to `opencode`; overridable for tests).
     binary: String,
 }
 
-impl OpencodeEngine {
+impl ClaudeEngine {
     #[must_use]
     pub fn new(model: impl Into<String>) -> Self {
         Self {
             model: model.into(),
-            binary: "opencode".to_owned(),
+            binary: "claude".to_owned(),
         }
     }
 
-    /// Override the binary path (used by discovery / tests).
     #[must_use]
     pub fn with_binary(mut self, binary: impl Into<String>) -> Self {
         self.binary = binary.into();
@@ -35,9 +34,9 @@ impl OpencodeEngine {
 }
 
 #[async_trait]
-impl AgentEnginePort for OpencodeEngine {
+impl AgentEnginePort for ClaudeEngine {
     fn id(&self) -> &'static str {
-        "opencode"
+        "claude"
     }
 
     async fn run(&self, request: AgentRequest) -> Result<AgentOutcome, PortError> {
@@ -47,22 +46,22 @@ impl AgentEnginePort for OpencodeEngine {
         );
 
         let mut cmd = Command::new(&self.binary);
-        cmd.arg("run")
+        cmd.arg("-p")
+            .arg(prompt)
             .arg("--model")
             .arg(&self.model)
+            .arg("--output-format")
+            .arg("text")
             .arg("--dangerously-skip-permissions")
-            .arg("--dir")
-            .arg(&request.work_dir)
-            .arg(prompt)
             .current_dir(&request.work_dir)
+            // No stdin: claude -p otherwise waits for piped input and warns/exits.
             .stdin(std::process::Stdio::null())
             .kill_on_drop(true);
 
-        let fut = cmd.output();
-        let output = tokio::time::timeout(request.timeout, fut)
+        let output = tokio::time::timeout(request.timeout, cmd.output())
             .await
-            .map_err(|_| PortError::Backend("opencode timed out".to_owned()))?
-            .map_err(|e| PortError::Backend(format!("spawn opencode: {e}")))?;
+            .map_err(|_| PortError::Backend("claude timed out".to_owned()))?
+            .map_err(|e| PortError::Backend(format!("spawn claude: {e}")))?;
 
         Ok(AgentOutcome {
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),

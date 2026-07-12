@@ -79,8 +79,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             ..CycleReport::default()
         };
 
+        // BA runs on the first cycle of each period. `(cycle-1) % n == 0` is
+        // correct for every n including 1 (unlike `cycle % n == 1`).
         let ba_every = self.config.workflow.ba_every_n_cycles;
-        if ba_every > 0 && cycle % ba_every == 1 {
+        if ba_every > 0 && (cycle - 1) % ba_every == 0 {
             match self.ba().execute().await {
                 Ok(ids) => report.ba_created = ids,
                 Err(e) => report.errors.push(format!("BA: {e}")),

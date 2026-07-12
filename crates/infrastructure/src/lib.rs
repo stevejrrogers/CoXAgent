@@ -5,5 +5,5 @@
 pub mod engine;
 pub mod state;
 
-pub use engine::{discover, DetectedEngine, MockEngine, OpencodeEngine};
+pub use engine::{discover, AnyEngine, ClaudeEngine, DetectedEngine, MockEngine, OpencodeEngine};
 pub use state::JsonStateStore;
