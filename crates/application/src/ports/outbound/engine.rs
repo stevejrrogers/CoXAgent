@@ -18,6 +18,14 @@ pub struct AgentRequest {
     pub timeout: Duration,
 }
 
+/// Token/cost usage reported by an engine, when it exposes it.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Usage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cost_usd: f64,
+}
+
 /// The raw result of an engine run. Parsing into domain effects is the caller's
 /// job — the engine layer stays dumb.
 #[derive(Debug, Clone)]
@@ -25,6 +33,7 @@ pub struct AgentOutcome {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: Option<i32>,
+    pub usage: Option<Usage>,
 }
 
 impl AgentOutcome {

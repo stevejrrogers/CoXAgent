@@ -10,13 +10,15 @@ mod shutdown;
 use coxagent_application::config::Config;
 use coxagent_application::ports::outbound::{AgentEnginePort, StateStorePort};
 use coxagent_application::use_cases::{RecoverUseCase, RunBaUseCase, RunCycleUseCase};
-use coxagent_infrastructure::engine::AnyEngine;
+use coxagent_application::Spend;
+use coxagent_infrastructure::engine::{AnyEngine, Meter, MeteringEngine};
 use coxagent_infrastructure::{discover, JsonStateStore};
 use coxagent_presentation::{cli, render_changelog, render_report, Command};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -54,7 +56,7 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
         }
         Command::RunBa { work_dir, context } => {
             let config = load_config(&args.state_dir);
-            let engine = build_engine(&config)?;
+            let (engine, _meter) = build_engine(&config)?;
             let uc = RunBaUseCase::new(Arc::clone(&store), engine, config, work_dir, context);
             let created = uc.execute().await?;
             let mut out = format!("BA proposed {} feature(s):\n", created.len());
@@ -133,7 +135,7 @@ async fn serve_with_runner(
     use coxagent_application::use_cases::{run_forever, RunCycleUseCase, RunnerHandle};
 
     let config = load_config(state_dir);
-    let engine = build_engine(&config)?;
+    let (engine, meter) = build_engine(&config)?;
     let sleep = std::time::Duration::from_secs(config.workflow.sleep_seconds);
 
     // Recover orphaned claims before hosting the loop.
@@ -143,7 +145,8 @@ async fn serve_with_runner(
     }
 
     let context = std::fs::read_to_string(state_dir.join("project_context.md")).unwrap_or_default();
-    let cycle_uc = RunCycleUseCase::new(Arc::clone(&store), engine, config, work_dir, context);
+    let cycle_uc = RunCycleUseCase::new(Arc::clone(&store), engine, config, work_dir, context)
+        .with_meter(meter);
     let handle = Arc::new(RunnerHandle::new());
 
     let loop_handle = Arc::clone(&handle);
@@ -157,12 +160,20 @@ async fn serve_with_runner(
     Ok(())
 }
 
-/// Build the engine named by the default choice in config.
-fn build_engine(config: &Config) -> Result<Arc<AnyEngine>, Box<dyn std::error::Error>> {
+/// The metered engine plus the spend meter it feeds.
+type BuiltEngine = (Arc<MeteringEngine<AnyEngine>>, Meter);
+
+/// Build the metered engine named by the default choice in config, plus the
+/// shared spend meter the cycle drains into state.
+fn build_engine(config: &Config) -> Result<BuiltEngine, Box<dyn std::error::Error>> {
     let choice = &config.engine.default;
-    let engine = AnyEngine::from_choice(choice)?;
-    tracing::info!("engine: {} ({})", engine.id(), choice.model);
-    Ok(Arc::new(engine))
+    let inner = AnyEngine::from_choice(choice)?;
+    tracing::info!("engine: {} ({})", inner.id(), choice.model);
+    let meter: Meter = Arc::new(Mutex::new(Spend::default()));
+    Ok((
+        Arc::new(MeteringEngine::new(inner, Arc::clone(&meter))),
+        meter,
+    ))
 }
 
 /// The continuous cycle loop with graceful shutdown.
@@ -174,7 +185,7 @@ async fn run_loop(
     max_cycles: Option<u64>,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let config = load_config(state_dir);
-    let engine = build_engine(&config)?;
+    let (engine, meter) = build_engine(&config)?;
     let sleep = std::time::Duration::from_secs(config.workflow.sleep_seconds);
 
     // Recovery: release any claims orphaned by a previous crash before looping.
@@ -183,7 +194,8 @@ async fn run_loop(
         tracing::info!("recovered {} orphaned claim(s)", recovered.len());
     }
 
-    let uc = RunCycleUseCase::new(Arc::clone(&store), engine, config, work_dir, context);
+    let uc = RunCycleUseCase::new(Arc::clone(&store), engine, config, work_dir, context)
+        .with_meter(meter);
     let shutdown = shutdown::Shutdown::listen();
     tracing::info!("cycle loop started");
 
@@ -194,6 +206,10 @@ async fn run_loop(
         tracing::info!("{}", report.summary());
         for e in &report.errors {
             tracing::warn!("{e}");
+        }
+        if report.over_budget {
+            tracing::warn!("budget cap reached — stopping loop");
+            break;
         }
         if max_cycles.is_some_and(|m| cycle >= m) {
             break;

@@ -130,6 +130,7 @@ mod tests {
                 stdout: self.stdout.clone(),
                 stderr: String::new(),
                 exit_code: Some(self.code),
+                usage: None,
             })
         }
     }

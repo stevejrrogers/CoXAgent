@@ -1,0 +1,54 @@
+//! `MeteringEngine` — a decorator over any `AgentEnginePort` that records token
+//! and cost usage into a shared accumulator, attributed per agent role. This is
+//! the enforce-by-architecture answer to AI FinOps: cost tracking is a wrapper,
+//! so no use case knows or cares about it.
+
+use async_trait::async_trait;
+use coxagent_application::ports::outbound::{AgentEnginePort, AgentOutcome, AgentRequest};
+use coxagent_application::state::Spend;
+use coxagent_application::PortError;
+use std::sync::{Arc, Mutex};
+
+/// Shared, drainable spend accumulator (deltas since the last drain).
+pub type Meter = Arc<Mutex<Spend>>;
+
+/// Wraps an engine and meters its usage.
+pub struct MeteringEngine<E: AgentEnginePort> {
+    inner: E,
+    meter: Meter,
+}
+
+impl<E: AgentEnginePort> MeteringEngine<E> {
+    pub fn new(inner: E, meter: Meter) -> Self {
+        Self { inner, meter }
+    }
+}
+
+#[async_trait]
+impl<E: AgentEnginePort> AgentEnginePort for MeteringEngine<E> {
+    fn id(&self) -> &'static str {
+        self.inner.id()
+    }
+
+    async fn run(&self, request: AgentRequest) -> Result<AgentOutcome, PortError> {
+        let role = role_key(request.role);
+        let outcome = self.inner.run(request).await?;
+        if let Some(u) = outcome.usage {
+            if let Ok(mut m) = self.meter.lock() {
+                m.total_cost_usd += u.cost_usd;
+                m.input_tokens += u.input_tokens;
+                m.output_tokens += u.output_tokens;
+                m.runs += 1;
+                *m.by_role.entry(role).or_default() += u.cost_usd;
+            }
+        }
+        Ok(outcome)
+    }
+}
+
+fn role_key(role: coxagent_domain::Role) -> String {
+    serde_json::to_value(role)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "unknown".to_owned())
+}

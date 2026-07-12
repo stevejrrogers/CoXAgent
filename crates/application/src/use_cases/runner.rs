@@ -132,6 +132,11 @@ pub async fn run_forever<S: StateStorePort, E: AgentEnginePort>(
             tracing::warn!("{e}");
         }
 
+        if report.over_budget {
+            tracing::warn!("budget cap reached — pausing loop");
+            handle.pause();
+            continue;
+        }
         if stepping {
             handle.pause();
         } else {

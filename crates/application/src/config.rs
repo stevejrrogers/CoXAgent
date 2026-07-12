@@ -73,7 +73,7 @@ impl EngineMapping {
 }
 
 /// Loop tuning.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkflowConfig {
     /// BA runs when `cycle % ba_every == 1` (0 disables BA).
     pub ba_every_n_cycles: u64,
@@ -81,6 +81,9 @@ pub struct WorkflowConfig {
     pub feature_dev_enabled: bool,
     /// Seconds to sleep between cycles.
     pub sleep_seconds: u64,
+    /// Optional spend cap in USD; the loop pauses when total spend reaches it.
+    #[serde(default)]
+    pub budget_usd: Option<f64>,
 }
 
 impl Default for WorkflowConfig {
@@ -89,12 +92,13 @@ impl Default for WorkflowConfig {
             ba_every_n_cycles: 4,
             feature_dev_enabled: true,
             sleep_seconds: 30,
+            budget_usd: None,
         }
     }
 }
 
 /// Top-level configuration persisted as `coxagent.json`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     pub engine: EngineMapping,
     #[serde(default)]

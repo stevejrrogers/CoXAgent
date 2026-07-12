@@ -28,6 +28,7 @@ impl MockEngine {
                 stdout,
                 stderr: String::new(),
                 exit_code: Some(0),
+                usage: None,
             })
             .collect();
         Self {

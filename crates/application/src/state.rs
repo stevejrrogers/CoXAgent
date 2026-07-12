@@ -35,8 +35,20 @@ pub struct ActivityEntry {
 /// Keep the activity feed bounded.
 pub const MAX_ACTIVITY: usize = 60;
 
+/// Accumulated engine spend — the FinOps view of the autonomous team.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Spend {
+    pub total_cost_usd: f64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub runs: u64,
+    /// Cost attributed per agent role (e.g. `dev_feature`).
+    #[serde(default)]
+    pub by_role: std::collections::BTreeMap<String, f64>,
+}
+
 /// The whole state of one managed project.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectState {
     pub schema_version: u32,
     /// Short project alias prefixed onto every ticket id (e.g. `CXC`). Empty for
@@ -49,6 +61,8 @@ pub struct ProjectState {
     pub history: Vec<DeployRecord>,
     #[serde(default)]
     pub activity: Vec<ActivityEntry>,
+    #[serde(default)]
+    pub spend: Spend,
 }
 
 impl Default for ProjectState {
@@ -60,6 +74,7 @@ impl Default for ProjectState {
             tickets: Vec::new(),
             history: Vec::new(),
             activity: Vec::new(),
+            spend: Spend::default(),
         }
     }
 }

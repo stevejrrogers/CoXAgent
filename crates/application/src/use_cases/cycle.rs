@@ -4,6 +4,7 @@
 
 use crate::config::Config;
 use crate::ports::outbound::{AgentEnginePort, StateStorePort};
+use crate::state::Spend;
 use crate::use_cases::run_dev::DevMode;
 use crate::use_cases::{
     RunBaUseCase, RunConformanceUseCase, RunDevUseCase, RunDocsUseCase, RunSaUseCase,
@@ -12,7 +13,7 @@ use crate::use_cases::{
 use coxagent_domain::TicketId;
 use std::fmt::Write as _;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// What happened during one cycle. Rendered for logs and the eventual dashboard.
 #[derive(Debug, Default)]
@@ -25,6 +26,8 @@ pub struct CycleReport {
     pub documented: Option<TicketId>,
     pub bugs_filed: Vec<TicketId>,
     pub errors: Vec<String>,
+    /// True when accumulated spend has crossed the configured budget cap.
+    pub over_budget: bool,
 }
 
 impl CycleReport {
@@ -59,6 +62,7 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     config: Config,
     work_dir: PathBuf,
     context: String,
+    meter: Option<Arc<Mutex<Spend>>>,
 }
 
 impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
@@ -75,7 +79,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             config,
             work_dir,
             context,
+            meter: None,
         }
+    }
+
+    /// Attach a spend meter (drained into state each cycle for FinOps tracking).
+    #[must_use]
+    pub fn with_meter(mut self, meter: Arc<Mutex<Spend>>) -> Self {
+        self.meter = Some(meter);
+        self
     }
 
     /// Run one cycle. Never returns `Err`: agent failures are collected into the
@@ -129,15 +141,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             Err(e) => report.errors.push(format!("CONFORMANCE: {e}")),
         }
 
-        self.record_activity(&report).await;
+        report.over_budget = self.record_activity(&report).await;
         report
     }
 
-    /// Append a human-readable activity trail for this cycle so the dashboard can
-    /// show what the agents did. Best-effort: a failure here never fails a cycle.
-    async fn record_activity(&self, report: &CycleReport) {
+    /// Append a human-readable activity trail plus drain the spend meter into
+    /// state. Returns whether accumulated spend has crossed the budget cap.
+    /// Best-effort: a failure here never fails a cycle.
+    async fn record_activity(&self, report: &CycleReport) -> bool {
         let Ok(mut state) = self.store.load().await else {
-            return;
+            return false;
         };
         for id in &report.ba_created {
             state.log_activity("BA", "proposed feature", Some(id.to_string()));
@@ -157,7 +170,28 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         for id in &report.bugs_filed {
             state.log_activity("TEST", "filed bug", Some(id.to_string()));
         }
+
+        // Drain the spend meter (deltas since last cycle) into persistent state.
+        if let Some(meter) = &self.meter {
+            if let Ok(mut m) = meter.lock() {
+                state.spend.total_cost_usd += m.total_cost_usd;
+                state.spend.input_tokens += m.input_tokens;
+                state.spend.output_tokens += m.output_tokens;
+                state.spend.runs += m.runs;
+                for (role, cost) in std::mem::take(&mut m.by_role) {
+                    *state.spend.by_role.entry(role).or_default() += cost;
+                }
+                *m = Spend::default();
+            }
+        }
+        let over = self
+            .config
+            .workflow
+            .budget_usd
+            .is_some_and(|cap| cap > 0.0 && state.spend.total_cost_usd >= cap);
+
         let _ = self.store.save(&state).await;
+        over
     }
 
     fn ba(&self) -> RunBaUseCase<S, E> {
@@ -265,6 +299,7 @@ mod tests {
                 stdout,
                 stderr: String::new(),
                 exit_code: Some(0),
+                usage: None,
             })
         }
     }

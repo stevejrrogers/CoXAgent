@@ -3,5 +3,5 @@
 pub mod engine;
 pub mod state_store;
 
-pub use engine::{AgentEnginePort, AgentOutcome, AgentRequest};
+pub use engine::{AgentEnginePort, AgentOutcome, AgentRequest, Usage};
 pub use state_store::StateStorePort;

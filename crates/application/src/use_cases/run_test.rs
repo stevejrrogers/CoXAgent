@@ -127,6 +127,7 @@ mod tests {
                 stdout: self.0.clone(),
                 stderr: String::new(),
                 exit_code: Some(0),
+                usage: None,
             })
         }
     }

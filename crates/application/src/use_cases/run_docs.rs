@@ -109,6 +109,7 @@ mod tests {
                 stdout: "wrote docs".to_owned(),
                 stderr: String::new(),
                 exit_code: Some(0),
+                usage: None,
             })
         }
     }
