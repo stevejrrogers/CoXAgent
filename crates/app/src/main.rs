@@ -149,7 +149,11 @@ async fn serve_with_runner(
     let loop_handle = Arc::clone(&handle);
     tokio::spawn(async move { run_forever(loop_handle, cycle_uc, sleep).await });
 
-    coxagent_presentation::serve(store, handle, port).await?;
+    let config_path = state_dir
+        .parent()
+        .unwrap_or(state_dir)
+        .join("coxagent.json");
+    coxagent_presentation::serve(store, handle, config_path, port).await?;
     Ok(())
 }
 

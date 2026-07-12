@@ -9,13 +9,13 @@
     --bg:#0B0E14; --surf:#12161F; --surf2:#171C28; --border:#242A38; --border2:#1B2130;
     --text:#E6EDF3; --muted:#8B95A7; --dim:#4A5266;
     --blue:#58A6FF; --green:#3FB950; --amber:#E3B341; --red:#F85149;
-    --purple:#BC8CFF; --teal:#39D353; --orange:#F0883E;
+    --purple:#BC8CFF; --teal:#39D353;
   }
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--text);
     font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;font-size:14px}
   .header{display:flex;align-items:center;gap:12px;padding:12px 22px;
-    background:var(--surf);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:5}
+    background:var(--surf);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:5;flex-wrap:wrap}
   .logo{width:34px;height:34px;border-radius:9px;flex-shrink:0;
     background:linear-gradient(135deg,var(--blue),var(--purple));
     display:flex;align-items:center;justify-content:center;font-size:18px}
@@ -26,206 +26,217 @@
     border:1px solid var(--border);font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px}
   .pill b{color:var(--text)}
   .dot{width:7px;height:7px;border-radius:50%;background:var(--green)}
-  .dot.live{animation:pulse 1.8s infinite}
-  .dot.off{background:var(--red);animation:none}
-  .dot.paused{background:var(--amber);animation:none}
-  .ctrl{display:flex;gap:6px}
-  .ctrl button{background:var(--surf2);color:var(--text);border:1px solid var(--border);
-    border-radius:8px;padding:6px 11px;font-size:12px;cursor:pointer;font-weight:500}
-  .ctrl button:hover{border-color:var(--blue);color:var(--blue)}
-  .ctrl button:active{transform:translateY(1px)}
+  .dot.live{animation:pulse 1.8s infinite}.dot.off{background:var(--red)}.dot.paused{background:var(--amber)}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+  .btns{display:flex;gap:6px}
+  .btns button{background:var(--surf2);color:var(--text);border:1px solid var(--border);
+    border-radius:8px;padding:6px 11px;font-size:12px;cursor:pointer;font-weight:500}
+  .btns button:hover{border-color:var(--blue);color:var(--blue)}
   .wrap{padding:20px 22px;max-width:1440px;margin:0 auto}
-  h2{font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:var(--dim);
-    margin:24px 0 12px;font-weight:700}
-  /* KPI */
+  h2{font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:var(--dim);margin:22px 0 12px;font-weight:700}
   .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
-  .kpi{background:var(--surf);border:1px solid var(--border);border-radius:12px;
-    padding:14px 16px;position:relative;overflow:hidden}
+  .kpi{background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:14px 16px;position:relative;overflow:hidden}
   .kpi:before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--accent,var(--blue))}
   .kpi .k{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
-  .kpi .v{font-size:26px;font-weight:700;margin-top:4px;letter-spacing:-.02em}
+  .kpi .v{font-size:26px;font-weight:700;margin-top:4px}
   .kpi .foot{font-size:11px;color:var(--dim);margin-top:2px}
-  .spark{display:block;margin-top:8px}
-  /* agents */
   .agents{display:grid;grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:10px}
   .agent{background:var(--surf);border:1px solid var(--border);border-radius:11px;padding:12px 14px}
   .agent .role{font-size:13px;font-weight:600;margin-bottom:3px}
   .agent .st{font-size:11px;color:var(--muted);display:flex;align-items:center;gap:5px}
   .agent .st .d{width:6px;height:6px;border-radius:50%;background:var(--dim)}
-  .agent.run{border-color:rgba(63,185,80,.4)}
-  .agent.run .st{color:var(--green)} .agent.run .st .d{background:var(--green);animation:pulse 1.6s infinite}
+  .agent.run{border-color:rgba(63,185,80,.4)} .agent.run .st{color:var(--green)}
+  .agent.run .st .d{background:var(--green);animation:pulse 1.6s infinite}
   .agent .desc{font-size:11px;color:var(--dim);margin-top:6px;line-height:1.4}
-  /* board */
   .layout{display:grid;grid-template-columns:1fr 300px;gap:20px;align-items:start}
   .cols{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px}
   .col{background:var(--surf);border:1px solid var(--border);border-radius:11px;padding:11px;min-height:80px}
   .col h3{margin:0 0 9px;font-size:12px;display:flex;align-items:center;gap:6px;font-weight:600}
   .col h3 .n{margin-left:auto;background:var(--surf2);border-radius:10px;padding:1px 8px;font-size:11px;color:var(--muted)}
-  .card{background:var(--surf2);border:1px solid var(--border2);border-radius:9px;
-    padding:10px 11px;margin-bottom:8px;border-left:2px solid var(--accent,var(--dim))}
+  .card{background:var(--surf2);border:1px solid var(--border2);border-radius:9px;padding:10px 11px;margin-bottom:8px;
+    border-left:2px solid var(--accent,var(--dim));cursor:pointer}
+  .card:hover{border-color:var(--blue)}
   .card .cid{font-size:11px;color:var(--muted);font-family:ui-monospace,monospace}
   .card .ct{font-size:13px;margin:3px 0 7px;line-height:1.35}
   .badges{display:flex;gap:5px;flex-wrap:wrap}
   .b{font-size:10px;padding:1px 7px;border-radius:10px;font-weight:600}
-  .b.high{background:rgba(248,81,73,.15);color:var(--red)}
-  .b.medium{background:rgba(227,179,65,.15);color:var(--amber)}
-  .b.low{background:rgba(139,149,167,.15);color:var(--muted)}
-  .b.ui{background:rgba(188,140,255,.15);color:var(--purple)}
+  .b.high{background:rgba(248,81,73,.15);color:var(--red)} .b.medium{background:rgba(227,179,65,.15);color:var(--amber)}
+  .b.low{background:rgba(139,149,167,.15);color:var(--muted)} .b.ui{background:rgba(188,140,255,.15);color:var(--purple)}
   .b.bug{background:rgba(248,81,73,.15);color:var(--red)}
   .empty{color:var(--dim);font-size:12px;text-align:center;padding:14px 0}
-  .side{background:var(--surf);border:1px solid var(--border);border-radius:11px;padding:15px}
-  .rel{border-left:2px solid var(--border);padding:0 0 14px 13px;margin-left:4px;position:relative}
-  .rel:last-child{padding-bottom:0}
-  .rel:before{content:"";position:absolute;left:-5px;top:3px;width:8px;height:8px;border-radius:50%;background:var(--green)}
-  .rel .v{font-weight:600;font-size:13px}
-  .rel .d{font-size:11px;color:var(--muted)}
-  .rel .t{font-size:12px;color:var(--muted);margin-top:2px}
+  .side{background:var(--surf);border:1px solid var(--border);border-radius:11px;padding:15px;margin-bottom:16px}
+  .rel{border-left:2px solid var(--border);padding:0 0 12px 13px;margin-left:4px;position:relative}
+  .rel:last-child{padding-bottom:0} .rel:before{content:"";position:absolute;left:-5px;top:3px;width:8px;height:8px;border-radius:50%;background:var(--green)}
+  .rel .v{font-weight:600;font-size:13px} .rel .d{font-size:11px;color:var(--muted)} .rel .t{font-size:12px;color:var(--muted);margin-top:2px}
+  .act{display:flex;gap:8px;padding:6px 0;border-bottom:1px solid var(--border2);font-size:12px}
+  .act:last-child{border:none}
+  .act .who{color:var(--blue);font-weight:600;min-width:78px}
+  .act .what{color:var(--muted);flex:1}
+  .act .tk{color:var(--text);font-family:ui-monospace,monospace;font-size:11px}
+  .act .tm{color:var(--dim);font-size:10px}
+  /* modal */
+  .overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:20;padding:20px}
+  .overlay.open{display:flex}
+  .modal{background:var(--surf);border:1px solid var(--border);border-radius:14px;max-width:560px;width:100%;max-height:85vh;overflow:auto;padding:20px 22px}
+  .modal h3{margin:0 0 4px;font-size:18px}
+  .modal .x{float:right;cursor:pointer;color:var(--muted);font-size:20px;line-height:1}
+  .modal .row{display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--border2);font-size:13px}
+  .modal .row .lbl{color:var(--muted);min-width:120px}
+  .modal pre{background:var(--surf2);border:1px solid var(--border);border-radius:8px;padding:10px;font-size:12px;overflow:auto;white-space:pre-wrap}
+  .modal select,.modal input{background:var(--surf2);color:var(--text);border:1px solid var(--border);border-radius:7px;padding:5px 8px;font-size:12px}
+  .modal .save{background:var(--blue);color:#04162e;border:none;border-radius:8px;padding:8px 14px;font-weight:600;cursor:pointer;margin-top:14px}
   .foot{color:var(--dim);font-size:11px;text-align:center;padding:22px}
 </style>
 </head>
 <body>
   <div class="header">
     <div class="logo">🤖</div>
-    <div>
-      <div class="title">CoXAgent · Control Center</div>
-      <div class="sub">autonomous software team</div>
-    </div>
+    <div><div class="title">CoXAgent · Control Center</div><div class="sub">autonomous software team</div></div>
     <div class="spacer"></div>
-    <div class="ctrl">
-      <button id="btn-resume" onclick="ctl('resume')">▶ Resume</button>
-      <button id="btn-step" onclick="ctl('step')">⏭ Step</button>
-      <button id="btn-pause" onclick="ctl('pause')">⏸ Pause</button>
+    <div class="btns">
+      <button onclick="ctl('resume')">▶ Resume</button>
+      <button onclick="ctl('step')">⏭ Step</button>
+      <button onclick="ctl('pause')">⏸ Pause</button>
+      <button onclick="openSettings()">⚙ Settings</button>
     </div>
     <div class="pill"><span class="dot off" id="runmode"></span><span id="runlbl">—</span></div>
     <div class="pill"><span class="dot off" id="conn"></span><span id="connlbl">connecting</span></div>
-    <div class="pill">version <b id="ver">—</b></div>
+    <div class="pill">v<b id="ver">—</b></div>
   </div>
 
   <div class="wrap">
-    <h2>Overview</h2>
-    <div class="kpis" id="kpis"></div>
-
-    <h2>Team</h2>
-    <div class="agents" id="agents"></div>
-
+    <h2>Overview</h2><div class="kpis" id="kpis"></div>
+    <h2>Team</h2><div class="agents" id="agents"></div>
     <div class="layout">
       <div>
-        <h2>Feature board</h2>
-        <div class="cols" id="features"></div>
-        <h2>Bugs</h2>
-        <div class="cols" id="bugs"></div>
+        <h2>Feature board</h2><div class="cols" id="features"></div>
+        <h2>Bugs</h2><div class="cols" id="bugs"></div>
       </div>
       <div>
-        <h2>Changelog</h2>
-        <div class="side" id="changelog"></div>
+        <h2>Activity</h2><div class="side" id="activity"></div>
+        <h2>Changelog</h2><div class="side" id="changelog"></div>
       </div>
     </div>
     <div class="foot" id="footer">—</div>
   </div>
 
+  <div class="overlay" id="ov-ticket" onclick="if(event.target===this)close_('ov-ticket')">
+    <div class="modal" id="ticket-body"></div>
+  </div>
+  <div class="overlay" id="ov-settings" onclick="if(event.target===this)close_('ov-settings')">
+    <div class="modal" id="settings-body"></div>
+  </div>
+
 <script>
-const AGENTS = [
-  ["BA","proposes features"],["PO","owns priority"],["SM","runs the process"],
-  ["SA","designs the how"],["PD","owns UX"],["DEV-BUG","fixes bugs"],
-  ["DEV-FEATURE","builds features"],["TEST","verifies + finds bugs"],["DOCS","writes guides"]
-];
+const AGENTS=[["BA","proposes features"],["PO","owns priority"],["SM","runs the process"],
+  ["SA","designs the how"],["PD","owns UX"],["DEV-BUG","fixes bugs"],["DEV-FEATURE","builds features"],
+  ["TEST","verifies + finds bugs"],["DOCS","writes guides"]];
 const FCOLS=[["pending","Pending","var(--muted)"],["ready","Ready","var(--blue)"],
   ["in_progress","In progress","var(--amber)"],["done","Done","var(--green)"],["documented","Documented","var(--teal)"]];
 const BCOLS=[["open","Open","var(--red)"],["fixed","Fixed","var(--amber)"],["verified","Verified","var(--green)"]];
+const ROLES=["ba","po","sm","sa","pd","dev_bug","dev_feature","test","docs"];
 const esc=s=>(s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+let TICKETS={};
 
-function kpi(k,v,foot,accent){
-  return `<div class="kpi" style="--accent:${accent}"><div class="k">${k}</div>
-    <div class="v">${v}</div><div class="foot">${foot||""}</div></div>`;
-}
-function sparkline(days){
-  if(!days.length) return "";
-  const w=150,h=30,max=Math.max(...days.map(d=>d.count),1);
-  const step=days.length>1?w/(days.length-1):0;
-  const pts=days.map((d,i)=>`${(i*step).toFixed(1)},${(h-2-(d.count/max)*(h-4)).toFixed(1)}`).join(" ");
-  return `<svg class="spark" width="${w}" height="${h}"><polyline fill="none" stroke="var(--blue)"
-    stroke-width="1.5" points="${pts}"/></svg>`;
-}
+function kpi(k,v,foot,a){return `<div class="kpi" style="--accent:${a}"><div class="k">${k}</div><div class="v">${v}</div><div class="foot">${foot||""}</div></div>`;}
 function metricsFrom(s){
-  const t=s.tickets||[], h=s.history||[];
-  const isFeat=x=>x.type!=="bug";
-  const shipped=t.filter(x=>isFeat(x)&&(x.status==="done"||x.status==="documented")).length;
-  const inflight=t.filter(x=>isFeat(x)&&(x.status==="ready"||x.status==="in_progress")).length;
-  const openBugs=t.filter(x=>x.type==="bug"&&x.status==="open").length;
-  const verBugs=t.filter(x=>x.type==="bug"&&x.status==="verified").length;
-  const featDeploys=h.filter(r=>/^(FEAT|CHORE)/.test(r.ticket)).length;
-  const ratio=h.length?Math.round(featDeploys*100/h.length):0;
-  const dayMap={}; h.forEach(r=>{const d=(r.at||"").split("T")[0]; dayMap[d]=(dayMap[d]||0)+1;});
-  const days=Object.keys(dayMap).sort().map(d=>({day:d,count:dayMap[d]}));
-  return {shipped,inflight,openBugs,verBugs,releases:h.length,ratio,days};
+  const t=s.tickets||[],h=s.history||[],isF=x=>x.type!=="bug";
+  return {shipped:t.filter(x=>isF(x)&&(x.status==="done"||x.status==="documented")).length,
+    inflight:t.filter(x=>isF(x)&&(x.status==="ready"||x.status==="in_progress")).length,
+    openBugs:t.filter(x=>x.type==="bug"&&x.status==="open").length,
+    docd:t.filter(x=>x.status==="documented").length, releases:h.length};
 }
 function card(t){
-  const accent={high:"var(--red)",medium:"var(--amber)",low:"var(--dim)"}[t.priority]||"var(--dim)";
-  const ui=t.has_ui?'<span class="b ui">UI</span>':'';
-  const bug=t.type==="bug"?'<span class="b bug">bug</span>':'';
-  return `<div class="card" style="--accent:${accent}"><div class="cid">${esc(t.id)}</div>
-    <div class="ct">${esc(t.title)}</div>
-    <div class="badges"><span class="b ${t.priority}">${t.priority}</span>${ui}${bug}</div></div>`;
+  const a={high:"var(--red)",medium:"var(--amber)",low:"var(--dim)"}[t.priority]||"var(--dim)";
+  const ui=t.has_ui?'<span class="b ui">UI</span>':'', bug=t.type==="bug"?'<span class="b bug">bug</span>':'';
+  return `<div class="card" style="--accent:${a}" onclick="showTicket('${t.id}')"><div class="cid">${esc(t.id)}</div>
+    <div class="ct">${esc(t.title)}</div><div class="badges"><span class="b ${t.priority}">${t.priority}</span>${ui}${bug}</div></div>`;
 }
-function column([key,label,color],ts){
-  const items=ts.filter(t=>t.status===key);
-  const body=items.length?items.map(card).join(""):'<div class="empty">—</div>';
-  return `<div class="col"><h3><span style="color:${color}">●</span>${label}<span class="n">${items.length}</span></h3>${body}</div>`;
-}
+function column([k,l,c],ts){const items=ts.filter(t=>t.status===k);
+  return `<div class="col"><h3><span style="color:${c}">●</span>${l}<span class="n">${items.length}</span></h3>${items.length?items.map(card).join(""):'<div class="empty">—</div>'}</div>`;}
 function render(s){
+  TICKETS={}; (s.tickets||[]).forEach(t=>TICKETS[t.id]=t);
   const m=metricsFrom(s);
   document.getElementById("ver").textContent=s.current_version;
   document.getElementById("kpis").innerHTML=[
     kpi("Shipped",m.shipped,"features done","var(--green)"),
     kpi("In flight",m.inflight,"ready + in progress","var(--amber)"),
-    kpi("Open bugs",m.openBugs,m.verBugs+" verified","var(--red)"),
-    kpi("Releases",m.releases,"feature ratio "+m.ratio+"%","var(--blue)"),
-    kpi("Deploys",m.days.reduce((a,d)=>a+d.count,0),sparkline(m.days),"var(--purple)"),
-  ].join("");
-  const active=s.tickets.filter(t=>t.status==="in_progress");
+    kpi("Open bugs",m.openBugs,"needs fixing","var(--red)"),
+    kpi("Documented",m.docd,"guides written","var(--teal)"),
+    kpi("Releases",m.releases,"shipped versions","var(--blue)")].join("");
+  const active=(s.tickets||[]).filter(t=>t.status==="in_progress");
   document.getElementById("agents").innerHTML=AGENTS.map(([r,d])=>{
     const run=active.length&&(r==="DEV-FEATURE"||r==="DEV-BUG");
-    return `<div class="agent ${run?'run':''}"><div class="role">${r}</div>
-      <div class="st"><span class="d"></span>${run?'working':'standby'}</div>
-      <div class="desc">${d}</div></div>`;
+    return `<div class="agent ${run?'run':''}"><div class="role">${r}</div><div class="st"><span class="d"></span>${run?'working':'standby'}</div><div class="desc">${d}</div></div>`;
   }).join("");
-  const feats=s.tickets.filter(t=>t.type!=="bug"), bugs=s.tickets.filter(t=>t.type==="bug");
+  const feats=(s.tickets||[]).filter(t=>t.type!=="bug"), bugs=(s.tickets||[]).filter(t=>t.type==="bug");
   document.getElementById("features").innerHTML=FCOLS.map(c=>column(c,feats)).join("");
   document.getElementById("bugs").innerHTML=BCOLS.map(c=>column(c,bugs)).join("");
+  const act=[...(s.activity||[])].reverse();
+  document.getElementById("activity").innerHTML=act.length?act.map(a=>`<div class="act">
+    <span class="who">${esc(a.agent)}</span><span class="what">${esc(a.action)} ${a.ticket?`<span class="tk">${esc(a.ticket)}</span>`:''}</span>
+    <span class="tm">${esc((a.at||"").slice(11,16))}</span></div>`).join(""):'<div class="empty">no activity yet</div>';
   const h=s.history||[];
-  document.getElementById("changelog").innerHTML=h.length
-    ?[...h].reverse().map(r=>`<div class="rel"><div class="v">v${esc(r.version)}</div>
-      <div class="d">${esc((r.at||"").split("T")[0])}</div>
-      <div class="t">${esc(r.title)} <span style="color:var(--dim)">(${esc(r.ticket)})</span></div></div>`).join("")
-    :'<div class="empty">no releases yet</div>';
-  document.getElementById("footer").textContent="live · updated "+new Date().toLocaleTimeString();
+  document.getElementById("changelog").innerHTML=h.length?[...h].reverse().map(r=>`<div class="rel"><div class="v">v${esc(r.version)}</div>
+    <div class="d">${esc((r.at||"").split("T")[0])}</div><div class="t">${esc(r.title)} <span style="color:var(--dim)">(${esc(r.ticket)})</span></div></div>`).join(""):'<div class="empty">no releases yet</div>';
 }
-function setConn(on){
-  document.getElementById("conn").className="dot "+(on?"live":"off");
-  document.getElementById("connlbl").textContent=on?"live":"reconnecting";
+function showTicket(id){
+  const t=TICKETS[id]; if(!t)return;
+  const d=t.design||{}, tech=d.technical, ux=d.ux;
+  let html=`<span class="x" onclick="close_('ov-ticket')">×</span><h3>${esc(t.title)}</h3>
+    <div class="sub" style="margin-bottom:10px">${esc(t.id)} · ${esc(t.type)}</div>
+    <div class="row"><span class="lbl">Status</span><b>${esc(t.status)}</b></div>
+    <div class="row"><span class="lbl">Priority</span>${esc(t.priority)} · ${esc(t.complexity)}${t.has_ui?' · has UI':''}</div>
+    <div class="row"><span class="lbl">Depends on</span>${(t.depends_on&&t.depends_on.length)?t.depends_on.map(esc).join(", "):'—'}</div>
+    <div class="row" style="display:block"><span class="lbl">Description</span><div style="margin-top:6px;color:var(--muted)">${esc(t.description)||'—'}</div></div>`;
+  if(tech) html+=`<div class="row" style="display:block"><span class="lbl">Technical design</span>
+    <pre>${esc(tech.approach)}\nfiles: ${esc((tech.files||[]).join(", "))}\napi: ${esc(tech.api_contract)}\ntest: ${esc(tech.test_plan)}</pre></div>`;
+  if(ux) html+=`<div class="row" style="display:block"><span class="lbl">UX design</span><pre>${esc(ux.user_flow)}\nscreens: ${esc((ux.screens||[]).join(", "))}</pre></div>`;
+  document.getElementById("ticket-body").innerHTML=html;
+  document.getElementById("ov-ticket").classList.add("open");
 }
-function renderRunner(r){
-  if(!r)return;
-  const cls=r.mode==="running"?"live":(r.mode==="paused"?"paused":"off");
-  document.getElementById("runmode").className="dot "+cls;
-  document.getElementById("runlbl").textContent=r.mode+" · cycle "+r.cycle;
-  document.getElementById("footer").textContent=r.last_summary||"idle";
+async function openSettings(){
+  let cfg={}; try{cfg=await(await fetch("/api/config")).json();}catch(e){}
+  const def=cfg.engine&&cfg.engine.default||{engine:"claude",model:"sonnet"};
+  const per=cfg.engine&&cfg.engine.per_role||{};
+  const engines=["opencode","claude","scripted","mock"];
+  const opt=(sel)=>engines.map(e=>`<option ${e===sel?'selected':''}>${e}</option>`).join("");
+  let rows=`<div class="row"><span class="lbl">Default</span>
+    <select id="eng-default">${opt(def.engine)}</select>
+    <input id="mdl-default" value="${esc(def.model)}" placeholder="model" style="flex:1"/></div>`;
+  rows+=ROLES.map(r=>{const c=per[r]||{};return `<div class="row"><span class="lbl">${r}</span>
+    <select id="eng-${r}"><option value="">(default)</option>${engines.map(e=>`<option ${c.engine===e?'selected':''}>${e}</option>`).join("")}</select>
+    <input id="mdl-${r}" value="${esc(c.model||'')}" placeholder="model override" style="flex:1"/></div>`;}).join("");
+  document.getElementById("settings-body").innerHTML=`<span class="x" onclick="close_('ov-settings')">×</span>
+    <h3>Engine settings</h3><div class="sub" style="margin-bottom:10px">which engine + model each agent uses · applies on restart</div>
+    ${rows}<button class="save" onclick="saveSettings()">Save</button>
+    <span id="save-note" style="margin-left:10px;color:var(--muted);font-size:12px"></span>`;
+  document.getElementById("ov-settings").classList.add("open");
+  window._cfg=cfg;
 }
-async function ctl(action){
-  try{ const r=await fetch("/api/control/"+action,{method:"POST"}); renderRunner(await r.json()); }catch(e){}
+async function saveSettings(){
+  const cfg=window._cfg||{engine:{},workflow:{}};
+  cfg.engine=cfg.engine||{};
+  cfg.engine.default={engine:document.getElementById("eng-default").value,model:document.getElementById("mdl-default").value};
+  const per={};
+  ROLES.forEach(r=>{const e=document.getElementById("eng-"+r).value,m=document.getElementById("mdl-"+r).value;
+    if(e){per[r]={engine:e,model:m||"sonnet"};}});
+  cfg.engine.per_role=per;
+  try{const res=await(await fetch("/api/config",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(cfg)})).json();
+    document.getElementById("save-note").textContent=res.ok?"saved · restart to apply":"error";}catch(e){document.getElementById("save-note").textContent="error";}
 }
-// Prefer SSE; fall back to polling if the stream drops.
+function close_(id){document.getElementById(id).classList.remove("open");}
+function setConn(on){document.getElementById("conn").className="dot "+(on?"live":"off");document.getElementById("connlbl").textContent=on?"live":"reconnecting";}
+function renderRunner(r){if(!r)return;const c=r.mode==="running"?"live":(r.mode==="paused"?"paused":"off");
+  document.getElementById("runmode").className="dot "+c;document.getElementById("runlbl").textContent=r.mode+" · cycle "+r.cycle;
+  document.getElementById("footer").textContent=r.last_summary||"idle";}
+async function ctl(a){try{renderRunner(await(await fetch("/api/control/"+a,{method:"POST"})).json());}catch(e){}}
 let poll=null;
-function handle(msg){ if(msg.state)render(msg.state); renderRunner(msg.runner); setConn(true); }
-function startPoll(){ if(poll)return; poll=setInterval(async()=>{
-  try{const s=await(await fetch("/api/state")).json();const rn=await(await fetch("/api/runner")).json();
-    render(s);renderRunner(rn);setConn(false);}catch(e){} },3000); }
-function connect(){
-  const es=new EventSource("/api/events");
-  es.onmessage=e=>{ try{handle(JSON.parse(e.data));if(poll){clearInterval(poll);poll=null;}}catch(_){} };
-  es.onerror=()=>{ setConn(false); startPoll(); };
-}
+function handle(m){if(m.state)render(m.state);renderRunner(m.runner);setConn(true);}
+function startPoll(){if(poll)return;poll=setInterval(async()=>{try{const s=await(await fetch("/api/state")).json();const rn=await(await fetch("/api/runner")).json();render(s);renderRunner(rn);setConn(false);}catch(e){}},3000);}
+function connect(){const es=new EventSource("/api/events");
+  es.onmessage=e=>{try{handle(JSON.parse(e.data));if(poll){clearInterval(poll);poll=null;}}catch(_){}};
+  es.onerror=()=>{setConn(false);startPoll();};}
 connect();
 </script>
 </body>

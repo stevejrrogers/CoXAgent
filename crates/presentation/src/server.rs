@@ -10,7 +10,9 @@ use axum::Router;
 use coxagent_application::metrics;
 use coxagent_application::ports::outbound::StateStorePort;
 use coxagent_application::use_cases::RunnerHandle;
+use coxagent_application::Config;
 use std::convert::Infallible;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_stream::wrappers::IntervalStream;
@@ -26,6 +28,7 @@ const STREAM_INTERVAL: Duration = Duration::from_secs(1);
 struct AppState {
     store: Arc<dyn StateStorePort>,
     runner: Arc<RunnerHandle>,
+    config_path: PathBuf,
 }
 
 /// Serve the dashboard and API on `port`, driving the given runner.
@@ -35,6 +38,7 @@ struct AppState {
 pub async fn serve(
     store: Arc<dyn StateStorePort>,
     runner: Arc<RunnerHandle>,
+    config_path: PathBuf,
     port: u16,
 ) -> std::io::Result<()> {
     let app = Router::new()
@@ -43,9 +47,14 @@ pub async fn serve(
         .route("/api/state", get(state))
         .route("/api/metrics", get(metrics_endpoint))
         .route("/api/runner", get(runner_status))
+        .route("/api/config", get(get_config).put(put_config))
         .route("/api/control/:action", post(control))
         .route("/api/events", get(events))
-        .with_state(AppState { store, runner });
+        .with_state(AppState {
+            store,
+            runner,
+            config_path,
+        });
 
     let addr = format!("127.0.0.1:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -77,6 +86,28 @@ async fn metrics_endpoint(State(app): State<AppState>) -> impl IntoResponse {
 
 async fn runner_status(State(app): State<AppState>) -> impl IntoResponse {
     Json(app.runner.snapshot())
+}
+
+/// Current config (engine-per-role mapping, workflow, architecture rules).
+async fn get_config(State(app): State<AppState>) -> impl IntoResponse {
+    let cfg = std::fs::read_to_string(&app.config_path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Config>(&t).ok())
+        .unwrap_or_default();
+    Json(cfg)
+}
+
+/// Replace config. Takes effect on the next runner restart.
+async fn put_config(State(app): State<AppState>, Json(cfg): Json<Config>) -> impl IntoResponse {
+    match serde_json::to_string_pretty(&cfg) {
+        Ok(text) => match std::fs::write(&app.config_path, text) {
+            Ok(()) => {
+                Json(serde_json::json!({ "ok": true, "note": "restart to apply" })).into_response()
+            }
+            Err(e) => internal_error(&e.to_string()),
+        },
+        Err(e) => internal_error(&e.to_string()),
+    }
 }
 
 /// Drive the runner. `action` is one of resume | pause | step | stop.

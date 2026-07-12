@@ -21,6 +21,20 @@ pub struct DeployRecord {
     pub at: String,
 }
 
+/// One entry in the activity feed — who did what to which ticket, when. Powers
+/// the dashboard's "what are the agents doing" view.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivityEntry {
+    pub at: String,
+    pub agent: String,
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
+}
+
+/// Keep the activity feed bounded.
+pub const MAX_ACTIVITY: usize = 60;
+
 /// The whole state of one managed project.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectState {
@@ -33,6 +47,8 @@ pub struct ProjectState {
     pub tickets: Vec<Ticket>,
     #[serde(default)]
     pub history: Vec<DeployRecord>,
+    #[serde(default)]
+    pub activity: Vec<ActivityEntry>,
 }
 
 impl Default for ProjectState {
@@ -43,8 +59,31 @@ impl Default for ProjectState {
             current_version: SemVer::default(),
             tickets: Vec::new(),
             history: Vec::new(),
+            activity: Vec::new(),
         }
     }
+}
+
+impl ProjectState {
+    /// Append an activity entry, trimming the feed to [`MAX_ACTIVITY`].
+    pub fn log_activity(&mut self, agent: &str, action: &str, ticket: Option<String>) {
+        self.activity.push(ActivityEntry {
+            at: now_rfc3339(),
+            agent: agent.to_owned(),
+            action: action.to_owned(),
+            ticket,
+        });
+        let overflow = self.activity.len().saturating_sub(MAX_ACTIVITY);
+        if overflow > 0 {
+            self.activity.drain(0..overflow);
+        }
+    }
+}
+
+fn now_rfc3339() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default()
 }
 
 /// Derive a short uppercase alias from a project name: its capital letters

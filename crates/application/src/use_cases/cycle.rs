@@ -129,7 +129,35 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             Err(e) => report.errors.push(format!("CONFORMANCE: {e}")),
         }
 
+        self.record_activity(&report).await;
         report
+    }
+
+    /// Append a human-readable activity trail for this cycle so the dashboard can
+    /// show what the agents did. Best-effort: a failure here never fails a cycle.
+    async fn record_activity(&self, report: &CycleReport) {
+        let Ok(mut state) = self.store.load().await else {
+            return;
+        };
+        for id in &report.ba_created {
+            state.log_activity("BA", "proposed feature", Some(id.to_string()));
+        }
+        if let Some(id) = &report.sa_readied {
+            state.log_activity("SA", "designed & readied", Some(id.to_string()));
+        }
+        if let Some(id) = &report.bug_fixed {
+            state.log_activity("DEV-BUG", "fixed bug", Some(id.to_string()));
+        }
+        if let Some(id) = &report.feature_done {
+            state.log_activity("DEV-FEATURE", "implemented feature", Some(id.to_string()));
+        }
+        if let Some(id) = &report.documented {
+            state.log_activity("DOCS", "documented", Some(id.to_string()));
+        }
+        for id in &report.bugs_filed {
+            state.log_activity("TEST", "filed bug", Some(id.to_string()));
+        }
+        let _ = self.store.save(&state).await;
     }
 
     fn ba(&self) -> RunBaUseCase<S, E> {
