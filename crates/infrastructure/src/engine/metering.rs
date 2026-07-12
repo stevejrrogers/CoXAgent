@@ -52,3 +52,59 @@ fn role_key(role: coxagent_domain::Role) -> String {
         .and_then(|v| v.as_str().map(str::to_owned))
         .unwrap_or_else(|| "unknown".to_owned())
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
+    use super::*;
+    use coxagent_application::ports::outbound::Usage;
+    use coxagent_domain::Role;
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    struct Priced(f64);
+    #[async_trait]
+    impl AgentEnginePort for Priced {
+        fn id(&self) -> &'static str {
+            "priced"
+        }
+        async fn run(&self, _r: AgentRequest) -> Result<AgentOutcome, PortError> {
+            Ok(AgentOutcome {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: Some(0),
+                usage: Some(Usage {
+                    input_tokens: 100,
+                    output_tokens: 50,
+                    cost_usd: self.0,
+                }),
+            })
+        }
+    }
+
+    fn req(role: Role) -> AgentRequest {
+        AgentRequest {
+            role,
+            system_prompt: String::new(),
+            task_prompt: String::new(),
+            work_dir: PathBuf::from("/tmp"),
+            timeout: Duration::from_secs(1),
+        }
+    }
+
+    #[tokio::test]
+    async fn meters_cost_and_tokens_per_role() {
+        let meter: Meter = Arc::new(Mutex::new(Spend::default()));
+        let eng = MeteringEngine::new(Priced(0.10), Arc::clone(&meter));
+        eng.run(req(Role::DevFeature)).await.unwrap();
+        eng.run(req(Role::DevFeature)).await.unwrap();
+        eng.run(req(Role::Docs)).await.unwrap();
+
+        let m = meter.lock().unwrap();
+        assert_eq!(m.runs, 3);
+        assert_eq!(m.input_tokens, 300);
+        assert!((m.total_cost_usd - 0.30).abs() < 1e-9);
+        assert!((m.by_role["dev_feature"] - 0.20).abs() < 1e-9);
+        assert!((m.by_role["docs"] - 0.10).abs() < 1e-9);
+    }
+}

@@ -134,8 +134,8 @@ impl Default for Config {
         Self {
             engine: EngineMapping {
                 default: EngineChoice {
-                    engine: EngineKind::Opencode,
-                    model: "bizbrain/DeepSeek-V4-Pro".to_owned(),
+                    engine: EngineKind::Claude,
+                    model: "sonnet".to_owned(),
                 },
                 per_role: HashMap::new(),
             },
@@ -160,10 +160,7 @@ mod tests {
             },
         );
         assert_eq!(m.resolve(Role::Docs).model, "anthropic/haiku");
-        assert_eq!(
-            m.resolve(Role::DevFeature).model,
-            "bizbrain/DeepSeek-V4-Pro"
-        );
+        assert_eq!(m.resolve(Role::DevFeature).model, "sonnet");
     }
 
     #[test]

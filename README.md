@@ -24,15 +24,22 @@ crates/
   plus a code-enforced **architecture governance** step. Claim/release, crash
   recovery, and per-agent error isolation are all orchestrator-owned.
 - **Domain**: `Ticket` aggregate (guarded mutations), transition table + field-level
-  role permissions as pure functions. Ids carry a per-project alias (`CXC-F001`).
+  role permissions as pure functions. Ids carry a per-project alias (`CXC-F001` /
+  `CXC-B001` / `CXC-C001`).
 - **State**: `JsonStateStore` with atomic writes, file lock, rolling backups,
   auto-repair from backup, `schema_version` guard. Contract-tested for substitutability.
-- **Engines** behind one port: `opencode`, `claude`, `scripted` (offline), `mock`.
-- **Dashboard**: `coxagent serve` hosts a controllable runner (Resume/Step/Pause),
-  live SSE, KPIs, kanban, changelog, metrics API.
+- **Engines** behind one port: `claude`, `opencode`, `scripted` (offline), `mock`,
+  with a metering decorator; per-role engine/model mapping.
+- **Scrum**: optional sprint mode — sprints commit the backlog, roll over on a
+  window, and report velocity (kanban stays the default).
+- **FinOps**: real token/cost usage (from `claude --output-format json`) metered
+  per role into state; a `budget_usd` cap auto-pauses the loop.
+- **Dashboard** (`coxagent serve`): a multi-view SPA — Overview, Team, Board,
+  Sprint, Activity, Cost, Settings — over a live SSE feed, with a controllable
+  runner (Resume/Step/Pause), ticket detail, and editable engine/workflow config.
 - **Governance**: declared stack rules are injected into agent prompts (proactive)
   and checked against the codebase each cycle (reactive) — drift becomes bugs.
-- 58 tests; clippy pedantic + `-D warnings`; CI.
+- 62 tests; clippy pedantic + `-D warnings`; CI.
 
 Multi-tenant hub, RBAC/SSO, and the enterprise tier are the documented v2 roadmap
 (see PLAN.md), not part of this v1.

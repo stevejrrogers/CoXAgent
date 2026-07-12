@@ -98,11 +98,26 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             ..CycleReport::default()
         };
 
-        // Scrum: open/roll over the sprint at the start of the cycle.
+        // Scrum: open/roll over the sprint at the start of the cycle, with an
+        // SM retro line when a previous sprint closes.
         if self.config.workflow.mode == crate::config::Mode::Scrum {
             if let Ok(mut state) = self.store.load().await {
                 let len = self.config.workflow.sprint_length_cycles;
+                let prev = state.sprint.as_ref().map(|s| {
+                    (
+                        s.number,
+                        s.committed.len(),
+                        crate::sprint::done_count(&state),
+                    )
+                });
                 if let Some(n) = crate::sprint::advance(&mut state, cycle, len) {
+                    if let Some((pn, committed, done)) = prev {
+                        state.log_activity(
+                            "SM",
+                            &format!("closed sprint {pn}: {done}/{committed} shipped"),
+                            None,
+                        );
+                    }
                     state.log_activity("SM", "opened sprint", Some(format!("sprint {n}")));
                     let _ = self.store.save(&state).await;
                 }
