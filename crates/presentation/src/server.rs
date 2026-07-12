@@ -50,6 +50,7 @@ pub async fn serve(
         .route("/api/audit", get(audit))
         .route("/api/config", get(get_config).put(put_config))
         .route("/api/control/:action", post(control))
+        .route("/api/ticket/:id/priority", post(set_priority))
         .route("/api/events", get(events))
         .with_state(AppState {
             store,
@@ -130,6 +131,37 @@ async fn put_config(State(app): State<AppState>, Json(cfg): Json<Config>) -> imp
         },
         Err(e) => internal_error(&e.to_string()),
     }
+}
+
+/// Change a ticket's priority from the dashboard (acting as super-PO). Only PO
+/// authority may set priority — the aggregate enforces it.
+async fn set_priority(
+    State(app): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<PriorityReq>,
+) -> impl IntoResponse {
+    let Ok(tid) = coxagent_domain::TicketId::new(id.clone()) else {
+        return (axum::http::StatusCode::BAD_REQUEST, "bad id").into_response();
+    };
+    let Ok(mut state) = app.store.load().await else {
+        return internal_error("load failed");
+    };
+    let Some(ticket) = state.ticket_mut(&tid) else {
+        return (axum::http::StatusCode::NOT_FOUND, "no such ticket").into_response();
+    };
+    if let Err(e) = ticket.set_priority(coxagent_domain::Role::User, req.priority) {
+        return (axum::http::StatusCode::FORBIDDEN, e.to_string()).into_response();
+    }
+    state.log_activity("USER", "set priority", Some(id));
+    match app.store.save(&state).await {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct PriorityReq {
+    priority: coxagent_domain::Priority,
 }
 
 /// Drive the runner. `action` is one of resume | pause | step | stop.

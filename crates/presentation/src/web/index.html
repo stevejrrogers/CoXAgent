@@ -331,7 +331,10 @@ function showTicket(id){const t=(STATE.tickets||[]).find(x=>x.id===id);if(!t)ret
   let h=`<span class="x" onclick="close_('ov-ticket')"><i class="ti ti-x"></i></span><h3>${esc(t.title)}</h3>
     <div class="msub">${esc(t.id)} · ${esc(t.type)}</div>
     <div class="mrow"><span class="lbl">Status</span><b>${esc(t.status)}</b></div>
-    <div class="mrow"><span class="lbl">Priority</span>${esc(t.priority)} · ${esc(t.complexity)}${t.has_ui?' · has UI':''}</div>
+    <div class="mrow"><span class="lbl">Priority</span>
+      <div style="display:flex;gap:6px;align-items:center">
+        ${["high","medium","low"].map(p=>`<span onclick="setPriority('${t.id}','${p}')" style="cursor:pointer;font-size:11px;padding:3px 10px;border-radius:7px;font-weight:600;${t.priority===p?`background:var(--accentbg);color:var(--accent2)`:'background:var(--card2);color:var(--muted)'}">${p}</span>`).join("")}
+        <span style="color:var(--dim);font-size:12px;margin-left:6px">· ${esc(t.complexity)}${t.has_ui?' · UI':''}</span></div></div>
     <div class="mrow"><span class="lbl">Depends on</span>${(t.depends_on&&t.depends_on.length)?t.depends_on.map(esc).join(", "):'—'}</div>
     <div class="mrow" style="display:block"><span class="lbl">Description</span><div style="margin-top:7px;color:var(--muted);line-height:1.6">${esc(t.description)||'—'}</div></div>`;
   if(tech)h+=`<div class="mrow" style="display:block;border:none"><span class="lbl">Technical design</span><pre>${esc(tech.approach)}\nfiles: ${esc((tech.files||[]).join(", "))}\napi: ${esc(tech.api_contract)}\ntest: ${esc(tech.test_plan)}</pre></div>`;
@@ -372,6 +375,10 @@ async function saveSettings(){const cfg=window._cfg||{engine:{},workflow:{}};cfg
   try{const res=await(await fetch("/api/config",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(cfg)})).json();
     document.getElementById("save-note").textContent=res.ok?"saved · restart to apply":"error";}catch(e){document.getElementById("save-note").textContent="error";}}
 function val(id){return document.getElementById(id).value;}
+async function setPriority(id,p){
+  try{await fetch("/api/ticket/"+id+"/priority",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({priority:p})});
+    const t=(STATE.tickets||[]).find(x=>x.id===id);if(t)t.priority=p;showTicket(id);}catch(e){}
+}
 function close_(id){document.getElementById(id).classList.remove("open");}
 function setConn(on){document.getElementById("conn").className="dot "+(on?"live":"off");document.getElementById("connlbl").textContent=on?"live":"reconnecting";}
 function renderRunner(r){if(!r)return;const c=r.mode==="running"?"live":(r.mode==="paused"?"paused":"off");
