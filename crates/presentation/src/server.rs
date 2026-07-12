@@ -47,6 +47,7 @@ pub async fn serve(
         .route("/api/state", get(state))
         .route("/api/metrics", get(metrics_endpoint))
         .route("/api/runner", get(runner_status))
+        .route("/api/audit", get(audit))
         .route("/api/config", get(get_config).put(put_config))
         .route("/api/control/:action", post(control))
         .route("/api/events", get(events))
@@ -86,6 +87,27 @@ async fn metrics_endpoint(State(app): State<AppState>) -> impl IntoResponse {
 
 async fn runner_status(State(app): State<AppState>) -> impl IntoResponse {
     Json(app.runner.snapshot())
+}
+
+/// Export the activity trail as a downloadable JSON audit log.
+async fn audit(State(app): State<AppState>) -> impl IntoResponse {
+    let entries = app
+        .store
+        .load()
+        .await
+        .map(|s| s.activity)
+        .unwrap_or_default();
+    let body = serde_json::to_string_pretty(&entries).unwrap_or_else(|_| "[]".to_owned());
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "application/json"),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                "attachment; filename=\"coxagent-audit.json\"",
+            ),
+        ],
+        body,
+    )
 }
 
 /// Current config (engine-per-role mapping, workflow, architecture rules).
