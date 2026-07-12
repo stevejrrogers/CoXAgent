@@ -31,6 +31,24 @@ pub enum Command {
         #[arg(long, default_value = "A new software product.")]
         context: String,
     },
+    /// Run the continuous cycle loop (BA → DEV-BUG → DEV-FEATURE → TEST).
+    Run {
+        /// Managed codebase directory.
+        #[arg(long, default_value = ".")]
+        work_dir: PathBuf,
+        /// Product context passed to the BA agent.
+        #[arg(long, default_value = "A new software product.")]
+        context: String,
+        /// Stop after this many cycles (default: run until interrupted).
+        #[arg(long)]
+        max_cycles: Option<u64>,
+    },
+    /// Scaffold a new project workspace (greenfield onboarding).
+    Onboard {
+        /// Human-readable project name.
+        #[arg(long)]
+        name: String,
+    },
 }
 
 /// Parse process arguments into a [`Cli`].

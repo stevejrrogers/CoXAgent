@@ -4,26 +4,14 @@
 
 use crate::config::Config;
 use crate::error::AppError;
+use crate::parsing::parse_items;
 use crate::ports::outbound::{AgentEnginePort, AgentRequest, StateStorePort};
 use crate::prompts;
 use crate::use_cases::{AddTicketInput, AddTicketUseCase};
-use coxagent_domain::{Complexity, Priority, Role, TicketId, TicketType};
-use serde::Deserialize;
+use coxagent_domain::{Role, TicketId, TicketType};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-
-/// A feature proposed by the BA. Deserialized from the engine's JSON output.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ProposedFeature {
-    pub title: String,
-    #[serde(default)]
-    pub description: String,
-    pub priority: Priority,
-    pub complexity: Complexity,
-    #[serde(default)]
-    pub has_ui: bool,
-}
 
 /// Runs the BA agent and appends its proposals to the backlog.
 pub struct RunBaUseCase<S: StateStorePort, E: AgentEnginePort> {
@@ -79,7 +67,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
             .into());
         }
 
-        let proposals = parse_proposals(&outcome.stdout)
+        let proposals = parse_items(&outcome.stdout)
             .map_err(|e| crate::error::PortError::Corrupt(format!("BA output: {e}")))?;
 
         let adder = AddTicketUseCase::new(Arc::clone(&self.store));
@@ -99,17 +87,6 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
         }
         Ok(created)
     }
-}
-
-/// Parse the engine output into proposals, tolerating surrounding prose by
-/// extracting the outermost JSON array.
-fn parse_proposals(raw: &str) -> Result<Vec<ProposedFeature>, String> {
-    let start = raw.find('[').ok_or("no JSON array found")?;
-    let end = raw.rfind(']').ok_or("no closing bracket")?;
-    if end < start {
-        return Err("malformed array bounds".to_owned());
-    }
-    serde_json::from_str(&raw[start..=end]).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

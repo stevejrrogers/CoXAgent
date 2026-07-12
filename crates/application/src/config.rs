@@ -69,10 +69,33 @@ impl EngineMapping {
     }
 }
 
+/// Loop tuning.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowConfig {
+    /// BA runs when `cycle % ba_every == 1` (0 disables BA).
+    pub ba_every_n_cycles: u64,
+    /// Whether the DEV-FEATURE agent runs (false = single-dev mode).
+    pub feature_dev_enabled: bool,
+    /// Seconds to sleep between cycles.
+    pub sleep_seconds: u64,
+}
+
+impl Default for WorkflowConfig {
+    fn default() -> Self {
+        Self {
+            ba_every_n_cycles: 4,
+            feature_dev_enabled: true,
+            sleep_seconds: 30,
+        }
+    }
+}
+
 /// Top-level configuration persisted as `coxagent.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     pub engine: EngineMapping,
+    #[serde(default)]
+    pub workflow: WorkflowConfig,
 }
 
 impl Default for Config {
@@ -85,6 +108,7 @@ impl Default for Config {
                 },
                 per_role: HashMap::new(),
             },
+            workflow: WorkflowConfig::default(),
         }
     }
 }

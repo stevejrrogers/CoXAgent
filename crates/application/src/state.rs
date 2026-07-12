@@ -35,6 +35,11 @@ impl ProjectState {
         self.tickets.iter().find(|t| t.id() == id)
     }
 
+    /// Find a ticket by id for mutation (guarded methods still apply).
+    pub fn ticket_mut(&mut self, id: &TicketId) -> Option<&mut Ticket> {
+        self.tickets.iter_mut().find(|t| t.id() == id)
+    }
+
     /// Structural validation independent of transport: unique ids and every
     /// dependency referencing an existing ticket. Returns the offending detail.
     ///
