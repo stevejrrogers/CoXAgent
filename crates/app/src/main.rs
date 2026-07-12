@@ -9,10 +9,10 @@ mod shutdown;
 
 use coxagent_application::config::{Config, EngineKind};
 use coxagent_application::ports::outbound::StateStorePort;
-use coxagent_application::use_cases::{RunBaUseCase, RunCycleUseCase};
+use coxagent_application::use_cases::{RecoverUseCase, RunBaUseCase, RunCycleUseCase};
 use coxagent_infrastructure::engine::OpencodeEngine;
 use coxagent_infrastructure::{discover, JsonStateStore};
-use coxagent_presentation::{cli, render_report, Command};
+use coxagent_presentation::{cli, render_changelog, render_report, Command};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -63,6 +63,15 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
             out.push_str(&render_report(&store.load().await?));
             Ok(out)
         }
+        Command::Changelog { out } => {
+            let changelog = render_changelog(&store.load().await?);
+            if let Some(path) = out {
+                std::fs::write(&path, &changelog)?;
+                Ok(format!("wrote changelog to {}\n", path.display()))
+            } else {
+                Ok(changelog)
+            }
+        }
         Command::Run {
             work_dir,
             context,
@@ -81,8 +90,14 @@ async fn run_loop(
     let config = Config::default();
     let engine = build_opencode(&config)?;
     let sleep = std::time::Duration::from_secs(config.workflow.sleep_seconds);
-    let uc = RunCycleUseCase::new(Arc::clone(&store), engine, config, work_dir, context);
 
+    // Recovery: release any claims orphaned by a previous crash before looping.
+    let recovered = RecoverUseCase::new(Arc::clone(&store)).execute().await?;
+    if !recovered.is_empty() {
+        tracing::info!("recovered {} orphaned claim(s)", recovered.len());
+    }
+
+    let uc = RunCycleUseCase::new(Arc::clone(&store), engine, config, work_dir, context);
     let shutdown = shutdown::Shutdown::listen();
     tracing::info!("cycle loop started");
 

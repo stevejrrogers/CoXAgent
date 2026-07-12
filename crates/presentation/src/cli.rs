@@ -49,6 +49,12 @@ pub enum Command {
         #[arg(long)]
         name: String,
     },
+    /// Render the changelog from deploy history (writes to a file if given).
+    Changelog {
+        /// Optional path to write the changelog to (prints to stdout otherwise).
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 /// Parse process arguments into a [`Cli`].

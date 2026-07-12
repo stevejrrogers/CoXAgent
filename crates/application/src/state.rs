@@ -10,12 +10,25 @@ use serde::{Deserialize, Serialize};
 /// the store refuses to silently load a newer version than it understands.
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// One deployment: a version and the ticket that produced it. The changelog is
+/// rendered from these — deterministic, zero-token, never out of sync.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeployRecord {
+    pub version: SemVer,
+    pub ticket: TicketId,
+    pub title: String,
+    /// RFC3339 timestamp.
+    pub at: String,
+}
+
 /// The whole state of one managed project.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectState {
     pub schema_version: u32,
     pub current_version: SemVer,
     pub tickets: Vec<Ticket>,
+    #[serde(default)]
+    pub history: Vec<DeployRecord>,
 }
 
 impl Default for ProjectState {
@@ -24,6 +37,7 @@ impl Default for ProjectState {
             schema_version: SCHEMA_VERSION,
             current_version: SemVer::default(),
             tickets: Vec::new(),
+            history: Vec::new(),
         }
     }
 }

@@ -296,6 +296,37 @@ impl Ticket {
         Ok(())
     }
 
+    /// Release an orphaned claim back to the work queue during recovery.
+    ///
+    /// Only `System` (the orchestrator at startup) may do this: a ticket left
+    /// `InProgress` by a crashed run is returned to `Ready` (feature/chore) or
+    /// `Open` (bug) so it can be picked up again. A dedicated method rather than
+    /// a table edge, so normal agents can never "un-claim" work.
+    ///
+    /// # Errors
+    /// - [`DomainError::FieldNotPermitted`] if `actor` is not `System`.
+    /// - [`DomainError::InvalidTransition`] if the ticket is not `InProgress`.
+    pub fn release_claim(&mut self, actor: Role) -> Result<(), DomainError> {
+        if actor != Role::System {
+            return Err(DomainError::FieldNotPermitted {
+                role: actor,
+                field: "claim",
+            });
+        }
+        if self.status != Status::InProgress {
+            return Err(DomainError::InvalidTransition {
+                ticket_type: self.kind,
+                from: self.status,
+                to: self.status,
+            });
+        }
+        self.status = match self.kind {
+            TicketType::Bug => Status::Open,
+            TicketType::Feature | TicketType::Chore => Status::Ready,
+        };
+        Ok(())
+    }
+
     /// Definition of Ready: technical design present, and UX design present when
     /// the ticket has UI.
     fn check_ready(&self) -> Result<(), DomainError> {
@@ -410,5 +441,30 @@ mod tests {
         assert!(t.set_priority(Role::DevFeature, Priority::High).is_err());
         assert!(t.set_priority(Role::Po, Priority::High).is_ok());
         assert_eq!(t.priority(), Priority::High);
+    }
+
+    #[test]
+    fn system_releases_orphaned_claim_to_ready() {
+        let mut t = feature(false);
+        t.set_technical_design(Role::Sa, tech_design())
+            .expect("set");
+        t.transition_to(Role::Sa, Status::Ready).expect("ready");
+        t.transition_to(Role::DevFeature, Status::InProgress)
+            .expect("claim");
+        // Crash happens here; recovery releases the claim.
+        t.release_claim(Role::System).expect("release");
+        assert_eq!(t.status(), Status::Ready);
+    }
+
+    #[test]
+    fn non_system_cannot_release_claim() {
+        let mut t = feature(false);
+        t.set_technical_design(Role::Sa, tech_design())
+            .expect("set");
+        t.transition_to(Role::Sa, Status::Ready).expect("ready");
+        t.transition_to(Role::DevFeature, Status::InProgress)
+            .expect("claim");
+        assert!(t.release_claim(Role::DevFeature).is_err());
+        assert_eq!(t.status(), Status::InProgress);
     }
 }

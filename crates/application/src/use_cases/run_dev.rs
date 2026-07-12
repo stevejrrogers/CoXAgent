@@ -100,7 +100,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         }
 
         // Complete: reload (the run may have changed nothing we track), move to
-        // the terminal status, bump the version, persist.
+        // the terminal status, bump the version, record the deploy, persist.
         let mut state = self.store.load().await?;
         transition(
             &mut state,
@@ -108,7 +108,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             self.mode.role(),
             self.mode.complete_status(),
         )?;
-        state.current_version = state.current_version.bumped(self.mode.bump());
+        let version = state.current_version.bumped(self.mode.bump());
+        state.current_version = version.clone();
+        let title = state
+            .ticket(&id)
+            .map_or_else(String::new, |t| t.title().to_owned());
+        state.history.push(crate::state::DeployRecord {
+            version,
+            ticket: id.clone(),
+            title,
+            at: now_rfc3339(),
+        });
         self.store.save(&state).await?;
         Ok(Some(id))
     }
@@ -131,6 +141,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             timeout: Duration::from_secs(3600),
         }
     }
+}
+
+/// Current UTC time as an RFC3339 string, or a stable fallback if formatting
+/// fails (it does not, for `now_utc`).
+fn now_rfc3339() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default()
 }
 
 /// Apply a guarded transition to a ticket in state, mapping a missing ticket to

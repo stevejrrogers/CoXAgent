@@ -44,22 +44,42 @@ impl JsonStateStore {
         self.root.join(LOCK_FILE)
     }
 
-    /// Blocking load — parse state.json, or default when it is absent.
+    /// Blocking load — parse state.json, or default when it is absent. If the
+    /// file is present but corrupt, try to recover from the newest good backup.
     fn load_blocking(&self) -> Result<ProjectState, PortError> {
         let path = self.state_path();
         if !path.exists() {
             return Ok(ProjectState::default());
         }
         let bytes = std::fs::read(&path).map_err(|e| PortError::Backend(e.to_string()))?;
-        let state: ProjectState =
-            serde_json::from_slice(&bytes).map_err(|e| PortError::Corrupt(e.to_string()))?;
-        if state.schema_version > SCHEMA_VERSION {
-            return Err(PortError::Corrupt(format!(
-                "state schema_version {} is newer than supported {SCHEMA_VERSION}; upgrade coxagent",
-                state.schema_version
-            )));
+        match parse_checked(&bytes) {
+            Ok(state) => Ok(state),
+            Err(primary) => match self.recover_from_backup() {
+                Some(state) => {
+                    tracing::warn!("state.json corrupt ({primary}); recovered from backup");
+                    Ok(state)
+                }
+                None => Err(PortError::Corrupt(format!(
+                    "state.json corrupt and no usable backup: {primary}"
+                ))),
+            },
         }
-        Ok(state)
+    }
+
+    /// Return the newest backup that parses, if any.
+    fn recover_from_backup(&self) -> Option<ProjectState> {
+        let dir = self.root.join(BACKUP_DIR);
+        let mut backups: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .ok()?
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.is_file())
+            .collect();
+        backups.sort(); // timestamped names sort oldest -> newest
+        backups
+            .iter()
+            .rev()
+            .find_map(|p| std::fs::read(p).ok().and_then(|b| parse_checked(&b).ok()))
     }
 
     /// Blocking save — lock, validate, atomic rename, snapshot backup.
@@ -112,6 +132,19 @@ impl StateStorePort for JsonStateStore {
             .await
             .map_err(|e| PortError::Backend(e.to_string()))?
     }
+}
+
+/// Parse bytes into state and reject a schema newer than we understand.
+fn parse_checked(bytes: &[u8]) -> Result<ProjectState, PortError> {
+    let state: ProjectState =
+        serde_json::from_slice(bytes).map_err(|e| PortError::Corrupt(e.to_string()))?;
+    if state.schema_version > SCHEMA_VERSION {
+        return Err(PortError::Corrupt(format!(
+            "state schema_version {} is newer than supported {SCHEMA_VERSION}; upgrade coxagent",
+            state.schema_version
+        )));
+    }
+    Ok(state)
 }
 
 /// Acquire an exclusive advisory lock on the lock file.

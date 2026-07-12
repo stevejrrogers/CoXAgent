@@ -30,6 +30,23 @@ pub fn render_report(state: &ProjectState) -> String {
     out
 }
 
+/// Render a CHANGELOG from deploy history — deterministic, zero-token, always in
+/// sync with what was actually shipped (newest first).
+#[must_use]
+pub fn render_changelog(state: &ProjectState) -> String {
+    let mut out = String::from("# Changelog\n\n");
+    if state.history.is_empty() {
+        out.push_str("_No releases yet._\n");
+        return out;
+    }
+    for rec in state.history.iter().rev() {
+        let date = rec.at.split('T').next().unwrap_or(&rec.at);
+        let _ = writeln!(out, "## {} — {}", rec.version, date);
+        let _ = writeln!(out, "- {} ({})\n", rec.title, rec.ticket);
+    }
+    out
+}
+
 fn status_label(status: Status) -> &'static str {
     match status {
         Status::Pending => "pending",

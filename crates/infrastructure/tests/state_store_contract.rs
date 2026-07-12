@@ -62,6 +62,28 @@ async fn json_store_satisfies_contract() {
 }
 
 #[tokio::test]
+async fn json_store_recovers_corrupt_state_from_backup() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = JsonStateStore::new(dir.path()).expect("store");
+
+    // First save (no backup yet), then a second save which backs up the first.
+    let mut a = ProjectState::default();
+    a.tickets.push(sample_ticket("FEAT-001"));
+    store.save(&a).await.expect("save a");
+    let mut b = a.clone();
+    b.tickets.push(sample_ticket("FEAT-002"));
+    store.save(&b).await.expect("save b");
+
+    // Corrupt the live state file.
+    std::fs::write(dir.path().join("state.json"), b"{ not json").expect("corrupt");
+
+    // Load recovers the newest good backup (state A, one ticket).
+    let recovered = store.load().await.expect("recover");
+    assert_eq!(recovered.tickets.len(), 1);
+    assert_eq!(recovered.tickets[0].id().as_str(), "FEAT-001");
+}
+
+#[tokio::test]
 async fn json_store_creates_backup_on_overwrite() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = JsonStateStore::new(dir.path()).expect("store");
