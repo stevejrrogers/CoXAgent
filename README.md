@@ -34,12 +34,18 @@ crates/
   window, and report velocity (kanban stays the default).
 - **FinOps**: real token/cost usage (from `claude --output-format json`) metered
   per role into state; a `budget_usd` cap auto-pauses the loop.
-- **Dashboard** (`coxagent serve`): a multi-view SPA — Overview, Team, Board,
-  Sprint, Activity, Cost, Settings — over a live SSE feed, with a controllable
-  runner (Resume/Step/Pause), ticket detail, and editable engine/workflow config.
+- **Deploy**: after DEV, `DockerComposeDeploy` runs `docker compose up -d --build`
+  so TEST verifies a running build; deploy health surfaces on the dashboard.
+- **Observability**: every agent run's prompt + output is written to
+  `logs/transcripts/`; per-cycle activity trail with audit export.
+- **Dashboard** (`coxagent serve`): a multi-view SPA — Overview (alerts + deploy
+  health), Team, Board (filter), Sprint (velocity chart), Activity, Cost, Settings
+  — over a live SSE feed, with a controllable runner (Resume/Step/Pause) and
+  **interactive tickets** (set priority, reject) from the UI.
 - **Governance**: declared stack rules are injected into agent prompts (proactive)
   and checked against the codebase each cycle (reactive) — drift becomes bugs.
-- 62 tests; clippy pedantic + `-D warnings`; CI.
+- 63 tests; clippy pedantic + `-D warnings`; CI + tagged release binaries
+  (macOS arm64/x64, linux).
 
 Multi-tenant hub, RBAC/SSO, and the enterprise tier are the documented v2 roadmap
 (see PLAN.md), not part of this v1.
