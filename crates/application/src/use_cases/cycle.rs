@@ -5,7 +5,7 @@
 use crate::config::Config;
 use crate::ports::outbound::{AgentEnginePort, StateStorePort};
 use crate::use_cases::run_dev::DevMode;
-use crate::use_cases::{RunBaUseCase, RunDevUseCase, RunTestUseCase};
+use crate::use_cases::{RunBaUseCase, RunDevUseCase, RunSaUseCase, RunTestUseCase};
 use coxagent_domain::TicketId;
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -16,6 +16,7 @@ use std::sync::Arc;
 pub struct CycleReport {
     pub cycle: u64,
     pub ba_created: Vec<TicketId>,
+    pub sa_readied: Option<TicketId>,
     pub bug_fixed: Option<TicketId>,
     pub feature_done: Option<TicketId>,
     pub bugs_filed: Vec<TicketId>,
@@ -27,6 +28,9 @@ impl CycleReport {
     pub fn summary(&self) -> String {
         let mut s = format!("cycle {} —", self.cycle);
         let _ = write!(s, " BA+{}", self.ba_created.len());
+        if let Some(r) = &self.sa_readied {
+            let _ = write!(s, " ready {r}");
+        }
         if let Some(b) = &self.bug_fixed {
             let _ = write!(s, " fixed {b}");
         }
@@ -83,6 +87,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             }
         }
 
+        match self.sa().execute().await {
+            Ok(id) => report.sa_readied = id,
+            Err(e) => report.errors.push(format!("SA: {e}")),
+        }
+
         match self.dev(DevMode::Bug).execute().await {
             Ok(id) => report.bug_fixed = id,
             Err(e) => report.errors.push(format!("DEV-BUG: {e}")),
@@ -113,6 +122,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         )
     }
 
+    fn sa(&self) -> RunSaUseCase<S, E> {
+        RunSaUseCase::new(
+            Arc::clone(&self.store),
+            Arc::clone(&self.engine),
+            self.config.clone(),
+            self.work_dir.clone(),
+        )
+    }
+
     fn dev(&self, mode: DevMode) -> RunDevUseCase<S, E> {
         RunDevUseCase::new(
             Arc::clone(&self.store),
@@ -139,6 +157,7 @@ mod tests {
     use crate::ports::outbound::{AgentOutcome, AgentRequest};
     use crate::state::ProjectState;
     use crate::PortError;
+    use coxagent_domain::Status;
     use std::sync::Mutex;
 
     #[derive(Default)]
@@ -169,6 +188,9 @@ mod tests {
             let stdout = if r.system_prompt.contains("Business Analyst") {
                 r#"[{"title":"Feature A","priority":"high","complexity":"small","has_ui":false}]"#
                     .to_owned()
+            } else if r.system_prompt.contains("Solution Architect") {
+                r#"{"approach":"a","files":["a.rs"],"api_contract":"","data_changes":"","test_plan":"t","ux":null}"#
+                    .to_owned()
             } else if r.system_prompt.contains("QA Engineer") {
                 "[]".to_owned()
             } else {
@@ -183,7 +205,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cycle_runs_ba_then_agents_without_error() {
+    async fn one_cycle_carries_a_feature_from_proposal_to_done() {
         let store = Arc::new(MemStore::default());
         let uc = RunCycleUseCase::new(
             Arc::clone(&store),
@@ -192,18 +214,19 @@ mod tests {
             PathBuf::from("/tmp"),
             "goal".to_owned(),
         );
-        // Cycle 1: BA runs (1 % 4 == 1) and proposes a feature.
+        // Cycle 1: BA proposes → SA designs → DEV-FEATURE implements → TEST clean.
         let report = uc.run_cycle(1).await;
-        assert_eq!(report.ba_created.len(), 1, "BA proposed a feature");
         assert!(
             report.errors.is_empty(),
             "no agent errored: {:?}",
             report.errors
         );
-        // The proposed feature is only `pending` (no design yet), so DEV-FEATURE
-        // had nothing ready to do.
-        assert!(report.feature_done.is_none());
+        assert_eq!(report.ba_created.len(), 1, "BA proposed a feature");
+        assert!(report.sa_readied.is_some(), "SA readied it");
+        assert!(report.feature_done.is_some(), "DEV completed it same cycle");
+
         let state = store.load().await.expect("load");
-        assert_eq!(state.tickets.len(), 1);
+        assert_eq!(state.tickets[0].status(), Status::Done);
+        assert_eq!(state.current_version.to_string(), "0.1.0");
     }
 }

@@ -14,6 +14,17 @@ pub fn next_open_bug(state: &ProjectState) -> Option<TicketId> {
     })
 }
 
+/// Highest-priority `pending` feature/chore still missing its technical design.
+/// This is the SA design gate's work queue.
+#[must_use]
+pub fn next_feature_needing_design(state: &ProjectState) -> Option<TicketId> {
+    best(state, |t| {
+        matches!(t.ticket_type(), TicketType::Feature | TicketType::Chore)
+            && t.status() == Status::Pending
+            && t.design().technical.is_none()
+    })
+}
+
 /// Highest-priority `ready` feature whose dependencies are all satisfied.
 #[must_use]
 pub fn next_ready_feature(state: &ProjectState) -> Option<TicketId> {
