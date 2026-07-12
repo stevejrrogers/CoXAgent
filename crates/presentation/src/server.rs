@@ -1,6 +1,7 @@
-//! HTTP server (inbound adapter) — serves the embedded dashboard, a JSON API
-//! over the project state, an SSE stream for live updates, and control
-//! endpoints that drive the hosted cycle runner (resume / pause / step / stop).
+//! HTTP server (inbound adapter) — a multi-project hub. Serves the embedded
+//! dashboard plus a per-project JSON API, SSE stream, controllable runner, and
+//! ticket actions. A single-project `serve` registers one project; `hub`
+//! registers many. Routes are scoped `/api/projects/:pid/...`.
 
 use axum::extract::{Path, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -11,6 +12,7 @@ use coxagent_application::metrics;
 use coxagent_application::ports::outbound::StateStorePort;
 use coxagent_application::use_cases::RunnerHandle;
 use coxagent_application::Config;
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -24,40 +26,56 @@ const INDEX_HTML: &str = include_str!("web/index.html");
 /// How often the SSE stream pushes a fresh snapshot.
 const STREAM_INTERVAL: Duration = Duration::from_secs(1);
 
+/// One managed project the hub serves.
 #[derive(Clone)]
-struct AppState {
-    store: Arc<dyn StateStorePort>,
-    runner: Arc<RunnerHandle>,
-    config_path: PathBuf,
+pub struct ProjectHandle {
+    pub id: String,
+    pub name: String,
+    pub alias: String,
+    pub store: Arc<dyn StateStorePort>,
+    pub runner: Arc<RunnerHandle>,
+    pub config_path: PathBuf,
 }
 
-/// Serve the dashboard and API on `port`, driving the given runner.
+#[derive(Clone)]
+struct AppState {
+    projects: Arc<HashMap<String, ProjectHandle>>,
+    order: Arc<Vec<String>>,
+}
+
+impl AppState {
+    fn project(&self, pid: &str) -> Option<&ProjectHandle> {
+        self.projects.get(pid)
+    }
+}
+
+/// Serve the dashboard and API for the given projects on `port`.
 ///
 /// # Errors
 /// Returns an IO error if the port cannot be bound.
-pub async fn serve(
-    store: Arc<dyn StateStorePort>,
-    runner: Arc<RunnerHandle>,
-    config_path: PathBuf,
-    port: u16,
-) -> std::io::Result<()> {
+pub async fn serve(projects: Vec<ProjectHandle>, port: u16) -> std::io::Result<()> {
+    let order: Vec<String> = projects.iter().map(|p| p.id.clone()).collect();
+    let map: HashMap<String, ProjectHandle> =
+        projects.into_iter().map(|p| (p.id.clone(), p)).collect();
+    let state = AppState {
+        projects: Arc::new(map),
+        order: Arc::new(order),
+    };
+
     let app = Router::new()
         .route("/", get(index))
         .route("/api/health", get(health))
-        .route("/api/state", get(state))
-        .route("/api/metrics", get(metrics_endpoint))
-        .route("/api/runner", get(runner_status))
-        .route("/api/audit", get(audit))
-        .route("/api/config", get(get_config).put(put_config))
-        .route("/api/control/:action", post(control))
-        .route("/api/ticket/:id/priority", post(set_priority))
-        .route("/api/ticket/:id/reject", post(reject_ticket))
-        .route("/api/events", get(events))
-        .with_state(AppState {
-            store,
-            runner,
-            config_path,
-        });
+        .route("/api/projects", get(list_projects))
+        .route("/api/projects/:pid/state", get(state_ep))
+        .route("/api/projects/:pid/metrics", get(metrics_ep))
+        .route("/api/projects/:pid/runner", get(runner_ep))
+        .route("/api/projects/:pid/audit", get(audit_ep))
+        .route("/api/projects/:pid/config", get(get_config).put(put_config))
+        .route("/api/projects/:pid/control/:action", post(control_ep))
+        .route("/api/projects/:pid/ticket/:id/priority", post(set_priority))
+        .route("/api/projects/:pid/ticket/:id/reject", post(reject_ticket))
+        .route("/api/projects/:pid/events", get(events_ep))
+        .with_state(state);
 
     let addr = format!("127.0.0.1:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -73,32 +91,69 @@ async fn health() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "ok" }))
 }
 
-async fn state(State(app): State<AppState>) -> impl IntoResponse {
-    match app.store.load().await {
+/// List projects (id, name, alias, version, ticket count) in registration order.
+async fn list_projects(State(app): State<AppState>) -> impl IntoResponse {
+    let mut out = Vec::new();
+    for id in app.order.iter() {
+        if let Some(p) = app.project(id) {
+            let (version, tickets) = p.store.load().await.map_or_else(
+                |_| ("0.0.0".to_owned(), 0),
+                |s| (s.current_version.to_string(), s.tickets.len()),
+            );
+            out.push(serde_json::json!({
+                "id": p.id, "name": p.name, "alias": p.alias,
+                "version": version, "tickets": tickets,
+                "mode": p.runner.snapshot().mode,
+            }));
+        }
+    }
+    Json(out)
+}
+
+async fn state_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid) else {
+        return not_found();
+    };
+    match p.store.load().await {
         Ok(state) => Json(serde_json::to_value(state).unwrap_or_default()).into_response(),
         Err(e) => internal_error(&e.to_string()),
     }
 }
 
-async fn metrics_endpoint(State(app): State<AppState>) -> impl IntoResponse {
-    match app.store.load().await {
+async fn metrics_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid) else {
+        return not_found();
+    };
+    match p.store.load().await {
         Ok(state) => Json(metrics::compute(&state)).into_response(),
         Err(e) => internal_error(&e.to_string()),
     }
 }
 
-async fn runner_status(State(app): State<AppState>) -> impl IntoResponse {
-    Json(app.runner.snapshot())
+async fn runner_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid) else {
+        return not_found();
+    };
+    Json(p.runner.snapshot()).into_response()
 }
 
-/// Export the activity trail as a downloadable JSON audit log.
-async fn audit(State(app): State<AppState>) -> impl IntoResponse {
-    let entries = app
-        .store
-        .load()
-        .await
-        .map(|s| s.activity)
-        .unwrap_or_default();
+async fn audit_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid) else {
+        return not_found();
+    };
+    let entries = p.store.load().await.map(|s| s.activity).unwrap_or_default();
     let body = serde_json::to_string_pretty(&entries).unwrap_or_else(|_| "[]".to_owned());
     (
         [
@@ -110,21 +165,33 @@ async fn audit(State(app): State<AppState>) -> impl IntoResponse {
         ],
         body,
     )
+        .into_response()
 }
 
-/// Current config (engine-per-role mapping, workflow, architecture rules).
-async fn get_config(State(app): State<AppState>) -> impl IntoResponse {
-    let cfg = std::fs::read_to_string(&app.config_path)
+async fn get_config(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid) else {
+        return not_found();
+    };
+    let cfg = std::fs::read_to_string(&p.config_path)
         .ok()
         .and_then(|t| serde_json::from_str::<Config>(&t).ok())
         .unwrap_or_default();
-    Json(cfg)
+    Json(cfg).into_response()
 }
 
-/// Replace config. Takes effect on the next runner restart.
-async fn put_config(State(app): State<AppState>, Json(cfg): Json<Config>) -> impl IntoResponse {
+async fn put_config(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    Json(cfg): Json<Config>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid) else {
+        return not_found();
+    };
     match serde_json::to_string_pretty(&cfg) {
-        Ok(text) => match std::fs::write(&app.config_path, text) {
+        Ok(text) => match std::fs::write(&p.config_path, text) {
             Ok(()) => {
                 Json(serde_json::json!({ "ok": true, "note": "restart to apply" })).into_response()
             }
@@ -134,17 +201,23 @@ async fn put_config(State(app): State<AppState>, Json(cfg): Json<Config>) -> imp
     }
 }
 
-/// Change a ticket's priority from the dashboard (acting as super-PO). Only PO
-/// authority may set priority — the aggregate enforces it.
+#[derive(serde::Deserialize)]
+struct PriorityReq {
+    priority: coxagent_domain::Priority,
+}
+
 async fn set_priority(
     State(app): State<AppState>,
-    Path(id): Path<String>,
+    Path((pid, id)): Path<(String, String)>,
     Json(req): Json<PriorityReq>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid) else {
+        return not_found();
+    };
     let Ok(tid) = coxagent_domain::TicketId::new(id.clone()) else {
         return (axum::http::StatusCode::BAD_REQUEST, "bad id").into_response();
     };
-    let Ok(mut state) = app.store.load().await else {
+    let Ok(mut state) = p.store.load().await else {
         return internal_error("load failed");
     };
     let Some(ticket) = state.ticket_mut(&tid) else {
@@ -154,23 +227,23 @@ async fn set_priority(
         return (axum::http::StatusCode::FORBIDDEN, e.to_string()).into_response();
     }
     state.log_activity("USER", "set priority", Some(id));
-    match app.store.save(&state).await {
+    match p.store.save(&state).await {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => internal_error(&e.to_string()),
     }
 }
 
-#[derive(serde::Deserialize)]
-struct PriorityReq {
-    priority: coxagent_domain::Priority,
-}
-
-/// Reject a ticket from the dashboard (super-PO). Valid only from pending/open.
-async fn reject_ticket(State(app): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+async fn reject_ticket(
+    State(app): State<AppState>,
+    Path((pid, id)): Path<(String, String)>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid) else {
+        return not_found();
+    };
     let Ok(tid) = coxagent_domain::TicketId::new(id.clone()) else {
         return (axum::http::StatusCode::BAD_REQUEST, "bad id").into_response();
     };
-    let Ok(mut state) = app.store.load().await else {
+    let Ok(mut state) = p.store.load().await else {
         return internal_error("load failed");
     };
     let Some(ticket) = state.ticket_mut(&tid) else {
@@ -183,19 +256,24 @@ async fn reject_ticket(State(app): State<AppState>, Path(id): Path<String>) -> i
         return (axum::http::StatusCode::CONFLICT, e.to_string()).into_response();
     }
     state.log_activity("USER", "rejected ticket", Some(id));
-    match app.store.save(&state).await {
+    match p.store.save(&state).await {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => internal_error(&e.to_string()),
     }
 }
 
-/// Drive the runner. `action` is one of resume | pause | step | stop.
-async fn control(State(app): State<AppState>, Path(action): Path<String>) -> impl IntoResponse {
+async fn control_ep(
+    State(app): State<AppState>,
+    Path((pid, action)): Path<(String, String)>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid) else {
+        return not_found();
+    };
     match action.as_str() {
-        "resume" => app.runner.resume(),
-        "pause" => app.runner.pause(),
-        "step" => app.runner.step(),
-        "stop" => app.runner.stop(),
+        "resume" => p.runner.resume(),
+        "pause" => p.runner.pause(),
+        "step" => p.runner.step(),
+        "stop" => p.runner.stop(),
         other => {
             return (
                 axum::http::StatusCode::BAD_REQUEST,
@@ -204,23 +282,32 @@ async fn control(State(app): State<AppState>, Path(action): Path<String>) -> imp
                 .into_response()
         }
     }
-    Json(app.runner.snapshot()).into_response()
+    Json(p.runner.snapshot()).into_response()
 }
 
-/// SSE stream: pushes `{state, runner}` every second.
-async fn events(State(app): State<AppState>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+async fn events_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let handle = app.project(&pid).cloned();
     let stream = IntervalStream::new(tokio::time::interval(STREAM_INTERVAL)).then(move |_| {
-        let app = app.clone();
+        let handle = handle.clone();
         async move {
-            let state = app.store.load().await.ok();
-            let payload = serde_json::json!({
-                "state": state,
-                "runner": app.runner.snapshot(),
-            });
+            let payload = match handle {
+                Some(p) => {
+                    let state = p.store.load().await.ok();
+                    serde_json::json!({ "state": state, "runner": p.runner.snapshot() })
+                }
+                None => serde_json::json!({ "error": "no such project" }),
+            };
             Ok(Event::default().data(payload.to_string()))
         }
     });
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+fn not_found() -> axum::response::Response {
+    (axum::http::StatusCode::NOT_FOUND, "no such project").into_response()
 }
 
 fn internal_error(msg: &str) -> axum::response::Response {

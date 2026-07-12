@@ -8,7 +8,7 @@ pub mod cli;
 pub mod server;
 
 pub use cli::{parse, Cli, Command};
-pub use server::serve;
+pub use server::{serve, ProjectHandle};
 
 use coxagent_application::state::ProjectState;
 use coxagent_domain::ticket::Status;

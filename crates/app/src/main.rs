@@ -98,6 +98,10 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
             serve_with_runner(store, &args.state_dir, work_dir, port).await?;
             Ok(String::new())
         }
+        Command::Hub { registry, port } => {
+            run_hub(&registry, port).await?;
+            Ok(String::new())
+        }
         Command::Run {
             work_dir,
             context,
@@ -123,33 +127,31 @@ fn load_config(state_dir: &Path) -> Config {
     }
 }
 
-/// Serve the dashboard while hosting the cycle runner in the background. The
-/// runner starts paused — the operator resumes/steps it from the dashboard, so
-/// hosting the loop never burns engine calls unattended.
-async fn serve_with_runner(
-    store: Arc<JsonStateStore>,
+/// Build one project: store, engine stack, runner (spawned, paused), returned as
+/// a `ProjectHandle` the hub server can host alongside others.
+async fn build_project(
+    id: &str,
     state_dir: &Path,
     work_dir: PathBuf,
-    port: u16,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<coxagent_presentation::ProjectHandle, Box<dyn std::error::Error>> {
     use coxagent_application::use_cases::{run_forever, RunCycleUseCase, RunnerHandle};
 
+    let store = Arc::new(JsonStateStore::new(state_dir)?);
     let config = load_config(state_dir);
     let (engine, meter) = build_engine(&config, logs_dir(state_dir))?;
     let sleep = std::time::Duration::from_secs(config.workflow.sleep_seconds);
 
-    // Recover orphaned claims before hosting the loop.
     let recovered = RecoverUseCase::new(Arc::clone(&store)).execute().await?;
     if !recovered.is_empty() {
-        tracing::info!("recovered {} orphaned claim(s)", recovered.len());
+        tracing::info!("[{id}] recovered {} orphaned claim(s)", recovered.len());
     }
 
+    let alias = store.load().await.map(|s| s.alias).unwrap_or_default();
     let context = std::fs::read_to_string(state_dir.join("project_context.md")).unwrap_or_default();
     let cycle_uc = RunCycleUseCase::new(Arc::clone(&store), engine, config, work_dir, context)
         .with_meter(meter)
-        .with_deploy(std::sync::Arc::new(DockerComposeDeploy::new()));
+        .with_deploy(Arc::new(DockerComposeDeploy::new()));
     let handle = Arc::new(RunnerHandle::new());
-
     let loop_handle = Arc::clone(&handle);
     tokio::spawn(async move { run_forever(loop_handle, cycle_uc, sleep).await });
 
@@ -157,7 +159,64 @@ async fn serve_with_runner(
         .parent()
         .unwrap_or(state_dir)
         .join("coxagent.json");
-    coxagent_presentation::serve(store, handle, config_path, port).await?;
+    Ok(coxagent_presentation::ProjectHandle {
+        id: id.to_owned(),
+        name: if alias.is_empty() {
+            id.to_owned()
+        } else {
+            format!("{alias} project")
+        },
+        alias,
+        store,
+        runner: handle,
+        config_path,
+    })
+}
+
+/// Serve a single project (the `serve` command).
+async fn serve_with_runner(
+    _store: Arc<JsonStateStore>,
+    state_dir: &Path,
+    work_dir: PathBuf,
+    port: u16,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let project = build_project("default", state_dir, work_dir).await?;
+    coxagent_presentation::serve(vec![project], port).await?;
+    Ok(())
+}
+
+/// Serve many projects from a hub registry file (the `hub` command). The
+/// registry is a JSON array of `{ "id", "path" }` where `path` is a workspace
+/// dir containing `state/` and `codebase/`.
+async fn run_hub(registry: &Path, port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        id: String,
+        path: PathBuf,
+    }
+    let text = std::fs::read_to_string(registry)
+        .map_err(|e| format!("cannot read hub registry {}: {e}", registry.display()))?;
+    let entries: Vec<Entry> = serde_json::from_str(&text)?;
+    if entries.is_empty() {
+        return Err("hub registry is empty".into());
+    }
+
+    let mut projects = Vec::new();
+    for e in entries {
+        let state_dir = e.path.join("state");
+        let work_dir = e.path.join("codebase");
+        match build_project(&e.id, &state_dir, work_dir).await {
+            Ok(p) => {
+                tracing::info!("hub: registered project '{}'", p.id);
+                projects.push(p);
+            }
+            Err(err) => tracing::warn!("hub: skipping '{}': {err}", e.id),
+        }
+    }
+    if projects.is_empty() {
+        return Err("no projects could be registered".into());
+    }
+    coxagent_presentation::serve(projects, port).await?;
     Ok(())
 }
 

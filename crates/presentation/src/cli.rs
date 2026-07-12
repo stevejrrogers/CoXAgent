@@ -73,6 +73,15 @@ pub enum Command {
         #[arg(long, default_value = ".")]
         work_dir: PathBuf,
     },
+    /// Serve many projects from a hub registry (multi-project mode).
+    Hub {
+        /// Path to the hub registry JSON: an array of `{ "id", "path" }`.
+        #[arg(long)]
+        registry: PathBuf,
+        /// Port to listen on.
+        #[arg(long, default_value_t = 4000)]
+        port: u16,
+    },
 }
 
 /// Parse process arguments into a [`Cli`].

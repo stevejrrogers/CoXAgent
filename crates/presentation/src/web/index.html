@@ -106,7 +106,8 @@
 <body>
   <aside class="side">
     <div class="brand"><div class="mk"><i class="ti ti-hexagon-letter-c"></i></div><div><div class="nm">CoXAgent</div><div class="tg">autonomous dev team</div></div></div>
-    <div class="proj"><div class="pn"><i class="ti ti-folder" style="color:var(--muted)"></i><span id="pn-name">Project</span><span class="al" id="pn-alias">—</span></div>
+    <div class="proj">
+      <select id="proj-switch" onchange="switchProject(this.value)" style="width:100%;margin-bottom:7px;background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:7px 9px;font-size:13px;font-weight:600;font-family:inherit"></select>
       <div class="pv"><span><i class="ti ti-tag" style="font-size:13px"></i> v<b id="ver">0.0.0</b></span><span id="pn-tickets">0 tickets</span></div></div>
     <nav class="nav">
       <a data-v="overview" class="on" onclick="nav('overview')"><i class="ti ti-layout-dashboard"></i> Overview</a>
@@ -145,7 +146,7 @@
       </div>
       <div class="view" id="view-activity">
         <div class="filters"><span style="font-size:12px;color:var(--muted)">Filter</span><select class="sel" id="act-filter" onchange="renderActive()"><option value="">all agents</option></select>
-          <div style="flex:1"></div><a href="/api/audit" class="fchip" style="text-decoration:none"><i class="ti ti-download" style="font-size:14px"></i> Export audit</a></div>
+          <div style="flex:1"></div><a onclick="window.open(api('/audit'))" class="fchip" style="text-decoration:none;cursor:pointer"><i class="ti ti-download" style="font-size:14px"></i> Export audit</a></div>
         <div class="panel"><div id="activity-full"></div></div>
       </div>
       <div class="view" id="view-sprint"><div id="sprint-body"></div></div>
@@ -236,8 +237,6 @@ function column([k,l,c],ts){const items=ts.filter(t=>t.status===k);
 
 function renderSidebar(s){
   document.getElementById("ver").textContent=s.current_version||"0.0.0";
-  document.getElementById("pn-name").textContent=s.alias?s.alias+" project":"Project";
-  document.getElementById("pn-alias").textContent=s.alias||"—";
   document.getElementById("pn-tickets").textContent=(s.tickets||[]).length+" tickets";}
 function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
   if(CUR==="overview"){
@@ -341,8 +340,8 @@ function showTicket(id){const t=(STATE.tickets||[]).find(x=>x.id===id);if(!t)ret
   if(ux)h+=`<div class="mrow" style="display:block;border:none"><span class="lbl">UX design</span><pre>${esc(ux.user_flow)}\nscreens: ${esc((ux.screens||[]).join(", "))}</pre></div>`;
   if(t.status==="pending"||t.status==="open")h+=`<button onclick="rejectTicket('${t.id}')" style="margin-top:14px;background:transparent;color:var(--red);border:1px solid var(--red);border-radius:9px;padding:8px 15px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit"><i class="ti ti-ban" style="font-size:14px"></i> Reject ticket</button>`;
   document.getElementById("ticket-body").innerHTML=h;document.getElementById("ov-ticket").classList.add("open");}
-async function rejectTicket(id){try{await fetch("/api/ticket/"+id+"/reject",{method:"POST"});close_("ov-ticket");}catch(e){}}
-async function loadSettings(){let cfg={};try{cfg=await(await fetch("/api/config")).json();}catch(e){}window._cfg=cfg;
+async function rejectTicket(id){try{await fetch(api("/ticket/"+id+"/reject"),{method:"POST"});close_("ov-ticket");}catch(e){}}
+async function loadSettings(){let cfg={};try{cfg=await(await fetch(api("/config"))).json();}catch(e){}window._cfg=cfg;
   const def=cfg.engine&&cfg.engine.default||{engine:"claude",model:"sonnet"},per=cfg.engine&&cfg.engine.per_role||{},wf=cfg.workflow||{};
   const eng=["opencode","claude","scripted","mock"],opt=(s)=>eng.map(e=>`<option ${e===s?'selected':''}>${e}</option>`).join("");
   let rows=`<div class="fr"><span class="lbl">Default engine</span><select id="eng-default" onchange="onEngine('default')">${opt(def.engine)}</select>
@@ -374,11 +373,11 @@ async function saveSettings(){const cfg=window._cfg||{engine:{},workflow:{}};cfg
   cfg.workflow.feature_dev_enabled=val("wf-fd")==="true";
   cfg.workflow.sleep_seconds=parseInt(val("wf-sl")||"30",10);
   const bg=val("wf-bg");cfg.workflow.budget_usd=bg?parseFloat(bg):null;
-  try{const res=await(await fetch("/api/config",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(cfg)})).json();
+  try{const res=await(await fetch(api("/config"),{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(cfg)})).json();
     document.getElementById("save-note").textContent=res.ok?"saved · restart to apply":"error";}catch(e){document.getElementById("save-note").textContent="error";}}
 function val(id){return document.getElementById(id).value;}
 async function setPriority(id,p){
-  try{await fetch("/api/ticket/"+id+"/priority",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({priority:p})});
+  try{await fetch(api("/ticket/"+id+"/priority"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({priority:p})});
     const t=(STATE.tickets||[]).find(x=>x.id===id);if(t)t.priority=p;showTicket(id);}catch(e){}
 }
 function close_(id){document.getElementById(id).classList.remove("open");}
@@ -386,14 +385,27 @@ function setConn(on){document.getElementById("conn").className="dot "+(on?"live"
 function renderRunner(r){if(!r)return;const c=r.mode==="running"?"live":(r.mode==="paused"?"paused":"off");
   document.getElementById("runmode").className="dot "+c;document.getElementById("runlbl").textContent=r.mode+" · cycle "+r.cycle;
   document.getElementById("runsum").textContent=r.last_summary||"idle";}
-async function ctl(a){try{renderRunner(await(await fetch("/api/control/"+a,{method:"POST"})).json());}catch(e){}}
-let poll=null;
+async function ctl(a){try{renderRunner(await(await fetch(api("/control/"+a),{method:"POST"})).json());}catch(e){}}
+let PID=null, ES=null, poll=null;
+const api=p=>"/api/projects/"+encodeURIComponent(PID)+p;
 function handle(m){if(m.state)render(m.state);renderRunner(m.runner);setConn(true);}
-function startPoll(){if(poll)return;poll=setInterval(async()=>{try{const s=await(await fetch("/api/state")).json();const rn=await(await fetch("/api/runner")).json();render(s);renderRunner(rn);setConn(false);}catch(e){}},3000);}
-function connect(){const es=new EventSource("/api/events");es.onmessage=e=>{try{handle(JSON.parse(e.data));if(poll){clearInterval(poll);poll=null;}}catch(_){}};es.onerror=()=>{setConn(false);startPoll();};}
-fetch("/api/config").then(r=>r.json()).then(c=>{window._budget=(c.workflow&&c.workflow.budget_usd)||null;if(CUR==="insights")renderActive();}).catch(()=>{});
+function startPoll(){if(poll)return;poll=setInterval(async()=>{try{const s=await(await fetch(api("/state"))).json();const rn=await(await fetch(api("/runner"))).json();render(s);renderRunner(rn);setConn(false);}catch(e){}},3000);}
+function connect(){if(ES)ES.close();if(poll){clearInterval(poll);poll=null;}
+  ES=new EventSource(api("/events"));ES.onmessage=e=>{try{handle(JSON.parse(e.data));if(poll){clearInterval(poll);poll=null;}}catch(_){}};ES.onerror=()=>{setConn(false);startPoll();};}
+function loadBudget(){fetch(api("/config")).then(r=>r.json()).then(c=>{window._budget=(c.workflow&&c.workflow.budget_usd)||null;if(CUR==="insights")renderActive();}).catch(()=>{});}
+function switchProject(id){PID=id;INIT_ACT=false;localStorage.setItem("coxpid",id);loadBudget();connect();}
+async function loadProjects(){
+  let list=[];try{list=await(await fetch("/api/projects")).json();}catch(e){}
+  const sel=document.getElementById("proj-switch");
+  if(!list.length){sel.innerHTML='<option>no projects</option>';return;}
+  sel.innerHTML=list.map(p=>`<option value="${esc(p.id)}">${esc(p.name)}${p.alias?' ('+esc(p.alias)+')':''}</option>`).join("");
+  const saved=localStorage.getItem("coxpid");
+  PID=(saved&&list.some(p=>p.id===saved))?saved:list[0].id;
+  sel.value=PID;
+  loadBudget();connect();
+}
 const h=(location.hash||"").slice(1);if(TITLES[h])nav(h);else nav("overview");
-connect();
+loadProjects();
 </script>
 </body>
 </html>
