@@ -99,6 +99,9 @@ pub struct Config {
     pub engine: EngineMapping,
     #[serde(default)]
     pub workflow: WorkflowConfig,
+    /// Architecture conformance rules enforced against the codebase (empty = off).
+    #[serde(default)]
+    pub architecture: Vec<crate::conformance::StackRule>,
 }
 
 impl Default for Config {
@@ -112,6 +115,7 @@ impl Default for Config {
                 per_role: HashMap::new(),
             },
             workflow: WorkflowConfig::default(),
+            architecture: Vec::new(),
         }
     }
 }

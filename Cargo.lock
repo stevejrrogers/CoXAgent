@@ -219,6 +219,7 @@ dependencies = [
  "coxagent-domain",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "time",
  "tokio",

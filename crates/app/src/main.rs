@@ -74,6 +74,24 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
                 Ok(changelog)
             }
         }
+        Command::Check { work_dir } => {
+            let config = load_config(&args.state_dir);
+            let uc = coxagent_application::use_cases::RunConformanceUseCase::new(
+                Arc::clone(&store),
+                work_dir,
+                config.architecture,
+            );
+            let filed = uc.execute().await?;
+            if filed.is_empty() {
+                Ok("architecture conformance: OK (no drift)\n".to_owned())
+            } else {
+                let mut out = format!("architecture drift — filed {} bug(s):\n", filed.len());
+                for id in &filed {
+                    let _ = writeln!(out, "  {id}");
+                }
+                Ok(out)
+            }
+        }
         Command::Serve { port, work_dir } => {
             serve_with_runner(store, &args.state_dir, work_dir, port).await?;
             Ok(String::new())

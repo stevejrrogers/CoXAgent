@@ -5,7 +5,9 @@
 use crate::config::Config;
 use crate::ports::outbound::{AgentEnginePort, StateStorePort};
 use crate::use_cases::run_dev::DevMode;
-use crate::use_cases::{RunBaUseCase, RunDevUseCase, RunSaUseCase, RunTestUseCase};
+use crate::use_cases::{
+    RunBaUseCase, RunConformanceUseCase, RunDevUseCase, RunSaUseCase, RunTestUseCase,
+};
 use coxagent_domain::TicketId;
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -111,6 +113,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             Err(e) => report.errors.push(format!("TEST: {e}")),
         }
 
+        // Governance: architecture-conformance drift becomes tracked bugs.
+        match self.conformance().execute().await {
+            Ok(mut ids) => report.bugs_filed.append(&mut ids),
+            Err(e) => report.errors.push(format!("CONFORMANCE: {e}")),
+        }
+
         report
     }
 
@@ -149,6 +157,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             Arc::clone(&self.engine),
             self.config.clone(),
             self.work_dir.clone(),
+        )
+    }
+
+    fn conformance(&self) -> RunConformanceUseCase<S> {
+        RunConformanceUseCase::new(
+            Arc::clone(&self.store),
+            self.work_dir.clone(),
+            self.config.architecture.clone(),
         )
     }
 }

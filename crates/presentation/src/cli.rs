@@ -58,6 +58,12 @@ pub enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Run architecture-conformance governance and file bugs for any drift.
+    Check {
+        /// Managed codebase directory to scan.
+        #[arg(long, default_value = ".")]
+        work_dir: PathBuf,
+    },
     /// Serve the web dashboard and host the controllable cycle runner.
     Serve {
         /// Port to listen on.
