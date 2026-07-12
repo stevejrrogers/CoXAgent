@@ -49,7 +49,9 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
             Ok(render_report(&state))
         }
         Command::Discover => Ok(render_discovery()),
-        Command::Onboard { name } => onboard::greenfield(&store, &args.state_dir, &name).await,
+        Command::Onboard { name, alias } => {
+            onboard::greenfield(&store, &args.state_dir, &name, alias).await
+        }
         Command::RunBa { work_dir, context } => {
             let config = load_config(&args.state_dir);
             let engine = build_engine(&config)?;

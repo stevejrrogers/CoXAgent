@@ -61,15 +61,21 @@ fn mint_id(
     ticket_type: TicketType,
     state: &crate::state::ProjectState,
 ) -> Result<TicketId, AppError> {
-    let prefix = match ticket_type {
+    let kind = match ticket_type {
         TicketType::Feature => "FEAT",
         TicketType::Bug => "BUG",
         TicketType::Chore => "CHORE",
     };
+    // Prefix with the project alias when set: `CXC-FEAT-001`, else `FEAT-001`.
+    let prefix = if state.alias.is_empty() {
+        kind.to_owned()
+    } else {
+        format!("{}-{kind}", state.alias)
+    };
     let next = state
         .tickets
         .iter()
-        .filter(|t| t.id().as_str().starts_with(prefix))
+        .filter(|t| t.id().as_str().starts_with(&prefix))
         .count()
         + 1;
     Ok(TicketId::new(format!("{prefix}-{next:03}"))?)

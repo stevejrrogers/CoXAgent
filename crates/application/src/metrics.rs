@@ -64,7 +64,8 @@ pub fn compute(state: &ProjectState) -> Metrics {
     for rec in &state.history {
         let day = rec.at.split('T').next().unwrap_or(&rec.at).to_owned();
         *day_map.entry(day).or_default() += 1;
-        if rec.ticket.as_str().starts_with("FEAT") || rec.ticket.as_str().starts_with("CHORE") {
+        // Ids look like `FEAT-001` or `CXC-FEAT-001`; match the type segment.
+        if rec.ticket.as_str().contains("FEAT") || rec.ticket.as_str().contains("CHORE") {
             feature_deploys += 1;
         }
     }

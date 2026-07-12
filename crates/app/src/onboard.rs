@@ -17,11 +17,20 @@ pub async fn greenfield(
     store: &Arc<JsonStateStore>,
     state_dir: &Path,
     name: &str,
+    alias: Option<String>,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let existing = store.load().await?;
+    let mut existing = store.load().await?;
     if !existing.tickets.is_empty() {
         return Err("workspace already has tickets; refusing to re-onboard".into());
     }
+
+    // Establish the ticket-id alias (user-provided or derived) before minting.
+    let alias = alias.map_or_else(
+        || coxagent_application::state::derive_alias(name),
+        |a| a.to_uppercase(),
+    );
+    existing.alias = alias.clone();
+    store.save(&existing).await?;
 
     // Workspace root is the parent of the state dir (or the state dir itself).
     let root = state_dir.parent().unwrap_or(state_dir);
@@ -51,7 +60,7 @@ pub async fn greenfield(
         .await?;
 
     Ok(format!(
-        "Onboarded project '{name}'.\n\
+        "Onboarded project '{name}' (alias {alias}).\n\
          Wrote: {}\n       {}\n\
          Seeded: {skeleton} (walking skeleton)\n\n\
          HUMAN GATE: review and complete {} before running `coxagent run`.\n",

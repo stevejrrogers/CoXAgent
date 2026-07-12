@@ -25,6 +25,10 @@ pub struct DeployRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectState {
     pub schema_version: u32,
+    /// Short project alias prefixed onto every ticket id (e.g. `CXC`). Empty for
+    /// backward compatibility (ids then read `FEAT-001` with no prefix).
+    #[serde(default)]
+    pub alias: String,
     pub current_version: SemVer,
     pub tickets: Vec<Ticket>,
     #[serde(default)]
@@ -35,11 +39,27 @@ impl Default for ProjectState {
     fn default() -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
+            alias: String::new(),
             current_version: SemVer::default(),
             tickets: Vec::new(),
             history: Vec::new(),
         }
     }
+}
+
+/// Derive a short uppercase alias from a project name: its capital letters
+/// (`CoXChat` -> `CXC`), else the first three alphanumerics uppercased.
+#[must_use]
+pub fn derive_alias(name: &str) -> String {
+    let caps: String = name.chars().filter(char::is_ascii_uppercase).collect();
+    if caps.len() >= 2 {
+        return caps.chars().take(4).collect();
+    }
+    name.chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(3)
+        .collect::<String>()
+        .to_uppercase()
 }
 
 impl ProjectState {
@@ -74,5 +94,22 @@ impl ProjectState {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod alias_tests {
+    use super::derive_alias;
+
+    #[test]
+    fn derives_from_capitals() {
+        assert_eq!(derive_alias("CoXChat"), "CXC");
+        assert_eq!(derive_alias("CoXAgent"), "CXA");
+    }
+
+    #[test]
+    fn falls_back_to_first_letters() {
+        assert_eq!(derive_alias("quotes"), "QUO");
+        assert_eq!(derive_alias("my app"), "MYA");
     }
 }

@@ -48,6 +48,9 @@ pub enum Command {
         /// Human-readable project name.
         #[arg(long)]
         name: String,
+        /// Short ticket-id alias (e.g. CXC). Auto-derived from the name if omitted.
+        #[arg(long)]
+        alias: Option<String>,
     },
     /// Render the changelog from deploy history (writes to a file if given).
     Changelog {
