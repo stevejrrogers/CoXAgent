@@ -2,8 +2,10 @@
 //! ports (state stores, engines, deploy, git, event bus). M0 ships the JSON
 //! state store.
 
+pub mod deploy;
 pub mod engine;
 pub mod state;
 
+pub use deploy::DockerComposeDeploy;
 pub use engine::{discover, AnyEngine, ClaudeEngine, DetectedEngine, MockEngine, OpencodeEngine};
 pub use state::JsonStateStore;

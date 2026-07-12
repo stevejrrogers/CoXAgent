@@ -12,7 +12,7 @@ use coxagent_application::ports::outbound::{AgentEnginePort, StateStorePort};
 use coxagent_application::use_cases::{RecoverUseCase, RunBaUseCase, RunCycleUseCase};
 use coxagent_application::Spend;
 use coxagent_infrastructure::engine::{AnyEngine, Meter, MeteringEngine};
-use coxagent_infrastructure::{discover, JsonStateStore};
+use coxagent_infrastructure::{discover, DockerComposeDeploy, JsonStateStore};
 use coxagent_presentation::{cli, render_changelog, render_report, Command};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -146,7 +146,8 @@ async fn serve_with_runner(
 
     let context = std::fs::read_to_string(state_dir.join("project_context.md")).unwrap_or_default();
     let cycle_uc = RunCycleUseCase::new(Arc::clone(&store), engine, config, work_dir, context)
-        .with_meter(meter);
+        .with_meter(meter)
+        .with_deploy(std::sync::Arc::new(DockerComposeDeploy::new()));
     let handle = Arc::new(RunnerHandle::new());
 
     let loop_handle = Arc::clone(&handle);
@@ -195,7 +196,8 @@ async fn run_loop(
     }
 
     let uc = RunCycleUseCase::new(Arc::clone(&store), engine, config, work_dir, context)
-        .with_meter(meter);
+        .with_meter(meter)
+        .with_deploy(std::sync::Arc::new(DockerComposeDeploy::new()));
     let shutdown = shutdown::Shutdown::listen();
     tracing::info!("cycle loop started");
 

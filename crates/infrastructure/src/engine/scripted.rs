@@ -97,14 +97,22 @@ const SA_DESIGN: &str = r#"{
   "ux":null
 }"#;
 
-/// Write a working Quotes API into `dir`.
+/// Write a working, deployable Quotes API into `dir` (code + docker files).
 fn write_codebase(dir: &std::path::Path) -> Result<(), PortError> {
+    let w = |name: &str, body: &str| {
+        std::fs::write(dir.join(name), body).map_err(|e| PortError::Backend(e.to_string()))
+    };
     std::fs::create_dir_all(dir).map_err(|e| PortError::Backend(e.to_string()))?;
-    std::fs::write(dir.join("app.py"), APP_PY).map_err(|e| PortError::Backend(e.to_string()))?;
-    std::fs::write(dir.join("README.md"), README_MD)
-        .map_err(|e| PortError::Backend(e.to_string()))?;
+    w("app.py", APP_PY)?;
+    w("README.md", README_MD)?;
+    w("Dockerfile", DOCKERFILE)?;
+    w("docker-compose.yml", COMPOSE)?;
     Ok(())
 }
+
+const DOCKERFILE: &str = "FROM python:3.12-slim\nWORKDIR /app\nCOPY app.py .\nEXPOSE 8000\nCMD [\"python3\", \"app.py\"]\n";
+
+const COMPOSE: &str = "services:\n  quotes:\n    build: .\n    ports:\n      - \"8000:8000\"\n";
 
 const APP_PY: &str = r#"#!/usr/bin/env python3
 """Quotes API — Python stdlib only. Run: python3 app.py (listens on :8000)."""

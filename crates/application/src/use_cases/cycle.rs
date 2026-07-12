@@ -3,7 +3,7 @@
 //! one bad run never stalls the team (matching the reference workflow).
 
 use crate::config::Config;
-use crate::ports::outbound::{AgentEnginePort, StateStorePort};
+use crate::ports::outbound::{AgentEnginePort, DeployPort, StateStorePort};
 use crate::state::Spend;
 use crate::use_cases::run_dev::DevMode;
 use crate::use_cases::{
@@ -63,6 +63,7 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     work_dir: PathBuf,
     context: String,
     meter: Option<Arc<Mutex<Spend>>>,
+    deploy: Option<Arc<dyn DeployPort>>,
 }
 
 impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
@@ -80,6 +81,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             work_dir,
             context,
             meter: None,
+            deploy: None,
         }
     }
 
@@ -87,6 +89,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     #[must_use]
     pub fn with_meter(mut self, meter: Arc<Mutex<Spend>>) -> Self {
         self.meter = Some(meter);
+        self
+    }
+
+    /// Attach a deploy port, run after DEV so TEST verifies a running build.
+    #[must_use]
+    pub fn with_deploy(mut self, deploy: Arc<dyn DeployPort>) -> Self {
+        self.deploy = Some(deploy);
         self
     }
 
@@ -151,6 +160,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             }
         }
 
+        // Deploy after code changes so TEST verifies a running build.
+        if (report.feature_done.is_some() || report.bug_fixed.is_some()) && self.deploy.is_some() {
+            if let Some(deploy) = &self.deploy {
+                match deploy.deploy(&self.work_dir).await {
+                    Ok(r) if r.deployed => self.log("DEPLOY", &r.summary, None).await,
+                    Ok(_) => {}
+                    Err(e) => report.errors.push(format!("DEPLOY: {e}")),
+                }
+            }
+        }
+
         match self.test().execute().await {
             Ok(ids) => report.bugs_filed = ids,
             Err(e) => report.errors.push(format!("TEST: {e}")),
@@ -169,6 +189,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
 
         report.over_budget = self.record_activity(&report).await;
         report
+    }
+
+    /// Append a single activity entry. Best-effort.
+    async fn log(&self, agent: &str, action: &str, ticket: Option<String>) {
+        if let Ok(mut state) = self.store.load().await {
+            state.log_activity(agent, action, ticket);
+            let _ = self.store.save(&state).await;
+        }
     }
 
     /// Append a human-readable activity trail plus drain the spend meter into
@@ -355,5 +383,41 @@ mod tests {
         let state = store.load().await.expect("load");
         assert_eq!(state.tickets[0].status(), Status::Documented);
         assert_eq!(state.current_version.to_string(), "0.1.0");
+    }
+
+    struct SpyDeploy {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl crate::ports::outbound::DeployPort for SpyDeploy {
+        async fn deploy(
+            &self,
+            _work_dir: &std::path::Path,
+        ) -> Result<crate::ports::outbound::DeployReport, PortError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(crate::ports::outbound::DeployReport {
+                success: true,
+                deployed: true,
+                summary: "spy deployed".to_owned(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn deploys_after_a_feature_completes() {
+        let store = Arc::new(MemStore::default());
+        let spy = Arc::new(SpyDeploy {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let uc = RunCycleUseCase::new(
+            Arc::clone(&store),
+            Arc::new(RoleAwareEngine),
+            Config::default(),
+            PathBuf::from("/tmp"),
+            "goal".to_owned(),
+        )
+        .with_deploy(Arc::clone(&spy) as Arc<dyn crate::ports::outbound::DeployPort>);
+        uc.run_cycle(1).await;
+        assert_eq!(spy.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }
