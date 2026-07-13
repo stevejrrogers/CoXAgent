@@ -17,6 +17,8 @@ fs4.workspace = true
 tracing.workspace = true
 argon2.workspace = true
 rand.workspace = true
+tokio-postgres.workspace = true
+deadpool-postgres.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

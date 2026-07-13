@@ -12,4 +12,4 @@ pub mod state;
 pub use auth::FileAuthService;
 pub use deploy::DockerComposeDeploy;
 pub use engine::{discover, AnyEngine, ClaudeEngine, DetectedEngine, MockEngine, OpencodeEngine};
-pub use state::JsonStateStore;
+pub use state::{AnyStateStore, JsonStateStore, SqlStateStore};

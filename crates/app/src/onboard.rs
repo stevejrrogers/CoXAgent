@@ -7,14 +7,14 @@ use coxagent_application::config::Config;
 use coxagent_application::ports::outbound::StateStorePort;
 use coxagent_application::use_cases::{AddTicketInput, AddTicketUseCase};
 use coxagent_domain::{Complexity, Priority, TicketType};
-use coxagent_infrastructure::JsonStateStore;
 use std::path::Path;
 use std::sync::Arc;
 
 /// Scaffold `coxagent.json`, a `project_context.md` template, and seed the
-/// FEAT-000 walking skeleton. Returns the message shown to the operator.
-pub async fn greenfield(
-    store: &Arc<JsonStateStore>,
+/// FEAT-000 walking skeleton. Returns the message shown to the operator. Works
+/// with any [`StateStorePort`] (JSON file or Postgres).
+pub async fn greenfield<S: StateStorePort + 'static>(
+    store: &Arc<S>,
     state_dir: &Path,
     name: &str,
     alias: Option<String>,

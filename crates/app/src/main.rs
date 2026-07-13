@@ -12,7 +12,9 @@ use coxagent_application::ports::outbound::{AgentEnginePort, StateStorePort};
 use coxagent_application::use_cases::{RecoverUseCase, RunBaUseCase, RunCycleUseCase};
 use coxagent_application::Spend;
 use coxagent_infrastructure::engine::{AnyEngine, Meter, MeteringEngine, TranscriptEngine};
-use coxagent_infrastructure::{discover, DockerComposeDeploy, JsonStateStore};
+use coxagent_infrastructure::{
+    discover, AnyStateStore, DockerComposeDeploy, JsonStateStore, SqlStateStore,
+};
 use coxagent_presentation::{cli, render_changelog, render_report, Command};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -41,9 +43,28 @@ fn init_tracing() {
     let _ = fmt().with_env_filter(filter).with_target(false).try_init();
 }
 
+/// Build the state store for one project, honoring `COXAGENT_DB_DSN`: when set,
+/// a shared Postgres store keyed by `id` (multi-tenant); otherwise the local
+/// JSON file store rooted at `state_dir`. This is the ports adapter swap — use
+/// cases never see which backend they got.
+async fn make_store(
+    id: &str,
+    state_dir: &Path,
+) -> Result<Arc<AnyStateStore>, Box<dyn std::error::Error>> {
+    match std::env::var("COXAGENT_DB_DSN") {
+        Ok(dsn) if !dsn.is_empty() => {
+            tracing::info!("[{id}] state store: Postgres");
+            Ok(Arc::new(AnyStateStore::Sql(
+                SqlStateStore::connect(&dsn, id).await?,
+            )))
+        }
+        _ => Ok(Arc::new(AnyStateStore::Json(JsonStateStore::new(state_dir)?))),
+    }
+}
+
 async fn run() -> Result<String, Box<dyn std::error::Error>> {
     let args = cli::parse();
-    let store = Arc::new(JsonStateStore::new(&args.state_dir)?);
+    let store = make_store("default", &args.state_dir).await?;
 
     match args.command {
         Command::Report => {
@@ -95,7 +116,7 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
             }
         }
         Command::Serve { port, work_dir } => {
-            serve_with_runner(store, &args.state_dir, work_dir, port).await?;
+            serve_with_runner(&args.state_dir, work_dir, port).await?;
             Ok(String::new())
         }
         Command::Hub { registry, port } => {
@@ -136,7 +157,7 @@ async fn build_project(
 ) -> Result<coxagent_presentation::ProjectHandle, Box<dyn std::error::Error>> {
     use coxagent_application::use_cases::{run_forever, RunCycleUseCase, RunnerHandle};
 
-    let store = Arc::new(JsonStateStore::new(state_dir)?);
+    let store = make_store(id, state_dir).await?;
     let config = load_config(state_dir);
     let (engine, meter) = build_engine(&config, logs_dir(state_dir))?;
     let sleep = std::time::Duration::from_secs(config.workflow.sleep_seconds);
@@ -175,7 +196,6 @@ async fn build_project(
 
 /// Serve a single project (the `serve` command).
 async fn serve_with_runner(
-    _store: Arc<JsonStateStore>,
     state_dir: &Path,
     work_dir: PathBuf,
     port: u16,
@@ -283,7 +303,7 @@ async fn onboard_project(
     std::fs::create_dir_all(&state_dir).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&work_dir).map_err(|e| e.to_string())?;
 
-    let store = Arc::new(JsonStateStore::new(&state_dir).map_err(|e| e.to_string())?);
+    let store = make_store(&id, &state_dir).await.map_err(|e| e.to_string())?;
     onboard::greenfield(&store, &state_dir, name, alias)
         .await
         .map_err(|e| e.to_string())?;
@@ -346,7 +366,7 @@ fn logs_dir(state_dir: &Path) -> PathBuf {
 
 /// The continuous cycle loop with graceful shutdown.
 async fn run_loop(
-    store: Arc<JsonStateStore>,
+    store: Arc<AnyStateStore>,
     state_dir: &Path,
     work_dir: PathBuf,
     context: String,
