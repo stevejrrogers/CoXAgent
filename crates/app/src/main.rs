@@ -13,7 +13,7 @@ use coxagent_application::use_cases::{RecoverUseCase, RunBaUseCase, RunCycleUseC
 use coxagent_application::Spend;
 use coxagent_infrastructure::engine::{AnyEngine, Meter, MeteringEngine, TranscriptEngine};
 use coxagent_infrastructure::{
-    discover, AnyStateStore, DockerComposeDeploy, JsonStateStore, SqlStateStore,
+    discover, AnyStateStore, DockerComposeDeploy, JsonStateStore, SqlStateStore, WebhookNotifier,
 };
 use coxagent_presentation::{cli, render_changelog, render_report, Command};
 use std::fmt::Write as _;
@@ -178,9 +178,13 @@ async fn build_project(
 
     let alias = store.load().await.map(|s| s.alias).unwrap_or_default();
     let context = std::fs::read_to_string(state_dir.join("project_context.md")).unwrap_or_default();
-    let cycle_uc = RunCycleUseCase::new(Arc::clone(&store), engine, config, work_dir, context)
+    let webhook = config.workflow.webhook_url.clone();
+    let mut cycle_uc = RunCycleUseCase::new(Arc::clone(&store), engine, config, work_dir, context)
         .with_meter(meter)
         .with_deploy(Arc::new(DockerComposeDeploy::new()));
+    if let Some(url) = webhook.filter(|u| !u.is_empty()) {
+        cycle_uc = cycle_uc.with_notifier(Arc::new(WebhookNotifier::new(url)));
+    }
     let handle = Arc::new(RunnerHandle::new());
     let loop_handle = Arc::clone(&handle);
     tokio::spawn(async move { run_forever(loop_handle, cycle_uc, sleep).await });
@@ -421,9 +425,13 @@ async fn run_loop(
         tracing::info!("recovered {} orphaned claim(s)", recovered.len());
     }
 
-    let uc = RunCycleUseCase::new(Arc::clone(&store), engine, config, work_dir, context)
+    let webhook = config.workflow.webhook_url.clone();
+    let mut uc = RunCycleUseCase::new(Arc::clone(&store), engine, config, work_dir, context)
         .with_meter(meter)
         .with_deploy(std::sync::Arc::new(DockerComposeDeploy::new()));
+    if let Some(url) = webhook.filter(|u| !u.is_empty()) {
+        uc = uc.with_notifier(std::sync::Arc::new(WebhookNotifier::new(url)));
+    }
     let shutdown = shutdown::Shutdown::listen();
     tracing::info!("cycle loop started");
 

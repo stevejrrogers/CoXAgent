@@ -70,6 +70,7 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     context: String,
     meter: Option<Arc<Mutex<Spend>>>,
     deploy: Option<Arc<dyn DeployPort>>,
+    notifier: Option<Arc<dyn crate::ports::outbound::NotifierPort>>,
 }
 
 impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
@@ -88,7 +89,64 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             context,
             meter: None,
             deploy: None,
+            notifier: None,
         }
+    }
+
+    /// Attach a notifier fired on significant events (deploy, budget, policy).
+    #[must_use]
+    pub fn with_notifier(
+        mut self,
+        notifier: Arc<dyn crate::ports::outbound::NotifierPort>,
+    ) -> Self {
+        self.notifier = Some(notifier);
+        self
+    }
+
+    /// Model-allowlist gate. When the configured model is disallowed, record the
+    /// block, notify, mark the report to pause the loop, and return `true`.
+    async fn model_policy_blocks(&self, report: &mut CycleReport) -> bool {
+        let model = &self.config.engine.default.model;
+        if crate::policy::model_allowed(&self.config.policy, model) {
+            return false;
+        }
+        report
+            .errors
+            .push(format!("POLICY: model '{model}' is not in the allowlist"));
+        report.over_budget = true; // pause the loop until config is fixed
+        if let Ok(mut state) = self.store.load().await {
+            state.log_activity("POLICY", &format!("blocked model '{model}'"), None);
+            let _ = self.store.save(&state).await;
+        }
+        self.notify(
+            "policy_blocked",
+            format!("model '{model}' is not in the allowlist — loop paused"),
+        )
+        .await;
+        true
+    }
+
+    /// Emit an event to the notifier, if one is attached. Best-effort.
+    async fn notify(&self, kind: &str, message: String) {
+        if let Some(n) = &self.notifier {
+            let project = self.config_project_label();
+            n.notify(crate::ports::outbound::NotifyEvent {
+                kind: kind.to_owned(),
+                project,
+                message,
+            })
+            .await;
+        }
+    }
+
+    fn config_project_label(&self) -> String {
+        self.work_dir
+            .parent()
+            .and_then(|p| p.file_name())
+            .map_or_else(
+                || "project".to_owned(),
+                |n| n.to_string_lossy().into_owned(),
+            )
     }
 
     /// Attach a spend meter (drained into state each cycle for FinOps tracking).
@@ -115,16 +173,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
 
         // Policy gate: refuse to run agents on a model outside the allowlist —
         // stop before spending a token rather than after.
-        let model = &self.config.engine.default.model;
-        if !crate::policy::model_allowed(&self.config.policy, model) {
-            report
-                .errors
-                .push(format!("POLICY: model '{model}' is not in the allowlist"));
-            report.over_budget = true; // pause the loop until config is fixed
-            if let Ok(mut state) = self.store.load().await {
-                state.log_activity("POLICY", &format!("blocked model '{model}'"), None);
-                let _ = self.store.save(&state).await;
-            }
+        if self.model_policy_blocks(&mut report).await {
             return report;
         }
 
@@ -202,7 +251,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         if (report.feature_done.is_some() || report.bug_fixed.is_some()) && self.deploy.is_some() {
             if let Some(deploy) = &self.deploy {
                 match deploy.deploy(&self.work_dir).await {
-                    Ok(r) if r.deployed => self.record_deploy(r.success, &r.summary).await,
+                    Ok(r) if r.deployed => {
+                        self.record_deploy(r.success, &r.summary).await;
+                        let kind = if r.success {
+                            "deploy_ok"
+                        } else {
+                            "deploy_failed"
+                        };
+                        self.notify(kind, r.summary.clone()).await;
+                    }
                     Ok(_) => {}
                     Err(e) => report.errors.push(format!("DEPLOY: {e}")),
                 }
@@ -226,6 +283,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
 
         report.over_budget = self.record_activity(&report).await;
+        if report.over_budget {
+            self.notify(
+                "budget_reached",
+                "spend cap reached — loop paused".to_owned(),
+            )
+            .await;
+        }
         report
     }
 

@@ -99,6 +99,10 @@ pub struct WorkflowConfig {
     /// Cycles per sprint in scrum mode.
     #[serde(default = "default_sprint_len")]
     pub sprint_length_cycles: u64,
+    /// Webhook URL notified on significant events (deploy, budget, policy).
+    /// Empty = no notifications. Slack/Teams incoming webhooks work directly.
+    #[serde(default)]
+    pub webhook_url: Option<String>,
 }
 
 fn default_sprint_len() -> u64 {
@@ -114,6 +118,7 @@ impl Default for WorkflowConfig {
             budget_usd: None,
             mode: Mode::Kanban,
             sprint_length_cycles: default_sprint_len(),
+            webhook_url: None,
         }
     }
 }

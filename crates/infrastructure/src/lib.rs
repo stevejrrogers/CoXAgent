@@ -8,6 +8,7 @@ pub mod audit_sink;
 pub mod auth;
 pub mod deploy;
 pub mod engine;
+pub mod notifier;
 pub mod state;
 pub mod totp;
 
@@ -15,4 +16,5 @@ pub use audit_sink::{MemoryAuditSink, SqlAuditSink};
 pub use auth::FileAuthService;
 pub use deploy::DockerComposeDeploy;
 pub use engine::{discover, AnyEngine, ClaudeEngine, DetectedEngine, MockEngine, OpencodeEngine};
+pub use notifier::WebhookNotifier;
 pub use state::{AnyStateStore, JsonStateStore, SqlStateStore};
