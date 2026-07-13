@@ -170,6 +170,7 @@ body:not(.admin) .admin-only { display: none !important; }
         <div id="ov-alerts"></div>
         <div class="kpis" id="kpis"></div>
         <div id="ov-deploy"></div>
+        <div class="row2" id="ov-charts"></div>
         <div id="ov-design"></div>
         <div class="row2">
           <div class="panel"><h4><i class="ti ti-activity" style="color:var(--accent2)"></i> Recent activity <span class="mo" onclick="nav('activity')">view all</span></h4><div id="ov-activity"></div></div>
@@ -348,6 +349,30 @@ function velocityHtml(sprints){
   return `<div class="sec">Velocity</div><div class="panel"><div style="display:flex;gap:10px;align-items:flex-end">${bars}</div>
     <div style="color:var(--dim);font-size:11px;margin-top:10px">shipped (cyan) vs committed (grey) per closed sprint</div></div>`;
 }
+function chartsHtml(s){
+  const ts=s.tickets||[],h=s.history||[];
+  if(!ts.length&&!h.length)return "";
+  // Ticket status distribution (stacked bar).
+  const order=[["pending","--muted"],["ready","--accent2"],["in_progress","--amber"],["done","--green"],["documented","--teal"],["open","--red"],["fixed","--amber"],["verified","--green"],["rejected","--dim"]];
+  const counts={};ts.forEach(t=>counts[t.status]=(counts[t.status]||0)+1);
+  const total=ts.length||1;
+  const seg=order.filter(([k])=>counts[k]).map(([k,c])=>`<div title="${k}: ${counts[k]}" style="width:${counts[k]/total*100}%;background:var(${c})"></div>`).join("");
+  const legend=order.filter(([k])=>counts[k]).map(([k,c])=>`<span style="display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--muted);margin-right:12px"><span style="width:9px;height:9px;border-radius:2px;background:var(${c})"></span>${k} ${counts[k]}</span>`).join("");
+  const statusChart=`<div class="panel"><h4><i class="ti ti-chart-pie" style="color:var(--accent2)"></i> Ticket status</h4>
+    <div style="display:flex;height:14px;border-radius:7px;overflow:hidden;background:var(--card2);margin:6px 0 10px">${seg||'<div style="width:100%"></div>'}</div>
+    <div style="line-height:1.9">${legend||'<span class="empty">no tickets</span>'}</div></div>`;
+  // Throughput: deliveries per day over the last 14 days.
+  const days=[];for(let i=13;i>=0;i--){const d=new Date(Date.now()-i*86400000);days.push(d.toISOString().slice(0,10));}
+  const perDay={};h.forEach(r=>{const d=(r.at||"").slice(0,10);perDay[d]=(perDay[d]||0)+1;});
+  const max=Math.max(1,...days.map(d=>perDay[d]||0));
+  const bars=days.map(d=>{const v=perDay[d]||0;const ht=Math.max(3,Math.round(v/max*70));
+    return `<div title="${d}: ${v} shipped" style="flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:3px">
+      <div style="width:70%;height:${ht}px;background:${v?'var(--accent2)':'var(--card2)'};border-radius:3px 3px 0 0"></div></div>`;}).join("");
+  const totalShipped=h.length;
+  const throughput=`<div class="panel"><h4><i class="ti ti-chart-bar" style="color:var(--accent2)"></i> Throughput <span style="font-size:11px;color:var(--dim);font-weight:400">· ${totalShipped} shipped, last 14 days</span></h4>
+    <div style="display:flex;align-items:flex-end;height:80px;gap:2px;margin-top:6px">${bars}</div></div>`;
+  return statusChart+throughput;
+}
 function designSystemHtml(ds){
   if(!ds)return "";
   const has=(ds.principles||(ds.palette||[]).length||ds.typography||(ds.components||[]).length);
@@ -435,6 +460,7 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
       <div class="av" style="width:36px;height:36px;background:${dp.ok?'var(--green)':'var(--red)'}22;color:${dp.ok?'var(--green)':'var(--red)'}"><i class="ti ti-${dp.ok?'cloud-check':'cloud-x'}"></i></div>
       <div style="flex:1"><div style="font-size:13px;font-weight:600">Deployment ${dp.ok?'healthy':'failed'}</div><div style="font-size:12px;color:var(--muted)">${esc(dp.summary)}</div></div>
       <div style="font-size:11px;color:var(--dim)">${esc((dp.at||"").slice(0,16).replace("T"," "))}</div></div>`:"";
+    document.getElementById("ov-charts").innerHTML=chartsHtml(s);
     document.getElementById("ov-design").innerHTML=designSystemHtml(s.design_system);
     const act=[...(s.activity||[])].reverse().slice(0,7);
     document.getElementById("ov-activity").innerHTML=act.length?act.map(actItem).join(""):'<div class="empty">no activity yet</div>';
