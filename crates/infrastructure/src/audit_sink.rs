@@ -112,7 +112,8 @@ impl SqlAuditSink {
                     \"user\" TEXT NOT NULL,
                     action  TEXT NOT NULL,
                     status  INTEGER NOT NULL
-                );",
+                );
+                 CREATE INDEX IF NOT EXISTS audit_log_at_idx ON audit_log (at);",
             )
             .await
             .map_err(|e| PortError::Backend(format!("audit migrate: {e}")))
