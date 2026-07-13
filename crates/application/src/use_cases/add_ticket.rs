@@ -17,11 +17,11 @@ pub struct AddTicketInput {
 }
 
 /// Adds a new ticket to the project backlog.
-pub struct AddTicketUseCase<S: StateStorePort> {
+pub struct AddTicketUseCase<S: StateStorePort + ?Sized> {
     store: Arc<S>,
 }
 
-impl<S: StateStorePort> AddTicketUseCase<S> {
+impl<S: StateStorePort + ?Sized> AddTicketUseCase<S> {
     pub fn new(store: Arc<S>) -> Self {
         Self { store }
     }

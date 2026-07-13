@@ -178,7 +178,10 @@ body:not(.admin) .admin-only { display: none !important; }
       </div>
       <div class="view" id="view-team"><div class="agents" id="agents"></div></div>
       <div class="view" id="view-board">
-        <div class="filters" id="board-filters"></div>
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
+          <div class="filters" id="board-filters" style="flex:1;margin:0"></div>
+          <button class="pri ticket-actions" onclick="openNewTicket()"><i class="ti ti-plus"></i> New ticket</button>
+        </div>
         <div class="sec">Features</div><div class="cols" id="features"></div>
         <div class="sec">Bugs</div><div class="cols" id="bugs"></div>
       </div>
@@ -236,6 +239,27 @@ body:not(.admin) .admin-only { display: none !important; }
   </main>
 
   <div class="ov" id="ov-ticket" onclick="if(event.target===this)close_('ov-ticket')"><div class="modal" id="ticket-body"></div></div>
+  <div class="ov" id="ov-newticket" onclick="if(event.target===this)close_('ov-newticket')"><div class="modal">
+    <span class="x" onclick="close_('ov-newticket')"><i class="ti ti-x"></i></span>
+    <h3>New ticket</h3>
+    <div class="msub">added to the backlog — SA designs it, DEV builds it, highest priority first</div>
+    <div class="mrow" style="flex-direction:column;align-items:stretch;gap:6px">
+      <span class="lbl">Title</span>
+      <input id="nt-title" placeholder="e.g. Add password reset" style="background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 11px;font-size:13px;font-family:inherit">
+    </div>
+    <div class="mrow" style="flex-direction:column;align-items:stretch;gap:6px">
+      <span class="lbl">Description</span>
+      <textarea id="nt-desc" rows="4" placeholder="What should it do? Acceptance criteria?" style="background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 11px;font-size:13px;font-family:inherit;resize:vertical"></textarea>
+    </div>
+    <div class="mrow" style="gap:8px;flex-wrap:wrap">
+      <div style="flex:1;min-width:90px;display:flex;flex-direction:column;gap:5px"><span class="lbl">Type</span><select id="nt-type" class="sel"><option value="feature">feature</option><option value="bug">bug</option><option value="chore">chore</option></select></div>
+      <div style="flex:1;min-width:90px;display:flex;flex-direction:column;gap:5px"><span class="lbl">Priority</span><select id="nt-prio" class="sel"><option value="high">high</option><option value="medium" selected>medium</option><option value="low">low</option></select></div>
+      <div style="flex:1;min-width:90px;display:flex;flex-direction:column;gap:5px"><span class="lbl">Size</span><select id="nt-cx" class="sel"><option value="small">small</option><option value="medium" selected>medium</option><option value="large">large</option></select></div>
+    </div>
+    <label class="mrow" style="gap:8px;cursor:pointer"><input type="checkbox" id="nt-ui"> <span class="lbl" style="cursor:pointer">Has UI (PD will design UX)</span></label>
+    <div id="nt-err" style="color:var(--red);font-size:12px;min-height:16px;margin:4px 0"></div>
+    <button class="pri" onclick="createTicket()" style="width:100%;justify-content:center"><i class="ti ti-plus"></i> Create ticket</button>
+  </div></div>
   <div class="ov" id="ov-newproj" onclick="if(event.target===this)close_('ov-newproj')"><div class="modal">
     <span class="x" onclick="close_('ov-newproj')"><i class="ti ti-x"></i></span>
     <h3>New project</h3>
@@ -576,6 +600,24 @@ async function loadProjects(){
   PID=(saved&&list.some(p=>p.id===saved))?saved:list[0].id;
   sel.value=PID;
   loadBudget();loadComments();connect();
+}
+function openNewTicket(){["nt-title","nt-desc"].forEach(i=>document.getElementById(i).value="");document.getElementById("nt-err").textContent="";document.getElementById("nt-ui").checked=false;document.getElementById("ov-newticket").classList.add("open");setTimeout(()=>document.getElementById("nt-title").focus(),50);}
+async function createTicket(){
+  const title=document.getElementById("nt-title").value.trim();
+  const err=document.getElementById("nt-err");
+  if(!title){err.textContent="Title is required.";return;}
+  const body={title,description:document.getElementById("nt-desc").value,
+    ticket_type:document.getElementById("nt-type").value,
+    priority:document.getElementById("nt-prio").value,
+    complexity:document.getElementById("nt-cx").value,
+    has_ui:document.getElementById("nt-ui").checked};
+  err.textContent="Creating…";
+  try{
+    const r=await fetch(api("/tickets"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    if(!r.ok){err.textContent=await r.text()||"Failed.";return;}
+    close_("ov-newticket");
+    const s=await(await fetch(api("/state"))).json();render(s);
+  }catch(e){err.textContent="Network error.";}
 }
 function openNewProject(){document.getElementById("np-name").value="";document.getElementById("np-alias").value="";document.getElementById("np-err").textContent="";document.getElementById("ov-newproj").classList.add("open");setTimeout(()=>document.getElementById("np-name").focus(),50);}
 async function createProject(){

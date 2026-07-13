@@ -141,6 +141,7 @@ pub async fn serve_full(
         .route("/api/projects/:pid/audit", get(audit_ep))
         .route("/api/projects/:pid/config", get(get_config).put(put_config))
         .route("/api/projects/:pid/control/:action", post(control_ep))
+        .route("/api/projects/:pid/tickets", post(create_ticket))
         .route("/api/projects/:pid/ticket/:id/priority", post(set_priority))
         .route("/api/projects/:pid/ticket/:id/reject", post(reject_ticket))
         .route(
@@ -323,6 +324,65 @@ async fn put_config(
 #[derive(serde::Deserialize)]
 struct PriorityReq {
     priority: coxagent_domain::Priority,
+}
+
+#[derive(serde::Deserialize)]
+struct CreateTicketReq {
+    #[serde(default)]
+    ticket_type: Option<String>,
+    title: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    priority: Option<coxagent_domain::Priority>,
+    #[serde(default)]
+    complexity: Option<coxagent_domain::Complexity>,
+    #[serde(default)]
+    has_ui: bool,
+}
+
+/// Create a ticket in the backlog (the manual entry point; the BA/SA/DEV
+/// pipeline then designs and builds it, highest priority first).
+async fn create_ticket(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    Json(req): Json<CreateTicketReq>,
+) -> axum::response::Response {
+    use coxagent_application::use_cases::{AddTicketInput, AddTicketUseCase};
+    use coxagent_domain::{Complexity, Priority, TicketType};
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let title = req.title.trim();
+    if title.is_empty() {
+        return (StatusCode::BAD_REQUEST, "title is required").into_response();
+    }
+    let ticket_type = match req.ticket_type.as_deref() {
+        Some("bug") => TicketType::Bug,
+        Some("chore") => TicketType::Chore,
+        _ => TicketType::Feature,
+    };
+    let input = AddTicketInput {
+        ticket_type,
+        title: title.to_owned(),
+        description: req.description.trim().to_owned(),
+        priority: req.priority.unwrap_or(Priority::Medium),
+        complexity: req.complexity.unwrap_or(Complexity::Medium),
+        has_ui: req.has_ui,
+    };
+    match AddTicketUseCase::new(Arc::clone(&p.store))
+        .execute(input)
+        .await
+    {
+        Ok(id) => {
+            if let Ok(mut state) = p.store.load().await {
+                state.log_activity("USER", "created ticket", Some(id.to_string()));
+                let _ = p.store.save(&state).await;
+            }
+            Json(serde_json::json!({ "ok": true, "id": id.to_string() })).into_response()
+        }
+        Err(e) => internal_error(&e.to_string()),
+    }
 }
 
 async fn set_priority(
