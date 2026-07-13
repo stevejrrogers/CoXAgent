@@ -17,6 +17,12 @@ use std::time::{Duration, Instant};
 /// Sessions live this long before a token must be re-issued.
 const SESSION_TTL: Duration = Duration::from_secs(12 * 60 * 60);
 
+/// Consecutive failed logins for one account before it is locked.
+const MAX_FAILS: u32 = 5;
+
+/// How long an account stays locked after too many failures.
+const LOCKOUT: Duration = Duration::from_secs(15 * 60);
+
 /// One stored account: username, Argon2 password hash (PHC string), role.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredUser {
@@ -35,10 +41,19 @@ struct Session {
     expires: Instant,
 }
 
+/// Failed-login tracking for one account (brute-force throttle).
+#[derive(Default)]
+struct Attempts {
+    fails: u32,
+    /// When set, the account is locked until this instant.
+    locked_until: Option<Instant>,
+}
+
 /// File-backed auth service with in-memory sessions.
 pub struct FileAuthService {
     users: Vec<StoredUser>,
     sessions: Mutex<HashMap<String, Session>>,
+    attempts: Mutex<HashMap<String, Attempts>>,
 }
 
 impl FileAuthService {
@@ -58,6 +73,7 @@ impl FileAuthService {
         Ok(Self {
             users,
             sessions: Mutex::new(HashMap::new()),
+            attempts: Mutex::new(HashMap::new()),
         })
     }
 
@@ -91,6 +107,44 @@ impl FileAuthService {
         !self.users.is_empty()
     }
 
+    /// Whether `username` is currently locked out (expired locks are cleared).
+    fn is_locked(&self, username: &str) -> bool {
+        let Ok(mut map) = self.attempts.lock() else {
+            return false;
+        };
+        let Some(a) = map.get_mut(username) else {
+            return false;
+        };
+        match a.locked_until {
+            Some(until) if until > Instant::now() => true,
+            Some(_) => {
+                // Lock expired: reset the counter.
+                a.locked_until = None;
+                a.fails = 0;
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// Count a failed attempt; lock the account after [`MAX_FAILS`].
+    fn record_failure(&self, username: &str) {
+        if let Ok(mut map) = self.attempts.lock() {
+            let a = map.entry(username.to_owned()).or_default();
+            a.fails += 1;
+            if a.fails >= MAX_FAILS {
+                a.locked_until = Some(Instant::now() + LOCKOUT);
+            }
+        }
+    }
+
+    /// Clear failure tracking after a successful login.
+    fn clear_failures(&self, username: &str) {
+        if let Ok(mut map) = self.attempts.lock() {
+            map.remove(username);
+        }
+    }
+
     /// The workspace-relative default location for the user file.
     #[must_use]
     pub fn default_path(base: &Path) -> PathBuf {
@@ -121,11 +175,26 @@ fn mint_token() -> String {
 #[async_trait]
 impl AuthPort for FileAuthService {
     async fn login(&self, username: &str, password: &str) -> Option<String> {
-        let user = self.users.iter().find(|u| u.username == username)?;
-        let parsed = PasswordHash::new(&user.hash).ok()?;
-        Argon2::default()
-            .verify_password(password.as_bytes(), &parsed)
-            .ok()?;
+        // Brute-force throttle: refuse while the account is locked.
+        if self.is_locked(username) {
+            return None;
+        }
+        let verified = self
+            .users
+            .iter()
+            .find(|u| u.username == username)
+            .and_then(|user| {
+                let parsed = PasswordHash::new(&user.hash).ok()?;
+                Argon2::default()
+                    .verify_password(password.as_bytes(), &parsed)
+                    .ok()?;
+                Some(user)
+            });
+        let Some(user) = verified else {
+            self.record_failure(username);
+            return None;
+        };
+        self.clear_failures(username);
         let token = mint_token();
         let session = Session {
             user: AuthUser {
@@ -178,6 +247,24 @@ mod tests {
         assert!(user.role.can_write());
         svc.logout(&token).await;
         assert!(svc.user_for(&token).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn locks_out_after_repeated_failures() {
+        let dir = tempdir().unwrap();
+        let path = FileAuthService::default_path(dir.path());
+        FileAuthService::bootstrap_admin(&path, "root", "s3cret").unwrap();
+        let svc = FileAuthService::open(&path).unwrap();
+
+        // Exhaust the allowed failures.
+        for _ in 0..super::MAX_FAILS {
+            assert!(svc.login("root", "wrong").await.is_none());
+        }
+        // Now even the CORRECT password is refused — the account is locked.
+        assert!(
+            svc.login("root", "s3cret").await.is_none(),
+            "correct password must be refused while locked"
+        );
     }
 
     #[tokio::test]
