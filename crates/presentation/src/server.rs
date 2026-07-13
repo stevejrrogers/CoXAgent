@@ -47,7 +47,10 @@ pub struct ProjectHandle {
 /// composition root so the presentation layer stays free of infrastructure.
 /// Takes `(name, alias)`, returns a ready [`ProjectHandle`] or an error message.
 pub type ProjectFactory = Arc<
-    dyn Fn(String, Option<String>) -> Pin<Box<dyn Future<Output = Result<ProjectHandle, String>> + Send>>
+    dyn Fn(
+            String,
+            Option<String>,
+        ) -> Pin<Box<dyn Future<Output = Result<ProjectHandle, String>> + Send>>
         + Send
         + Sync,
 >;
@@ -130,10 +133,7 @@ pub async fn serve_full(
             get(list_comments).post(post_comment),
         )
         .route("/api/projects/:pid/events", get(events_ep))
-        .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            auth_mw,
-        ))
+        .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth_mw))
         .with_state(state);
 
     let addr = format!("127.0.0.1:{port}");
@@ -202,7 +202,11 @@ async fn create_project(
     {
         let mut map = app.projects.write().await;
         if map.contains_key(&id) {
-            return (axum::http::StatusCode::CONFLICT, "project id already exists").into_response();
+            return (
+                axum::http::StatusCode::CONFLICT,
+                "project id already exists",
+            )
+                .into_response();
         }
         map.insert(id.clone(), handle);
         app.order.write().await.push(id.clone());
@@ -489,7 +493,10 @@ async fn auth_mw(
         None => None,
     };
     let Some(user) = user else {
-        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthenticated" })))
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "unauthenticated" })),
+        )
             .into_response();
     };
     let is_write = matches!(
@@ -578,9 +585,17 @@ async fn me_ep(
                 "role": if u.role.can_write() { "admin" } else { "viewer" },
             }))
             .into_response(),
-            None => (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "auth": true }))).into_response(),
+            None => (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "auth": true })),
+            )
+                .into_response(),
         },
-        None => (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "auth": true }))).into_response(),
+        None => (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "auth": true })),
+        )
+            .into_response(),
     }
 }
 

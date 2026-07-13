@@ -35,7 +35,10 @@ async fn sql_store_satisfies_contract() {
         .expect("connect + migrate");
 
     // 1. Empty store loads the default state.
-    assert_eq!(store.load().await.expect("load default"), ProjectState::default());
+    assert_eq!(
+        store.load().await.expect("load default"),
+        ProjectState::default()
+    );
 
     // 2. Round-trip.
     let state = ProjectState {
@@ -57,11 +60,17 @@ async fn sql_store_satisfies_contract() {
     bad.tickets.push(sample_ticket("DUP-1"));
     bad.tickets.push(sample_ticket("DUP-1"));
     assert!(store.save(&bad).await.is_err());
-    assert_eq!(store.load().await.expect("reload after bad").tickets.len(), 2);
+    assert_eq!(
+        store.load().await.expect("reload after bad").tickets.len(),
+        2
+    );
 
     // 5. Isolation: a different project id sees its own (default) state.
     let other = SqlStateStore::connect(&dsn, format!("{pid}-other"))
         .await
         .expect("connect other");
-    assert_eq!(other.load().await.expect("other load"), ProjectState::default());
+    assert_eq!(
+        other.load().await.expect("other load"),
+        ProjectState::default()
+    );
 }

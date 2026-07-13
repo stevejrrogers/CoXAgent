@@ -69,8 +69,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
             ))
             .into());
         }
-        let ux = parse_ux(&outcome.stdout)
-            .map_err(|e| PortError::Corrupt(format!("PD output: {e}")))?;
+        let ux =
+            parse_ux(&outcome.stdout).map_err(|e| PortError::Corrupt(format!("PD output: {e}")))?;
 
         let mut state = self.store.load().await?;
         let ticket = state

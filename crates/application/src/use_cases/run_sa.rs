@@ -200,7 +200,8 @@ mod tests {
     async fn ui_feature_gets_technical_but_stays_pending_for_pd() {
         let store = Arc::new(MemStore::default());
         seed(&store, true).await;
-        let out = r#"{"approach":"do it","files":[],"api_contract":"","data_changes":"","test_plan":""}"#;
+        let out =
+            r#"{"approach":"do it","files":[],"api_contract":"","data_changes":"","test_plan":""}"#;
         let id = uc(Arc::clone(&store), out).execute().await.expect("run");
         assert!(id.is_some());
         let state = store.load().await.expect("load");

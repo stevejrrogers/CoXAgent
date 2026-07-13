@@ -105,8 +105,8 @@ impl StateStorePort for SqlStateStore {
         state
             .validate()
             .map_err(|e| PortError::Corrupt(format!("refusing to save invalid state: {e}")))?;
-        let value = serde_json::to_value(state)
-            .map_err(|e| PortError::Backend(format!("encode: {e}")))?;
+        let value =
+            serde_json::to_value(state).map_err(|e| PortError::Backend(format!("encode: {e}")))?;
 
         let client = self.client().await?;
         // Optimistic concurrency: insert when absent, otherwise bump the

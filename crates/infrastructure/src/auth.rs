@@ -134,10 +134,7 @@ impl AuthPort for FileAuthService {
             },
             expires: Instant::now() + SESSION_TTL,
         };
-        self.sessions
-            .lock()
-            .ok()?
-            .insert(token.clone(), session);
+        self.sessions.lock().ok()?.insert(token.clone(), session);
         Some(token)
     }
 

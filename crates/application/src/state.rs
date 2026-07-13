@@ -271,7 +271,10 @@ mod comment_tests {
         }
         assert_eq!(s.comments.len(), MAX_COMMENTS);
         // Oldest were dropped; the very latest survives.
-        assert_eq!(s.comments.last().unwrap().body, format!("m{}", MAX_COMMENTS + 9));
+        assert_eq!(
+            s.comments.last().unwrap().body,
+            format!("m{}", MAX_COMMENTS + 9)
+        );
     }
 }
 

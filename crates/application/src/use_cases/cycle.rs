@@ -138,11 +138,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                         .sprint
                         .as_ref()
                         .map_or_else(String::new, |s| s.goal.clone());
-                    state.post_comment(
-                        "SM",
-                        &format!("Sprint {n} started. Goal: {goal}"),
-                        None,
-                    );
+                    state.post_comment("SM", &format!("Sprint {n} started. Goal: {goal}"), None);
                     let _ = self.store.save(&state).await;
                 }
             }

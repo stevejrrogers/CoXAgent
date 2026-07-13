@@ -58,7 +58,9 @@ async fn make_store(
                 SqlStateStore::connect(&dsn, id).await?,
             )))
         }
-        _ => Ok(Arc::new(AnyStateStore::Json(JsonStateStore::new(state_dir)?))),
+        _ => Ok(Arc::new(AnyStateStore::Json(JsonStateStore::new(
+            state_dir,
+        )?))),
     }
 }
 
@@ -279,7 +281,9 @@ fn build_auth(
         tracing::info!("RBAC enabled ({} account file)", auth_path.display());
         Ok(Some(Arc::new(svc)))
     } else {
-        tracing::info!("no auth configured — running open (set COXAGENT_ADMIN_USER/PASSWORD to enable)");
+        tracing::info!(
+            "no auth configured — running open (set COXAGENT_ADMIN_USER/PASSWORD to enable)"
+        );
         Ok(None)
     }
 }
@@ -293,9 +297,9 @@ async fn onboard_project(
     name: &str,
     alias: Option<String>,
 ) -> Result<coxagent_presentation::ProjectHandle, String> {
-    let derived = alias.clone().unwrap_or_else(|| {
-        coxagent_application::state::derive_alias(name)
-    });
+    let derived = alias
+        .clone()
+        .unwrap_or_else(|| coxagent_application::state::derive_alias(name));
     let id = unique_id(base, &derived.to_lowercase());
     let proj_dir = base.join(&id);
     let state_dir = proj_dir.join("state");
@@ -303,7 +307,9 @@ async fn onboard_project(
     std::fs::create_dir_all(&state_dir).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&work_dir).map_err(|e| e.to_string())?;
 
-    let store = make_store(&id, &state_dir).await.map_err(|e| e.to_string())?;
+    let store = make_store(&id, &state_dir)
+        .await
+        .map_err(|e| e.to_string())?;
     onboard::greenfield(&store, &state_dir, name, alias)
         .await
         .map_err(|e| e.to_string())?;
