@@ -271,7 +271,133 @@ impl ProjectState {
                 }
             }
         }
+        // A dependency cycle would deadlock the loop: no ticket in the cycle can
+        // ever become workable because its dependencies never all reach `done`.
+        if let Some(node) = self.first_dependency_cycle() {
+            return Err(format!("dependency cycle involving ticket {node}"));
+        }
         Ok(())
+    }
+
+    /// Detect a cycle in the `depends_on` graph, returning a node on the cycle.
+    /// Iterative DFS with white/grey/black coloring; a grey→grey edge is a cycle.
+    fn first_dependency_cycle(&self) -> Option<TicketId> {
+        use std::collections::HashMap;
+        #[derive(Clone, Copy, PartialEq)]
+        enum Color {
+            White,
+            Grey,
+            Black,
+        }
+        let mut color: HashMap<&TicketId, Color> = self
+            .tickets
+            .iter()
+            .map(|t| (t.id(), Color::White))
+            .collect();
+
+        for start in self.tickets.iter().map(Ticket::id) {
+            if color.get(start) != Some(&Color::White) {
+                continue;
+            }
+            // Stack of (node, "entering" flag). Entering marks grey; on exit, black.
+            let mut stack = vec![(start, false)];
+            while let Some((node, exiting)) = stack.pop() {
+                if exiting {
+                    color.insert(node, Color::Black);
+                    continue;
+                }
+                // A node can be queued more than once (shared dependency); only
+                // enter it while still White.
+                if color.get(node) != Some(&Color::White) {
+                    continue;
+                }
+                color.insert(node, Color::Grey);
+                stack.push((node, true));
+                if let Some(t) = self.ticket(node) {
+                    for dep in t.depends_on() {
+                        match color.get(dep) {
+                            Some(Color::Grey) => return Some(dep.clone()),
+                            Some(Color::White) | None => stack.push((dep, false)),
+                            Some(Color::Black) => {}
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+
+#[cfg(test)]
+mod dependency_tests {
+    use super::ProjectState;
+    use coxagent_domain::{Complexity, Priority, Role, Ticket, TicketId, TicketType};
+
+    fn feat(id: &str, deps: &[&str]) -> Ticket {
+        let mut t = Ticket::new(
+            TicketId::new(id).expect("id"),
+            TicketType::Feature,
+            "f",
+            "",
+            Priority::Medium,
+            Complexity::Small,
+            false,
+        )
+        .expect("ticket");
+        for d in deps {
+            t.add_dependency(Role::Sa, TicketId::new(*d).expect("dep"))
+                .expect("dep");
+        }
+        t
+    }
+
+    #[test]
+    fn acyclic_graph_validates() {
+        let s = ProjectState {
+            tickets: vec![
+                feat("A-1", &["A-2"]),
+                feat("A-2", &["A-3"]),
+                feat("A-3", &[]),
+            ],
+            ..ProjectState::default()
+        };
+        assert!(s.validate().is_ok());
+    }
+
+    #[test]
+    fn direct_cycle_is_rejected() {
+        let s = ProjectState {
+            tickets: vec![feat("A-1", &["A-2"]), feat("A-2", &["A-1"])],
+            ..ProjectState::default()
+        };
+        assert!(s.validate().unwrap_err().contains("cycle"));
+    }
+
+    #[test]
+    fn indirect_cycle_is_rejected() {
+        let s = ProjectState {
+            tickets: vec![
+                feat("A-1", &["A-2"]),
+                feat("A-2", &["A-3"]),
+                feat("A-3", &["A-1"]),
+            ],
+            ..ProjectState::default()
+        };
+        assert!(s.validate().unwrap_err().contains("cycle"));
+    }
+
+    #[test]
+    fn shared_dependency_is_not_a_cycle() {
+        // A-1 and A-2 both depend on A-3 (diamond, no cycle).
+        let s = ProjectState {
+            tickets: vec![
+                feat("A-1", &["A-3"]),
+                feat("A-2", &["A-3"]),
+                feat("A-3", &[]),
+            ],
+            ..ProjectState::default()
+        };
+        assert!(s.validate().is_ok());
     }
 }
 
