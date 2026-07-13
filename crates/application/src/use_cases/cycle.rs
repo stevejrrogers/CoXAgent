@@ -126,6 +126,41 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         true
     }
 
+    /// Scrum only: open/roll over the sprint at the start of a cycle, with an SM
+    /// retro line when a previous sprint closes and a standup comment on open.
+    async fn advance_sprint_if_scrum(&self, cycle: u64) {
+        if self.config.workflow.mode != crate::config::Mode::Scrum {
+            return;
+        }
+        let Ok(mut state) = self.store.load().await else {
+            return;
+        };
+        let len = self.config.workflow.sprint_length_cycles;
+        let prev = state.sprint.as_ref().map(|s| {
+            (
+                s.number,
+                s.committed.len(),
+                crate::sprint::done_count(&state),
+            )
+        });
+        if let Some(n) = crate::sprint::advance(&mut state, cycle, len) {
+            if let Some((pn, committed, done)) = prev {
+                state.log_activity(
+                    "SM",
+                    &format!("closed sprint {pn}: {done}/{committed} shipped"),
+                    None,
+                );
+            }
+            state.log_activity("SM", "opened sprint", Some(format!("sprint {n}")));
+            let goal = state
+                .sprint
+                .as_ref()
+                .map_or_else(String::new, |s| s.goal.clone());
+            state.post_comment("SM", &format!("Sprint {n} started. Goal: {goal}"), None);
+            let _ = self.store.save(&state).await;
+        }
+    }
+
     /// Emit an event to the notifier, if one is attached. Best-effort.
     async fn notify(&self, kind: &str, message: String) {
         if let Some(n) = &self.notifier {
@@ -177,36 +212,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             return report;
         }
 
-        // Scrum: open/roll over the sprint at the start of the cycle, with an
-        // SM retro line when a previous sprint closes.
-        if self.config.workflow.mode == crate::config::Mode::Scrum {
-            if let Ok(mut state) = self.store.load().await {
-                let len = self.config.workflow.sprint_length_cycles;
-                let prev = state.sprint.as_ref().map(|s| {
-                    (
-                        s.number,
-                        s.committed.len(),
-                        crate::sprint::done_count(&state),
-                    )
-                });
-                if let Some(n) = crate::sprint::advance(&mut state, cycle, len) {
-                    if let Some((pn, committed, done)) = prev {
-                        state.log_activity(
-                            "SM",
-                            &format!("closed sprint {pn}: {done}/{committed} shipped"),
-                            None,
-                        );
-                    }
-                    state.log_activity("SM", "opened sprint", Some(format!("sprint {n}")));
-                    let goal = state
-                        .sprint
-                        .as_ref()
-                        .map_or_else(String::new, |s| s.goal.clone());
-                    state.post_comment("SM", &format!("Sprint {n} started. Goal: {goal}"), None);
-                    let _ = self.store.save(&state).await;
-                }
-            }
-        }
+        // Scrum: open/roll over the sprint at the start of the cycle.
+        self.advance_sprint_if_scrum(cycle).await;
 
         // BA runs on the first cycle of each period. `(cycle-1) % n == 0` is
         // correct for every n including 1 (unlike `cycle % n == 1`).
