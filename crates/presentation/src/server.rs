@@ -74,6 +74,10 @@ pub async fn serve(projects: Vec<ProjectHandle>, port: u16) -> std::io::Result<(
         .route("/api/projects/:pid/control/:action", post(control_ep))
         .route("/api/projects/:pid/ticket/:id/priority", post(set_priority))
         .route("/api/projects/:pid/ticket/:id/reject", post(reject_ticket))
+        .route(
+            "/api/projects/:pid/comments",
+            get(list_comments).post(post_comment),
+        )
         .route("/api/projects/:pid/events", get(events_ep))
         .with_state(state);
 
@@ -256,6 +260,57 @@ async fn reject_ticket(
         return (axum::http::StatusCode::CONFLICT, e.to_string()).into_response();
     }
     state.log_activity("USER", "rejected ticket", Some(id));
+    match p.store.save(&state).await {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// List discussion comments, optionally filtered to one ticket via `?ticket=ID`.
+async fn list_comments(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<CommentQuery>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid) else {
+        return not_found();
+    };
+    let mut comments = p.store.load().await.map(|s| s.comments).unwrap_or_default();
+    if let Some(tid) = q.ticket {
+        comments.retain(|c| c.ticket.as_deref() == Some(tid.as_str()));
+    }
+    Json(comments).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct CommentQuery {
+    ticket: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct PostCommentReq {
+    body: String,
+    #[serde(default)]
+    ticket: Option<String>,
+}
+
+/// Post a comment (as the user) to a ticket thread or the team channel.
+async fn post_comment(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    Json(req): Json<PostCommentReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid) else {
+        return not_found();
+    };
+    let body = req.body.trim();
+    if body.is_empty() {
+        return (axum::http::StatusCode::BAD_REQUEST, "empty comment").into_response();
+    }
+    let Ok(mut state) = p.store.load().await else {
+        return internal_error("load failed");
+    };
+    state.post_comment("USER", body, req.ticket);
     match p.store.save(&state).await {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => internal_error(&e.to_string()),

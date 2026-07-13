@@ -128,6 +128,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                         );
                     }
                     state.log_activity("SM", "opened sprint", Some(format!("sprint {n}")));
+                    let goal = state
+                        .sprint
+                        .as_ref()
+                        .map_or_else(String::new, |s| s.goal.clone());
+                    state.post_comment(
+                        "SM",
+                        &format!("Sprint {n} started. Goal: {goal}"),
+                        None,
+                    );
                     let _ = self.store.save(&state).await;
                 }
             }
@@ -196,6 +205,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         if let Ok(mut state) = self.store.load().await {
             let at = crate::state::now_rfc3339();
             state.log_activity("DEPLOY", summary, None);
+            let verb = if ok { "shipped" } else { "deploy failed" };
+            state.post_comment("SM", &format!("{verb}: {summary}"), None);
             state.deploy = Some(crate::state::DeployStatus {
                 at,
                 ok,

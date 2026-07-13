@@ -35,6 +35,22 @@ pub struct ActivityEntry {
 /// Keep the activity feed bounded.
 pub const MAX_ACTIVITY: usize = 60;
 
+/// One message on a discussion thread — an agent or the user commenting on a
+/// ticket (`ticket = Some`) or on the team channel (`ticket = None`). This is
+/// the teamwork surface the original workflow lacked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Comment {
+    pub at: String,
+    /// Author: an agent role (e.g. `SM`, `PO`) or `USER`.
+    pub author: String,
+    pub body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
+}
+
+/// Keep discussion threads bounded per project.
+pub const MAX_COMMENTS: usize = 500;
+
 /// Accumulated engine spend — the FinOps view of the autonomous team.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Spend {
@@ -98,6 +114,9 @@ pub struct ProjectState {
     pub sprints: Vec<SprintRecord>,
     #[serde(default)]
     pub deploy: Option<DeployStatus>,
+    /// Discussion threads: per-ticket and team-channel comments.
+    #[serde(default)]
+    pub comments: Vec<Comment>,
 }
 
 impl Default for ProjectState {
@@ -113,6 +132,7 @@ impl Default for ProjectState {
             sprint: None,
             sprints: Vec::new(),
             deploy: None,
+            comments: Vec::new(),
         }
     }
 }
@@ -129,6 +149,20 @@ impl ProjectState {
         let overflow = self.activity.len().saturating_sub(MAX_ACTIVITY);
         if overflow > 0 {
             self.activity.drain(0..overflow);
+        }
+    }
+
+    /// Post a comment to a discussion thread, trimming to [`MAX_COMMENTS`].
+    pub fn post_comment(&mut self, author: &str, body: &str, ticket: Option<String>) {
+        self.comments.push(Comment {
+            at: now_rfc3339(),
+            author: author.to_owned(),
+            body: body.to_owned(),
+            ticket,
+        });
+        let overflow = self.comments.len().saturating_sub(MAX_COMMENTS);
+        if overflow > 0 {
+            self.comments.drain(0..overflow);
         }
     }
 }
@@ -186,6 +220,27 @@ impl ProjectState {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod comment_tests {
+    use super::{ProjectState, MAX_COMMENTS};
+
+    #[test]
+    fn posts_and_bounds_the_thread() {
+        let mut s = ProjectState::default();
+        s.post_comment("SM", "hello", None);
+        s.post_comment("USER", "hi", Some("CXC-F001".to_owned()));
+        assert_eq!(s.comments.len(), 2);
+        assert_eq!(s.comments[0].author, "SM");
+        assert_eq!(s.comments[1].ticket.as_deref(), Some("CXC-F001"));
+        for i in 0..MAX_COMMENTS + 10 {
+            s.post_comment("BA", &format!("m{i}"), None);
+        }
+        assert_eq!(s.comments.len(), MAX_COMMENTS);
+        // Oldest were dropped; the very latest survives.
+        assert_eq!(s.comments.last().unwrap().body, format!("m{}", MAX_COMMENTS + 9));
     }
 }
 

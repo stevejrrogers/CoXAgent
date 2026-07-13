@@ -115,6 +115,7 @@
       <a data-v="board" onclick="nav('board')"><i class="ti ti-columns"></i> Board</a>
       <a data-v="sprint" onclick="nav('sprint')"><i class="ti ti-run"></i> Sprint</a>
       <a data-v="activity" onclick="nav('activity')"><i class="ti ti-activity"></i> Activity</a>
+      <a data-v="discuss" onclick="nav('discuss')"><i class="ti ti-messages"></i> Discussion</a>
       <a data-v="insights" onclick="nav('insights')"><i class="ti ti-coin"></i> Cost</a>
       <a data-v="settings" onclick="nav('settings')"><i class="ti ti-settings"></i> Settings</a>
     </nav>
@@ -150,6 +151,14 @@
         <div class="panel"><div id="activity-full"></div></div>
       </div>
       <div class="view" id="view-sprint"><div id="sprint-body"></div></div>
+      <div class="view" id="view-discuss">
+        <div class="filters"><span style="font-size:12px;color:var(--muted)">Thread</span><select class="sel" id="disc-filter" onchange="renderDiscuss()"><option value="">Team channel</option></select></div>
+        <div class="panel"><div id="disc-thread" style="max-height:52vh;overflow-y:auto"></div></div>
+        <div style="display:flex;gap:8px;margin-top:12px">
+          <input id="disc-input" placeholder="Write a message… (Enter to send)" onkeydown="if(event.key==='Enter')sendComment()" style="flex:1;background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:10px 12px;font-size:13px;font-family:inherit">
+          <button class="pri" onclick="sendComment()" style="padding:0 16px"><i class="ti ti-send"></i> Send</button>
+        </div>
+      </div>
       <div class="view" id="view-insights"><div class="kpis" id="cost-kpis"></div>
         <div class="sec">Cost by agent</div><div class="panel" id="cost-roles"></div>
         <div class="sec">Budget</div><div class="panel" id="cost-budget"></div></div>
@@ -180,8 +189,8 @@ function onEngine(sid){const eng=document.getElementById("eng-"+sid).value;
 const KPI_IC={Shipped:"ti-rocket","In flight":"ti-plane-tilt","Open bugs":"ti-bug",Documented:"ti-book",Releases:"ti-versions",Cost:"ti-coin","Total spend":"ti-coin",Tokens:"ti-cpu",Runs:"ti-repeat"};
 const money=n=>"$"+(Number(n)||0).toFixed(2);
 const fmtK=n=>{n=Number(n)||0;return n>=1000?(n/1000).toFixed(1)+"k":String(n);};
-const AC={BA:"--blue","DEV-FEATURE":"--green","DEV-BUG":"--red",SA:"--purple",TEST:"--teal",DOCS:"--blue",PO:"--amber",SM:"--teal",PD:"--purple"};
-const TITLES={overview:["Overview","project health at a glance"],team:["Team","nine agents, one loop"],board:["Board","every ticket, every stage"],activity:["Activity","what the agents are doing"],sprint:["Sprint","the current scrum window"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
+const AC={BA:"--blue","DEV-FEATURE":"--green","DEV-BUG":"--red",SA:"--purple",TEST:"--teal",DOCS:"--blue",PO:"--amber",SM:"--teal",PD:"--purple",USER:"--accent"};
+const TITLES={overview:["Overview","project health at a glance"],team:["Team","nine agents, one loop"],board:["Board","every ticket, every stage"],activity:["Activity","what the agents are doing"],sprint:["Sprint","the current scrum window"],discuss:["Discussion","team threads & standups"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
 const esc=s=>(s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 const cvar=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim()||"#888";
 let STATE={}, CUR="overview", BF="all", INIT_ACT=false;
@@ -192,7 +201,7 @@ function nav(v){CUR=v;location.hash=v;
   document.querySelectorAll(".nav a").forEach(a=>a.classList.toggle("on",a.dataset.v===v));
   document.getElementById("pg-title").textContent=TITLES[v][0];
   document.getElementById("pg-sub").textContent=TITLES[v][1];
-  if(v==="settings")loadSettings(); else renderActive();}
+  if(v==="settings")loadSettings(); else if(v==="discuss"){loadComments();} else renderActive();}
 function initials(r){return r.replace("DEV-","").slice(0,2);}
 function metricsFrom(s){const t=s.tickets||[],h=s.history||[],isF=x=>x.type!=="bug";
   return {shipped:t.filter(x=>isF(x)&&(x.status==="done"||x.status==="documented")).length,
@@ -324,7 +333,28 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
         <div style="background:var(--card2);border-radius:6px;height:10px;overflow:hidden"><div style="width:${used}%;height:100%;background:${used>=90?'var(--red)':used>=70?'var(--amber)':'var(--accent2)'}"></div></div>
         <div style="color:var(--dim);font-size:11px;margin-top:8px">Loop auto-pauses when the cap is reached.</div>`;
     }else{document.getElementById("cost-budget").innerHTML='<div class="empty">no budget cap set — add "budget_usd" in coxagent.json</div>';}
-  }}
+  }else if(CUR==="discuss"){renderDiscuss();}}
+
+function loadComments(){if(CUR==="discuss")renderDiscuss();}
+function renderDiscuss(){
+  const sel=document.getElementById("disc-filter");if(!sel)return;
+  const want=sel.value;
+  const ids=(STATE.tickets||[]).map(t=>t.id);
+  const opts=['<option value="">Team channel</option>'].concat(ids.map(id=>`<option value="${esc(id)}">${esc(id)}</option>`)).join("");
+  if(sel.dataset.n!=String(ids.length)){sel.innerHTML=opts;sel.value=want;sel.dataset.n=String(ids.length);}
+  const msgs=(STATE.comments||[]).filter(c=>want?c.ticket===want:!c.ticket);
+  const box=document.getElementById("disc-thread");
+  box.innerHTML=msgs.length?msgs.map(c=>{const col=cvar(AC[c.author]||"--muted");
+    return `<div class="act"><div class="ad" style="background:${col}22;color:${col}">${initials(c.author)}</div>
+      <div class="atx"><span class="who">${esc(c.author)}</span>${c.ticket&&!want?` <span class="tk">${esc(c.ticket)}</span>`:''}<div style="margin-top:2px;color:var(--text)">${esc(c.body)}</div></div>
+      <span class="tm">${esc((c.at||"").slice(5,16).replace("T"," "))}</span></div>`;}).join(""):'<div class="empty">No messages yet — start the conversation.</div>';
+  box.scrollTop=box.scrollHeight;
+}
+function sendComment(){const inp=document.getElementById("disc-input");const body=inp.value.trim();if(!body)return;
+  const ticket=document.getElementById("disc-filter").value||null;
+  inp.value="";
+  fetch(api("/comments"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({body,ticket})})
+    .catch(()=>{});}
 function render(s){STATE=s;renderSidebar(s);renderActive();}
 function showTicket(id){const t=(STATE.tickets||[]).find(x=>x.id===id);if(!t)return;const d=t.design||{},tech=d.technical,ux=d.ux;
   let h=`<span class="x" onclick="close_('ov-ticket')"><i class="ti ti-x"></i></span><h3>${esc(t.title)}</h3>
@@ -393,7 +423,7 @@ function startPoll(){if(poll)return;poll=setInterval(async()=>{try{const s=await
 function connect(){if(ES)ES.close();if(poll){clearInterval(poll);poll=null;}
   ES=new EventSource(api("/events"));ES.onmessage=e=>{try{handle(JSON.parse(e.data));if(poll){clearInterval(poll);poll=null;}}catch(_){}};ES.onerror=()=>{setConn(false);startPoll();};}
 function loadBudget(){fetch(api("/config")).then(r=>r.json()).then(c=>{window._budget=(c.workflow&&c.workflow.budget_usd)||null;if(CUR==="insights")renderActive();}).catch(()=>{});}
-function switchProject(id){PID=id;INIT_ACT=false;localStorage.setItem("coxpid",id);loadBudget();connect();}
+function switchProject(id){PID=id;INIT_ACT=false;localStorage.setItem("coxpid",id);loadBudget();loadComments();connect();}
 async function loadProjects(){
   let list=[];try{list=await(await fetch("/api/projects")).json();}catch(e){}
   const sel=document.getElementById("proj-switch");
@@ -402,7 +432,7 @@ async function loadProjects(){
   const saved=localStorage.getItem("coxpid");
   PID=(saved&&list.some(p=>p.id===saved))?saved:list[0].id;
   sel.value=PID;
-  loadBudget();connect();
+  loadBudget();loadComments();connect();
 }
 const h=(location.hash||"").slice(1);if(TITLES[h])nav(h);else nav("overview");
 loadProjects();

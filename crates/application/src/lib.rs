@@ -17,4 +17,4 @@ pub mod use_cases;
 
 pub use config::{Config, EngineChoice, EngineKind, EngineMapping, Mode, WorkflowConfig};
 pub use error::{AppError, PortError};
-pub use state::{ProjectState, Spend, Sprint, SCHEMA_VERSION};
+pub use state::{Comment, ProjectState, Spend, Sprint, SCHEMA_VERSION};
