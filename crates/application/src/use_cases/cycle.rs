@@ -7,8 +7,8 @@ use crate::ports::outbound::{AgentEnginePort, DeployPort, StateStorePort};
 use crate::state::Spend;
 use crate::use_cases::run_dev::DevMode;
 use crate::use_cases::{
-    RunBaUseCase, RunConformanceUseCase, RunDevUseCase, RunDocsUseCase, RunSaUseCase,
-    RunTestUseCase,
+    RunBaUseCase, RunConformanceUseCase, RunDevUseCase, RunDocsUseCase, RunPdUseCase,
+    RunSaUseCase, RunTestUseCase,
 };
 use coxagent_domain::TicketId;
 use std::fmt::Write as _;
@@ -21,6 +21,7 @@ pub struct CycleReport {
     pub cycle: u64,
     pub ba_created: Vec<TicketId>,
     pub sa_readied: Option<TicketId>,
+    pub pd_designed: Option<TicketId>,
     pub bug_fixed: Option<TicketId>,
     pub feature_done: Option<TicketId>,
     pub documented: Option<TicketId>,
@@ -36,7 +37,10 @@ impl CycleReport {
         let mut s = format!("cycle {} —", self.cycle);
         let _ = write!(s, " BA+{}", self.ba_created.len());
         if let Some(r) = &self.sa_readied {
-            let _ = write!(s, " ready {r}");
+            let _ = write!(s, " design {r}");
+        }
+        if let Some(u) = &self.pd_designed {
+            let _ = write!(s, " ux {u}");
         }
         if let Some(b) = &self.bug_fixed {
             let _ = write!(s, " fixed {b}");
@@ -157,6 +161,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             Err(e) => report.errors.push(format!("SA: {e}")),
         }
 
+        // PD authors UX for a UI ticket SA left pending, taking it to ready.
+        match self.pd().execute().await {
+            Ok(id) => report.pd_designed = id,
+            Err(e) => report.errors.push(format!("PD: {e}")),
+        }
+
         match self.dev(DevMode::Bug).execute().await {
             Ok(id) => report.bug_fixed = id,
             Err(e) => report.errors.push(format!("DEV-BUG: {e}")),
@@ -227,7 +237,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             state.log_activity("BA", "proposed feature", Some(id.to_string()));
         }
         if let Some(id) = &report.sa_readied {
-            state.log_activity("SA", "designed & readied", Some(id.to_string()));
+            state.log_activity("SA", "designed (technical)", Some(id.to_string()));
+        }
+        if let Some(id) = &report.pd_designed {
+            state.log_activity("PD", "designed UX & readied", Some(id.to_string()));
         }
         if let Some(id) = &report.bug_fixed {
             state.log_activity("DEV-BUG", "fixed bug", Some(id.to_string()));
@@ -277,6 +290,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
 
     fn sa(&self) -> RunSaUseCase<S, E> {
         RunSaUseCase::new(
+            Arc::clone(&self.store),
+            Arc::clone(&self.engine),
+            self.config.clone(),
+            self.work_dir.clone(),
+        )
+    }
+
+    fn pd(&self) -> RunPdUseCase<S, E> {
+        RunPdUseCase::new(
             Arc::clone(&self.store),
             Arc::clone(&self.engine),
             self.config.clone(),

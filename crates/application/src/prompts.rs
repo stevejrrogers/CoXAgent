@@ -16,16 +16,25 @@ Respond with ONLY a JSON array, no prose, each item exactly:\n\
 {\"title\": string, \"description\": string, \"priority\": \"low\"|\"medium\"|\"high\", \
 \"complexity\": \"small\"|\"medium\"|\"large\", \"has_ui\": boolean}";
 
-/// Solution Architect — designs one feature. Also covers UX until PD exists.
+/// Solution Architect — produces the technical design for one feature. UX is
+/// owned by the PD in a separate pass.
 pub const SA: &str = "\
 You are the Solution Architect. Produce a technical design for the given \
 feature, consistent with the existing architecture.\n\n\
 Respond with ONLY a JSON object, no prose, exactly:\n\
 {\"approach\": string, \"files\": [string], \"api_contract\": string, \
-\"data_changes\": string, \"test_plan\": string, \
-\"ux\": {\"user_flow\": string, \"screens\": [string], \
-\"component_states\": [string], \"responsive_notes\": string} | null}\n\
-Set \"ux\" to null for features with no user interface; otherwise fill it.";
+\"data_changes\": string, \"test_plan\": string}";
+
+/// Product Designer — authors the UX design for one UI feature that already has
+/// a technical design.
+pub const PD: &str = "\
+You are the Product Designer. Design the user experience for the given UI \
+feature: the primary user flow, the screens involved, the states each key \
+component can be in (empty, loading, error, success), and how it adapts across \
+screen sizes.\n\n\
+Respond with ONLY a JSON object, no prose, exactly:\n\
+{\"user_flow\": string, \"screens\": [string], \
+\"component_states\": [string], \"responsive_notes\": string}";
 
 /// Developer — implements the one ticket handed to it in the working directory.
 pub const DEV: &str = "\

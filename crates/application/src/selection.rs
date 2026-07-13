@@ -25,6 +25,20 @@ pub fn next_feature_needing_design(state: &ProjectState) -> Option<TicketId> {
     })
 }
 
+/// Highest-priority `pending` UI feature/chore that has a technical design but
+/// still needs UX. This is the PD design gate's work queue — it runs after SA
+/// has attached the technical design and left the UI ticket for design.
+#[must_use]
+pub fn next_feature_needing_ux(state: &ProjectState) -> Option<TicketId> {
+    best(state, |t| {
+        matches!(t.ticket_type(), TicketType::Feature | TicketType::Chore)
+            && t.status() == Status::Pending
+            && t.has_ui()
+            && t.design().technical.is_some()
+            && t.design().ux.is_none()
+    })
+}
+
 /// Highest-priority feature/chore in `Done` awaiting documentation.
 #[must_use]
 pub fn next_documentable(state: &ProjectState) -> Option<TicketId> {

@@ -55,6 +55,10 @@ impl AgentEnginePort for ScriptedEngine {
             return Ok(Self::ok(SA_DESIGN.to_owned()));
         }
 
+        if sp.contains("Product Designer") {
+            return Ok(Self::ok(PD_UX.to_owned()));
+        }
+
         if sp.contains("QA Engineer") {
             // A clean build: no bugs.
             return Ok(Self::ok("[]".to_owned()));
@@ -93,8 +97,14 @@ const SA_DESIGN: &str = r#"{
   "files":["app.py","README.md"],
   "api_contract":"GET /health -> 200 {status}; GET /quote -> 200 {quote,author}",
   "data_changes":"none (in-memory)",
-  "test_plan":"curl /health and /quote, assert 200 and JSON shape",
-  "ux":null
+  "test_plan":"curl /health and /quote, assert 200 and JSON shape"
+}"#;
+
+const PD_UX: &str = r#"{
+  "user_flow":"User opens the page, sees a quote, clicks refresh for a new one",
+  "screens":["quote view"],
+  "component_states":["loading","loaded","error"],
+  "responsive_notes":"single column; button full-width on mobile"
 }"#;
 
 /// Write a working, deployable Quotes API into `dir` (code + docker files).
