@@ -221,11 +221,15 @@ async fn serve_with_runner(
 /// trail then survives restarts and is shared across the hub), else in memory.
 async fn build_audit() -> Arc<dyn coxagent_application::ports::outbound::AuditPort> {
     use coxagent_infrastructure::{MemoryAuditSink, SqlAuditSink};
+    // Optional compliance retention: prune audit rows older than N days.
+    let retention_days = std::env::var("COXAGENT_AUDIT_RETENTION_DAYS")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok());
     if let Ok(dsn) = std::env::var("COXAGENT_DB_DSN") {
         if !dsn.is_empty() {
-            match SqlAuditSink::connect(&dsn).await {
+            match SqlAuditSink::connect(&dsn, retention_days).await {
                 Ok(sink) => {
-                    tracing::info!("audit sink: Postgres");
+                    tracing::info!("audit sink: Postgres (retention: {retention_days:?} days)");
                     return Arc::new(sink);
                 }
                 Err(e) => tracing::warn!("audit sink: Postgres unavailable ({e}); using memory"),

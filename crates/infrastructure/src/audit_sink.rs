@@ -46,25 +46,56 @@ impl AuditPort for MemoryAuditSink {
     }
 }
 
+/// Prune roughly every this many records (plus once at startup), so a
+/// long-running hub does not accumulate rows past the retention window without
+/// paying a DELETE on every single write.
+const PRUNE_EVERY: usize = 100;
+
 /// Postgres-backed audit sink — one row per entry in a shared table.
 pub struct SqlAuditSink {
     pool: Pool,
+    /// Retention window in days; older rows are pruned. `None` = keep forever.
+    retention_days: Option<u32>,
+    writes: std::sync::atomic::AtomicUsize,
 }
 
 impl SqlAuditSink {
-    /// Connect to `dsn` and ensure the audit table exists.
+    /// Connect to `dsn`, ensure the audit table exists, and prune once against
+    /// `retention_days` (compliance retention; `None` keeps rows forever).
     ///
     /// # Errors
     /// [`PortError::Backend`] if the pool or migration fails.
-    pub async fn connect(dsn: &str) -> Result<Self, PortError> {
+    pub async fn connect(dsn: &str, retention_days: Option<u32>) -> Result<Self, PortError> {
         let mut cfg = Config::new();
         cfg.url = Some(dsn.to_owned());
         let pool = cfg
             .create_pool(Some(Runtime::Tokio1), NoTls)
             .map_err(|e| PortError::Backend(format!("audit pool: {e}")))?;
-        let sink = Self { pool };
+        let sink = Self {
+            pool,
+            retention_days,
+            writes: std::sync::atomic::AtomicUsize::new(0),
+        };
         sink.migrate().await?;
+        sink.prune().await;
         Ok(sink)
+    }
+
+    /// Delete rows older than the retention window (best-effort, no-op when
+    /// retention is unset). `at` is RFC3339, which sorts lexicographically.
+    async fn prune(&self) {
+        let Some(days) = self.retention_days else {
+            return;
+        };
+        let cutoff = time::OffsetDateTime::now_utc() - time::Duration::days(i64::from(days));
+        let Ok(cutoff) = cutoff.format(&time::format_description::well_known::Rfc3339) else {
+            return;
+        };
+        if let Ok(client) = self.pool.get().await {
+            let _ = client
+                .execute("DELETE FROM audit_log WHERE at < $1", &[&cutoff])
+                .await;
+        }
     }
 
     async fn migrate(&self) -> Result<(), PortError> {
@@ -102,6 +133,17 @@ impl AuditPort for SqlAuditSink {
                 &[&entry.at, &entry.user, &entry.action, &status],
             )
             .await;
+        drop(client);
+        // Amortised pruning so long runs stay within the retention window.
+        if self.retention_days.is_some()
+            && self
+                .writes
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                % PRUNE_EVERY
+                == PRUNE_EVERY - 1
+        {
+            self.prune().await;
+        }
     }
 
     async fn recent(&self, limit: usize) -> Result<Vec<AuditRecord>, PortError> {
