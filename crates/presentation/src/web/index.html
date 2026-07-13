@@ -256,8 +256,9 @@ body:not(.admin) .admin-only { display: none !important; }
       <input id="nt-title" placeholder="e.g. Add password reset" style="background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 11px;font-size:13px;font-family:inherit">
     </div>
     <div class="mrow" style="flex-direction:column;align-items:stretch;gap:6px">
-      <span class="lbl">Description</span>
-      <textarea id="nt-desc" rows="4" placeholder="What should it do? Acceptance criteria?" style="background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 11px;font-size:13px;font-family:inherit;resize:vertical"></textarea>
+      <div style="display:flex;align-items:center;gap:8px"><span class="lbl">Description</span><div style="flex:1"></div>
+        <button onclick="baRefine()" title="Let the BA agent refine this into a ticket" style="background:var(--card2);color:var(--accent2);border:1px solid var(--border2);border-radius:8px;padding:5px 10px;font-size:11px;font-weight:600;cursor:pointer;font-family:inherit"><i class="ti ti-sparkles"></i> <span id="nt-ba-label">Refine with BA</span></button></div>
+      <textarea id="nt-desc" rows="4" placeholder="Describe the idea — or write a rough note and click Refine with BA" style="background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 11px;font-size:13px;font-family:inherit;resize:vertical"></textarea>
     </div>
     <div class="mrow" style="gap:8px;flex-wrap:wrap">
       <div style="flex:1;min-width:90px;display:flex;flex-direction:column;gap:5px"><span class="lbl">Type</span><select id="nt-type" class="sel"><option value="feature">feature</option><option value="bug">bug</option><option value="chore">chore</option></select></div>
@@ -634,6 +635,25 @@ async function loadProjects(){
   PID=(saved&&list.some(p=>p.id===saved))?saved:list[0].id;
   sel.value=PID;
   loadBudget();loadComments();connect();
+}
+async function baRefine(){
+  const idea=(document.getElementById("nt-desc").value||document.getElementById("nt-title").value).trim();
+  const err=document.getElementById("nt-err");const lbl=document.getElementById("nt-ba-label");
+  if(!idea){err.textContent="Write an idea first, then Refine with BA.";return;}
+  lbl.textContent="Analysing…";err.textContent="";
+  try{
+    const r=await fetch(api("/ba-analyze"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({description:idea})});
+    if(!r.ok){err.textContent="BA analysis failed: "+(await r.text()||r.status)+" (needs a configured engine).";lbl.textContent="Refine with BA";return;}
+    const p=await r.json();
+    if(p.title)document.getElementById("nt-title").value=p.title;
+    if(p.description)document.getElementById("nt-desc").value=p.description;
+    if(p.priority)document.getElementById("nt-prio").value=p.priority;
+    if(p.complexity)document.getElementById("nt-cx").value=p.complexity;
+    document.getElementById("nt-ui").checked=!!p.has_ui;
+    err.style.color="var(--green)";err.textContent="Refined by BA — review and create.";
+    setTimeout(()=>{err.style.color="var(--red)";err.textContent="";},4000);
+  }catch(e){err.textContent="Network error.";}
+  lbl.textContent="Refine with BA";
 }
 function openNewTicket(){["nt-title","nt-desc"].forEach(i=>document.getElementById(i).value="");document.getElementById("nt-err").textContent="";document.getElementById("nt-ui").checked=false;document.getElementById("ov-newticket").classList.add("open");setTimeout(()=>document.getElementById("nt-title").focus(),50);}
 async function createTicket(){

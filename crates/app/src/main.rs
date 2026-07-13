@@ -179,6 +179,10 @@ async fn build_project(
     let alias = store.load().await.map(|s| s.alias).unwrap_or_default();
     let context = std::fs::read_to_string(state_dir.join("project_context.md")).unwrap_or_default();
     let webhook = config.workflow.webhook_url.clone();
+    // Keep handles for on-demand server actions before they move into the loop.
+    let engine_for_handle: Arc<dyn coxagent_application::ports::outbound::AgentEnginePort> =
+        engine.clone();
+    let work_dir_for_handle = work_dir.clone();
     let mut cycle_uc = RunCycleUseCase::new(Arc::clone(&store), engine, config, work_dir, context)
         .with_meter(meter)
         .with_deploy(Arc::new(DockerComposeDeploy::new()));
@@ -204,6 +208,8 @@ async fn build_project(
         store,
         runner: handle,
         config_path,
+        engine: engine_for_handle,
+        work_dir: work_dir_for_handle,
     })
 }
 

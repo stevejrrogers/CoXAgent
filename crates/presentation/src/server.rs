@@ -41,6 +41,10 @@ pub struct ProjectHandle {
     pub store: Arc<dyn StateStorePort>,
     pub runner: Arc<RunnerHandle>,
     pub config_path: PathBuf,
+    /// The engine, exposed for on-demand actions (e.g. BA idea analysis).
+    pub engine: Arc<dyn coxagent_application::ports::outbound::AgentEnginePort>,
+    /// The managed codebase directory.
+    pub work_dir: PathBuf,
 }
 
 /// Builds a fresh project on demand (scaffold + register), injected by the
@@ -141,6 +145,7 @@ pub async fn serve_full(
         .route("/api/projects/:pid/audit", get(audit_ep))
         .route("/api/projects/:pid/config", get(get_config).put(put_config))
         .route("/api/projects/:pid/control/:action", post(control_ep))
+        .route("/api/projects/:pid/ba-analyze", post(ba_analyze))
         .route("/api/projects/:pid/tickets", post(create_ticket))
         .route("/api/projects/:pid/ticket/:id/priority", post(set_priority))
         .route("/api/projects/:pid/ticket/:id/reject", post(reject_ticket))
@@ -341,6 +346,59 @@ struct CreateTicketReq {
     complexity: Option<coxagent_domain::Complexity>,
     #[serde(default)]
     has_ui: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct AnalyzeReq {
+    description: String,
+}
+
+/// Run the BA agent on a rough idea and return a refined ticket proposal for
+/// the user to review — WITHOUT saving. The user edits and saves via the normal
+/// create-ticket endpoint. Needs a working engine (claude/opencode).
+async fn ba_analyze(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    Json(req): Json<AnalyzeReq>,
+) -> axum::response::Response {
+    use coxagent_application::parsing::parse_items;
+    use coxagent_application::ports::outbound::AgentRequest;
+    use coxagent_application::prompts;
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let idea = req.description.trim();
+    if idea.is_empty() {
+        return (StatusCode::BAD_REQUEST, "description is required").into_response();
+    }
+    let request = AgentRequest {
+        role: coxagent_domain::Role::Ba,
+        system_prompt: prompts::system_prompt(prompts::BA),
+        task_prompt: format!(
+            "A stakeholder proposes this idea. Refine it into ONE well-formed \
+             feature ticket (crisp title, clear description, sensible priority / \
+             complexity / has_ui). Respond with the same JSON array shape, one item:\n\n{idea}"
+        ),
+        work_dir: p.work_dir.clone(),
+        timeout: std::time::Duration::from_secs(120),
+    };
+    let outcome = match p.engine.run(request).await {
+        Ok(o) if o.succeeded() => o,
+        Ok(o) => return internal_error(&format!("BA engine failed: {}", o.stderr.trim())),
+        Err(e) => return internal_error(&e.to_string()),
+    };
+    match parse_items(&outcome.stdout) {
+        Ok(items) if !items.is_empty() => {
+            let p0 = &items[0];
+            Json(serde_json::json!({
+                "title": p0.title, "description": p0.description,
+                "priority": p0.priority, "complexity": p0.complexity, "has_ui": p0.has_ui,
+            }))
+            .into_response()
+        }
+        Ok(_) => (StatusCode::UNPROCESSABLE_ENTITY, "BA returned no proposal").into_response(),
+        Err(e) => internal_error(&format!("could not parse BA output: {e}")),
+    }
 }
 
 /// Create a ticket in the backlog (the manual entry point; the BA/SA/DEV
