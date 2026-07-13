@@ -90,6 +90,21 @@ pub fn design_constraints(ds: Option<&crate::state::DesignSystem>) -> String {
     s
 }
 
+/// Render the assigned host port as a deploy constraint appended to the DEV
+/// prompt, so `docker-compose` publishes a non-conflicting port. Empty when no
+/// port is assigned.
+#[must_use]
+pub fn deploy_constraints(deploy: &crate::config::DeployConfig) -> String {
+    match deploy.host_port {
+        Some(port) => format!(
+            "\n\nDEPLOY CONSTRAINT (mandatory): publish the app on host port {port} in \
+             docker-compose (e.g. \"{port}:<container-port>\"). Do not use any other host \
+             port — it is reserved to avoid clashing with other projects on this host."
+        ),
+        None => String::new(),
+    }
+}
+
 /// Compose a full system prompt for a role from the base and role sections.
 #[must_use]
 pub fn system_prompt(role_section: &str) -> String {
@@ -120,8 +135,19 @@ pub fn stack_constraints(rules: &[crate::conformance::StackRule]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::design_constraints;
+    use super::{deploy_constraints, design_constraints};
+    use crate::config::DeployConfig;
     use crate::state::DesignSystem;
+
+    #[test]
+    fn deploy_constraint_names_the_assigned_port() {
+        assert!(deploy_constraints(&DeployConfig { host_port: None }).is_empty());
+        let out = deploy_constraints(&DeployConfig {
+            host_port: Some(8123),
+        });
+        assert!(out.contains("8123"));
+        assert!(out.contains("docker-compose"));
+    }
 
     #[test]
     fn empty_design_system_renders_nothing() {

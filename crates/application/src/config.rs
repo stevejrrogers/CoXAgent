@@ -141,6 +141,16 @@ pub struct PolicyConfig {
     pub daily_budget_usd: Option<f64>,
 }
 
+/// Deploy configuration. `host_port` is assigned per project at onboard so two
+/// projects deploying with `docker compose` on one host do not fight over the
+/// same published port — agents are told which port to bind.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeployConfig {
+    /// The host port this project's app should publish (None = agent's choice).
+    #[serde(default)]
+    pub host_port: Option<u16>,
+}
+
 /// Top-level configuration persisted as `coxagent.json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
@@ -153,6 +163,9 @@ pub struct Config {
     /// Governance policy (model allowlist, forbidden paths, daily budget).
     #[serde(default)]
     pub policy: PolicyConfig,
+    /// Deploy settings (per-project host port allocation).
+    #[serde(default)]
+    pub deploy: DeployConfig,
 }
 
 impl Default for Config {
@@ -168,6 +181,7 @@ impl Default for Config {
             workflow: WorkflowConfig::default(),
             architecture: Vec::new(),
             policy: PolicyConfig::default(),
+            deploy: DeployConfig::default(),
         }
     }
 }
