@@ -164,6 +164,7 @@ body:not(.admin) .admin-only { display: none !important; }
 
   <main class="main">
     <div class="topbar"><h1 id="pg-title">Overview</h1><span class="sub" id="pg-sub"></span><div class="sp"></div>
+      <div class="chip" id="viewers-chip" title="live dashboard connections (desktop window + browser tabs share one hub)" style="display:none"><i class="ti ti-eye" style="font-size:13px"></i> <span id="viewers-n">1</span></div>
       <div class="chip"><span class="dot off" id="conn"></span><span id="connlbl">connecting</span></div></div>
     <div class="content">
       <div class="view on" id="view-overview">
@@ -644,7 +645,10 @@ function renderRunner(r){if(!r)return;const c=r.mode==="running"?"live":(r.mode=
 async function ctl(a){try{renderRunner(await(await fetch(api("/control/"+a),{method:"POST"})).json());}catch(e){}}
 let PID=null, ES=null, poll=null;
 const api=p=>"/api/projects/"+encodeURIComponent(PID)+p;
-function handle(m){if(m.state)render(m.state);renderRunner(m.runner);setConn(true);}
+function handle(m){if(m.state)render(m.state);renderRunner(m.runner);setConn(true);
+  if(typeof m.viewers==="number"){const c=document.getElementById("viewers-chip");
+    document.getElementById("viewers-n").textContent=m.viewers;c.style.display=m.viewers>1?"":"none";
+    c.title=m.viewers+" live connection"+(m.viewers>1?"s":"")+" (desktop window + browser tabs share one hub)";}}
 function startPoll(){if(poll)return;poll=setInterval(async()=>{try{const s=await(await fetch(api("/state"))).json();const rn=await(await fetch(api("/runner"))).json();render(s);renderRunner(rn);setConn(false);}catch(e){}},3000);}
 function connect(){if(ES)ES.close();if(poll){clearInterval(poll);poll=null;}
   ES=new EventSource(api("/events"));ES.onmessage=e=>{try{handle(JSON.parse(e.data));if(poll){clearInterval(poll);poll=null;}}catch(_){}};ES.onerror=()=>{setConn(false);startPoll();};}

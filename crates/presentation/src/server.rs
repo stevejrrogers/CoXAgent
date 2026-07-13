@@ -85,6 +85,29 @@ struct AppState {
     audit: Arc<dyn AuditPort>,
     /// Agent CLIs detected on this machine's PATH: `(name, path)`.
     engines: Arc<Vec<(String, String)>>,
+    /// Live dashboard connections (desktop window + browser tabs share the hub).
+    viewers: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// Increments the live-viewer count for its lifetime; decrements on drop when
+/// the SSE stream ends (tab closed / window quit).
+struct ViewerGuard(Arc<std::sync::atomic::AtomicUsize>);
+
+impl ViewerGuard {
+    fn new(counter: &Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self(Arc::clone(counter))
+    }
+    /// Current viewer count. Also keeps the guard owned by the SSE closure.
+    fn count(&self) -> usize {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl Drop for ViewerGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 impl AppState {
@@ -117,6 +140,7 @@ pub async fn serve_full(
         auth,
         audit,
         engines: Arc::new(engines),
+        viewers: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
 
     let app = Router::new()
@@ -691,14 +715,18 @@ async fn events_ep(
     Path(pid): Path<String>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let handle = app.project(&pid).await;
+    let guard = ViewerGuard::new(&app.viewers);
     let stream = IntervalStream::new(tokio::time::interval(STREAM_INTERVAL)).then(move |_| {
+        // `guard` is owned by this closure, so the count drops when the stream ends.
+        let count = guard.count();
         let handle = handle.clone();
         async move {
             let payload = match handle {
-                Some(p) => {
-                    let state = p.store.load().await.ok();
-                    serde_json::json!({ "state": state, "runner": p.runner.snapshot() })
-                }
+                Some(p) => serde_json::json!({
+                    "state": p.store.load().await.ok(),
+                    "runner": p.runner.snapshot(),
+                    "viewers": count,
+                }),
                 None => serde_json::json!({ "error": "no such project" }),
             };
             Ok(Event::default().data(payload.to_string()))
