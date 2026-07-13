@@ -6,9 +6,10 @@ use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
 use async_trait::async_trait;
-use coxagent_application::auth::{AuthPort, AuthRole, AuthUser};
+use coxagent_application::auth::{AuthPort, AuthRole, AuthUser, TokenInfo};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -31,9 +32,21 @@ struct StoredUser {
     role: AuthRole,
 }
 
+/// One stored API token: label, role, SHA-256 hex of the secret, created-at.
+/// The secret itself is never persisted — only its hash.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredToken {
+    label: String,
+    role: AuthRole,
+    hash: String,
+    created: String,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct UserFile {
     users: Vec<StoredUser>,
+    #[serde(default)]
+    tokens: Vec<StoredToken>,
 }
 
 struct Session {
@@ -51,30 +64,42 @@ struct Attempts {
 
 /// File-backed auth service with in-memory sessions.
 pub struct FileAuthService {
+    path: PathBuf,
     users: Vec<StoredUser>,
+    tokens: Mutex<Vec<StoredToken>>,
     sessions: Mutex<HashMap<String, Session>>,
     attempts: Mutex<HashMap<String, Attempts>>,
 }
 
 impl FileAuthService {
-    /// Load users from `path`. A missing file yields an empty (locked) store.
+    /// Load users and API tokens from `path`. A missing file yields an empty
+    /// (locked) store.
     ///
     /// # Errors
     /// Returns an error if the file exists but cannot be parsed.
     pub fn open(path: &Path) -> Result<Self, String> {
-        let users = match std::fs::read_to_string(path) {
-            Ok(text) => {
-                let f: UserFile =
-                    serde_json::from_str(&text).map_err(|e| format!("bad auth file: {e}"))?;
-                f.users
-            }
-            Err(_) => Vec::new(),
+        let file: UserFile = match std::fs::read_to_string(path) {
+            Ok(text) => serde_json::from_str(&text).map_err(|e| format!("bad auth file: {e}"))?,
+            Err(_) => UserFile::default(),
         };
         Ok(Self {
-            users,
+            path: path.to_path_buf(),
+            users: file.users,
+            tokens: Mutex::new(file.tokens),
             sessions: Mutex::new(HashMap::new()),
             attempts: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Persist the current users + tokens back to `path`.
+    fn persist(&self) -> Result<(), String> {
+        let tokens = self.tokens.lock().map_err(|e| e.to_string())?.clone();
+        let file = UserFile {
+            users: self.users.clone(),
+            tokens,
+        };
+        let text = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
+        std::fs::write(&self.path, text).map_err(|e| e.to_string())
     }
 
     /// Ensure an admin account with `username`/`password` exists in `path`,
@@ -180,6 +205,23 @@ fn mint_token() -> String {
     })
 }
 
+/// SHA-256 hex of an API token — a fast hash suitable for high-entropy secrets
+/// verified on every request (unlike Argon2, which is for low-entropy passwords).
+fn sha256_hex(token: &str) -> String {
+    use std::fmt::Write as _;
+    let digest = Sha256::digest(token.as_bytes());
+    digest.iter().fold(String::with_capacity(64), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
+}
+
+fn now_rfc3339() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default()
+}
+
 #[async_trait]
 impl AuthPort for FileAuthService {
     async fn login(&self, username: &str, password: &str) -> Option<String> {
@@ -229,6 +271,65 @@ impl AuthPort for FileAuthService {
         if let Ok(mut sessions) = self.sessions.lock() {
             sessions.remove(token);
         }
+    }
+
+    async fn principal_for_bearer(&self, token: &str) -> Option<AuthUser> {
+        let hash = sha256_hex(token);
+        let tokens = self.tokens.lock().ok()?;
+        let stored = tokens.iter().find(|t| t.hash == hash)?;
+        Some(AuthUser {
+            username: format!("svc:{}", stored.label),
+            role: stored.role,
+        })
+    }
+
+    async fn create_token(&self, label: &str, role: AuthRole) -> Option<String> {
+        {
+            let mut tokens = self.tokens.lock().ok()?;
+            if tokens.iter().any(|t| t.label == label) {
+                return None; // label already in use
+            }
+            let secret = mint_token();
+            tokens.push(StoredToken {
+                label: label.to_owned(),
+                role,
+                hash: sha256_hex(&secret),
+                created: now_rfc3339(),
+            });
+            drop(tokens);
+            self.persist().ok()?;
+            Some(secret)
+        }
+    }
+
+    async fn list_tokens(&self) -> Vec<TokenInfo> {
+        self.tokens.lock().map_or_else(
+            |_| Vec::new(),
+            |tokens| {
+                tokens
+                    .iter()
+                    .map(|t| TokenInfo {
+                        label: t.label.clone(),
+                        role: t.role,
+                        created: t.created.clone(),
+                    })
+                    .collect()
+            },
+        )
+    }
+
+    async fn revoke_token(&self, label: &str) -> bool {
+        let Ok(mut tokens) = self.tokens.lock() else {
+            return false;
+        };
+        let before = tokens.len();
+        tokens.retain(|t| t.label != label);
+        let removed = tokens.len() != before;
+        drop(tokens);
+        if removed {
+            let _ = self.persist();
+        }
+        removed
     }
 }
 
@@ -290,6 +391,33 @@ mod tests {
             svc.login("root", "s3cret").await.is_none(),
             "correct password must be refused while locked"
         );
+    }
+
+    #[tokio::test]
+    async fn api_tokens_mint_authenticate_and_revoke() {
+        let dir = tempdir().unwrap();
+        let path = FileAuthService::default_path(dir.path());
+        FileAuthService::bootstrap_admin(&path, "root", "s3cret").unwrap();
+        let svc = FileAuthService::open(&path).unwrap();
+
+        let secret = svc.create_token("ci", AuthRole::Admin).await.expect("mint");
+        // Duplicate label is refused.
+        assert!(svc.create_token("ci", AuthRole::Viewer).await.is_none());
+
+        let principal = svc.principal_for_bearer(&secret).await.expect("resolve");
+        assert_eq!(principal.username, "svc:ci");
+        assert!(principal.role.can_write());
+        assert!(svc.principal_for_bearer("nonsense").await.is_none());
+
+        assert_eq!(svc.list_tokens().await.len(), 1);
+
+        // Persistence: a freshly opened service sees the token, hash only.
+        let reopened = FileAuthService::open(&path).unwrap();
+        assert!(reopened.principal_for_bearer(&secret).await.is_some());
+
+        assert!(svc.revoke_token("ci").await);
+        assert!(!svc.revoke_token("ci").await); // already gone
+        assert!(svc.principal_for_bearer(&secret).await.is_none());
     }
 
     #[tokio::test]

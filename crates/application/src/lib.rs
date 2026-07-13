@@ -16,7 +16,7 @@ pub mod sprint;
 pub mod state;
 pub mod use_cases;
 
-pub use auth::{AuthPort, AuthRole, AuthUser};
+pub use auth::{AuthPort, AuthRole, AuthUser, TokenInfo};
 pub use config::{Config, EngineChoice, EngineKind, EngineMapping, Mode, WorkflowConfig};
 pub use error::{AppError, PortError};
 pub use state::{Comment, DesignSystem, ProjectState, Spend, Sprint, SCHEMA_VERSION};

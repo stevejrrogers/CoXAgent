@@ -117,6 +117,14 @@ pub async fn serve_full(
         .route("/api/auth/login", post(login_ep))
         .route("/api/auth/logout", post(logout_ep))
         .route("/api/auth/me", get(me_ep))
+        .route(
+            "/api/auth/tokens",
+            get(list_tokens_ep).post(create_token_ep),
+        )
+        .route(
+            "/api/auth/tokens/:label",
+            axum::routing::delete(revoke_token_ep),
+        )
         .route("/api/audit-log", get(audit_log_ep))
         .route("/api/projects", get(list_projects).post(create_project))
         .route("/api/projects/:pid/state", get(state_ep))
@@ -463,13 +471,36 @@ async fn events_ep(
 /// Name of the session cookie.
 const SESSION_COOKIE: &str = "cox_session";
 
-/// Extract a cookie value from a request's `Cookie` header.
-fn cookie_value(req: &Request<axum::body::Body>, name: &str) -> Option<String> {
-    let raw = req.headers().get(header::COOKIE)?.to_str().ok()?;
+/// Extract a cookie value from a `Cookie` header set.
+fn cookie_value(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
+    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
     raw.split(';').find_map(|pair| {
         let (k, v) = pair.split_once('=')?;
         (k.trim() == name).then(|| v.trim().to_owned())
     })
+}
+
+/// The `Authorization: Bearer <token>` value, if present.
+fn bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
+    let raw = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    raw.strip_prefix("Bearer ").map(|t| t.trim().to_owned())
+}
+
+/// Resolve the principal: an `Authorization: Bearer` API token (for automation)
+/// takes precedence, else the session cookie.
+async fn resolve_principal(
+    auth: &Arc<dyn AuthPort>,
+    headers: &axum::http::HeaderMap,
+) -> Option<coxagent_application::AuthUser> {
+    if let Some(token) = bearer_token(headers) {
+        if let Some(user) = auth.principal_for_bearer(&token).await {
+            return Some(user);
+        }
+    }
+    match cookie_value(headers, SESSION_COOKIE) {
+        Some(token) => auth.user_for(&token).await,
+        None => None,
+    }
 }
 
 /// RBAC gate. Open (pass-through) when no auth is configured. Otherwise: the
@@ -487,11 +518,7 @@ async fn auth_mw(
     if path == "/" || path == "/api/health" || path == "/api/auth/login" {
         return next.run(req).await;
     }
-    let user = match cookie_value(&req, SESSION_COOKIE) {
-        Some(token) => auth.user_for(&token).await,
-        None => None,
-    };
-    let Some(user) = user else {
+    let Some(user) = resolve_principal(&auth, req.headers()).await else {
         return (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({ "error": "unauthenticated" })),
@@ -535,18 +562,83 @@ async fn auth_mw(
     resp
 }
 
+#[derive(serde::Deserialize)]
+struct CreateTokenReq {
+    label: String,
+    /// "admin" or "viewer" (defaults to viewer).
+    #[serde(default)]
+    role: Option<String>,
+}
+
+/// Mint an API token for a service account. The secret is returned once and
+/// never stored in plaintext. Admin-only (enforced by the middleware).
+async fn create_token_ep(
+    State(app): State<AppState>,
+    Json(req): Json<CreateTokenReq>,
+) -> axum::response::Response {
+    let Some(auth) = app.auth.clone() else {
+        return (StatusCode::NOT_IMPLEMENTED, "auth not configured").into_response();
+    };
+    let label = req.label.trim();
+    if label.is_empty() {
+        return (StatusCode::BAD_REQUEST, "label is required").into_response();
+    }
+    let role = match req.role.as_deref() {
+        Some("admin") => coxagent_application::AuthRole::Admin,
+        _ => coxagent_application::AuthRole::Viewer,
+    };
+    match auth.create_token(label, role).await {
+        Some(secret) => Json(serde_json::json!({
+            "ok": true, "label": label, "token": secret,
+            "note": "store this now — it is not shown again",
+        }))
+        .into_response(),
+        None => (StatusCode::CONFLICT, "label already in use").into_response(),
+    }
+}
+
+/// List minted API tokens (metadata only). Admin-only via middleware write gate
+/// is not applied to GET, so restrict to admins explicitly.
+async fn list_tokens_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let Some(auth) = app.auth.clone() else {
+        return Json(Vec::<coxagent_application::TokenInfo>::new()).into_response();
+    };
+    let is_admin = resolve_principal(&auth, &headers)
+        .await
+        .is_some_and(|u| u.role.can_write());
+    if !is_admin {
+        return (StatusCode::FORBIDDEN, "admin role required").into_response();
+    }
+    Json(auth.list_tokens().await).into_response()
+}
+
+/// Revoke an API token by label. Admin-only (write gate in middleware).
+async fn revoke_token_ep(
+    State(app): State<AppState>,
+    Path(label): Path<String>,
+) -> axum::response::Response {
+    let Some(auth) = app.auth.clone() else {
+        return (StatusCode::NOT_IMPLEMENTED, "auth not configured").into_response();
+    };
+    if auth.revoke_token(&label).await {
+        Json(serde_json::json!({ "ok": true })).into_response()
+    } else {
+        (StatusCode::NOT_FOUND, "no such token").into_response()
+    }
+}
+
 /// Return the security audit log (admin only, newest first).
 async fn audit_log_ep(
     State(app): State<AppState>,
-    req: Request<axum::body::Body>,
+    headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
     // When auth is on, require an admin; open mode exposes it freely.
     if let Some(auth) = app.auth.clone() {
-        let ok = match cookie_value(&req, SESSION_COOKIE) {
-            Some(token) => auth
-                .user_for(&token)
-                .await
-                .is_some_and(|u| u.role.can_write()),
+        let ok = match resolve_principal(&auth, &headers).await {
+            Some(u) => u.role.can_write(),
             None => false,
         };
         if !ok {
@@ -608,9 +700,9 @@ async fn login_ep(
 /// Invalidate the session and clear the cookie.
 async fn logout_ep(
     State(app): State<AppState>,
-    req: Request<axum::body::Body>,
+    headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
-    if let (Some(auth), Some(token)) = (app.auth.clone(), cookie_value(&req, SESSION_COOKIE)) {
+    if let (Some(auth), Some(token)) = (app.auth.clone(), cookie_value(&headers, SESSION_COOKIE)) {
         auth.logout(&token).await;
     }
     let cleared = format!("{SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
@@ -624,24 +716,17 @@ async fn logout_ep(
 /// Report the current principal (or `auth:false` when running open).
 async fn me_ep(
     State(app): State<AppState>,
-    req: Request<axum::body::Body>,
+    headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
     let Some(auth) = app.auth.clone() else {
         return Json(serde_json::json!({ "auth": false })).into_response();
     };
-    match cookie_value(&req, SESSION_COOKIE) {
-        Some(token) => match auth.user_for(&token).await {
-            Some(u) => Json(serde_json::json!({
-                "auth": true, "username": u.username,
-                "role": if u.role.can_write() { "admin" } else { "viewer" },
-            }))
-            .into_response(),
-            None => (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({ "auth": true })),
-            )
-                .into_response(),
-        },
+    match resolve_principal(&auth, &headers).await {
+        Some(u) => Json(serde_json::json!({
+            "auth": true, "username": u.username,
+            "role": if u.role.can_write() { "admin" } else { "viewer" },
+        }))
+        .into_response(),
         None => (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({ "auth": true })),

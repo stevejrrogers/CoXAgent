@@ -30,7 +30,17 @@ pub struct AuthUser {
     pub role: AuthRole,
 }
 
-/// Authentication boundary: verify credentials, mint/resolve session tokens.
+/// Metadata about a minted API token (never the secret itself).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenInfo {
+    pub label: String,
+    pub role: AuthRole,
+    /// RFC3339 creation timestamp.
+    pub created: String,
+}
+
+/// Authentication boundary: verify credentials, mint/resolve session tokens,
+/// and manage long-lived API tokens for service accounts.
 #[async_trait]
 pub trait AuthPort: Send + Sync {
     /// Verify `username`/`password`; on success return an opaque session token.
@@ -41,4 +51,17 @@ pub trait AuthPort: Send + Sync {
 
     /// Invalidate a session token (logout). No-op if unknown.
     async fn logout(&self, token: &str);
+
+    /// Resolve a bearer API token to its service-account principal.
+    async fn principal_for_bearer(&self, token: &str) -> Option<AuthUser>;
+
+    /// Mint an API token (`label`, `role`) and return the secret **once**.
+    /// Returns `None` if the label is taken or persistence fails.
+    async fn create_token(&self, label: &str, role: AuthRole) -> Option<String>;
+
+    /// List minted tokens (metadata only, never the secret).
+    async fn list_tokens(&self) -> Vec<TokenInfo>;
+
+    /// Revoke the token with `label`. Returns whether one was removed.
+    async fn revoke_token(&self, label: &str) -> bool;
 }
