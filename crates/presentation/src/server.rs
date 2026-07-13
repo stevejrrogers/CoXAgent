@@ -83,6 +83,8 @@ struct AppState {
     factory: Option<ProjectFactory>,
     auth: Option<Arc<dyn AuthPort>>,
     audit: Arc<dyn AuditPort>,
+    /// Agent CLIs detected on this machine's PATH: `(name, path)`.
+    engines: Arc<Vec<(String, String)>>,
 }
 
 impl AppState {
@@ -103,6 +105,7 @@ pub async fn serve_full(
     factory: Option<ProjectFactory>,
     audit: Arc<dyn AuditPort>,
     auth: Option<Arc<dyn AuthPort>>,
+    engines: Vec<(String, String)>,
 ) -> std::io::Result<()> {
     let order: Vec<String> = projects.iter().map(|p| p.id.clone()).collect();
     let map: HashMap<String, ProjectHandle> =
@@ -113,6 +116,7 @@ pub async fn serve_full(
         factory,
         auth,
         audit,
+        engines: Arc::new(engines),
     };
 
     let app = Router::new()
@@ -138,6 +142,7 @@ pub async fn serve_full(
             axum::routing::delete(delete_user_ep),
         )
         .route("/api/audit-log", get(audit_log_ep))
+        .route("/api/engines", get(engines_ep))
         .route("/api/projects", get(list_projects).post(create_project))
         .route("/api/projects/:pid/state", get(state_ep))
         .route("/api/projects/:pid/metrics", get(metrics_ep))
@@ -172,6 +177,17 @@ async fn index() -> Html<&'static str> {
 
 async fn health() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "ok" }))
+}
+
+/// Agent CLIs detected on this machine's PATH — so the dashboard can show what
+/// can actually run locally, not just the known engine types.
+async fn engines_ep(State(app): State<AppState>) -> impl IntoResponse {
+    let list: Vec<_> = app
+        .engines
+        .iter()
+        .map(|(name, path)| serde_json::json!({ "name": name, "path": path }))
+        .collect();
+    Json(list)
 }
 
 /// List projects (id, name, alias, version, ticket count) in registration order.

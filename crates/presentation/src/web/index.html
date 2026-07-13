@@ -588,15 +588,25 @@ function showTicket(id){const t=(STATE.tickets||[]).find(x=>x.id===id);if(!t)ret
   document.getElementById("ticket-body").innerHTML=h;document.getElementById("ov-ticket").classList.add("open");}
 async function rejectTicket(id){try{await fetch(api("/ticket/"+id+"/reject"),{method:"POST"});close_("ov-ticket");}catch(e){}}
 async function loadSettings(){let cfg={};try{cfg=await(await fetch(api("/config"))).json();}catch(e){}window._cfg=cfg;
+  let detected=[];try{detected=await(await fetch("/api/engines")).json();}catch(e){}
+  const detNames=new Set((detected||[]).map(d=>d.name));window._detected=detNames;
   const def=cfg.engine&&cfg.engine.default||{engine:"claude",model:"sonnet"},per=cfg.engine&&cfg.engine.per_role||{},wf=cfg.workflow||{};
-  const eng=["opencode","claude","scripted","mock"],opt=(s)=>eng.map(e=>`<option ${e===s?'selected':''}>${e}</option>`).join("");
+  const eng=["opencode","claude","scripted","mock"];
+  const label=e=>e+(detNames.has(e)?" ✓":(e==="scripted"||e==="mock")?"":" (not installed)");
+  const opt=(s)=>eng.map(e=>`<option value="${e}" ${e===s?'selected':''}>${label(e)}</option>`).join("");
+  const detBanner=(detected&&detected.length)
+    ? `<div class="panel" style="margin-bottom:12px"><div style="font-size:12px;color:var(--muted);margin-bottom:6px"><i class="ti ti-cpu" style="color:var(--accent2)"></i> Detected agent CLIs on this machine — agents run locally via these:</div>`
+      + detected.map(d=>`<div style="display:flex;align-items:center;gap:8px;font-size:12px;padding:2px 0"><span class="tk" style="background:var(--green)22;color:var(--green)">${esc(d.name)}</span><span style="color:var(--dim);font-family:ui-monospace,monospace">${esc(d.path)}</span></div>`).join("")
+      + `</div>`
+    : `<div class="panel" style="margin-bottom:12px"><div style="font-size:12px;color:var(--amber)"><i class="ti ti-alert-triangle"></i> No agent CLI detected on PATH. Install <b>claude</b> or <b>opencode</b> to run real agents (scripted/mock work offline).</div></div>`;
   let rows=`<div class="fr"><span class="lbl">Default engine</span><select id="eng-default" onchange="onEngine('default')">${opt(def.engine)}</select>
     <span id="mc-default" style="flex:1;display:flex">${modelControl(def.engine,def.model,'default')}</span></div>`;
   rows+=ROLES.map(r=>{const c=per[r]||{};return `<div class="fr"><span class="lbl">${r}</span>
-    <select id="eng-${r}" onchange="onEngine('${r}')"><option value="">(default)</option>${eng.map(e=>`<option ${c.engine===e?'selected':''}>${e}</option>`).join("")}</select>
+    <select id="eng-${r}" onchange="onEngine('${r}')"><option value="">(default)</option>${eng.map(e=>`<option value="${e}" ${c.engine===e?'selected':''}>${label(e)}</option>`).join("")}</select>
     <span id="mc-${r}" style="flex:1;display:flex">${modelControl(c.engine||"",c.model||"",r)}</span></div>`;}).join("");
   document.getElementById("settings-body").innerHTML=`
     <div class="sec">Engines &amp; models</div>
+    ${detBanner}
     <div class="panel frm">${rows}</div>
     <div class="sec">Workflow</div>
     <div class="panel frm">

@@ -240,8 +240,17 @@ async fn serve_with_runner(
     let audit = build_audit().await;
     // Single-project serve honors the same RBAC env vars as the hub.
     let auth = build_auth(state_dir.parent().unwrap_or(state_dir))?;
-    coxagent_presentation::serve_full(vec![project], port, None, audit, auth).await?;
+    coxagent_presentation::serve_full(vec![project], port, None, audit, auth, detected_engines())
+        .await?;
     Ok(())
+}
+
+/// Engine CLIs found on PATH, as `(name, path)` for the dashboard.
+fn detected_engines() -> Vec<(String, String)> {
+    discover()
+        .into_iter()
+        .map(|d| (d.kind.as_binary().to_owned(), d.path.display().to_string()))
+        .collect()
 }
 
 /// Build the security-audit sink: Postgres when `COXAGENT_DB_DSN` is set (the
@@ -314,7 +323,15 @@ async fn run_hub(registry: &Path, port: u16) -> Result<(), Box<dyn std::error::E
 
     let auth = build_auth(registry.parent().unwrap_or_else(|| Path::new(".")))?;
     let audit = build_audit().await;
-    coxagent_presentation::serve_full(projects, port, Some(factory), audit, auth).await?;
+    coxagent_presentation::serve_full(
+        projects,
+        port,
+        Some(factory),
+        audit,
+        auth,
+        detected_engines(),
+    )
+    .await?;
     Ok(())
 }
 
