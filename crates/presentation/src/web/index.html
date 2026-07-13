@@ -189,7 +189,14 @@ body:not(.admin) .admin-only { display: none !important; }
         <div class="filters"><span style="font-size:12px;color:var(--muted)">Filter</span><select class="sel" id="act-filter" onchange="renderActive()"><option value="">all agents</option></select>
           <div style="flex:1"></div><a onclick="window.open(api('/audit'))" class="fchip" style="text-decoration:none;cursor:pointer"><i class="ti ti-download" style="font-size:14px"></i> Export audit</a></div>
         <div class="panel"><div id="activity-full"></div></div>
+        <div class="sec" style="margin-top:20px">Agent transcripts <span style="font-size:11px;color:var(--dim);font-weight:400">· full prompt + output per run</span></div>
+        <div class="panel"><div id="transcript-list"></div></div>
       </div>
+      <div class="ov" id="ov-transcript" onclick="if(event.target===this)close_('ov-transcript')"><div class="modal" style="max-width:760px">
+        <span class="x" onclick="close_('ov-transcript')"><i class="ti ti-x"></i></span>
+        <h3 id="tr-title" style="font-size:15px;word-break:break-all">transcript</h3>
+        <pre id="tr-body" style="max-height:60vh;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:12px;background:var(--card2);padding:12px;border-radius:8px"></pre>
+      </div></div>
       <div class="view" id="view-roadmap"><div id="roadmap-body"></div></div>
       <div class="view" id="view-sprint"><div id="sprint-body"></div></div>
       <div class="view" id="view-audit">
@@ -455,6 +462,7 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
       sel.innerHTML='<option value="">all agents</option>'+agents.map(a=>`<option>${esc(a)}</option>`).join("");INIT_ACT=true;}
     const f=sel.value;let act=[...(s.activity||[])].reverse();if(f)act=act.filter(a=>a.agent===f);
     document.getElementById("activity-full").innerHTML=act.length?act.map(actItem).join(""):'<div class="empty">no activity</div>';
+    renderTranscripts();
   }else if(CUR==="sprint"){
     const sp=s.sprint;
     if(!sp){document.getElementById("sprint-body").innerHTML='<div class="panel"><div class="empty">Kanban mode — no sprints. Switch to scrum in Settings.</div></div>';}
@@ -712,6 +720,24 @@ async function createUser(){
   }catch(e){err.textContent="Network error.";}
 }
 async function deleteUser(username){try{const r=await fetch("/api/auth/users/"+username,{method:"DELETE"});if(!r.ok)document.getElementById("usr-err").textContent=await r.text();renderUsers();}catch(e){}}
+function fmtBytes(n){return n<1024?n+" B":n<1048576?(n/1024).toFixed(1)+" KB":(n/1048576).toFixed(1)+" MB";}
+function renderTranscripts(){
+  const el=document.getElementById("transcript-list");if(!el)return;
+  fetch(api("/transcripts")).then(r=>r.ok?r.json():[]).then(rows=>{
+    if(!Array.isArray(rows)||!rows.length){el.innerHTML='<div class="empty">no transcripts yet — they appear once the loop runs an engine</div>';return;}
+    el.innerHTML=rows.map(t=>{const m=t.name.match(/-(\w[\w-]*)\.md$/);const role=m?m[1]:"run";const col=cvar(AC[role.toUpperCase().replace("_","-")]||"--muted");
+      return `<div class="act" onclick="openTranscript('${encodeURIComponent(t.name)}','${esc(t.name)}')" style="cursor:pointer">
+        <div class="ad" style="background:${col}22;color:${col}"><i class="ti ti-file-text" style="font-size:13px"></i></div>
+        <div class="atx"><span class="who">${esc(t.name)}</span></div><span class="tm">${fmtBytes(t.size)}</span></div>`;}).join("");
+  }).catch(()=>{el.innerHTML='<div class="empty">unable to load transcripts</div>';});
+}
+async function openTranscript(enc,name){
+  document.getElementById("tr-title").textContent=name;
+  document.getElementById("tr-body").textContent="loading…";
+  document.getElementById("ov-transcript").classList.add("open");
+  try{const r=await fetch(api("/transcripts/"+enc));document.getElementById("tr-body").textContent=r.ok?await r.text():"(unavailable)";}
+  catch(e){document.getElementById("tr-body").textContent="(error)";}
+}
 function renderTwofa(){
   const el=document.getElementById("twofa-body");if(!el)return;
   const on=ME&&ME.twofa;

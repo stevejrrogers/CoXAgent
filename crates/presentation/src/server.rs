@@ -148,6 +148,8 @@ pub async fn serve_full(
             "/api/projects/:pid/comments",
             get(list_comments).post(post_comment),
         )
+        .route("/api/projects/:pid/transcripts", get(list_transcripts))
+        .route("/api/projects/:pid/transcripts/:name", get(get_transcript))
         .route("/api/projects/:pid/events", get(events_ep))
         .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth_mw))
         .with_state(state);
@@ -489,6 +491,62 @@ async fn post_comment(
     match p.store.save(&state).await {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// The transcript directory for a project: `<workspace>/logs/transcripts`.
+fn transcripts_dir(p: &ProjectHandle) -> PathBuf {
+    p.config_path
+        .parent()
+        .unwrap_or(&p.config_path)
+        .join("logs")
+        .join("transcripts")
+}
+
+/// List transcript files (name + size + modified), newest first.
+async fn list_transcripts(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let dir = transcripts_dir(&p);
+    let mut items: Vec<serde_json::Value> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        let mut files: Vec<_> = entries.flatten().collect();
+        files.sort_by_key(|e| {
+            std::cmp::Reverse(
+                e.metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+            )
+        });
+        for e in files.into_iter().take(200) {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let size = e.metadata().map_or(0, |m| m.len());
+            items.push(serde_json::json!({ "name": name, "size": size }));
+        }
+    }
+    Json(items).into_response()
+}
+
+/// Return one transcript's content. The name is validated to prevent traversal.
+async fn get_transcript(
+    State(app): State<AppState>,
+    Path((pid, name)): Path<(String, String)>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    // Reject any path separators / traversal — only a bare filename is allowed.
+    if name.contains('/') || name.contains('\\') || name.contains("..") {
+        return (StatusCode::BAD_REQUEST, "bad name").into_response();
+    }
+    let path = transcripts_dir(&p).join(&name);
+    match std::fs::read_to_string(&path) {
+        Ok(body) => ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response(),
+        Err(_) => (StatusCode::NOT_FOUND, "no such transcript").into_response(),
     }
 }
 
