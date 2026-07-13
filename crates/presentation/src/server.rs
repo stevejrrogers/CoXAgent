@@ -15,12 +15,12 @@ use coxagent_application::metrics;
 use coxagent_application::ports::outbound::StateStorePort;
 use coxagent_application::use_cases::RunnerHandle;
 use coxagent_application::Config;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio_stream::wrappers::IntervalStream;
@@ -55,12 +55,50 @@ pub type ProjectFactory = Arc<
         + Sync,
 >;
 
+/// One security-audit record: an authenticated mutation or an auth attempt.
+#[derive(Clone, serde::Serialize)]
+struct AuditEntry {
+    at: String,
+    /// The acting principal, or `anonymous` before authentication.
+    user: String,
+    action: String,
+    /// HTTP status of the outcome (200/403/401/…).
+    status: u16,
+}
+
+/// Keep the audit log bounded in memory.
+const MAX_AUDIT: usize = 1000;
+
+/// Append-only in-memory security audit log (newest last).
+type AuditLog = Arc<Mutex<VecDeque<AuditEntry>>>;
+
+fn audit_push(log: &AuditLog, user: &str, action: String, status: u16) {
+    if let Ok(mut buf) = log.lock() {
+        buf.push_back(AuditEntry {
+            at: now_rfc3339(),
+            user: user.to_owned(),
+            action,
+            status,
+        });
+        while buf.len() > MAX_AUDIT {
+            buf.pop_front();
+        }
+    }
+}
+
+fn now_rfc3339() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default()
+}
+
 #[derive(Clone)]
 struct AppState {
     projects: Arc<RwLock<HashMap<String, ProjectHandle>>>,
     order: Arc<RwLock<Vec<String>>>,
     factory: Option<ProjectFactory>,
     auth: Option<Arc<dyn AuthPort>>,
+    audit: AuditLog,
 }
 
 impl AppState {
@@ -111,6 +149,7 @@ pub async fn serve_full(
         order: Arc::new(RwLock::new(order)),
         factory,
         auth,
+        audit: Arc::new(Mutex::new(VecDeque::new())),
     };
 
     let app = Router::new()
@@ -119,6 +158,7 @@ pub async fn serve_full(
         .route("/api/auth/login", post(login_ep))
         .route("/api/auth/logout", post(logout_ep))
         .route("/api/auth/me", get(me_ep))
+        .route("/api/audit-log", get(audit_log_ep))
         .route("/api/projects", get(list_projects).post(create_project))
         .route("/api/projects/:pid/state", get(state_ep))
         .route("/api/projects/:pid/metrics", get(metrics_ep))
@@ -506,14 +546,58 @@ async fn auth_mw(
             | axum::http::Method::DELETE
             | axum::http::Method::PATCH
     ) && path != "/api/auth/logout";
+    let method = req.method().clone();
+    let username = user.username.clone();
     if is_write && !user.role.can_write() {
+        audit_push(
+            &app.audit,
+            &username,
+            format!("{method} {path}"),
+            StatusCode::FORBIDDEN.as_u16(),
+        );
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({ "error": "admin role required" })),
         )
             .into_response();
     }
-    next.run(req).await
+    let resp = next.run(req).await;
+    // Record every authenticated mutation with its outcome.
+    if is_write {
+        audit_push(
+            &app.audit,
+            &username,
+            format!("{method} {path}"),
+            resp.status().as_u16(),
+        );
+    }
+    resp
+}
+
+/// Return the security audit log (admin only, newest first).
+async fn audit_log_ep(
+    State(app): State<AppState>,
+    req: Request<axum::body::Body>,
+) -> axum::response::Response {
+    // When auth is on, require an admin; open mode exposes it freely.
+    if let Some(auth) = app.auth.clone() {
+        let ok = match cookie_value(&req, SESSION_COOKIE) {
+            Some(token) => auth
+                .user_for(&token)
+                .await
+                .is_some_and(|u| u.role.can_write()),
+            None => false,
+        };
+        if !ok {
+            return (StatusCode::FORBIDDEN, "admin role required").into_response();
+        }
+    }
+    let entries: Vec<AuditEntry> = app
+        .audit
+        .lock()
+        .map(|b| b.iter().rev().cloned().collect())
+        .unwrap_or_default();
+    Json(entries).into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -530,28 +614,35 @@ async fn login_ep(
     let Some(auth) = app.auth.clone() else {
         return Json(serde_json::json!({ "ok": true, "auth": false })).into_response();
     };
-    match auth.login(&req.username, &req.password).await {
-        Some(token) => {
-            let user = auth.user_for(&token).await;
-            let role = user.as_ref().map_or("viewer", |u| match u.role {
-                coxagent_application::AuthRole::Admin => "admin",
-                coxagent_application::AuthRole::Viewer => "viewer",
-            });
-            let cookie = format!(
-                "{SESSION_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200"
-            );
-            (
-                [(header::SET_COOKIE, cookie)],
-                Json(serde_json::json!({ "ok": true, "username": req.username, "role": role })),
-            )
-                .into_response()
-        }
-        None => (
+    let Some(token) = auth.login(&req.username, &req.password).await else {
+        audit_push(
+            &app.audit,
+            &req.username,
+            "failed login".to_owned(),
+            StatusCode::UNAUTHORIZED.as_u16(),
+        );
+        return (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({ "error": "invalid credentials" })),
         )
-            .into_response(),
-    }
+            .into_response();
+    };
+    let user = auth.user_for(&token).await;
+    let role = user.as_ref().map_or("viewer", |u| {
+        if u.role.can_write() {
+            "admin"
+        } else {
+            "viewer"
+        }
+    });
+    audit_push(&app.audit, &req.username, "login".to_owned(), 200);
+    let cookie =
+        format!("{SESSION_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200");
+    (
+        [(header::SET_COOKIE, cookie)],
+        Json(serde_json::json!({ "ok": true, "username": req.username, "role": role })),
+    )
+        .into_response()
 }
 
 /// Invalidate the session and clear the cookie.

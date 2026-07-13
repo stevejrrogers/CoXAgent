@@ -102,6 +102,7 @@
   .mrow{display:flex;gap:12px;padding:10px 0;border-bottom:1px solid var(--border);font-size:13px} .mrow .lbl{color:var(--muted);min-width:118px}
   .modal pre{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:12px;font-size:12px;overflow:auto;white-space:pre-wrap;line-height:1.55;font-family:ui-monospace,monospace}
 body.viewer .ctlrow, body.viewer #proj-switch + button, body.viewer .ticket-actions { display: none !important; }
+body:not(.admin) .admin-only { display: none !important; }
 .pri{background:var(--accent);color:#fff;border:1px solid transparent;border-radius:9px;padding:9px 14px;font-size:13px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:6px;font-family:inherit}
 .pri:hover{background:var(--accenth)}
 </style>
@@ -140,6 +141,7 @@ body.viewer .ctlrow, body.viewer #proj-switch + button, body.viewer .ticket-acti
       <a data-v="activity" onclick="nav('activity')"><i class="ti ti-activity"></i> Activity</a>
       <a data-v="discuss" onclick="nav('discuss')"><i class="ti ti-messages"></i> Discussion</a>
       <a data-v="insights" onclick="nav('insights')"><i class="ti ti-coin"></i> Cost</a>
+      <a data-v="audit" class="admin-only" onclick="nav('audit')"><i class="ti ti-shield-lock"></i> Audit</a>
       <a data-v="settings" onclick="nav('settings')"><i class="ti ti-settings"></i> Settings</a>
     </nav>
     <div class="runner"><div class="rt"><span class="dot off" id="runmode"></span><span id="runlbl">idle</span></div>
@@ -180,6 +182,11 @@ body.viewer .ctlrow, body.viewer #proj-switch + button, body.viewer .ticket-acti
         <div class="panel"><div id="activity-full"></div></div>
       </div>
       <div class="view" id="view-sprint"><div id="sprint-body"></div></div>
+      <div class="view" id="view-audit">
+        <div class="filters"><span style="font-size:12px;color:var(--muted)">Security audit — authenticated mutations & sign-ins</span>
+          <div style="flex:1"></div><a onclick="window.open('/api/audit-log')" class="fchip" style="text-decoration:none;cursor:pointer"><i class="ti ti-download" style="font-size:14px"></i> Export</a></div>
+        <div class="panel"><div id="audit-body"></div></div>
+      </div>
       <div class="view" id="view-discuss">
         <div class="filters"><span style="font-size:12px;color:var(--muted)">Thread</span><select class="sel" id="disc-filter" onchange="renderDiscuss()"><option value="">Team channel</option></select></div>
         <div class="panel"><div id="disc-thread" style="max-height:52vh;overflow-y:auto"></div></div>
@@ -234,7 +241,7 @@ const KPI_IC={Shipped:"ti-rocket","In flight":"ti-plane-tilt","Open bugs":"ti-bu
 const money=n=>"$"+(Number(n)||0).toFixed(2);
 const fmtK=n=>{n=Number(n)||0;return n>=1000?(n/1000).toFixed(1)+"k":String(n);};
 const AC={BA:"--blue","DEV-FEATURE":"--green","DEV-BUG":"--red",SA:"--purple",TEST:"--teal",DOCS:"--blue",PO:"--amber",SM:"--teal",PD:"--purple",USER:"--accent"};
-const TITLES={overview:["Overview","project health at a glance"],team:["Team","nine agents, one loop"],board:["Board","every ticket, every stage"],activity:["Activity","what the agents are doing"],sprint:["Sprint","the current scrum window"],discuss:["Discussion","team threads & standups"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
+const TITLES={overview:["Overview","project health at a glance"],team:["Team","nine agents, one loop"],board:["Board","every ticket, every stage"],activity:["Activity","what the agents are doing"],sprint:["Sprint","the current scrum window"],discuss:["Discussion","team threads & standups"],audit:["Audit","who did what, when"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
 const esc=s=>(s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 const cvar=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim()||"#888";
 let STATE={}, CUR="overview", BF="all", INIT_ACT=false;
@@ -245,7 +252,7 @@ function nav(v){CUR=v;location.hash=v;
   document.querySelectorAll(".nav a").forEach(a=>a.classList.toggle("on",a.dataset.v===v));
   document.getElementById("pg-title").textContent=TITLES[v][0];
   document.getElementById("pg-sub").textContent=TITLES[v][1];
-  if(v==="settings")loadSettings(); else if(v==="discuss"){loadComments();} else renderActive();}
+  if(v==="settings")loadSettings(); else if(v==="discuss"){loadComments();} else if(v==="audit"){renderAudit();} else renderActive();}
 function initials(r){return r.replace("DEV-","").slice(0,2);}
 function metricsFrom(s){const t=s.tickets||[],h=s.history||[],isF=x=>x.type!=="bug";
   return {shipped:t.filter(x=>isF(x)&&(x.status==="done"||x.status==="documented")).length,
@@ -542,11 +549,25 @@ async function doLogout(){try{await fetch("/api/auth/logout",{method:"POST"});}c
 // Viewers get a read-only UI: hide runner controls, new-project, per-ticket actions.
 function applyRole(){
   const isViewer=ME&&ME.auth&&ME.role!=="admin";
+  // Admin surfaces (Audit) show for admins and in open/local mode; hidden for viewers.
+  const isAdmin=!ME||!ME.auth||ME.role==="admin";
   document.body.classList.toggle("viewer",!!isViewer);
-  // user badge + logout in the runner card
+  document.body.classList.toggle("admin",!!isAdmin);
   const badge=document.getElementById("user-badge");
   if(ME&&ME.auth){badge.style.display="";badge.querySelector("#ub-name").textContent=ME.username;badge.querySelector("#ub-role").textContent=ME.role;}
   else{badge.style.display="none";}
+}
+function renderAudit(){
+  fetch("/api/audit-log").then(r=>r.ok?r.json():[]).then(rows=>{
+    const el=document.getElementById("audit-body");
+    if(!Array.isArray(rows)||!rows.length){el.innerHTML='<div class="empty">no audited actions yet</div>';return;}
+    el.innerHTML=rows.map(e=>{
+      const bad=e.status>=400;const col=bad?"var(--red)":"var(--green)";
+      const ic=e.action.includes("login")?(bad?"lock-x":"login"):"pencil";
+      return `<div class="act"><div class="ad" style="background:${col}22;color:${col}"><i class="ti ti-${ic}" style="font-size:13px"></i></div>
+        <div class="atx"><span class="who">${esc(e.user)}</span> ${esc(e.action)} <span class="tk" style="background:${col}22;color:${col}">${e.status}</span></div>
+        <span class="tm">${esc((e.at||"").slice(5,16).replace("T"," "))}</span></div>`;}).join("");
+  }).catch(()=>{document.getElementById("audit-body").innerHTML='<div class="empty">unable to load audit log</div>';});
 }
 boot();
 </script>
