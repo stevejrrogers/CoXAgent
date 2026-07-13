@@ -118,6 +118,24 @@ impl Default for WorkflowConfig {
     }
 }
 
+/// Governance policy — human gates turned into configuration (M9-10). Empty
+/// fields mean "no restriction", so policy is opt-in and backward compatible.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PolicyConfig {
+    /// Permitted engine models. Empty = any model allowed. A configured model
+    /// outside this list stops the loop before spending a token on it.
+    #[serde(default)]
+    pub model_allowlist: Vec<String>,
+    /// Path prefixes agents must not touch (e.g. `infra/`, `.github/`). Empty =
+    /// none. Evaluated by [`crate::policy::forbidden_hits`] against a change set.
+    #[serde(default)]
+    pub forbidden_paths: Vec<String>,
+    /// Per-day spend cap in USD. The loop pauses once today's spend reaches it,
+    /// independent of the lifetime `budget_usd` cap.
+    #[serde(default)]
+    pub daily_budget_usd: Option<f64>,
+}
+
 /// Top-level configuration persisted as `coxagent.json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
@@ -127,6 +145,9 @@ pub struct Config {
     /// Architecture conformance rules enforced against the codebase (empty = off).
     #[serde(default)]
     pub architecture: Vec<crate::conformance::StackRule>,
+    /// Governance policy (model allowlist, forbidden paths, daily budget).
+    #[serde(default)]
+    pub policy: PolicyConfig,
 }
 
 impl Default for Config {
@@ -141,6 +162,7 @@ impl Default for Config {
             },
             workflow: WorkflowConfig::default(),
             architecture: Vec::new(),
+            policy: PolicyConfig::default(),
         }
     }
 }

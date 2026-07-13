@@ -147,6 +147,13 @@ pub struct ProjectState {
     /// prompts PD to create it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub design_system: Option<DesignSystem>,
+    /// Spend accumulated on the current calendar day (UTC), for the daily budget
+    /// policy. Resets when the day rolls over.
+    #[serde(default)]
+    pub spend_today_usd: f64,
+    /// The UTC date (`YYYY-MM-DD`) `spend_today_usd` is counting.
+    #[serde(default)]
+    pub spend_day: String,
 }
 
 impl Default for ProjectState {
@@ -164,6 +171,8 @@ impl Default for ProjectState {
             deploy: None,
             comments: Vec::new(),
             design_system: None,
+            spend_today_usd: 0.0,
+            spend_day: String::new(),
         }
     }
 }
@@ -181,6 +190,18 @@ impl ProjectState {
         if overflow > 0 {
             self.activity.drain(0..overflow);
         }
+    }
+
+    /// Add `usd` to today's spend, rolling the counter over when the UTC date
+    /// changes. Returns the new same-day total.
+    pub fn add_daily_spend(&mut self, usd: f64) -> f64 {
+        let today = now_rfc3339().get(..10).unwrap_or_default().to_owned();
+        if self.spend_day != today {
+            self.spend_day = today;
+            self.spend_today_usd = 0.0;
+        }
+        self.spend_today_usd += usd;
+        self.spend_today_usd
     }
 
     /// Post a comment to a discussion thread, trimming to [`MAX_COMMENTS`].

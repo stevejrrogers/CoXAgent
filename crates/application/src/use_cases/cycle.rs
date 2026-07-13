@@ -113,6 +113,21 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             ..CycleReport::default()
         };
 
+        // Policy gate: refuse to run agents on a model outside the allowlist —
+        // stop before spending a token rather than after.
+        let model = &self.config.engine.default.model;
+        if !crate::policy::model_allowed(&self.config.policy, model) {
+            report
+                .errors
+                .push(format!("POLICY: model '{model}' is not in the allowlist"));
+            report.over_budget = true; // pause the loop until config is fixed
+            if let Ok(mut state) = self.store.load().await {
+                state.log_activity("POLICY", &format!("blocked model '{model}'"), None);
+                let _ = self.store.save(&state).await;
+            }
+            return report;
+        }
+
         // Scrum: open/roll over the sprint at the start of the cycle, with an
         // SM retro line when a previous sprint closes.
         if self.config.workflow.mode == crate::config::Mode::Scrum {
@@ -263,8 +278,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
 
         // Drain the spend meter (deltas since last cycle) into persistent state.
+        let mut cycle_cost = 0.0;
         if let Some(meter) = &self.meter {
             if let Ok(mut m) = meter.lock() {
+                cycle_cost = m.total_cost_usd;
                 state.spend.total_cost_usd += m.total_cost_usd;
                 state.spend.input_tokens += m.input_tokens;
                 state.spend.output_tokens += m.output_tokens;
@@ -275,14 +292,21 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 *m = Spend::default();
             }
         }
-        let over = self
+        let spent_today = state.add_daily_spend(cycle_cost);
+
+        // Pause on either the lifetime cap or the per-day policy cap.
+        let over_lifetime = self
             .config
             .workflow
             .budget_usd
             .is_some_and(|cap| cap > 0.0 && state.spend.total_cost_usd >= cap);
+        let over_daily = crate::policy::over_daily_budget(&self.config.policy, spent_today);
+        if over_daily {
+            state.log_activity("POLICY", "daily budget cap reached", None);
+        }
 
         let _ = self.store.save(&state).await;
-        over
+        over_lifetime || over_daily
     }
 
     fn ba(&self) -> RunBaUseCase<S, E> {

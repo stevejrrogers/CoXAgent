@@ -9,6 +9,7 @@ pub mod conformance;
 pub mod error;
 pub mod metrics;
 pub mod parsing;
+pub mod policy;
 pub mod ports;
 pub mod prompts;
 pub mod selection;
@@ -17,6 +18,8 @@ pub mod state;
 pub mod use_cases;
 
 pub use auth::{AuthPort, AuthRole, AuthUser, TokenInfo};
-pub use config::{Config, EngineChoice, EngineKind, EngineMapping, Mode, WorkflowConfig};
+pub use config::{
+    Config, EngineChoice, EngineKind, EngineMapping, Mode, PolicyConfig, WorkflowConfig,
+};
 pub use error::{AppError, PortError};
 pub use state::{Comment, DesignSystem, ProjectState, Spend, Sprint, SCHEMA_VERSION};
