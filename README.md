@@ -1,56 +1,96 @@
 # CoXAgent
 
-Autonomous multi-agent software team that runs a continuous BA → SA → DEV → TEST → DOCS
-loop over a managed codebase. See [PLAN.md](PLAN.md) for the full design (roles,
-lifecycle, sprint/scrum, teamwork, hub & workers, enterprise track).
+An autonomous multi-agent software team. A continuous loop of role-agents —
+BA → SA → PD → DEV → TEST → DOCS, with code-enforced governance — carries a
+ticket from proposal to a running, tested, documented build over a managed
+codebase. See [PLAN.md](PLAN.md) for the full design.
+
+The core idea: the LLM proposes and implements, but **state invariants live in
+code, not in prompts**. Who may change a ticket's status, when a ticket is
+"ready", how spend is metered, what the architecture must be — all enforced by
+the type system and pure functions, so the agents cannot corrupt the workflow
+even when a model misbehaves.
 
 ## Architecture
 
-Clean / hexagonal architecture — the dependency rule is enforced by Cargo, not by
-convention. A layer can only depend on the layers below it; a violation fails to compile.
+Clean / hexagonal — the dependency rule is enforced by Cargo, not convention. A
+layer only depends on layers below it; a violation fails to compile.
 
 ```
 crates/
-├── domain/          # DDD core: Ticket aggregate, transitions, events — no IO, no deps
-├── application/     # use cases + ports (inbound/outbound traits)
-├── infrastructure/  # outbound adapters (JsonStateStore; engines/deploy/git later)
-├── presentation/    # inbound adapters (report now; axum/CLI later)
+├── domain/          # DDD core: Ticket aggregate, transitions, events — no IO
+├── application/     # use cases + ports (inbound/outbound traits), auth boundary
+├── infrastructure/  # adapters: state stores, engines, deploy, auth
+├── presentation/    # inbound adapters: axum server + embedded SPA, clap CLI
 └── app/             # composition root — the one place DI happens; binary `coxagent`
 ```
 
-## Status — v1 (local single-user, feature-complete)
+Ports mean swaps, not rewrites: the state store is `JsonStateStore` locally and
+`SqlStateStore` (Postgres) in a multi-tenant hub — the use cases never change.
 
-- **Six-agent cycle**: BA → SA (design gate) → DEV-BUG → DEV-FEATURE → TEST → DOCS,
-  plus a code-enforced **architecture governance** step. Claim/release, crash
-  recovery, and per-agent error isolation are all orchestrator-owned.
-- **Domain**: `Ticket` aggregate (guarded mutations), transition table + field-level
-  role permissions as pure functions. Ids carry a per-project alias (`CXC-F001` /
-  `CXC-B001` / `CXC-C001`).
-- **State**: `JsonStateStore` with atomic writes, file lock, rolling backups,
-  auto-repair from backup, `schema_version` guard. Contract-tested for substitutability.
-- **Engines** behind one port: `claude`, `opencode`, `scripted` (offline), `mock`,
-  with a metering decorator; per-role engine/model mapping.
-- **Scrum**: optional sprint mode — sprints commit the backlog, roll over on a
-  window, and report velocity (kanban stays the default).
-- **FinOps**: real token/cost usage (from `claude --output-format json`) metered
-  per role into state; a `budget_usd` cap auto-pauses the loop.
-- **Deploy**: after DEV, `DockerComposeDeploy` runs `docker compose up -d --build`
-  so TEST verifies a running build; deploy health surfaces on the dashboard.
-- **Observability**: every agent run's prompt + output is written to
-  `logs/transcripts/`; per-cycle activity trail with audit export.
-- **Dashboard** (`coxagent serve`): a multi-view SPA — Overview (alerts + deploy
-  health), Team, Board (filter), Sprint (velocity chart), Activity, Cost, Settings
-  — over a live SSE feed, with a controllable runner (Resume/Step/Pause) and
-  **interactive tickets** (set priority, reject) from the UI.
-- **Governance**: declared stack rules are injected into agent prompts (proactive)
-  and checked against the codebase each cycle (reactive) — drift becomes bugs.
-- 63 tests; clippy pedantic + `-D warnings`; CI + tagged release binaries
-  (macOS arm64/x64, linux).
+## The team
 
-Multi-tenant hub, RBAC/SSO, and the enterprise tier are the documented v2 roadmap
-(see PLAN.md), not part of this v1.
+| Role | Does | Enforced by |
+|------|------|-------------|
+| **BA** | Proposes features to the backlog | — |
+| **SA** | Technical design; readies non-UI tickets | `design.technical` gate |
+| **PD** | Project design system + per-ticket UX | `design.ux` gate; DoR needs both designs for UI |
+| **DEV-BUG / DEV-FEATURE** | Implements one claimed ticket | claim = `System` transition |
+| **TEST** | Verifies the running build, files bugs | — |
+| **DOCS** | Writes an end-user guide per feature | — |
+| **PO / SM** | Priority & rejection / sprint cadence | field-level role permissions |
+| **Governance** | Checks the codebase against declared stack rules | drift → bugs |
 
-## Use
+## Status — v2 (multi-tenant, RBAC, feature-complete)
+
+**Core loop.** Six-agent cycle plus architecture governance. Claim/release,
+crash recovery, per-agent error isolation, all orchestrator-owned. `Ticket`
+aggregate with guarded mutations; transition table + field permissions as pure
+functions. Ids carry a per-project alias (`CXC-F001` / `CXC-B001` / `CXC-C001`).
+
+**Design gates.** SA owns the technical design; PD establishes a project-level
+**design system** (palette, typography, components) once UI work appears and
+authors per-ticket **UX**. The design system is injected into DEV prompts for UI
+tickets — proactive design governance, the analogue of the stack rules.
+
+**Multi-project hub.** `coxagent hub` hosts many projects from one dashboard,
+each with its own runner; every API and SSE stream is scoped per project. New
+projects are onboarded from the UI (scaffold + seed + register live) and
+persisted to the hub registry.
+
+**RBAC.** Argon2id-hashed credentials (a JSON user file storing only hashes),
+HttpOnly session cookies, middleware that gates every route: writes require an
+admin, viewers are read-only. Bootstrap an admin once via env; runs open when no
+account is configured.
+
+**Persistence.** `JsonStateStore` (atomic writes, file lock, rolling backups,
+auto-repair) locally; `SqlStateStore` (Postgres, JSONB per project, optimistic
+concurrency) for the shared hub. Both pass the same contract test.
+
+**Scrum & FinOps.** Optional sprint mode (commit backlog, roll over, report
+velocity). Real token/cost usage metered per role into state; a `budget_usd` cap
+auto-pauses the loop.
+
+**Teamwork.** Per-ticket and team-channel **discussion threads**; agents post
+standups and ship notes, humans reply — live over SSE.
+
+**Deploy & observability.** After DEV, `DockerComposeDeploy` runs
+`docker compose up -d --build` so TEST verifies a running build. Every agent
+run's prompt + output is written to `logs/transcripts/`; per-cycle activity
+trail with audit export.
+
+**Dashboard** (`serve` / `hub`): a cyan-themed multi-view SPA — Overview (alerts,
+deploy health, design system), Team, Board, Sprint (velocity), Activity,
+Discussion, Cost, Settings (engine + model-per-role, workflow) — over a live SSE
+feed, controllable runner (Resume/Step/Pause), interactive tickets, login +
+role-aware UI.
+
+73 tests; clippy pedantic + `-D warnings`; CI + tagged release binaries
+(macOS arm64/x64, linux).
+
+## Quickstart
+
+### Single project (local)
 
 ```sh
 coxagent --state-dir <ws>/state onboard --name "MyApp" --alias APP
@@ -59,8 +99,40 @@ coxagent --state-dir <ws>/state check --work-dir <ws>/codebase   # governance on
 scripts/install-launchd.sh <ws>                                  # run 24/7 (macOS)
 ```
 
+### Multi-project hub
+
+A registry is a JSON array of `{ "id", "path" }`; each `path` is a workspace with
+`state/` and `codebase/`. New projects can also be created from the dashboard.
+
+```sh
+echo '[{"id":"myapp","path":"/srv/myapp"}]' > registry.json
+coxagent hub --registry registry.json --port 4000
+```
+
+### Enterprise: RBAC + Postgres
+
+```sh
+# Bootstrap the admin once (seeds a hashed auth.json beside the registry).
+export COXAGENT_ADMIN_USER=root
+export COXAGENT_ADMIN_PASSWORD='••••••••'
+# Shared multi-tenant persistence (else the local JSON store is used).
+export COXAGENT_DB_DSN='postgres://user:pass@host:5432/coxagent'
+coxagent hub --registry registry.json --port 4000
+```
+
+`auth.json` holds only Argon2 hashes and is git-ignored — never commit it.
+
+## Engines
+
+`claude`, `opencode`, `scripted` (offline, deterministic — writes a real runnable
+app + Docker files), and `mock`, all behind one port with metering and transcript
+decorators. Engine and model are configurable per role in `coxagent.json` or from
+the dashboard's Settings screen.
+
 ## Develop
 
 ```sh
 cargo test && cargo clippy --all-targets && cargo fmt --all
+# Postgres adapter contract (needs a database):
+COXAGENT_TEST_PG_DSN='postgres://…' cargo test -p coxagent-infrastructure --test sql_store_contract
 ```
