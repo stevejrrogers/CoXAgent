@@ -61,12 +61,25 @@ persisted to the hub registry.
 **RBAC.** Argon2id-hashed credentials (a JSON user file storing only hashes),
 HttpOnly session cookies, brute-force lockout (5 failures → 15-min lock),
 middleware that gates every route: writes require an admin, viewers are
-read-only. Bootstrap an admin once via env; runs open when no account is
-configured.
+read-only. Bootstrap an admin from env (authoritative — it always wins over a
+stale file); runs open when no account is configured. **API tokens** for
+automation: admins mint scoped service-account tokens (stored as SHA-256
+hashes, shown once) used via `Authorization: Bearer`.
 
 **Audit.** An append-only security trail records every authenticated mutation
 and sign-in (success and failure) with actor, action, and outcome. Admin-only,
 exportable; persisted to Postgres (survives restart) or in memory locally.
+
+**Policy.** Opt-in governance in config: a model allowlist (the loop refuses to
+run on a disallowed model), a per-day spend cap (pauses independently of the
+lifetime cap), and forbidden-path evaluation — human gates as configuration.
+
+**Roadmap.** A self-generating Now / Next / Later / Shipped timeline rendered
+from tickets + sprint + dependencies + priority — never hand-maintained.
+
+**Onboarding.** Greenfield (`onboard`) scaffolds a new workspace; brownfield
+(`onboard --existing <path>`) adopts a codebase — git-inits it and seeds
+follow-up work.
 
 **Persistence.** `JsonStateStore` (atomic writes, file lock, rolling backups,
 auto-repair) locally; `SqlStateStore` (Postgres, JSONB per project, optimistic
@@ -86,11 +99,11 @@ trail with audit export.
 
 **Dashboard** (`serve` / `hub`): a cyan-themed multi-view SPA — Overview (alerts,
 deploy health, design system), Team, Board, Sprint (velocity), Activity,
-Discussion, Cost, Audit (admin), Settings (engine + model-per-role, workflow) —
-over a live SSE feed, controllable runner (Resume/Step/Pause), interactive
-tickets, login + role-aware UI.
+Roadmap, Discussion, Cost, Audit (admin), Settings (engine + model-per-role,
+workflow) — over a live SSE feed, controllable runner (Resume/Step/Pause),
+interactive tickets, login + role-aware UI.
 
-75 tests; clippy pedantic + `-D warnings`; CI + tagged release binaries
+81 tests; clippy pedantic + `-D warnings`; CI + tagged release binaries
 (macOS arm64/x64, linux).
 
 ## Quickstart
