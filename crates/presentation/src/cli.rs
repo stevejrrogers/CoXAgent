@@ -43,7 +43,8 @@ pub enum Command {
         #[arg(long)]
         max_cycles: Option<u64>,
     },
-    /// Scaffold a new project workspace (greenfield onboarding).
+    /// Scaffold a new project workspace (greenfield), or adopt an existing
+    /// codebase with `--existing <path>` (brownfield).
     Onboard {
         /// Human-readable project name.
         #[arg(long)]
@@ -51,6 +52,10 @@ pub enum Command {
         /// Short ticket-id alias (e.g. CXC). Auto-derived from the name if omitted.
         #[arg(long)]
         alias: Option<String>,
+        /// Adopt an existing codebase at this path instead of scaffolding a new
+        /// one: initialises git if needed and seeds follow-up work.
+        #[arg(long)]
+        existing: Option<PathBuf>,
     },
     /// Render the changelog from deploy history (writes to a file if given).
     Changelog {
