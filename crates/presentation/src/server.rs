@@ -12,15 +12,15 @@ use axum::routing::{get, post};
 use axum::Router;
 use coxagent_application::auth::AuthPort;
 use coxagent_application::metrics;
-use coxagent_application::ports::outbound::StateStorePort;
+use coxagent_application::ports::outbound::{AuditPort, AuditRecord, StateStorePort};
 use coxagent_application::use_cases::RunnerHandle;
 use coxagent_application::Config;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio_stream::wrappers::IntervalStream;
@@ -55,35 +55,15 @@ pub type ProjectFactory = Arc<
         + Sync,
 >;
 
-/// One security-audit record: an authenticated mutation or an auth attempt.
-#[derive(Clone, serde::Serialize)]
-struct AuditEntry {
-    at: String,
-    /// The acting principal, or `anonymous` before authentication.
-    user: String,
-    action: String,
-    /// HTTP status of the outcome (200/403/401/…).
-    status: u16,
-}
-
-/// Keep the audit log bounded in memory.
-const MAX_AUDIT: usize = 1000;
-
-/// Append-only in-memory security audit log (newest last).
-type AuditLog = Arc<Mutex<VecDeque<AuditEntry>>>;
-
-fn audit_push(log: &AuditLog, user: &str, action: String, status: u16) {
-    if let Ok(mut buf) = log.lock() {
-        buf.push_back(AuditEntry {
-            at: now_rfc3339(),
-            user: user.to_owned(),
-            action,
-            status,
-        });
-        while buf.len() > MAX_AUDIT {
-            buf.pop_front();
-        }
-    }
+/// Record one audit entry through the injected sink (fire-and-forget).
+async fn audit_push(sink: &Arc<dyn AuditPort>, user: &str, action: String, status: u16) {
+    sink.record(AuditRecord {
+        at: now_rfc3339(),
+        user: user.to_owned(),
+        action,
+        status,
+    })
+    .await;
 }
 
 fn now_rfc3339() -> String {
@@ -98,7 +78,7 @@ struct AppState {
     order: Arc<RwLock<Vec<String>>>,
     factory: Option<ProjectFactory>,
     auth: Option<Arc<dyn AuthPort>>,
-    audit: AuditLog,
+    audit: Arc<dyn AuditPort>,
 }
 
 impl AppState {
@@ -108,30 +88,8 @@ impl AppState {
     }
 }
 
-/// Serve the dashboard and API for the given projects on `port`.
-///
-/// # Errors
-/// Returns an IO error if the port cannot be bound.
-pub async fn serve(projects: Vec<ProjectHandle>, port: u16) -> std::io::Result<()> {
-    serve_full(projects, port, None, None).await
-}
-
-/// Serve with a [`ProjectFactory`] so the dashboard can onboard new projects at
-/// runtime (POST `/api/projects`). `serve` passes `None` (static project set).
-///
-/// # Errors
-/// Returns an IO error if the port cannot be bound.
-pub async fn serve_with_factory(
-    projects: Vec<ProjectHandle>,
-    port: u16,
-    factory: Option<ProjectFactory>,
-) -> std::io::Result<()> {
-    serve_full(projects, port, factory, None).await
-}
-
-/// Serve with an optional [`ProjectFactory`] and optional [`AuthPort`]. When
-/// `auth` is `Some` and has users, RBAC is enforced (login required; writes
-/// need an admin). When `None`, the app runs open (single-user local mode).
+/// Serve the dashboard and API. `factory` enables dashboard onboarding; `auth`
+/// (when it has users) enforces RBAC; `audit` is the security-audit sink.
 ///
 /// # Errors
 /// Returns an IO error if the port cannot be bound.
@@ -139,6 +97,7 @@ pub async fn serve_full(
     projects: Vec<ProjectHandle>,
     port: u16,
     factory: Option<ProjectFactory>,
+    audit: Arc<dyn AuditPort>,
     auth: Option<Arc<dyn AuthPort>>,
 ) -> std::io::Result<()> {
     let order: Vec<String> = projects.iter().map(|p| p.id.clone()).collect();
@@ -149,7 +108,7 @@ pub async fn serve_full(
         order: Arc::new(RwLock::new(order)),
         factory,
         auth,
-        audit: Arc::new(Mutex::new(VecDeque::new())),
+        audit,
     };
 
     let app = Router::new()
@@ -554,7 +513,8 @@ async fn auth_mw(
             &username,
             format!("{method} {path}"),
             StatusCode::FORBIDDEN.as_u16(),
-        );
+        )
+        .await;
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({ "error": "admin role required" })),
@@ -569,7 +529,8 @@ async fn auth_mw(
             &username,
             format!("{method} {path}"),
             resp.status().as_u16(),
-        );
+        )
+        .await;
     }
     resp
 }
@@ -592,12 +553,10 @@ async fn audit_log_ep(
             return (StatusCode::FORBIDDEN, "admin role required").into_response();
         }
     }
-    let entries: Vec<AuditEntry> = app
-        .audit
-        .lock()
-        .map(|b| b.iter().rev().cloned().collect())
-        .unwrap_or_default();
-    Json(entries).into_response()
+    match app.audit.recent(1000).await {
+        Ok(entries) => Json(entries).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -620,7 +579,8 @@ async fn login_ep(
             &req.username,
             "failed login".to_owned(),
             StatusCode::UNAUTHORIZED.as_u16(),
-        );
+        )
+        .await;
         return (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({ "error": "invalid credentials" })),
@@ -635,7 +595,7 @@ async fn login_ep(
             "viewer"
         }
     });
-    audit_push(&app.audit, &req.username, "login".to_owned(), 200);
+    audit_push(&app.audit, &req.username, "login".to_owned(), 200).await;
     let cookie =
         format!("{SESSION_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200");
     (

@@ -203,8 +203,27 @@ async fn serve_with_runner(
     port: u16,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let project = build_project("default", state_dir, work_dir).await?;
-    coxagent_presentation::serve(vec![project], port).await?;
+    let audit = build_audit().await;
+    coxagent_presentation::serve_full(vec![project], port, None, audit, None).await?;
     Ok(())
+}
+
+/// Build the security-audit sink: Postgres when `COXAGENT_DB_DSN` is set (the
+/// trail then survives restarts and is shared across the hub), else in memory.
+async fn build_audit() -> Arc<dyn coxagent_application::ports::outbound::AuditPort> {
+    use coxagent_infrastructure::{MemoryAuditSink, SqlAuditSink};
+    if let Ok(dsn) = std::env::var("COXAGENT_DB_DSN") {
+        if !dsn.is_empty() {
+            match SqlAuditSink::connect(&dsn).await {
+                Ok(sink) => {
+                    tracing::info!("audit sink: Postgres");
+                    return Arc::new(sink);
+                }
+                Err(e) => tracing::warn!("audit sink: Postgres unavailable ({e}); using memory"),
+            }
+        }
+    }
+    Arc::new(MemoryAuditSink::default())
 }
 
 /// Serve many projects from a hub registry file (the `hub` command). The
@@ -254,7 +273,8 @@ async fn run_hub(registry: &Path, port: u16) -> Result<(), Box<dyn std::error::E
     });
 
     let auth = build_auth(registry)?;
-    coxagent_presentation::serve_full(projects, port, Some(factory), auth).await?;
+    let audit = build_audit().await;
+    coxagent_presentation::serve_full(projects, port, Some(factory), audit, auth).await?;
     Ok(())
 }
 
