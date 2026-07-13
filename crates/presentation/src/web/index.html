@@ -191,7 +191,18 @@ body:not(.admin) .admin-only { display: none !important; }
         <div class="panel"><div id="audit-body"></div></div>
       </div>
       <div class="view" id="view-access">
-        <div class="sec">API tokens</div>
+        <div class="sec">Team members</div>
+        <div class="panel">
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
+            <input id="usr-name" placeholder="username" style="flex:1;min-width:120px;background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 11px;font-size:13px;font-family:inherit">
+            <input id="usr-pass" type="password" placeholder="password" style="flex:1;min-width:120px;background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 11px;font-size:13px;font-family:inherit">
+            <select id="usr-role" class="sel"><option value="viewer">viewer</option><option value="admin">admin</option></select>
+            <button class="pri" onclick="createUser()"><i class="ti ti-user-plus"></i> Add</button>
+          </div>
+          <div id="usr-err" style="color:var(--red);font-size:12px;min-height:14px;margin-bottom:6px"></div>
+          <div id="usr-list"></div>
+        </div>
+        <div class="sec" style="margin-top:20px">API tokens</div>
         <div class="panel">
           <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
             <input id="tok-label" placeholder="token label (e.g. ci-bot)" style="flex:1;min-width:160px;background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 11px;font-size:13px;font-family:inherit">
@@ -615,7 +626,34 @@ function applyRole(){
   if(ME&&ME.auth){badge.style.display="";badge.querySelector("#ub-name").textContent=ME.username;badge.querySelector("#ub-role").textContent=ME.role;}
   else{badge.style.display="none";}
 }
+function renderUsers(){
+  const list=document.getElementById("usr-list");if(!list)return;
+  fetch("/api/auth/users").then(r=>r.ok?r.json():[]).then(rows=>{
+    if(!Array.isArray(rows)||!rows.length){list.innerHTML='<div class="empty">no accounts</div>';return;}
+    list.innerHTML=rows.map(u=>{const admin=u.role==="admin";const col=admin?"var(--amber)":"var(--accent2)";
+      const me=ME&&ME.username===u.username;
+      return `<div class="act"><div class="ad" style="background:${col}22;color:${col}"><i class="ti ti-${admin?'shield':'user'}" style="font-size:13px"></i></div>
+        <div class="atx"><span class="who">${esc(u.username)}</span> <span class="tk" style="background:${col}22;color:${col}">${esc(u.role)}</span>${me?' <span style="font-size:11px;color:var(--dim)">(you)</span>':''}</div>
+        ${me?'':`<span class="tm" style="cursor:pointer;color:var(--red)" onclick="deleteUser('${encodeURIComponent(u.username)}')"><i class="ti ti-trash"></i></span>`}</div>`;}).join("");
+  }).catch(()=>{list.innerHTML='<div class="empty">unable to load users</div>';});
+}
+async function createUser(){
+  const username=document.getElementById("usr-name").value.trim();
+  const password=document.getElementById("usr-pass").value;
+  const role=document.getElementById("usr-role").value;
+  const err=document.getElementById("usr-err");
+  if(!username||!password){err.textContent="Username and password required.";return;}
+  err.textContent="";
+  try{
+    const r=await fetch("/api/auth/users",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username,password,role})});
+    if(!r.ok){err.textContent=await r.text()||"Failed.";return;}
+    document.getElementById("usr-name").value="";document.getElementById("usr-pass").value="";
+    renderUsers();
+  }catch(e){err.textContent="Network error.";}
+}
+async function deleteUser(username){try{const r=await fetch("/api/auth/users/"+username,{method:"DELETE"});if(!r.ok)document.getElementById("usr-err").textContent=await r.text();renderUsers();}catch(e){}}
 function renderAccess(){
+  renderUsers();
   const list=document.getElementById("tok-list");
   fetch("/api/auth/tokens").then(r=>r.ok?r.json():[]).then(rows=>{
     if(!Array.isArray(rows)||!rows.length){list.innerHTML='<div class="empty">no API tokens yet</div>';return;}

@@ -65,7 +65,7 @@ struct Attempts {
 /// File-backed auth service with in-memory sessions.
 pub struct FileAuthService {
     path: PathBuf,
-    users: Vec<StoredUser>,
+    users: Mutex<Vec<StoredUser>>,
     tokens: Mutex<Vec<StoredToken>>,
     sessions: Mutex<HashMap<String, Session>>,
     attempts: Mutex<HashMap<String, Attempts>>,
@@ -84,7 +84,7 @@ impl FileAuthService {
         };
         Ok(Self {
             path: path.to_path_buf(),
-            users: file.users,
+            users: Mutex::new(file.users),
             tokens: Mutex::new(file.tokens),
             sessions: Mutex::new(HashMap::new()),
             attempts: Mutex::new(HashMap::new()),
@@ -93,11 +93,9 @@ impl FileAuthService {
 
     /// Persist the current users + tokens back to `path`.
     fn persist(&self) -> Result<(), String> {
+        let users = self.users.lock().map_err(|e| e.to_string())?.clone();
         let tokens = self.tokens.lock().map_err(|e| e.to_string())?.clone();
-        let file = UserFile {
-            users: self.users.clone(),
-            tokens,
-        };
+        let file = UserFile { users, tokens };
         let text = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
         std::fs::write(&self.path, text).map_err(|e| e.to_string())
     }
@@ -137,7 +135,7 @@ impl FileAuthService {
     /// Whether any account is configured. When false the app runs open.
     #[must_use]
     pub fn has_users(&self) -> bool {
-        !self.users.is_empty()
+        self.users.lock().is_ok_and(|u| !u.is_empty())
     }
 
     /// Whether `username` is currently locked out (expired locks are cleared).
@@ -229,17 +227,17 @@ impl AuthPort for FileAuthService {
         if self.is_locked(username) {
             return None;
         }
-        let verified = self
-            .users
-            .iter()
-            .find(|u| u.username == username)
-            .and_then(|user| {
-                let parsed = PasswordHash::new(&user.hash).ok()?;
-                Argon2::default()
-                    .verify_password(password.as_bytes(), &parsed)
-                    .ok()?;
-                Some(user)
-            });
+        let verified = self.users.lock().ok().and_then(|users| {
+            let user = users.iter().find(|u| u.username == username)?;
+            let parsed = PasswordHash::new(&user.hash).ok()?;
+            Argon2::default()
+                .verify_password(password.as_bytes(), &parsed)
+                .ok()?;
+            Some(AuthUser {
+                username: user.username.clone(),
+                role: user.role,
+            })
+        });
         let Some(user) = verified else {
             self.record_failure(username);
             return None;
@@ -247,10 +245,7 @@ impl AuthPort for FileAuthService {
         self.clear_failures(username);
         let token = mint_token();
         let session = Session {
-            user: AuthUser {
-                username: user.username.clone(),
-                role: user.role,
-            },
+            user,
             expires: Instant::now() + SESSION_TTL,
         };
         self.sessions.lock().ok()?.insert(token.clone(), session);
@@ -331,6 +326,72 @@ impl AuthPort for FileAuthService {
         }
         removed
     }
+
+    async fn list_users(&self) -> Vec<AuthUser> {
+        self.users.lock().map_or_else(
+            |_| Vec::new(),
+            |users| {
+                users
+                    .iter()
+                    .map(|u| AuthUser {
+                        username: u.username.clone(),
+                        role: u.role,
+                    })
+                    .collect()
+            },
+        )
+    }
+
+    async fn create_user(&self, username: &str, password: &str, role: AuthRole) -> bool {
+        if username.trim().is_empty() || password.is_empty() {
+            return false;
+        }
+        let Ok(hash) = hash_password(password) else {
+            return false;
+        };
+        {
+            let Ok(mut users) = self.users.lock() else {
+                return false;
+            };
+            match users.iter_mut().find(|u| u.username == username) {
+                Some(existing) => {
+                    existing.hash = hash;
+                    existing.role = role;
+                }
+                None => users.push(StoredUser {
+                    username: username.to_owned(),
+                    hash,
+                    role,
+                }),
+            }
+        }
+        self.persist().is_ok()
+    }
+
+    async fn delete_user(&self, username: &str) -> bool {
+        {
+            let Ok(mut users) = self.users.lock() else {
+                return false;
+            };
+            let exists = users.iter().any(|u| u.username == username);
+            if !exists {
+                return false;
+            }
+            // Never remove the last admin — that would lock everyone out.
+            let admins_left = users
+                .iter()
+                .filter(|u| u.role == AuthRole::Admin && u.username != username)
+                .count();
+            let removing_admin = users
+                .iter()
+                .any(|u| u.username == username && u.role == AuthRole::Admin);
+            if removing_admin && admins_left == 0 {
+                return false;
+            }
+            users.retain(|u| u.username != username);
+        }
+        self.persist().is_ok()
+    }
 }
 
 #[cfg(test)]
@@ -372,7 +433,7 @@ mod tests {
         );
         assert!(svc.login("root", "newpass").await.is_some(), "new pw works");
         // Still exactly one account (upsert, not append).
-        assert_eq!(svc.users.len(), 1);
+        assert_eq!(svc.list_users().await.len(), 1);
     }
 
     #[tokio::test]
@@ -418,6 +479,27 @@ mod tests {
         assert!(svc.revoke_token("ci").await);
         assert!(!svc.revoke_token("ci").await); // already gone
         assert!(svc.principal_for_bearer(&secret).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn user_management_create_login_and_protect_last_admin() {
+        let dir = tempdir().unwrap();
+        let path = FileAuthService::default_path(dir.path());
+        FileAuthService::bootstrap_admin(&path, "root", "s3cret").unwrap();
+        let svc = FileAuthService::open(&path).unwrap();
+
+        // Add a viewer; it can log in and persists.
+        assert!(svc.create_user("viewer1", "pw", AuthRole::Viewer).await);
+        assert!(svc.login("viewer1", "pw").await.is_some());
+        assert_eq!(svc.list_users().await.len(), 2);
+        let reopened = FileAuthService::open(&path).unwrap();
+        assert!(reopened.login("viewer1", "pw").await.is_some());
+
+        // The last admin cannot be deleted; a viewer can.
+        assert!(!svc.delete_user("root").await, "last admin protected");
+        assert!(svc.delete_user("viewer1").await);
+        assert!(!svc.delete_user("nobody").await);
+        assert_eq!(svc.list_users().await.len(), 1);
     }
 
     #[tokio::test]

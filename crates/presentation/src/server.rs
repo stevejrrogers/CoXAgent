@@ -125,6 +125,11 @@ pub async fn serve_full(
             "/api/auth/tokens/:label",
             axum::routing::delete(revoke_token_ep),
         )
+        .route("/api/auth/users", get(list_users_ep).post(create_user_ep))
+        .route(
+            "/api/auth/users/:username",
+            axum::routing::delete(delete_user_ep),
+        )
         .route("/api/audit-log", get(audit_log_ep))
         .route("/api/projects", get(list_projects).post(create_project))
         .route("/api/projects/:pid/state", get(state_ep))
@@ -627,6 +632,82 @@ async fn revoke_token_ep(
         Json(serde_json::json!({ "ok": true })).into_response()
     } else {
         (StatusCode::NOT_FOUND, "no such token").into_response()
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct CreateUserReq {
+    username: String,
+    password: String,
+    #[serde(default)]
+    role: Option<String>,
+}
+
+fn role_from(s: Option<&str>) -> coxagent_application::AuthRole {
+    match s {
+        Some("admin") => coxagent_application::AuthRole::Admin,
+        _ => coxagent_application::AuthRole::Viewer,
+    }
+}
+
+/// List user accounts (admin-only). Returns `[{username, role}]`.
+async fn list_users_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let Some(auth) = app.auth.clone() else {
+        return Json(Vec::<coxagent_application::AuthUser>::new()).into_response();
+    };
+    let is_admin = resolve_principal(&auth, &headers)
+        .await
+        .is_some_and(|u| u.role.can_write());
+    if !is_admin {
+        return (StatusCode::FORBIDDEN, "admin role required").into_response();
+    }
+    Json(auth.list_users().await).into_response()
+}
+
+/// Create or update a user account (admin-only via the write gate).
+async fn create_user_ep(
+    State(app): State<AppState>,
+    Json(req): Json<CreateUserReq>,
+) -> axum::response::Response {
+    let Some(auth) = app.auth.clone() else {
+        return (StatusCode::NOT_IMPLEMENTED, "auth not configured").into_response();
+    };
+    if req.username.trim().is_empty() || req.password.is_empty() {
+        return (StatusCode::BAD_REQUEST, "username and password required").into_response();
+    }
+    if auth
+        .create_user(
+            req.username.trim(),
+            &req.password,
+            role_from(req.role.as_deref()),
+        )
+        .await
+    {
+        Json(serde_json::json!({ "ok": true })).into_response()
+    } else {
+        internal_error("could not create user")
+    }
+}
+
+/// Delete a user account (admin-only). Refuses to remove the last admin.
+async fn delete_user_ep(
+    State(app): State<AppState>,
+    Path(username): Path<String>,
+) -> axum::response::Response {
+    let Some(auth) = app.auth.clone() else {
+        return (StatusCode::NOT_IMPLEMENTED, "auth not configured").into_response();
+    };
+    if auth.delete_user(&username).await {
+        Json(serde_json::json!({ "ok": true })).into_response()
+    } else {
+        (
+            StatusCode::CONFLICT,
+            "cannot delete (unknown user or last admin)",
+        )
+            .into_response()
     }
 }
 

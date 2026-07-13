@@ -64,4 +64,15 @@ pub trait AuthPort: Send + Sync {
 
     /// Revoke the token with `label`. Returns whether one was removed.
     async fn revoke_token(&self, label: &str) -> bool;
+
+    /// List user accounts (usernames + roles, never hashes).
+    async fn list_users(&self) -> Vec<AuthUser>;
+
+    /// Create (or update the password/role of) a user account. Returns `false`
+    /// if the input is invalid or persistence fails.
+    async fn create_user(&self, username: &str, password: &str, role: AuthRole) -> bool;
+
+    /// Remove a user account. Returns `false` if it does not exist or removing
+    /// it would leave no admin (the last admin cannot be deleted).
+    async fn delete_user(&self, username: &str) -> bool;
 }
