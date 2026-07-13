@@ -7,8 +7,8 @@ use crate::ports::outbound::{AgentEnginePort, DeployPort, StateStorePort};
 use crate::state::Spend;
 use crate::use_cases::run_dev::DevMode;
 use crate::use_cases::{
-    RunBaUseCase, RunConformanceUseCase, RunDevUseCase, RunDocsUseCase, RunPdUseCase,
-    RunSaUseCase, RunTestUseCase,
+    RunBaUseCase, RunConformanceUseCase, RunDesignSystemUseCase, RunDevUseCase, RunDocsUseCase,
+    RunPdUseCase, RunSaUseCase, RunTestUseCase,
 };
 use coxagent_domain::TicketId;
 use std::fmt::Write as _;
@@ -21,6 +21,8 @@ pub struct CycleReport {
     pub cycle: u64,
     pub ba_created: Vec<TicketId>,
     pub sa_readied: Option<TicketId>,
+    /// True when PD established the project design system this cycle.
+    pub design_system_created: bool,
     pub pd_designed: Option<TicketId>,
     pub bug_fixed: Option<TicketId>,
     pub feature_done: Option<TicketId>,
@@ -161,6 +163,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             Err(e) => report.errors.push(format!("SA: {e}")),
         }
 
+        // PD establishes the project design system once UI work appears.
+        match self.design_system().execute().await {
+            Ok(created) => report.design_system_created = created,
+            Err(e) => report.errors.push(format!("PD design-system: {e}")),
+        }
+
         // PD authors UX for a UI ticket SA left pending, taking it to ready.
         match self.pd().execute().await {
             Ok(id) => report.pd_designed = id,
@@ -239,6 +247,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         if let Some(id) = &report.sa_readied {
             state.log_activity("SA", "designed (technical)", Some(id.to_string()));
         }
+        if report.design_system_created {
+            state.log_activity("PD", "established design system", None);
+        }
         if let Some(id) = &report.pd_designed {
             state.log_activity("PD", "designed UX & readied", Some(id.to_string()));
         }
@@ -290,6 +301,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
 
     fn sa(&self) -> RunSaUseCase<S, E> {
         RunSaUseCase::new(
+            Arc::clone(&self.store),
+            Arc::clone(&self.engine),
+            self.config.clone(),
+            self.work_dir.clone(),
+        )
+    }
+
+    fn design_system(&self) -> RunDesignSystemUseCase<S, E> {
+        RunDesignSystemUseCase::new(
             Arc::clone(&self.store),
             Arc::clone(&self.engine),
             self.config.clone(),

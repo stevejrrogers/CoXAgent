@@ -55,6 +55,10 @@ impl AgentEnginePort for ScriptedEngine {
             return Ok(Self::ok(SA_DESIGN.to_owned()));
         }
 
+        if sp.contains("design system") {
+            return Ok(Self::ok(PD_DESIGN_SYSTEM.to_owned()));
+        }
+
         if sp.contains("Product Designer") {
             return Ok(Self::ok(PD_UX.to_owned()));
         }
@@ -98,6 +102,13 @@ const SA_DESIGN: &str = r#"{
   "api_contract":"GET /health -> 200 {status}; GET /quote -> 200 {quote,author}",
   "data_changes":"none (in-memory)",
   "test_plan":"curl /health and /quote, assert 200 and JSON shape"
+}"#;
+
+const PD_DESIGN_SYSTEM: &str = r#"{
+  "principles":"calm, focused, content-first; generous whitespace",
+  "palette":["primary: cyan #0891B2","text: slate #0f172a","bg: white #ffffff"],
+  "typography":"Inter; 16px base; 1.25 scale; 600 weight for headings",
+  "components":["buttons: 8px radius, filled primary","cards: 12px radius, subtle border"]
 }"#;
 
 const PD_UX: &str = r#"{

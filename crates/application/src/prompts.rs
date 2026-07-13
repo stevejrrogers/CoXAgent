@@ -56,6 +56,40 @@ You are a Tech Writer. Write a concise end-user guide for the given feature and 
 save it to `docs/<ticket-id>.md` in the working directory (what it does, where \
 to find it, a short usage example). Then print a one-line summary.";
 
+/// Product Designer authoring the project-level design system (once).
+pub const DESIGN_SYSTEM: &str = "\
+You are the Product Designer establishing the project's design system — the \
+shared visual language every UI feature must follow.\n\n\
+Respond with ONLY a JSON object, no prose, exactly:\n\
+{\"principles\": string, \"palette\": [string], \"typography\": string, \
+\"components\": [string]}\n\
+`palette` items look like \"primary: cyan #0891B2\"; `components` items look \
+like \"buttons: 8px radius, filled primary\".";
+
+/// Render the design system as mandatory guidance appended to a DEV prompt for
+/// a UI ticket. Empty when there is no populated design system.
+#[must_use]
+pub fn design_constraints(ds: Option<&crate::state::DesignSystem>) -> String {
+    use std::fmt::Write as _;
+    let Some(ds) = ds.filter(|d| d.is_populated()) else {
+        return String::new();
+    };
+    let mut s = String::from("\n\nDESIGN SYSTEM (follow for all UI):\n");
+    if !ds.principles.is_empty() {
+        let _ = writeln!(s, "- Principles: {}", ds.principles);
+    }
+    if !ds.palette.is_empty() {
+        let _ = writeln!(s, "- Palette: {}", ds.palette.join("; "));
+    }
+    if !ds.typography.is_empty() {
+        let _ = writeln!(s, "- Typography: {}", ds.typography);
+    }
+    if !ds.components.is_empty() {
+        let _ = writeln!(s, "- Components: {}", ds.components.join("; "));
+    }
+    s
+}
+
 /// Compose a full system prompt for a role from the base and role sections.
 #[must_use]
 pub fn system_prompt(role_section: &str) -> String {
@@ -82,4 +116,32 @@ pub fn stack_constraints(rules: &[crate::conformance::StackRule]) -> String {
         s.push('\n');
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::design_constraints;
+    use crate::state::DesignSystem;
+
+    #[test]
+    fn empty_design_system_renders_nothing() {
+        assert!(design_constraints(None).is_empty());
+        assert!(design_constraints(Some(&DesignSystem::default())).is_empty());
+    }
+
+    #[test]
+    fn populated_design_system_renders_all_sections() {
+        let ds = DesignSystem {
+            principles: "calm".to_owned(),
+            palette: vec!["primary: cyan #0891B2".to_owned()],
+            typography: "Inter".to_owned(),
+            components: vec!["buttons: 8px radius".to_owned()],
+        };
+        let out = design_constraints(Some(&ds));
+        assert!(out.contains("DESIGN SYSTEM"));
+        assert!(out.contains("calm"));
+        assert!(out.contains("cyan #0891B2"));
+        assert!(out.contains("Inter"));
+        assert!(out.contains("8px radius"));
+    }
 }

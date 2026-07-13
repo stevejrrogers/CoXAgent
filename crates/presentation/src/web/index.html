@@ -162,6 +162,7 @@ body.viewer .ctlrow, body.viewer #proj-switch + button, body.viewer .ticket-acti
         <div id="ov-alerts"></div>
         <div class="kpis" id="kpis"></div>
         <div id="ov-deploy"></div>
+        <div id="ov-design"></div>
         <div class="row2">
           <div class="panel"><h4><i class="ti ti-activity" style="color:var(--accent2)"></i> Recent activity <span class="mo" onclick="nav('activity')">view all</span></h4><div id="ov-activity"></div></div>
           <div class="panel"><h4><i class="ti ti-history" style="color:var(--accent2)"></i> Releases</h4><div id="ov-changelog"></div></div>
@@ -276,6 +277,22 @@ function velocityHtml(sprints){
   return `<div class="sec">Velocity</div><div class="panel"><div style="display:flex;gap:10px;align-items:flex-end">${bars}</div>
     <div style="color:var(--dim);font-size:11px;margin-top:10px">shipped (cyan) vs committed (grey) per closed sprint</div></div>`;
 }
+function designSystemHtml(ds){
+  if(!ds)return "";
+  const has=(ds.principles||(ds.palette||[]).length||ds.typography||(ds.components||[]).length);
+  if(!has)return "";
+  const swatch=t=>{const m=(t||"").match(/#([0-9a-fA-F]{3,8})/);const c=m?m[0]:"var(--card2)";
+    return `<div style="display:flex;align-items:center;gap:7px;background:var(--card2);border:1px solid var(--border2);border-radius:8px;padding:5px 9px;font-size:12px">
+      <span style="width:14px;height:14px;border-radius:4px;background:${c};border:1px solid var(--border);flex-shrink:0"></span>${esc(t)}</div>`;};
+  const chips=(arr,ic)=>((arr||[]).map(x=>`<span class="fchip" style="cursor:default"><i class="ti ti-${ic}" style="font-size:13px"></i> ${esc(x)}</span>`).join(""));
+  return `<div class="panel" style="margin-top:16px">
+    <h4 style="margin-top:0"><i class="ti ti-palette" style="color:var(--accent)"></i> Design system <span style="font-size:11px;color:var(--dim);font-weight:400">· authored by PD</span></h4>
+    ${ds.principles?`<div style="font-size:13px;color:var(--muted);margin-bottom:10px">${esc(ds.principles)}</div>`:""}
+    ${(ds.palette||[]).length?`<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px">${ds.palette.map(swatch).join("")}</div>`:""}
+    ${ds.typography?`<div style="display:flex;align-items:center;gap:7px;font-size:12px;color:var(--muted);margin-bottom:10px"><i class="ti ti-typography" style="color:var(--accent2)"></i> ${esc(ds.typography)}</div>`:""}
+    ${(ds.components||[]).length?`<div style="display:flex;flex-wrap:wrap;gap:6px">${chips(ds.components,"components")}</div>`:""}
+  </div>`;
+}
 function actItem(a){const col=cvar(AC[a.agent]||"--muted");
   return `<div class="act"><div class="ad" style="background:${col}22;color:${col}">${initials(a.agent)}</div>
     <div class="atx"><span class="who">${esc(a.agent)}</span> ${esc(a.action)} ${a.ticket?`<span class="tk">${esc(a.ticket)}</span>`:''}</div>
@@ -313,6 +330,7 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
       <div class="av" style="width:36px;height:36px;background:${dp.ok?'var(--green)':'var(--red)'}22;color:${dp.ok?'var(--green)':'var(--red)'}"><i class="ti ti-${dp.ok?'cloud-check':'cloud-x'}"></i></div>
       <div style="flex:1"><div style="font-size:13px;font-weight:600">Deployment ${dp.ok?'healthy':'failed'}</div><div style="font-size:12px;color:var(--muted)">${esc(dp.summary)}</div></div>
       <div style="font-size:11px;color:var(--dim)">${esc((dp.at||"").slice(0,16).replace("T"," "))}</div></div>`:"";
+    document.getElementById("ov-design").innerHTML=designSystemHtml(s.design_system);
     const act=[...(s.activity||[])].reverse().slice(0,7);
     document.getElementById("ov-activity").innerHTML=act.length?act.map(actItem).join(""):'<div class="empty">no activity yet</div>';
     const h=s.history||[];

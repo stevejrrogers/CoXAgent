@@ -51,6 +51,32 @@ pub struct Comment {
 /// Keep discussion threads bounded per project.
 pub const MAX_COMMENTS: usize = 500;
 
+/// The project-level design system authored once by PD. Injected into DEV
+/// prompts for UI tickets so implementation is visually consistent — the
+/// design analogue of architecture governance (proactive, in-prompt).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DesignSystem {
+    /// The overall design language / principles in prose.
+    pub principles: String,
+    /// Color tokens, e.g. `primary: cyan #0891B2`.
+    pub palette: Vec<String>,
+    /// Typography guidance (families, scale, weights).
+    pub typography: String,
+    /// Component conventions, e.g. `buttons: 8px radius, filled primary`.
+    pub components: Vec<String>,
+}
+
+impl DesignSystem {
+    /// Whether any field carries content (an authored system, not a blank one).
+    #[must_use]
+    pub fn is_populated(&self) -> bool {
+        !self.principles.is_empty()
+            || !self.palette.is_empty()
+            || !self.typography.is_empty()
+            || !self.components.is_empty()
+    }
+}
+
 /// Accumulated engine spend — the FinOps view of the autonomous team.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Spend {
@@ -117,6 +143,10 @@ pub struct ProjectState {
     /// Discussion threads: per-ticket and team-channel comments.
     #[serde(default)]
     pub comments: Vec<Comment>,
+    /// Project-level design system authored by PD (absent until a UI ticket
+    /// prompts PD to create it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub design_system: Option<DesignSystem>,
 }
 
 impl Default for ProjectState {
@@ -133,6 +163,7 @@ impl Default for ProjectState {
             sprints: Vec::new(),
             deploy: None,
             comments: Vec::new(),
+            design_system: None,
         }
     }
 }

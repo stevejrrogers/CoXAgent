@@ -19,4 +19,4 @@ pub mod use_cases;
 pub use auth::{AuthPort, AuthRole, AuthUser};
 pub use config::{Config, EngineChoice, EngineKind, EngineMapping, Mode, WorkflowConfig};
 pub use error::{AppError, PortError};
-pub use state::{Comment, ProjectState, Spend, Sprint, SCHEMA_VERSION};
+pub use state::{Comment, DesignSystem, ProjectState, Spend, Sprint, SCHEMA_VERSION};
