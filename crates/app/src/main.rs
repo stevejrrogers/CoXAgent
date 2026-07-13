@@ -204,7 +204,9 @@ async fn serve_with_runner(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let project = build_project("default", state_dir, work_dir).await?;
     let audit = build_audit().await;
-    coxagent_presentation::serve_full(vec![project], port, None, audit, None).await?;
+    // Single-project serve honors the same RBAC env vars as the hub.
+    let auth = build_auth(state_dir.parent().unwrap_or(state_dir))?;
+    coxagent_presentation::serve_full(vec![project], port, None, audit, auth).await?;
     Ok(())
 }
 
@@ -272,21 +274,20 @@ async fn run_hub(registry: &Path, port: u16) -> Result<(), Box<dyn std::error::E
         Box::pin(async move { onboard_project(&base, &registry_path, &name, alias).await })
     });
 
-    let auth = build_auth(registry)?;
+    let auth = build_auth(registry.parent().unwrap_or_else(|| Path::new(".")))?;
     let audit = build_audit().await;
     coxagent_presentation::serve_full(projects, port, Some(factory), audit, auth).await?;
     Ok(())
 }
 
-/// Wire RBAC for the hub. An admin can be bootstrapped once via the
-/// `COXAGENT_ADMIN_USER` / `COXAGENT_ADMIN_PASSWORD` env vars, which seed a
-/// hashed `auth.json` beside the registry. If neither the file nor the env
-/// exists, the hub runs open (no login) — handy for local single-user use.
+/// Wire RBAC. An admin is (re-)provisioned from the `COXAGENT_ADMIN_USER` /
+/// `COXAGENT_ADMIN_PASSWORD` env vars into `auth.json` under `base` — the env is
+/// authoritative, so setting it always makes that password work even if a stale
+/// file exists. With no file and no env, the server runs open (no login).
 fn build_auth(
-    registry: &Path,
+    base: &Path,
 ) -> Result<Option<Arc<dyn coxagent_application::auth::AuthPort>>, Box<dyn std::error::Error>> {
     use coxagent_infrastructure::FileAuthService;
-    let base = registry.parent().unwrap_or_else(|| Path::new("."));
     let auth_path = FileAuthService::default_path(base);
 
     if let (Ok(user), Ok(pass)) = (
@@ -294,6 +295,7 @@ fn build_auth(
         std::env::var("COXAGENT_ADMIN_PASSWORD"),
     ) {
         FileAuthService::bootstrap_admin(&auth_path, &user, &pass)?;
+        tracing::info!("admin '{user}' provisioned from environment");
     }
 
     let svc = FileAuthService::open(&auth_path)?;

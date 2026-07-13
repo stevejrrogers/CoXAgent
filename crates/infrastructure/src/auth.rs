@@ -77,23 +77,31 @@ impl FileAuthService {
         })
     }
 
-    /// Ensure an admin account exists in `path`, creating the file with a hashed
-    /// password if it is absent. Idempotent: an existing file is left untouched.
+    /// Ensure an admin account with `username`/`password` exists in `path`,
+    /// creating the file if absent and **updating the hash if the account
+    /// already exists**. The environment-provided admin is the source of truth,
+    /// so a stale `auth.json` never locks the operator out — re-running with the
+    /// intended password always makes it work.
     ///
     /// # Errors
-    /// Returns an error if hashing fails or the file cannot be written.
+    /// Returns an error if hashing, reading, or writing the file fails.
     pub fn bootstrap_admin(path: &Path, username: &str, password: &str) -> Result<(), String> {
-        if path.exists() {
-            return Ok(());
-        }
         let hash = hash_password(password)?;
-        let file = UserFile {
-            users: vec![StoredUser {
+        let mut file: UserFile = match std::fs::read_to_string(path) {
+            Ok(text) => serde_json::from_str(&text).map_err(|e| format!("bad auth file: {e}"))?,
+            Err(_) => UserFile::default(),
+        };
+        match file.users.iter_mut().find(|u| u.username == username) {
+            Some(existing) => {
+                existing.hash = hash;
+                existing.role = AuthRole::Admin;
+            }
+            None => file.users.push(StoredUser {
                 username: username.to_owned(),
                 hash,
                 role: AuthRole::Admin,
-            }],
-        };
+            }),
+        }
         let text = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -234,8 +242,6 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = FileAuthService::default_path(dir.path());
         FileAuthService::bootstrap_admin(&path, "root", "s3cret").unwrap();
-        // Idempotent second call keeps the same file.
-        FileAuthService::bootstrap_admin(&path, "root", "different").unwrap();
 
         let svc = FileAuthService::open(&path).unwrap();
         assert!(svc.has_users());
@@ -247,6 +253,25 @@ mod tests {
         assert!(user.role.can_write());
         svc.logout(&token).await;
         assert!(svc.user_for(&token).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn re_bootstrap_updates_the_password() {
+        // Regression: a stale auth.json must not lock the operator out. The
+        // second bootstrap (the env password of record) wins.
+        let dir = tempdir().unwrap();
+        let path = FileAuthService::default_path(dir.path());
+        FileAuthService::bootstrap_admin(&path, "root", "oldpass").unwrap();
+        FileAuthService::bootstrap_admin(&path, "root", "newpass").unwrap();
+
+        let svc = FileAuthService::open(&path).unwrap();
+        assert!(
+            svc.login("root", "oldpass").await.is_none(),
+            "old pw revoked"
+        );
+        assert!(svc.login("root", "newpass").await.is_some(), "new pw works");
+        // Still exactly one account (upsert, not append).
+        assert_eq!(svc.users.len(), 1);
     }
 
     #[tokio::test]
