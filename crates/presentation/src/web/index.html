@@ -232,7 +232,9 @@ body:not(.admin) .admin-only { display: none !important; }
         <div class="panel"><div id="twofa-body"></div></div>
       </div>
       <div class="view" id="view-discuss">
-        <div class="filters"><span style="font-size:12px;color:var(--muted)">Thread</span><select class="sel" id="disc-filter" onchange="renderDiscuss()"><option value="">Team channel</option></select></div>
+        <div class="filters"><span style="font-size:12px;color:var(--muted)">Thread</span><select class="sel" id="disc-filter" onchange="renderDiscuss()"><option value="">Team channel</option></select>
+          <div style="flex:1"></div>
+          <button class="ticket-actions" onclick="startDiscussion()" style="background:var(--card2);color:var(--accent2);border:1px solid var(--border2);border-radius:8px;padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit"><i class="ti ti-users-group"></i> <span id="disc-run-label">Start agent discussion</span></button></div>
         <div class="panel"><div id="disc-thread" style="max-height:52vh;overflow-y:auto"></div></div>
         <div style="display:flex;gap:8px;margin-top:12px">
           <input id="disc-input" placeholder="Write a message… (Enter to send)" onkeydown="if(event.key==='Enter')sendComment()" style="flex:1;background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:10px 12px;font-size:13px;font-family:inherit">
@@ -543,6 +545,18 @@ function renderDiscuss(){
       <div class="atx"><span class="who">${esc(c.author)}</span>${c.ticket&&!want?` <span class="tk">${esc(c.ticket)}</span>`:''}<div style="margin-top:2px;color:var(--text)">${esc(c.body)}</div></div>
       <span class="tm">${esc((c.at||"").slice(5,16).replace("T"," "))}</span></div>`;}).join(""):'<div class="empty">No messages yet — start the conversation.</div>';
   box.scrollTop=box.scrollHeight;
+}
+async function startDiscussion(){
+  const topic=prompt("Discussion topic for the team (PO + SA weigh in, SM decides):");
+  if(!topic||!topic.trim())return;
+  const lbl=document.getElementById("disc-run-label");lbl.textContent="Agents discussing…";
+  document.getElementById("disc-filter").value="";
+  try{
+    const r=await fetch(api("/discuss"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({topic:topic.trim()})});
+    if(!r.ok){alert("Discussion failed: "+(await r.text()||r.status)+" (needs a configured engine).");}
+    else{const s=await(await fetch(api("/state"))).json();render(s);renderDiscuss();}
+  }catch(e){alert("Network error.");}
+  lbl.textContent="Start agent discussion";
 }
 function sendComment(){const inp=document.getElementById("disc-input");const body=inp.value.trim();if(!body)return;
   const ticket=document.getElementById("disc-filter").value||null;

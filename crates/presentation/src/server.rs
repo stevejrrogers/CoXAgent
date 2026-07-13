@@ -146,6 +146,7 @@ pub async fn serve_full(
         .route("/api/projects/:pid/config", get(get_config).put(put_config))
         .route("/api/projects/:pid/control/:action", post(control_ep))
         .route("/api/projects/:pid/ba-analyze", post(ba_analyze))
+        .route("/api/projects/:pid/discuss", post(run_discussion_ep))
         .route("/api/projects/:pid/tickets", post(create_ticket))
         .route("/api/projects/:pid/ticket/:id/priority", post(set_priority))
         .route("/api/projects/:pid/ticket/:id/reject", post(reject_ticket))
@@ -346,6 +347,41 @@ struct CreateTicketReq {
     complexity: Option<coxagent_domain::Complexity>,
     #[serde(default)]
     has_ui: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct DiscussReq {
+    topic: String,
+}
+
+/// Facilitate a multi-agent discussion on a topic: PO and SA weigh in, SM
+/// decides and may create a ticket. Turns are posted to the team channel.
+async fn run_discussion_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    Json(req): Json<DiscussReq>,
+) -> axum::response::Response {
+    use coxagent_application::use_cases::RunDiscussionUseCase;
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let topic = req.topic.trim();
+    if topic.is_empty() {
+        return (StatusCode::BAD_REQUEST, "topic is required").into_response();
+    }
+    let uc = RunDiscussionUseCase::new(
+        Arc::clone(&p.store),
+        Arc::clone(&p.engine),
+        p.work_dir.clone(),
+    );
+    match uc.execute(topic).await {
+        Ok(o) => Json(serde_json::json!({
+            "ok": true, "turns": o.turns, "decision": o.decision,
+            "created_ticket": o.created_ticket,
+        }))
+        .into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
 }
 
 #[derive(serde::Deserialize)]
