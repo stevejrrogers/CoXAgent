@@ -132,6 +132,21 @@ echo '[{"id":"myapp","path":"/srv/myapp"}]' > registry.json
 coxagent hub --registry registry.json --port 4000
 ```
 
+### Self-host with Docker
+
+Run the hub + dashboard in a container, backed by Postgres (state, audit,
+retention). The server binds `0.0.0.0` in-container (`COXAGENT_HOST`) so the
+published port is reachable.
+
+```sh
+COXAGENT_ADMIN_PASSWORD=yourpw docker compose up -d --build
+# → http://localhost:4000, log in as root / yourpw
+```
+
+Real LLM agents need a CLI (`claude`/`opencode`) on PATH inside the container;
+the base image ships the offline `scripted`/`mock` engines — install a CLI in a
+derived image to run real agents in the container.
+
 ### Enterprise: RBAC + Postgres
 
 ```sh

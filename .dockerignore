@@ -1,0 +1,7 @@
+target/
+desktop/build/
+.git/
+.github/
+**/*.dmg
+benchmark-reports/
+scripts/harness/

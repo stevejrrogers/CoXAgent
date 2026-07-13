@@ -165,7 +165,10 @@ pub async fn serve_full(
         .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth_mw))
         .with_state(state);
 
-    let addr = format!("127.0.0.1:{port}");
+    // Bind loopback by default (safe for local use); a container sets
+    // COXAGENT_HOST=0.0.0.0 so published ports are reachable from the host.
+    let host = std::env::var("COXAGENT_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned());
+    let addr = format!("{host}:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("dashboard on http://{addr}");
     axum::serve(listener, app).await

@@ -1,0 +1,40 @@
+# Self-host CoXAgent: the hub + dashboard, backed by Postgres for multi-tenant
+# state, audit, and audit retention. Bring up with:
+#   COXAGENT_ADMIN_PASSWORD=yourpw docker compose up -d --build
+# then open http://localhost:4000 and log in as root.
+#
+# Note: real LLM agents need a CLI (claude/opencode) on PATH inside the
+# container; the base image ships scripted/mock (offline). Install a CLI in a
+# derived image, or run the loop where the CLI lives.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: cox
+      POSTGRES_DB: coxagent
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
+
+  coxagent:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      COXAGENT_DB_DSN: postgres://postgres:cox@db:5432/coxagent
+      COXAGENT_ADMIN_USER: root
+      COXAGENT_ADMIN_PASSWORD: ${COXAGENT_ADMIN_PASSWORD:-changeme}
+      COXAGENT_AUDIT_RETENTION_DAYS: "90"
+    ports:
+      - "4000:4000"
+    volumes:
+      - workspace:/workspace
+
+volumes:
+  pgdata:
+  workspace:
