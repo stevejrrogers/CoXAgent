@@ -68,7 +68,12 @@ hashes, shown once) used via `Authorization: Bearer`.
 
 **Audit.** An append-only security trail records every authenticated mutation
 and sign-in (success and failure) with actor, action, and outcome. Admin-only,
-exportable; persisted to Postgres (survives restart) or in memory locally.
+exportable; persisted to Postgres (survives restart, with an optional retention
+window) or in memory locally.
+
+**Access management.** Admins manage teammates and automation from the
+dashboard: add/remove user accounts (the last admin is protected) and mint or
+revoke API tokens — no file editing.
 
 **Policy.** Opt-in governance in config: a model allowlist (the loop refuses to
 run on a disallowed model), a per-day spend cap (pauses independently of the
@@ -103,7 +108,7 @@ Roadmap, Discussion, Cost, Audit (admin), Settings (engine + model-per-role,
 workflow) — over a live SSE feed, controllable runner (Resume/Step/Pause),
 interactive tickets, login + role-aware UI.
 
-81 tests; clippy pedantic + `-D warnings`; CI + tagged release binaries
+86 tests; clippy pedantic + `-D warnings`; CI + tagged release binaries
 (macOS arm64/x64, linux).
 
 ## Quickstart
