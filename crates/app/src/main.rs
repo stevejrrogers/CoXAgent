@@ -66,11 +66,14 @@ async fn make_store(
 
 async fn run() -> Result<String, Box<dyn std::error::Error>> {
     let args = cli::parse();
-    let store = make_store("default", &args.state_dir).await?;
+    // The single-project store is built lazily: `serve`/`hub`/`discover` don't
+    // use it, so we must not create it eagerly — the default `./state` would
+    // resolve against a read-only cwd (e.g. a GUI-launched app runs in `/`).
+    let store = || make_store("default", &args.state_dir);
 
     match args.command {
         Command::Report => {
-            let state = store.load().await?;
+            let state = store().await?.load().await?;
             Ok(render_report(&state))
         }
         Command::Discover => Ok(render_discovery()),
@@ -78,13 +81,17 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
             name,
             alias,
             existing,
-        } => match existing {
-            Some(codebase) => {
-                onboard::brownfield(&store, &args.state_dir, &name, alias, &codebase).await
+        } => {
+            let store = store().await?;
+            match existing {
+                Some(codebase) => {
+                    onboard::brownfield(&store, &args.state_dir, &name, alias, &codebase).await
+                }
+                None => onboard::greenfield(&store, &args.state_dir, &name, alias).await,
             }
-            None => onboard::greenfield(&store, &args.state_dir, &name, alias).await,
-        },
+        }
         Command::RunBa { work_dir, context } => {
+            let store = store().await?;
             let config = load_config(&args.state_dir);
             let (engine, _meter) = build_engine(&config, logs_dir(&args.state_dir))?;
             let uc = RunBaUseCase::new(Arc::clone(&store), engine, config, work_dir, context);
@@ -98,7 +105,7 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
             Ok(out)
         }
         Command::Changelog { out } => {
-            let changelog = render_changelog(&store.load().await?);
+            let changelog = render_changelog(&store().await?.load().await?);
             if let Some(path) = out {
                 std::fs::write(&path, &changelog)?;
                 Ok(format!("wrote changelog to {}\n", path.display()))
@@ -107,6 +114,7 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
             }
         }
         Command::Check { work_dir } => {
+            let store = store().await?;
             let config = load_config(&args.state_dir);
             let uc = coxagent_application::use_cases::RunConformanceUseCase::new(
                 Arc::clone(&store),
@@ -136,7 +144,16 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
             work_dir,
             context,
             max_cycles,
-        } => run_loop(store, &args.state_dir, work_dir, context, max_cycles).await,
+        } => {
+            run_loop(
+                store().await?,
+                &args.state_dir,
+                work_dir,
+                context,
+                max_cycles,
+            )
+            .await
+        }
     }
 }
 
