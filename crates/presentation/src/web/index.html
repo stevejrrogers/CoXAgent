@@ -137,6 +137,25 @@
   .chatempty i{font-size:34px;color:var(--accent2)}
   .chatempty div{font-size:15px;font-weight:600;color:var(--text);margin:10px 0 3px}
   .chatempty span{font-size:12px;color:var(--dim)}
+  .sethero{text-align:center;margin-bottom:16px}
+  .seticon{width:54px;height:54px;margin:0 auto 12px;border-radius:15px;display:grid;place-items:center;font-size:26px;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2))}
+  .sethero h3{font-size:17px;font-weight:700}
+  .sethero p{font-size:12.5px;color:var(--muted);margin-top:5px;line-height:1.5}
+  .setrow{display:flex;gap:12px;padding:13px;border:1px solid var(--border2);border-radius:12px;margin-bottom:10px}
+  .setrow.ok{border-color:color-mix(in srgb,var(--green) 40%,transparent);background:color-mix(in srgb,var(--green) 8%,transparent)}
+  .setmk{flex:none;width:32px;height:32px;border-radius:9px;display:grid;place-items:center;font-size:16px;background:var(--card2);color:var(--muted)}
+  .setrow.ok .setmk{background:color-mix(in srgb,var(--green) 20%,transparent);color:var(--green)}
+  .setname{font-size:13.5px;font-weight:600;display:flex;align-items:center;gap:8px}
+  .setdesc{font-size:11.5px;color:var(--muted);margin-top:1px}
+  .setpill{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;padding:2px 7px;border-radius:20px;background:var(--card2);color:var(--dim)}
+  .setpill.on{background:color-mix(in srgb,var(--green) 20%,transparent);color:var(--green)}
+  .setcmd{display:flex;align-items:center;gap:6px;margin-top:9px;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:6px 8px 6px 11px}
+  .setcmd code{flex:1;min-width:0;font-family:ui-monospace,monospace;font-size:11.5px;color:var(--accent2);overflow-x:auto;white-space:nowrap}
+  .setcmd button{flex:none;background:var(--card2);border:1px solid var(--border2);color:var(--muted);border-radius:6px;padding:4px 7px;cursor:pointer;font-size:13px}
+  .setcmd.copied button{color:var(--green);border-color:var(--green)}
+  .setlink{display:inline-flex;align-items:center;gap:4px;font-size:11.5px;color:var(--accent2);text-decoration:none;margin-top:7px}
+  .setnote{display:flex;gap:8px;font-size:11.5px;color:var(--muted);background:var(--card2);border-radius:9px;padding:10px 12px;line-height:1.5}
+  .setnote code{font-family:ui-monospace,monospace;font-size:11px;color:var(--accent2)}
   .fchip.on{background:var(--accentbg);border-color:transparent;color:var(--accent2)}
   select.sel{background:var(--card);color:var(--text);border:1px solid var(--border2);border-radius:9px;padding:7px 10px;font-size:12px;font-family:inherit}
   .act{display:flex;gap:11px;padding:11px 0;border-bottom:1px solid var(--border);align-items:flex-start}
@@ -355,6 +374,13 @@ body:not(.admin) .admin-only { display: none !important; }
   </main>
 
   <div class="ov" id="ov-ticket" onclick="if(event.target===this)close_('ov-ticket')"><div class="modal" id="ticket-body"></div></div>
+  <div class="ov" id="ov-setup"><div class="modal" style="max-width:460px">
+    <div id="setup-body"></div>
+    <div style="display:flex;gap:8px;margin-top:16px">
+      <button class="pri" id="set-recheck" onclick="recheckAgents()" style="flex:1;justify-content:center"><i class="ti ti-refresh"></i> Re-check</button>
+      <button onclick="dismissSetup()" style="background:var(--card2);color:var(--muted);border:1px solid var(--border2);border-radius:9px;padding:9px 15px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit">I'll do this later</button>
+    </div>
+  </div></div>
   <datalist id="opencode-models"></datalist>
   <div class="ov" id="ov-newticket" onclick="if(event.target===this)close_('ov-newticket')"><div class="modal">
     <span class="x" onclick="close_('ov-newticket')"><i class="ti ti-x"></i></span>
@@ -795,6 +821,7 @@ async function loadSettings(){let cfg={};try{cfg=await(await fetch(api("/config"
   document.getElementById("settings-body").innerHTML=`
     <div class="sec">Engines &amp; models</div>
     ${detBanner}
+    <div style="margin:-2px 0 10px"><button onclick="checkAgentSetup(true)" style="display:inline-flex;align-items:center;gap:6px;background:var(--card2);color:var(--accent2);border:1px solid var(--border2);border-radius:8px;padding:7px 12px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit"><i class="ti ti-robot"></i> Agent setup guide</button></div>
     <div class="panel frm">${rows}</div>
     <div class="sec">Workflow</div>
     <div class="panel frm">
@@ -978,7 +1005,50 @@ function startApp(){
   applyRole();
   const h=(location.hash||"").slice(1);if(TITLES[h])nav(h);else nav("overview");
   loadProjects();
+  checkAgentSetup(false);
 }
+const AGENT_CLIS={claude:{label:"Claude Code",desc:"Anthropic's coding agent",install:"curl -fsSL https://claude.ai/install.sh | bash",docs:"https://claude.com/claude-code"},
+  opencode:{label:"opencode",desc:"open-source multi-model agent",install:"curl -fsSL https://opencode.ai/install | bash",docs:"https://opencode.ai"}};
+async function checkAgentSetup(force){
+  let list=[];try{list=await(await fetch("/api/engines")).json();}catch(e){}
+  const have=new Set((list||[]).map(e=>e.name.toLowerCase()));
+  window._engines=have;
+  // Only auto-open once per browser unless the user re-checks from Settings.
+  const dismissed=localStorage.getItem("coxSetupDone")==="1";
+  const runnable=[...have].some(n=>n==="claude"||n==="opencode");
+  if(runnable)localStorage.setItem("coxSetupDone","1");
+  if(!force&&(runnable||dismissed))return;
+  renderSetupWizard(have);
+  document.getElementById("ov-setup").classList.add("open");
+}
+function renderSetupWizard(have){
+  const rows=Object.entries(AGENT_CLIS).map(([k,c])=>{
+    const ok=have.has(k);
+    return `<div class="setrow ${ok?'ok':''}">
+      <div class="setmk">${ok?'<i class="ti ti-check"></i>':'<i class="ti ti-download"></i>'}</div>
+      <div style="flex:1;min-width:0"><div class="setname">${esc(c.label)} ${ok?'<span class="setpill on">installed</span>':'<span class="setpill">not found</span>'}</div>
+        <div class="setdesc">${esc(c.desc)}</div>
+        ${ok?'':`<div class="setcmd"><code id="cmd-${k}">${esc(c.install)}</code><button onclick="copyCmd('${k}')" title="Copy"><i class="ti ti-copy"></i></button></div>
+          <a href="${c.docs}" target="_blank" rel="noopener" class="setlink">Installation guide <i class="ti ti-external-link" style="font-size:12px"></i></a>`}</div></div>`;
+  }).join("");
+  const anyOk=[...have].some(n=>n==="claude"||n==="opencode");
+  document.getElementById("setup-body").innerHTML=`
+    <div class="sethero"><div class="seticon"><i class="ti ti-robot"></i></div>
+      <h3>Connect a coding agent</h3>
+      <p>CoXAgent runs local agent CLIs to do the work. ${anyOk?'You\'re ready to go — an agent was detected.':'Install one below (Claude Code is free to start), then re-check.'}</p></div>
+    ${rows}
+    <div class="setnote"><i class="ti ti-info-circle"></i> Run the command in your terminal, then press <b>Re-check</b>. CoXAgent detects CLIs on your <code>PATH</code>.</div>`;
+}
+function copyCmd(k){const el=document.getElementById("cmd-"+k);if(!el)return;
+  navigator.clipboard.writeText(el.textContent).then(()=>{el.parentElement.classList.add("copied");setTimeout(()=>el.parentElement.classList.remove("copied"),1200);}).catch(()=>{});}
+async function recheckAgents(){
+  const btn=document.getElementById("set-recheck");const old=btn.innerHTML;btn.innerHTML='<i class="ti ti-loader-2"></i> Checking…';
+  let list=[];try{list=await(await fetch("/api/engines")).json();}catch(e){}
+  const have=new Set((list||[]).map(e=>e.name.toLowerCase()));window._engines=have;
+  renderSetupWizard(have);btn.innerHTML=old;
+  if([...have].some(n=>n==="claude"||n==="opencode")){localStorage.setItem("coxSetupDone","1");}
+}
+function dismissSetup(){localStorage.setItem("coxSetupDone","1");close_("ov-setup");}
 function showLogin(){document.getElementById("ov-login").classList.add("open");setTimeout(()=>document.getElementById("lg-user").focus(),50);}
 async function doLogin(){
   const username=document.getElementById("lg-user").value.trim();
