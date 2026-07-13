@@ -3,6 +3,7 @@
 //! ports, presentation drives the inbound ones.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod auth;
 pub mod config;
 pub mod conformance;
 pub mod error;
@@ -15,6 +16,7 @@ pub mod sprint;
 pub mod state;
 pub mod use_cases;
 
+pub use auth::{AuthPort, AuthRole, AuthUser};
 pub use config::{Config, EngineChoice, EngineKind, EngineMapping, Mode, WorkflowConfig};
 pub use error::{AppError, PortError};
 pub use state::{Comment, ProjectState, Spend, Sprint, SCHEMA_VERSION};

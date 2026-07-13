@@ -8,3 +8,7 @@ Cargo.lock.orig
 /codebase/
 
 .DS_Store
+
+# Local auth store — hashed credentials, never commit
+auth.json
+**/auth.json

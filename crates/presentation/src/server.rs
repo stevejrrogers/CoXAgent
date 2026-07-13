@@ -4,10 +4,13 @@
 //! registers many. Routes are scoped `/api/projects/:pid/...`.
 
 use axum::extract::{Path, State};
+use axum::http::{header, Request, StatusCode};
+use axum::middleware::Next;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Json};
 use axum::routing::{get, post};
 use axum::Router;
+use coxagent_application::auth::AuthPort;
 use coxagent_application::metrics;
 use coxagent_application::ports::outbound::StateStorePort;
 use coxagent_application::use_cases::RunnerHandle;
@@ -54,6 +57,7 @@ struct AppState {
     projects: Arc<RwLock<HashMap<String, ProjectHandle>>>,
     order: Arc<RwLock<Vec<String>>>,
     factory: Option<ProjectFactory>,
+    auth: Option<Arc<dyn AuthPort>>,
 }
 
 impl AppState {
@@ -68,7 +72,7 @@ impl AppState {
 /// # Errors
 /// Returns an IO error if the port cannot be bound.
 pub async fn serve(projects: Vec<ProjectHandle>, port: u16) -> std::io::Result<()> {
-    serve_with_factory(projects, port, None).await
+    serve_full(projects, port, None, None).await
 }
 
 /// Serve with a [`ProjectFactory`] so the dashboard can onboard new projects at
@@ -81,6 +85,21 @@ pub async fn serve_with_factory(
     port: u16,
     factory: Option<ProjectFactory>,
 ) -> std::io::Result<()> {
+    serve_full(projects, port, factory, None).await
+}
+
+/// Serve with an optional [`ProjectFactory`] and optional [`AuthPort`]. When
+/// `auth` is `Some` and has users, RBAC is enforced (login required; writes
+/// need an admin). When `None`, the app runs open (single-user local mode).
+///
+/// # Errors
+/// Returns an IO error if the port cannot be bound.
+pub async fn serve_full(
+    projects: Vec<ProjectHandle>,
+    port: u16,
+    factory: Option<ProjectFactory>,
+    auth: Option<Arc<dyn AuthPort>>,
+) -> std::io::Result<()> {
     let order: Vec<String> = projects.iter().map(|p| p.id.clone()).collect();
     let map: HashMap<String, ProjectHandle> =
         projects.into_iter().map(|p| (p.id.clone(), p)).collect();
@@ -88,11 +107,15 @@ pub async fn serve_with_factory(
         projects: Arc::new(RwLock::new(map)),
         order: Arc::new(RwLock::new(order)),
         factory,
+        auth,
     };
 
     let app = Router::new()
         .route("/", get(index))
         .route("/api/health", get(health))
+        .route("/api/auth/login", post(login_ep))
+        .route("/api/auth/logout", post(logout_ep))
+        .route("/api/auth/me", get(me_ep))
         .route("/api/projects", get(list_projects).post(create_project))
         .route("/api/projects/:pid/state", get(state_ep))
         .route("/api/projects/:pid/metrics", get(metrics_ep))
@@ -107,6 +130,10 @@ pub async fn serve_with_factory(
             get(list_comments).post(post_comment),
         )
         .route("/api/projects/:pid/events", get(events_ep))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth_mw,
+        ))
         .with_state(state);
 
     let addr = format!("127.0.0.1:{port}");
@@ -428,6 +455,133 @@ async fn events_ep(
         }
     });
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// Name of the session cookie.
+const SESSION_COOKIE: &str = "cox_session";
+
+/// Extract a cookie value from a request's `Cookie` header.
+fn cookie_value(req: &Request<axum::body::Body>, name: &str) -> Option<String> {
+    let raw = req.headers().get(header::COOKIE)?.to_str().ok()?;
+    raw.split(';').find_map(|pair| {
+        let (k, v) = pair.split_once('=')?;
+        (k.trim() == name).then(|| v.trim().to_owned())
+    })
+}
+
+/// RBAC gate. Open (pass-through) when no auth is configured. Otherwise: the
+/// SPA shell, health, and login are public; every other route needs a valid
+/// session, and mutating methods (except logout) need an admin.
+async fn auth_mw(
+    State(app): State<AppState>,
+    req: Request<axum::body::Body>,
+    next: Next,
+) -> axum::response::Response {
+    let Some(auth) = app.auth.clone() else {
+        return next.run(req).await;
+    };
+    let path = req.uri().path().to_owned();
+    if path == "/" || path == "/api/health" || path == "/api/auth/login" {
+        return next.run(req).await;
+    }
+    let user = match cookie_value(&req, SESSION_COOKIE) {
+        Some(token) => auth.user_for(&token).await,
+        None => None,
+    };
+    let Some(user) = user else {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthenticated" })))
+            .into_response();
+    };
+    let is_write = matches!(
+        *req.method(),
+        axum::http::Method::POST
+            | axum::http::Method::PUT
+            | axum::http::Method::DELETE
+            | axum::http::Method::PATCH
+    ) && path != "/api/auth/logout";
+    if is_write && !user.role.can_write() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "admin role required" })),
+        )
+            .into_response();
+    }
+    next.run(req).await
+}
+
+#[derive(serde::Deserialize)]
+struct LoginReq {
+    username: String,
+    password: String,
+}
+
+/// Verify credentials and, on success, set an HttpOnly session cookie.
+async fn login_ep(
+    State(app): State<AppState>,
+    Json(req): Json<LoginReq>,
+) -> axum::response::Response {
+    let Some(auth) = app.auth.clone() else {
+        return Json(serde_json::json!({ "ok": true, "auth": false })).into_response();
+    };
+    match auth.login(&req.username, &req.password).await {
+        Some(token) => {
+            let user = auth.user_for(&token).await;
+            let role = user.as_ref().map_or("viewer", |u| match u.role {
+                coxagent_application::AuthRole::Admin => "admin",
+                coxagent_application::AuthRole::Viewer => "viewer",
+            });
+            let cookie = format!(
+                "{SESSION_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200"
+            );
+            (
+                [(header::SET_COOKIE, cookie)],
+                Json(serde_json::json!({ "ok": true, "username": req.username, "role": role })),
+            )
+                .into_response()
+        }
+        None => (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "invalid credentials" })),
+        )
+            .into_response(),
+    }
+}
+
+/// Invalidate the session and clear the cookie.
+async fn logout_ep(
+    State(app): State<AppState>,
+    req: Request<axum::body::Body>,
+) -> axum::response::Response {
+    if let (Some(auth), Some(token)) = (app.auth.clone(), cookie_value(&req, SESSION_COOKIE)) {
+        auth.logout(&token).await;
+    }
+    let cleared = format!("{SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
+    (
+        [(header::SET_COOKIE, cleared)],
+        Json(serde_json::json!({ "ok": true })),
+    )
+        .into_response()
+}
+
+/// Report the current principal (or `auth:false` when running open).
+async fn me_ep(
+    State(app): State<AppState>,
+    req: Request<axum::body::Body>,
+) -> axum::response::Response {
+    let Some(auth) = app.auth.clone() else {
+        return Json(serde_json::json!({ "auth": false })).into_response();
+    };
+    match cookie_value(&req, SESSION_COOKIE) {
+        Some(token) => match auth.user_for(&token).await {
+            Some(u) => Json(serde_json::json!({
+                "auth": true, "username": u.username,
+                "role": if u.role.can_write() { "admin" } else { "viewer" },
+            }))
+            .into_response(),
+            None => (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "auth": true }))).into_response(),
+        },
+        None => (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "auth": true }))).into_response(),
+    }
 }
 
 fn not_found() -> axum::response::Response {

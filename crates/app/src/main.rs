@@ -231,8 +231,37 @@ async fn run_hub(registry: &Path, port: u16) -> Result<(), Box<dyn std::error::E
         Box::pin(async move { onboard_project(&base, &registry_path, &name, alias).await })
     });
 
-    coxagent_presentation::serve_with_factory(projects, port, Some(factory)).await?;
+    let auth = build_auth(registry)?;
+    coxagent_presentation::serve_full(projects, port, Some(factory), auth).await?;
     Ok(())
+}
+
+/// Wire RBAC for the hub. An admin can be bootstrapped once via the
+/// `COXAGENT_ADMIN_USER` / `COXAGENT_ADMIN_PASSWORD` env vars, which seed a
+/// hashed `auth.json` beside the registry. If neither the file nor the env
+/// exists, the hub runs open (no login) — handy for local single-user use.
+fn build_auth(
+    registry: &Path,
+) -> Result<Option<Arc<dyn coxagent_application::auth::AuthPort>>, Box<dyn std::error::Error>> {
+    use coxagent_infrastructure::FileAuthService;
+    let base = registry.parent().unwrap_or_else(|| Path::new("."));
+    let auth_path = FileAuthService::default_path(base);
+
+    if let (Ok(user), Ok(pass)) = (
+        std::env::var("COXAGENT_ADMIN_USER"),
+        std::env::var("COXAGENT_ADMIN_PASSWORD"),
+    ) {
+        FileAuthService::bootstrap_admin(&auth_path, &user, &pass)?;
+    }
+
+    let svc = FileAuthService::open(&auth_path)?;
+    if svc.has_users() {
+        tracing::info!("RBAC enabled ({} account file)", auth_path.display());
+        Ok(Some(Arc::new(svc)))
+    } else {
+        tracing::info!("no auth configured — running open (set COXAGENT_ADMIN_USER/PASSWORD to enable)");
+        Ok(None)
+    }
 }
 
 /// Scaffold a new project workspace under `base`, seed it, append it to the hub

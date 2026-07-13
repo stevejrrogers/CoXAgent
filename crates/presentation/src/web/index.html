@@ -101,9 +101,29 @@
   .modal .x:hover{background:var(--card);color:var(--text)} .modal .msub{color:var(--muted);font-size:12px;margin:2px 0 16px}
   .mrow{display:flex;gap:12px;padding:10px 0;border-bottom:1px solid var(--border);font-size:13px} .mrow .lbl{color:var(--muted);min-width:118px}
   .modal pre{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:12px;font-size:12px;overflow:auto;white-space:pre-wrap;line-height:1.55;font-family:ui-monospace,monospace}
+body.viewer .ctlrow, body.viewer #proj-switch + button, body.viewer .ticket-actions { display: none !important; }
+.pri{background:var(--accent);color:#fff;border:1px solid transparent;border-radius:9px;padding:9px 14px;font-size:13px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:6px;font-family:inherit}
+.pri:hover{background:var(--accenth)}
 </style>
 </head>
 <body>
+  <div class="ov" id="ov-login" style="backdrop-filter:blur(8px)"><div class="modal" style="max-width:360px">
+    <div style="text-align:center;margin-bottom:18px">
+      <div class="mk" style="width:44px;height:44px;margin:0 auto 10px;display:flex;align-items:center;justify-content:center;background:var(--accent)22;border-radius:12px"><i class="ti ti-hexagon-letter-c" style="font-size:24px;color:var(--accent)"></i></div>
+      <h3 style="margin:0">CoXAgent</h3>
+      <div class="msub">Sign in to continue</div>
+    </div>
+    <div class="mrow" style="flex-direction:column;align-items:stretch;gap:6px">
+      <span class="lbl">Username</span>
+      <input id="lg-user" autocomplete="username" onkeydown="if(event.key==='Enter')document.getElementById('lg-pass').focus()" style="background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:10px 12px;font-size:13px;font-family:inherit">
+    </div>
+    <div class="mrow" style="flex-direction:column;align-items:stretch;gap:6px">
+      <span class="lbl">Password</span>
+      <input id="lg-pass" type="password" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()" style="background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:10px 12px;font-size:13px;font-family:inherit">
+    </div>
+    <div id="lg-err" style="color:var(--red);font-size:12px;min-height:16px;margin:4px 0"></div>
+    <button class="pri" onclick="doLogin()" style="width:100%;justify-content:center"><i class="ti ti-login"></i> Sign in</button>
+  </div></div>
   <aside class="side">
     <div class="brand"><div class="mk"><i class="ti ti-hexagon-letter-c"></i></div><div><div class="nm">CoXAgent</div><div class="tg">autonomous dev team</div></div></div>
     <div class="proj">
@@ -127,6 +147,11 @@
       <div class="ctlrow"><button class="pri" onclick="ctl('resume')"><i class="ti ti-player-play"></i> Resume</button>
         <button onclick="ctl('step')"><i class="ti ti-player-track-next"></i> Step</button>
         <button onclick="ctl('pause')"><i class="ti ti-player-pause"></i> Pause</button></div></div>
+    <div id="user-badge" style="display:none;margin-top:10px;padding:9px 11px;background:var(--card2);border:1px solid var(--border2);border-radius:10px;display:flex;align-items:center;gap:9px">
+      <div class="ad" style="background:var(--accent)22;color:var(--accent);width:30px;height:30px;flex-shrink:0"><i class="ti ti-user"></i></div>
+      <div style="flex:1;min-width:0"><div id="ub-name" style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis"></div><div id="ub-role" style="font-size:11px;color:var(--dim);text-transform:capitalize"></div></div>
+      <button onclick="doLogout()" title="Sign out" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px;padding:4px"><i class="ti ti-logout"></i></button>
+    </div>
   </aside>
 
   <main class="main">
@@ -468,8 +493,44 @@ async function createProject(){
     if(id){const sel=document.getElementById("proj-switch");sel.value=id;switchProject(id);}
   }catch(e){err.textContent="Network error.";}
 }
-const h=(location.hash||"").slice(1);if(TITLES[h])nav(h);else nav("overview");
-loadProjects();
+let ME=null;
+async function boot(){
+  let r;try{r=await fetch("/api/auth/me");}catch(e){showLogin();return;}
+  if(r.status===401){showLogin();return;}
+  try{ME=await r.json();}catch(e){ME={auth:false};}
+  startApp();
+}
+function startApp(){
+  document.getElementById("ov-login").classList.remove("open");
+  applyRole();
+  const h=(location.hash||"").slice(1);if(TITLES[h])nav(h);else nav("overview");
+  loadProjects();
+}
+function showLogin(){document.getElementById("ov-login").classList.add("open");setTimeout(()=>document.getElementById("lg-user").focus(),50);}
+async function doLogin(){
+  const username=document.getElementById("lg-user").value.trim();
+  const password=document.getElementById("lg-pass").value;
+  const err=document.getElementById("lg-err");
+  if(!username||!password){err.textContent="Enter username and password.";return;}
+  err.textContent="Signing in…";
+  try{
+    const r=await fetch("/api/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username,password})});
+    if(!r.ok){err.textContent="Invalid credentials.";return;}
+    document.getElementById("lg-pass").value="";
+    await boot();
+  }catch(e){err.textContent="Network error.";}
+}
+async function doLogout(){try{await fetch("/api/auth/logout",{method:"POST"});}catch(e){}location.reload();}
+// Viewers get a read-only UI: hide runner controls, new-project, per-ticket actions.
+function applyRole(){
+  const isViewer=ME&&ME.auth&&ME.role!=="admin";
+  document.body.classList.toggle("viewer",!!isViewer);
+  // user badge + logout in the runner card
+  const badge=document.getElementById("user-badge");
+  if(ME&&ME.auth){badge.style.display="";badge.querySelector("#ub-name").textContent=ME.username;badge.querySelector("#ub-role").textContent=ME.role;}
+  else{badge.style.display="none";}
+}
+boot();
 </script>
 </body>
 </html>
