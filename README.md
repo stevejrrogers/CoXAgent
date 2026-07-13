@@ -59,9 +59,14 @@ projects are onboarded from the UI (scaffold + seed + register live) and
 persisted to the hub registry.
 
 **RBAC.** Argon2id-hashed credentials (a JSON user file storing only hashes),
-HttpOnly session cookies, middleware that gates every route: writes require an
-admin, viewers are read-only. Bootstrap an admin once via env; runs open when no
-account is configured.
+HttpOnly session cookies, brute-force lockout (5 failures → 15-min lock),
+middleware that gates every route: writes require an admin, viewers are
+read-only. Bootstrap an admin once via env; runs open when no account is
+configured.
+
+**Audit.** An append-only security trail records every authenticated mutation
+and sign-in (success and failure) with actor, action, and outcome. Admin-only,
+exportable; persisted to Postgres (survives restart) or in memory locally.
 
 **Persistence.** `JsonStateStore` (atomic writes, file lock, rolling backups,
 auto-repair) locally; `SqlStateStore` (Postgres, JSONB per project, optimistic
@@ -81,11 +86,11 @@ trail with audit export.
 
 **Dashboard** (`serve` / `hub`): a cyan-themed multi-view SPA — Overview (alerts,
 deploy health, design system), Team, Board, Sprint (velocity), Activity,
-Discussion, Cost, Settings (engine + model-per-role, workflow) — over a live SSE
-feed, controllable runner (Resume/Step/Pause), interactive tickets, login +
-role-aware UI.
+Discussion, Cost, Audit (admin), Settings (engine + model-per-role, workflow) —
+over a live SSE feed, controllable runner (Resume/Step/Pause), interactive
+tickets, login + role-aware UI.
 
-73 tests; clippy pedantic + `-D warnings`; CI + tagged release binaries
+75 tests; clippy pedantic + `-D warnings`; CI + tagged release binaries
 (macOS arm64/x64, linux).
 
 ## Quickstart
