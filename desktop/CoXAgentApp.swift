@@ -52,6 +52,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         return env
     }
 
+    // First-run prompt: set an admin password to require login, or skip for a
+    // no-login local app. Returns nil when left blank.
+    func promptForPassword() -> String? {
+        let alert = NSAlert()
+        alert.messageText = "Secure CoXAgent with a login?"
+        alert.informativeText =
+            "Set an admin password to require sign-in (recommended if others use this Mac). "
+            + "Leave blank to open without a login."
+        alert.addButton(withTitle: "Continue")
+        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        field.placeholderString = "admin password (optional)"
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        alert.runModal()
+        let pw = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return pw.isEmpty ? nil : pw
+    }
+
     func startHub() {
         let fm = FileManager.default
         let ws = workspace()
@@ -61,9 +79,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         try? fm.createDirectory(atPath: ws + "/default/codebase", withIntermediateDirectories: true)
 
         let wsURL = URL(fileURLWithPath: ws)
+        let authPath = ws + "/auth.json"
 
-        // First run: onboard a default project and write the registry.
+        // First run: optionally set a login, then onboard a default project.
+        var hubEnv = richEnv()
         if !fm.fileExists(atPath: reg) {
+            // Ask once whether to protect the app with a login.
+            if !fm.fileExists(atPath: authPath), let pw = promptForPassword() {
+                hubEnv["COXAGENT_ADMIN_USER"] = "root"
+                hubEnv["COXAGENT_ADMIN_PASSWORD"] = pw
+            }
             let ob = Process()
             ob.executableURL = coxagentURL()
             ob.environment = richEnv()
@@ -76,7 +101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
 
         let p = Process()
         p.executableURL = coxagentURL()
-        p.environment = richEnv()
+        p.environment = hubEnv // carries the admin login on first run, if chosen
         p.currentDirectoryURL = wsURL // Finder launches with cwd=/ (read-only)
         p.arguments = ["hub", "--registry", reg, "--port", "\(PORT)"]
         // Redirect to a log file: a GUI app has no console, and letting the hub
