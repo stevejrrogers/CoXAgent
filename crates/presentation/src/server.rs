@@ -51,13 +51,25 @@ pub struct ProjectHandle {
 /// composition root so the presentation layer stays free of infrastructure.
 /// Takes `(name, alias)`, returns a ready [`ProjectHandle`] or an error message.
 pub type ProjectFactory = Arc<
-    dyn Fn(
-            String,
-            Option<String>,
-        ) -> Pin<Box<dyn Future<Output = Result<ProjectHandle, String>> + Send>>
+    dyn Fn(NewProjectReq) -> Pin<Box<dyn Future<Output = Result<ProjectHandle, String>> + Send>>
         + Send
         + Sync,
 >;
+
+/// A request to create a project. `existing` adopts a codebase (brownfield);
+/// `goal` seeds the project context (from AI-assisted goal drafting).
+#[derive(Clone, Default)]
+pub struct NewProjectReq {
+    pub name: String,
+    pub alias: Option<String>,
+    pub existing: Option<PathBuf>,
+    pub goal: Option<String>,
+}
+
+/// Deregisters a project (removes it from the hub registry), injected by the
+/// composition root. Returns an error message on failure.
+pub type ProjectRemover =
+    Arc<dyn Fn(String) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync>;
 
 /// Record one audit entry through the injected sink (fire-and-forget).
 async fn audit_push(sink: &Arc<dyn AuditPort>, user: &str, action: String, status: u16) {
@@ -87,6 +99,14 @@ struct AppState {
     engines: Arc<Vec<(String, String)>>,
     /// Live dashboard connections (desktop window + browser tabs share the hub).
     viewers: Arc<std::sync::atomic::AtomicUsize>,
+    /// Deregisters a project from the hub registry.
+    remover: Option<ProjectRemover>,
+    /// A hub-level engine for cross-project drafting (e.g. project goals), with a
+    /// working directory to run it in.
+    analyzer: Option<(
+        Arc<dyn coxagent_application::ports::outbound::AgentEnginePort>,
+        PathBuf,
+    )>,
 }
 
 /// Increments the live-viewer count for its lifetime; decrements on drop when
@@ -117,18 +137,35 @@ impl AppState {
     }
 }
 
-/// Serve the dashboard and API. `factory` enables dashboard onboarding; `auth`
-/// (when it has users) enforces RBAC; `audit` is the security-audit sink.
+/// Optional hub capabilities injected by the composition root, keeping the
+/// presentation layer free of infrastructure.
+#[derive(Default)]
+pub struct HubExtras {
+    /// Onboard a new project at runtime (dashboard "New project").
+    pub factory: Option<ProjectFactory>,
+    /// Deregister a project (dashboard "Delete project").
+    pub remover: Option<ProjectRemover>,
+    /// RBAC (login required when it has users).
+    pub auth: Option<Arc<dyn AuthPort>>,
+    /// Agent CLIs detected on this machine's PATH: `(name, path)`.
+    pub engines: Vec<(String, String)>,
+    /// A hub-level engine + work dir for cross-project drafting (project goals).
+    pub analyzer: Option<(
+        Arc<dyn coxagent_application::ports::outbound::AgentEnginePort>,
+        PathBuf,
+    )>,
+}
+
+/// Serve the dashboard and API on `port`, with the security-audit sink and the
+/// optional hub capabilities in `extras`.
 ///
 /// # Errors
 /// Returns an IO error if the port cannot be bound.
 pub async fn serve_full(
     projects: Vec<ProjectHandle>,
     port: u16,
-    factory: Option<ProjectFactory>,
     audit: Arc<dyn AuditPort>,
-    auth: Option<Arc<dyn AuthPort>>,
-    engines: Vec<(String, String)>,
+    extras: HubExtras,
 ) -> std::io::Result<()> {
     let order: Vec<String> = projects.iter().map(|p| p.id.clone()).collect();
     let map: HashMap<String, ProjectHandle> =
@@ -136,11 +173,13 @@ pub async fn serve_full(
     let state = AppState {
         projects: Arc::new(RwLock::new(map)),
         order: Arc::new(RwLock::new(order)),
-        factory,
-        auth,
+        factory: extras.factory,
+        auth: extras.auth,
         audit,
-        engines: Arc::new(engines),
+        engines: Arc::new(extras.engines),
         viewers: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        remover: extras.remover,
+        analyzer: extras.analyzer,
     };
 
     let app = Router::new()
@@ -167,7 +206,12 @@ pub async fn serve_full(
         )
         .route("/api/audit-log", get(audit_log_ep))
         .route("/api/engines", get(engines_ep))
+        .route("/api/analyze-goal", post(analyze_goal_ep))
         .route("/api/projects", get(list_projects).post(create_project))
+        .route(
+            "/api/projects/:pid",
+            axum::routing::delete(delete_project_ep),
+        )
         .route("/api/projects/:pid/state", get(state_ep))
         .route("/api/projects/:pid/metrics", get(metrics_ep))
         .route("/api/projects/:pid/runner", get(runner_ep))
@@ -242,26 +286,42 @@ struct CreateProjectReq {
     name: String,
     #[serde(default)]
     alias: Option<String>,
+    /// Adopt an existing codebase at this path (brownfield import).
+    #[serde(default)]
+    existing: Option<String>,
+    /// Confirmed project goal/context to seed (from AI-assisted drafting).
+    #[serde(default)]
+    goal: Option<String>,
 }
 
-/// Onboard a new project from the dashboard: scaffold its workspace via the
-/// injected factory and register it live. Returns the new project's id.
+/// Onboard a new project from the dashboard (greenfield, or brownfield import
+/// with `existing`, optionally seeded with a `goal`) via the injected factory.
 async fn create_project(
     State(app): State<AppState>,
     Json(req): Json<CreateProjectReq>,
 ) -> axum::response::Response {
     let Some(factory) = app.factory.clone() else {
         return (
-            axum::http::StatusCode::NOT_IMPLEMENTED,
+            StatusCode::NOT_IMPLEMENTED,
             "onboarding is only available in hub mode",
         )
             .into_response();
     };
     let name = req.name.trim().to_owned();
     if name.is_empty() {
-        return (axum::http::StatusCode::BAD_REQUEST, "name is required").into_response();
+        return (StatusCode::BAD_REQUEST, "name is required").into_response();
     }
-    let handle = match factory(name, req.alias).await {
+    let handle = match factory(NewProjectReq {
+        name,
+        alias: req.alias,
+        existing: req
+            .existing
+            .filter(|s| !s.trim().is_empty())
+            .map(PathBuf::from),
+        goal: req.goal.filter(|s| !s.trim().is_empty()),
+    })
+    .await
+    {
         Ok(h) => h,
         Err(e) => return internal_error(&e),
     };
@@ -269,16 +329,74 @@ async fn create_project(
     {
         let mut map = app.projects.write().await;
         if map.contains_key(&id) {
-            return (
-                axum::http::StatusCode::CONFLICT,
-                "project id already exists",
-            )
-                .into_response();
+            return (StatusCode::CONFLICT, "project id already exists").into_response();
         }
         map.insert(id.clone(), handle);
         app.order.write().await.push(id.clone());
     }
     Json(serde_json::json!({ "ok": true, "id": id })).into_response()
+}
+
+/// Delete (deregister) a project: stop its runner, remove it from the hub, and
+/// deregister it from the registry. The workspace files are left on disk.
+async fn delete_project_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    p.runner.stop();
+    app.projects.write().await.remove(&pid);
+    app.order.write().await.retain(|id| id != &pid);
+    if let Some(remover) = &app.remover {
+        if let Err(e) = remover(pid.clone()).await {
+            return internal_error(&e);
+        }
+    }
+    Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct GoalReq {
+    goal: String,
+}
+
+/// Refine a rough project goal into a project brief (goal, stack, scope,
+/// constraints) via the hub engine — for review before creating the project.
+async fn analyze_goal_ep(
+    State(app): State<AppState>,
+    Json(req): Json<GoalReq>,
+) -> axum::response::Response {
+    use coxagent_application::ports::outbound::AgentRequest;
+    let Some((engine, work_dir)) = app.analyzer.clone() else {
+        return (StatusCode::NOT_IMPLEMENTED, "no engine configured").into_response();
+    };
+    let goal = req.goal.trim();
+    if goal.is_empty() {
+        return (StatusCode::BAD_REQUEST, "goal is required").into_response();
+    }
+    let request = AgentRequest {
+        role: coxagent_domain::Role::Ba,
+        system_prompt: "You are the BA and PO of a software team scoping a NEW project. \
+            Turn the stakeholder's rough goal into a crisp project brief."
+            .to_owned(),
+        task_prompt: format!(
+            "Rough goal:\n{goal}\n\nWrite a concise project brief in markdown with EXACTLY these \
+             sections and nothing else:\n## Goal\n(what we're building, for whom, the problem)\n\
+             ## Tech stack\n(frontend / backend / database / infra)\n## Product scope\n(feature \
+             groups the BA may propose)\n## Constraints\n(auth, deploy target, performance)"
+        ),
+        work_dir,
+        timeout: std::time::Duration::from_secs(120),
+    };
+    match engine.run(request).await {
+        Ok(o) if o.succeeded() => {
+            Json(serde_json::json!({ "brief": o.stdout.trim() })).into_response()
+        }
+        Ok(o) => internal_error(&format!("engine failed: {}", o.stderr.trim())),
+        Err(e) => internal_error(&e.to_string()),
+    }
 }
 
 async fn state_ep(

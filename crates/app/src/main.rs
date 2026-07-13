@@ -240,8 +240,12 @@ async fn serve_with_runner(
     let audit = build_audit().await;
     // Single-project serve honors the same RBAC env vars as the hub.
     let auth = build_auth(state_dir.parent().unwrap_or(state_dir))?;
-    coxagent_presentation::serve_full(vec![project], port, None, audit, auth, detected_engines())
-        .await?;
+    let extras = coxagent_presentation::HubExtras {
+        auth,
+        engines: detected_engines(),
+        ..Default::default()
+    };
+    coxagent_presentation::serve_full(vec![project], port, audit, extras).await?;
     Ok(())
 }
 
@@ -315,24 +319,55 @@ async fn run_hub(registry: &Path, port: u16) -> Result<(), Box<dyn std::error::E
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
     let registry_path = registry.to_path_buf();
-    let factory: coxagent_presentation::ProjectFactory = Arc::new(move |name, alias| {
+    let factory: coxagent_presentation::ProjectFactory = Arc::new({
         let base = base.clone();
         let registry_path = registry_path.clone();
-        Box::pin(async move { onboard_project(&base, &registry_path, &name, alias).await })
+        move |req| {
+            let base = base.clone();
+            let registry_path = registry_path.clone();
+            Box::pin(async move { onboard_project(&base, &registry_path, req).await })
+        }
     });
+    let remover: coxagent_presentation::ProjectRemover = Arc::new({
+        let registry_path = registry_path.clone();
+        move |id| {
+            let registry_path = registry_path.clone();
+            Box::pin(async move { remove_from_registry(&registry_path, &id) })
+        }
+    });
+
+    // A hub-level engine for cross-project drafting (e.g. project goals), built
+    // from the first project's config; its work dir is the registry directory.
+    let analyzer = build_engine(&Config::default(), logs_dir(&base))
+        .ok()
+        .map(|(e, _)| {
+            let engine: Arc<dyn coxagent_application::ports::outbound::AgentEnginePort> = e;
+            (engine, base.clone())
+        });
 
     let auth = build_auth(registry.parent().unwrap_or_else(|| Path::new(".")))?;
     let audit = build_audit().await;
-    coxagent_presentation::serve_full(
-        projects,
-        port,
-        Some(factory),
-        audit,
+    let extras = coxagent_presentation::HubExtras {
+        factory: Some(factory),
+        remover: Some(remover),
         auth,
-        detected_engines(),
-    )
-    .await?;
+        engines: detected_engines(),
+        analyzer,
+    };
+    coxagent_presentation::serve_full(projects, port, audit, extras).await?;
     Ok(())
+}
+
+/// Remove a project entry (by id) from the hub registry file.
+fn remove_from_registry(registry_path: &Path, id: &str) -> Result<(), String> {
+    let text = std::fs::read_to_string(registry_path).map_err(|e| e.to_string())?;
+    let mut arr: Vec<serde_json::Value> = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    arr.retain(|e| e.get("id").and_then(|v| v.as_str()) != Some(id));
+    std::fs::write(
+        registry_path,
+        serde_json::to_string_pretty(&arr).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// Wire RBAC. An admin is (re-)provisioned from the `COXAGENT_ADMIN_USER` /
@@ -371,25 +406,42 @@ fn build_auth(
 async fn onboard_project(
     base: &Path,
     registry_path: &Path,
-    name: &str,
-    alias: Option<String>,
+    req: coxagent_presentation::NewProjectReq,
 ) -> Result<coxagent_presentation::ProjectHandle, String> {
-    let derived = alias
+    let name = req.name.trim();
+    let derived = req
+        .alias
         .clone()
         .unwrap_or_else(|| coxagent_application::state::derive_alias(name));
     let id = unique_id(base, &derived.to_lowercase());
     let proj_dir = base.join(&id);
     let state_dir = proj_dir.join("state");
-    let work_dir = proj_dir.join("codebase");
     std::fs::create_dir_all(&state_dir).map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(&work_dir).map_err(|e| e.to_string())?;
 
     let store = make_store(&id, &state_dir)
         .await
         .map_err(|e| e.to_string())?;
-    onboard::greenfield(&store, &state_dir, name, alias)
-        .await
-        .map_err(|e| e.to_string())?;
+
+    // Brownfield import: adopt the given codebase in place. Greenfield: scaffold
+    // a fresh `codebase/` under the workspace.
+    let work_dir = if let Some(path) = &req.existing {
+        onboard::brownfield(&store, &state_dir, name, req.alias.clone(), path)
+            .await
+            .map_err(|e| e.to_string())?;
+        path.clone()
+    } else {
+        let wd = proj_dir.join("codebase");
+        std::fs::create_dir_all(&wd).map_err(|e| e.to_string())?;
+        onboard::greenfield(&store, &state_dir, name, req.alias.clone())
+            .await
+            .map_err(|e| e.to_string())?;
+        wd
+    };
+
+    // Seed the confirmed project brief (from AI-assisted drafting), if any.
+    if let Some(goal) = req.goal.as_ref().filter(|g| !g.trim().is_empty()) {
+        let _ = std::fs::write(state_dir.join("project_context.md"), goal);
+    }
 
     // Assign a unique host port so this project's `docker compose` deploy does
     // not clash with the others on this host.

@@ -105,6 +105,17 @@ body.viewer .ctlrow, body.viewer #proj-switch + button, body.viewer .ticket-acti
 body:not(.admin) .admin-only { display: none !important; }
 .pri{background:var(--accent);color:#fff;border:1px solid transparent;border-radius:9px;padding:9px 14px;font-size:13px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:6px;font-family:inherit}
 .pri:hover{background:var(--accenth)}
+.userbox{display:none;align-items:center;gap:10px;margin-top:10px;padding:8px 10px;background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--border2);border-radius:12px}
+.uavatar{width:34px;height:34px;flex-shrink:0;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2))}
+.uinfo{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.uname{font-size:13px;font-weight:600;line-height:1.1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.urole{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;padding:1px 6px;border-radius:5px;align-self:flex-start}
+.urole.admin{background:var(--amber)22;color:var(--amber)}
+.urole.viewer{background:var(--accent2)22;color:var(--accent2)}
+.ulogout{background:none;border:1px solid var(--border2);color:var(--muted);cursor:pointer;font-size:15px;padding:6px 8px;border-radius:8px;line-height:0}
+.ulogout:hover{color:var(--red);border-color:var(--red)}
+.npmode{flex:1;background:transparent;border:none;color:var(--muted);cursor:pointer;font-size:12px;font-weight:600;padding:7px;border-radius:7px;font-family:inherit}
+.npmode.on{background:var(--accent);color:#fff}
 </style>
 </head>
 <body>
@@ -134,7 +145,8 @@ body:not(.admin) .admin-only { display: none !important; }
     <div class="proj">
       <div style="display:flex;gap:6px;margin-bottom:7px">
         <select id="proj-switch" onchange="switchProject(this.value)" style="flex:1;min-width:0;background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:7px 9px;font-size:13px;font-weight:600;font-family:inherit"></select>
-        <button onclick="openNewProject()" title="New project" style="background:var(--card2);color:var(--accent);border:1px solid var(--border2);border-radius:8px;padding:0 10px;cursor:pointer;font-size:16px;font-family:inherit"><i class="ti ti-plus"></i></button>
+        <button onclick="openNewProject()" title="New project" class="ticket-actions" style="background:var(--card2);color:var(--accent);border:1px solid var(--border2);border-radius:8px;padding:0 10px;cursor:pointer;font-size:16px;font-family:inherit"><i class="ti ti-plus"></i></button>
+        <button onclick="deleteProject()" title="Delete this project" class="ticket-actions" style="background:var(--card2);color:var(--muted);border:1px solid var(--border2);border-radius:8px;padding:0 10px;cursor:pointer;font-size:15px;font-family:inherit"><i class="ti ti-trash"></i></button>
       </div>
       <div class="pv"><span><i class="ti ti-tag" style="font-size:13px"></i> v<b id="ver">0.0.0</b></span><span id="pn-tickets">0 tickets</span></div></div>
     <nav class="nav">
@@ -155,10 +167,10 @@ body:not(.admin) .admin-only { display: none !important; }
       <div class="ctlrow"><button class="pri" onclick="ctl('resume')"><i class="ti ti-player-play"></i> Resume</button>
         <button onclick="ctl('step')"><i class="ti ti-player-track-next"></i> Step</button>
         <button onclick="ctl('pause')"><i class="ti ti-player-pause"></i> Pause</button></div></div>
-    <div id="user-badge" style="display:none;margin-top:10px;padding:9px 11px;background:var(--card2);border:1px solid var(--border2);border-radius:10px;display:flex;align-items:center;gap:9px">
-      <div class="ad" style="background:var(--accent)22;color:var(--accent);width:30px;height:30px;flex-shrink:0"><i class="ti ti-user"></i></div>
-      <div style="flex:1;min-width:0"><div id="ub-name" style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis"></div><div id="ub-role" style="font-size:11px;color:var(--dim);text-transform:capitalize"></div></div>
-      <button onclick="doLogout()" title="Sign out" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px;padding:4px"><i class="ti ti-logout"></i></button>
+    <div id="user-badge" class="userbox">
+      <div class="uavatar"><span id="ub-initials">U</span></div>
+      <div class="uinfo"><div id="ub-name" class="uname"></div><span id="ub-role" class="urole"></span></div>
+      <button onclick="doLogout()" title="Sign out" class="ulogout"><i class="ti ti-logout"></i></button>
     </div>
   </aside>
 
@@ -275,17 +287,30 @@ body:not(.admin) .admin-only { display: none !important; }
   <div class="ov" id="ov-newproj" onclick="if(event.target===this)close_('ov-newproj')"><div class="modal">
     <span class="x" onclick="close_('ov-newproj')"><i class="ti ti-x"></i></span>
     <h3>New project</h3>
-    <div class="msub">scaffold a workspace, seed the walking skeleton, start its runner (paused)</div>
+    <div style="display:flex;gap:6px;background:var(--card2);border:1px solid var(--border2);border-radius:9px;padding:3px;margin-bottom:12px">
+      <button id="npm-new" class="npmode on" onclick="setProjMode('new')">Start fresh</button>
+      <button id="npm-import" class="npmode" onclick="setProjMode('import')">Import codebase</button>
+    </div>
     <div class="mrow" style="flex-direction:column;align-items:stretch;gap:6px">
       <span class="lbl">Project name</span>
       <input id="np-name" placeholder="e.g. CoXChat" style="background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 11px;font-size:13px;font-family:inherit">
     </div>
     <div class="mrow" style="flex-direction:column;align-items:stretch;gap:6px">
-      <span class="lbl">Ticket alias <span style="color:var(--dim)">(optional — derived from name)</span></span>
+      <span class="lbl">Ticket alias <span style="color:var(--dim)">(optional)</span></span>
       <input id="np-alias" placeholder="e.g. CXC" maxlength="5" style="background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 11px;font-size:13px;font-family:inherit;text-transform:uppercase">
     </div>
+    <div class="mrow" id="np-path-row" style="flex-direction:column;align-items:stretch;gap:6px;display:none">
+      <span class="lbl">Existing codebase path</span>
+      <input id="np-path" placeholder="/Users/you/Projects/my-app" style="background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 11px;font-size:13px;font-family:ui-monospace,monospace">
+      <span style="font-size:11px;color:var(--dim)">git-inits it if needed; seeds a dockerize chore if no compose file</span>
+    </div>
+    <div class="mrow" id="np-goal-row" style="flex-direction:column;align-items:stretch;gap:6px">
+      <div style="display:flex;align-items:center;gap:8px"><span class="lbl">Project goal <span style="color:var(--dim)">(optional)</span></span><div style="flex:1"></div>
+        <button onclick="refineGoal()" style="background:var(--card2);color:var(--accent2);border:1px solid var(--border2);border-radius:8px;padding:5px 10px;font-size:11px;font-weight:600;cursor:pointer;font-family:inherit"><i class="ti ti-sparkles"></i> <span id="np-goal-label">Draft with BA/PO</span></button></div>
+      <textarea id="np-goal" rows="3" placeholder="Rough idea — e.g. 'a secure team chat, more private than WhatsApp'. Click Draft to have BA/PO turn it into a project brief you review." style="background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 11px;font-size:13px;font-family:inherit;resize:vertical"></textarea>
+    </div>
     <div id="np-err" style="color:var(--red);font-size:12px;min-height:16px;margin:4px 0"></div>
-    <button class="pri" onclick="createProject()" style="width:100%;justify-content:center"><i class="ti ti-plus"></i> Create project</button>
+    <button class="pri" onclick="createProject()" style="width:100%;justify-content:center"><i class="ti ti-plus"></i> <span id="np-submit-label">Create project</span></button>
   </div></div>
 
 <script>
@@ -701,21 +726,59 @@ async function createTicket(){
     const s=await(await fetch(api("/state"))).json();render(s);
   }catch(e){err.textContent="Network error.";}
 }
-function openNewProject(){document.getElementById("np-name").value="";document.getElementById("np-alias").value="";document.getElementById("np-err").textContent="";document.getElementById("ov-newproj").classList.add("open");setTimeout(()=>document.getElementById("np-name").focus(),50);}
+let PROJ_MODE="new";
+function setProjMode(m){PROJ_MODE=m;
+  document.getElementById("npm-new").classList.toggle("on",m==="new");
+  document.getElementById("npm-import").classList.toggle("on",m==="import");
+  document.getElementById("np-path-row").style.display=m==="import"?"flex":"none";
+  document.getElementById("np-goal-row").style.display=m==="import"?"none":"flex";
+  document.getElementById("np-submit-label").textContent=m==="import"?"Import project":"Create project";}
+function openNewProject(){["np-name","np-alias","np-path","np-goal"].forEach(i=>document.getElementById(i).value="");document.getElementById("np-err").textContent="";setProjMode("new");document.getElementById("ov-newproj").classList.add("open");setTimeout(()=>document.getElementById("np-name").focus(),50);}
+async function refineGoal(){
+  const goal=document.getElementById("np-goal").value.trim();
+  const err=document.getElementById("np-err");const lbl=document.getElementById("np-goal-label");
+  if(!goal){err.textContent="Write a rough goal first.";return;}
+  lbl.textContent="Drafting…";err.textContent="";
+  try{
+    const r=await fetch("/api/analyze-goal",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({goal})});
+    if(!r.ok){err.textContent="Draft failed: "+(await r.text()||r.status)+" (needs a configured engine).";lbl.textContent="Draft with BA/PO";return;}
+    const {brief}=await r.json();
+    document.getElementById("np-goal").value=brief;
+    err.style.color="var(--green)";err.textContent="BA/PO drafted a brief — review/edit, then create.";
+    setTimeout(()=>{err.style.color="var(--red)";err.textContent="";},5000);
+  }catch(e){err.textContent="Network error.";}
+  lbl.textContent="Draft with BA/PO";
+}
 async function createProject(){
   const name=document.getElementById("np-name").value.trim();
   const alias=document.getElementById("np-alias").value.trim().toUpperCase();
   const err=document.getElementById("np-err");
   if(!name){err.textContent="Project name is required.";return;}
-  err.textContent="Creating…";
+  const body={name,alias:alias||null};
+  if(PROJ_MODE==="import"){const p=document.getElementById("np-path").value.trim();
+    if(!p){err.textContent="Enter the codebase path to import.";return;}body.existing=p;}
+  else{const g=document.getElementById("np-goal").value.trim();if(g)body.goal=g;}
+  err.style.color="var(--red)";err.textContent=PROJ_MODE==="import"?"Importing…":"Creating…";
   try{
-    const r=await fetch("/api/projects",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name,alias:alias||null})});
-    if(!r.ok){err.textContent=await r.text()||"Failed to create project.";return;}
+    const r=await fetch("/api/projects",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    if(!r.ok){err.textContent=await r.text()||"Failed.";return;}
     const {id}=await r.json();
     close_("ov-newproj");
     await loadProjects();
     if(id){const sel=document.getElementById("proj-switch");sel.value=id;switchProject(id);}
   }catch(e){err.textContent="Network error.";}
+}
+async function deleteProject(){
+  if(!PID)return;
+  const sel=document.getElementById("proj-switch");
+  const nm=sel.options[sel.selectedIndex]?sel.options[sel.selectedIndex].text:PID;
+  if(!confirm("Remove project \""+nm+"\" from CoXAgent?\n\nIts workspace files stay on disk; only the registration is removed."))return;
+  try{
+    const r=await fetch("/api/projects/"+encodeURIComponent(PID),{method:"DELETE"});
+    if(!r.ok){alert("Delete failed: "+(await r.text()||r.status));return;}
+    localStorage.removeItem("coxpid");
+    await loadProjects();
+  }catch(e){alert("Network error.");}
 }
 let ME=null;
 async function boot(){
@@ -765,7 +828,10 @@ function applyRole(){
   document.body.classList.toggle("viewer",!!isViewer);
   document.body.classList.toggle("admin",!!isAdmin);
   const badge=document.getElementById("user-badge");
-  if(ME&&ME.auth){badge.style.display="";badge.querySelector("#ub-name").textContent=ME.username;badge.querySelector("#ub-role").textContent=ME.role;}
+  if(ME&&ME.auth){badge.style.display="flex";
+    document.getElementById("ub-initials").textContent=(ME.username||"?").slice(0,2).toUpperCase();
+    document.getElementById("ub-name").textContent=ME.username;
+    const rc=document.getElementById("ub-role");rc.textContent=ME.role;rc.className="urole "+(ME.role==="admin"?"admin":"viewer");}
   else{badge.style.display="none";}
 }
 function renderUsers(){
