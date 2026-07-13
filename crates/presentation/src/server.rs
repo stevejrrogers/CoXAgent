@@ -14,9 +14,12 @@ use coxagent_application::use_cases::RunnerHandle;
 use coxagent_application::Config;
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::RwLock;
 use tokio_stream::wrappers::IntervalStream;
 use tokio_stream::{Stream, StreamExt};
 
@@ -37,15 +40,26 @@ pub struct ProjectHandle {
     pub config_path: PathBuf,
 }
 
+/// Builds a fresh project on demand (scaffold + register), injected by the
+/// composition root so the presentation layer stays free of infrastructure.
+/// Takes `(name, alias)`, returns a ready [`ProjectHandle`] or an error message.
+pub type ProjectFactory = Arc<
+    dyn Fn(String, Option<String>) -> Pin<Box<dyn Future<Output = Result<ProjectHandle, String>> + Send>>
+        + Send
+        + Sync,
+>;
+
 #[derive(Clone)]
 struct AppState {
-    projects: Arc<HashMap<String, ProjectHandle>>,
-    order: Arc<Vec<String>>,
+    projects: Arc<RwLock<HashMap<String, ProjectHandle>>>,
+    order: Arc<RwLock<Vec<String>>>,
+    factory: Option<ProjectFactory>,
 }
 
 impl AppState {
-    fn project(&self, pid: &str) -> Option<&ProjectHandle> {
-        self.projects.get(pid)
+    /// Clone out the handle for a project id (cheap — all fields are `Arc`).
+    async fn project(&self, pid: &str) -> Option<ProjectHandle> {
+        self.projects.read().await.get(pid).cloned()
     }
 }
 
@@ -54,18 +68,32 @@ impl AppState {
 /// # Errors
 /// Returns an IO error if the port cannot be bound.
 pub async fn serve(projects: Vec<ProjectHandle>, port: u16) -> std::io::Result<()> {
+    serve_with_factory(projects, port, None).await
+}
+
+/// Serve with a [`ProjectFactory`] so the dashboard can onboard new projects at
+/// runtime (POST `/api/projects`). `serve` passes `None` (static project set).
+///
+/// # Errors
+/// Returns an IO error if the port cannot be bound.
+pub async fn serve_with_factory(
+    projects: Vec<ProjectHandle>,
+    port: u16,
+    factory: Option<ProjectFactory>,
+) -> std::io::Result<()> {
     let order: Vec<String> = projects.iter().map(|p| p.id.clone()).collect();
     let map: HashMap<String, ProjectHandle> =
         projects.into_iter().map(|p| (p.id.clone(), p)).collect();
     let state = AppState {
-        projects: Arc::new(map),
-        order: Arc::new(order),
+        projects: Arc::new(RwLock::new(map)),
+        order: Arc::new(RwLock::new(order)),
+        factory,
     };
 
     let app = Router::new()
         .route("/", get(index))
         .route("/api/health", get(health))
-        .route("/api/projects", get(list_projects))
+        .route("/api/projects", get(list_projects).post(create_project))
         .route("/api/projects/:pid/state", get(state_ep))
         .route("/api/projects/:pid/metrics", get(metrics_ep))
         .route("/api/projects/:pid/runner", get(runner_ep))
@@ -97,9 +125,10 @@ async fn health() -> impl IntoResponse {
 
 /// List projects (id, name, alias, version, ticket count) in registration order.
 async fn list_projects(State(app): State<AppState>) -> impl IntoResponse {
+    let order = app.order.read().await.clone();
     let mut out = Vec::new();
-    for id in app.order.iter() {
-        if let Some(p) = app.project(id) {
+    for id in &order {
+        if let Some(p) = app.project(id).await {
             let (version, tickets) = p.store.load().await.map_or_else(
                 |_| ("0.0.0".to_owned(), 0),
                 |s| (s.current_version.to_string(), s.tickets.len()),
@@ -114,11 +143,51 @@ async fn list_projects(State(app): State<AppState>) -> impl IntoResponse {
     Json(out)
 }
 
+#[derive(serde::Deserialize)]
+struct CreateProjectReq {
+    name: String,
+    #[serde(default)]
+    alias: Option<String>,
+}
+
+/// Onboard a new project from the dashboard: scaffold its workspace via the
+/// injected factory and register it live. Returns the new project's id.
+async fn create_project(
+    State(app): State<AppState>,
+    Json(req): Json<CreateProjectReq>,
+) -> axum::response::Response {
+    let Some(factory) = app.factory.clone() else {
+        return (
+            axum::http::StatusCode::NOT_IMPLEMENTED,
+            "onboarding is only available in hub mode",
+        )
+            .into_response();
+    };
+    let name = req.name.trim().to_owned();
+    if name.is_empty() {
+        return (axum::http::StatusCode::BAD_REQUEST, "name is required").into_response();
+    }
+    let handle = match factory(name, req.alias).await {
+        Ok(h) => h,
+        Err(e) => return internal_error(&e),
+    };
+    let id = handle.id.clone();
+    {
+        let mut map = app.projects.write().await;
+        if map.contains_key(&id) {
+            return (axum::http::StatusCode::CONFLICT, "project id already exists").into_response();
+        }
+        map.insert(id.clone(), handle);
+        app.order.write().await.push(id.clone());
+    }
+    Json(serde_json::json!({ "ok": true, "id": id })).into_response()
+}
+
 async fn state_ep(
     State(app): State<AppState>,
     Path(pid): Path<String>,
 ) -> axum::response::Response {
-    let Some(p) = app.project(&pid) else {
+    let Some(p) = app.project(&pid).await else {
         return not_found();
     };
     match p.store.load().await {
@@ -131,7 +200,7 @@ async fn metrics_ep(
     State(app): State<AppState>,
     Path(pid): Path<String>,
 ) -> axum::response::Response {
-    let Some(p) = app.project(&pid) else {
+    let Some(p) = app.project(&pid).await else {
         return not_found();
     };
     match p.store.load().await {
@@ -144,7 +213,7 @@ async fn runner_ep(
     State(app): State<AppState>,
     Path(pid): Path<String>,
 ) -> axum::response::Response {
-    let Some(p) = app.project(&pid) else {
+    let Some(p) = app.project(&pid).await else {
         return not_found();
     };
     Json(p.runner.snapshot()).into_response()
@@ -154,7 +223,7 @@ async fn audit_ep(
     State(app): State<AppState>,
     Path(pid): Path<String>,
 ) -> axum::response::Response {
-    let Some(p) = app.project(&pid) else {
+    let Some(p) = app.project(&pid).await else {
         return not_found();
     };
     let entries = p.store.load().await.map(|s| s.activity).unwrap_or_default();
@@ -176,7 +245,7 @@ async fn get_config(
     State(app): State<AppState>,
     Path(pid): Path<String>,
 ) -> axum::response::Response {
-    let Some(p) = app.project(&pid) else {
+    let Some(p) = app.project(&pid).await else {
         return not_found();
     };
     let cfg = std::fs::read_to_string(&p.config_path)
@@ -191,7 +260,7 @@ async fn put_config(
     Path(pid): Path<String>,
     Json(cfg): Json<Config>,
 ) -> axum::response::Response {
-    let Some(p) = app.project(&pid) else {
+    let Some(p) = app.project(&pid).await else {
         return not_found();
     };
     match serde_json::to_string_pretty(&cfg) {
@@ -215,7 +284,7 @@ async fn set_priority(
     Path((pid, id)): Path<(String, String)>,
     Json(req): Json<PriorityReq>,
 ) -> axum::response::Response {
-    let Some(p) = app.project(&pid) else {
+    let Some(p) = app.project(&pid).await else {
         return not_found();
     };
     let Ok(tid) = coxagent_domain::TicketId::new(id.clone()) else {
@@ -241,7 +310,7 @@ async fn reject_ticket(
     State(app): State<AppState>,
     Path((pid, id)): Path<(String, String)>,
 ) -> axum::response::Response {
-    let Some(p) = app.project(&pid) else {
+    let Some(p) = app.project(&pid).await else {
         return not_found();
     };
     let Ok(tid) = coxagent_domain::TicketId::new(id.clone()) else {
@@ -272,7 +341,7 @@ async fn list_comments(
     Path(pid): Path<String>,
     axum::extract::Query(q): axum::extract::Query<CommentQuery>,
 ) -> axum::response::Response {
-    let Some(p) = app.project(&pid) else {
+    let Some(p) = app.project(&pid).await else {
         return not_found();
     };
     let mut comments = p.store.load().await.map(|s| s.comments).unwrap_or_default();
@@ -300,7 +369,7 @@ async fn post_comment(
     Path(pid): Path<String>,
     Json(req): Json<PostCommentReq>,
 ) -> axum::response::Response {
-    let Some(p) = app.project(&pid) else {
+    let Some(p) = app.project(&pid).await else {
         return not_found();
     };
     let body = req.body.trim();
@@ -321,7 +390,7 @@ async fn control_ep(
     State(app): State<AppState>,
     Path((pid, action)): Path<(String, String)>,
 ) -> axum::response::Response {
-    let Some(p) = app.project(&pid) else {
+    let Some(p) = app.project(&pid).await else {
         return not_found();
     };
     match action.as_str() {
@@ -344,7 +413,7 @@ async fn events_ep(
     State(app): State<AppState>,
     Path(pid): Path<String>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let handle = app.project(&pid).cloned();
+    let handle = app.project(&pid).await;
     let stream = IntervalStream::new(tokio::time::interval(STREAM_INTERVAL)).then(move |_| {
         let handle = handle.clone();
         async move {

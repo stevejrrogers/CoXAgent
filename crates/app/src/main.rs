@@ -216,8 +216,74 @@ async fn run_hub(registry: &Path, port: u16) -> Result<(), Box<dyn std::error::E
     if projects.is_empty() {
         return Err("no projects could be registered".into());
     }
-    coxagent_presentation::serve(projects, port).await?;
+
+    // Factory: onboard a brand-new project from the dashboard. New workspaces
+    // land under the registry's directory and are appended to the registry file
+    // so they survive a restart.
+    let base = registry
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    let registry_path = registry.to_path_buf();
+    let factory: coxagent_presentation::ProjectFactory = Arc::new(move |name, alias| {
+        let base = base.clone();
+        let registry_path = registry_path.clone();
+        Box::pin(async move { onboard_project(&base, &registry_path, &name, alias).await })
+    });
+
+    coxagent_presentation::serve_with_factory(projects, port, Some(factory)).await?;
     Ok(())
+}
+
+/// Scaffold a new project workspace under `base`, seed it, append it to the hub
+/// registry, and build a live [`ProjectHandle`]. Used by the dashboard's
+/// "new project" flow.
+async fn onboard_project(
+    base: &Path,
+    registry_path: &Path,
+    name: &str,
+    alias: Option<String>,
+) -> Result<coxagent_presentation::ProjectHandle, String> {
+    let derived = alias.clone().unwrap_or_else(|| {
+        coxagent_application::state::derive_alias(name)
+    });
+    let id = unique_id(base, &derived.to_lowercase());
+    let proj_dir = base.join(&id);
+    let state_dir = proj_dir.join("state");
+    let work_dir = proj_dir.join("codebase");
+    std::fs::create_dir_all(&state_dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&work_dir).map_err(|e| e.to_string())?;
+
+    let store = Arc::new(JsonStateStore::new(&state_dir).map_err(|e| e.to_string())?);
+    onboard::greenfield(&store, &state_dir, name, alias)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    append_registry(registry_path, &id, &proj_dir).map_err(|e| e.to_string())?;
+
+    build_project(&id, &state_dir, work_dir)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Pick an id not already taken by a workspace directory under `base`.
+fn unique_id(base: &Path, seed: &str) -> String {
+    let seed = if seed.is_empty() { "project" } else { seed };
+    if !base.join(seed).exists() {
+        return seed.to_owned();
+    }
+    (2..10_000)
+        .map(|n| format!("{seed}-{n}"))
+        .find(|c| !base.join(c).exists())
+        .unwrap_or_else(|| format!("{seed}-x"))
+}
+
+/// Append `{ id, path }` to the hub registry JSON array (best-effort persistence).
+fn append_registry(registry_path: &Path, id: &str, path: &Path) -> std::io::Result<()> {
+    let text = std::fs::read_to_string(registry_path).unwrap_or_else(|_| "[]".to_owned());
+    let mut arr: Vec<serde_json::Value> = serde_json::from_str(&text).unwrap_or_default();
+    arr.push(serde_json::json!({ "id": id, "path": path }));
+    std::fs::write(registry_path, serde_json::to_string_pretty(&arr)?)
 }
 
 /// The metered + transcript-logging engine plus the spend meter it feeds.
