@@ -39,12 +39,24 @@ pub struct TokenInfo {
     pub created: String,
 }
 
+/// Outcome of a login attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoginResult {
+    /// Credentials (and 2FA, if enabled) verified — the session token.
+    Ok(String),
+    /// Password is correct but a valid TOTP code is required to proceed.
+    TotpRequired,
+    /// Credentials invalid, account locked, or the TOTP code was wrong.
+    Denied,
+}
+
 /// Authentication boundary: verify credentials, mint/resolve session tokens,
-/// and manage long-lived API tokens for service accounts.
+/// manage API tokens, users, and TOTP two-factor enrollment.
 #[async_trait]
 pub trait AuthPort: Send + Sync {
-    /// Verify `username`/`password`; on success return an opaque session token.
-    async fn login(&self, username: &str, password: &str) -> Option<String>;
+    /// Verify `username`/`password` (and `totp` when 2FA is enabled for the
+    /// account). Returns a [`LoginResult`].
+    async fn login(&self, username: &str, password: &str, totp: Option<&str>) -> LoginResult;
 
     /// Resolve a session token to its principal, or `None` if invalid/expired.
     async fn user_for(&self, token: &str) -> Option<AuthUser>;
@@ -75,4 +87,17 @@ pub trait AuthPort: Send + Sync {
     /// Remove a user account. Returns `false` if it does not exist or removing
     /// it would leave no admin (the last admin cannot be deleted).
     async fn delete_user(&self, username: &str) -> bool;
+
+    /// Begin TOTP enrollment for `username`: generate a pending secret and return
+    /// `(secret, otpauth_uri)`. Not active until [`enable_2fa`](Self::enable_2fa).
+    async fn enroll_2fa(&self, username: &str) -> Option<(String, String)>;
+
+    /// Activate 2FA for `username` if `code` matches the pending secret.
+    async fn enable_2fa(&self, username: &str, code: &str) -> bool;
+
+    /// Turn off 2FA for `username`. Returns whether it was enabled.
+    async fn disable_2fa(&self, username: &str) -> bool;
+
+    /// Whether `username` currently has 2FA enabled.
+    async fn has_2fa(&self, username: &str) -> bool;
 }

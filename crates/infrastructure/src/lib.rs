@@ -9,6 +9,7 @@ pub mod auth;
 pub mod deploy;
 pub mod engine;
 pub mod state;
+pub mod totp;
 
 pub use audit_sink::{MemoryAuditSink, SqlAuditSink};
 pub use auth::FileAuthService;

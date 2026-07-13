@@ -6,7 +6,7 @@ use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
 use async_trait::async_trait;
-use coxagent_application::auth::{AuthPort, AuthRole, AuthUser, TokenInfo};
+use coxagent_application::auth::{AuthPort, AuthRole, AuthUser, LoginResult, TokenInfo};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -24,12 +24,15 @@ const MAX_FAILS: u32 = 5;
 /// How long an account stays locked after too many failures.
 const LOCKOUT: Duration = Duration::from_secs(15 * 60);
 
-/// One stored account: username, Argon2 password hash (PHC string), role.
+/// One stored account: username, Argon2 password hash (PHC string), role, and
+/// an optional (base32) TOTP secret — present only when 2FA is enabled.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredUser {
     username: String,
     hash: String,
     role: AuthRole,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    totp_secret: Option<String>,
 }
 
 /// One stored API token: label, role, SHA-256 hex of the secret, created-at.
@@ -69,6 +72,8 @@ pub struct FileAuthService {
     tokens: Mutex<Vec<StoredToken>>,
     sessions: Mutex<HashMap<String, Session>>,
     attempts: Mutex<HashMap<String, Attempts>>,
+    /// Pending TOTP secrets during enrollment (before the user confirms a code).
+    pending_totp: Mutex<HashMap<String, String>>,
 }
 
 impl FileAuthService {
@@ -88,6 +93,7 @@ impl FileAuthService {
             tokens: Mutex::new(file.tokens),
             sessions: Mutex::new(HashMap::new()),
             attempts: Mutex::new(HashMap::new()),
+            pending_totp: Mutex::new(HashMap::new()),
         })
     }
 
@@ -123,6 +129,7 @@ impl FileAuthService {
                 username: username.to_owned(),
                 hash,
                 role: AuthRole::Admin,
+                totp_secret: None,
             }),
         }
         let text = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
@@ -220,36 +227,58 @@ fn now_rfc3339() -> String {
         .unwrap_or_default()
 }
 
+/// Current unix time in seconds (for TOTP).
+fn unix_now() -> u64 {
+    u64::try_from(time::OffsetDateTime::now_utc().unix_timestamp()).unwrap_or(0)
+}
+
 #[async_trait]
 impl AuthPort for FileAuthService {
-    async fn login(&self, username: &str, password: &str) -> Option<String> {
+    async fn login(&self, username: &str, password: &str, totp: Option<&str>) -> LoginResult {
         // Brute-force throttle: refuse while the account is locked.
         if self.is_locked(username) {
-            return None;
+            return LoginResult::Denied;
         }
+        // Verify the password and read back the (role, 2FA secret) atomically.
         let verified = self.users.lock().ok().and_then(|users| {
             let user = users.iter().find(|u| u.username == username)?;
             let parsed = PasswordHash::new(&user.hash).ok()?;
             Argon2::default()
                 .verify_password(password.as_bytes(), &parsed)
                 .ok()?;
-            Some(AuthUser {
-                username: user.username.clone(),
-                role: user.role,
-            })
+            Some((user.role, user.totp_secret.clone()))
         });
-        let Some(user) = verified else {
+        let Some((role, totp_secret)) = verified else {
             self.record_failure(username);
-            return None;
+            return LoginResult::Denied;
         };
+        // Second factor when enrolled.
+        if let Some(secret) = totp_secret {
+            let Some(code) = totp else {
+                // Password is right; the client must now supply a code.
+                return LoginResult::TotpRequired;
+            };
+            if !crate::totp::verify(&secret, code, unix_now()) {
+                self.record_failure(username);
+                return LoginResult::Denied;
+            }
+        }
         self.clear_failures(username);
         let token = mint_token();
         let session = Session {
-            user,
+            user: AuthUser {
+                username: username.to_owned(),
+                role,
+            },
             expires: Instant::now() + SESSION_TTL,
         };
-        self.sessions.lock().ok()?.insert(token.clone(), session);
-        Some(token)
+        match self.sessions.lock() {
+            Ok(mut s) => {
+                s.insert(token.clone(), session);
+                LoginResult::Ok(token)
+            }
+            Err(_) => LoginResult::Denied,
+        }
     }
 
     async fn user_for(&self, token: &str) -> Option<AuthUser> {
@@ -362,6 +391,7 @@ impl AuthPort for FileAuthService {
                     username: username.to_owned(),
                     hash,
                     role,
+                    totp_secret: None,
                 }),
             }
         }
@@ -392,6 +422,77 @@ impl AuthPort for FileAuthService {
         }
         self.persist().is_ok()
     }
+
+    async fn enroll_2fa(&self, username: &str) -> Option<(String, String)> {
+        // The account must exist.
+        if !self
+            .users
+            .lock()
+            .ok()?
+            .iter()
+            .any(|u| u.username == username)
+        {
+            return None;
+        }
+        let secret = crate::totp::generate_secret();
+        let uri = crate::totp::provisioning_uri(&secret, username, "CoXAgent");
+        self.pending_totp
+            .lock()
+            .ok()?
+            .insert(username.to_owned(), secret.clone());
+        Some((secret, uri))
+    }
+
+    async fn enable_2fa(&self, username: &str, code: &str) -> bool {
+        let Some(secret) = self
+            .pending_totp
+            .lock()
+            .ok()
+            .and_then(|m| m.get(username).cloned())
+        else {
+            return false;
+        };
+        if !crate::totp::verify(&secret, code, unix_now()) {
+            return false;
+        }
+        {
+            let Ok(mut users) = self.users.lock() else {
+                return false;
+            };
+            let Some(user) = users.iter_mut().find(|u| u.username == username) else {
+                return false;
+            };
+            user.totp_secret = Some(secret);
+        }
+        if let Ok(mut p) = self.pending_totp.lock() {
+            p.remove(username);
+        }
+        self.persist().is_ok()
+    }
+
+    async fn disable_2fa(&self, username: &str) -> bool {
+        let was_enabled = {
+            let Ok(mut users) = self.users.lock() else {
+                return false;
+            };
+            match users.iter_mut().find(|u| u.username == username) {
+                Some(user) => user.totp_secret.take().is_some(),
+                None => false,
+            }
+        };
+        if was_enabled {
+            let _ = self.persist();
+        }
+        was_enabled
+    }
+
+    async fn has_2fa(&self, username: &str) -> bool {
+        self.users.lock().is_ok_and(|users| {
+            users
+                .iter()
+                .any(|u| u.username == username && u.totp_secret.is_some())
+        })
+    }
 }
 
 #[cfg(test)]
@@ -407,8 +508,13 @@ mod tests {
 
         let svc = FileAuthService::open(&path).unwrap();
         assert!(svc.has_users());
-        assert!(svc.login("root", "wrong").await.is_none());
-        let token = svc.login("root", "s3cret").await.expect("login ok");
+        assert!(matches!(
+            svc.login("root", "wrong", None).await,
+            LoginResult::Denied
+        ));
+        let LoginResult::Ok(token) = svc.login("root", "s3cret", None).await else {
+            panic!("login ok")
+        };
         let user = svc.user_for(&token).await.expect("session");
         assert_eq!(user.username, "root");
         assert_eq!(user.role, AuthRole::Admin);
@@ -428,10 +534,16 @@ mod tests {
 
         let svc = FileAuthService::open(&path).unwrap();
         assert!(
-            svc.login("root", "oldpass").await.is_none(),
+            matches!(
+                svc.login("root", "oldpass", None).await,
+                LoginResult::Denied
+            ),
             "old pw revoked"
         );
-        assert!(svc.login("root", "newpass").await.is_some(), "new pw works");
+        assert!(
+            matches!(svc.login("root", "newpass", None).await, LoginResult::Ok(_)),
+            "new pw works"
+        );
         // Still exactly one account (upsert, not append).
         assert_eq!(svc.list_users().await.len(), 1);
     }
@@ -445,11 +557,14 @@ mod tests {
 
         // Exhaust the allowed failures.
         for _ in 0..super::MAX_FAILS {
-            assert!(svc.login("root", "wrong").await.is_none());
+            assert!(matches!(
+                svc.login("root", "wrong", None).await,
+                LoginResult::Denied
+            ));
         }
         // Now even the CORRECT password is refused — the account is locked.
         assert!(
-            svc.login("root", "s3cret").await.is_none(),
+            matches!(svc.login("root", "s3cret", None).await, LoginResult::Denied),
             "correct password must be refused while locked"
         );
     }
@@ -490,16 +605,73 @@ mod tests {
 
         // Add a viewer; it can log in and persists.
         assert!(svc.create_user("viewer1", "pw", AuthRole::Viewer).await);
-        assert!(svc.login("viewer1", "pw").await.is_some());
+        assert!(matches!(
+            svc.login("viewer1", "pw", None).await,
+            LoginResult::Ok(_)
+        ));
         assert_eq!(svc.list_users().await.len(), 2);
         let reopened = FileAuthService::open(&path).unwrap();
-        assert!(reopened.login("viewer1", "pw").await.is_some());
+        assert!(matches!(
+            reopened.login("viewer1", "pw", None).await,
+            LoginResult::Ok(_)
+        ));
 
         // The last admin cannot be deleted; a viewer can.
         assert!(!svc.delete_user("root").await, "last admin protected");
         assert!(svc.delete_user("viewer1").await);
         assert!(!svc.delete_user("nobody").await);
         assert_eq!(svc.list_users().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn totp_2fa_enroll_enable_and_gate_login() {
+        let dir = tempdir().unwrap();
+        let path = FileAuthService::default_path(dir.path());
+        FileAuthService::bootstrap_admin(&path, "root", "s3cret").unwrap();
+        let svc = FileAuthService::open(&path).unwrap();
+
+        // Without 2FA, a plain login works.
+        assert!(matches!(
+            svc.login("root", "s3cret", None).await,
+            LoginResult::Ok(_)
+        ));
+
+        // Enroll: a wrong confirmation code does not enable.
+        let (secret, uri) = svc.enroll_2fa("root").await.expect("enroll");
+        assert!(uri.starts_with("otpauth://totp/"));
+        assert!(!svc.enable_2fa("root", "000000").await || !svc.has_2fa("root").await);
+
+        // Confirm with the real code → enabled and persisted.
+        let now = unix_now();
+        let code = crate::totp::code_at(&secret, now).unwrap();
+        assert!(svc.enable_2fa("root", &code).await);
+        assert!(svc.has_2fa("root").await);
+
+        // Now a password-only login is refused with TotpRequired…
+        assert_eq!(
+            svc.login("root", "s3cret", None).await,
+            LoginResult::TotpRequired
+        );
+        // …a wrong code is Denied…
+        assert_eq!(
+            svc.login("root", "s3cret", Some("000000")).await,
+            LoginResult::Denied
+        );
+        // …the correct code logs in.
+        let code = crate::totp::code_at(&secret, unix_now()).unwrap();
+        assert!(matches!(
+            svc.login("root", "s3cret", Some(&code)).await,
+            LoginResult::Ok(_)
+        ));
+
+        // Disable restores password-only login (survives reopen).
+        assert!(svc.disable_2fa("root").await);
+        let reopened = FileAuthService::open(&path).unwrap();
+        assert!(!reopened.has_2fa("root").await);
+        assert!(matches!(
+            reopened.login("root", "s3cret", None).await,
+            LoginResult::Ok(_)
+        ));
     }
 
     #[tokio::test]

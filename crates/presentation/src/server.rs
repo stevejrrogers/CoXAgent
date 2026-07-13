@@ -125,6 +125,9 @@ pub async fn serve_full(
             "/api/auth/tokens/:label",
             axum::routing::delete(revoke_token_ep),
         )
+        .route("/api/auth/2fa/enroll", post(enroll_2fa_ep))
+        .route("/api/auth/2fa/enable", post(enable_2fa_ep))
+        .route("/api/auth/2fa/disable", post(disable_2fa_ep))
         .route("/api/auth/users", get(list_users_ep).post(create_user_ep))
         .route(
             "/api/auth/users/:username",
@@ -536,7 +539,8 @@ async fn auth_mw(
             | axum::http::Method::PUT
             | axum::http::Method::DELETE
             | axum::http::Method::PATCH
-    ) && path != "/api/auth/logout";
+    ) && path != "/api/auth/logout"
+        && !path.starts_with("/api/auth/2fa/"); // self-service, any signed-in user
     let method = req.method().clone();
     let username = user.username.clone();
     if is_write && !user.role.can_write() {
@@ -732,33 +736,109 @@ async fn audit_log_ep(
     }
 }
 
+/// Begin 2FA enrollment for the signed-in user: returns the secret + otpauth URI.
+async fn enroll_2fa_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let Some(auth) = app.auth.clone() else {
+        return (StatusCode::NOT_IMPLEMENTED, "auth not configured").into_response();
+    };
+    let Some(user) = resolve_principal(&auth, &headers).await else {
+        return (StatusCode::UNAUTHORIZED, "unauthenticated").into_response();
+    };
+    match auth.enroll_2fa(&user.username).await {
+        Some((secret, uri)) => {
+            Json(serde_json::json!({ "secret": secret, "uri": uri })).into_response()
+        }
+        None => internal_error("could not start enrollment"),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct CodeReq {
+    code: String,
+}
+
+/// Activate 2FA for the signed-in user after confirming a code.
+async fn enable_2fa_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<CodeReq>,
+) -> axum::response::Response {
+    let Some(auth) = app.auth.clone() else {
+        return (StatusCode::NOT_IMPLEMENTED, "auth not configured").into_response();
+    };
+    let Some(user) = resolve_principal(&auth, &headers).await else {
+        return (StatusCode::UNAUTHORIZED, "unauthenticated").into_response();
+    };
+    if auth.enable_2fa(&user.username, req.code.trim()).await {
+        Json(serde_json::json!({ "ok": true })).into_response()
+    } else {
+        (StatusCode::BAD_REQUEST, "invalid or expired code").into_response()
+    }
+}
+
+/// Disable 2FA for the signed-in user.
+async fn disable_2fa_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let Some(auth) = app.auth.clone() else {
+        return (StatusCode::NOT_IMPLEMENTED, "auth not configured").into_response();
+    };
+    let Some(user) = resolve_principal(&auth, &headers).await else {
+        return (StatusCode::UNAUTHORIZED, "unauthenticated").into_response();
+    };
+    auth.disable_2fa(&user.username).await;
+    Json(serde_json::json!({ "ok": true })).into_response()
+}
+
 #[derive(serde::Deserialize)]
 struct LoginReq {
     username: String,
     password: String,
+    /// TOTP code, required when the account has 2FA enabled.
+    #[serde(default)]
+    totp: Option<String>,
 }
 
-/// Verify credentials and, on success, set an HttpOnly session cookie.
+/// Verify credentials (and 2FA when enabled) and set an HttpOnly session cookie.
 async fn login_ep(
     State(app): State<AppState>,
     Json(req): Json<LoginReq>,
 ) -> axum::response::Response {
+    use coxagent_application::LoginResult;
     let Some(auth) = app.auth.clone() else {
         return Json(serde_json::json!({ "ok": true, "auth": false })).into_response();
     };
-    let Some(token) = auth.login(&req.username, &req.password).await else {
-        audit_push(
-            &app.audit,
-            &req.username,
-            "failed login".to_owned(),
-            StatusCode::UNAUTHORIZED.as_u16(),
-        )
-        .await;
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({ "error": "invalid credentials" })),
-        )
-            .into_response();
+    let token = match auth
+        .login(&req.username, &req.password, req.totp.as_deref())
+        .await
+    {
+        LoginResult::Ok(token) => token,
+        LoginResult::TotpRequired => {
+            // Password is correct; the client must supply a 2FA code next.
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "error": "totp required", "totp_required": true })),
+            )
+                .into_response();
+        }
+        LoginResult::Denied => {
+            audit_push(
+                &app.audit,
+                &req.username,
+                "failed login".to_owned(),
+                StatusCode::UNAUTHORIZED.as_u16(),
+            )
+            .await;
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "error": "invalid credentials" })),
+            )
+                .into_response();
+        }
     };
     let user = auth.user_for(&token).await;
     let role = user.as_ref().map_or("viewer", |u| {
@@ -803,11 +883,15 @@ async fn me_ep(
         return Json(serde_json::json!({ "auth": false })).into_response();
     };
     match resolve_principal(&auth, &headers).await {
-        Some(u) => Json(serde_json::json!({
-            "auth": true, "username": u.username,
-            "role": if u.role.can_write() { "admin" } else { "viewer" },
-        }))
-        .into_response(),
+        Some(u) => {
+            let twofa = auth.has_2fa(&u.username).await;
+            Json(serde_json::json!({
+                "auth": true, "username": u.username,
+                "role": if u.role.can_write() { "admin" } else { "viewer" },
+                "twofa": twofa,
+            }))
+            .into_response()
+        }
         None => (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({ "auth": true })),

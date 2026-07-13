@@ -17,7 +17,7 @@ pub mod sprint;
 pub mod state;
 pub mod use_cases;
 
-pub use auth::{AuthPort, AuthRole, AuthUser, TokenInfo};
+pub use auth::{AuthPort, AuthRole, AuthUser, LoginResult, TokenInfo};
 pub use config::{
     Config, EngineChoice, EngineKind, EngineMapping, Mode, PolicyConfig, WorkflowConfig,
 };
