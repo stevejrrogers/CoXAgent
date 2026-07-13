@@ -25,6 +25,30 @@
   .proj .pn{font-weight:600;font-size:13px;display:flex;align-items:center;gap:7px}
   .proj .al{background:var(--accentbg);color:var(--accent2);font-size:10px;font-weight:600;padding:2px 7px;border-radius:6px}
   .proj .pv{font-size:11px;color:var(--muted);margin-top:5px;display:flex;gap:10px}
+  .projpick{position:relative;display:flex;gap:6px}
+  .projbtn{flex:1;min-width:0;display:flex;align-items:center;gap:9px;background:var(--card2);border:1px solid var(--border2);border-radius:10px;padding:7px 9px;cursor:pointer;font-family:inherit;text-align:left;transition:border-color .15s,background .15s}
+  .projbtn:hover{border-color:var(--accent);background:var(--accentbg)}
+  .projmk{flex:none;width:26px;height:26px;border-radius:7px;display:grid;place-items:center;font-size:12px;font-weight:700;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2))}
+  .projmeta{min-width:0;flex:1;display:flex;flex-direction:column;line-height:1.2}
+  .projname{font-size:13px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .projsub{font-size:10.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .projcar{flex:none;color:var(--muted);font-size:16px}
+  .projadd{flex:none;background:var(--card2);color:var(--accent);border:1px solid var(--border2);border-radius:10px;padding:0 11px;cursor:pointer;font-size:16px;font-family:inherit;transition:border-color .15s}
+  .projadd:hover{border-color:var(--accent)}
+  .projmenu{display:none;position:absolute;top:calc(100% + 5px);left:0;right:0;z-index:40;background:var(--card);border:1px solid var(--border2);border-radius:11px;box-shadow:0 12px 34px rgba(0,0,0,.32);padding:5px;max-height:320px;overflow-y:auto}
+  .projmenu.open{display:block}
+  .projitem{display:flex;align-items:center;gap:9px;padding:7px 8px;border-radius:8px;cursor:pointer}
+  .projitem:hover{background:var(--card2)}
+  .projitem.sel{background:var(--accentbg)}
+  .projitem .pi-mk{flex:none;width:24px;height:24px;border-radius:6px;display:grid;place-items:center;font-size:11px;font-weight:700;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2))}
+  .projitem .pi-meta{min-width:0;flex:1;display:flex;flex-direction:column;line-height:1.2}
+  .projitem .pi-name{font-size:12.5px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .projitem .pi-sub{font-size:10px;color:var(--muted)}
+  .projitem .pi-check{flex:none;color:var(--accent);font-size:15px;opacity:0}
+  .projitem.sel .pi-check{opacity:1}
+  .projitem .pi-del{flex:none;color:var(--muted);opacity:0;padding:3px;border-radius:5px}
+  .projitem:hover .pi-del{opacity:.7}
+  .projitem .pi-del:hover{opacity:1;color:var(--red);background:var(--card)}
   .nav{display:flex;flex-direction:column;gap:2px;margin-top:6px}
   .nav a{display:flex;align-items:center;gap:11px;padding:9px 11px;border-radius:10px;color:var(--muted);text-decoration:none;font-size:13px;font-weight:500;cursor:pointer}
   .nav a:hover{background:var(--card);color:var(--text)} .nav a.on{background:var(--accentbg);color:var(--accent2)}
@@ -85,6 +109,17 @@
   .act .ad{width:28px;height:28px;border-radius:8px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600}
   .act .atx{flex:1;font-size:13px;line-height:1.5} .act .atx .who{font-weight:600} .act .atx .tk{color:var(--muted);font-family:ui-monospace,monospace;font-size:11px}
   .act .tm{color:var(--dim);font-size:11px;white-space:nowrap}
+  .ptbl{width:100%;border-collapse:collapse;font-size:13px}
+  .ptbl th{text-align:left;color:var(--muted);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;padding:0 12px 9px;border-bottom:1px solid var(--border)}
+  .ptbl td{padding:11px 12px;border-bottom:1px solid var(--border);vertical-align:middle}
+  .ptbl tr:last-child td{border-bottom:none}
+  .pcell{display:flex;align-items:center;gap:9px}
+  .pav{width:26px;height:26px;border-radius:7px;display:grid;place-items:center;font-size:12px;font-weight:700;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2))}
+  .pbadge{font-size:11px;font-weight:600;padding:3px 9px;border-radius:20px}
+  .pbadge.on{background:var(--greenbg,rgba(34,197,94,.15));color:var(--green)}
+  .pbadge.idle{background:var(--accentbg);color:var(--muted)}
+  .pbadge.off{background:var(--card2);color:var(--dim)}
+  .ptbl .tk{display:inline-block;background:var(--card2);color:var(--muted);font-family:ui-monospace,monospace;font-size:10.5px;padding:2px 6px;border-radius:5px;margin:1px 0}
   .rel{display:flex;gap:11px;padding-bottom:14px} .rel:last-child{padding-bottom:0}
   .rel .rv{background:var(--accentbg);color:var(--accent2);font-size:11px;font-weight:600;padding:3px 8px;border-radius:7px;height:fit-content}
   .rel .rt{font-size:12px} .rel .rt .rd{color:var(--dim);font-size:11px;margin-top:2px}
@@ -101,7 +136,7 @@
   .modal .x:hover{background:var(--card);color:var(--text)} .modal .msub{color:var(--muted);font-size:12px;margin:2px 0 16px}
   .mrow{display:flex;gap:12px;padding:10px 0;border-bottom:1px solid var(--border);font-size:13px} .mrow .lbl{color:var(--muted);min-width:118px}
   .modal pre{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:12px;font-size:12px;overflow:auto;white-space:pre-wrap;line-height:1.55;font-family:ui-monospace,monospace}
-body.viewer .ctlrow, body.viewer #proj-switch + button, body.viewer .ticket-actions { display: none !important; }
+body.viewer .ctlrow, body.viewer .projadd, body.viewer .pi-del, body.viewer .ticket-actions { display: none !important; }
 body:not(.admin) .admin-only { display: none !important; }
 .pri{background:var(--accent);color:#fff;border:1px solid transparent;border-radius:9px;padding:9px 14px;font-size:13px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:6px;font-family:inherit}
 .pri:hover{background:var(--accenth)}
@@ -143,10 +178,14 @@ body:not(.admin) .admin-only { display: none !important; }
   <aside class="side">
     <div class="brand"><div class="mk"><i class="ti ti-hexagon-letter-c"></i></div><div><div class="nm">CoXAgent</div><div class="tg">autonomous dev team</div></div></div>
     <div class="proj">
-      <div style="display:flex;gap:6px;margin-bottom:7px">
-        <select id="proj-switch" onchange="switchProject(this.value)" style="flex:1;min-width:0;background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:7px 9px;font-size:13px;font-weight:600;font-family:inherit"></select>
-        <button onclick="openNewProject()" title="New project" class="ticket-actions" style="background:var(--card2);color:var(--accent);border:1px solid var(--border2);border-radius:8px;padding:0 10px;cursor:pointer;font-size:16px;font-family:inherit"><i class="ti ti-plus"></i></button>
-        <button onclick="deleteProject()" title="Delete this project" class="ticket-actions" style="background:var(--card2);color:var(--muted);border:1px solid var(--border2);border-radius:8px;padding:0 10px;cursor:pointer;font-size:15px;font-family:inherit"><i class="ti ti-trash"></i></button>
+      <div class="projpick">
+        <button id="proj-btn" class="projbtn" onclick="toggleProjMenu(event)">
+          <span class="projmk" id="proj-mk">P</span>
+          <span class="projmeta"><span class="projname" id="proj-name">Select project</span><span class="projsub" id="proj-count">—</span></span>
+          <i class="ti ti-selector projcar"></i>
+        </button>
+        <button onclick="openNewProject()" title="New project" class="ticket-actions projadd"><i class="ti ti-plus"></i></button>
+        <div id="proj-menu" class="projmenu"></div>
       </div>
       <div class="pv"><span><i class="ti ti-tag" style="font-size:13px"></i> v<b id="ver">0.0.0</b></span><span id="pn-tickets">0 tickets</span></div></div>
     <nav class="nav">
@@ -158,6 +197,7 @@ body:not(.admin) .admin-only { display: none !important; }
       <a data-v="activity" onclick="nav('activity')"><i class="ti ti-activity"></i> Activity</a>
       <a data-v="discuss" onclick="nav('discuss')"><i class="ti ti-messages"></i> Discussion</a>
       <a data-v="insights" onclick="nav('insights')"><i class="ti ti-coin"></i> Cost</a>
+      <a data-v="people" class="admin-only" onclick="nav('people')"><i class="ti ti-user-star"></i> People</a>
       <a data-v="audit" class="admin-only" onclick="nav('audit')"><i class="ti ti-shield-lock"></i> Audit</a>
       <a data-v="access" class="admin-only" onclick="nav('access')"><i class="ti ti-key"></i> Access</a>
       <a data-v="settings" onclick="nav('settings')"><i class="ti ti-settings"></i> Settings</a>
@@ -213,6 +253,12 @@ body:not(.admin) .admin-only { display: none !important; }
       </div></div>
       <div class="view" id="view-roadmap"><div id="roadmap-body"></div></div>
       <div class="view" id="view-sprint"><div id="sprint-body"></div></div>
+      <div class="view" id="view-people">
+        <div class="filters"><span style="font-size:12px;color:var(--muted)">Derived from the security audit trail — who is actually working, how much, and how effectively.</span>
+          <div style="flex:1"></div><span id="people-sample" class="fchip"></span></div>
+        <div class="kpis" id="people-kpis"></div>
+        <div class="panel" style="margin-top:12px"><div id="people-body"></div></div>
+      </div>
       <div class="view" id="view-audit">
         <div class="filters"><span style="font-size:12px;color:var(--muted)">Security audit — authenticated mutations & sign-ins</span>
           <div style="flex:1"></div><a onclick="window.open('/api/audit-log')" class="fchip" style="text-decoration:none;cursor:pointer"><i class="ti ti-download" style="font-size:14px"></i> Export</a></div>
@@ -341,7 +387,7 @@ const KPI_IC={Shipped:"ti-rocket","In flight":"ti-plane-tilt","Open bugs":"ti-bu
 const money=n=>"$"+(Number(n)||0).toFixed(2);
 const fmtK=n=>{n=Number(n)||0;return n>=1000?(n/1000).toFixed(1)+"k":String(n);};
 const AC={BA:"--blue","DEV-FEATURE":"--green","DEV-BUG":"--red",SA:"--purple",TEST:"--teal",DOCS:"--blue",PO:"--amber",SM:"--teal",PD:"--purple",USER:"--accent"};
-const TITLES={overview:["Overview","project health at a glance"],team:["Team","nine agents, one loop"],board:["Board","every ticket, every stage"],activity:["Activity","what the agents are doing"],roadmap:["Roadmap","now · next · later, auto-generated"],sprint:["Sprint","the current scrum window"],discuss:["Discussion","team threads & standups"],audit:["Audit","who did what, when"],access:["Access","API tokens & service accounts"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
+const TITLES={overview:["Overview","project health at a glance"],team:["Team","nine agents, one loop"],board:["Board","every ticket, every stage"],activity:["Activity","what the agents are doing"],roadmap:["Roadmap","now · next · later, auto-generated"],sprint:["Sprint","the current scrum window"],discuss:["Discussion","team threads & standups"],people:["People","per-user activity & productivity"],audit:["Audit","who did what, when"],access:["Access","API tokens & service accounts"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
 const esc=s=>(s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 const cvar=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim()||"#888";
 let STATE={}, CUR="overview", BF="all", INIT_ACT=false;
@@ -352,7 +398,7 @@ function nav(v){CUR=v;location.hash=v;
   document.querySelectorAll(".nav a").forEach(a=>a.classList.toggle("on",a.dataset.v===v));
   document.getElementById("pg-title").textContent=TITLES[v][0];
   document.getElementById("pg-sub").textContent=TITLES[v][1];
-  if(v==="settings")loadSettings(); else if(v==="discuss"){loadComments();} else if(v==="audit"){renderAudit();} else if(v==="access"){renderAccess();} else if(v==="roadmap"){renderRoadmap();} else renderActive();}
+  if(v==="settings")loadSettings(); else if(v==="discuss"){loadComments();} else if(v==="people"){renderPeople();} else if(v==="audit"){renderAudit();} else if(v==="access"){renderAccess();} else if(v==="roadmap"){renderRoadmap();} else renderActive();}
 function initials(r){return r.replace("DEV-","").slice(0,2);}
 function metricsFrom(s){const t=s.tickets||[],h=s.history||[],isF=x=>x.type!=="bug";
   return {shipped:t.filter(x=>isF(x)&&(x.status==="done"||x.status==="documented")).length,
@@ -711,20 +757,39 @@ const api=p=>"/api/projects/"+encodeURIComponent(PID)+p;
 function handle(m){if(m.state)render(m.state);renderRunner(m.runner);setConn(true);
   if(typeof m.viewers==="number"){const c=document.getElementById("viewers-chip");
     document.getElementById("viewers-n").textContent=m.viewers;c.style.display=m.viewers>1?"":"none";
-    c.title=m.viewers+" live connection"+(m.viewers>1?"s":"")+" (desktop window + browser tabs share one hub)";}}
+    c.title=m.viewers+" user"+(m.viewers>1?"s":"")+" viewing (counts distinct people, not tabs)";}}
 function startPoll(){if(poll)return;poll=setInterval(async()=>{try{const s=await(await fetch(api("/state"))).json();const rn=await(await fetch(api("/runner"))).json();render(s);renderRunner(rn);setConn(false);}catch(e){}},3000);}
 function connect(){if(ES)ES.close();if(poll){clearInterval(poll);poll=null;}
   ES=new EventSource(api("/events"));ES.onmessage=e=>{try{handle(JSON.parse(e.data));if(poll){clearInterval(poll);poll=null;}}catch(_){}};ES.onerror=()=>{setConn(false);startPoll();};}
 function loadBudget(){fetch(api("/config")).then(r=>r.json()).then(c=>{window._budget=(c.workflow&&c.workflow.budget_usd)||null;if(CUR==="insights")renderActive();}).catch(()=>{});}
-function switchProject(id){PID=id;INIT_ACT=false;localStorage.setItem("coxpid",id);loadBudget();loadComments();connect();}
+let PROJECTS=[];
+function projInitial(p){return (p.alias||p.name||"P").trim().charAt(0).toUpperCase()||"P";}
+function switchProject(id){PID=id;INIT_ACT=false;localStorage.setItem("coxpid",id);closeProjMenu();renderProjBtn();loadBudget();loadComments();connect();}
+function renderProjBtn(){
+  const p=PROJECTS.find(x=>x.id===PID);
+  document.getElementById("proj-mk").textContent=p?projInitial(p):"P";
+  document.getElementById("proj-name").textContent=p?p.name:(PROJECTS.length?"Select project":"No projects");
+  document.getElementById("proj-count").textContent=p?(p.alias?p.alias:"active project"):(PROJECTS.length+" available");
+}
+function toggleProjMenu(e){e.stopPropagation();const m=document.getElementById("proj-menu");if(m.classList.contains("open")){closeProjMenu();return;}renderProjMenu();m.classList.add("open");}
+function closeProjMenu(){document.getElementById("proj-menu").classList.remove("open");}
+document.addEventListener("click",e=>{const pk=document.querySelector(".projpick");if(pk&&!pk.contains(e.target))closeProjMenu();});
+function renderProjMenu(){
+  const m=document.getElementById("proj-menu");
+  if(!PROJECTS.length){m.innerHTML='<div class="projitem" style="cursor:default;color:var(--muted)">No projects yet</div>';return;}
+  m.innerHTML=PROJECTS.map(p=>`<div class="projitem${p.id===PID?' sel':''}" onclick="switchProject('${esc(p.id)}')">
+    <span class="pi-mk">${esc(projInitial(p))}</span>
+    <span class="pi-meta"><span class="pi-name">${esc(p.name)}</span><span class="pi-sub">${p.alias?esc(p.alias):esc(p.id)}</span></span>
+    <i class="ti ti-check pi-check"></i>
+    <i class="ti ti-trash pi-del" title="Remove project" onclick="event.stopPropagation();deleteProject('${esc(p.id)}')"></i></div>`).join("");
+}
 async function loadProjects(){
   let list=[];try{list=await(await fetch("/api/projects")).json();}catch(e){}
-  const sel=document.getElementById("proj-switch");
-  if(!list.length){sel.innerHTML='<option>no projects</option>';return;}
-  sel.innerHTML=list.map(p=>`<option value="${esc(p.id)}">${esc(p.name)}${p.alias?' ('+esc(p.alias)+')':''}</option>`).join("");
+  PROJECTS=list;
+  if(!list.length){renderProjBtn();return;}
   const saved=localStorage.getItem("coxpid");
   PID=(saved&&list.some(p=>p.id===saved))?saved:list[0].id;
-  sel.value=PID;
+  renderProjBtn();
   loadBudget();loadComments();connect();
 }
 async function baRefine(){
@@ -803,18 +868,18 @@ async function createProject(){
     const {id}=await r.json();
     close_("ov-newproj");
     await loadProjects();
-    if(id){const sel=document.getElementById("proj-switch");sel.value=id;switchProject(id);}
+    if(id){switchProject(id);}
   }catch(e){err.textContent="Network error.";}
 }
-async function deleteProject(){
-  if(!PID)return;
-  const sel=document.getElementById("proj-switch");
-  const nm=sel.options[sel.selectedIndex]?sel.options[sel.selectedIndex].text:PID;
+async function deleteProject(id){
+  id=id||PID;if(!id)return;
+  const p=PROJECTS.find(x=>x.id===id);const nm=p?p.name:id;
   if(!confirm("Remove project \""+nm+"\" from CoXAgent?\n\nIts workspace files stay on disk; only the registration is removed."))return;
   try{
-    const r=await fetch("/api/projects/"+encodeURIComponent(PID),{method:"DELETE"});
+    const r=await fetch("/api/projects/"+encodeURIComponent(id),{method:"DELETE"});
     if(!r.ok){alert("Delete failed: "+(await r.text()||r.status));return;}
-    localStorage.removeItem("coxpid");
+    if(id===PID)localStorage.removeItem("coxpid");
+    closeProjMenu();
     await loadProjects();
   }catch(e){alert("Network error.");}
 }
@@ -1000,6 +1065,42 @@ function renderAudit(){
         <div class="atx"><span class="who">${esc(e.user)}</span> ${esc(e.action)} <span class="tk" style="background:${col}22;color:${col}">${e.status}</span></div>
         <span class="tm">${esc((e.at||"").slice(5,16).replace("T"," "))}</span></div>`;}).join("");
   }).catch(()=>{document.getElementById("audit-body").innerHTML='<div class="empty">unable to load audit log</div>';});
+}
+function relTime(iso){if(!iso)return "never";const t=Date.parse(iso.replace(" ","T"));if(isNaN(t))return esc(iso.slice(5,16));
+  const s=(Date.now()-t)/1000;if(s<90)return "just now";if(s<3600)return Math.round(s/60)+"m ago";if(s<86400)return Math.round(s/3600)+"h ago";return Math.round(s/86400)+"d ago";}
+function isActiveRecent(iso){if(!iso)return false;const t=Date.parse(iso.replace(" ","T"));return !isNaN(t)&&(Date.now()-t)<86400000;}
+function renderPeople(){
+  const body=document.getElementById("people-body");
+  body.innerHTML='<div class="empty">loading…</div>';
+  fetch("/api/people-analytics").then(r=>r.ok?r.json():null).then(d=>{
+    if(!d){body.innerHTML='<div class="empty">admin role required</div>';return;}
+    const people=d.people||[];
+    document.getElementById("people-sample").textContent=(d.sample||0)+" events analysed";
+    const active=people.filter(p=>isActiveRecent(p.last_active)).length;
+    const working=people.filter(p=>p.work>0).length;
+    const totalWork=people.reduce((a,p)=>a+(p.work||0),0);
+    document.getElementById("people-kpis").innerHTML=
+      kpi("Active 24h",active)+kpi("Contributors",working)+kpi("People",people.length)+kpi("Work actions",totalWork);
+    if(!people.length){body.innerHTML='<div class="empty">no activity recorded yet</div>';return;}
+    body.innerHTML='<table class="ptbl"><thead><tr><th>User</th><th>Status</th><th>Work</th><th>Total</th><th>Active days</th><th>Success</th><th>Last active</th><th>Top actions</th></tr></thead><tbody>'+
+      people.map(p=>{
+        const live=isActiveRecent(p.last_active);
+        const working=p.work>0;
+        const badge=live?'<span class="pbadge on">● active</span>':(working?'<span class="pbadge idle">idle</span>':'<span class="pbadge off">observer</span>');
+        const sc=p.success_rate>=95?"var(--green)":(p.success_rate>=80?"var(--amber)":"var(--red)");
+        const top=(p.top_actions||[]).map(a=>`<span class="tk">${esc(a.action)} ·${a.count}</span>`).join(" ")||'<span style="color:var(--muted)">—</span>';
+        const initial=(p.user||"?").charAt(0).toUpperCase();
+        return `<tr>
+          <td><div class="pcell"><span class="pav">${esc(initial)}</span><b>${esc(p.user)}</b></div></td>
+          <td>${badge}</td>
+          <td><b style="color:${working?'var(--text)':'var(--muted)'}">${p.work}</b></td>
+          <td>${p.actions}</td>
+          <td>${p.active_days}</td>
+          <td style="color:${sc}">${p.success_rate}%</td>
+          <td style="color:var(--muted)">${relTime(p.last_active)}</td>
+          <td>${top}</td></tr>`;
+      }).join("")+'</tbody></table>';
+  }).catch(()=>{body.innerHTML='<div class="empty">unable to load analytics</div>';});
 }
 boot();
 </script>

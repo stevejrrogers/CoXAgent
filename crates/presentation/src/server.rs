@@ -97,8 +97,9 @@ struct AppState {
     audit: Arc<dyn AuditPort>,
     /// Agent CLIs detected on this machine's PATH: `(name, path)`.
     engines: Arc<Vec<(String, String)>>,
-    /// Live dashboard connections (desktop window + browser tabs share the hub).
-    viewers: Arc<std::sync::atomic::AtomicUsize>,
+    /// Live viewers keyed by username → open-connection count. Distinct users =
+    /// map length, so one person in the app + a browser tab counts once.
+    viewers: Arc<std::sync::Mutex<HashMap<String, usize>>>,
     /// Deregisters a project from the hub registry.
     remover: Option<ProjectRemover>,
     /// A hub-level engine for cross-project drafting (e.g. project goals), with a
@@ -109,24 +110,41 @@ struct AppState {
     )>,
 }
 
-/// Increments the live-viewer count for its lifetime; decrements on drop when
-/// the SSE stream ends (tab closed / window quit).
-struct ViewerGuard(Arc<std::sync::atomic::AtomicUsize>);
+/// Registers one live connection for a user; on drop (stream closed) it
+/// deregisters, so distinct-user counts stay accurate across tabs.
+type Viewers = Arc<std::sync::Mutex<HashMap<String, usize>>>;
+struct ViewerGuard {
+    viewers: Viewers,
+    user: String,
+}
 
 impl ViewerGuard {
-    fn new(counter: &Arc<std::sync::atomic::AtomicUsize>) -> Self {
-        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Self(Arc::clone(counter))
+    fn new(viewers: &Viewers, user: String) -> Self {
+        if let Ok(mut map) = viewers.lock() {
+            *map.entry(user.clone()).or_insert(0) += 1;
+        }
+        Self {
+            viewers: Arc::clone(viewers),
+            user,
+        }
     }
-    /// Current viewer count. Also keeps the guard owned by the SSE closure.
+    /// Number of distinct users currently connected. Also keeps the guard owned
+    /// by the SSE closure.
     fn count(&self) -> usize {
-        self.0.load(std::sync::atomic::Ordering::Relaxed)
+        self.viewers.lock().map_or(1, |m| m.len().max(1))
     }
 }
 
 impl Drop for ViewerGuard {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut map) = self.viewers.lock() {
+            if let Some(n) = map.get_mut(&self.user) {
+                *n -= 1;
+                if *n == 0 {
+                    map.remove(&self.user);
+                }
+            }
+        }
     }
 }
 
@@ -177,7 +195,7 @@ pub async fn serve_full(
         auth: extras.auth,
         audit,
         engines: Arc::new(extras.engines),
-        viewers: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        viewers: Arc::new(std::sync::Mutex::new(HashMap::new())),
         remover: extras.remover,
         analyzer: extras.analyzer,
     };
@@ -205,6 +223,7 @@ pub async fn serve_full(
             axum::routing::delete(delete_user_ep),
         )
         .route("/api/audit-log", get(audit_log_ep))
+        .route("/api/people-analytics", get(people_analytics_ep))
         .route("/api/engines", get(engines_ep))
         .route("/api/analyze-goal", post(analyze_goal_ep))
         .route("/api/projects", get(list_projects).post(create_project))
@@ -831,9 +850,17 @@ async fn control_ep(
 async fn events_ep(
     State(app): State<AppState>,
     Path(pid): Path<String>,
+    headers: axum::http::HeaderMap,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let handle = app.project(&pid).await;
-    let guard = ViewerGuard::new(&app.viewers);
+    // Identify the viewer so distinct-user counts (not tab counts) are reported.
+    let user = match &app.auth {
+        Some(auth) => resolve_principal(auth, &headers)
+            .await
+            .map_or_else(|| "anonymous".to_owned(), |u| u.username),
+        None => "local".to_owned(),
+    };
+    let guard = ViewerGuard::new(&app.viewers, user);
     let stream = IntervalStream::new(tokio::time::interval(STREAM_INTERVAL)).then(move |_| {
         // `guard` is owned by this closure, so the count drops when the stream ends.
         let count = guard.count();
@@ -1111,6 +1138,101 @@ async fn audit_log_ep(
         Ok(entries) => Json(entries).into_response(),
         Err(e) => internal_error(&e.to_string()),
     }
+}
+
+/// Running per-user aggregate used by [`people_analytics_ep`].
+struct PeopleAgg {
+    actions: u32,
+    work: u32,
+    failures: u32,
+    last_active: String,
+    days: std::collections::BTreeSet<String>,
+    by_action: std::collections::BTreeMap<String, u32>,
+}
+
+/// Per-user activity analytics for admins: who is actually working, how much,
+/// how recently, and how effectively. Derived from the audit trail so it needs
+/// no extra storage. Newest audit window (up to 5000 rows) is aggregated per
+/// user into totals, work vs. sign-in actions, success rate, active days, and a
+/// simple productivity score.
+async fn people_analytics_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    if let Some(auth) = app.auth.clone() {
+        let ok = match resolve_principal(&auth, &headers).await {
+            Some(u) => u.role.can_write(),
+            None => false,
+        };
+        if !ok {
+            return (StatusCode::FORBIDDEN, "admin role required").into_response();
+        }
+    }
+    let entries = match app.audit.recent(5000).await {
+        Ok(e) => e,
+        Err(e) => return internal_error(&e.to_string()),
+    };
+
+    let mut per: HashMap<String, PeopleAgg> = HashMap::new();
+    for e in &entries {
+        let a = per.entry(e.user.clone()).or_insert_with(|| PeopleAgg {
+            actions: 0,
+            work: 0,
+            failures: 0,
+            last_active: String::new(),
+            days: std::collections::BTreeSet::new(),
+            by_action: std::collections::BTreeMap::new(),
+        });
+        a.actions += 1;
+        // "Work" = anything that changes state, i.e. not a passive sign-in/read.
+        let sign_in = matches!(e.action.as_str(), "login" | "logout" | "2fa-verify");
+        if !sign_in {
+            a.work += 1;
+        }
+        if e.status >= 400 {
+            a.failures += 1;
+        }
+        if e.at > a.last_active {
+            a.last_active.clone_from(&e.at);
+        }
+        if let Some(day) = e.at.split('T').next() {
+            a.days.insert(day.to_owned());
+        }
+        *a.by_action.entry(e.action.clone()).or_insert(0) += 1;
+    }
+
+    let mut people: Vec<serde_json::Value> = per
+        .into_iter()
+        .map(|(user, a)| {
+            let success = if a.actions == 0 {
+                100.0
+            } else {
+                f64::from(a.actions - a.failures) / f64::from(a.actions) * 100.0
+            };
+            // Top actions, most frequent first.
+            let mut top: Vec<(String, u32)> = a.by_action.into_iter().collect();
+            top.sort_by_key(|(_, c)| std::cmp::Reverse(*c));
+            top.truncate(4);
+            serde_json::json!({
+                "user": user,
+                "actions": a.actions,
+                "work": a.work,
+                "success_rate": (success * 10.0).round() / 10.0,
+                "active_days": a.days.len(),
+                "last_active": a.last_active,
+                "top_actions": top.iter().map(|(k,v)| serde_json::json!({"action":k,"count":v})).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    // Busiest workers first.
+    people.sort_by_key(|p| {
+        std::cmp::Reverse(
+            p.get("work")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+        )
+    });
+    Json(serde_json::json!({ "people": people, "sample": entries.len() })).into_response()
 }
 
 /// Begin 2FA enrollment for the signed-in user: returns the secret + otpauth URI.
