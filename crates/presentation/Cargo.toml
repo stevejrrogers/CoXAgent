@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 coxagent-domain.workspace = true
 coxagent-application.workspace = true
+async-trait.workspace = true
 clap.workspace = true
 axum.workspace = true
 tokio.workspace = true

@@ -113,7 +113,6 @@ struct ChatChannel {
 struct SysChat {
     inner: Arc<tokio::sync::Mutex<coxagent_application::SystemChat>>,
     path: PathBuf,
-    media_dir: PathBuf,
     tx: tokio::sync::broadcast::Sender<String>,
 }
 
@@ -128,7 +127,6 @@ impl SysChat {
         Self {
             inner: Arc::new(tokio::sync::Mutex::new(inner)),
             path,
-            media_dir: dir.join("chat-media"),
             tx: tokio::sync::broadcast::channel(256).0,
         }
     }
@@ -140,6 +138,45 @@ impl SysChat {
             let _ = std::fs::create_dir_all(parent);
         }
         let _ = std::fs::write(&self.path, json);
+    }
+}
+
+/// Default blob storage: local disk under a root, used when no S3/MinIO backend
+/// is injected. Keys are relative paths (e.g. `chat/<file>`).
+struct DiskStorage {
+    root: PathBuf,
+}
+
+#[async_trait::async_trait]
+impl coxagent_application::ports::outbound::StoragePort for DiskStorage {
+    async fn put(
+        &self,
+        key: &str,
+        data: &[u8],
+        _mime: &str,
+    ) -> Result<(), coxagent_application::PortError> {
+        if key.contains("..") {
+            return Err(coxagent_application::PortError::Backend(
+                "bad key".to_owned(),
+            ));
+        }
+        let path = self.root.join(key);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| coxagent_application::PortError::Backend(e.to_string()))?;
+        }
+        std::fs::write(&path, data)
+            .map_err(|e| coxagent_application::PortError::Backend(e.to_string()))
+    }
+
+    async fn get(&self, key: &str) -> Result<Vec<u8>, coxagent_application::PortError> {
+        if key.contains("..") {
+            return Err(coxagent_application::PortError::Backend(
+                "bad key".to_owned(),
+            ));
+        }
+        std::fs::read(self.root.join(key))
+            .map_err(|e| coxagent_application::PortError::Backend(e.to_string()))
     }
 }
 
@@ -163,6 +200,8 @@ struct AppState {
     remover: Option<ProjectRemover>,
     /// System-wide chat store shared across all projects.
     syschat: SysChat,
+    /// Blob storage for uploaded files (local disk by default, or S3/MinIO).
+    storage: Arc<dyn coxagent_application::ports::outbound::StoragePort>,
     /// A hub-level engine for cross-project drafting (e.g. project goals), with a
     /// working directory to run it in.
     analyzer: Option<(
@@ -319,6 +358,9 @@ pub struct HubExtras {
     /// Directory holding hub-wide state (system chat + its media). Defaults to
     /// the current directory when unset.
     pub hub_dir: Option<PathBuf>,
+    /// Blob storage backend for uploads. Defaults to local disk under `hub_dir`
+    /// when unset; the composition root wires S3/MinIO when configured.
+    pub storage: Option<Arc<dyn coxagent_application::ports::outbound::StoragePort>>,
 }
 
 /// Assemble the shared [`AppState`] from the registered projects and hub extras.
@@ -344,6 +386,11 @@ fn build_state(
         remover: extras.remover,
         analyzer: extras.analyzer,
         syschat: SysChat::load(&hub_dir),
+        storage: extras.storage.unwrap_or_else(|| {
+            Arc::new(DiskStorage {
+                root: hub_dir.join("blobs"),
+            })
+        }),
     }
 }
 
@@ -1329,13 +1376,14 @@ async fn post_comment(
     // If the user attached something an agent can read, let the SA agent read it
     // and respond — answering if a question was asked, otherwise reading it
     // proactively and asking back. Runs in the background so the post is instant.
-    maybe_analyze_attachments(&p, "USER", body, req.ticket, &req.attachments);
+    maybe_analyze_attachments(&app, &p, "USER", body, req.ticket, &req.attachments);
     Json(serde_json::json!({ "ok": true })).into_response()
 }
 
 /// Spawn a background SA turn that reads any readable attachments on a freshly
 /// posted comment and replies. No-op when there are no readable attachments.
 fn maybe_analyze_attachments(
+    app: &AppState,
     p: &ProjectHandle,
     author: &str,
     body: &str,
@@ -1343,32 +1391,48 @@ fn maybe_analyze_attachments(
     attachments: &[coxagent_application::Attachment],
 ) {
     use coxagent_application::use_cases::{AnalyzeAttachmentUseCase, ReadableAttachment};
-    let dir = media_dir(p);
-    let readable: Vec<ReadableAttachment> = attachments
+    // Storage keys for each attachment (the CLI reads local files, so we fetch
+    // the bytes from the blob store into a temp dir — works for disk and S3).
+    let items: Vec<(String, String, String)> = attachments
         .iter()
         .filter_map(|a| {
-            // Resolve the browser URL back to the on-disk file the CLI can open.
             let file = a.url.rsplit('/').next()?;
-            let path = dir.join(file);
-            (path.is_file()).then(|| ReadableAttachment {
-                name: a.name.clone(),
-                mime: a.mime.clone(),
-                path,
-            })
+            Some((
+                a.name.clone(),
+                a.mime.clone(),
+                format!("proj/{}/{file}", p.id),
+            ))
         })
         .collect();
-    if readable.is_empty() {
+    if items.is_empty() {
         return;
     }
+    let storage = Arc::clone(&app.storage);
     let store = Arc::clone(&p.store);
     let engine = Arc::clone(&p.engine);
     let work_dir = p.work_dir.clone();
     let (author, body) = (author.to_owned(), body.to_owned());
     tokio::spawn(async move {
-        let uc = AnalyzeAttachmentUseCase::new(store, engine, work_dir);
-        if let Err(e) = uc.execute(&author, &body, ticket, &readable).await {
-            tracing::warn!("attachment analysis failed: {e}");
+        let tmp = std::env::temp_dir().join(format!("cox-att-{}", mint_media_token()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let mut readable: Vec<ReadableAttachment> = Vec::new();
+        for (name, mime, key) in items {
+            let Ok(bytes) = storage.get(&key).await else {
+                continue;
+            };
+            let fname = key.rsplit('/').next().unwrap_or("file");
+            let path = tmp.join(fname);
+            if std::fs::write(&path, &bytes).is_ok() {
+                readable.push(ReadableAttachment { name, mime, path });
+            }
         }
+        if !readable.is_empty() {
+            let uc = AnalyzeAttachmentUseCase::new(store, engine, work_dir);
+            if let Err(e) = uc.execute(&author, &body, ticket, &readable).await {
+                tracing::warn!("attachment analysis failed: {e}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
     });
 }
 
@@ -1717,15 +1781,6 @@ async fn pr_action_ep(
     }
 }
 
-/// The per-project media directory (`<state_dir>/media`), created on demand.
-fn media_dir(p: &ProjectHandle) -> PathBuf {
-    let state_dir = p
-        .context_path
-        .parent()
-        .map_or_else(|| PathBuf::from("."), std::path::Path::to_path_buf);
-    state_dir.join("media")
-}
-
 /// Max upload size (bytes) — generous for images/docs, bounded to protect disk.
 const UPLOAD_MAX: usize = 25 * 1024 * 1024;
 
@@ -1737,12 +1792,8 @@ async fn upload_ep(
     Path(pid): Path<String>,
     mut multipart: axum::extract::Multipart,
 ) -> axum::response::Response {
-    let Some(p) = app.project(&pid).await else {
+    if app.project(&pid).await.is_none() {
         return not_found();
-    };
-    let dir = media_dir(&p);
-    if std::fs::create_dir_all(&dir).is_err() {
-        return internal_error("cannot create media dir");
     }
     let Ok(Some(field)) = multipart.next_field().await else {
         return (StatusCode::BAD_REQUEST, "no file").into_response();
@@ -1757,20 +1808,13 @@ async fn upload_ep(
         Ok(_) => return (StatusCode::PAYLOAD_TOO_LARGE, "file too large").into_response(),
         Err(_) => return (StatusCode::BAD_REQUEST, "read failed").into_response(),
     };
-    // Stored name: random prefix + a sanitized original (keeps the extension).
-    let safe: String = orig
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let token = mint_media_token();
-    let stored = format!("{token}-{safe}");
-    if std::fs::write(dir.join(&stored), &data).is_err() {
+    let stored = format!("{}-{}", mint_media_token(), sanitize_name(&orig));
+    if app
+        .storage
+        .put(&format!("proj/{pid}/{stored}"), &data, &mime)
+        .await
+        .is_err()
+    {
         return internal_error("write failed");
     }
     let att = serde_json::json!({
@@ -1800,14 +1844,13 @@ async fn media_ep(
     State(app): State<AppState>,
     Path((pid, file)): Path<(String, String)>,
 ) -> axum::response::Response {
-    let Some(p) = app.project(&pid).await else {
+    if app.project(&pid).await.is_none() {
         return not_found();
-    };
+    }
     if file.contains('/') || file.contains("..") {
         return (StatusCode::BAD_REQUEST, "bad name").into_response();
     }
-    let path = media_dir(&p).join(&file);
-    let Ok(bytes) = std::fs::read(&path) else {
+    let Ok(bytes) = app.storage.get(&format!("proj/{pid}/{file}")).await else {
         return not_found();
     };
     let mime = mime_of(&file);
@@ -2264,15 +2307,11 @@ async fn syschat_socket(mut socket: WebSocket, app: AppState, user: String) {
     }
 }
 
-/// Upload a file for system chat; stores it under the hub chat-media dir.
+/// Upload a file for system chat; stored via the blob store (disk or S3/MinIO).
 async fn syschat_upload_ep(
     State(app): State<AppState>,
     mut multipart: axum::extract::Multipart,
 ) -> axum::response::Response {
-    let dir = app.syschat.media_dir.clone();
-    if std::fs::create_dir_all(&dir).is_err() {
-        return internal_error("cannot create media dir");
-    }
     let Ok(Some(field)) = multipart.next_field().await else {
         return (StatusCode::BAD_REQUEST, "no file").into_response();
     };
@@ -2286,18 +2325,13 @@ async fn syschat_upload_ep(
         Ok(_) => return (StatusCode::PAYLOAD_TOO_LARGE, "file too large").into_response(),
         Err(_) => return (StatusCode::BAD_REQUEST, "read failed").into_response(),
     };
-    let safe: String = orig
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let stored = format!("{}-{safe}", mint_media_token());
-    if std::fs::write(dir.join(&stored), &data).is_err() {
+    let stored = format!("{}-{}", mint_media_token(), sanitize_name(&orig));
+    if app
+        .storage
+        .put(&format!("chat/{stored}"), &data, &mime)
+        .await
+        .is_err()
+    {
         return internal_error("write failed");
     }
     Json(serde_json::json!({
@@ -2309,7 +2343,7 @@ async fn syschat_upload_ep(
     .into_response()
 }
 
-/// Serve a system-chat media file (path-traversal guarded).
+/// Serve a system-chat media file from the blob store (path-traversal guarded).
 async fn syschat_media_ep(
     State(app): State<AppState>,
     Path(file): Path<String>,
@@ -2317,8 +2351,7 @@ async fn syschat_media_ep(
     if file.contains('/') || file.contains("..") {
         return (StatusCode::BAD_REQUEST, "bad name").into_response();
     }
-    let path = app.syschat.media_dir.join(&file);
-    let Ok(bytes) = std::fs::read(&path) else {
+    let Ok(bytes) = app.storage.get(&format!("chat/{file}")).await else {
         return not_found();
     };
     (
@@ -2329,6 +2362,19 @@ async fn syschat_media_ep(
         bytes,
     )
         .into_response()
+}
+
+/// Sanitize an original filename to a safe stored suffix (keeps the extension).
+fn sanitize_name(orig: &str) -> String {
+    orig.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// Max characters accepted in a single chat message.

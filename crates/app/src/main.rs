@@ -285,10 +285,23 @@ async fn serve_with_runner(
         tooling: detected_tooling(),
         // System chat + its media live alongside the project state.
         hub_dir: Some(state_dir.parent().unwrap_or(state_dir).to_path_buf()),
+        storage: build_storage().await,
         ..Default::default()
     };
     coxagent_presentation::serve_full(vec![project], port, audit, extras).await?;
     Ok(())
+}
+
+/// Blob storage backend: S3/MinIO when `COXAGENT_S3_*` is configured, else the
+/// presentation layer's local-disk default.
+async fn build_storage(
+) -> Option<std::sync::Arc<dyn coxagent_application::ports::outbound::StoragePort>> {
+    let s3 = coxagent_infrastructure::S3Storage::from_env()?;
+    match s3.ensure_bucket().await {
+        Ok(()) => tracing::info!("blob storage: S3/MinIO"),
+        Err(e) => tracing::warn!("S3 bucket check failed ({e}); uploads may fail"),
+    }
+    Some(std::sync::Arc::new(s3))
 }
 
 /// Engine CLIs found on PATH, as `(name, path)` for the dashboard.
@@ -402,6 +415,7 @@ async fn run_hub(registry: &Path, port: u16) -> Result<(), Box<dyn std::error::E
         analyzer,
         // System-wide chat lives at the hub root (next to the registry).
         hub_dir: Some(base.clone()),
+        storage: build_storage().await,
     };
     coxagent_presentation::serve_full(projects, port, audit, extras).await?;
     Ok(())

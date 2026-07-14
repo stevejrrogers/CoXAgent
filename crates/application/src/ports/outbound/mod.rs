@@ -7,6 +7,7 @@ pub mod forge;
 pub mod git;
 pub mod notify;
 pub mod state_store;
+pub mod storage;
 
 pub use audit::{AuditPort, AuditRecord};
 pub use deploy::{DeployPort, DeployReport};
@@ -15,3 +16,4 @@ pub use forge::{ForgePort, PullRequest};
 pub use git::{GitAuthor, GitPort};
 pub use notify::{NotifierPort, NotifyEvent, NullNotifier};
 pub use state_store::StateStorePort;
+pub use storage::StoragePort;

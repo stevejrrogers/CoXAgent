@@ -13,6 +13,7 @@ pub mod git;
 pub mod notifier;
 pub mod sql_auth;
 pub mod state;
+pub mod storage;
 pub mod totp;
 
 pub use audit_sink::{MemoryAuditSink, SqlAuditSink};
@@ -27,3 +28,4 @@ pub use git::SystemGit;
 pub use notifier::WebhookNotifier;
 pub use sql_auth::SqlAuthService;
 pub use state::{AnyStateStore, JsonStateStore, SqlStateStore};
+pub use storage::{LocalStorage, S3Storage};
