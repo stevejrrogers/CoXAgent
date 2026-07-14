@@ -208,6 +208,7 @@ pub async fn serve_full(
         .route("/api/auth/login", post(login_ep))
         .route("/api/auth/logout", post(logout_ep))
         .route("/api/auth/me", get(me_ep))
+        .route("/api/auth/sessions", get(sessions_ep))
         .route(
             "/api/auth/tokens",
             get(list_tokens_ep).post(create_token_ep),
@@ -1577,8 +1578,61 @@ struct LoginReq {
 }
 
 /// Verify credentials (and 2FA when enabled) and set an HttpOnly session cookie.
+/// Turn a User-Agent string into a friendly "Browser on OS" device label.
+fn device_label(ua: &str) -> String {
+    if ua.trim().is_empty() {
+        return "Unknown device".to_owned();
+    }
+    let browser = if ua.contains("Edg") {
+        "Edge"
+    } else if ua.contains("OPR") || ua.contains("Opera") {
+        "Opera"
+    } else if ua.contains("Chrome") {
+        "Chrome"
+    } else if ua.contains("Firefox") {
+        "Firefox"
+    } else if ua.contains("Safari") {
+        "Safari"
+    } else {
+        "Browser"
+    };
+    let os = if ua.contains("Windows") {
+        "Windows"
+    } else if ua.contains("iPhone") {
+        "iPhone"
+    } else if ua.contains("iPad") {
+        "iPad"
+    } else if ua.contains("Mac OS X") || ua.contains("Macintosh") {
+        "macOS"
+    } else if ua.contains("Android") {
+        "Android"
+    } else if ua.contains("Linux") {
+        "Linux"
+    } else {
+        "device"
+    };
+    format!("{browser} on {os}")
+}
+
+/// The signed-in user's active sessions (where they're logged in), for the
+/// "your devices" view. The caller's own session is flagged `current`.
+async fn sessions_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let Some(auth) = app.auth.clone() else {
+        return Json(serde_json::json!([])).into_response();
+    };
+    let Some(user) = resolve_principal(&auth, &headers).await else {
+        return (StatusCode::UNAUTHORIZED, "unauthenticated").into_response();
+    };
+    let token = cookie_value(&headers, SESSION_COOKIE).unwrap_or_default();
+    Json(auth.sessions_for(&user.username, &token).await).into_response()
+}
+
 async fn login_ep(
     State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<LoginReq>,
 ) -> axum::response::Response {
     use coxagent_application::LoginResult;
@@ -1589,7 +1643,15 @@ async fn login_ep(
         .login(&req.username, &req.password, req.totp.as_deref())
         .await
     {
-        LoginResult::Ok(token) => token,
+        LoginResult::Ok(token) => {
+            // Label the session with the device/browser from the User-Agent.
+            let ua = headers
+                .get(axum::http::header::USER_AGENT)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            auth.attach_device(&token, &device_label(ua)).await;
+            token
+        }
         LoginResult::TotpRequired => {
             // Password is correct; the client must supply a 2FA code next.
             return (

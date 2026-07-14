@@ -136,6 +136,17 @@
   .arole.viewer{background:var(--accentbg);color:var(--accent2)}
   .arow .adel{flex:none;background:transparent;border:none;color:var(--muted);cursor:pointer;padding:5px;border-radius:6px}
   .arow .adel:hover{color:var(--red);background:var(--card)}
+  .urow{align-items:flex-start}
+  .uprojrow{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px}
+  .uproj{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;background:var(--accentbg);color:var(--accent2);border-radius:7px;padding:3px 9px}
+  .uproj i{cursor:pointer;font-size:12px;opacity:.6}
+  .uproj i:hover{opacity:1;color:var(--red)}
+  .uproj.none,.uproj.all{background:var(--card2);color:var(--dim);font-weight:400}
+  .uprojadd{background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:7px;padding:3px 8px;font-size:11px;font-family:inherit;cursor:pointer}
+  .sessrow{display:flex;align-items:center;gap:11px;padding:8px 0;border-bottom:1px solid var(--border)}
+  .sessrow:last-child{border-bottom:none}
+  .sessic{flex:none;width:34px;height:34px;border-radius:9px;display:grid;place-items:center;background:var(--accentbg);color:var(--accent2);font-size:17px}
+  .sessname{font-size:13px;font-weight:600;display:flex;align-items:center;gap:8px}
   .dupwarn{display:flex;gap:10px;align-items:flex-start;background:color-mix(in srgb,var(--amber) 12%,transparent);border:1px solid color-mix(in srgb,var(--amber) 40%,transparent);border-radius:10px;padding:11px 14px;margin-bottom:12px;font-size:12.5px;color:var(--text)}
   .dupwarn i{color:var(--amber);font-size:16px;margin-top:1px}
   .dupwarn .tk{background:var(--card2);padding:1px 7px;border-radius:5px;font-family:ui-monospace,monospace;font-size:11px}
@@ -357,6 +368,7 @@ body:not(.admin) .admin-only { display: none !important; }
       <div class="view" id="view-team">
         <div class="kpis" id="team-summary"></div>
         <div id="team-dupwarn"></div>
+        <div id="team-sessions"></div>
         <div class="sec">Agents <span style="font-size:11px;color:var(--dim);font-weight:400">· your autonomous workers — click one to see its live log</span></div>
         <div class="agents" id="agents"></div>
         <div class="sec admin-only" style="margin-top:22px">People on this project <span style="font-size:11px;color:var(--dim);font-weight:400">· humans who oversee & collaborate</span></div>
@@ -825,6 +837,7 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
         <div class="agstats"><span title="actions"><i class="ti ti-bolt"></i> ${st.n}</span><span title="tickets touched"><i class="ti ti-ticket"></i> ${st.tk.size}</span>${cost>0?`<span title="cost"><i class="ti ti-coin"></i> ${money(cost)}</span>`:''}</div>
         <div class="st">${live?'<i class="ti ti-loader-2" style="font-size:13px"></i> working on ':'<i class="ti ti-point" style="font-size:13px"></i> last: '}${curHtml}</div></div></div>`;}).join("");
     renderDupWarn(s);
+    renderSessions();
     if(ME&&ME.role==="admin")renderTeamPeople();
   }else if(CUR==="board"){
     let feats=(s.tickets||[]).filter(t=>t.type!=="bug"),bugs=(s.tickets||[]).filter(t=>t.type==="bug");
@@ -1347,12 +1360,19 @@ function renderUsers(){
     list.innerHTML=rows.map(u=>{const admin=u.role==="admin";
       const grad=admin?"linear-gradient(135deg,var(--amber),#b45309)":"linear-gradient(135deg,var(--accent),var(--accent2))";
       const me=ME&&ME.username===u.username;
-      const np=(u.projects||[]).length;
-      return `<div class="arow"><div class="aav" style="background:${grad}">${esc((u.username||'?').slice(0,2).toUpperCase())}</div>
-        <div style="flex:1;min-width:0"><div class="aname">${esc(u.username)}${me?' <span style="font-size:10px;color:var(--dim);font-weight:400">· you</span>':''}</div>
-          <div class="ameta">${np?np+' project'+(np>1?'s':''):'no projects assigned'}${u.twofa?' · 2FA on':''}</div></div>
-        <span class="arole ${admin?'admin':'viewer'}">${esc(u.role)}</span>
-        ${me?'':`<button class="adel" onclick="deleteUser('${encodeURIComponent(u.username)}')" title="Remove"><i class="ti ti-trash"></i></button>`}</div>`;}).join("");
+      const un=encodeURIComponent(u.username);
+      const mine=u.projects||[];
+      // Admins implicitly see every project; viewers are scoped to assignments.
+      const chips=admin?'<span class="uproj all">all projects (admin)</span>'
+        :(mine.length?mine.map(pid=>{const p=PROJECTS.find(x=>x.id===pid);const nm=p?p.name:pid;
+            return `<span class="uproj">${esc(nm)}<i class="ti ti-x" title="Unassign" onclick="unassignUser('${esc(pid)}','${un}')"></i></span>`;}).join("")
+          :'<span class="uproj none">no projects</span>');
+      const avail=PROJECTS.filter(p=>!mine.includes(p.id));
+      const addSel=(!admin&&avail.length)?`<select class="uprojadd" onchange="if(this.value){assignUser(this.value,'${un}');this.value=''}"><option value="">＋ assign…</option>${avail.map(p=>`<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</select>`:'';
+      return `<div class="arow urow"><div class="aav" style="background:${grad}">${esc((u.username||'?').slice(0,2).toUpperCase())}</div>
+        <div style="flex:1;min-width:0"><div class="aname">${esc(u.username)}${me?' <span style="font-size:10px;color:var(--dim);font-weight:400">· you</span>':''}<span class="arole ${admin?'admin':'viewer'}" style="margin-left:8px">${esc(u.role)}</span>${u.twofa?' <span class="pbadge" style="background:color-mix(in srgb,var(--green) 16%,transparent);color:var(--green)">2FA</span>':''}</div>
+          <div class="uprojrow">${chips}${addSel}</div></div>
+        ${me?'':`<button class="adel" onclick="deleteUser('${un}')" title="Remove account"><i class="ti ti-trash"></i></button>`}</div>`;}).join("");
   }).catch(()=>{list.innerHTML='<div class="empty">unable to load users</div>';});
 }
 async function createUser(){
@@ -1370,6 +1390,8 @@ async function createUser(){
   }catch(e){err.textContent="Network error.";}
 }
 async function deleteUser(username){try{const r=await fetch("/api/auth/users/"+username,{method:"DELETE"});if(!r.ok)document.getElementById("usr-err").textContent=await r.text();renderUsers();}catch(e){}}
+async function assignUser(pid,username){try{await fetch("/api/projects/"+pid+"/members",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:decodeURIComponent(username)})});renderUsers();}catch(e){}}
+async function unassignUser(pid,username){try{await fetch("/api/projects/"+pid+"/members/"+username,{method:"DELETE"});renderUsers();}catch(e){}}
 function fmtBytes(n){return n<1024?n+" B":n<1048576?(n/1024).toFixed(1)+" KB":(n/1048576).toFixed(1)+" MB";}
 function renderTranscripts(){
   const el=document.getElementById("transcript-list");if(!el)return;
@@ -1381,23 +1403,37 @@ function renderTranscripts(){
         <div class="atx"><span class="who">${esc(t.name)}</span></div><span class="tm">${fmtBytes(t.size)}</span></div>`;}).join("");
   }).catch(()=>{el.innerHTML='<div class="empty">unable to load transcripts</div>';});
 }
+function deviceIcon(label){const l=(label||"").toLowerCase();
+  const os=l.includes("iphone")||l.includes("android")?"device-mobile":(l.includes("ipad")?"device-tablet":null);
+  if(os)return os;
+  if(l.includes("chrome"))return "brand-chrome";if(l.includes("firefox"))return "brand-firefox";
+  if(l.includes("safari"))return "brand-safari";if(l.includes("edge"))return "brand-edge";
+  return "device-desktop";}
+async function renderSessions(){
+  const el=document.getElementById("team-sessions");if(!el)return;
+  let ss=[];try{ss=await(await fetch("/api/auth/sessions")).json();}catch(e){}
+  if(!Array.isArray(ss)||!ss.length){el.innerHTML="";return;}
+  const rows=ss.map(x=>`<div class="sessrow">
+    <div class="sessic"><i class="ti ti-${deviceIcon(x.label)}"></i></div>
+    <div style="flex:1;min-width:0"><div class="sessname">${esc(x.label)}${x.current?' <span class="pbadge on">this device</span>':''}</div>
+      <div class="ameta">signed in ${relTime(x.at)}</div></div></div>`).join("");
+  el.innerHTML=`<div class="sec">Your devices <span style="font-size:11px;color:var(--dim);font-weight:400">· where <b style="color:var(--text)">${esc((ME&&ME.username)||'you')}</b> is signed in (${ss.length})</span></div>
+    <div class="panel"><div class="alist">${rows}</div>
+    <div style="font-size:11px;color:var(--dim);margin-top:8px">Agents run on the hub, so Start/Step/Pause from any of these controls the same loop.</div></div>`;
+}
 async function renderTeamPeople(){
   const el=document.getElementById("team-people");if(!el)return;
   let rows=[];try{rows=await(await fetch(api("/members"))).json();}catch(e){}
   if(!Array.isArray(rows)){el.innerHTML='<div class="empty">admin only</div>';return;}
-  const members=rows.filter(u=>u.assigned),available=rows.filter(u=>!u.assigned);
+  const members=rows.filter(u=>u.assigned);
   const isAdmin=r=>String(r).toLowerCase()==="admin";
+  // Read-only here — assignment now lives in Users.
   const memHtml=members.length?members.map(u=>{const grad=isAdmin(u.role)?"linear-gradient(135deg,var(--amber),#b45309)":"linear-gradient(135deg,var(--accent),var(--accent2))";
     return `<div class="arow"><div class="aav" style="background:${grad}">${esc((u.username||'?').slice(0,2).toUpperCase())}</div>
-      <div style="flex:1;min-width:0"><div class="aname">${esc(u.username)}</div><div class="ameta">assigned · <a onclick="nav('people')" style="color:var(--accent2);cursor:pointer">see their activity</a></div></div>
-      <span class="arole ${isAdmin(u.role)?'admin':'viewer'}">${esc(String(u.role).toLowerCase())}</span>
-      <button class="adel" onclick="unassignMember('${encodeURIComponent(u.username)}')" title="Remove from project"><i class="ti ti-user-minus"></i></button></div>`;}).join(""):'<div class="empty">no one assigned yet — add a teammate below</div>';
-  const addHtml=available.length?`<div class="ainvite" style="margin-top:12px">
-      <select id="member-add" class="sel" style="flex:1;min-width:160px">${available.map(u=>`<option value="${esc(u.username)}">${esc(u.username)} · ${esc(String(u.role).toLowerCase())}</option>`).join("")}</select>
-      <button class="pri" onclick="assignMember()"><i class="ti ti-user-plus"></i> Assign</button></div>
-      <div style="font-size:11px;color:var(--dim);margin-top:8px">Need a new account? Create it in <a onclick="nav('access')" style="color:var(--accent2);cursor:pointer">Access</a> first.</div>`
-    :'<div style="font-size:11px;color:var(--dim);margin-top:10px">Everyone is assigned. Create more accounts in <a onclick="nav(\'access\')" style="color:var(--accent2);cursor:pointer">Access</a>.</div>';
-  el.innerHTML=`<div class="alist">${memHtml}</div>${addHtml}`;
+      <div style="flex:1;min-width:0"><div class="aname">${esc(u.username)}</div><div class="ameta">on this project · <a onclick="nav('people')" style="color:var(--accent2);cursor:pointer">activity</a></div></div>
+      <span class="arole ${isAdmin(u.role)?'admin':'viewer'}">${esc(String(u.role).toLowerCase())}</span></div>`;}).join(""):'<div class="empty">no humans assigned yet</div>';
+  el.innerHTML=`<div class="alist">${memHtml}</div>
+    <div style="font-size:11px;color:var(--dim);margin-top:10px">Manage who works on which project in <a onclick="nav('access')" style="color:var(--accent2);cursor:pointer">Users</a>.</div>`;
 }
 async function assignMember(){const s=document.getElementById("member-add");if(!s||!s.value)return;
   try{await fetch(api("/members"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:s.value})});renderTeamPeople();}catch(e){}}

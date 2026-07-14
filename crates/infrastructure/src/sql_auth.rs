@@ -6,7 +6,9 @@
 use argon2::password_hash::{PasswordHash, PasswordVerifier};
 use argon2::Argon2;
 use async_trait::async_trait;
-use coxagent_application::auth::{AuthPort, AuthRole, AuthUser, LoginResult, TokenInfo};
+use coxagent_application::auth::{
+    AuthPort, AuthRole, AuthUser, LoginResult, SessionInfo, TokenInfo,
+};
 use deadpool_postgres::{Config, Pool, Runtime};
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -37,6 +39,8 @@ CREATE TABLE IF NOT EXISTS auth_tokens (
 struct Session {
     user: AuthUser,
     expires: Instant,
+    label: String,
+    at: String,
 }
 
 #[derive(Default)]
@@ -200,6 +204,8 @@ impl AuthPort for SqlAuthService {
                 projects: Vec::new(),
             },
             expires: Instant::now() + SESSION_TTL,
+            label: String::new(),
+            at: now_rfc3339(),
         };
         match self.sessions.lock() {
             Ok(mut s) => {
@@ -208,6 +214,36 @@ impl AuthPort for SqlAuthService {
             }
             Err(_) => LoginResult::Denied,
         }
+    }
+
+    async fn attach_device(&self, token: &str, device: &str) {
+        if let Ok(mut s) = self.sessions.lock() {
+            if let Some(sess) = s.get_mut(token) {
+                device.clone_into(&mut sess.label);
+            }
+        }
+    }
+
+    async fn sessions_for(&self, username: &str, current_token: &str) -> Vec<SessionInfo> {
+        let Ok(sessions) = self.sessions.lock() else {
+            return Vec::new();
+        };
+        let now = Instant::now();
+        let mut out: Vec<SessionInfo> = sessions
+            .iter()
+            .filter(|(_, s)| s.user.username == username && s.expires > now)
+            .map(|(tok, s)| SessionInfo {
+                label: if s.label.is_empty() {
+                    "Unknown device".to_owned()
+                } else {
+                    s.label.clone()
+                },
+                at: s.at.clone(),
+                current: tok == current_token,
+            })
+            .collect();
+        out.sort_by(|a, b| b.at.cmp(&a.at));
+        out
     }
 
     async fn user_for(&self, token: &str) -> Option<AuthUser> {

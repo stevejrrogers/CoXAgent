@@ -34,6 +34,17 @@ pub struct AuthUser {
     pub projects: Vec<String>,
 }
 
+/// One active browser/device session for a signed-in user.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionInfo {
+    /// Friendly device label, e.g. "Chrome on macOS".
+    pub label: String,
+    /// RFC3339 time the session was created.
+    pub at: String,
+    /// Whether this is the caller's own session.
+    pub current: bool,
+}
+
 /// Metadata about a minted API token (never the secret itself).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenInfo {
@@ -61,6 +72,16 @@ pub trait AuthPort: Send + Sync {
     /// Verify `username`/`password` (and `totp` when 2FA is enabled for the
     /// account). Returns a [`LoginResult`].
     async fn login(&self, username: &str, password: &str, totp: Option<&str>) -> LoginResult;
+
+    /// Attach a human device label (e.g. "Chrome on macOS") to a session token,
+    /// so a user can see where they're signed in. No-op if the token is unknown.
+    async fn attach_device(&self, _token: &str, _device: &str) {}
+
+    /// The active sessions for `username`, newest first — for the "your devices"
+    /// view. `current_token` is flagged as the caller's own session.
+    async fn sessions_for(&self, _username: &str, _current_token: &str) -> Vec<SessionInfo> {
+        Vec::new()
+    }
 
     /// Resolve a session token to its principal, or `None` if invalid/expired.
     async fn user_for(&self, token: &str) -> Option<AuthUser>;

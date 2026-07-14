@@ -6,7 +6,9 @@ use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
 use async_trait::async_trait;
-use coxagent_application::auth::{AuthPort, AuthRole, AuthUser, LoginResult, TokenInfo};
+use coxagent_application::auth::{
+    AuthPort, AuthRole, AuthUser, LoginResult, SessionInfo, TokenInfo,
+};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -58,6 +60,10 @@ struct UserFile {
 struct Session {
     user: AuthUser,
     expires: Instant,
+    /// Human device label ("Chrome on macOS"); empty until `attach_device`.
+    label: String,
+    /// RFC3339 login time.
+    at: String,
 }
 
 /// Failed-login tracking for one account (brute-force throttle).
@@ -276,6 +282,8 @@ impl AuthPort for FileAuthService {
                 projects: Vec::new(),
             },
             expires: Instant::now() + SESSION_TTL,
+            label: String::new(),
+            at: now_rfc3339(),
         };
         match self.sessions.lock() {
             Ok(mut s) => {
@@ -300,6 +308,36 @@ impl AuthPort for FileAuthService {
         if let Ok(mut sessions) = self.sessions.lock() {
             sessions.remove(token);
         }
+    }
+
+    async fn attach_device(&self, token: &str, device: &str) {
+        if let Ok(mut sessions) = self.sessions.lock() {
+            if let Some(s) = sessions.get_mut(token) {
+                device.clone_into(&mut s.label);
+            }
+        }
+    }
+
+    async fn sessions_for(&self, username: &str, current_token: &str) -> Vec<SessionInfo> {
+        let Ok(sessions) = self.sessions.lock() else {
+            return Vec::new();
+        };
+        let now = Instant::now();
+        let mut out: Vec<SessionInfo> = sessions
+            .iter()
+            .filter(|(_, s)| s.user.username == username && s.expires > now)
+            .map(|(tok, s)| SessionInfo {
+                label: if s.label.is_empty() {
+                    "Unknown device".to_owned()
+                } else {
+                    s.label.clone()
+                },
+                at: s.at.clone(),
+                current: tok == current_token,
+            })
+            .collect();
+        out.sort_by(|a, b| b.at.cmp(&a.at));
+        out
     }
 
     async fn principal_for_bearer(&self, token: &str) -> Option<AuthUser> {
