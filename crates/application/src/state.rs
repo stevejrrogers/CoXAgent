@@ -37,6 +37,19 @@ pub const MAX_ACTIVITY: usize = 60;
 
 /// One message on a discussion thread — an agent or the user commenting on a
 /// ticket (`ticket = Some`) or on the team channel (`ticket = None`). This is
+/// A file or image attached to a chat message or discussion comment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attachment {
+    /// Original filename shown to the user.
+    pub name: String,
+    /// Path to fetch it, e.g. `/api/projects/<pid>/media/<stored>`.
+    pub url: String,
+    /// MIME type (e.g. `image/png`), used to render images inline.
+    pub mime: String,
+    /// Size in bytes.
+    pub size: u64,
+}
+
 /// the teamwork surface the original workflow lacked.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Comment {
@@ -46,6 +59,9 @@ pub struct Comment {
     pub body: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ticket: Option<String>,
+    /// Files/images attached to the comment.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
 }
 
 /// Keep discussion threads bounded per project.
@@ -60,6 +76,9 @@ pub struct ChatMsg {
     /// The authenticated username of the sender.
     pub user: String,
     pub body: String,
+    /// Files/images attached to the message.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
 }
 
 /// Keep the team chat bounded per project.
@@ -243,11 +262,23 @@ impl ProjectState {
 
     /// Post a comment to a discussion thread, trimming to [`MAX_COMMENTS`].
     pub fn post_comment(&mut self, author: &str, body: &str, ticket: Option<String>) {
+        self.post_comment_att(author, body, ticket, Vec::new());
+    }
+
+    /// Post a comment with attachments.
+    pub fn post_comment_att(
+        &mut self,
+        author: &str,
+        body: &str,
+        ticket: Option<String>,
+        attachments: Vec<Attachment>,
+    ) {
         self.comments.push(Comment {
             at: now_rfc3339(),
             author: author.to_owned(),
             body: body.to_owned(),
             ticket,
+            attachments,
         });
         let overflow = self.comments.len().saturating_sub(MAX_COMMENTS);
         if overflow > 0 {
@@ -258,10 +289,16 @@ impl ProjectState {
     /// Append a team-chat message from `user`, trimming the oldest beyond
     /// [`MAX_CHAT`].
     pub fn post_chat(&mut self, user: &str, body: &str) {
+        self.post_chat_att(user, body, Vec::new());
+    }
+
+    /// Append a team-chat message with attachments.
+    pub fn post_chat_att(&mut self, user: &str, body: &str, attachments: Vec<Attachment>) {
         self.chat.push(ChatMsg {
             at: now_rfc3339(),
             user: user.to_owned(),
             body: body.to_owned(),
+            attachments,
         });
         let overflow = self.chat.len().saturating_sub(MAX_CHAT);
         if overflow > 0 {

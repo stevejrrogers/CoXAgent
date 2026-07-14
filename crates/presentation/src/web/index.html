@@ -217,6 +217,29 @@
   .tcmsg.grp .tcbub{border-radius:12px}
   .tcmsg.mine .tcbub{background:var(--accent);border-color:transparent;color:#fff;border-radius:12px 4px 12px 12px}
   .tcmsg.mine.grp .tcbub{border-radius:12px}
+  /* Attachments — compose strip + in-message rendering (chat + discussion) */
+  .composewrap{display:flex;flex-direction:column;gap:0}
+  .att-strip{display:none;flex-wrap:wrap;gap:6px;padding:8px 8px 0}
+  .att-chip{display:inline-flex;align-items:center;gap:6px;max-width:220px;padding:4px 8px;background:var(--card2);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--text)}
+  .att-chip.up{opacity:.6}
+  .att-chip img{width:24px;height:24px;border-radius:4px;object-fit:cover;flex:none}
+  .att-chip .att-nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .att-chip .att-rm{cursor:pointer;color:var(--muted);flex:none}
+  .att-chip .att-rm:hover{color:var(--red)}
+  .att-spin{animation:spin 1s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .att-btn{background:transparent;border:none;color:var(--muted);cursor:pointer;font-size:17px;padding:0 8px;display:flex;align-items:center}
+  .att-btn:hover{color:var(--accent)}
+  .dropping{outline:2px dashed var(--accent);outline-offset:-4px;background:var(--accent)08}
+  .msg-att{display:flex;flex-direction:column;gap:6px;margin-top:5px}
+  .msg-img{display:inline-block;max-width:260px;border-radius:8px;overflow:hidden;border:1px solid var(--border)}
+  .msg-img img{display:block;max-width:100%;max-height:280px;object-fit:cover}
+  .msg-file{display:inline-flex;align-items:center;gap:8px;padding:7px 11px;background:var(--card2);border:1px solid var(--border);border-radius:8px;font-size:12.5px;color:var(--text);text-decoration:none;max-width:280px}
+  .msg-file:hover{border-color:var(--accent)}
+  .msg-file i{color:var(--accent2);font-size:15px}
+  .msg-file span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .msg-file em{color:var(--muted);font-style:normal;flex:none;margin-left:auto}
+  .tcmsg.mine .msg-file,.cmsg.mine .msg-file{background:rgba(255,255,255,.15);border-color:transparent;color:#fff}
   /* View transition */
   .view.on{animation:viewin .22s ease}
   @keyframes viewin{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
@@ -781,10 +804,15 @@ body:not(.admin) .admin-only { display: none !important; }
             <button class="ticket-actions chatstart" onclick="runStandup(this)" title="SM posts a status roundup pulling every agent in — free, no engine cost"><i class="ti ti-clipboard-check"></i> Standup</button>
             <button class="ticket-actions chatstart" onclick="startDiscussion()"><i class="ti ti-users-group"></i> <span id="disc-run-label">Agent discussion</span></button>
           </div>
-          <div id="disc-thread" class="chatbody"></div>
-          <div class="chatcompose">
-            <input id="disc-input" placeholder="Message the team…  (Enter to send)" onkeydown="if(event.key==='Enter')sendComment()">
-            <button class="pri" onclick="sendComment()"><i class="ti ti-send"></i></button>
+          <div id="disc-thread" class="chatbody" ondragover="event.preventDefault();this.classList.add('dropping')" ondragleave="this.classList.remove('dropping')" ondrop="dropFiles('disc',event)"></div>
+          <div class="composewrap">
+            <div class="att-strip" id="disc-att"></div>
+            <div class="chatcompose">
+              <input type="file" id="disc-file" multiple hidden onchange="pickFiles('disc',this)">
+              <button class="att-btn" onclick="document.getElementById('disc-file').click()" title="Attach files"><i class="ti ti-paperclip"></i></button>
+              <input id="disc-input" placeholder="Message the team…  (Enter to send)" onkeydown="if(event.key==='Enter')sendComment()">
+              <button class="pri" onclick="sendComment()"><i class="ti ti-send"></i></button>
+            </div>
           </div>
         </div>
       </div>
@@ -793,10 +821,15 @@ body:not(.admin) .admin-only { display: none !important; }
           <div class="chathead">
             <div class="chatchan"><span class="chatdot" style="background:var(--accent2)"></span><div><div class="chattitle">Team chat</div><div class="chatsub" id="chat-sub">the people on this project — humans only</div></div></div>
           </div>
-          <div id="chat-msgs" class="chatbody chatmsgs"></div>
-          <div class="chatcompose">
-            <input id="chat-input" placeholder="Message your teammates…  (Enter to send)" onkeydown="if(event.key==='Enter')sendChat()">
-            <button class="pri" onclick="sendChat()"><i class="ti ti-send"></i></button>
+          <div id="chat-msgs" class="chatbody chatmsgs" ondragover="event.preventDefault();this.classList.add('dropping')" ondragleave="this.classList.remove('dropping')" ondrop="dropFiles('chat',event)"></div>
+          <div class="composewrap">
+            <div class="att-strip" id="chat-att"></div>
+            <div class="chatcompose">
+              <input type="file" id="chat-file" multiple hidden onchange="pickFiles('chat',this)">
+              <button class="att-btn" onclick="document.getElementById('chat-file').click()" title="Attach files"><i class="ti ti-paperclip"></i></button>
+              <input id="chat-input" placeholder="Message your teammates…  (Enter to send)" onkeydown="if(event.key==='Enter')sendChat()">
+              <button class="pri" onclick="sendChat()"><i class="ti ti-send"></i></button>
+            </div>
           </div>
         </div>
       </div>
@@ -1360,7 +1393,7 @@ function renderDiscuss(){
     return `${sep}<div class="cmsg${mine?' mine':''}">
       <div class="cav" style="background:${col}22;color:${col}">${esc(initials(c.author))}</div>
       <div class="ccol"><div class="chead"><b>${esc(c.author)}</b>${badge}${tick}<span class="ctime">${esc(time)}</span></div>
-        <div class="cbub">${esc(c.body)}</div></div></div>`;}).join("");
+        ${c.body?`<div class="cbub">${esc(c.body)}</div>`:''}${attHtml(c.attachments)}</div></div>`;}).join("");
   if(atBottom)box.scrollTop=box.scrollHeight;
 }
 // Classify SM/DEPLOY scrum notifications so they render as a timeline event
@@ -1399,10 +1432,12 @@ async function startDiscussion(){
   }catch(e){alert("Network error.");}
   lbl.textContent="Start agent discussion";
 }
-function sendComment(){const inp=document.getElementById("disc-input");const body=inp.value.trim();if(!body)return;
+function sendComment(){const inp=document.getElementById("disc-input");const body=inp.value.trim();
+  const attachments=(ATT.disc||[]).slice();
+  if(!body&&!attachments.length)return;
   const ticket=document.getElementById("disc-filter").value||null;
-  inp.value="";
-  fetch(api("/comments"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({body,ticket})})
+  inp.value="";ATT.disc=[];renderAttStrip("disc");
+  fetch(api("/comments"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({body,ticket,attachments})})
     .catch(()=>{});}
 // ── Team chat (human-to-human channel, live over WebSocket) ─────────────────
 let CHAT=[], CHATWS=null, CHATWS_PID=null, chatwsRetry=null;
@@ -1457,23 +1492,56 @@ function renderChatList(force){
     const mine=m.user===me;
     const grouped=m.user===lastUser;lastUser=m.user;
     const col=userColor(m.user);
+    const bodyH=m.body?`<div class="tcbub" title="${esc(m.user)} · ${esc(time)}">${esc(m.body)}</div>`:'';
     html+=`<div class="tcmsg${mine?' mine':''}${grouped?' grp':''}">
       ${mine||grouped?'<div class="tcav-sp"></div>':`<div class="tcav" style="background:${col}22;color:${col}">${esc((m.user||"?").slice(0,2).toUpperCase())}</div>`}
       <div class="tccol">${grouped?'':`<div class="tchead"><b>${mine?"You":esc(m.user)}</b><span class="tctime">${esc(time)}</span></div>`}
-        <div class="tcbub" title="${esc(m.user)} · ${esc(time)}">${esc(m.body)}</div></div></div>`;});
+        ${bodyH}${attHtml(m.attachments)}</div></div>`;});
   box.innerHTML=html;
   if(atBottom)box.scrollTop=box.scrollHeight;
 }
 // Deterministic per-user accent so each teammate keeps a stable bubble color.
 function userColor(u){const pal=["#38bdf8","#a78bfa","#f472b6","#34d399","#fbbf24","#fb7185","#60a5fa","#c084fc"];
   let h=0;for(let i=0;i<(u||"").length;i++)h=(h*31+u.charCodeAt(i))>>>0;return pal[h%pal.length];}
-function sendChat(){const inp=document.getElementById("chat-input");const body=inp.value.trim();if(!body)return;
-  inp.value="";
+function sendChat(){const inp=document.getElementById("chat-input");const body=inp.value.trim();
+  const attachments=(ATT.chat||[]).slice();
+  if(!body&&!attachments.length)return;
+  inp.value="";ATT.chat=[];renderAttStrip("chat");
   // Prefer the live socket; the server echoes the canonical message straight
   // back over WS (so no optimistic insert). Fall back to REST if the socket
   // isn't open — SSE-independent, still persisted server-side.
-  if(CHATWS&&CHATWS.readyState===1){CHATWS.send(JSON.stringify({body}));}
-  else{fetch(api("/chat"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({body})}).then(loadChatHistory).catch(()=>{});}}
+  if(CHATWS&&CHATWS.readyState===1){CHATWS.send(JSON.stringify({body,attachments}));}
+  else{fetch(api("/chat"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({body,attachments})}).then(loadChatHistory).catch(()=>{});}}
+// ── Shared attachment upload + rendering (chat + discussion) ────────────────
+let ATT={chat:[],disc:[]};
+async function uploadOne(file){const fd=new FormData();fd.append("file",file);
+  const r=await fetch(api("/upload"),{method:"POST",body:fd});
+  if(!r.ok)throw new Error(await r.text()||"upload failed");
+  return await r.json();}
+function pickFiles(surface,input){handleFiles(surface,[...input.files]);input.value="";}
+function dropFiles(surface,ev){ev.preventDefault();ev.currentTarget.classList.remove("dropping");
+  handleFiles(surface,[...(ev.dataTransfer.files||[])]);}
+async function handleFiles(surface,files){
+  for(const f of files){
+    if(f.size>25*1024*1024){toasty(f.name+" too large (max 25MB)","err");continue;}
+    const placeholder={name:f.name,uploading:true};ATT[surface]=ATT[surface]||[];ATT[surface].push(placeholder);renderAttStrip(surface);
+    try{const att=await uploadOne(f);const i=ATT[surface].indexOf(placeholder);if(i>=0)ATT[surface][i]=att;else ATT[surface].push(att);}
+    catch(e){const i=ATT[surface].indexOf(placeholder);if(i>=0)ATT[surface].splice(i,1);toasty("Upload failed: "+f.name,"err");}
+    renderAttStrip(surface);
+  }
+}
+function removeAtt(surface,idx){ATT[surface].splice(idx,1);renderAttStrip(surface);}
+function renderAttStrip(surface){const el=document.getElementById(surface+"-att");if(!el)return;
+  const a=ATT[surface]||[];el.innerHTML=a.map((x,i)=>`<div class="att-chip${x.uploading?' up':''}">
+    ${x.mime&&x.mime.startsWith("image/")?`<img src="${esc(x.url)}">`:`<i class="ti ti-file"></i>`}
+    <span class="att-nm">${esc(x.name)}</span>${x.uploading?'<i class="ti ti-loader-2 att-spin"></i>':`<i class="ti ti-x att-rm" onclick="removeAtt('${surface}',${i})"></i>`}</div>`).join("");
+  el.style.display=a.length?"flex":"none";}
+// Render a message's attachments: images inline (click to open), files as chips.
+function attHtml(atts){if(!atts||!atts.length)return"";
+  return `<div class="msg-att">`+atts.map(a=>{
+    if(a.mime&&a.mime.startsWith("image/"))return `<a href="${esc(a.url)}" target="_blank" rel="noopener" class="msg-img"><img src="${esc(a.url)}" alt="${esc(a.name)}" loading="lazy"></a>`;
+    return `<a href="${esc(a.url)}" target="_blank" rel="noopener" download class="msg-file"><i class="ti ti-file-download"></i> <span>${esc(a.name)}</span> <em>${fmtBytes(a.size||0)}</em></a>`;
+  }).join("")+`</div>`;}
 function render(s){STATE=s;renderSidebar(s);renderActive();if(CUR==="chat")mergeChat(s.chat);}
 function depChips(ids){
   if(!ids||!ids.length)return '<span style="color:var(--dim)">—</span>';

@@ -194,13 +194,19 @@ impl AppState {
 /// per-project `write_lock` serializes the load→append→save so concurrent
 /// senders can't lose each other's messages. Returns `false` if persistence
 /// fails. `body` must already be validated (non-empty, length-capped).
-async fn deliver_chat(app: &AppState, p: &ProjectHandle, user: &str, body: &str) -> bool {
+async fn deliver_chat(
+    app: &AppState,
+    p: &ProjectHandle,
+    user: &str,
+    body: &str,
+    attachments: Vec<coxagent_application::Attachment>,
+) -> bool {
     let ch = app.chat_channel(&p.id).await;
     let _guard = ch.write_lock.lock().await;
     let Ok(mut state) = p.store.load().await else {
         return false;
     };
-    state.post_chat(user, body);
+    state.post_chat_att(user, body, attachments);
     let msg = state.chat.last().cloned();
     if p.store.save(&state).await.is_err() {
         return false;
@@ -339,6 +345,8 @@ pub async fn serve_full(
             get(chat_list_ep).post(chat_post_ep),
         )
         .route("/api/projects/:pid/chat/ws", get(chat_ws_ep))
+        .route("/api/projects/:pid/upload", post(upload_ep))
+        .route("/api/projects/:pid/media/:file", get(media_ep))
         .route(
             "/api/projects/:pid/context",
             get(context_ep).post(context_update_ep),
@@ -1166,6 +1174,8 @@ struct PostCommentReq {
     body: String,
     #[serde(default)]
     ticket: Option<String>,
+    #[serde(default)]
+    attachments: Vec<coxagent_application::Attachment>,
 }
 
 /// Post a comment (as the user) to a ticket thread or the team channel.
@@ -1178,13 +1188,13 @@ async fn post_comment(
         return not_found();
     };
     let body = req.body.trim();
-    if body.is_empty() {
+    if body.is_empty() && req.attachments.is_empty() {
         return (axum::http::StatusCode::BAD_REQUEST, "empty comment").into_response();
     }
     let Ok(mut state) = p.store.load().await else {
         return internal_error("load failed");
     };
-    state.post_comment("USER", body, req.ticket);
+    state.post_comment_att("USER", body, req.ticket, req.attachments);
     match p.store.save(&state).await {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => internal_error(&e.to_string()),
@@ -1206,6 +1216,8 @@ async fn chat_list_ep(
 #[derive(serde::Deserialize)]
 struct PostChatReq {
     body: String,
+    #[serde(default)]
+    attachments: Vec<coxagent_application::Attachment>,
 }
 
 /// Post a team-chat message as the signed-in user. Any authenticated principal
@@ -1221,7 +1233,7 @@ async fn chat_post_ep(
         return not_found();
     };
     let body = req.body.trim();
-    if body.is_empty() {
+    if body.is_empty() && req.attachments.is_empty() {
         return (axum::http::StatusCode::BAD_REQUEST, "empty message").into_response();
     }
     if body.chars().count() > 2000 {
@@ -1237,7 +1249,7 @@ async fn chat_post_ep(
             .map_or_else(|| "user".to_owned(), |u| u.username),
         None => "user".to_owned(),
     };
-    if deliver_chat(&app, &p, &user, body).await {
+    if deliver_chat(&app, &p, &user, body, req.attachments).await {
         Json(serde_json::json!({ "ok": true })).into_response()
     } else {
         internal_error("chat save failed")
@@ -1415,6 +1427,125 @@ async fn pr_action_ep(
     }
 }
 
+/// The per-project media directory (`<state_dir>/media`), created on demand.
+fn media_dir(p: &ProjectHandle) -> PathBuf {
+    let state_dir = p
+        .context_path
+        .parent()
+        .map_or_else(|| PathBuf::from("."), std::path::Path::to_path_buf);
+    state_dir.join("media")
+}
+
+/// Max upload size (bytes) — generous for images/docs, bounded to protect disk.
+const UPLOAD_MAX: usize = 25 * 1024 * 1024;
+
+/// Accept a multipart file upload, store it under the project's media dir, and
+/// return an [`coxagent_application::Attachment`] the client attaches to a
+/// chat/discussion message. Any signed-in user may upload (same as chat).
+async fn upload_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    mut multipart: axum::extract::Multipart,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let dir = media_dir(&p);
+    if std::fs::create_dir_all(&dir).is_err() {
+        return internal_error("cannot create media dir");
+    }
+    let Ok(Some(field)) = multipart.next_field().await else {
+        return (StatusCode::BAD_REQUEST, "no file").into_response();
+    };
+    let orig = field.file_name().unwrap_or("file").to_owned();
+    let mime = field
+        .content_type()
+        .unwrap_or("application/octet-stream")
+        .to_owned();
+    let data = match field.bytes().await {
+        Ok(b) if b.len() <= UPLOAD_MAX => b,
+        Ok(_) => return (StatusCode::PAYLOAD_TOO_LARGE, "file too large").into_response(),
+        Err(_) => return (StatusCode::BAD_REQUEST, "read failed").into_response(),
+    };
+    // Stored name: random prefix + a sanitized original (keeps the extension).
+    let safe: String = orig
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let token = mint_media_token();
+    let stored = format!("{token}-{safe}");
+    if std::fs::write(dir.join(&stored), &data).is_err() {
+        return internal_error("write failed");
+    }
+    let att = serde_json::json!({
+        "name": orig,
+        "url": format!("/api/projects/{pid}/media/{stored}"),
+        "mime": mime,
+        "size": data.len(),
+    });
+    Json(att).into_response()
+}
+
+/// A collision-free token for stored media filenames (nanos + a counter).
+fn mint_media_token() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("{nanos:x}{seq:x}")
+}
+
+/// Serve an uploaded media file. The filename is a single path segment; a guard
+/// rejects any traversal, so only files inside the project's media dir are read.
+async fn media_ep(
+    State(app): State<AppState>,
+    Path((pid, file)): Path<(String, String)>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    if file.contains('/') || file.contains("..") {
+        return (StatusCode::BAD_REQUEST, "bad name").into_response();
+    }
+    let path = media_dir(&p).join(&file);
+    let Ok(bytes) = std::fs::read(&path) else {
+        return not_found();
+    };
+    let mime = mime_of(&file);
+    (
+        [
+            (header::CONTENT_TYPE, mime),
+            (header::CACHE_CONTROL, "private, max-age=31536000"),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
+/// Best-effort MIME from a file extension (for serving uploads).
+fn mime_of(name: &str) -> &'static str {
+    match name.rsplit('.').next().map(str::to_lowercase).as_deref() {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        Some("pdf") => "application/pdf",
+        Some("txt" | "log" | "md") => "text/plain; charset=utf-8",
+        Some("json") => "application/json",
+        _ => "application/octet-stream",
+    }
+}
+
 /// Max characters accepted in a single chat message.
 const CHAT_MAX_CHARS: usize = 2000;
 /// Sliding-window rate limit for a single WebSocket: at most this many messages
@@ -1506,13 +1637,19 @@ async fn chat_socket(
                     Message::Close(_) => break,
                     _ => continue, // ignore binary/ping/pong
                 };
-                // Accept either a raw string or {"body": "..."}.
-                let body = serde_json::from_str::<serde_json::Value>(&text)
-                    .ok()
+                // Accept a raw string or {"body": "...", "attachments": [...]}.
+                let parsed = serde_json::from_str::<serde_json::Value>(&text).ok();
+                let body = parsed
+                    .as_ref()
                     .and_then(|v| v.get("body").and_then(|b| b.as_str()).map(str::to_owned))
-                    .unwrap_or(text);
+                    .unwrap_or_else(|| text.clone());
+                let attachments: Vec<coxagent_application::Attachment> = parsed
+                    .as_ref()
+                    .and_then(|v| v.get("attachments").cloned())
+                    .and_then(|a| serde_json::from_value(a).ok())
+                    .unwrap_or_default();
                 let body = body.trim();
-                if body.is_empty() || body.chars().count() > CHAT_MAX_CHARS {
+                if (body.is_empty() && attachments.is_empty()) || body.chars().count() > CHAT_MAX_CHARS {
                     continue;
                 }
                 let now = std::time::Instant::now();
@@ -1523,7 +1660,7 @@ async fn chat_socket(
                     continue; // silently drop; client is flooding
                 }
                 recv_times.push_back(now);
-                deliver_chat(&app, &p, &user, body).await;
+                deliver_chat(&app, &p, &user, body, attachments).await;
             }
         }
     }
@@ -1895,7 +2032,8 @@ async fn auth_mw(
             | axum::http::Method::PATCH
     ) && path != "/api/auth/logout"
         && !path.starts_with("/api/auth/2fa/") // self-service, any signed-in user
-        && !path.ends_with("/chat"); // team chat is open to any signed-in user
+        && !path.ends_with("/chat") // team chat is open to any signed-in user
+        && !path.ends_with("/upload"); // uploads are open to any signed-in user
     let method = req.method().clone();
     let username = user.username.clone();
     // PR review actions (merge / request-changes / close) are allowed for

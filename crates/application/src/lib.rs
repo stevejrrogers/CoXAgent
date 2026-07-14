@@ -24,5 +24,6 @@ pub use config::{
 };
 pub use error::{AppError, PortError};
 pub use state::{
-    ChatMsg, Comment, DesignSystem, Milestone, ProjectState, Spend, Sprint, SCHEMA_VERSION,
+    Attachment, ChatMsg, Comment, DesignSystem, Milestone, ProjectState, Spend, Sprint,
+    SCHEMA_VERSION,
 };
