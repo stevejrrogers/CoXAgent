@@ -838,7 +838,7 @@ body:not(.manage) .manage-only { display: none !important; }
       <div class="view" id="view-chat">
         <div class="chatlayout">
           <div class="chanrail">
-            <div class="chanrail-hd"><span>Channels</span><div class="chanrail-actions"><button class="chanadd" id="notif-toggle" onclick="toggleNotifs()" title="Enable desktop notifications"><i class="ti ti-bell"></i></button><button class="chanadd" onclick="createChannel()" title="Create channel"><i class="ti ti-plus"></i></button></div></div>
+            <div class="chanrail-hd"><span>Channels</span><div class="chanrail-actions"><button class="chanadd" id="notif-toggle" onclick="toggleNotifs()" title="Enable desktop notifications"><i class="ti ti-bell"></i></button><button class="chanadd manage-only" onclick="createChannel()" title="Create channel (leads & admins)"><i class="ti ti-plus"></i></button></div></div>
             <div class="chanlist" id="chan-list"></div>
           </div>
           <div class="chatwrap">
@@ -1477,7 +1477,7 @@ function openChat(){
   openChatWS();
   setTimeout(()=>{const i=document.getElementById("chat-input");if(i)i.focus();},40);}
 async function loadChannels(){
-  try{CHANNELS=await(await fetch(api("/channels"))).json();}catch(e){CHANNELS=[{id:"general",name:"general",owner:""}];}
+  try{CHANNELS=await(await fetch("/api/chat/channels")).json();}catch(e){CHANNELS=[{id:"general",name:"general",owner:""}];}
   if(!CHANNELS.some(c=>c.id===CURCHAN))CURCHAN="general";
   renderChannels();
 }
@@ -1510,7 +1510,7 @@ function selectChannel(id){
 }
 async function loadChatHistory(){
   const chan=CURCHAN;
-  try{CHAT=await(await fetch(api("/chat?channel="+encodeURIComponent(chan)))).json();}catch(e){CHAT=[];}
+  try{CHAT=await(await fetch("/api/chat/messages?channel="+encodeURIComponent(chan))).json();}catch(e){CHAT=[];}
   if(chan!==CURCHAN)return; // channel switched mid-flight
   CHAT.forEach(markSeen); // history is not "new" — don't notify for it
   renderChatList(true);
@@ -1519,7 +1519,7 @@ async function createChannel(){
   const name=prompt("New channel name (e.g. design-review):");
   if(!name||!name.trim())return;
   try{
-    const r=await fetch(api("/channels"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:name.trim()})});
+    const r=await fetch("/api/chat/channels",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:name.trim()})});
     if(!r.ok){toasty(await r.text()||"could not create channel","err");return;}
     const ch=await r.json();
     await loadChannels();
@@ -1533,7 +1533,7 @@ async function inviteToChannel(){
   let user=who.trim(),delegate=false;
   if(/\+invite\s*$/i.test(user)){delegate=true;user=user.replace(/\+invite\s*$/i,"").trim();}
   try{
-    const r=await fetch(api("/channels/"+encodeURIComponent(CURCHAN)+"/invite"),
+    const r=await fetch("/api/chat/channels/"+encodeURIComponent(CURCHAN)+"/invite",
       {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({user,delegate})});
     if(!r.ok){toasty(await r.text()||"could not invite","err");return;}
     await loadChannels();selectChannel(CURCHAN);
@@ -1669,7 +1669,7 @@ function openChatWS(){
   closeChatWS();
   const proto=location.protocol==="https:"?"wss":"ws";
   const pid=PID;CHATWS_PID=pid;
-  let ws;try{ws=new WebSocket(`${proto}://${location.host}/api/projects/${encodeURIComponent(pid)}/chat/ws`);}catch(e){return;}
+  let ws;try{ws=new WebSocket(`${proto}://${location.host}/api/chat/ws`);}catch(e){return;}
   CHATWS=ws;
   ws.onmessage=e=>{try{const m=JSON.parse(e.data);
     // The socket only carries channels this user may see (enforced server-side).
@@ -1717,11 +1717,13 @@ function sendChat(){const inp=document.getElementById("chat-input");const body=i
   // isn't open — SSE-independent, still persisted server-side.
   const channel=CURCHAN;
   if(CHATWS&&CHATWS.readyState===1){CHATWS.send(JSON.stringify({body,channel,attachments}));}
-  else{fetch(api("/chat"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({body,channel,attachments})}).then(loadChatHistory).catch(()=>{});}}
+  else{fetch("/api/chat/send",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({body,channel,attachments})}).then(loadChatHistory).catch(()=>{});}}
 // ── Shared attachment upload + rendering (chat + discussion) ────────────────
 let ATT={chat:[],disc:[]};
-async function uploadOne(file){const fd=new FormData();fd.append("file",file);
-  const r=await fetch(api("/upload"),{method:"POST",body:fd});
+async function uploadOne(file,surface){const fd=new FormData();fd.append("file",file);
+  // Chat is hub-wide (system media); discussion uploads stay per-project.
+  const url=surface==="chat"?"/api/chat/upload":api("/upload");
+  const r=await fetch(url,{method:"POST",body:fd});
   if(!r.ok)throw new Error(await r.text()||"upload failed");
   return await r.json();}
 function pickFiles(surface,input){handleFiles(surface,[...input.files]);input.value="";}
@@ -1731,7 +1733,7 @@ async function handleFiles(surface,files){
   for(const f of files){
     if(f.size>25*1024*1024){toasty(f.name+" too large (max 25MB)","err");continue;}
     const placeholder={name:f.name,uploading:true};ATT[surface]=ATT[surface]||[];ATT[surface].push(placeholder);renderAttStrip(surface);
-    try{const att=await uploadOne(f);const i=ATT[surface].indexOf(placeholder);if(i>=0)ATT[surface][i]=att;else ATT[surface].push(att);}
+    try{const att=await uploadOne(f,surface);const i=ATT[surface].indexOf(placeholder);if(i>=0)ATT[surface][i]=att;else ATT[surface].push(att);}
     catch(e){const i=ATT[surface].indexOf(placeholder);if(i>=0)ATT[surface].splice(i,1);toasty("Upload failed: "+f.name,"err");}
     renderAttStrip(surface);
   }
