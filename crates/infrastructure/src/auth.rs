@@ -195,7 +195,7 @@ impl FileAuthService {
 }
 
 /// Hash a password with Argon2id and a fresh random salt (PHC string output).
-fn hash_password(password: &str) -> Result<String, String> {
+pub(crate) fn hash_password(password: &str) -> Result<String, String> {
     let salt = SaltString::generate(&mut OsRng);
     Argon2::default()
         .hash_password(password.as_bytes(), &salt)
@@ -204,7 +204,7 @@ fn hash_password(password: &str) -> Result<String, String> {
 }
 
 /// A 256-bit random session token, hex-encoded.
-fn mint_token() -> String {
+pub(crate) fn mint_token() -> String {
     use std::fmt::Write as _;
     let mut bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut bytes);
@@ -216,7 +216,7 @@ fn mint_token() -> String {
 
 /// SHA-256 hex of an API token — a fast hash suitable for high-entropy secrets
 /// verified on every request (unlike Argon2, which is for low-entropy passwords).
-fn sha256_hex(token: &str) -> String {
+pub(crate) fn sha256_hex(token: &str) -> String {
     use std::fmt::Write as _;
     let digest = Sha256::digest(token.as_bytes());
     digest.iter().fold(String::with_capacity(64), |mut s, b| {
@@ -225,14 +225,14 @@ fn sha256_hex(token: &str) -> String {
     })
 }
 
-fn now_rfc3339() -> String {
+pub(crate) fn now_rfc3339() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default()
 }
 
 /// Current unix time in seconds (for TOTP).
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     u64::try_from(time::OffsetDateTime::now_utc().unix_timestamp()).unwrap_or(0)
 }
 

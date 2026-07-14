@@ -248,7 +248,7 @@ async fn serve_with_runner(
     let project = build_project("default", state_dir, work_dir).await?;
     let audit = build_audit().await;
     // Single-project serve honors the same RBAC env vars as the hub.
-    let auth = build_auth(state_dir.parent().unwrap_or(state_dir))?;
+    let auth = build_auth(state_dir.parent().unwrap_or(state_dir)).await?;
     let extras = coxagent_presentation::HubExtras {
         auth,
         engines: detected_engines(),
@@ -354,7 +354,7 @@ async fn run_hub(registry: &Path, port: u16) -> Result<(), Box<dyn std::error::E
             (engine, base.clone())
         });
 
-    let auth = build_auth(registry.parent().unwrap_or_else(|| Path::new(".")))?;
+    let auth = build_auth(registry.parent().unwrap_or_else(|| Path::new("."))).await?;
     let audit = build_audit().await;
     let extras = coxagent_presentation::HubExtras {
         factory: Some(factory),
@@ -383,20 +383,41 @@ fn remove_from_registry(registry_path: &Path, id: &str) -> Result<(), String> {
 /// `COXAGENT_ADMIN_PASSWORD` env vars into `auth.json` under `base` — the env is
 /// authoritative, so setting it always makes that password work even if a stale
 /// file exists. With no file and no env, the server runs open (no login).
-fn build_auth(
+async fn build_auth(
     base: &Path,
 ) -> Result<Option<Arc<dyn coxagent_application::auth::AuthPort>>, Box<dyn std::error::Error>> {
-    use coxagent_infrastructure::FileAuthService;
-    let auth_path = FileAuthService::default_path(base);
-
-    if let (Ok(user), Ok(pass)) = (
+    use coxagent_application::auth::AuthPort;
+    use coxagent_infrastructure::{FileAuthService, SqlAuthService};
+    let admin = match (
         std::env::var("COXAGENT_ADMIN_USER"),
         std::env::var("COXAGENT_ADMIN_PASSWORD"),
     ) {
-        FileAuthService::bootstrap_admin(&auth_path, &user, &pass)?;
-        tracing::info!("admin '{user}' provisioned from environment");
+        (Ok(user), Ok(pass)) => Some((user, pass)),
+        _ => None,
+    };
+
+    // Server mode: when a database is configured, accounts / membership / tokens
+    // live in Postgres (shared across instances), not a local file.
+    if let Ok(dsn) = std::env::var("COXAGENT_DB_DSN") {
+        let svc = SqlAuthService::connect(&dsn).await?;
+        if let Some((user, pass)) = &admin {
+            svc.bootstrap_admin(user, pass).await?;
+            tracing::info!("admin '{user}' provisioned in Postgres");
+        }
+        if svc.list_users().await.is_empty() {
+            tracing::info!("no auth configured — running open");
+            return Ok(None);
+        }
+        tracing::info!("RBAC enabled (Postgres auth store)");
+        return Ok(Some(Arc::new(svc)));
     }
 
+    // Local mode: a JSON account file next to the workspace.
+    let auth_path = FileAuthService::default_path(base);
+    if let Some((user, pass)) = &admin {
+        FileAuthService::bootstrap_admin(&auth_path, user, pass)?;
+        tracing::info!("admin '{user}' provisioned from environment");
+    }
     let svc = FileAuthService::open(&auth_path)?;
     if svc.has_users() {
         tracing::info!("RBAC enabled ({} account file)", auth_path.display());
