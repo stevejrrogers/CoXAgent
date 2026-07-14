@@ -105,6 +105,44 @@ struct ChatChannel {
     write_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
+/// Hub-level, system-wide chat: one store shared across every project. Holds the
+/// [`SystemChat`] aggregate (private channels + all messages) behind a mutex,
+/// the JSON file it persists to, a broadcast bus for live WebSockets, and the
+/// directory uploaded chat media lives in.
+#[derive(Clone)]
+struct SysChat {
+    inner: Arc<tokio::sync::Mutex<coxagent_application::SystemChat>>,
+    path: PathBuf,
+    media_dir: PathBuf,
+    tx: tokio::sync::broadcast::Sender<String>,
+}
+
+impl SysChat {
+    /// Load the store from `dir/system_chat.json` (empty if absent).
+    fn load(dir: &std::path::Path) -> Self {
+        let path = dir.join("system_chat.json");
+        let inner = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        Self {
+            inner: Arc::new(tokio::sync::Mutex::new(inner)),
+            path,
+            media_dir: dir.join("chat-media"),
+            tx: tokio::sync::broadcast::channel(256).0,
+        }
+    }
+
+    /// Persist the current state to disk (best-effort).
+    async fn save(&self) {
+        let json = { serde_json::to_string(&*self.inner.lock().await).unwrap_or_default() };
+        if let Some(parent) = self.path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&self.path, json);
+    }
+}
+
 #[derive(Clone)]
 struct AppState {
     projects: Arc<RwLock<HashMap<String, ProjectHandle>>>,
@@ -123,6 +161,8 @@ struct AppState {
     viewers: Arc<std::sync::Mutex<HashMap<String, usize>>>,
     /// Deregisters a project from the hub registry.
     remover: Option<ProjectRemover>,
+    /// System-wide chat store shared across all projects.
+    syschat: SysChat,
     /// A hub-level engine for cross-project drafting (e.g. project goals), with a
     /// working directory to run it in.
     analyzer: Option<(
@@ -188,6 +228,39 @@ impl AppState {
             })
             .clone()
     }
+
+    /// Build the live [`ChatContext`] — the users and projects the system-chat
+    /// model needs to compute `#general`/project-channel membership.
+    async fn chat_context(&self) -> coxagent_application::ChatContext {
+        use coxagent_application::{ChatContext, ProjectRef, UserRef};
+        let projects: Vec<ProjectRef> = {
+            let map = self.projects.read().await;
+            let order = self.order.read().await;
+            order
+                .iter()
+                .filter_map(|id| map.get(id))
+                .map(|h| ProjectRef {
+                    id: h.id.clone(),
+                    alias: h.alias.clone(),
+                    name: h.name.clone(),
+                })
+                .collect()
+        };
+        let users: Vec<UserRef> = match &self.auth {
+            Some(a) => a
+                .list_users()
+                .await
+                .into_iter()
+                .map(|u| UserRef {
+                    admin: u.role.as_str() == "admin",
+                    username: u.username,
+                    projects: u.projects,
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        ChatContext { users, projects }
+    }
 }
 
 /// Persist one chat message and fan it out to every live WebSocket. The
@@ -243,6 +316,9 @@ pub struct HubExtras {
         Arc<dyn coxagent_application::ports::outbound::AgentEnginePort>,
         PathBuf,
     )>,
+    /// Directory holding hub-wide state (system chat + its media). Defaults to
+    /// the current directory when unset.
+    pub hub_dir: Option<PathBuf>,
 }
 
 /// Assemble the shared [`AppState`] from the registered projects and hub extras.
@@ -254,6 +330,7 @@ fn build_state(
     let order: Vec<String> = projects.iter().map(|p| p.id.clone()).collect();
     let map: HashMap<String, ProjectHandle> =
         projects.into_iter().map(|p| (p.id.clone(), p)).collect();
+    let hub_dir = extras.hub_dir.unwrap_or_else(|| PathBuf::from("."));
     AppState {
         projects: Arc::new(RwLock::new(map)),
         chat_bus: Arc::new(RwLock::new(HashMap::new())),
@@ -266,6 +343,7 @@ fn build_state(
         viewers: Arc::new(std::sync::Mutex::new(HashMap::new())),
         remover: extras.remover,
         analyzer: extras.analyzer,
+        syschat: SysChat::load(&hub_dir),
     }
 }
 
@@ -323,6 +401,17 @@ pub async fn serve_full(
             "/api/projects/:pid/members/:username",
             axum::routing::delete(remove_member_ep),
         )
+        // System-wide chat (hub-level, shared across projects).
+        .route(
+            "/api/chat/channels",
+            get(syschat_channels_ep).post(syschat_create_ep),
+        )
+        .route("/api/chat/channels/:cid/invite", post(syschat_invite_ep))
+        .route("/api/chat/messages", get(syschat_messages_ep))
+        .route("/api/chat/send", post(syschat_send_ep))
+        .route("/api/chat/ws", get(syschat_ws_ep))
+        .route("/api/chat/upload", post(syschat_upload_ep))
+        .route("/api/chat/media/:file", get(syschat_media_ep))
         .route("/api/engines", get(engines_ep))
         .route("/api/tooling", get(tooling_ep))
         .route("/api/analyze-goal", post(analyze_goal_ep))
@@ -1735,6 +1824,311 @@ fn mime_of(name: &str) -> &'static str {
     }
 }
 
+// ── System-wide chat (hub-level: #general + project + private channels) ──────
+
+/// Resolve the caller's username and whether they may create channels.
+async fn resolve_user_caps(app: &AppState, headers: &axum::http::HeaderMap) -> (String, bool) {
+    match &app.auth {
+        Some(auth) => match resolve_principal(auth, headers).await {
+            Some(u) => (u.username, u.role.can_create_channel()),
+            None => ("user".to_owned(), false),
+        },
+        None => ("user".to_owned(), true), // open/local mode: allow
+    }
+}
+
+/// Persist one system-chat message and fan it out to every live WebSocket.
+/// Returns `false` if the user can't view the channel or persistence fails.
+async fn deliver_syschat(
+    app: &AppState,
+    user: &str,
+    body: &str,
+    channel: &str,
+    attachments: Vec<coxagent_application::Attachment>,
+) -> bool {
+    let ctx = app.chat_context().await;
+    let msg = {
+        let mut sc = app.syschat.inner.lock().await;
+        if !sc.can_view(channel, user, &ctx) {
+            return false;
+        }
+        sc.post(user, body, channel, attachments);
+        sc.chat.last().cloned()
+    };
+    app.syschat.save().await;
+    if let Some(m) = msg {
+        let _ = app
+            .syschat
+            .tx
+            .send(serde_json::to_string(&m).unwrap_or_default());
+    }
+    true
+}
+
+/// List the channels the signed-in user can see (general + their projects + private).
+async fn syschat_channels_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let user = resolve_username(&app, &headers).await;
+    let ctx = app.chat_context().await;
+    let channels = { app.syschat.inner.lock().await.channels_for(&user, &ctx) };
+    Json(channels).into_response()
+}
+
+/// Create a private channel. Restricted to Admin + lead tier (can_create_channel).
+async fn syschat_create_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<CreateChannelReq>,
+) -> axum::response::Response {
+    let (user, can_create) = resolve_user_caps(&app, &headers).await;
+    if !can_create {
+        return (
+            StatusCode::FORBIDDEN,
+            "only leads and admins can create channels",
+        )
+            .into_response();
+    }
+    let ctx = app.chat_context().await;
+    let result = {
+        let mut sc = app.syschat.inner.lock().await;
+        sc.create_channel(&req.name, &user, &ctx)
+    };
+    match result {
+        Ok(ch) => {
+            app.syschat.save().await;
+            (StatusCode::CREATED, Json(ch)).into_response()
+        }
+        Err(msg) => (StatusCode::BAD_REQUEST, msg).into_response(),
+    }
+}
+
+/// Invite a user to a private channel (or, with `delegate`, grant invite rights).
+async fn syschat_invite_ep(
+    State(app): State<AppState>,
+    Path(cid): Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<ChannelMemberReq>,
+) -> axum::response::Response {
+    let user = resolve_username(&app, &headers).await;
+    let (result, channel) = {
+        let mut sc = app.syschat.inner.lock().await;
+        let r = if req.delegate {
+            sc.delegate(&cid, &user, &req.user)
+        } else {
+            sc.invite(&cid, &user, &req.user)
+        };
+        let ch = sc.channels.iter().find(|c| c.id == cid).cloned();
+        (r, ch)
+    };
+    match result {
+        Ok(()) => {
+            app.syschat.save().await;
+            Json(channel).into_response()
+        }
+        Err(msg) => (StatusCode::FORBIDDEN, msg).into_response(),
+    }
+}
+
+/// List a channel's messages (oldest first). Empty for channels the user can't view.
+async fn syschat_messages_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<ChatListQuery>,
+) -> axum::response::Response {
+    let channel = q
+        .channel
+        .unwrap_or_else(|| coxagent_application::GENERAL_CHANNEL.to_owned());
+    let user = resolve_username(&app, &headers).await;
+    let ctx = app.chat_context().await;
+    let sc = app.syschat.inner.lock().await;
+    if !sc.can_view(&channel, &user, &ctx) {
+        return Json(Vec::<coxagent_application::ChatMsg>::new()).into_response();
+    }
+    Json(sc.messages_in(&channel)).into_response()
+}
+
+/// Post a message to a system channel over REST (WS is the primary path).
+async fn syschat_send_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<PostChatReq>,
+) -> axum::response::Response {
+    let body = req.body.trim();
+    if body.is_empty() && req.attachments.is_empty() {
+        return (StatusCode::BAD_REQUEST, "empty message").into_response();
+    }
+    if body.chars().count() > CHAT_MAX_CHARS {
+        return (StatusCode::PAYLOAD_TOO_LARGE, "message too long").into_response();
+    }
+    let user = resolve_username(&app, &headers).await;
+    let channel = req
+        .channel
+        .unwrap_or_else(|| coxagent_application::GENERAL_CHANNEL.to_owned());
+    if deliver_syschat(&app, &user, body, &channel, req.attachments).await {
+        Json(serde_json::json!({ "ok": true })).into_response()
+    } else {
+        (StatusCode::FORBIDDEN, "cannot post to this channel").into_response()
+    }
+}
+
+/// Whether `user` may receive a system-chat broadcast (membership per message).
+async fn syschat_may_see(app: &AppState, user: &str, json: &str) -> bool {
+    let channel = serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|v| v.get("channel").and_then(|c| c.as_str()).map(str::to_owned))
+        .unwrap_or_else(|| coxagent_application::GENERAL_CHANNEL.to_owned());
+    if channel == coxagent_application::GENERAL_CHANNEL {
+        return true;
+    }
+    let ctx = app.chat_context().await;
+    app.syschat
+        .inner
+        .lock()
+        .await
+        .can_view(&channel, user, &ctx)
+}
+
+/// Live system-chat WebSocket (same-origin guarded, authenticated).
+async fn syschat_ws_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+    ws: WebSocketUpgrade,
+) -> axum::response::Response {
+    if !origin_ok(&headers) {
+        return (StatusCode::FORBIDDEN, "cross-origin websocket rejected").into_response();
+    }
+    let user = match &app.auth {
+        Some(auth) => match resolve_principal(auth, &headers).await {
+            Some(u) => u.username,
+            None => return (StatusCode::UNAUTHORIZED, "unauthenticated").into_response(),
+        },
+        None => "user".to_owned(),
+    };
+    let ws = ws.max_message_size(64 * 1024);
+    ws.on_upgrade(move |socket| syschat_socket(socket, app, user))
+}
+
+/// Drive one system-chat WebSocket: forward broadcasts the user may see, accept
+/// validated, rate-limited messages from the client.
+async fn syschat_socket(mut socket: WebSocket, app: AppState, user: String) {
+    let mut rx = app.syschat.tx.subscribe();
+    let mut recv_times: std::collections::VecDeque<std::time::Instant> =
+        std::collections::VecDeque::new();
+    loop {
+        tokio::select! {
+            bcast = rx.recv() => {
+                match bcast {
+                    Ok(json) => {
+                        if !syschat_may_see(&app, &user, &json).await { continue; }
+                        if socket.send(Message::Text(json)).await.is_err() { break; }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(_) => break,
+                }
+            }
+            incoming = socket.recv() => {
+                let Some(Ok(msg)) = incoming else { break };
+                let text = match msg {
+                    Message::Text(t) => t,
+                    Message::Close(_) => break,
+                    _ => continue,
+                };
+                let parsed = serde_json::from_str::<serde_json::Value>(&text).ok();
+                let body = parsed.as_ref()
+                    .and_then(|v| v.get("body").and_then(|b| b.as_str()).map(str::to_owned))
+                    .unwrap_or_else(|| text.clone());
+                let channel = parsed.as_ref()
+                    .and_then(|v| v.get("channel").and_then(|c| c.as_str()).map(str::to_owned))
+                    .unwrap_or_else(|| coxagent_application::GENERAL_CHANNEL.to_owned());
+                let attachments: Vec<coxagent_application::Attachment> = parsed.as_ref()
+                    .and_then(|v| v.get("attachments").cloned())
+                    .and_then(|a| serde_json::from_value(a).ok())
+                    .unwrap_or_default();
+                let body = body.trim();
+                if (body.is_empty() && attachments.is_empty()) || body.chars().count() > CHAT_MAX_CHARS {
+                    continue;
+                }
+                let now = std::time::Instant::now();
+                while recv_times.front().is_some_and(|t| now.duration_since(*t) > CHAT_RATE_WINDOW) {
+                    recv_times.pop_front();
+                }
+                if recv_times.len() >= CHAT_RATE_MAX { continue; }
+                recv_times.push_back(now);
+                deliver_syschat(&app, &user, body, &channel, attachments).await;
+            }
+        }
+    }
+}
+
+/// Upload a file for system chat; stores it under the hub chat-media dir.
+async fn syschat_upload_ep(
+    State(app): State<AppState>,
+    mut multipart: axum::extract::Multipart,
+) -> axum::response::Response {
+    let dir = app.syschat.media_dir.clone();
+    if std::fs::create_dir_all(&dir).is_err() {
+        return internal_error("cannot create media dir");
+    }
+    let Ok(Some(field)) = multipart.next_field().await else {
+        return (StatusCode::BAD_REQUEST, "no file").into_response();
+    };
+    let orig = field.file_name().unwrap_or("file").to_owned();
+    let mime = field
+        .content_type()
+        .unwrap_or("application/octet-stream")
+        .to_owned();
+    let data = match field.bytes().await {
+        Ok(b) if b.len() <= UPLOAD_MAX => b,
+        Ok(_) => return (StatusCode::PAYLOAD_TOO_LARGE, "file too large").into_response(),
+        Err(_) => return (StatusCode::BAD_REQUEST, "read failed").into_response(),
+    };
+    let safe: String = orig
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let stored = format!("{}-{safe}", mint_media_token());
+    if std::fs::write(dir.join(&stored), &data).is_err() {
+        return internal_error("write failed");
+    }
+    Json(serde_json::json!({
+        "name": orig,
+        "url": format!("/api/chat/media/{stored}"),
+        "mime": mime,
+        "size": data.len(),
+    }))
+    .into_response()
+}
+
+/// Serve a system-chat media file (path-traversal guarded).
+async fn syschat_media_ep(
+    State(app): State<AppState>,
+    Path(file): Path<String>,
+) -> axum::response::Response {
+    if file.contains('/') || file.contains("..") {
+        return (StatusCode::BAD_REQUEST, "bad name").into_response();
+    }
+    let path = app.syschat.media_dir.join(&file);
+    let Ok(bytes) = std::fs::read(&path) else {
+        return not_found();
+    };
+    (
+        [
+            (header::CONTENT_TYPE, mime_of(&file)),
+            (header::CACHE_CONTROL, "private, max-age=31536000"),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
 /// Max characters accepted in a single chat message.
 const CHAT_MAX_CHARS: usize = 2000;
 /// Sliding-window rate limit for a single WebSocket: at most this many messages
@@ -2247,6 +2641,7 @@ async fn auth_mw(
     ) && path != "/api/auth/logout"
         && !path.starts_with("/api/auth/2fa/") // self-service, any signed-in user
         && !path.ends_with("/chat") // team chat is open to any signed-in user
+        && path != "/api/chat/send" // system chat send: any signed-in user
         && !path.contains("/channels") // create/invite channels: any signed-in user
         && !path.ends_with("/upload"); // uploads are open to any signed-in user
     let method = req.method().clone();

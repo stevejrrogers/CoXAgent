@@ -283,6 +283,8 @@ async fn serve_with_runner(
         auth,
         engines: detected_engines(),
         tooling: detected_tooling(),
+        // System chat + its media live alongside the project state.
+        hub_dir: Some(state_dir.parent().unwrap_or(state_dir).to_path_buf()),
         ..Default::default()
     };
     coxagent_presentation::serve_full(vec![project], port, audit, extras).await?;
@@ -398,6 +400,8 @@ async fn run_hub(registry: &Path, port: u16) -> Result<(), Box<dyn std::error::E
         engines: detected_engines(),
         tooling: detected_tooling(),
         analyzer,
+        // System-wide chat lives at the hub root (next to the registry).
+        hub_dir: Some(base.clone()),
     };
     coxagent_presentation::serve_full(projects, port, audit, extras).await?;
     Ok(())
