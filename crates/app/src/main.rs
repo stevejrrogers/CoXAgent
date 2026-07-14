@@ -337,7 +337,9 @@ async fn run_hub(registry: &Path, port: u16) -> Result<(), Box<dyn std::error::E
         .map_err(|e| format!("cannot read hub registry {}: {e}", registry.display()))?;
     let entries: Vec<Entry> = serde_json::from_str(&text)?;
     if entries.is_empty() {
-        return Err("hub registry is empty".into());
+        // A fresh install starts with no projects — serve anyway so the user can
+        // create the first one from the dashboard ("New project").
+        tracing::info!("hub: empty registry — serving with no projects yet");
     }
 
     let mut projects = Vec::new();
@@ -351,9 +353,6 @@ async fn run_hub(registry: &Path, port: u16) -> Result<(), Box<dyn std::error::E
             }
             Err(err) => tracing::warn!("hub: skipping '{}': {err}", e.id),
         }
-    }
-    if projects.is_empty() {
-        return Err("no projects could be registered".into());
     }
 
     // Factory: onboard a brand-new project from the dashboard. New workspaces

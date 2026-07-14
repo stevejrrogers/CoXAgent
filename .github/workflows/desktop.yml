@@ -45,7 +45,9 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist/CoXAgent
-          cp target/release/coxagent.exe dist/CoXAgent/
+          # Hub named cox-server.exe so it doesn't collide case-insensitively
+          # with the shell CoXAgent.exe on Windows.
+          cp target/release/coxagent.exe dist/CoXAgent/cox-server.exe
           cp desktop/coxagent-desktop/target/release/coxagent-desktop.exe dist/CoXAgent/CoXAgent.exe
           cd dist && 7z a ../CoXAgent-windows-x64.zip CoXAgent
       - uses: softprops/action-gh-release@v2
@@ -76,7 +78,7 @@ jobs:
       - name: Package
         run: |
           mkdir -p dist/CoXAgent
-          cp target/release/coxagent dist/CoXAgent/
+          cp target/release/coxagent dist/CoXAgent/cox-server
           cp desktop/coxagent-desktop/target/release/coxagent-desktop dist/CoXAgent/CoXAgent
           tar czf CoXAgent-linux-x64.tar.gz -C dist CoXAgent
       - uses: softprops/action-gh-release@v2

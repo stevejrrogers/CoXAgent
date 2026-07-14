@@ -22,14 +22,16 @@ use wry::WebViewBuilder;
 
 const PORT: u16 = 4000;
 
-/// The bundled hub binary sits next to this executable.
+/// The bundled hub binary sits next to this executable. It is named `cox-server`
+/// (not `coxagent`) so it never collides case-insensitively with the shell
+/// executable `CoXAgent` on Windows/macOS filesystems.
 fn hub_path() -> PathBuf {
     let exe = std::env::current_exe().expect("current exe");
     let dir = exe.parent().expect("exe dir");
     let name = if cfg!(windows) {
-        "coxagent.exe"
+        "cox-server.exe"
     } else {
-        "coxagent"
+        "cox-server"
     };
     dir.join(name)
 }
