@@ -236,6 +236,7 @@ async fn build_project(
         engine: engine_for_handle,
         work_dir: work_dir_for_handle,
         budget: live_budget,
+        context_path: state_dir.join("project_context.md"),
     })
 }
 

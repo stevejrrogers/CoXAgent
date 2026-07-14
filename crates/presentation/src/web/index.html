@@ -41,31 +41,39 @@
   .topbar-proj .projbtn{flex:0 0 auto;min-width:190px;max-width:240px}
   .topbar-proj .projmenu{left:auto;right:0;min-width:280px;z-index:60}
   .verchip b{color:var(--accent2)}
-  /* Header: title, status cluster, project pills */
+  /* Header: title · minimal status · segmented project switcher */
   .tb-title{display:flex;align-items:baseline;gap:8px;min-width:0}
-  .tb-status{display:flex;align-items:center;gap:8px;flex:none}
-  .tb-sep{width:1px;height:26px;background:var(--border);flex:none;margin:0 2px}
-  .statuschip{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);background:var(--card);border:1px solid var(--border);border-radius:20px;padding:5px 11px;white-space:nowrap}
-  .statuschip b{color:var(--accent2);font-weight:700}
-  .statuschip .stsep{color:var(--dim)}
-  .cmdk-hint{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);background:var(--card);border:1px solid var(--border);border-radius:20px;padding:5px 10px;cursor:pointer;font-family:inherit;transition:border-color .15s}
-  .cmdk-hint:hover{border-color:var(--accent)}
-  .cmdk-hint i{font-size:13px}
-  .projrail{display:flex;align-items:center;gap:6px;flex:none;max-width:min(42vw,520px);overflow-x:auto;scrollbar-width:none;padding:2px;-webkit-mask:linear-gradient(90deg,transparent 0,#000 14px,#000 calc(100% - 14px),transparent)}
-  .projrail::-webkit-scrollbar{display:none}
-  .projrail-empty{font-size:12px;color:var(--dim);padding:0 6px}
-  .ppill{flex:none;position:relative;display:inline-flex;align-items:center;gap:8px;background:var(--card2);border:1px solid var(--border2);border-radius:12px;padding:5px 12px 5px 6px;cursor:pointer;font-family:inherit;transition:border-color .15s,background .15s}
-  .ppill:hover{border-color:var(--accent)}
-  .ppill.on{background:var(--accentbg);border-color:var(--accent2)}
-  .ppill .pmk{flex:none;width:24px;height:24px;border-radius:7px;display:grid;place-items:center;font-size:11px;font-weight:700;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2))}
-  .ppill.on .pmk{box-shadow:0 0 0 3px color-mix(in srgb,var(--accent2) 26%,transparent)}
-  .ppill .pnm{font-size:12.5px;font-weight:600;color:var(--muted);white-space:nowrap;letter-spacing:.2px}
-  .ppill.on .pnm{color:var(--text)}
-  .ppill .pdel{position:absolute;top:-7px;right:-7px;width:17px;height:17px;border-radius:50%;background:var(--card);border:1px solid var(--border2);color:var(--muted);display:none;place-items:center;font-size:11px;line-height:1}
-  .ppill:hover .pdel{display:grid}
-  .ppill .pdel:hover{background:var(--red);border-color:var(--red);color:#fff}
-  .projadd{flex:none;display:grid;place-items:center;width:34px;height:34px;background:var(--card2);color:var(--accent);border:1px solid var(--border2);border-radius:11px;cursor:pointer;font-size:17px;font-family:inherit;transition:border-color .15s}
-  .projadd:hover{border-color:var(--accent)}
+  .tb-ver{display:inline-flex;align-items:center;gap:6px;flex:none;font-size:12px;color:var(--muted);white-space:nowrap}
+  .tb-div{width:1px;height:22px;background:var(--border);flex:none;margin:0 4px}
+  .iconbtn{flex:none;display:inline-flex;align-items:center;gap:5px;justify-content:center;min-width:32px;height:32px;padding:0 8px;background:transparent;border:1px solid transparent;border-radius:9px;color:var(--muted);cursor:pointer;font-family:inherit;font-size:15px;transition:background .15s,color .15s,border-color .15s}
+  .iconbtn:hover{background:var(--card2);color:var(--text)}
+  .viewers-pill{font-size:12px}
+  .segproj{display:inline-flex;align-items:center;gap:2px;flex:none;background:var(--card2);border:1px solid var(--border2);border-radius:11px;padding:3px;max-width:min(42vw,540px);overflow-x:auto;scrollbar-width:none}
+  .segproj::-webkit-scrollbar{display:none}
+  .segproj-empty{font-size:12px;color:var(--dim);padding:4px 8px}
+  .segseg{flex:none;display:inline-flex;align-items:center;gap:7px;border:none;background:transparent;color:var(--muted);font-family:inherit;font-size:12.5px;font-weight:600;padding:6px 11px;border-radius:8px;cursor:pointer;white-space:nowrap;transition:background .15s,color .15s}
+  .segseg:hover{color:var(--text);background:var(--card)}
+  .segseg.on{background:var(--accent);color:#fff}
+  .segseg .sdot{width:7px;height:7px;border-radius:50%;flex:none}
+  .segseg.on .sdot{background:#fff}
+  .segseg .sdel{margin-left:1px;font-size:13px;line-height:1;opacity:0;width:0;overflow:hidden;transition:opacity .12s;color:inherit}
+  .segseg:hover .sdel{opacity:.6;width:14px}
+  .segseg .sdel:hover{opacity:1}
+  /* Project goal card (Overview) */
+  .goalcard{background:linear-gradient(180deg,color-mix(in srgb,var(--accent2) 7%,var(--card)),var(--card));border:1px solid var(--border);border-left:3px solid var(--accent2);border-radius:var(--r);padding:15px 18px;margin-bottom:16px}
+  .gc-h{display:flex;align-items:center;gap:8px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--accent2)}
+  .gc-h i{font-size:15px}
+  .gc-edit{margin-left:auto;background:transparent;border:none;color:var(--muted);cursor:pointer;font-size:14px;padding:2px 5px;border-radius:6px}
+  .gc-edit:hover{color:var(--text);background:var(--card2)}
+  .gc-body{font-size:14px;line-height:1.55;color:var(--text);margin-top:8px;white-space:pre-wrap}
+  .gc-empty{color:var(--muted)}
+  .gc-empty a,.gc-body a{color:var(--accent2);cursor:pointer;text-decoration:underline}
+  .gc-ta{width:100%;margin-top:10px;background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:9px;padding:10px 12px;font-size:13.5px;line-height:1.5;font-family:inherit;resize:vertical}
+  .gc-actions{display:flex;align-items:center;gap:8px;margin-top:10px}
+  .gc-note{flex:1;font-size:11px;color:var(--dim);display:inline-flex;align-items:center;gap:5px}
+  .gc-btn{background:var(--card2);color:var(--muted);border:1px solid var(--border2);border-radius:8px;padding:7px 13px;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit}
+  .gc-btn:hover{color:var(--text)}
+  .gc-btn.pri{background:var(--accent);color:#fff;border-color:transparent}
   /* Team chat bubbles */
   .chatmsgs{display:flex;flex-direction:column;gap:3px}
   .tcmsg{display:flex;gap:9px;align-items:flex-start;max-width:74%}
@@ -467,22 +475,21 @@ body:not(.admin) .admin-only { display: none !important; }
     <div class="topbar">
       <div class="tb-title"><h1 id="pg-title">Overview</h1><span class="sub" id="pg-sub"></span></div>
       <div class="sp"></div>
-      <div class="tb-status">
-        <span class="statuschip" title="live connection · version · tickets"><span class="dot off" id="conn"></span> v<b id="ver">0.0.0</b> <span class="stsep">·</span> <span id="pn-tickets">0</span></span>
-        <button class="cmdk-hint" onclick="openCmdk()" title="Command palette — jump anywhere"><i class="ti ti-search"></i> <kbd>⌘K</kbd></button>
-        <span class="statuschip" id="viewers-chip" title="distinct users viewing" style="display:none"><i class="ti ti-eye"></i> <span id="viewers-n">1</span></span>
-      </div>
-      <div class="tb-sep"></div>
-      <div class="projrail" id="proj-rail"></div>
-      <button onclick="openNewProject()" title="New project" class="projadd"><i class="ti ti-plus"></i></button>
-      <span id="connlbl" hidden></span>
-      <div class="projpick topbar-proj" style="display:none">
+      <span class="tb-ver" title="live connection · current version"><span class="dot off" id="conn"></span> v<span id="ver">0.0.0</span></span>
+      <button class="iconbtn" onclick="openCmdk()" title="Search &amp; jump — ⌘K"><i class="ti ti-search"></i></button>
+      <span class="iconbtn viewers-pill" id="viewers-chip" title="distinct users viewing" style="display:none"><i class="ti ti-eye"></i> <span id="viewers-n">1</span></span>
+      <div class="tb-div"></div>
+      <div class="segproj" id="proj-rail"></div>
+      <button onclick="openNewProject()" title="New project" class="iconbtn"><i class="ti ti-plus"></i></button>
+      <span id="connlbl" hidden></span><span id="pn-tickets" hidden></span>
+      <div class="topbar-proj" style="display:none">
         <button id="proj-btn"><span id="proj-mk">P</span><span id="proj-name"></span><span id="proj-count"></span></button>
         <div id="proj-menu" class="projmenu"></div>
       </div></div>
     <div class="content">
       <div class="view on" id="view-overview">
         <div id="ov-alerts"></div>
+        <div id="ov-goal"></div>
         <div class="kpis" id="kpis"></div>
         <div id="ov-deploy"></div>
         <div class="row2" id="ov-charts"></div>
@@ -995,6 +1002,7 @@ function renderSidebar(s){
   document.title="CoXAgent · "+(document.getElementById("proj-name").textContent||"");}
 function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
   if(CUR==="overview"){
+    loadGoal();
     if(!(s.tickets||[]).length&&!(s.activity||[]).length){
       document.getElementById("kpis").innerHTML=`<div class="panel" style="grid-column:1/-1;text-align:center;padding:40px 20px">
         <i class="ti ti-rocket" style="font-size:34px;color:var(--accent2)"></i>
@@ -1389,7 +1397,7 @@ function connect(){if(ES)ES.close();if(poll){clearInterval(poll);poll=null;}
 function loadBudget(){fetch(api("/config")).then(r=>r.json()).then(c=>{window._budget=(c.workflow&&c.workflow.budget_usd)||null;if(CUR==="insights")renderActive();}).catch(()=>{});}
 let PROJECTS=[];
 function projInitial(p){return (p.alias||p.name||"P").trim().charAt(0).toUpperCase()||"P";}
-function switchProject(id){PID=id;INIT_ACT=false;localStorage.setItem("coxpid",id);closeProjMenu();renderProjBtn();loadBudget();loadComments();connect();closeChatWS();if(CUR==="settings")loadWorkspace("");if(CUR==="chat")openChat();}
+function switchProject(id){PID=id;INIT_ACT=false;GOAL_LOADED_PID=null;localStorage.setItem("coxpid",id);closeProjMenu();renderProjBtn();loadBudget();loadComments();connect();closeChatWS();if(CUR==="settings")loadWorkspace("");if(CUR==="chat")openChat();}
 function fileIcon(name){const e=(name.split(".").pop()||"").toLowerCase();
   if(["rs"].includes(e))return "brand-rust";if(["ts","tsx","js","jsx"].includes(e))return "brand-javascript";
   if(["json"].includes(e))return "braces";if(["md"].includes(e))return "markdown";
@@ -1436,17 +1444,56 @@ function renderProjBtn(){
   document.getElementById("proj-count").textContent=p?(p.alias?p.alias:"active project"):(PROJECTS.length+" available");
   renderProjRail();
 }
-// The header project switcher: one pill per project, active pill highlighted.
-// One click switches — no dropdown. Overflows scroll horizontally.
+// Header project switcher — a single segmented control (not floating pills, not
+// a dropdown): one click switches, active segment filled, a colour dot keeps
+// each project recognisable, and an inline × (on hover) removes one.
 function renderProjRail(){
   const rail=document.getElementById("proj-rail");if(!rail)return;
-  if(!PROJECTS.length){rail.innerHTML='<span class="projrail-empty">No projects yet</span>';return;}
+  if(!PROJECTS.length){rail.innerHTML='<span class="segproj-empty">No projects yet</span>';return;}
   rail.innerHTML=PROJECTS.map(p=>{const on=p.id===PID;const label=p.alias||p.name;
-    return `<button class="ppill${on?' on':''}" title="${esc(p.name)}" onclick="switchProject('${esc(p.id)}')">
-      <span class="pmk">${esc(projInitial(p))}</span><span class="pnm">${esc(label)}</span>
-      <i class="ti ti-x pdel" title="Remove ${esc(p.name)}" onclick="event.stopPropagation();deleteProject('${esc(p.id)}')"></i>
+    return `<button class="segseg${on?' on':''}" title="${esc(p.name)}" onclick="switchProject('${esc(p.id)}')">
+      <span class="sdot" style="background:${projColor(p.id)}"></span><span>${esc(label)}</span>
+      <i class="ti ti-x sdel" title="Remove ${esc(p.name)}" onclick="event.stopPropagation();deleteProject('${esc(p.id)}')"></i>
     </button>`;}).join("");
-  const act=rail.querySelector(".ppill.on");if(act)act.scrollIntoView({inline:"nearest",block:"nearest"});
+  const act=rail.querySelector(".segseg.on");if(act)act.scrollIntoView({inline:"nearest",block:"nearest"});
+}
+// Stable per-project colour for its switcher dot.
+function projColor(id){const pal=["#38bdf8","#a78bfa","#f472b6","#34d399","#fbbf24","#fb7185"];
+  let h=0;for(let i=0;i<(id||"").length;i++)h=(h*31+id.charCodeAt(i))>>>0;return pal[h%pal.length];}
+// ── Project goal (the brief agents are seeded with; from project_context.md) ──
+let GOAL_LOADED_PID=null;
+async function loadGoal(){
+  const el=document.getElementById("ov-goal");if(!el)return;
+  if(GOAL_LOADED_PID===PID)return;GOAL_LOADED_PID=PID;
+  let d={goal:""};try{d=await(await fetch(api("/context"))).json();}catch(e){}
+  renderGoal(d.goal||"");
+}
+function toasty(m,t){if(typeof toast==="function")toast(m,t);}
+function renderGoal(goal){
+  const el=document.getElementById("ov-goal");if(!el)return;el.dataset.goal=goal||"";
+  if(!goal){el.innerHTML=`<div class="goalcard"><div class="gc-h"><i class="ti ti-target"></i> Project goal</div>
+    <div class="gc-body gc-empty">No goal set yet — <a onclick="editGoal()">add one</a> to steer the agents.</div></div>`;return;}
+  el.innerHTML=`<div class="goalcard"><div class="gc-h"><i class="ti ti-target"></i> Project goal
+    <button class="gc-edit admin-only" onclick="editGoal()" title="Edit goal"><i class="ti ti-pencil"></i></button></div>
+    <div class="gc-body">${esc(goal)}</div></div>`;
+}
+function editGoal(){
+  const el=document.getElementById("ov-goal");const cur=el.dataset.goal||"";
+  el.innerHTML=`<div class="goalcard"><div class="gc-h"><i class="ti ti-target"></i> Project goal</div>
+    <textarea id="gc-input" class="gc-ta" rows="4" placeholder="What is this project building toward?">${esc(cur)}</textarea>
+    <div class="gc-actions"><span class="gc-note"><i class="ti ti-info-circle"></i> Seeds new agent work after the next restart.</span>
+      <button onclick="cancelGoal()" class="gc-btn">Cancel</button>
+      <button onclick="saveGoal()" class="gc-btn pri">Save goal</button></div></div>`;
+  document.getElementById("gc-input").focus();
+}
+function cancelGoal(){renderGoal(document.getElementById("ov-goal").dataset.goal||"");}
+async function saveGoal(){
+  const val=(document.getElementById("gc-input").value||"").trim();
+  if(!val){toasty("Goal can't be empty","err");return;}
+  try{const r=await fetch(api("/context"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({goal:val})});
+    if(r.ok){renderGoal(val);toasty("Project goal updated","ok");}
+    else{toasty("Save failed ("+r.status+")","err");}
+  }catch(e){toasty("Network error","err");}
 }
 function toggleProjMenu(e){e.stopPropagation();const m=document.getElementById("proj-menu");if(m.classList.contains("open")){closeProjMenu();return;}renderProjMenu();m.classList.add("open");}
 function closeProjMenu(){document.getElementById("proj-menu").classList.remove("open");}

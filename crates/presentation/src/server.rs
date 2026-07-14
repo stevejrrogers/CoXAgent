@@ -48,6 +48,8 @@ pub struct ProjectHandle {
     pub work_dir: PathBuf,
     /// Live spend caps shared with the running loop, so budget edits apply now.
     pub budget: coxagent_application::LiveBudget,
+    /// The `project_context.md` brief (goal + tech stack) agents are seeded with.
+    pub context_path: PathBuf,
 }
 
 /// Builds a fresh project on demand (scaffold + register), injected by the
@@ -315,6 +317,10 @@ pub async fn serve_full(
             get(chat_list_ep).post(chat_post_ep),
         )
         .route("/api/projects/:pid/chat/ws", get(chat_ws_ep))
+        .route(
+            "/api/projects/:pid/context",
+            get(context_ep).post(context_update_ep),
+        )
         .route("/api/projects/:pid/transcripts", get(list_transcripts))
         .route("/api/projects/:pid/transcripts/:name", get(get_transcript))
         .route("/api/projects/:pid/events", get(events_ep))
@@ -946,6 +952,101 @@ async fn chat_post_ep(
         Json(serde_json::json!({ "ok": true })).into_response()
     } else {
         internal_error("chat save failed")
+    }
+}
+
+/// The project brief agents are seeded with (`project_context.md`): its `Goal`
+/// section plus the full markdown, so the dashboard can surface what the team
+/// is actually building toward.
+async fn context_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let md = tokio::fs::read_to_string(&p.context_path)
+        .await
+        .unwrap_or_default();
+    Json(serde_json::json!({ "goal": extract_goal(&md), "full": md })).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct GoalUpdateReq {
+    goal: String,
+}
+
+/// Update the `## Goal` section of the project brief. Admin-only (enforced by
+/// `auth_mw`). Note: the running loop captured its context at startup, so an
+/// edited goal seeds agent work from the next restart onward.
+async fn context_update_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    Json(req): Json<GoalUpdateReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let goal = req.goal.trim();
+    if goal.is_empty() {
+        return (StatusCode::BAD_REQUEST, "empty goal").into_response();
+    }
+    if goal.chars().count() > 4000 {
+        return (StatusCode::PAYLOAD_TOO_LARGE, "goal too long").into_response();
+    }
+    let md = tokio::fs::read_to_string(&p.context_path)
+        .await
+        .unwrap_or_default();
+    match tokio::fs::write(&p.context_path, replace_goal(&md, goal)).await {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Extract the body of the `## Goal` markdown section (empty if absent).
+fn extract_goal(md: &str) -> String {
+    let mut in_goal = false;
+    let mut buf: Vec<&str> = Vec::new();
+    for line in md.lines() {
+        if line.starts_with("## ") {
+            in_goal = line.trim() == "## Goal";
+            continue;
+        }
+        if in_goal {
+            buf.push(line);
+        }
+    }
+    buf.join("\n").trim().to_owned()
+}
+
+/// Rewrite the `## Goal` section's body, preserving the rest of the brief.
+/// Prepends a `## Goal` section when none exists.
+fn replace_goal(md: &str, goal: &str) -> String {
+    let mut out = String::new();
+    let mut in_goal = false;
+    let mut wrote = false;
+    for line in md.lines() {
+        if line.starts_with("## ") {
+            if line.trim() == "## Goal" {
+                in_goal = true;
+                out.push_str("## Goal\n");
+                out.push_str(goal.trim());
+                out.push('\n');
+                wrote = true;
+                continue;
+            }
+            in_goal = false;
+        }
+        if in_goal {
+            continue; // drop the old goal body until the next header
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    if wrote {
+        out
+    } else {
+        format!("## Goal\n{}\n\n{}", goal.trim(), md)
     }
 }
 
