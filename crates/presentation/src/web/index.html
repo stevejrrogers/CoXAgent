@@ -93,6 +93,38 @@
   .eu-pwrow{display:flex;gap:8px;align-items:center}
   .eu-pwrow .eu-in{flex:1}
   .eu-msg{font-size:12px;color:var(--muted);min-height:16px;margin-top:8px}
+  /* Team members: invite panel + member rows */
+  .btn-ghost{display:inline-flex;align-items:center;gap:6px;background:var(--card2);border:1px solid var(--border2);color:var(--text);border-radius:9px;padding:7px 13px;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;transition:border-color .15s,background .15s}
+  .btn-ghost:hover{border-color:var(--accent)}
+  .btn-ghost.on{background:var(--accentbg);border-color:var(--accent2);color:var(--accent2)}
+  .invitebox{background:var(--bg);border:1px solid var(--border2);border-radius:12px;padding:16px;margin:4px 0 16px}
+  .invite-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px 14px}
+  .fld{display:flex;flex-direction:column;gap:5px;min-width:0}
+  .fld-wide{grid-column:1/-1;max-width:320px}
+  .fld>label{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--dim)}
+  .fld input,.fld .sel{width:100%;background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 11px;font-size:13.5px;font-family:inherit}
+  .fld input:focus,.fld .sel:focus{outline:none;border-color:var(--accent2)}
+  .invite-foot{display:flex;align-items:center;gap:12px;margin-top:14px}
+  .usr-err{flex:1;font-size:12px;color:var(--red);min-height:14px}
+  .mlist{display:flex;flex-direction:column;gap:8px;margin-top:4px}
+  .mrow{display:flex;align-items:center;gap:13px;background:var(--card2);border:1px solid var(--border);border-radius:11px;padding:12px 14px;transition:border-color .15s}
+  .mrow:hover{border-color:var(--border2)}
+  .mav{flex:none;width:40px;height:40px;border-radius:11px;display:grid;place-items:center;font-size:14px;font-weight:700;color:#fff}
+  .minfo{flex:1;min-width:0}
+  .mname{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:600;flex-wrap:wrap}
+  .mtag-you{font-size:10px;font-weight:500;color:var(--dim)}
+  .mrole{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;padding:2px 8px;border-radius:20px;background:var(--card);color:var(--muted)}
+  .mrole.admin{background:color-mix(in srgb,var(--amber) 16%,transparent);color:var(--amber)}
+  .mrole.viewer{background:color-mix(in srgb,var(--accent2) 14%,transparent);color:var(--accent2)}
+  .mtag-2fa{font-size:9.5px;font-weight:700;padding:2px 7px;border-radius:20px;background:color-mix(in srgb,var(--green) 16%,transparent);color:var(--green)}
+  .msub{font-size:12px;color:var(--muted);margin-top:3px}
+  .mchips{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:8px}
+  .uproj .sdot{width:6px;height:6px;border-radius:50%;flex:none}
+  .macts{flex:none;display:flex;gap:4px}
+  .micon{display:grid;place-items:center;width:32px;height:32px;background:transparent;border:1px solid transparent;border-radius:8px;color:var(--muted);cursor:pointer;font-size:15px;transition:background .15s,color .15s}
+  .micon:hover{background:var(--card);color:var(--text)}
+  .micon.danger:hover{background:color-mix(in srgb,var(--red) 14%,transparent);color:var(--red)}
+  @media(max-width:720px){.invite-grid{grid-template-columns:1fr}}
   /* Team chat bubbles */
   .chatmsgs{display:flex;flex-direction:column;gap:3px}
   .tcmsg{display:flex;gap:9px;align-items:flex-start;max-width:74%}
@@ -602,18 +634,20 @@ body:not(.admin) .admin-only { display: none !important; }
       </div>
       <div class="view" id="view-access">
         <div class="acard">
-          <div class="acard-h"><div><h4><i class="ti ti-users"></i> Team members</h4><span>People who can sign in. Add their details and pick which projects they join — a person can be on many.</span></div></div>
-          <div class="ainvite ainvite2">
-            <input id="usr-fullname" placeholder="full name (optional)">
-            <input id="usr-email" type="email" placeholder="email (optional)">
-            <input id="usr-name" placeholder="username">
-            <input id="usr-pass" type="password" placeholder="temporary password">
-            <select id="usr-role" class="sel"><option value="viewer">viewer</option><option value="admin">admin</option></select>
-            <button class="pri" onclick="createUser()"><i class="ti ti-user-plus"></i> Invite</button>
+          <div class="acard-h"><div><h4><i class="ti ti-users"></i> Team members</h4><span>People who can sign in — a person can join many projects.</span></div>
+            <button class="btn-ghost" id="invite-toggle" onclick="toggleInvite()"><i class="ti ti-user-plus"></i> Add member</button></div>
+          <div class="invitebox" id="invitebox" hidden>
+            <div class="invite-grid">
+              <div class="fld"><label>Full name</label><input id="usr-fullname" placeholder="e.g. Ada Lovelace"></div>
+              <div class="fld"><label>Email</label><input id="usr-email" type="email" placeholder="ada@team.io"></div>
+              <div class="fld"><label>Username</label><input id="usr-name" placeholder="ada"></div>
+              <div class="fld"><label>Temporary password</label><input id="usr-pass" type="password" placeholder="they can change it later"></div>
+              <div class="fld fld-wide"><label>Role</label><select id="usr-role" class="sel"><option value="viewer">Viewer — read-only</option><option value="admin">Admin — full access</option></select></div>
+            </div>
+            <div class="fld"><label>Assign to projects</label><div class="uprojpick" id="usr-projpick"></div></div>
+            <div class="invite-foot"><span id="usr-err" class="usr-err"></span><button class="pri" onclick="createUser()"><i class="ti ti-user-plus"></i> Invite member</button></div>
           </div>
-          <div class="uprojpick-wrap"><span class="uprojpick-lbl">Assign to projects</span><div class="uprojpick" id="usr-projpick"></div></div>
-          <div id="usr-err" style="color:var(--red);font-size:12px;min-height:14px;margin:2px 0 6px"></div>
-          <div id="usr-list" class="alist"></div>
+          <div id="usr-list" class="mlist"></div>
         </div>
         <div class="acard">
           <div class="acard-h"><div><h4><i class="ti ti-key"></i> API tokens</h4><span>For automation via <code>Authorization: Bearer &lt;token&gt;</code>. The secret is shown once.</span></div></div>
@@ -1768,22 +1802,23 @@ function renderUsers(){
       const me=ME&&ME.username===u.username;
       const un=encodeURIComponent(u.username);
       const mine=u.projects||[];
-      const av=(u.name&&u.name.trim())?u.name.trim().slice(0,2).toUpperCase():(u.username||'?').slice(0,2).toUpperCase();
+      const hasName=!!(u.name&&u.name.trim());
+      const av=(hasName?u.name.trim():(u.username||'?')).slice(0,2).toUpperCase();
       // Admins implicitly see every project; viewers are scoped to assignments.
-      const chips=admin?'<span class="uproj all">all projects (admin)</span>'
+      const chips=admin?'<span class="uproj all"><i class="ti ti-infinity" style="font-size:12px"></i> all projects</span>'
         :(mine.length?mine.map(pid=>{const p=PROJECTS.find(x=>x.id===pid);const nm=p?p.name:pid;
-            return `<span class="uproj">${esc(nm)}<i class="ti ti-x" title="Unassign" onclick="unassignUser('${esc(pid)}','${un}')"></i></span>`;}).join("")
-          :'<span class="uproj none">no projects</span>');
+            return `<span class="uproj"><span class="sdot" style="background:${projColor(pid)}"></span>${esc(nm)}<i class="ti ti-x" title="Unassign" onclick="unassignUser('${esc(pid)}','${un}')"></i></span>`;}).join("")
+          :'<span class="uproj none">no projects yet</span>');
       const avail=PROJECTS.filter(p=>!mine.includes(p.id));
       const addSel=(!admin&&avail.length)?`<select class="uprojadd" onchange="if(this.value){assignUser(this.value,'${un}');this.value=''}"><option value="">＋ assign…</option>${avail.map(p=>`<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</select>`:'';
-      const display=(u.name&&u.name.trim())?esc(u.name.trim()):esc(u.username);
-      const sub=[u.name&&u.name.trim()?'@'+esc(u.username):'',u.email?esc(u.email):''].filter(Boolean).join(' · ');
-      return `<div class="arow urow"><div class="aav" style="background:${grad}">${esc(av)}</div>
-        <div style="flex:1;min-width:0"><div class="aname">${display}${me?' <span style="font-size:10px;color:var(--dim);font-weight:400">· you</span>':''}<span class="arole ${admin?'admin':'viewer'}" style="margin-left:8px">${esc(u.role)}</span>${u.twofa?' <span class="pbadge" style="background:color-mix(in srgb,var(--green) 16%,transparent);color:var(--green)">2FA</span>':''}</div>
-          ${sub?`<div class="usub">${sub}</div>`:''}
-          <div class="uprojrow">${chips}${addSel}</div></div>
-        <button class="adel" onclick="editUser('${un}')" title="Edit user"><i class="ti ti-pencil"></i></button>
-        ${me?'':`<button class="adel" onclick="deleteUser('${un}')" title="Remove account"><i class="ti ti-trash"></i></button>`}</div>`;}).join("");
+      const display=hasName?esc(u.name.trim()):esc(u.username);
+      const sub=[hasName?'@'+esc(u.username):'',u.email?esc(u.email):''].filter(Boolean).join(' · ');
+      return `<div class="mrow"><div class="mav" style="background:${grad}">${esc(av)}</div>
+        <div class="minfo"><div class="mname">${display}${me?'<span class="mtag-you">you</span>':''}<span class="mrole ${admin?'admin':'viewer'}">${esc(u.role)}</span>${u.twofa?'<span class="mtag-2fa">2FA</span>':''}</div>
+          ${sub?`<div class="msub">${sub}</div>`:''}
+          <div class="mchips">${chips}${addSel}</div></div>
+        <div class="macts"><button class="micon" onclick="editUser('${un}')" title="Edit user"><i class="ti ti-pencil"></i></button>
+        ${me?'':`<button class="micon danger" onclick="deleteUser('${un}')" title="Remove account"><i class="ti ti-trash"></i></button>`}</div></div>`;}).join("");
   }).catch(()=>{list.innerHTML='<div class="empty">unable to load users</div>';});
 }
 // Multi-select project checkboxes for the create form (a user can join many).
@@ -1791,6 +1826,12 @@ function renderUserProjPicker(){
   const el=document.getElementById("usr-projpick");if(!el)return;
   if(!PROJECTS.length){el.innerHTML='<span style="font-size:12px;color:var(--dim)">no projects yet</span>';return;}
   el.innerHTML=PROJECTS.map(p=>`<label class="uprojchk"><input type="checkbox" value="${esc(p.id)}"><span class="sdot" style="background:${projColor(p.id)}"></span>${esc(p.name)}</label>`).join("");
+}
+function toggleInvite(force){
+  const box=document.getElementById("invitebox");const btn=document.getElementById("invite-toggle");if(!box)return;
+  const open=force===undefined?box.hasAttribute("hidden"):force;
+  if(open){box.removeAttribute("hidden");btn.classList.add("on");setTimeout(()=>{const f=document.getElementById("usr-fullname");if(f)f.focus();},30);}
+  else{box.setAttribute("hidden","");btn.classList.remove("on");}
 }
 async function createUser(){
   const username=document.getElementById("usr-name").value.trim();
@@ -1807,7 +1848,7 @@ async function createUser(){
     if(!r.ok){err.textContent=await r.text()||"Failed.";return;}
     ["usr-name","usr-pass","usr-fullname","usr-email"].forEach(id=>document.getElementById(id).value="");
     document.querySelectorAll("#usr-projpick input:checked").forEach(c=>c.checked=false);
-    toasty("User created","ok");renderUsers();
+    toggleInvite(false);toasty("Member added","ok");renderUsers();
   }catch(e){err.textContent="Network error.";}
 }
 let EU_USER=null;
