@@ -573,9 +573,30 @@ async fn git_connect_ep(
     if !ok {
         return (StatusCode::BAD_REQUEST, format!("sign-in failed: {out}")).into_response();
     }
-    // Confirm and read back the account.
-    let (_a, status_out) = run_cli(bin, &["auth", "status"]).await;
-    Json(serde_json::json!({ "ok": true, "account": parse_account(&status_out) })).into_response()
+    // Verify the token actually authenticates. `glab` stores a token without
+    // validating it, so a successful login command is not enough — require the
+    // status to resolve an account. If it doesn't, log the bad token back out so
+    // we never leave broken credentials behind.
+    let (status_ok, status_out) = run_cli(bin, &["auth", "status"]).await;
+    let account = parse_account(&status_out);
+    if !status_ok || account.is_none() {
+        let host_arg = if host.is_empty() {
+            if bin == "glab" {
+                "gitlab.com"
+            } else {
+                "github.com"
+            }
+        } else {
+            host.as_str()
+        };
+        let _ = run_cli(bin, &["auth", "logout", "--hostname", host_arg]).await;
+        return (
+            StatusCode::BAD_REQUEST,
+            "token was rejected — check the token value and its scopes",
+        )
+            .into_response();
+    }
+    Json(serde_json::json!({ "ok": true, "account": account })).into_response()
 }
 
 /// List projects (id, name, alias, version, ticket count) in registration order.
