@@ -114,6 +114,17 @@ pub struct Channel {
     pub inviters: Vec<String>,
     #[serde(default)]
     pub created_at: String,
+    /// Channel kind: `"general"` (everyone), `"project"` (auto-mirrors a
+    /// project's membership, id = `#<alias>`), or `"private"` (owner-created).
+    #[serde(default = "chan_kind_private")]
+    pub kind: String,
+    /// For a `"project"` channel, the project id it mirrors. Empty otherwise.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub project: String,
+}
+
+fn chan_kind_private() -> String {
+    "private".to_owned()
 }
 
 impl Channel {
@@ -411,6 +422,8 @@ impl ProjectState {
             members: vec![owner.to_owned()],
             inviters: Vec::new(),
             created_at: now_rfc3339(),
+            kind: "private".to_owned(),
+            project: String::new(),
         };
         self.channels.push(ch.clone());
         Ok(ch)
@@ -487,13 +500,15 @@ fn general_channel_record() -> Channel {
         members: Vec::new(),
         inviters: Vec::new(),
         created_at: String::new(),
+        kind: "general".to_owned(),
+        project: String::new(),
     }
 }
 
 /// Turn a display name into a URL-safe channel slug: lowercase, spaces and runs
 /// of punctuation collapsed to single hyphens, trimmed. `"Design Review!"` →
 /// `"design-review"`.
-fn slugify(name: &str) -> String {
+pub(crate) fn slugify(name: &str) -> String {
     let mut out = String::new();
     let mut prev_dash = false;
     for c in name.trim().chars() {

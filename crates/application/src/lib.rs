@@ -15,6 +15,7 @@ pub mod prompts;
 pub mod selection;
 pub mod sprint;
 pub mod state;
+pub mod system_chat;
 pub mod use_cases;
 
 pub use auth::{AuthPort, AuthRole, AuthUser, LoginResult, TokenInfo};
@@ -27,3 +28,4 @@ pub use state::{
     Attachment, Channel, ChatMsg, Comment, DesignSystem, Milestone, ProjectState, Spend, Sprint,
     GENERAL_CHANNEL, SCHEMA_VERSION,
 };
+pub use system_chat::{ChatContext, ProjectRef, SystemChat, UserRef};
