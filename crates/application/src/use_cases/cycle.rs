@@ -17,6 +17,14 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+/// The SA reviewer's JSON verdict on a pull request.
+#[derive(serde::Deserialize)]
+struct ReviewVerdict {
+    decision: String,
+    #[serde(default)]
+    summary: String,
+}
+
 /// What happened during one cycle. Rendered for logs and the eventual dashboard.
 #[derive(Debug, Default)]
 pub struct CycleReport {
@@ -218,6 +226,107 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             s.log_activity("GIT", action, None);
             let _ = self.store.save(&s).await;
         }
+    }
+
+    /// When `auto_merge` is on, the SA agent deep-dives each open PR (reads the
+    /// diff, judges correctness/completeness/safety) and either merges it or
+    /// requests changes — the automated stand-in for a human reviewer. Gated by
+    /// CI (never merges a failing or conflicting PR) and bounded per cycle to
+    /// keep cost predictable. Best-effort throughout.
+    async fn review_open_prs(&self) {
+        if !self.config.git.enabled || !self.config.git.auto_merge {
+            return;
+        }
+        let Some(forge) = &self.forge else { return };
+        let prs = match forge.list_open_prs().await {
+            Ok(p) => p,
+            Err(e) => {
+                self.log_git(&format!("review: list PRs failed: {e}")).await;
+                return;
+            }
+        };
+        // Bound cost: review a few PRs per cycle, oldest first.
+        for pr in prs.into_iter().rev().take(3) {
+            if pr.ci == "pending" {
+                continue; // wait for CI before judging
+            }
+            let blocked = if pr.ci == "failing" {
+                Some("CI is failing — fix the build/tests.".to_owned())
+            } else if !pr.mergeable {
+                Some("The branch has merge conflicts — rebase on the base branch.".to_owned())
+            } else {
+                None
+            };
+            if let Some(reason) = blocked {
+                let _ = forge.request_changes(pr.number, &reason).await;
+                self.log_git(&format!(
+                    "SA requested changes on PR #{} ({reason})",
+                    pr.number
+                ))
+                .await;
+                continue;
+            }
+            let Ok(diff) = forge.pr_diff(pr.number).await else {
+                continue;
+            };
+            match self.sa_review(&pr.title, &pr.head, &diff).await {
+                Some((true, _)) => match forge.merge_pr(pr.number).await {
+                    Ok(()) => {
+                        self.log_git(&format!("SA approved & merged PR #{}", pr.number))
+                            .await;
+                    }
+                    Err(e) => {
+                        self.log_git(&format!("merge PR #{} failed: {e}", pr.number))
+                            .await;
+                    }
+                },
+                Some((false, comment)) => {
+                    let _ = forge.request_changes(pr.number, &comment).await;
+                    self.log_git(&format!("SA requested changes on PR #{}", pr.number))
+                        .await;
+                }
+                None => {}
+            }
+        }
+    }
+
+    /// Run the SA engine as a code reviewer over a PR diff. Returns
+    /// `Some((approved, comment))`, or `None` if the engine failed / was
+    /// unparseable (in which case the PR is left untouched for a human).
+    async fn sa_review(&self, title: &str, head: &str, diff: &str) -> Option<(bool, String)> {
+        use coxagent_domain::Role;
+        let _ = self.config.engine.resolve(Role::Sa);
+        // Cap the diff so a huge PR doesn't blow the prompt budget.
+        let clipped: String = diff.chars().take(16_000).collect();
+        let task = format!(
+            "You are the reviewer on a pull request before merge. Do a deep code review for \
+             correctness, completeness, safety, and architecture fit.\n\nPR: {title}\nBranch: \
+             {head}\n\nUnified diff:\n```\n{clipped}\n```\n\nRespond with ONLY JSON: \
+             {{\"decision\": \"approve\" | \"request_changes\", \"summary\": \"one short \
+             paragraph; if request_changes, list the concrete fixes\"}}."
+        );
+        let request = AgentRequest {
+            role: Role::Sa,
+            system_prompt: crate::prompts::system_prompt(crate::prompts::SA),
+            task_prompt: task,
+            work_dir: self.work_dir.clone(),
+            timeout: std::time::Duration::from_secs(600),
+        };
+        let outcome = self.engine.run(request).await.ok()?;
+        if !outcome.succeeded() {
+            return None;
+        }
+        let raw = &outcome.stdout;
+        let start = raw.find('{')?;
+        let end = raw.rfind('}')?;
+        let v: ReviewVerdict = serde_json::from_str(raw.get(start..=end)?).ok()?;
+        let approved = v.decision.eq_ignore_ascii_case("approve");
+        let comment = if v.summary.trim().is_empty() {
+            "Changes requested by the SA reviewer.".to_owned()
+        } else {
+            v.summary
+        };
+        Some((approved, comment))
     }
 
     /// Attach a notifier fired on significant events (deploy, budget, policy).
@@ -530,6 +639,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             Ok(mut ids) => report.bugs_filed.append(&mut ids),
             Err(e) => report.errors.push(format!("CONFORMANCE: {e}")),
         }
+
+        // Auto-merge: the SA deep-dives open PRs and merges or requests changes.
+        self.review_open_prs().await;
 
         report.over_budget = self.record_activity(&report).await;
         if report.over_budget {
@@ -1093,5 +1205,144 @@ mod tests {
             commits[0].1, "5204779+bot@users.noreply.github.com",
             "commits under the configured noreply email"
         );
+    }
+
+    use crate::ports::outbound::{ForgePort, PullRequest};
+
+    /// Forge with one open PR that records merge / request-changes calls.
+    #[derive(Default)]
+    struct SpyForge {
+        ci: String,
+        mergeable: bool,
+        merged: Mutex<Vec<u64>>,
+        changes: Mutex<Vec<u64>>,
+    }
+    #[async_trait::async_trait]
+    impl ForgePort for SpyForge {
+        async fn open_pr(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<PullRequest, PortError> {
+            unimplemented!()
+        }
+        async fn list_open_prs(&self) -> Result<Vec<PullRequest>, PortError> {
+            Ok(vec![PullRequest {
+                number: 7,
+                title: "feat(X-1): add a".to_owned(),
+                head: "feat/X-1".to_owned(),
+                base: "main".to_owned(),
+                url: String::new(),
+                author: "coxagent-bot".to_owned(),
+                ci: self.ci.clone(),
+                mergeable: self.mergeable,
+                created: String::new(),
+            }])
+        }
+        async fn pr_diff(&self, _: u64) -> Result<String, PortError> {
+            Ok("+ added a line".to_owned())
+        }
+        async fn merge_pr(&self, n: u64) -> Result<(), PortError> {
+            self.merged.lock().expect("lock").push(n);
+            Ok(())
+        }
+        async fn request_changes(&self, n: u64, _: &str) -> Result<(), PortError> {
+            self.changes.lock().expect("lock").push(n);
+            Ok(())
+        }
+        async fn close_pr(&self, _: u64) -> Result<(), PortError> {
+            Ok(())
+        }
+    }
+
+    /// Engine whose SA review verdict is fixed to `decision`.
+    struct ReviewEngine {
+        decision: &'static str,
+    }
+    #[async_trait::async_trait]
+    impl AgentEnginePort for ReviewEngine {
+        fn id(&self) -> &'static str {
+            "review"
+        }
+        async fn run(&self, _: AgentRequest) -> Result<AgentOutcome, PortError> {
+            Ok(AgentOutcome {
+                stdout: format!("{{\"decision\":\"{}\",\"summary\":\"s\"}}", self.decision),
+                stderr: String::new(),
+                exit_code: Some(0),
+                usage: None,
+            })
+        }
+    }
+
+    fn review_uc(
+        forge: Arc<SpyForge>,
+        decision: &'static str,
+        auto_merge: bool,
+    ) -> RunCycleUseCase<MemStore, ReviewEngine> {
+        let mut cfg = Config::default();
+        cfg.git.enabled = true;
+        cfg.git.auto_merge = auto_merge;
+        RunCycleUseCase::new(
+            Arc::new(MemStore::default()),
+            Arc::new(ReviewEngine { decision }),
+            cfg,
+            PathBuf::from("/tmp"),
+            "goal".to_owned(),
+        )
+        .with_forge(forge as Arc<dyn ForgePort>)
+    }
+
+    #[tokio::test]
+    async fn sa_merges_on_approve_but_only_when_auto_merge() {
+        // auto_merge off → never merges even with an approve verdict.
+        let forge = Arc::new(SpyForge {
+            ci: "passing".to_owned(),
+            mergeable: true,
+            ..Default::default()
+        });
+        review_uc(Arc::clone(&forge), "approve", false)
+            .review_open_prs()
+            .await;
+        assert!(forge.merged.lock().expect("lock").is_empty());
+
+        // auto_merge on + approve + CI passing → merges PR #7.
+        let forge = Arc::new(SpyForge {
+            ci: "passing".to_owned(),
+            mergeable: true,
+            ..Default::default()
+        });
+        review_uc(Arc::clone(&forge), "approve", true)
+            .review_open_prs()
+            .await;
+        assert_eq!(*forge.merged.lock().expect("lock"), vec![7]);
+    }
+
+    #[tokio::test]
+    async fn sa_requests_changes_on_reject_and_never_merges_failing_ci() {
+        // SA says request_changes → no merge, a changes request instead.
+        let forge = Arc::new(SpyForge {
+            ci: "passing".to_owned(),
+            mergeable: true,
+            ..Default::default()
+        });
+        review_uc(Arc::clone(&forge), "request_changes", true)
+            .review_open_prs()
+            .await;
+        assert!(forge.merged.lock().expect("lock").is_empty());
+        assert_eq!(*forge.changes.lock().expect("lock"), vec![7]);
+
+        // Failing CI is never merged, even if the SA would approve.
+        let forge = Arc::new(SpyForge {
+            ci: "failing".to_owned(),
+            mergeable: true,
+            ..Default::default()
+        });
+        review_uc(Arc::clone(&forge), "approve", true)
+            .review_open_prs()
+            .await;
+        assert!(forge.merged.lock().expect("lock").is_empty());
+        assert_eq!(*forge.changes.lock().expect("lock"), vec![7]);
     }
 }

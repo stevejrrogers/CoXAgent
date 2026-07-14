@@ -1503,7 +1503,7 @@ async function loadSettings(){let cfg={};try{cfg=await(await fetch(api("/config"
       <div class="fr"><span class="lbl">Branch prefix</span><input id="git-bp" value="${esc(git.branch_prefix||'feat/')}" style="width:120px"/><span class="hint">→ ${esc(git.branch_prefix||'feat/')}CXC-123</span></div>
       <div class="fr"><span class="lbl">Commit email</span><input id="git-em" value="${esc(git.commit_email||'')}" placeholder="…@users.noreply.github.com" style="width:280px"/><span class="hint">use a noreply email to avoid privacy blocks</span></div>
       <div class="fr"><span class="lbl">Open PR/MR</span><select id="git-pr"><option value="true" ${git.auto_pr!==false?'selected':''}>automatically after push</option><option value="false" ${git.auto_pr===false?'selected':''}>manual</option></select></div>
-      <div class="fr"><span class="lbl">Auto-merge</span><select id="git-am"><option value="false" ${!git.auto_merge?'selected':''}>off — a human reviews</option><option value="true" ${git.auto_merge?'selected':''}>on — merge when CI passes</option></select><span class="hint">leave off until you trust the flow</span></div>
+      <div class="fr"><span class="lbl">Auto-merge</span><select id="git-am"><option value="false" ${!git.auto_merge?'selected':''}>off — a human reviews in the Review tab</option><option value="true" ${git.auto_merge?'selected':''}>on — the SA agent deep-dives &amp; merges</option></select><span class="hint">SA reviews the diff, merges on approve (never on failing CI); leave off until you trust the flow</span></div>
     </div>
     <button class="save" onclick="saveSettings()">Save changes</button>
     <span id="save-note" style="margin-left:12px;color:var(--muted);font-size:12px"></span>
