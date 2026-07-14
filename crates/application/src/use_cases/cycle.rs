@@ -276,6 +276,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                             "deploy_failed"
                         };
                         self.notify(kind, r.summary.clone()).await;
+                        // A failed deploy must become work, or nothing fixes it:
+                        // file it as a high-priority bug for DEV-BUG (deduped).
+                        if !r.success {
+                            if let Some(id) = self.file_deploy_bug(&r.summary).await {
+                                report.bugs_filed.push(id);
+                            }
+                        }
                     }
                     Ok(_) => {}
                     Err(e) => report.errors.push(format!("DEPLOY: {e}")),
@@ -324,6 +331,41 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             });
             let _ = self.store.save(&state).await;
         }
+    }
+
+    /// Turn a failed deploy into a high-priority bug so DEV-BUG will fix it.
+    /// Deduped: only one open "Deploy failing" bug exists at a time, refreshed
+    /// with the latest error. Returns the new ticket id when one is filed.
+    async fn file_deploy_bug(&self, summary: &str) -> Option<TicketId> {
+        use coxagent_domain::ticket::{Priority, Status, TicketType};
+        const MARKER: &str = "Deploy failing";
+        let Ok(state) = self.store.load().await else {
+            return None;
+        };
+        // If an open deploy bug already exists, don't pile on duplicates.
+        if state.tickets.iter().any(|t| {
+            t.ticket_type() == TicketType::Bug
+                && t.status() == Status::Open
+                && t.title().starts_with(MARKER)
+        }) {
+            return None;
+        }
+        let adder = crate::use_cases::AddTicketUseCase::new(Arc::clone(&self.store));
+        adder
+            .execute(crate::use_cases::AddTicketInput {
+                ticket_type: TicketType::Bug,
+                title: format!("{MARKER}: {summary}"),
+                description: format!(
+                    "The docker deploy failed and the container is not running. \
+                     Root-cause and fix so `docker compose up -d --build` succeeds.\n\n\
+                     Deploy output: {summary}"
+                ),
+                priority: Priority::High,
+                complexity: coxagent_domain::ticket::Complexity::Medium,
+                has_ui: false,
+            })
+            .await
+            .ok()
     }
 
     /// Append a human-readable activity trail plus drain the spend meter into
