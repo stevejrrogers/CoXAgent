@@ -118,6 +118,27 @@
   .wsfiles{display:flex;flex-wrap:wrap;gap:6px}
   .wsfile{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;color:var(--muted);background:var(--card2);border:1px solid var(--border);border-radius:7px;padding:4px 9px;font-family:ui-monospace,monospace}
   .wsfile.dir{color:var(--accent2)}
+  .acard{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:16px 18px;margin-bottom:14px}
+  .acard-h{display:flex;align-items:flex-start;gap:12px;margin-bottom:14px}
+  .acard-h h4{font-size:14px;font-weight:700;display:flex;align-items:center;gap:8px}
+  .acard-h h4 i{color:var(--accent2)}
+  .acard-h span{display:block;font-size:11.5px;color:var(--muted);margin-top:3px}
+  .ainvite{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+  .ainvite input{flex:1;min-width:130px;background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:9px;padding:10px 12px;font-size:13px;font-family:inherit}
+  .ainvite input:focus{outline:none;border-color:var(--accent)}
+  .alist{display:flex;flex-direction:column;gap:8px}
+  .arow{display:flex;align-items:center;gap:11px;background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:10px 13px}
+  .arow .aav{flex:none;width:32px;height:32px;border-radius:9px;display:grid;place-items:center;font-size:12px;font-weight:700;color:#fff}
+  .arow .aname{font-size:13px;font-weight:600}
+  .arow .ameta{font-size:11px;color:var(--dim)}
+  .arole{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;padding:2px 8px;border-radius:20px}
+  .arole.admin{background:color-mix(in srgb,var(--amber) 20%,transparent);color:var(--amber)}
+  .arole.viewer{background:var(--accentbg);color:var(--accent2)}
+  .arow .adel{flex:none;background:transparent;border:none;color:var(--muted);cursor:pointer;padding:5px;border-radius:6px}
+  .arow .adel:hover{color:var(--red);background:var(--card)}
+  .dupwarn{display:flex;gap:10px;align-items:flex-start;background:color-mix(in srgb,var(--amber) 12%,transparent);border:1px solid color-mix(in srgb,var(--amber) 40%,transparent);border-radius:10px;padding:11px 14px;margin-bottom:12px;font-size:12.5px;color:var(--text)}
+  .dupwarn i{color:var(--amber);font-size:16px;margin-top:1px}
+  .dupwarn .tk{background:var(--card2);padding:1px 7px;border-radius:5px;font-family:ui-monospace,monospace;font-size:11px}
   .chatwrap{display:flex;flex-direction:column;background:var(--card);border:1px solid var(--border);border-radius:var(--r);overflow:hidden;height:calc(100vh - 118px);min-height:540px}
   .cevent{display:flex;justify-content:center;margin:2px 0}
   .cev-pill{display:inline-flex;align-items:center;gap:7px;font-size:11.5px;color:var(--muted);background:var(--card2);border:1px solid var(--border2);border-left:3px solid var(--ec);border-radius:8px;padding:5px 12px;max-width:88%}
@@ -300,7 +321,13 @@ body:not(.admin) .admin-only { display: none !important; }
           <div class="panel"><h4><i class="ti ti-history" style="color:var(--accent2)"></i> Releases</h4><div id="ov-changelog"></div></div>
         </div>
       </div>
-      <div class="view" id="view-team"><div class="agents" id="agents"></div></div>
+      <div class="view" id="view-team">
+        <div id="team-dupwarn"></div>
+        <div class="sec">Agents <span style="font-size:11px;color:var(--dim);font-weight:400">· your autonomous workers — click one to see its live log</span></div>
+        <div class="agents" id="agents"></div>
+        <div class="sec admin-only" style="margin-top:22px">People on this project <span style="font-size:11px;color:var(--dim);font-weight:400">· humans who oversee & collaborate</span></div>
+        <div class="acard admin-only" id="team-people"><div class="empty">loading…</div></div>
+      </div>
       <div class="view" id="view-board">
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
           <div class="seg" id="work-seg">
@@ -353,30 +380,31 @@ body:not(.admin) .admin-only { display: none !important; }
         <div class="panel"><div id="audit-body"></div></div>
       </div>
       <div class="view" id="view-access">
-        <div class="sec">Team members</div>
-        <div class="panel">
-          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
-            <input id="usr-name" placeholder="username" style="flex:1;min-width:120px;background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 11px;font-size:13px;font-family:inherit">
-            <input id="usr-pass" type="password" placeholder="password" style="flex:1;min-width:120px;background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 11px;font-size:13px;font-family:inherit">
+        <div class="acard">
+          <div class="acard-h"><div><h4><i class="ti ti-users"></i> Team members</h4><span>People who can sign in. Assign them to projects in the Team view.</span></div></div>
+          <div class="ainvite">
+            <input id="usr-name" placeholder="username">
+            <input id="usr-pass" type="password" placeholder="temporary password">
             <select id="usr-role" class="sel"><option value="viewer">viewer</option><option value="admin">admin</option></select>
-            <button class="pri" onclick="createUser()"><i class="ti ti-user-plus"></i> Add</button>
+            <button class="pri" onclick="createUser()"><i class="ti ti-user-plus"></i> Invite</button>
           </div>
-          <div id="usr-err" style="color:var(--red);font-size:12px;min-height:14px;margin-bottom:6px"></div>
-          <div id="usr-list"></div>
+          <div id="usr-err" style="color:var(--red);font-size:12px;min-height:14px;margin:2px 0 6px"></div>
+          <div id="usr-list" class="alist"></div>
         </div>
-        <div class="sec" style="margin-top:20px">API tokens</div>
-        <div class="panel">
-          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
-            <input id="tok-label" placeholder="token label (e.g. ci-bot)" style="flex:1;min-width:160px;background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 11px;font-size:13px;font-family:inherit">
+        <div class="acard">
+          <div class="acard-h"><div><h4><i class="ti ti-key"></i> API tokens</h4><span>For automation via <code>Authorization: Bearer &lt;token&gt;</code>. The secret is shown once.</span></div></div>
+          <div class="ainvite">
+            <input id="tok-label" placeholder="token label (e.g. ci-bot)">
             <select id="tok-role" class="sel"><option value="viewer">viewer</option><option value="admin">admin</option></select>
             <button class="pri" onclick="mintToken()"><i class="ti ti-plus"></i> Mint token</button>
           </div>
           <div id="tok-secret"></div>
-          <div id="tok-list"></div>
+          <div id="tok-list" class="alist"></div>
         </div>
-        <div style="color:var(--dim);font-size:12px;margin-top:10px">Tokens authenticate automation via <code>Authorization: Bearer &lt;token&gt;</code>. The secret is shown once at creation.</div>
-        <div class="sec" style="margin-top:20px">Two-factor authentication</div>
-        <div class="panel"><div id="twofa-body"></div></div>
+        <div class="acard">
+          <div class="acard-h"><div><h4><i class="ti ti-shield-lock"></i> Two-factor authentication</h4><span>Protect your own account with an authenticator app.</span></div></div>
+          <div id="twofa-body"></div>
+        </div>
       </div>
       <div class="view" id="view-discuss">
         <div class="chatwrap">
@@ -726,6 +754,8 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
       return `<div class="agent ${run?'run':''}" onclick="openAgent('${r}')" style="cursor:pointer"><div class="av" style="background:${col}22;color:${col}">${initials(r)}<span class="sr"></span></div>
         <div style="flex:1"><div class="rl">${r} <i class="ti ti-terminal-2" style="font-size:12px;color:var(--dim);float:right"></i></div><div class="ds">${d}</div>
         <div class="st">${run?`<i class="ti ti-loader-2" style="font-size:13px"></i> on ${work}`:`<i class="ti ti-checkbox" style="font-size:13px"></i> ${n} actions`}</div></div></div>`;}).join("");
+    renderDupWarn(s);
+    if(ME&&ME.role==="admin")renderTeamPeople();
   }else if(CUR==="board"){
     let feats=(s.tickets||[]).filter(t=>t.type!=="bug"),bugs=(s.tickets||[]).filter(t=>t.type==="bug");
     if(BF!=="all"){feats=feats.filter(t=>t.priority===BF);bugs=bugs.filter(t=>t.priority===BF);}
@@ -1186,11 +1216,15 @@ function renderUsers(){
   const list=document.getElementById("usr-list");if(!list)return;
   fetch("/api/auth/users").then(r=>r.ok?r.json():[]).then(rows=>{
     if(!Array.isArray(rows)||!rows.length){list.innerHTML='<div class="empty">no accounts</div>';return;}
-    list.innerHTML=rows.map(u=>{const admin=u.role==="admin";const col=admin?"var(--amber)":"var(--accent2)";
+    list.innerHTML=rows.map(u=>{const admin=u.role==="admin";
+      const grad=admin?"linear-gradient(135deg,var(--amber),#b45309)":"linear-gradient(135deg,var(--accent),var(--accent2))";
       const me=ME&&ME.username===u.username;
-      return `<div class="act"><div class="ad" style="background:${col}22;color:${col}"><i class="ti ti-${admin?'shield':'user'}" style="font-size:13px"></i></div>
-        <div class="atx"><span class="who">${esc(u.username)}</span> <span class="tk" style="background:${col}22;color:${col}">${esc(u.role)}</span>${me?' <span style="font-size:11px;color:var(--dim)">(you)</span>':''}</div>
-        ${me?'':`<span class="tm" style="cursor:pointer;color:var(--red)" onclick="deleteUser('${encodeURIComponent(u.username)}')"><i class="ti ti-trash"></i></span>`}</div>`;}).join("");
+      const np=(u.projects||[]).length;
+      return `<div class="arow"><div class="aav" style="background:${grad}">${esc((u.username||'?').slice(0,2).toUpperCase())}</div>
+        <div style="flex:1;min-width:0"><div class="aname">${esc(u.username)}${me?' <span style="font-size:10px;color:var(--dim);font-weight:400">· you</span>':''}</div>
+          <div class="ameta">${np?np+' project'+(np>1?'s':''):'no projects assigned'}${u.twofa?' · 2FA on':''}</div></div>
+        <span class="arole ${admin?'admin':'viewer'}">${esc(u.role)}</span>
+        ${me?'':`<button class="adel" onclick="deleteUser('${encodeURIComponent(u.username)}')" title="Remove"><i class="ti ti-trash"></i></button>`}</div>`;}).join("");
   }).catch(()=>{list.innerHTML='<div class="empty">unable to load users</div>';});
 }
 async function createUser(){
@@ -1218,6 +1252,35 @@ function renderTranscripts(){
         <div class="ad" style="background:${col}22;color:${col}"><i class="ti ti-file-text" style="font-size:13px"></i></div>
         <div class="atx"><span class="who">${esc(t.name)}</span></div><span class="tm">${fmtBytes(t.size)}</span></div>`;}).join("");
   }).catch(()=>{el.innerHTML='<div class="empty">unable to load transcripts</div>';});
+}
+async function renderTeamPeople(){
+  const el=document.getElementById("team-people");if(!el)return;
+  let rows=[];try{rows=await(await fetch(api("/members"))).json();}catch(e){}
+  if(!Array.isArray(rows)){el.innerHTML='<div class="empty">admin only</div>';return;}
+  const members=rows.filter(u=>u.assigned),available=rows.filter(u=>!u.assigned);
+  const isAdmin=r=>String(r).toLowerCase()==="admin";
+  const memHtml=members.length?members.map(u=>{const grad=isAdmin(u.role)?"linear-gradient(135deg,var(--amber),#b45309)":"linear-gradient(135deg,var(--accent),var(--accent2))";
+    return `<div class="arow"><div class="aav" style="background:${grad}">${esc((u.username||'?').slice(0,2).toUpperCase())}</div>
+      <div style="flex:1;min-width:0"><div class="aname">${esc(u.username)}</div><div class="ameta">assigned · <a onclick="nav('people')" style="color:var(--accent2);cursor:pointer">see their activity</a></div></div>
+      <span class="arole ${isAdmin(u.role)?'admin':'viewer'}">${esc(String(u.role).toLowerCase())}</span>
+      <button class="adel" onclick="unassignMember('${encodeURIComponent(u.username)}')" title="Remove from project"><i class="ti ti-user-minus"></i></button></div>`;}).join(""):'<div class="empty">no one assigned yet — add a teammate below</div>';
+  const addHtml=available.length?`<div class="ainvite" style="margin-top:12px">
+      <select id="member-add" class="sel" style="flex:1;min-width:160px">${available.map(u=>`<option value="${esc(u.username)}">${esc(u.username)} · ${esc(String(u.role).toLowerCase())}</option>`).join("")}</select>
+      <button class="pri" onclick="assignMember()"><i class="ti ti-user-plus"></i> Assign</button></div>
+      <div style="font-size:11px;color:var(--dim);margin-top:8px">Need a new account? Create it in <a onclick="nav('access')" style="color:var(--accent2);cursor:pointer">Access</a> first.</div>`
+    :'<div style="font-size:11px;color:var(--dim);margin-top:10px">Everyone is assigned. Create more accounts in <a onclick="nav(\'access\')" style="color:var(--accent2);cursor:pointer">Access</a>.</div>';
+  el.innerHTML=`<div class="alist">${memHtml}</div>${addHtml}`;
+}
+async function assignMember(){const s=document.getElementById("member-add");if(!s||!s.value)return;
+  try{await fetch(api("/members"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:s.value})});renderTeamPeople();}catch(e){}}
+async function unassignMember(u){try{await fetch(api("/members/"+u),{method:"DELETE"});renderTeamPeople();}catch(e){}}
+// Flag tickets that share a normalised title — likely duplicate work.
+function renderDupWarn(s){
+  const el=document.getElementById("team-dupwarn");if(!el)return;
+  const norm=t=>(t.title||"").toLowerCase().replace(/[^a-z0-9]+/g," ").trim();
+  const g={};(s.tickets||[]).forEach(t=>{const k=norm(t);if(k)(g[k]=g[k]||[]).push(t);});
+  const dups=Object.values(g).filter(x=>x.length>1);
+  el.innerHTML=dups.length?dups.map(x=>`<div class="dupwarn"><i class="ti ti-copy-check"></i><div><b>Possible duplicate work:</b> ${x.map(t=>`<span class="tk" style="cursor:pointer" onclick="showTicket('${t.id}')">${esc(t.id)}</span>`).join(" ")} share the title “${esc(x[0].title)}”.</div></div>`).join(""):"";
 }
 async function openAgent(role){
   const meta=AGENTS.find(a=>a[0]===role);const col=cvar((meta&&meta[2])||"--muted");
@@ -1295,10 +1358,11 @@ function renderAccess(){
   const list=document.getElementById("tok-list");
   fetch("/api/auth/tokens").then(r=>r.ok?r.json():[]).then(rows=>{
     if(!Array.isArray(rows)||!rows.length){list.innerHTML='<div class="empty">no API tokens yet</div>';return;}
-    list.innerHTML=rows.map(t=>{const col=t.role==="admin"?"var(--amber)":"var(--accent2)";
-      return `<div class="act"><div class="ad" style="background:${col}22;color:${col}"><i class="ti ti-key" style="font-size:13px"></i></div>
-        <div class="atx"><span class="who">${esc(t.label)}</span> <span class="tk" style="background:${col}22;color:${col}">${esc(t.role)}</span><div style="font-size:11px;color:var(--dim)">created ${esc((t.created||"").slice(0,16).replace("T"," "))}</div></div>
-        <span class="tm" style="cursor:pointer;color:var(--red)" onclick="revokeToken('${encodeURIComponent(t.label)}')"><i class="ti ti-trash"></i></span></div>`;}).join("");
+    list.innerHTML=rows.map(t=>{const admin=t.role==="admin";
+      return `<div class="arow"><div class="aav" style="background:linear-gradient(135deg,var(--accent2),var(--accent))"><i class="ti ti-key" style="font-size:14px"></i></div>
+        <div style="flex:1;min-width:0"><div class="aname">${esc(t.label)}</div><div class="ameta">created ${esc((t.created||"").slice(0,16).replace("T"," "))}</div></div>
+        <span class="arole ${admin?'admin':'viewer'}">${esc(t.role)}</span>
+        <button class="adel" onclick="revokeToken('${encodeURIComponent(t.label)}')" title="Revoke"><i class="ti ti-trash"></i></button></div>`;}).join("");
   }).catch(()=>{list.innerHTML='<div class="empty">unable to load tokens</div>';});
 }
 async function mintToken(){

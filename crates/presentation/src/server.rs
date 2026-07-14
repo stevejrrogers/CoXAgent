@@ -225,6 +225,14 @@ pub async fn serve_full(
         .route("/api/audit-log", get(audit_log_ep))
         .route("/api/people-analytics", get(people_analytics_ep))
         .route("/api/projects/:pid/workspace", get(workspace_ep))
+        .route(
+            "/api/projects/:pid/members",
+            get(list_members_ep).post(add_member_ep),
+        )
+        .route(
+            "/api/projects/:pid/members/:username",
+            axum::routing::delete(remove_member_ep),
+        )
         .route("/api/engines", get(engines_ep))
         .route("/api/analyze-goal", post(analyze_goal_ep))
         .route("/api/projects", get(list_projects).post(create_project))
@@ -1167,6 +1175,73 @@ async fn delete_user_ep(
             "cannot delete (unknown user or last admin)",
         )
             .into_response()
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct MemberReq {
+    username: String,
+}
+
+/// List every account with a flag for whether it's assigned to this project, so
+/// the Team view can show members and offer the rest for assignment (admin-only).
+async fn list_members_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let Some(auth) = app.auth.clone() else {
+        return Json(serde_json::json!([])).into_response();
+    };
+    let is_admin = resolve_principal(&auth, &headers)
+        .await
+        .is_some_and(|u| u.role.can_write());
+    if !is_admin {
+        return (StatusCode::FORBIDDEN, "admin role required").into_response();
+    }
+    let out: Vec<serde_json::Value> = auth
+        .list_users()
+        .await
+        .into_iter()
+        .map(|u| {
+            serde_json::json!({
+                "username": u.username,
+                "role": u.role,
+                "assigned": u.projects.iter().any(|p| p == &pid),
+            })
+        })
+        .collect();
+    Json(out).into_response()
+}
+
+/// Assign a user to a project (admin-only via the write gate).
+async fn add_member_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    Json(req): Json<MemberReq>,
+) -> axum::response::Response {
+    let Some(auth) = app.auth.clone() else {
+        return (StatusCode::NOT_IMPLEMENTED, "auth not configured").into_response();
+    };
+    if auth.assign_project(req.username.trim(), &pid).await {
+        Json(serde_json::json!({ "ok": true })).into_response()
+    } else {
+        (StatusCode::CONFLICT, "unknown user").into_response()
+    }
+}
+
+/// Remove a user from a project (admin-only via the write gate).
+async fn remove_member_ep(
+    State(app): State<AppState>,
+    Path((pid, username)): Path<(String, String)>,
+) -> axum::response::Response {
+    let Some(auth) = app.auth.clone() else {
+        return (StatusCode::NOT_IMPLEMENTED, "auth not configured").into_response();
+    };
+    if auth.unassign_project(&username, &pid).await {
+        Json(serde_json::json!({ "ok": true })).into_response()
+    } else {
+        (StatusCode::CONFLICT, "not a member").into_response()
     }
 }
 

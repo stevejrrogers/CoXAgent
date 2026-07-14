@@ -28,6 +28,10 @@ impl AuthRole {
 pub struct AuthUser {
     pub username: String,
     pub role: AuthRole,
+    /// Project ids this user is a member of (empty for service accounts and
+    /// bare session principals). Populated by [`AuthPort::list_users`].
+    #[serde(default)]
+    pub projects: Vec<String>,
 }
 
 /// Metadata about a minted API token (never the secret itself).
@@ -87,6 +91,14 @@ pub trait AuthPort: Send + Sync {
     /// Remove a user account. Returns `false` if it does not exist or removing
     /// it would leave no admin (the last admin cannot be deleted).
     async fn delete_user(&self, username: &str) -> bool;
+
+    /// Add `pid` to `username`'s project memberships (idempotent). Returns
+    /// `false` if the user does not exist or persistence fails.
+    async fn assign_project(&self, username: &str, pid: &str) -> bool;
+
+    /// Remove `pid` from `username`'s project memberships. Returns whether the
+    /// membership existed and was removed.
+    async fn unassign_project(&self, username: &str, pid: &str) -> bool;
 
     /// Begin TOTP enrollment for `username`: generate a pending secret and return
     /// `(secret, otpauth_uri)`. Not active until [`enable_2fa`](Self::enable_2fa).

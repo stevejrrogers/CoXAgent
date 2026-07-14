@@ -33,6 +33,9 @@ struct StoredUser {
     role: AuthRole,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     totp_secret: Option<String>,
+    /// Project ids this user is assigned to work on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    projects: Vec<String>,
 }
 
 /// One stored API token: label, role, SHA-256 hex of the secret, created-at.
@@ -130,6 +133,7 @@ impl FileAuthService {
                 hash,
                 role: AuthRole::Admin,
                 totp_secret: None,
+                projects: Vec::new(),
             }),
         }
         let text = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
@@ -269,6 +273,7 @@ impl AuthPort for FileAuthService {
             user: AuthUser {
                 username: username.to_owned(),
                 role,
+                projects: Vec::new(),
             },
             expires: Instant::now() + SESSION_TTL,
         };
@@ -304,6 +309,7 @@ impl AuthPort for FileAuthService {
         Some(AuthUser {
             username: format!("svc:{}", stored.label),
             role: stored.role,
+            projects: Vec::new(),
         })
     }
 
@@ -365,6 +371,7 @@ impl AuthPort for FileAuthService {
                     .map(|u| AuthUser {
                         username: u.username.clone(),
                         role: u.role,
+                        projects: u.projects.clone(),
                     })
                     .collect()
             },
@@ -392,6 +399,7 @@ impl AuthPort for FileAuthService {
                     hash,
                     role,
                     totp_secret: None,
+                    projects: Vec::new(),
                 }),
             }
         }
@@ -421,6 +429,40 @@ impl AuthPort for FileAuthService {
             users.retain(|u| u.username != username);
         }
         self.persist().is_ok()
+    }
+
+    async fn assign_project(&self, username: &str, pid: &str) -> bool {
+        {
+            let Ok(mut users) = self.users.lock() else {
+                return false;
+            };
+            let Some(u) = users.iter_mut().find(|u| u.username == username) else {
+                return false;
+            };
+            if u.projects.iter().any(|p| p == pid) {
+                return true; // already a member — idempotent
+            }
+            u.projects.push(pid.to_owned());
+        }
+        self.persist().is_ok()
+    }
+
+    async fn unassign_project(&self, username: &str, pid: &str) -> bool {
+        let removed = {
+            let Ok(mut users) = self.users.lock() else {
+                return false;
+            };
+            let Some(u) = users.iter_mut().find(|u| u.username == username) else {
+                return false;
+            };
+            let before = u.projects.len();
+            u.projects.retain(|p| p != pid);
+            u.projects.len() != before
+        };
+        if removed {
+            let _ = self.persist();
+        }
+        removed
     }
 
     async fn enroll_2fa(&self, username: &str) -> Option<(String, String)> {
