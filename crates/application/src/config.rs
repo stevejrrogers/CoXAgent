@@ -165,10 +165,75 @@ pub struct DeployConfig {
     pub host_port: Option<u16>,
 }
 
+/// Per-project version-control settings. Drives the git flow (branch + commit
+/// per ticket) and the forge integration (GitHub/GitLab PR/MR). `enabled` is
+/// off by default, so an existing project's repo is never touched until the
+/// user opts in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitConfig {
+    /// Master switch. When false, the agent loop performs no git operations.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Forge provider: `"github"` or `"gitlab"`.
+    #[serde(default = "default_provider")]
+    pub provider: String,
+    /// API base URL for self-hosted / enterprise (empty = provider default).
+    #[serde(default)]
+    pub base_url: String,
+    /// Repository slug `owner/name` (e.g. `stevejrrogers/CoXChat`).
+    #[serde(default)]
+    pub repo: String,
+    /// The base branch PRs/MRs target.
+    #[serde(default = "default_branch")]
+    pub default_branch: String,
+    /// Prefix for per-ticket branches (e.g. `feat/` → `feat/CXC-123`).
+    #[serde(default = "default_branch_prefix")]
+    pub branch_prefix: String,
+    /// Email agents commit under. Use a GitHub `…@users.noreply.github.com`
+    /// address to avoid email-privacy push rejections.
+    #[serde(default)]
+    pub commit_email: String,
+    /// Open a PR/MR automatically after pushing a ticket branch.
+    #[serde(default)]
+    pub auto_pr: bool,
+    /// Auto-merge when CI passes (opt-in; default off — a human reviews first).
+    #[serde(default)]
+    pub auto_merge: bool,
+}
+
+fn default_provider() -> String {
+    "github".to_owned()
+}
+fn default_branch() -> String {
+    "main".to_owned()
+}
+fn default_branch_prefix() -> String {
+    "feat/".to_owned()
+}
+
+impl Default for GitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: default_provider(),
+            base_url: String::new(),
+            repo: String::new(),
+            default_branch: default_branch(),
+            branch_prefix: default_branch_prefix(),
+            commit_email: String::new(),
+            auto_pr: false,
+            auto_merge: false,
+        }
+    }
+}
+
 /// Top-level configuration persisted as `coxagent.json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     pub engine: EngineMapping,
+    /// Version-control / forge integration settings.
+    #[serde(default)]
+    pub git: GitConfig,
     #[serde(default)]
     pub workflow: WorkflowConfig,
     /// Architecture conformance rules enforced against the codebase (empty = off).
@@ -192,6 +257,7 @@ impl Default for Config {
                 },
                 per_role: HashMap::new(),
             },
+            git: GitConfig::default(),
             workflow: WorkflowConfig::default(),
             architecture: Vec::new(),
             policy: PolicyConfig::default(),

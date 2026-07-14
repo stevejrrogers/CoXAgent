@@ -131,6 +131,7 @@
   .memrole{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;padding:2px 8px;border-radius:20px;background:var(--card);color:var(--muted)}
   .memrole.admin{background:color-mix(in srgb,var(--amber) 16%,transparent);color:var(--amber)}
   .memrole.viewer{background:color-mix(in srgb,var(--accent2) 14%,transparent);color:var(--accent2)}
+  .memrole.reviewer{background:color-mix(in srgb,var(--green) 16%,transparent);color:var(--green)}
   .mem2fa{font-size:9.5px;font-weight:700;padding:2px 7px;border-radius:20px;background:color-mix(in srgb,var(--green) 16%,transparent);color:var(--green)}
   .memsub{font-size:12px;color:var(--muted);margin-top:3px}
   .memchips{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:8px}
@@ -632,7 +633,7 @@ body:not(.admin) .admin-only { display: none !important; }
           <label class="eu-lbl">Email</label>
           <input id="eu-email" class="eu-in" type="email" placeholder="email">
           <label class="eu-lbl">Role</label>
-          <select id="eu-role" class="sel eu-in"><option value="viewer">viewer</option><option value="admin">admin</option></select>
+          <select id="eu-role" class="sel eu-in"><option value="viewer">viewer</option><option value="reviewer">reviewer</option><option value="admin">admin</option></select>
           <div class="eu-actions"><button class="gc-btn" onclick="close_('ov-user')">Cancel</button><button class="gc-btn pri" onclick="saveUser()">Save changes</button></div>
         </div>
         <div class="eu-sep"></div>
@@ -649,7 +650,7 @@ body:not(.admin) .admin-only { display: none !important; }
           <div class="fld"><label>Email</label><input id="usr-email" type="email" placeholder="ada@team.io"></div>
           <div class="fld"><label>Username</label><input id="usr-name" placeholder="ada"></div>
           <div class="fld"><label>Temporary password</label><input id="usr-pass" type="password" placeholder="they can change it later"></div>
-          <div class="fld fld-wide"><label>Role</label><select id="usr-role" class="sel"><option value="viewer">Viewer — read-only</option><option value="admin">Admin — full access</option></select></div>
+          <div class="fld fld-wide"><label>Role</label><select id="usr-role" class="sel"><option value="viewer">Viewer — read-only</option><option value="reviewer">Reviewer — review &amp; merge code</option><option value="admin">Admin — full access</option></select></div>
         </div>
         <div class="fld" style="margin-top:12px"><label>Assign to projects</label><div class="uprojpick" id="usr-projpick"></div></div>
         <div class="invite-foot"><span id="usr-err" class="usr-err"></span><button class="gc-btn" onclick="close_('ov-invite')">Cancel</button><button class="pri" onclick="createUser()"><i class="ti ti-user-plus"></i> Invite member</button></div>
@@ -1432,7 +1433,7 @@ async function loadSettings(){let cfg={};try{cfg=await(await fetch(api("/config"
   let detected=[];try{detected=await(await fetch("/api/engines")).json();}catch(e){}
   if(!Array.isArray(detected))detected=[];
   const detNames=new Set(detected.map(d=>d.name));window._detected=detNames;
-  const def=cfg.engine&&cfg.engine.default||{engine:"claude",model:"sonnet"},per=cfg.engine&&cfg.engine.per_role||{},wf=cfg.workflow||{},pol=cfg.policy||{};
+  const def=cfg.engine&&cfg.engine.default||{engine:"claude",model:"sonnet"},per=cfg.engine&&cfg.engine.per_role||{},wf=cfg.workflow||{},pol=cfg.policy||{},git=cfg.git||{};
   const eng=["opencode","claude","scripted","mock"];
   const label=e=>e+(detNames.has(e)?" ✓":(e==="scripted"||e==="mock")?"":" (not installed)");
   const opt=(s)=>eng.map(e=>`<option value="${e}" ${e===s?'selected':''}>${label(e)}</option>`).join("");
@@ -1465,6 +1466,18 @@ async function loadSettings(){let cfg={};try{cfg=await(await fetch(api("/config"
         <label class="hint" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" id="wf-dg-unl" ${pol.daily_budget_usd==null?'checked':''} onchange="document.getElementById('wf-dg').disabled=this.checked;if(this.checked)document.getElementById('wf-dg').value='';"> unlimited</label>
         <span class="hint">resets at UTC midnight · <b style="color:var(--accent2)">applies live</b></span></div>
     </div>
+    <div class="sec">Git &amp; version control</div>
+    <div class="panel frm">
+      <div class="fr"><span class="lbl">Integration</span><select id="git-en"><option value="false" ${!git.enabled?'selected':''}>disabled</option><option value="true" ${git.enabled?'selected':''}>enabled</option></select><span class="hint">off = agents never touch git; safe until you turn it on</span></div>
+      <div class="fr"><span class="lbl">Provider</span><select id="git-pv"><option value="github" ${git.provider!=='gitlab'?'selected':''}>GitHub</option><option value="gitlab" ${git.provider==='gitlab'?'selected':''}>GitLab</option></select><span class="hint">GitLab for testing, GitHub for real</span></div>
+      <div class="fr"><span class="lbl">Repository</span><input id="git-repo" value="${esc(git.repo||'')}" placeholder="owner/name — e.g. stevejrrogers/CoXChat" style="width:280px"/></div>
+      <div class="fr"><span class="lbl">Base URL</span><input id="git-url" value="${esc(git.base_url||'')}" placeholder="blank = provider default (self-hosted/enterprise only)" style="width:280px"/></div>
+      <div class="fr"><span class="lbl">Default branch</span><input id="git-br" value="${esc(git.default_branch||'main')}" style="width:120px"/><span class="hint">PRs/MRs target this</span></div>
+      <div class="fr"><span class="lbl">Branch prefix</span><input id="git-bp" value="${esc(git.branch_prefix||'feat/')}" style="width:120px"/><span class="hint">→ ${esc(git.branch_prefix||'feat/')}CXC-123</span></div>
+      <div class="fr"><span class="lbl">Commit email</span><input id="git-em" value="${esc(git.commit_email||'')}" placeholder="…@users.noreply.github.com" style="width:280px"/><span class="hint">use a noreply email to avoid privacy blocks</span></div>
+      <div class="fr"><span class="lbl">Open PR/MR</span><select id="git-pr"><option value="true" ${git.auto_pr!==false?'selected':''}>automatically after push</option><option value="false" ${git.auto_pr===false?'selected':''}>manual</option></select></div>
+      <div class="fr"><span class="lbl">Auto-merge</span><select id="git-am"><option value="false" ${!git.auto_merge?'selected':''}>off — a human reviews</option><option value="true" ${git.auto_merge?'selected':''}>on — merge when CI passes</option></select><span class="hint">leave off until you trust the flow</span></div>
+    </div>
     <button class="save" onclick="saveSettings()">Save changes</button>
     <span id="save-note" style="margin-left:12px;color:var(--muted);font-size:12px"></span>
     <div style="color:var(--dim);font-size:11px;margin-top:10px">Budget caps apply <b style="color:var(--accent2)">immediately</b> (no restart). Other settings apply on the next serve restart. Leave a cap blank / tick <b>unlimited</b> for no limit. Note: the total cap is <b>cumulative</b> — to resume past a hit cap, set it above what's already spent (or unlimited).</div>`;
@@ -1480,6 +1493,11 @@ async function saveSettings(){const cfg=window._cfg||{engine:{},workflow:{}};cfg
   const bg=val("wf-bg");cfg.workflow.budget_usd=bg?parseFloat(bg):null;
   cfg.policy=cfg.policy||{};
   const dg=val("wf-dg");cfg.policy.daily_budget_usd=dg?parseFloat(dg):null;
+  cfg.git=Object.assign(cfg.git||{},{
+    enabled:val("git-en")==="true",provider:val("git-pv"),repo:val("git-repo").trim(),
+    base_url:val("git-url").trim(),default_branch:val("git-br").trim()||"main",
+    branch_prefix:val("git-bp").trim()||"feat/",commit_email:val("git-em").trim(),
+    auto_pr:val("git-pr")==="true",auto_merge:val("git-am")==="true"});
   try{const res=await(await fetch(api("/config"),{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(cfg)})).json();
     window._budget=cfg.workflow.budget_usd;if(CUR==="insights")renderActive();
     document.getElementById("save-note").textContent=res.ok?(res.note||"saved"):"error";}catch(e){document.getElementById("save-note").textContent="error";}}

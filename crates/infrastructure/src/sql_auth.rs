@@ -63,18 +63,11 @@ pub struct SqlAuthService {
 }
 
 fn role_str(role: AuthRole) -> &'static str {
-    match role {
-        AuthRole::Admin => "admin",
-        AuthRole::Viewer => "viewer",
-    }
+    role.as_str()
 }
 
 fn role_from(s: &str) -> AuthRole {
-    if s == "admin" {
-        AuthRole::Admin
-    } else {
-        AuthRole::Viewer
-    }
+    AuthRole::from_str_lenient(s)
 }
 
 impl SqlAuthService {

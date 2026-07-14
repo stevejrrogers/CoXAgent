@@ -6,20 +6,52 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-/// A coarse access role. `Admin` may mutate (control the runner, onboard, set
-/// priorities, reject, comment); `Viewer` is read-only.
+/// A coarse access role. `Admin` may mutate everything (control the runner,
+/// onboard, set priorities, edit config/users). `Reviewer` may review code —
+/// approve / merge / request changes on PRs & MRs — but not change config,
+/// tickets, or accounts. `Viewer` is read-only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AuthRole {
     Admin,
+    Reviewer,
     Viewer,
 }
 
 impl AuthRole {
-    /// Whether this role may perform mutating (write) actions.
+    /// Whether this role may perform mutating (write) actions on project data
+    /// and settings. Reviewers cannot — their power is scoped to code review.
     #[must_use]
     pub fn can_write(self) -> bool {
         matches!(self, Self::Admin)
+    }
+
+    /// Whether this role may act on code review (approve / merge / request
+    /// changes on pull/merge requests). Admins and reviewers can.
+    #[must_use]
+    pub fn can_review(self) -> bool {
+        matches!(self, Self::Admin | Self::Reviewer)
+    }
+
+    /// Lowercase wire label (`"admin"` / `"reviewer"` / `"viewer"`).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Admin => "admin",
+            Self::Reviewer => "reviewer",
+            Self::Viewer => "viewer",
+        }
+    }
+
+    /// Parse a wire label; unknown values fall back to the least-privileged
+    /// [`AuthRole::Viewer`].
+    #[must_use]
+    pub fn from_str_lenient(s: &str) -> Self {
+        match s {
+            "admin" => Self::Admin,
+            "reviewer" => Self::Reviewer,
+            _ => Self::Viewer,
+        }
     }
 }
 

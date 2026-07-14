@@ -1638,10 +1638,7 @@ async fn create_token_ep(
     if label.is_empty() {
         return (StatusCode::BAD_REQUEST, "label is required").into_response();
     }
-    let role = match req.role.as_deref() {
-        Some("admin") => coxagent_application::AuthRole::Admin,
-        _ => coxagent_application::AuthRole::Viewer,
-    };
+    let role = coxagent_application::AuthRole::from_str_lenient(req.role.as_deref().unwrap_or(""));
     match auth.create_token(label, role).await {
         Some(secret) => Json(serde_json::json!({
             "ok": true, "label": label, "token": secret,
@@ -1701,10 +1698,7 @@ struct CreateUserReq {
 }
 
 fn role_from(s: Option<&str>) -> coxagent_application::AuthRole {
-    match s {
-        Some("admin") => coxagent_application::AuthRole::Admin,
-        _ => coxagent_application::AuthRole::Viewer,
-    }
+    coxagent_application::AuthRole::from_str_lenient(s.unwrap_or(""))
 }
 
 /// List user accounts (admin-only). Returns `[{username, role}]`.
@@ -2173,13 +2167,7 @@ async fn login_ep(
         }
     };
     let user = auth.user_for(&token).await;
-    let role = user.as_ref().map_or("viewer", |u| {
-        if u.role.can_write() {
-            "admin"
-        } else {
-            "viewer"
-        }
-    });
+    let role = user.as_ref().map_or("viewer", |u| u.role.as_str());
     audit_push(&app.audit, &req.username, "login".to_owned(), 200).await;
     let cookie = format!(
         "{SESSION_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200{}",
@@ -2242,7 +2230,7 @@ async fn me_ep(
             let twofa = auth.has_2fa(&u.username).await;
             Json(serde_json::json!({
                 "auth": true, "username": u.username,
-                "role": if u.role.can_write() { "admin" } else { "viewer" },
+                "role": u.role.as_str(),
                 "twofa": twofa,
             }))
             .into_response()
