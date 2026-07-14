@@ -469,8 +469,12 @@
   .chatwrap{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--card);border:1px solid var(--border);border-radius:var(--r);overflow:hidden;height:100%}
   .chanrail{width:220px;flex:none;display:flex;flex-direction:column;background:var(--card);border:1px solid var(--border);border-radius:var(--r);overflow:hidden}
   .chanrail-hd{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--dim)}
+  .chanrail-actions{display:flex;gap:6px}
   .chanadd{background:var(--card2);border:1px solid var(--border2);color:var(--muted);width:24px;height:24px;border-radius:7px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:14px}
   .chanadd:hover{color:var(--accent);border-color:var(--accent)}
+  .chanadd.on{color:var(--accent2);border-color:var(--accent2)}
+  .chanitem.unread .channm{color:var(--text);font-weight:600}
+  .chanbadge{margin-left:auto;flex:none;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--accent);color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center}
   .chanlist{flex:1;overflow-y:auto;padding:2px 8px 10px}
   .chanitem{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;cursor:pointer;color:var(--muted);font-size:13.5px;transition:background .12s}
   .chanitem:hover{background:var(--card2)}
@@ -833,7 +837,7 @@ body:not(.admin) .admin-only { display: none !important; }
       <div class="view" id="view-chat">
         <div class="chatlayout">
           <div class="chanrail">
-            <div class="chanrail-hd"><span>Channels</span><button class="chanadd" onclick="createChannel()" title="Create channel"><i class="ti ti-plus"></i></button></div>
+            <div class="chanrail-hd"><span>Channels</span><div class="chanrail-actions"><button class="chanadd" id="notif-toggle" onclick="toggleNotifs()" title="Enable desktop notifications"><i class="ti ti-bell"></i></button><button class="chanadd" onclick="createChannel()" title="Create channel"><i class="ti ti-plus"></i></button></div></div>
             <div class="chanlist" id="chan-list"></div>
           </div>
           <div class="chatwrap">
@@ -1477,12 +1481,15 @@ function renderChannels(){
   const box=document.getElementById("chan-list");if(!box)return;
   box.innerHTML=CHANNELS.map(c=>{
     const priv=c.id!=="general";
-    return `<div class="chanitem${c.id===CURCHAN?' on':''}" onclick="selectChannel('${esc(c.id)}')">
-      <i class="ti ti-${priv?'lock':'hash'}"></i><span class="channm">${esc(c.name)}</span></div>`;}).join("");
+    const u=UNREAD[c.id]||0;
+    return `<div class="chanitem${c.id===CURCHAN?' on':''}${u?' unread':''}" onclick="selectChannel('${esc(c.id)}')">
+      <i class="ti ti-${priv?'lock':'hash'}"></i><span class="channm">${esc(c.name)}</span>${u?`<span class="chanbadge">${u>99?'99+':u}</span>`:''}</div>`;}).join("");
+  updateNotifToggle();
 }
 function currentChannel(){return CHANNELS.find(c=>c.id===CURCHAN)||{id:"general",name:"general",owner:""};}
 function selectChannel(id){
   CURCHAN=id;
+  clearUnread(id);
   const ch=currentChannel();
   const priv=id!=="general";
   document.getElementById("chat-title").textContent=(priv?"🔒 ":"# ")+ch.name;
@@ -1528,19 +1535,89 @@ async function inviteToChannel(){
     toasty((delegate?"Delegated invite to ":"Invited ")+user,"ok");
   }catch(e){toasty("could not invite","err");}
 }
+// ── Chat notifications: unread badges, desktop notifications, title flash ────
+let UNREAD={}, NOTIF_ON=(localStorage.getItem("cox_notif")==="1");
+// Central handler for every incoming chat message (live socket or fallback).
+function onChatIncoming(m){
+  const chan=m.channel||"general";
+  const me=(ME&&ME.username)||"user";
+  const active=(CUR==="chat"&&chan===CURCHAN&&!document.hidden);
+  if(chan===CURCHAN){
+    if(!chatHas(m)){CHAT.push(m);if(CUR==="chat")renderChatList();}
+  }
+  // Notify for other people's messages that the user isn't actively watching.
+  if(m.user!==me&&!active){
+    UNREAD[chan]=(UNREAD[chan]||0)+1;
+    if(CUR==="chat")renderChannels();
+    updateTitle();
+    notifyMessage(chan,m);
+  }
+}
+function channelName(id){const c=CHANNELS.find(x=>x.id===id);return c?c.name:id;}
+function totalUnread(){return Object.values(UNREAD).reduce((a,b)=>a+b,0);}
+function clearUnread(chan){if(UNREAD[chan]){delete UNREAD[chan];updateTitle();if(CUR==="chat")renderChannels();}}
+function updateTitle(){
+  const n=totalUnread();
+  const base=document.title.replace(/^\(\d+\)\s*/,"");
+  document.title=(n>0&&document.hidden)?`(${n}) ${base}`:base;
+}
+// Fire an OS desktop notification (when enabled + permitted) plus a soft chime.
+function notifyMessage(chan,m){
+  if(!NOTIF_ON||!("Notification"in window)||Notification.permission!=="granted")return;
+  const priv=chan!=="general";
+  const title=(priv?"🔒 ":"# ")+channelName(chan)+" · "+(m.user||"someone");
+  const body=m.body||(m.attachments&&m.attachments.length?"📎 sent an attachment":"");
+  try{
+    const n=new Notification(title,{body,tag:"cox-chat-"+chan,renotify:true,silent:false});
+    n.onclick=()=>{window.focus();nav("chat");selectChannel(chan);n.close();};
+  }catch(_){}
+  chime();
+}
+let _actx=null;
+function chime(){
+  try{_actx=_actx||new(window.AudioContext||window.webkitAudioContext)();
+    const o=_actx.createOscillator(),g=_actx.createGain();
+    o.type="sine";o.frequency.value=660;g.gain.value=0.05;
+    o.connect(g);g.connect(_actx.destination);
+    o.start();g.gain.exponentialRampToValueAtTime(0.0001,_actx.currentTime+0.25);
+    o.stop(_actx.currentTime+0.26);
+  }catch(_){}
+}
+async function toggleNotifs(){
+  if(!("Notification"in window)){toasty("This browser can't show notifications","err");return;}
+  if(NOTIF_ON){NOTIF_ON=false;localStorage.setItem("cox_notif","0");updateNotifToggle();toasty("Desktop notifications off","ok");return;}
+  let perm=Notification.permission;
+  if(perm!=="granted")perm=await Notification.requestPermission();
+  if(perm!=="granted"){toasty("Notifications blocked — allow them in your browser settings","err");return;}
+  NOTIF_ON=true;localStorage.setItem("cox_notif","1");updateNotifToggle();
+  toasty("Desktop notifications on","ok");
+  try{new Notification("CoXAgent notifications enabled",{body:"You'll be pinged about new chat messages."});}catch(_){}
+}
+function updateNotifToggle(){
+  const b=document.getElementById("notif-toggle");if(!b)return;
+  const on=NOTIF_ON&&("Notification"in window)&&Notification.permission==="granted";
+  b.innerHTML=`<i class="ti ti-bell${on?'-ringing':'-off'}"></i>`;
+  b.classList.toggle("on",on);
+  b.title=on?"Desktop notifications on":"Enable desktop notifications";
+}
+// Keep the tab title honest when focus changes.
+document.addEventListener("visibilitychange",()=>{if(!document.hidden){updateTitle();if(CUR==="chat")clearUnread(CURCHAN);}});
+window.addEventListener("focus",()=>{updateTitle();if(CUR==="chat")clearUnread(CURCHAN);});
 function chatKey(m){return (m.at||"")+"|"+(m.channel||"general")+"|"+(m.user||"")+"|"+(m.body||"");}
 function chatHas(m){const k=chatKey(m);return CHAT.some(x=>chatKey(x)===k);}
 // Fallback path: merge chat carried on the 1s SSE snapshot into the live list,
 // deduped by key. Runs when the WebSocket is down (WKWebView) or when another
 // hub wrote to the shared state file. Keeps chronological order by timestamp.
 function mergeChat(list){
-  // The SSE snapshot only carries #general, so it can only backfill that view.
-  if(CURCHAN!=="general"||!Array.isArray(list)||!list.length)return;
-  let added=false;
-  list.forEach(m=>{if((m.channel||"general")==="general"&&!chatHas(m)){CHAT.push(m);added=true;}});
-  if(!added)return;
-  CHAT.sort((a,b)=>(a.at||"").localeCompare(b.at||""));
-  if(CUR==="chat")renderChatList();
+  // The SSE snapshot only carries #general — the fallback path for clients whose
+  // WebSocket didn't connect (e.g. a WKWebView). Route each new message through
+  // the shared handler so unread badges and notifications work there too.
+  if(!Array.isArray(list)||!list.length)return;
+  const fresh=list.filter(m=>(m.channel||"general")==="general"&&!chatHas(m));
+  if(!fresh.length)return;
+  fresh.sort((a,b)=>(a.at||"").localeCompare(b.at||""));
+  fresh.forEach(onChatIncoming);
+  if(CURCHAN==="general"&&CUR==="chat"){CHAT.sort((a,b)=>(a.at||"").localeCompare(b.at||""));renderChatList();}
 }
 function openChatWS(){
   // Reuse a live socket for the same project; otherwise (re)connect.
@@ -1551,10 +1628,8 @@ function openChatWS(){
   let ws;try{ws=new WebSocket(`${proto}://${location.host}/api/projects/${encodeURIComponent(pid)}/chat/ws`);}catch(e){return;}
   CHATWS=ws;
   ws.onmessage=e=>{try{const m=JSON.parse(e.data);
-    // Only surface messages for the channel currently open; membership is
-    // already enforced server-side before the broadcast reaches this socket.
-    if((m.channel||"general")!==CURCHAN)return;
-    if(!chatHas(m)){CHAT.push(m);if(CUR==="chat")renderChatList();}}catch(_){}};
+    // The socket only carries channels this user may see (enforced server-side).
+    onChatIncoming(m);}catch(_){}};
   ws.onclose=()=>{if(CHATWS===ws){CHATWS=null;
     // Auto-reconnect while the user is still on this project's chat.
     if(CUR==="chat"&&CHATWS_PID===pid&&PID===pid){clearTimeout(chatwsRetry);chatwsRetry=setTimeout(openChatWS,1500);}}};
