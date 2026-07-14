@@ -1499,7 +1499,8 @@ async function loadSettings(){let cfg={};try{cfg=await(await fetch(api("/config"
       <div class="fr"><span class="lbl">Provider</span><select id="git-pv"><option value="github" ${git.provider!=='gitlab'?'selected':''}>GitHub</option><option value="gitlab" ${git.provider==='gitlab'?'selected':''}>GitLab</option></select><span class="hint">GitLab for testing, GitHub for real</span></div>
       <div class="fr"><span class="lbl">Repository</span><input id="git-repo" value="${esc(git.repo||'')}" placeholder="owner/name — e.g. stevejrrogers/CoXChat" style="width:280px"/></div>
       <div class="fr"><span class="lbl">Base URL</span><input id="git-url" value="${esc(git.base_url||'')}" placeholder="blank = provider default (self-hosted/enterprise only)" style="width:280px"/></div>
-      <div class="fr"><span class="lbl">Default branch</span><input id="git-br" value="${esc(git.default_branch||'main')}" style="width:120px"/><span class="hint">PRs/MRs target this</span></div>
+      <div class="fr"><span class="lbl">Default branch</span><input id="git-br" value="${esc(git.default_branch||'main')}" style="width:120px"/><span class="hint">the repo's main branch</span></div>
+      <div class="fr"><span class="lbl">Target branch</span><input id="git-tb" value="${esc(git.target_branch||'')}" placeholder="blank = default branch" style="width:140px"/><span class="hint">agent PRs open into &amp; auto-merge here (e.g. <code>develop</code>) — leave blank for the default branch</span></div>
       <div class="fr"><span class="lbl">Branch prefix</span><input id="git-bp" value="${esc(git.branch_prefix||'feat/')}" style="width:120px"/><span class="hint">→ ${esc(git.branch_prefix||'feat/')}CXC-123</span></div>
       <div class="fr"><span class="lbl">Commit email</span><input id="git-em" value="${esc(git.commit_email||'')}" placeholder="…@users.noreply.github.com" style="width:280px"/><span class="hint">use a noreply email to avoid privacy blocks</span></div>
       <div class="fr"><span class="lbl">Open PR/MR</span><select id="git-pr"><option value="true" ${git.auto_pr!==false?'selected':''}>automatically after push</option><option value="false" ${git.auto_pr===false?'selected':''}>manual</option></select></div>
@@ -1523,6 +1524,7 @@ async function saveSettings(){const cfg=window._cfg||{engine:{},workflow:{}};cfg
   cfg.git=Object.assign(cfg.git||{},{
     enabled:val("git-en")==="true",provider:val("git-pv"),repo:val("git-repo").trim(),
     base_url:val("git-url").trim(),default_branch:val("git-br").trim()||"main",
+    target_branch:val("git-tb").trim(),
     branch_prefix:val("git-bp").trim()||"feat/",commit_email:val("git-em").trim(),
     auto_pr:val("git-pr")==="true",auto_merge:val("git-am")==="true"});
   try{const res=await(await fetch(api("/config"),{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(cfg)})).json();

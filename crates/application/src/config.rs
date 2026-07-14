@@ -183,9 +183,14 @@ pub struct GitConfig {
     /// Repository slug `owner/name` (e.g. `stevejrrogers/CoXChat`).
     #[serde(default)]
     pub repo: String,
-    /// The base branch PRs/MRs target.
+    /// The repository's main branch.
     #[serde(default = "default_branch")]
     pub default_branch: String,
+    /// The branch the agent opens PRs/MRs into and auto-merges (empty = use
+    /// `default_branch`). Set this to route agent work onto an integration
+    /// branch (e.g. `develop`) while a human promotes it to `main`.
+    #[serde(default)]
+    pub target_branch: String,
     /// Prefix for per-ticket branches (e.g. `feat/` → `feat/CXC-123`).
     #[serde(default = "default_branch_prefix")]
     pub branch_prefix: String,
@@ -219,6 +224,7 @@ impl Default for GitConfig {
             base_url: String::new(),
             repo: String::new(),
             default_branch: default_branch(),
+            target_branch: String::new(),
             branch_prefix: default_branch_prefix(),
             commit_email: String::new(),
             auto_pr: false,

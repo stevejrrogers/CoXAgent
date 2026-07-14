@@ -194,7 +194,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
 
         if self.config.git.auto_pr {
             if let Some(forge) = &self.forge {
-                let base = &self.config.git.default_branch;
+                let base = self.flow_base();
                 let body = format!(
                     "Automated by CoXAgent for **{id}** — {title}.\n\nReview and merge to ship."
                 );
@@ -217,6 +217,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     Err(e) => self.log_git(&format!("open PR for {id} failed: {e}")).await,
                 }
             }
+        }
+    }
+
+    /// The branch the agent opens PRs into and auto-merges — `target_branch`
+    /// when set, otherwise the repository default.
+    fn flow_base(&self) -> &str {
+        let t = self.config.git.target_branch.trim();
+        if t.is_empty() {
+            &self.config.git.default_branch
+        } else {
+            t
         }
     }
 
@@ -245,8 +256,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 return;
             }
         };
+        let target = self.flow_base();
         // Bound cost: review a few PRs per cycle, oldest first.
         for pr in prs.into_iter().rev().take(3) {
+            // Only auto-merge PRs into the configured target branch; leave PRs
+            // aimed elsewhere (e.g. an integration → main promotion) to humans.
+            if pr.base != target {
+                continue;
+            }
             if pr.ci == "pending" {
                 continue; // wait for CI before judging
             }
@@ -1317,6 +1334,36 @@ mod tests {
             .review_open_prs()
             .await;
         assert_eq!(*forge.merged.lock().expect("lock"), vec![7]);
+    }
+
+    #[tokio::test]
+    async fn auto_merge_only_touches_prs_into_the_target_branch() {
+        // PR targets `main`, but the flow target is `develop` → left alone.
+        let forge = Arc::new(SpyForge {
+            ci: "passing".to_owned(),
+            mergeable: true,
+            ..Default::default()
+        });
+        let mut cfg = Config::default();
+        cfg.git.enabled = true;
+        cfg.git.auto_merge = true;
+        cfg.git.target_branch = "develop".to_owned();
+        RunCycleUseCase::new(
+            Arc::new(MemStore::default()),
+            Arc::new(ReviewEngine {
+                decision: "approve",
+            }),
+            cfg,
+            PathBuf::from("/tmp"),
+            "goal".to_owned(),
+        )
+        .with_forge(Arc::clone(&forge) as Arc<dyn ForgePort>)
+        .review_open_prs()
+        .await;
+        assert!(
+            forge.merged.lock().expect("lock").is_empty(),
+            "a PR into main is not auto-merged when the target is develop"
+        );
     }
 
     #[tokio::test]

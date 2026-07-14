@@ -209,13 +209,17 @@ async fn build_project(
     let engine_for_handle: Arc<dyn coxagent_application::ports::outbound::AgentEnginePort> =
         engine.clone();
     let work_dir_for_handle = work_dir.clone();
-    // Open PRs on the configured forge when git integration + auto-PR are on.
+    // Open PRs/MRs on the configured forge when git integration is on. Provider
+    // selects the adapter: GitHub via `gh`, GitLab via `glab`.
     let forge: Option<Arc<dyn coxagent_application::ports::outbound::ForgePort>> =
-        if config.git.enabled && config.git.provider == "github" && !config.git.repo.is_empty() {
-            Some(Arc::new(coxagent_infrastructure::GhForge::new(
-                config.git.repo.clone(),
-                config.git.base_url.clone(),
-            )))
+        if config.git.enabled && !config.git.repo.is_empty() {
+            let repo = config.git.repo.clone();
+            let base = config.git.base_url.clone();
+            match config.git.provider.as_str() {
+                "gitlab" => Some(Arc::new(coxagent_infrastructure::GlForge::new(repo, base))),
+                "github" => Some(Arc::new(coxagent_infrastructure::GhForge::new(repo, base))),
+                _ => None,
+            }
         } else {
             None
         };

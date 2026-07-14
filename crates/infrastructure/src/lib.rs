@@ -19,7 +19,7 @@ pub use audit_sink::{MemoryAuditSink, SqlAuditSink};
 pub use auth::FileAuthService;
 pub use deploy::DockerComposeDeploy;
 pub use engine::{discover, AnyEngine, ClaudeEngine, DetectedEngine, MockEngine, OpencodeEngine};
-pub use forge::GhForge;
+pub use forge::{GhForge, GlForge};
 pub use git::SystemGit;
 pub use notifier::WebhookNotifier;
 pub use sql_auth::SqlAuthService;
