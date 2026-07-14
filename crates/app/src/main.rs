@@ -212,7 +212,8 @@ async fn build_project(
     let mut cycle_uc = RunCycleUseCase::new(Arc::clone(&store), engine, config, work_dir, context)
         .with_meter(meter)
         .with_live_budget(Arc::clone(&live_budget))
-        .with_deploy(Arc::new(DockerComposeDeploy::new()));
+        .with_deploy(Arc::new(DockerComposeDeploy::new()))
+        .with_git(Arc::new(coxagent_infrastructure::SystemGit::new()));
     if let Some(url) = webhook.filter(|u| !u.is_empty()) {
         cycle_uc = cycle_uc.with_notifier(Arc::new(WebhookNotifier::new(url)));
     }

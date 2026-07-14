@@ -3,11 +3,13 @@
 pub mod audit;
 pub mod deploy;
 pub mod engine;
+pub mod git;
 pub mod notify;
 pub mod state_store;
 
 pub use audit::{AuditPort, AuditRecord};
 pub use deploy::{DeployPort, DeployReport};
 pub use engine::{AgentEnginePort, AgentOutcome, AgentRequest, Usage};
+pub use git::{GitAuthor, GitPort};
 pub use notify::{NotifierPort, NotifyEvent, NullNotifier};
 pub use state_store::StateStorePort;

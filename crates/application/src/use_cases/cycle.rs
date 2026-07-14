@@ -3,7 +3,9 @@
 //! one bad run never stalls the team (matching the reference workflow).
 
 use crate::config::Config;
-use crate::ports::outbound::{AgentEnginePort, AgentRequest, DeployPort, StateStorePort};
+use crate::ports::outbound::{
+    AgentEnginePort, AgentRequest, DeployPort, GitAuthor, GitPort, StateStorePort,
+};
 use crate::state::Spend;
 use crate::use_cases::run_dev::DevMode;
 use crate::use_cases::{
@@ -73,6 +75,8 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     notifier: Option<Arc<dyn crate::ports::outbound::NotifierPort>>,
     /// Live, runtime-adjustable spend caps (overrides the config caps when set).
     budget: Option<crate::config::LiveBudget>,
+    /// Local git, used for branch + commit per ticket when `config.git.enabled`.
+    git: Option<Arc<dyn GitPort>>,
 }
 
 impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
@@ -93,6 +97,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             deploy: None,
             notifier: None,
             budget: None,
+            git: None,
         }
     }
 
@@ -101,6 +106,64 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     pub fn with_live_budget(mut self, budget: crate::config::LiveBudget) -> Self {
         self.budget = Some(budget);
         self
+    }
+
+    /// Attach local git so completed tickets are committed (and, later, pushed)
+    /// when `config.git.enabled`.
+    #[must_use]
+    pub fn with_git(mut self, git: Arc<dyn GitPort>) -> Self {
+        self.git = Some(git);
+        self
+    }
+
+    /// Commit the working tree for a just-completed ticket, when git integration
+    /// is enabled. This local-only step keeps a clean linear history on the
+    /// default branch (branch-per-ticket + push + PR arrive with the forge
+    /// integration). Best-effort: any failure is logged and never stalls the
+    /// cycle. `kind` is `feat`/`fix`.
+    async fn commit_for_ticket(&self, id: &TicketId, kind: &str) {
+        if !self.config.git.enabled {
+            return;
+        }
+        let Some(git) = &self.git else { return };
+        if !git.is_repo(&self.work_dir).await {
+            return;
+        }
+        let title = self
+            .store
+            .load()
+            .await
+            .ok()
+            .and_then(|s| {
+                s.tickets
+                    .iter()
+                    .find(|t| t.id() == id)
+                    .map(|t| t.title().to_owned())
+            })
+            .unwrap_or_else(|| id.to_string());
+        let email = if self.config.git.commit_email.trim().is_empty() {
+            "coxagent-bot@users.noreply.github.com".to_owned()
+        } else {
+            self.config.git.commit_email.clone()
+        };
+        let author = GitAuthor {
+            name: "coxagent-bot".to_owned(),
+            email,
+        };
+        let msg = format!("{kind}({id}): {title}");
+        match git.commit_all(&self.work_dir, &msg, &author).await {
+            Ok(Some(sha)) => self.log_git(&format!("committed {sha} — {id}")).await,
+            Ok(None) => {}
+            Err(e) => self.log_git(&format!("commit failed for {id}: {e}")).await,
+        }
+    }
+
+    /// Record a git action in the activity feed (best-effort).
+    async fn log_git(&self, action: &str) {
+        if let Ok(mut s) = self.store.load().await {
+            s.log_activity("GIT", action, None);
+            let _ = self.store.save(&s).await;
+        }
     }
 
     /// Attach a notifier fired on significant events (deploy, budget, policy).
@@ -348,7 +411,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
 
         match self.dev(DevMode::Bug).execute().await {
-            Ok(id) => report.bug_fixed = id,
+            Ok(id) => {
+                if let Some(tid) = &id {
+                    self.commit_for_ticket(tid, "fix").await;
+                }
+                report.bug_fixed = id;
+            }
             Err(e) => report.errors.push(format!("DEV-BUG: {e}")),
         }
 
@@ -357,7 +425,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // of done — DEV raises unclear tickets and the BA fills them in.
             self.clarify_next_feature().await;
             match self.dev(DevMode::Feature).execute().await {
-                Ok(id) => report.feature_done = id,
+                Ok(id) => {
+                    if let Some(tid) = &id {
+                        self.commit_for_ticket(tid, "feat").await;
+                    }
+                    report.feature_done = id;
+                }
                 Err(e) => report.errors.push(format!("DEV-FEATURE: {e}")),
             }
         }
@@ -885,5 +958,86 @@ mod tests {
         .with_deploy(Arc::clone(&spy) as Arc<dyn crate::ports::outbound::DeployPort>);
         uc.run_cycle(1).await;
         assert_eq!(spy.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// Records commit_all calls so we can assert the cycle commits completed work.
+    #[derive(Default)]
+    struct SpyGit {
+        commits: Mutex<Vec<(String, String)>>, // (message, author_email)
+    }
+    #[async_trait::async_trait]
+    impl GitPort for SpyGit {
+        async fn is_repo(&self, _: &std::path::Path) -> bool {
+            true
+        }
+        async fn current_branch(&self, _: &std::path::Path) -> Result<String, PortError> {
+            Ok("main".to_owned())
+        }
+        async fn checkout_branch(&self, _: &std::path::Path, _: &str) -> Result<(), PortError> {
+            Ok(())
+        }
+        async fn commit_all(
+            &self,
+            _: &std::path::Path,
+            message: &str,
+            author: &GitAuthor,
+        ) -> Result<Option<String>, PortError> {
+            self.commits
+                .lock()
+                .expect("lock")
+                .push((message.to_owned(), author.email.clone()));
+            Ok(Some("abc1234".to_owned()))
+        }
+        async fn push(&self, _: &std::path::Path, _: &str) -> Result<(), PortError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn commits_completed_feature_only_when_git_enabled() {
+        // git disabled (default) → no commit.
+        let store = Arc::new(MemStore::default());
+        let spy = Arc::new(SpyGit::default());
+        let uc = RunCycleUseCase::new(
+            Arc::clone(&store),
+            Arc::new(RoleAwareEngine),
+            Config::default(),
+            PathBuf::from("/tmp"),
+            "goal".to_owned(),
+        )
+        .with_git(Arc::clone(&spy) as Arc<dyn GitPort>);
+        uc.run_cycle(1).await;
+        assert!(
+            spy.commits.lock().expect("lock").is_empty(),
+            "no commit when git.enabled is false"
+        );
+
+        // git enabled + a custom commit email → one conventional commit.
+        let store = Arc::new(MemStore::default());
+        let spy = Arc::new(SpyGit::default());
+        let mut cfg = Config::default();
+        cfg.git.enabled = true;
+        cfg.git.commit_email = "5204779+bot@users.noreply.github.com".to_owned();
+        let uc = RunCycleUseCase::new(
+            Arc::clone(&store),
+            Arc::new(RoleAwareEngine),
+            cfg,
+            PathBuf::from("/tmp"),
+            "goal".to_owned(),
+        )
+        .with_git(Arc::clone(&spy) as Arc<dyn GitPort>);
+        uc.run_cycle(1).await;
+
+        let commits = spy.commits.lock().expect("lock");
+        assert_eq!(commits.len(), 1, "one commit for the completed feature");
+        assert!(
+            commits[0].0.starts_with("feat(") && commits[0].0.contains("Feature A"),
+            "conventional message with ticket + title: {}",
+            commits[0].0
+        );
+        assert_eq!(
+            commits[0].1, "5204779+bot@users.noreply.github.com",
+            "commits under the configured noreply email"
+        );
     }
 }
