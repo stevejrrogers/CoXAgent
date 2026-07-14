@@ -106,6 +106,18 @@
   .seg button{display:inline-flex;align-items:center;gap:6px;background:transparent;border:none;color:var(--muted);font-family:inherit;font-size:12.5px;font-weight:600;padding:6px 13px;border-radius:8px;cursor:pointer;transition:background .15s,color .15s}
   .seg button:hover{color:var(--text)}
   .seg button.on{background:var(--accent);color:#fff}
+  .gantt-row,.gantt-axis{display:flex;align-items:center;gap:12px;margin:5px 0}
+  .gantt-lbl{flex:none;width:150px;display:flex;flex-direction:column;line-height:1.25;overflow:hidden}
+  .gantt-lbl b{font-size:12px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .gantt-lbl span{font-size:10.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .gantt-track{flex:1;position:relative;height:22px;background:var(--card2);border-radius:6px}
+  .gantt-bar{position:absolute;top:3px;height:16px;border-radius:5px;display:flex;align-items:center;justify-content:center;min-width:6px}
+  .wspath{display:flex;align-items:center;gap:8px;background:var(--bg);border:1px solid var(--border2);border-radius:8px;padding:8px 10px}
+  .wspath code{flex:1;min-width:0;font-family:ui-monospace,monospace;font-size:12px;color:var(--accent2);overflow-x:auto;white-space:nowrap}
+  .wspath button{flex:none;background:var(--card2);border:1px solid var(--border2);color:var(--muted);border-radius:6px;padding:4px 8px;cursor:pointer}
+  .wsfiles{display:flex;flex-wrap:wrap;gap:6px}
+  .wsfile{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;color:var(--muted);background:var(--card2);border:1px solid var(--border);border-radius:7px;padding:4px 9px;font-family:ui-monospace,monospace}
+  .wsfile.dir{color:var(--accent2)}
   .chatwrap{display:flex;flex-direction:column;background:var(--card);border:1px solid var(--border);border-radius:var(--r);overflow:hidden;height:calc(100vh - 150px);min-height:420px}
   .chathead{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--border);background:var(--card2)}
   .chatchan{display:flex;align-items:center;gap:10px;flex:1;min-width:0}
@@ -278,6 +290,7 @@ body:not(.admin) .admin-only { display: none !important; }
         <div id="ov-deploy"></div>
         <div class="row2" id="ov-charts"></div>
         <div id="ov-design"></div>
+        <div id="ov-workspace"></div>
         <div class="row2">
           <div class="panel"><h4><i class="ti ti-activity" style="color:var(--accent2)"></i> Recent activity <span class="mo" onclick="nav('activity')">view all</span></h4><div id="ov-activity"></div></div>
           <div class="panel"><h4><i class="ti ti-history" style="color:var(--accent2)"></i> Releases</h4><div id="ov-changelog"></div></div>
@@ -608,7 +621,45 @@ function renderRoadmap(){
           <div style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.title)}">${esc(r.title)}</div>
           <div style="font-size:10px;color:var(--dim)">${esc((r.at||'').slice(0,10))}</div></div>`).join("")}</div></div>`;
   }
-  el.innerHTML=header+board+timeline;
+  el.innerHTML=header+ganttHtml(s)+board+timeline;
+}
+// A Gantt-style delivery chart on a real time axis: each shipped version is a
+// bar spanning the time it took to ship (previous release → its own release),
+// and the active sprint is a projected in-flight bar toward its goal.
+function ganttHtml(s){
+  const hist=(s.history||[]).map(r=>({...r,t:Date.parse(r.at)})).filter(r=>!isNaN(r.t)).sort((a,b)=>a.t-b.t);
+  const sp=s.sprint;
+  if(!hist.length&&!sp)return '';
+  const now=Date.now();
+  // Build rows: one per version (bar prev→this), plus a projected sprint bar.
+  const rows=[];
+  let prev=hist.length?hist[0].t-Math.max(60000,(hist.length>1?hist[1].t-hist[0].t:3600000)):now;
+  hist.forEach(r=>{rows.push({label:'v'+r.version,sub:r.title,start:prev,end:r.t,kind:'shipped',ticket:r.ticket});prev=r.t;});
+  if(sp){const spStart=hist.length?hist[hist.length-1].t:now-3600000;
+    const projEnd=now+Math.max(1800000,(rows.length?(rows.reduce((a,r)=>a+(r.end-r.start),0)/rows.length):3600000));
+    rows.push({label:'Sprint #'+sp.number,sub:sp.goal||'in progress',start:spStart,end:projEnd,kind:'active'});}
+  if(!rows.length)return '';
+  const min=Math.min(...rows.map(r=>r.start));
+  const max=Math.max(now,...rows.map(r=>r.end));
+  const span=Math.max(1,max-min);
+  const pct=t=>((t-min)/span*100);
+  // Axis ticks: 5 evenly spaced timestamps.
+  const fmt=t=>{const d=new Date(t);const sameDay=(max-min)<86400000;
+    return sameDay?d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):d.toLocaleDateString([],{month:'short',day:'numeric'});};
+  const ticks=[0,.25,.5,.75,1].map(f=>`<span style="position:absolute;left:${f*100}%;transform:translateX(-50%);font-size:10px;color:var(--dim)">${fmt(min+f*span)}</span>`).join("");
+  const nowPct=pct(now);
+  const bars=rows.map(r=>{const l=pct(r.start),w=Math.max(1.5,pct(r.end)-pct(r.start));
+    const col=r.kind==='active'?'var(--amber)':'var(--green)';
+    const stripe=r.kind==='active'?`background:repeating-linear-gradient(45deg,${col},${col} 6px,transparent 6px,transparent 12px);border:1px solid ${col}`:`background:${col}`;
+    return `<div class="gantt-row">
+      <div class="gantt-lbl" title="${esc(r.sub||'')}"><b>${esc(r.label)}</b><span>${esc((r.sub||'').slice(0,42))}</span></div>
+      <div class="gantt-track"><div class="gantt-bar" style="left:${l}%;width:${w}%;${stripe}" title="${esc(r.label)} · ${esc(r.sub||'')}">${r.kind==='shipped'?'<i class="ti ti-check" style="font-size:11px;color:#fff"></i>':''}</div></div></div>`;}).join("");
+  return `<div class="sec" style="margin-top:22px">Release Gantt <span style="font-size:11px;color:var(--dim);font-weight:400">· when each version shipped, and the sprint in flight</span></div>
+    <div class="panel" style="overflow-x:auto"><div style="min-width:520px">
+      <div class="gantt-axis"><div class="gantt-lbl"></div><div class="gantt-track" style="height:16px">${ticks}<div style="position:absolute;left:${nowPct}%;top:-2px;bottom:-999px;width:2px;background:var(--accent2);opacity:.5" title="now"></div></div></div>
+      ${bars}
+      <div class="gantt-axis" style="margin-top:6px"><div class="gantt-lbl"></div><div class="gantt-track" style="height:0"><div style="position:absolute;left:${nowPct}%;transform:translateX(-50%);font-size:9px;color:var(--accent2)">now</div></div></div>
+    </div></div>`;
 }
 function actItem(a){const col=cvar(AC[a.agent]||"--muted");
   return `<div class="act"><div class="ad" style="background:${col}22;color:${col}">${initials(a.agent)}</div>
@@ -874,7 +925,21 @@ function connect(){if(ES)ES.close();if(poll){clearInterval(poll);poll=null;}
 function loadBudget(){fetch(api("/config")).then(r=>r.json()).then(c=>{window._budget=(c.workflow&&c.workflow.budget_usd)||null;if(CUR==="insights")renderActive();}).catch(()=>{});}
 let PROJECTS=[];
 function projInitial(p){return (p.alias||p.name||"P").trim().charAt(0).toUpperCase()||"P";}
-function switchProject(id){PID=id;INIT_ACT=false;localStorage.setItem("coxpid",id);closeProjMenu();renderProjBtn();loadBudget();loadComments();connect();}
+function switchProject(id){PID=id;INIT_ACT=false;localStorage.setItem("coxpid",id);closeProjMenu();renderProjBtn();loadBudget();loadComments();loadWorkspace();connect();}
+async function loadWorkspace(){
+  const el=document.getElementById("ov-workspace");if(!el)return;
+  let w=null;try{w=await(await fetch(api("/workspace"))).json();}catch(e){}
+  if(!w||!w.codebase){el.innerHTML="";return;}
+  const files=(w.entries||[]).map(e=>`<span class="wsfile ${e.dir?'dir':''}"><i class="ti ti-${e.dir?'folder':'file'}" style="font-size:12px"></i> ${esc(e.name)}</span>`).join("")||'<span style="color:var(--dim);font-size:12px">empty — agents will scaffold it</span>';
+  el.innerHTML=`<div class="panel" style="margin-top:16px">
+    <h4><i class="ti ti-folder-code" style="color:var(--accent2)"></i> Workspace &amp; source
+      ${w.is_git?'<span class="fchip" style="padding:2px 9px;font-size:10px">git</span>':''}</h4>
+    <div class="wspath"><code id="ws-path">${esc(w.codebase)}</code><button onclick="copyText('ws-path',this)" title="Copy path"><i class="ti ti-copy"></i></button></div>
+    <div style="font-size:11px;color:var(--dim);margin:6px 0 10px">The agents read and write real files here. Open it in your editor or terminal.</div>
+    <div class="wsfiles">${files}</div></div>`;
+}
+function copyText(id,btn){const el=document.getElementById(id);if(!el)return;
+  navigator.clipboard.writeText(el.textContent).then(()=>{const o=btn.innerHTML;btn.innerHTML='<i class="ti ti-check"></i>';setTimeout(()=>btn.innerHTML=o,1200);}).catch(()=>{});}
 function renderProjBtn(){
   const p=PROJECTS.find(x=>x.id===PID);
   document.getElementById("proj-mk").textContent=p?projInitial(p):"P";
@@ -900,7 +965,7 @@ async function loadProjects(){
   const saved=localStorage.getItem("coxpid");
   PID=(saved&&list.some(p=>p.id===saved))?saved:list[0].id;
   renderProjBtn();
-  loadBudget();loadComments();connect();
+  loadBudget();loadComments();loadWorkspace();connect();
 }
 async function baRefine(){
   const idea=(document.getElementById("nt-desc").value||document.getElementById("nt-title").value).trim();

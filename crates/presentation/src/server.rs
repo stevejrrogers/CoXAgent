@@ -224,6 +224,7 @@ pub async fn serve_full(
         )
         .route("/api/audit-log", get(audit_log_ep))
         .route("/api/people-analytics", get(people_analytics_ep))
+        .route("/api/projects/:pid/workspace", get(workspace_ep))
         .route("/api/engines", get(engines_ep))
         .route("/api/analyze-goal", post(analyze_goal_ep))
         .route("/api/projects", get(list_projects).post(create_project))
@@ -766,6 +767,56 @@ async fn post_comment(
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => internal_error(&e.to_string()),
     }
+}
+
+/// Where a project's code and state live on disk, plus a shallow listing of the
+/// codebase root so the dashboard can answer "where is my source?".
+async fn workspace_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let codebase = p.work_dir.clone();
+    let mut entries: Vec<serde_json::Value> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&codebase) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            // Skip build/VCS noise — show the meaningful project files.
+            if matches!(
+                name.as_str(),
+                "target" | ".git" | "node_modules" | ".DS_Store"
+            ) {
+                continue;
+            }
+            let is_dir = e.file_type().is_ok_and(|t| t.is_dir());
+            entries.push(serde_json::json!({ "name": name, "dir": is_dir }));
+        }
+    }
+    entries.sort_by(|a, b| {
+        let ad = a
+            .get("dir")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let bd = b
+            .get("dir")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        bd.cmp(&ad).then_with(|| {
+            a.get("name")
+                .and_then(serde_json::Value::as_str)
+                .cmp(&b.get("name").and_then(serde_json::Value::as_str))
+        })
+    });
+    let is_git = codebase.join(".git").exists();
+    Json(serde_json::json!({
+        "codebase": codebase.display().to_string(),
+        "config": p.config_path.display().to_string(),
+        "is_git": is_git,
+        "entries": entries,
+    }))
+    .into_response()
 }
 
 /// The transcript directory for a project: `<workspace>/logs/transcripts`.
