@@ -109,6 +109,20 @@ fn default_sprint_len() -> u64 {
     10
 }
 
+/// Live, runtime-adjustable spend caps. Shared between the config API and the
+/// running cycle loop so budget changes apply immediately without a restart.
+/// `None` on a field means "no cap" (unlimited) for that dimension.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BudgetCaps {
+    /// Lifetime total-spend cap in USD.
+    pub lifetime_usd: Option<f64>,
+    /// Per-day spend cap in USD (resets at UTC midnight).
+    pub daily_usd: Option<f64>,
+}
+
+/// A [`BudgetCaps`] cell shared between the HTTP layer and the cycle loop.
+pub type LiveBudget = std::sync::Arc<std::sync::Mutex<BudgetCaps>>;
+
 impl Default for WorkflowConfig {
     fn default() -> Self {
         Self {

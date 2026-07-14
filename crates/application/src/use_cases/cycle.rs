@@ -71,6 +71,8 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     meter: Option<Arc<Mutex<Spend>>>,
     deploy: Option<Arc<dyn DeployPort>>,
     notifier: Option<Arc<dyn crate::ports::outbound::NotifierPort>>,
+    /// Live, runtime-adjustable spend caps (overrides the config caps when set).
+    budget: Option<crate::config::LiveBudget>,
 }
 
 impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
@@ -90,7 +92,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             meter: None,
             deploy: None,
             notifier: None,
+            budget: None,
         }
+    }
+
+    /// Attach a live budget cell so cap changes apply without restarting.
+    #[must_use]
+    pub fn with_live_budget(mut self, budget: crate::config::LiveBudget) -> Self {
+        self.budget = Some(budget);
+        self
     }
 
     /// Attach a notifier fired on significant events (deploy, budget, policy).
@@ -365,13 +375,29 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
         let spent_today = state.add_daily_spend(cycle_cost);
 
-        // Pause on either the lifetime cap or the per-day policy cap.
-        let over_lifetime = self
-            .config
-            .workflow
-            .budget_usd
-            .is_some_and(|cap| cap > 0.0 && state.spend.total_cost_usd >= cap);
-        let over_daily = crate::policy::over_daily_budget(&self.config.policy, spent_today);
+        // Effective caps: the live cell (adjustable without restart) when present,
+        // otherwise the caps from the loaded config.
+        let (lifetime_cap, daily_cap) = self.budget.as_ref().map_or_else(
+            || {
+                (
+                    self.config.workflow.budget_usd,
+                    self.config.policy.daily_budget_usd,
+                )
+            },
+            |b| {
+                b.lock().map_or(
+                    (
+                        self.config.workflow.budget_usd,
+                        self.config.policy.daily_budget_usd,
+                    ),
+                    |caps| (caps.lifetime_usd, caps.daily_usd),
+                )
+            },
+        );
+        // Pause on either the lifetime cap or the per-day cap.
+        let over_lifetime =
+            lifetime_cap.is_some_and(|cap| cap > 0.0 && state.spend.total_cost_usd >= cap);
+        let over_daily = daily_cap.is_some_and(|cap| cap > 0.0 && spent_today >= cap);
         if over_daily {
             state.log_activity("POLICY", "daily budget cap reached", None);
         }

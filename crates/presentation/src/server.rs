@@ -45,6 +45,8 @@ pub struct ProjectHandle {
     pub engine: Arc<dyn coxagent_application::ports::outbound::AgentEnginePort>,
     /// The managed codebase directory.
     pub work_dir: PathBuf,
+    /// Live spend caps shared with the running loop, so budget edits apply now.
+    pub budget: coxagent_application::LiveBudget,
 }
 
 /// Builds a fresh project on demand (scaffold + register), injected by the
@@ -508,11 +510,19 @@ async fn put_config(
     let Some(p) = app.project(&pid).await else {
         return not_found();
     };
+    // Budget caps apply immediately (shared live cell); everything else needs a
+    // restart since the runner captured it at spawn.
+    if let Ok(mut caps) = p.budget.lock() {
+        caps.lifetime_usd = cfg.workflow.budget_usd;
+        caps.daily_usd = cfg.policy.daily_budget_usd;
+    }
     match serde_json::to_string_pretty(&cfg) {
         Ok(text) => match std::fs::write(&p.config_path, text) {
-            Ok(()) => {
-                Json(serde_json::json!({ "ok": true, "note": "restart to apply" })).into_response()
-            }
+            Ok(()) => Json(serde_json::json!({
+                "ok": true,
+                "note": "budget applied live; other changes apply on restart"
+            }))
+            .into_response(),
             Err(e) => internal_error(&e.to_string()),
         },
         Err(e) => internal_error(&e.to_string()),

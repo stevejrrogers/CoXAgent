@@ -19,8 +19,8 @@ pub mod use_cases;
 
 pub use auth::{AuthPort, AuthRole, AuthUser, LoginResult, TokenInfo};
 pub use config::{
-    Config, DeployConfig, EngineChoice, EngineKind, EngineMapping, Mode, PolicyConfig,
-    WorkflowConfig,
+    BudgetCaps, Config, DeployConfig, EngineChoice, EngineKind, EngineMapping, LiveBudget, Mode,
+    PolicyConfig, WorkflowConfig,
 };
 pub use error::{AppError, PortError};
 pub use state::{Comment, DesignSystem, ProjectState, Spend, Sprint, SCHEMA_VERSION};

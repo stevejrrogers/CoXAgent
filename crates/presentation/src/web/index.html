@@ -921,8 +921,9 @@ function showTicket(id){const t=(STATE.tickets||[]).find(x=>x.id===id);if(!t)ret
 async function rejectTicket(id){try{await fetch(api("/ticket/"+id+"/reject"),{method:"POST"});close_("ov-ticket");}catch(e){}}
 async function loadSettings(){let cfg={};try{cfg=await(await fetch(api("/config"))).json();}catch(e){}window._cfg=cfg;
   let detected=[];try{detected=await(await fetch("/api/engines")).json();}catch(e){}
-  const detNames=new Set((detected||[]).map(d=>d.name));window._detected=detNames;
-  const def=cfg.engine&&cfg.engine.default||{engine:"claude",model:"sonnet"},per=cfg.engine&&cfg.engine.per_role||{},wf=cfg.workflow||{};
+  if(!Array.isArray(detected))detected=[];
+  const detNames=new Set(detected.map(d=>d.name));window._detected=detNames;
+  const def=cfg.engine&&cfg.engine.default||{engine:"claude",model:"sonnet"},per=cfg.engine&&cfg.engine.per_role||{},wf=cfg.workflow||{},pol=cfg.policy||{};
   const eng=["opencode","claude","scripted","mock"];
   const label=e=>e+(detNames.has(e)?" ✓":(e==="scripted"||e==="mock")?"":" (not installed)");
   const opt=(s)=>eng.map(e=>`<option value="${e}" ${e===s?'selected':''}>${label(e)}</option>`).join("");
@@ -948,11 +949,16 @@ async function loadSettings(){let cfg={};try{cfg=await(await fetch(api("/config"
       <div class="fr"><span class="lbl">BA every N cycles</span><input id="wf-ba" type="number" min="0" value="${wf.ba_every_n_cycles??4}" style="width:90px"/><span class="hint">0 disables BA</span></div>
       <div class="fr"><span class="lbl">Feature dev</span><select id="wf-fd"><option value="true" ${wf.feature_dev_enabled!==false?'selected':''}>enabled</option><option value="false" ${wf.feature_dev_enabled===false?'selected':''}>disabled</option></select></div>
       <div class="fr"><span class="lbl">Sleep seconds</span><input id="wf-sl" type="number" min="0" value="${wf.sleep_seconds??30}" style="width:90px"/><span class="hint">between cycles</span></div>
-      <div class="fr"><span class="lbl">Budget (USD)</span><input id="wf-bg" type="number" min="0" step="0.5" value="${wf.budget_usd??''}" placeholder="none" style="width:90px"/><span class="hint">loop pauses at cap</span></div>
+      <div class="fr"><span class="lbl">Budget — total (USD)</span><input id="wf-bg" type="number" min="0" step="0.5" value="${wf.budget_usd??''}" placeholder="unlimited" style="width:100px" ${wf.budget_usd==null?'disabled':''}/>
+        <label class="hint" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" id="wf-bg-unl" ${wf.budget_usd==null?'checked':''} onchange="document.getElementById('wf-bg').disabled=this.checked;if(this.checked)document.getElementById('wf-bg').value='';"> unlimited</label>
+        <span class="hint">lifetime cap · pauses loop · <b style="color:var(--accent2)">applies live</b></span></div>
+      <div class="fr"><span class="lbl">Budget — per day (USD)</span><input id="wf-dg" type="number" min="0" step="0.5" value="${pol.daily_budget_usd??''}" placeholder="unlimited" style="width:100px" ${pol.daily_budget_usd==null?'disabled':''}/>
+        <label class="hint" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" id="wf-dg-unl" ${pol.daily_budget_usd==null?'checked':''} onchange="document.getElementById('wf-dg').disabled=this.checked;if(this.checked)document.getElementById('wf-dg').value='';"> unlimited</label>
+        <span class="hint">resets at UTC midnight · <b style="color:var(--accent2)">applies live</b></span></div>
     </div>
     <button class="save" onclick="saveSettings()">Save changes</button>
     <span id="save-note" style="margin-left:12px;color:var(--muted);font-size:12px"></span>
-    <div style="color:var(--dim);font-size:11px;margin-top:10px">Changes apply on the next serve restart.</div>`;}
+    <div style="color:var(--dim);font-size:11px;margin-top:10px">Budget caps apply <b style="color:var(--accent2)">immediately</b> (no restart). Other settings apply on the next serve restart. Leave a cap blank / tick <b>unlimited</b> for no limit. Note: the total cap is <b>cumulative</b> — to resume past a hit cap, set it above what's already spent (or unlimited).</div>`;}
 async function saveSettings(){const cfg=window._cfg||{engine:{},workflow:{}};cfg.engine=cfg.engine||{};cfg.workflow=cfg.workflow||{};
   cfg.engine.default={engine:val("eng-default"),model:val("mdl-default")};
   const per={};ROLES.forEach(r=>{const e=val("eng-"+r),m=val("mdl-"+r);if(e)per[r]={engine:e,model:m||"sonnet"};});cfg.engine.per_role=per;
@@ -962,8 +968,11 @@ async function saveSettings(){const cfg=window._cfg||{engine:{},workflow:{}};cfg
   cfg.workflow.feature_dev_enabled=val("wf-fd")==="true";
   cfg.workflow.sleep_seconds=parseInt(val("wf-sl")||"30",10);
   const bg=val("wf-bg");cfg.workflow.budget_usd=bg?parseFloat(bg):null;
+  cfg.policy=cfg.policy||{};
+  const dg=val("wf-dg");cfg.policy.daily_budget_usd=dg?parseFloat(dg):null;
   try{const res=await(await fetch(api("/config"),{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(cfg)})).json();
-    document.getElementById("save-note").textContent=res.ok?"saved · restart to apply":"error";}catch(e){document.getElementById("save-note").textContent="error";}}
+    window._budget=cfg.workflow.budget_usd;if(CUR==="insights")renderActive();
+    document.getElementById("save-note").textContent=res.ok?(res.note||"saved"):"error";}catch(e){document.getElementById("save-note").textContent="error";}}
 function val(id){return document.getElementById(id).value;}
 async function setPriority(id,p){
   try{await fetch(api("/ticket/"+id+"/priority"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({priority:p})});
