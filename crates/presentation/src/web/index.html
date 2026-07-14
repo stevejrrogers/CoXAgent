@@ -106,24 +106,25 @@
   .fld input:focus,.fld .sel:focus{outline:none;border-color:var(--accent2)}
   .invite-foot{display:flex;align-items:center;gap:12px;margin-top:14px}
   .usr-err{flex:1;font-size:12px;color:var(--red);min-height:14px}
-  .mlist{display:flex;flex-direction:column;gap:8px;margin-top:4px}
-  .mrow{display:flex;align-items:center;gap:13px;background:var(--card2);border:1px solid var(--border);border-radius:11px;padding:12px 14px;transition:border-color .15s}
-  .mrow:hover{border-color:var(--border2)}
-  .mav{flex:none;width:40px;height:40px;border-radius:11px;display:grid;place-items:center;font-size:14px;font-weight:700;color:#fff}
-  .minfo{flex:1;min-width:0}
-  .mname{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:600;flex-wrap:wrap}
-  .mtag-you{font-size:10px;font-weight:500;color:var(--dim)}
-  .mrole{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;padding:2px 8px;border-radius:20px;background:var(--card);color:var(--muted)}
-  .mrole.admin{background:color-mix(in srgb,var(--amber) 16%,transparent);color:var(--amber)}
-  .mrole.viewer{background:color-mix(in srgb,var(--accent2) 14%,transparent);color:var(--accent2)}
-  .mtag-2fa{font-size:9.5px;font-weight:700;padding:2px 7px;border-radius:20px;background:color-mix(in srgb,var(--green) 16%,transparent);color:var(--green)}
-  .msub{font-size:12px;color:var(--muted);margin-top:3px}
-  .mchips{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:8px}
+  .acard-h .btn-ghost{margin-left:auto;align-self:center}
+  .memlist{display:flex;flex-direction:column;gap:8px;margin-top:4px}
+  .memrow{display:flex;align-items:center;gap:13px;background:var(--card2);border:1px solid var(--border);border-radius:11px;padding:12px 14px;transition:border-color .15s}
+  .memrow:hover{border-color:var(--border2)}
+  .memav{flex:none;width:40px;height:40px;border-radius:11px;display:grid;place-items:center;font-size:14px;font-weight:700;color:#fff}
+  .meminfo{flex:1;min-width:0}
+  .memname{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:600;flex-wrap:wrap}
+  .memyou{font-size:10px;font-weight:500;color:var(--dim)}
+  .memrole{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;padding:2px 8px;border-radius:20px;background:var(--card);color:var(--muted)}
+  .memrole.admin{background:color-mix(in srgb,var(--amber) 16%,transparent);color:var(--amber)}
+  .memrole.viewer{background:color-mix(in srgb,var(--accent2) 14%,transparent);color:var(--accent2)}
+  .mem2fa{font-size:9.5px;font-weight:700;padding:2px 7px;border-radius:20px;background:color-mix(in srgb,var(--green) 16%,transparent);color:var(--green)}
+  .memsub{font-size:12px;color:var(--muted);margin-top:3px}
+  .memchips{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:8px}
   .uproj .sdot{width:6px;height:6px;border-radius:50%;flex:none}
-  .macts{flex:none;display:flex;gap:4px}
-  .micon{display:grid;place-items:center;width:32px;height:32px;background:transparent;border:1px solid transparent;border-radius:8px;color:var(--muted);cursor:pointer;font-size:15px;transition:background .15s,color .15s}
-  .micon:hover{background:var(--card);color:var(--text)}
-  .micon.danger:hover{background:color-mix(in srgb,var(--red) 14%,transparent);color:var(--red)}
+  .memacts{flex:none;display:flex;gap:4px}
+  .memicon{display:grid;place-items:center;width:32px;height:32px;background:transparent;border:1px solid transparent;border-radius:8px;color:var(--muted);cursor:pointer;font-size:15px;transition:background .15s,color .15s}
+  .memicon:hover{background:var(--card);color:var(--text)}
+  .memicon.danger:hover{background:color-mix(in srgb,var(--red) 14%,transparent);color:var(--red)}
   @media(max-width:720px){.invite-grid{grid-template-columns:1fr}}
   /* Team chat bubbles */
   .chatmsgs{display:flex;flex-direction:column;gap:3px}
@@ -647,7 +648,7 @@ body:not(.admin) .admin-only { display: none !important; }
             <div class="fld"><label>Assign to projects</label><div class="uprojpick" id="usr-projpick"></div></div>
             <div class="invite-foot"><span id="usr-err" class="usr-err"></span><button class="pri" onclick="createUser()"><i class="ti ti-user-plus"></i> Invite member</button></div>
           </div>
-          <div id="usr-list" class="mlist"></div>
+          <div id="usr-list" class="memlist"></div>
         </div>
         <div class="acard">
           <div class="acard-h"><div><h4><i class="ti ti-key"></i> API tokens</h4><span>For automation via <code>Authorization: Bearer &lt;token&gt;</code>. The secret is shown once.</span></div></div>
@@ -1813,12 +1814,12 @@ function renderUsers(){
       const addSel=(!admin&&avail.length)?`<select class="uprojadd" onchange="if(this.value){assignUser(this.value,'${un}');this.value=''}"><option value="">＋ assign…</option>${avail.map(p=>`<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</select>`:'';
       const display=hasName?esc(u.name.trim()):esc(u.username);
       const sub=[hasName?'@'+esc(u.username):'',u.email?esc(u.email):''].filter(Boolean).join(' · ');
-      return `<div class="mrow"><div class="mav" style="background:${grad}">${esc(av)}</div>
-        <div class="minfo"><div class="mname">${display}${me?'<span class="mtag-you">you</span>':''}<span class="mrole ${admin?'admin':'viewer'}">${esc(u.role)}</span>${u.twofa?'<span class="mtag-2fa">2FA</span>':''}</div>
-          ${sub?`<div class="msub">${sub}</div>`:''}
-          <div class="mchips">${chips}${addSel}</div></div>
-        <div class="macts"><button class="micon" onclick="editUser('${un}')" title="Edit user"><i class="ti ti-pencil"></i></button>
-        ${me?'':`<button class="micon danger" onclick="deleteUser('${un}')" title="Remove account"><i class="ti ti-trash"></i></button>`}</div></div>`;}).join("");
+      return `<div class="memrow"><div class="memav" style="background:${grad}">${esc(av)}</div>
+        <div class="meminfo"><div class="memname">${display}${me?'<span class="memyou">you</span>':''}<span class="memrole ${admin?'admin':'viewer'}">${esc(u.role)}</span>${u.twofa?'<span class="mem2fa">2FA</span>':''}</div>
+          ${sub?`<div class="memsub">${sub}</div>`:''}
+          <div class="memchips">${chips}${addSel}</div></div>
+        <div class="memacts"><button class="memicon" onclick="editUser('${un}')" title="Edit user"><i class="ti ti-pencil"></i></button>
+        ${me?'':`<button class="memicon danger" onclick="deleteUser('${un}')" title="Remove account"><i class="ti ti-trash"></i></button>`}</div></div>`;}).join("");
   }).catch(()=>{list.innerHTML='<div class="empty">unable to load users</div>';});
 }
 // Multi-select project checkboxes for the create form (a user can join many).
