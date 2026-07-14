@@ -411,6 +411,7 @@ body:not(.admin) .admin-only { display: none !important; }
           <div class="chathead">
             <div class="chatchan"><span class="chatdot"></span><div><div class="chattitle" id="disc-title">Team channel</div><div class="chatsub" id="disc-sub">standups, decisions & threads</div></div></div>
             <select class="sel" id="disc-filter" onchange="renderDiscuss()"><option value="">Team channel</option></select>
+            <button class="ticket-actions chatstart" onclick="runStandup(this)" title="SM posts a status roundup pulling every agent in — free, no engine cost"><i class="ti ti-clipboard-check"></i> Standup</button>
             <button class="ticket-actions chatstart" onclick="startDiscussion()"><i class="ti ti-users-group"></i> <span id="disc-run-label">Agent discussion</span></button>
           </div>
           <div id="disc-thread" class="chatbody"></div>
@@ -867,6 +868,15 @@ function scrumEvent(c){
   if(/^shipped:/i.test(b)) return {icon:"rocket",col:"var(--green)",text:b};
   if(/^(standup|retro|sprint (review|retro))/i.test(b)) return {icon:"users-group",col:"var(--accent2)",text:b};
   return null;
+}
+async function runStandup(btn){
+  const old=btn.innerHTML;btn.innerHTML='<i class="ti ti-loader-2"></i> …';btn.disabled=true;
+  document.getElementById("disc-filter").value="";
+  try{
+    const r=await fetch(api("/standup"),{method:"POST"});
+    if(r.ok){const s=await(await fetch(api("/state"))).json();render(s);renderDiscuss();}
+  }catch(e){}
+  btn.innerHTML=old;btn.disabled=false;
 }
 async function startDiscussion(){
   const topic=prompt("Discussion topic for the team (PO + SA weigh in, SM decides):");

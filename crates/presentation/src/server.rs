@@ -248,6 +248,7 @@ pub async fn serve_full(
         .route("/api/projects/:pid/control/:action", post(control_ep))
         .route("/api/projects/:pid/ba-analyze", post(ba_analyze))
         .route("/api/projects/:pid/discuss", post(run_discussion_ep))
+        .route("/api/projects/:pid/standup", post(standup_ep))
         .route("/api/projects/:pid/tickets", post(create_ticket))
         .route("/api/projects/:pid/ticket/:id/priority", post(set_priority))
         .route("/api/projects/:pid/ticket/:id/reject", post(reject_ticket))
@@ -772,6 +773,95 @@ async fn post_comment(
     };
     state.post_comment("USER", body, req.ticket);
     match p.store.save(&state).await {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// SM-run standup: posts a deterministic status roundup to the team channel and
+/// pulls in each agent's latest contribution. Zero engine cost — derived from
+/// state — so it can be triggered freely to see the team "gather".
+async fn standup_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    use coxagent_domain::ticket::{Status, TicketType};
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Ok(mut s) = p.store.load().await else {
+        return internal_error("load failed");
+    };
+
+    let inflight = s
+        .tickets
+        .iter()
+        .filter(|t| matches!(t.status(), Status::Ready | Status::InProgress))
+        .count();
+    let shipped = s
+        .tickets
+        .iter()
+        .filter(|t| matches!(t.status(), Status::Done | Status::Documented))
+        .count();
+    let blockers: Vec<String> = s
+        .tickets
+        .iter()
+        .filter(|t| t.ticket_type() == TicketType::Bug && t.status() == Status::Open)
+        .map(|t| t.id().to_string())
+        .collect();
+
+    let header = if let Some(sp) = &s.sprint {
+        let done = sp
+            .committed
+            .iter()
+            .filter(|id| {
+                s.tickets.iter().any(|t| {
+                    t.id() == *id && matches!(t.status(), Status::Done | Status::Documented)
+                })
+            })
+            .count();
+        format!(
+            "Standup — Sprint #{} \u{201c}{}\u{201d}: {}/{} committed shipped, {inflight} in flight, {} blocker(s).",
+            sp.number,
+            sp.goal,
+            done,
+            sp.committed.len(),
+            blockers.len()
+        )
+    } else {
+        format!(
+            "Standup — {shipped} shipped, {inflight} in flight, {} blocker(s).",
+            blockers.len()
+        )
+    };
+    s.post_comment("SM", &header, None);
+
+    // Pull each agent into the standup with its latest recorded contribution.
+    for agent in ["BA", "SA", "PD", "DEV-FEATURE", "DEV-BUG", "TEST", "DOCS"] {
+        if let Some(act) = s.activity.iter().rev().find(|e| e.agent == agent) {
+            let tk = act
+                .ticket
+                .as_deref()
+                .map_or_else(String::new, |t| format!(" ({t})"));
+            let line = format!("{}{tk}.", act.action);
+            s.post_comment(agent, &line, None);
+        }
+    }
+
+    let closing =
+        if blockers.is_empty() {
+            "Focus: keep burning the sprint backlog — ship before proposing more.".to_owned()
+        } else {
+            let show: Vec<&String> = blockers.iter().take(3).collect();
+            format!(
+            "Focus: clear {} open bug(s) first ({}). DEV-BUG, these take priority over features.",
+            blockers.len(),
+            show.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+        )
+        };
+    s.post_comment("SM", &closing, None);
+
+    match p.store.save(&s).await {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => internal_error(&e.to_string()),
     }
