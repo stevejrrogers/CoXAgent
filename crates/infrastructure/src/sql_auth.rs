@@ -27,8 +27,12 @@ CREATE TABLE IF NOT EXISTS auth_users (
     hash        TEXT NOT NULL,
     role        TEXT NOT NULL,
     totp_secret TEXT,
-    projects    JSONB NOT NULL DEFAULT '[]'
+    projects    JSONB NOT NULL DEFAULT '[]',
+    name        TEXT NOT NULL DEFAULT '',
+    email       TEXT NOT NULL DEFAULT ''
 );
+ALTER TABLE auth_users ADD COLUMN IF NOT EXISTS name  TEXT NOT NULL DEFAULT '';
+ALTER TABLE auth_users ADD COLUMN IF NOT EXISTS email TEXT NOT NULL DEFAULT '';
 CREATE TABLE IF NOT EXISTS auth_tokens (
     label   TEXT PRIMARY KEY,
     role    TEXT NOT NULL,
@@ -200,6 +204,8 @@ impl AuthPort for SqlAuthService {
         let session = Session {
             user: AuthUser {
                 username: username.to_owned(),
+                name: String::new(),
+                email: String::new(),
                 role,
                 projects: Vec::new(),
             },
@@ -275,6 +281,8 @@ impl AuthPort for SqlAuthService {
             .flatten()?;
         Some(AuthUser {
             username: format!("svc:{}", row.get::<_, String>(0)),
+            name: String::new(),
+            email: String::new(),
             role: role_from(&row.get::<_, String>(1)),
             projects: Vec::new(),
         })
@@ -345,7 +353,7 @@ impl AuthPort for SqlAuthService {
         };
         client
             .query(
-                "SELECT username, role, projects FROM auth_users ORDER BY username",
+                "SELECT username, role, projects, name, email FROM auth_users ORDER BY username",
                 &[],
             )
             .await
@@ -355,6 +363,8 @@ impl AuthPort for SqlAuthService {
                         username: r.get(0),
                         role: role_from(&r.get::<_, String>(1)),
                         projects: serde_json::from_value(r.get(2)).unwrap_or_default(),
+                        name: r.get(3),
+                        email: r.get(4),
                     })
                     .collect()
             })
@@ -379,6 +389,56 @@ impl AuthPort for SqlAuthService {
             )
             .await
             .is_ok()
+    }
+
+    async fn update_user(
+        &self,
+        username: &str,
+        name: &str,
+        email: &str,
+        role: Option<AuthRole>,
+    ) -> bool {
+        let Ok(client) = self.client().await else {
+            return false;
+        };
+        let name = name.trim();
+        let email = email.trim();
+        let n = match role {
+            Some(r) => client
+                .execute(
+                    "UPDATE auth_users SET name = $2, email = $3, role = $4 WHERE username = $1",
+                    &[&username, &name, &email, &role_str(r)],
+                )
+                .await,
+            None => {
+                client
+                    .execute(
+                        "UPDATE auth_users SET name = $2, email = $3 WHERE username = $1",
+                        &[&username, &name, &email],
+                    )
+                    .await
+            }
+        };
+        n.is_ok_and(|rows| rows > 0)
+    }
+
+    async fn set_password(&self, username: &str, password: &str) -> bool {
+        if password.is_empty() {
+            return false;
+        }
+        let Ok(hash) = hash_password(password) else {
+            return false;
+        };
+        let Ok(client) = self.client().await else {
+            return false;
+        };
+        client
+            .execute(
+                "UPDATE auth_users SET hash = $2 WHERE username = $1",
+                &[&username, &hash],
+            )
+            .await
+            .is_ok_and(|rows| rows > 0)
     }
 
     async fn delete_user(&self, username: &str) -> bool {

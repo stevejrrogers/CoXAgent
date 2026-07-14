@@ -274,7 +274,11 @@ pub async fn serve_full(
         .route("/api/auth/users", get(list_users_ep).post(create_user_ep))
         .route(
             "/api/auth/users/:username",
-            axum::routing::delete(delete_user_ep),
+            axum::routing::delete(delete_user_ep).patch(update_user_ep),
+        )
+        .route(
+            "/api/auth/users/:username/password",
+            post(reset_password_ep),
         )
         .route("/api/audit-log", get(audit_log_ep))
         .route("/api/people-analytics", get(people_analytics_ep))
@@ -339,8 +343,27 @@ pub async fn serve_full(
 async fn index() -> impl IntoResponse {
     // Always revalidate so a rebuilt dashboard is picked up on reload (the SPA is
     // small; no-cache avoids stale UI after an upgrade).
+    //
+    // CSP + hardening headers. The dashboard uses inline <script>/<style> (a
+    // single embedded file) so 'unsafe-inline' is required there; the Inter font
+    // and Tabler icon webfont come from Google Fonts / jsDelivr, so those hosts
+    // are allow-listed for style/font. Everything else is locked to same-origin,
+    // WebSocket to self, images/fonts to data:, and framing is denied.
+    const CSP: &str = "default-src 'self'; \
+        script-src 'self' 'unsafe-inline'; \
+        style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; \
+        font-src 'self' data: https://fonts.gstatic.com https://cdn.jsdelivr.net; \
+        img-src 'self' data:; \
+        connect-src 'self' ws: wss:; \
+        object-src 'none'; base-uri 'self'; frame-ancestors 'none'";
     (
-        [(header::CACHE_CONTROL, "no-cache, must-revalidate")],
+        [
+            (header::CACHE_CONTROL, "no-cache, must-revalidate"),
+            (header::CONTENT_SECURITY_POLICY, CSP),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (header::X_FRAME_OPTIONS, "DENY"),
+            (header::REFERRER_POLICY, "strict-origin-when-cross-origin"),
+        ],
         Html(INDEX_HTML),
     )
 }
@@ -1635,6 +1658,13 @@ struct CreateUserReq {
     password: String,
     #[serde(default)]
     role: Option<String>,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    email: String,
+    /// Project ids to assign the new user to (a user may join many).
+    #[serde(default)]
+    projects: Vec<String>,
 }
 
 fn role_from(s: Option<&str>) -> coxagent_application::AuthRole {
@@ -1672,17 +1702,73 @@ async fn create_user_ep(
     if req.username.trim().is_empty() || req.password.is_empty() {
         return (StatusCode::BAD_REQUEST, "username and password required").into_response();
     }
+    let username = req.username.trim();
+    let role = role_from(req.role.as_deref());
+    if !auth.create_user(username, &req.password, role).await {
+        return internal_error("could not create user");
+    }
+    // Best-effort profile + project assignment on the freshly created account.
+    if !req.name.trim().is_empty() || !req.email.trim().is_empty() {
+        auth.update_user(username, req.name.trim(), req.email.trim(), None)
+            .await;
+    }
+    for pid in &req.projects {
+        auth.assign_project(username, pid).await;
+    }
+    Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct UpdateUserReq {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    email: String,
+    #[serde(default)]
+    role: Option<String>,
+}
+
+/// Update a user's profile (name/email) and optionally role. Admin-only.
+async fn update_user_ep(
+    State(app): State<AppState>,
+    Path(username): Path<String>,
+    Json(req): Json<UpdateUserReq>,
+) -> axum::response::Response {
+    let Some(auth) = app.auth.clone() else {
+        return (StatusCode::NOT_IMPLEMENTED, "auth not configured").into_response();
+    };
+    let role = req.role.as_deref().map(|s| role_from(Some(s)));
     if auth
-        .create_user(
-            req.username.trim(),
-            &req.password,
-            role_from(req.role.as_deref()),
-        )
+        .update_user(&username, req.name.trim(), req.email.trim(), role)
         .await
     {
         Json(serde_json::json!({ "ok": true })).into_response()
     } else {
-        internal_error("could not create user")
+        (StatusCode::NOT_FOUND, "no such user").into_response()
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ResetPasswordReq {
+    password: String,
+}
+
+/// Reset a user's password. Admin-only.
+async fn reset_password_ep(
+    State(app): State<AppState>,
+    Path(username): Path<String>,
+    Json(req): Json<ResetPasswordReq>,
+) -> axum::response::Response {
+    let Some(auth) = app.auth.clone() else {
+        return (StatusCode::NOT_IMPLEMENTED, "auth not configured").into_response();
+    };
+    if req.password.len() < 4 {
+        return (StatusCode::BAD_REQUEST, "password too short").into_response();
+    }
+    if auth.set_password(&username, &req.password).await {
+        Json(serde_json::json!({ "ok": true })).into_response()
+    } else {
+        (StatusCode::NOT_FOUND, "no such user").into_response()
     }
 }
 
@@ -2062,8 +2148,10 @@ async fn login_ep(
         }
     });
     audit_push(&app.audit, &req.username, "login".to_owned(), 200).await;
-    let cookie =
-        format!("{SESSION_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200");
+    let cookie = format!(
+        "{SESSION_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200{}",
+        cookie_secure(&headers)
+    );
     (
         [(header::SET_COOKIE, cookie)],
         Json(serde_json::json!({ "ok": true, "username": req.username, "role": role })),
@@ -2079,12 +2167,33 @@ async fn logout_ep(
     if let (Some(auth), Some(token)) = (app.auth.clone(), cookie_value(&headers, SESSION_COOKIE)) {
         auth.logout(&token).await;
     }
-    let cleared = format!("{SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
+    let cleared = format!(
+        "{SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0{}",
+        cookie_secure(&headers)
+    );
     (
         [(header::SET_COOKIE, cleared)],
         Json(serde_json::json!({ "ok": true })),
     )
         .into_response()
+}
+
+/// The `; Secure` cookie attribute when the connection is TLS-terminated —
+/// detected via `X-Forwarded-Proto: https` (behind a reverse proxy) or the
+/// `COXAGENT_SECURE_COOKIES=1` opt-in. Omitted for plain-HTTP localhost so the
+/// cookie still works there.
+fn cookie_secure(headers: &axum::http::HeaderMap) -> &'static str {
+    let forwarded_https = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|p| p.eq_ignore_ascii_case("https"));
+    let forced = std::env::var("COXAGENT_SECURE_COOKIES")
+        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+    if forwarded_https || forced {
+        "; Secure"
+    } else {
+        ""
+    }
 }
 
 /// Report the current principal (or `auth:false` when running open).

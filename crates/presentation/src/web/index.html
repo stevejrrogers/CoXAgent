@@ -74,6 +74,25 @@
   .gc-btn{background:var(--card2);color:var(--muted);border:1px solid var(--border2);border-radius:8px;padding:7px 13px;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit}
   .gc-btn:hover{color:var(--text)}
   .gc-btn.pri{background:var(--accent);color:#fff;border-color:transparent}
+  /* Users: richer create form + project picker + edit modal */
+  .ainvite2{flex-wrap:wrap}
+  .uprojpick-wrap{display:flex;align-items:flex-start;gap:12px;margin:2px 0 10px;flex-wrap:wrap}
+  .uprojpick-lbl{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--dim);padding-top:7px;flex:none}
+  .uprojpick{display:flex;flex-wrap:wrap;gap:7px;flex:1;min-width:0}
+  .uprojchk{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--muted);background:var(--card2);border:1px solid var(--border2);border-radius:9px;padding:5px 11px;cursor:pointer;transition:border-color .15s,color .15s}
+  .uprojchk:hover{border-color:var(--accent)}
+  .uprojchk input{accent-color:var(--accent2);margin:0}
+  .uprojchk .sdot{width:7px;height:7px;border-radius:50%;flex:none}
+  .uprojchk:has(input:checked){color:var(--text);border-color:var(--accent2);background:var(--accentbg)}
+  .usub{font-size:11.5px;color:var(--muted);margin:2px 0 3px}
+  .eu-form{display:flex;flex-direction:column;gap:3px;margin-top:6px}
+  .eu-lbl{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--dim);margin-top:8px}
+  .eu-in{width:100%;background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 11px;font-size:13.5px;font-family:inherit;margin-top:4px}
+  .eu-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
+  .eu-sep{height:1px;background:var(--border);margin:16px 0}
+  .eu-pwrow{display:flex;gap:8px;align-items:center}
+  .eu-pwrow .eu-in{flex:1}
+  .eu-msg{font-size:12px;color:var(--muted);min-height:16px;margin-top:8px}
   /* Team chat bubbles */
   .chatmsgs{display:flex;flex-direction:column;gap:3px}
   .tcmsg{display:flex;gap:9px;align-items:flex-start;max-width:74%}
@@ -552,6 +571,23 @@ body:not(.admin) .admin-only { display: none !important; }
         <h3 id="file-title" style="font-size:14px;word-break:break-all;font-family:ui-monospace,monospace"><i class="ti ti-file-code" style="color:var(--accent2)"></i> file</h3>
         <pre id="file-body" style="max-height:66vh;overflow:auto;white-space:pre;word-break:normal;font-size:12px;line-height:1.5;background:var(--card2);padding:14px;border-radius:8px;font-family:ui-monospace,monospace">—</pre>
       </div></div>
+      <div class="ov" id="ov-user" onclick="if(event.target===this)close_('ov-user')"><div class="modal" style="max-width:440px">
+        <span class="x" onclick="close_('ov-user')"><i class="ti ti-x"></i></span>
+        <h3 style="font-size:15px"><i class="ti ti-user-edit" style="color:var(--accent2)"></i> Edit <span id="eu-title"></span></h3>
+        <div class="eu-form">
+          <label class="eu-lbl">Full name</label>
+          <input id="eu-name" class="eu-in" placeholder="full name">
+          <label class="eu-lbl">Email</label>
+          <input id="eu-email" class="eu-in" type="email" placeholder="email">
+          <label class="eu-lbl">Role</label>
+          <select id="eu-role" class="sel eu-in"><option value="viewer">viewer</option><option value="admin">admin</option></select>
+          <div class="eu-actions"><button class="gc-btn" onclick="close_('ov-user')">Cancel</button><button class="gc-btn pri" onclick="saveUser()">Save changes</button></div>
+        </div>
+        <div class="eu-sep"></div>
+        <label class="eu-lbl">Reset password</label>
+        <div class="eu-pwrow"><input id="eu-pass" class="eu-in" type="password" placeholder="new temporary password"><button class="gc-btn" onclick="resetUserPassword()">Reset</button></div>
+        <div id="eu-msg" class="eu-msg"></div>
+      </div></div>
       <div class="view" id="view-roadmap"><div id="roadmap-body"></div></div>
       <div class="view" id="view-people">
         <div class="filters"><span style="font-size:12px;color:var(--muted)">Derived from the security audit trail — who is actually working, how much, and how effectively.</span>
@@ -566,13 +602,16 @@ body:not(.admin) .admin-only { display: none !important; }
       </div>
       <div class="view" id="view-access">
         <div class="acard">
-          <div class="acard-h"><div><h4><i class="ti ti-users"></i> Team members</h4><span>People who can sign in. Assign them to projects in the Team view.</span></div></div>
-          <div class="ainvite">
+          <div class="acard-h"><div><h4><i class="ti ti-users"></i> Team members</h4><span>People who can sign in. Add their details and pick which projects they join — a person can be on many.</span></div></div>
+          <div class="ainvite ainvite2">
+            <input id="usr-fullname" placeholder="full name (optional)">
+            <input id="usr-email" type="email" placeholder="email (optional)">
             <input id="usr-name" placeholder="username">
             <input id="usr-pass" type="password" placeholder="temporary password">
             <select id="usr-role" class="sel"><option value="viewer">viewer</option><option value="admin">admin</option></select>
             <button class="pri" onclick="createUser()"><i class="ti ti-user-plus"></i> Invite</button>
           </div>
+          <div class="uprojpick-wrap"><span class="uprojpick-lbl">Assign to projects</span><div class="uprojpick" id="usr-projpick"></div></div>
           <div id="usr-err" style="color:var(--red);font-size:12px;min-height:14px;margin:2px 0 6px"></div>
           <div id="usr-list" class="alist"></div>
         </div>
@@ -1717,15 +1756,19 @@ function applyRole(){
     const rc=document.getElementById("ub-role");rc.textContent=ME.role;rc.className="urole "+(ME.role==="admin"?"admin":"viewer");}
   else{badge.style.display="none";}
 }
+let USERS=[];
 function renderUsers(){
   const list=document.getElementById("usr-list");if(!list)return;
+  renderUserProjPicker();
   fetch("/api/auth/users").then(r=>r.ok?r.json():[]).then(rows=>{
-    if(!Array.isArray(rows)||!rows.length){list.innerHTML='<div class="empty">no accounts</div>';return;}
-    list.innerHTML=rows.map(u=>{const admin=u.role==="admin";
+    USERS=Array.isArray(rows)?rows:[];
+    if(!USERS.length){list.innerHTML='<div class="empty">no accounts</div>';return;}
+    list.innerHTML=USERS.map(u=>{const admin=u.role==="admin";
       const grad=admin?"linear-gradient(135deg,var(--amber),#b45309)":"linear-gradient(135deg,var(--accent),var(--accent2))";
       const me=ME&&ME.username===u.username;
       const un=encodeURIComponent(u.username);
       const mine=u.projects||[];
+      const av=(u.name&&u.name.trim())?u.name.trim().slice(0,2).toUpperCase():(u.username||'?').slice(0,2).toUpperCase();
       // Admins implicitly see every project; viewers are scoped to assignments.
       const chips=admin?'<span class="uproj all">all projects (admin)</span>'
         :(mine.length?mine.map(pid=>{const p=PROJECTS.find(x=>x.id===pid);const nm=p?p.name:pid;
@@ -1733,27 +1776,70 @@ function renderUsers(){
           :'<span class="uproj none">no projects</span>');
       const avail=PROJECTS.filter(p=>!mine.includes(p.id));
       const addSel=(!admin&&avail.length)?`<select class="uprojadd" onchange="if(this.value){assignUser(this.value,'${un}');this.value=''}"><option value="">＋ assign…</option>${avail.map(p=>`<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</select>`:'';
-      return `<div class="arow urow"><div class="aav" style="background:${grad}">${esc((u.username||'?').slice(0,2).toUpperCase())}</div>
-        <div style="flex:1;min-width:0"><div class="aname">${esc(u.username)}${me?' <span style="font-size:10px;color:var(--dim);font-weight:400">· you</span>':''}<span class="arole ${admin?'admin':'viewer'}" style="margin-left:8px">${esc(u.role)}</span>${u.twofa?' <span class="pbadge" style="background:color-mix(in srgb,var(--green) 16%,transparent);color:var(--green)">2FA</span>':''}</div>
+      const display=(u.name&&u.name.trim())?esc(u.name.trim()):esc(u.username);
+      const sub=[u.name&&u.name.trim()?'@'+esc(u.username):'',u.email?esc(u.email):''].filter(Boolean).join(' · ');
+      return `<div class="arow urow"><div class="aav" style="background:${grad}">${esc(av)}</div>
+        <div style="flex:1;min-width:0"><div class="aname">${display}${me?' <span style="font-size:10px;color:var(--dim);font-weight:400">· you</span>':''}<span class="arole ${admin?'admin':'viewer'}" style="margin-left:8px">${esc(u.role)}</span>${u.twofa?' <span class="pbadge" style="background:color-mix(in srgb,var(--green) 16%,transparent);color:var(--green)">2FA</span>':''}</div>
+          ${sub?`<div class="usub">${sub}</div>`:''}
           <div class="uprojrow">${chips}${addSel}</div></div>
+        <button class="adel" onclick="editUser('${un}')" title="Edit user"><i class="ti ti-pencil"></i></button>
         ${me?'':`<button class="adel" onclick="deleteUser('${un}')" title="Remove account"><i class="ti ti-trash"></i></button>`}</div>`;}).join("");
   }).catch(()=>{list.innerHTML='<div class="empty">unable to load users</div>';});
+}
+// Multi-select project checkboxes for the create form (a user can join many).
+function renderUserProjPicker(){
+  const el=document.getElementById("usr-projpick");if(!el)return;
+  if(!PROJECTS.length){el.innerHTML='<span style="font-size:12px;color:var(--dim)">no projects yet</span>';return;}
+  el.innerHTML=PROJECTS.map(p=>`<label class="uprojchk"><input type="checkbox" value="${esc(p.id)}"><span class="sdot" style="background:${projColor(p.id)}"></span>${esc(p.name)}</label>`).join("");
 }
 async function createUser(){
   const username=document.getElementById("usr-name").value.trim();
   const password=document.getElementById("usr-pass").value;
   const role=document.getElementById("usr-role").value;
+  const name=document.getElementById("usr-fullname").value.trim();
+  const email=document.getElementById("usr-email").value.trim();
+  const projects=[...document.querySelectorAll("#usr-projpick input:checked")].map(c=>c.value);
   const err=document.getElementById("usr-err");
   if(!username||!password){err.textContent="Username and password required.";return;}
   err.textContent="";
   try{
-    const r=await fetch("/api/auth/users",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username,password,role})});
+    const r=await fetch("/api/auth/users",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username,password,role,name,email,projects})});
     if(!r.ok){err.textContent=await r.text()||"Failed.";return;}
-    document.getElementById("usr-name").value="";document.getElementById("usr-pass").value="";
-    renderUsers();
+    ["usr-name","usr-pass","usr-fullname","usr-email"].forEach(id=>document.getElementById(id).value="");
+    document.querySelectorAll("#usr-projpick input:checked").forEach(c=>c.checked=false);
+    toasty("User created","ok");renderUsers();
   }catch(e){err.textContent="Network error.";}
 }
-async function deleteUser(username){try{const r=await fetch("/api/auth/users/"+username,{method:"DELETE"});if(!r.ok)document.getElementById("usr-err").textContent=await r.text();renderUsers();}catch(e){}}
+let EU_USER=null;
+function editUser(un){const username=decodeURIComponent(un);const u=USERS.find(x=>x.username===username);if(!u)return;
+  EU_USER=username;
+  document.getElementById("eu-title").textContent=username;
+  document.getElementById("eu-name").value=u.name||"";
+  document.getElementById("eu-email").value=u.email||"";
+  document.getElementById("eu-role").value=u.role||"viewer";
+  document.getElementById("eu-pass").value="";
+  document.getElementById("eu-msg").textContent="";
+  document.getElementById("ov-user").classList.add("open");
+}
+async function saveUser(){if(!EU_USER)return;
+  const name=document.getElementById("eu-name").value.trim();
+  const email=document.getElementById("eu-email").value.trim();
+  const role=document.getElementById("eu-role").value;
+  try{const r=await fetch("/api/auth/users/"+encodeURIComponent(EU_USER),{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({name,email,role})});
+    if(r.ok){close_("ov-user");toasty("User updated","ok");renderUsers();}
+    else{document.getElementById("eu-msg").textContent=await r.text()||"Failed.";}
+  }catch(e){document.getElementById("eu-msg").textContent="Network error.";}
+}
+async function resetUserPassword(){if(!EU_USER)return;
+  const pass=document.getElementById("eu-pass").value;
+  const msg=document.getElementById("eu-msg");
+  if(pass.length<4){msg.textContent="Password too short (min 4).";return;}
+  try{const r=await fetch("/api/auth/users/"+encodeURIComponent(EU_USER)+"/password",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:pass})});
+    if(r.ok){document.getElementById("eu-pass").value="";msg.style.color="var(--green)";msg.textContent="Password reset ✓";}
+    else{msg.style.color="var(--red)";msg.textContent=await r.text()||"Failed.";}
+  }catch(e){msg.style.color="var(--red)";msg.textContent="Network error.";}
+}
+async function deleteUser(username){if(!confirm("Remove this account?"))return;try{const r=await fetch("/api/auth/users/"+username,{method:"DELETE"});if(!r.ok)document.getElementById("usr-err").textContent=await r.text();renderUsers();}catch(e){}}
 async function assignUser(pid,username){try{await fetch("/api/projects/"+pid+"/members",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:decodeURIComponent(username)})});renderUsers();}catch(e){}}
 async function unassignUser(pid,username){try{await fetch("/api/projects/"+pid+"/members/"+username,{method:"DELETE"});renderUsers();}catch(e){}}
 function fmtBytes(n){return n<1024?n+" B":n<1048576?(n/1024).toFixed(1)+" KB":(n/1048576).toFixed(1)+" MB";}

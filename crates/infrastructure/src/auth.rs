@@ -32,6 +32,10 @@ const LOCKOUT: Duration = Duration::from_secs(15 * 60);
 struct StoredUser {
     username: String,
     hash: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    email: String,
     role: AuthRole,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     totp_secret: Option<String>,
@@ -137,6 +141,8 @@ impl FileAuthService {
             None => file.users.push(StoredUser {
                 username: username.to_owned(),
                 hash,
+                name: String::new(),
+                email: String::new(),
                 role: AuthRole::Admin,
                 totp_secret: None,
                 projects: Vec::new(),
@@ -231,6 +237,20 @@ pub(crate) fn sha256_hex(token: &str) -> String {
     })
 }
 
+/// Constant-time equality for equal-length secrets (token hashes), so matching
+/// doesn't leak how many leading characters were correct via response timing.
+pub(crate) fn ct_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 pub(crate) fn now_rfc3339() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
@@ -278,6 +298,8 @@ impl AuthPort for FileAuthService {
         let session = Session {
             user: AuthUser {
                 username: username.to_owned(),
+                name: String::new(),
+                email: String::new(),
                 role,
                 projects: Vec::new(),
             },
@@ -343,9 +365,11 @@ impl AuthPort for FileAuthService {
     async fn principal_for_bearer(&self, token: &str) -> Option<AuthUser> {
         let hash = sha256_hex(token);
         let tokens = self.tokens.lock().ok()?;
-        let stored = tokens.iter().find(|t| t.hash == hash)?;
+        let stored = tokens.iter().find(|t| ct_eq(&t.hash, &hash))?;
         Some(AuthUser {
             username: format!("svc:{}", stored.label),
+            name: String::new(),
+            email: String::new(),
             role: stored.role,
             projects: Vec::new(),
         })
@@ -408,6 +432,8 @@ impl AuthPort for FileAuthService {
                     .iter()
                     .map(|u| AuthUser {
                         username: u.username.clone(),
+                        name: u.name.clone(),
+                        email: u.email.clone(),
                         role: u.role,
                         projects: u.projects.clone(),
                     })
@@ -435,11 +461,55 @@ impl AuthPort for FileAuthService {
                 None => users.push(StoredUser {
                     username: username.to_owned(),
                     hash,
+                    name: String::new(),
+                    email: String::new(),
                     role,
                     totp_secret: None,
                     projects: Vec::new(),
                 }),
             }
+        }
+        self.persist().is_ok()
+    }
+
+    async fn update_user(
+        &self,
+        username: &str,
+        name: &str,
+        email: &str,
+        role: Option<AuthRole>,
+    ) -> bool {
+        {
+            let Ok(mut users) = self.users.lock() else {
+                return false;
+            };
+            let Some(u) = users.iter_mut().find(|u| u.username == username) else {
+                return false;
+            };
+            name.trim().clone_into(&mut u.name);
+            email.trim().clone_into(&mut u.email);
+            if let Some(r) = role {
+                u.role = r;
+            }
+        }
+        self.persist().is_ok()
+    }
+
+    async fn set_password(&self, username: &str, password: &str) -> bool {
+        if password.is_empty() {
+            return false;
+        }
+        let Ok(hash) = hash_password(password) else {
+            return false;
+        };
+        {
+            let Ok(mut users) = self.users.lock() else {
+                return false;
+            };
+            let Some(u) = users.iter_mut().find(|u| u.username == username) else {
+                return false;
+            };
+            u.hash = hash;
         }
         self.persist().is_ok()
     }

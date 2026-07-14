@@ -27,6 +27,12 @@ impl AuthRole {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthUser {
     pub username: String,
+    /// Human display name (optional; empty when unset).
+    #[serde(default)]
+    pub name: String,
+    /// Contact email (optional; empty when unset).
+    #[serde(default)]
+    pub email: String,
     pub role: AuthRole,
     /// Project ids this user is a member of (empty for service accounts and
     /// bare session principals). Populated by [`AuthPort::list_users`].
@@ -108,6 +114,25 @@ pub trait AuthPort: Send + Sync {
     /// Create (or update the password/role of) a user account. Returns `false`
     /// if the input is invalid or persistence fails.
     async fn create_user(&self, username: &str, password: &str, role: AuthRole) -> bool;
+
+    /// Update a user's profile (display `name`, `email`) and, when `role` is
+    /// `Some`, their role. Empty strings clear the corresponding field. Returns
+    /// `false` if the user does not exist or persistence fails.
+    async fn update_user(
+        &self,
+        _username: &str,
+        _name: &str,
+        _email: &str,
+        _role: Option<AuthRole>,
+    ) -> bool {
+        false
+    }
+
+    /// Reset a user's password to `password`. Returns `false` if the user does
+    /// not exist, the password is empty, or persistence fails.
+    async fn set_password(&self, _username: &str, _password: &str) -> bool {
+        false
+    }
 
     /// Remove a user account. Returns `false` if it does not exist or removing
     /// it would leave no admin (the last admin cannot be deleted).
