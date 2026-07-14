@@ -2060,7 +2060,14 @@ async fn syschat_socket(mut socket: WebSocket, app: AppState, user: String) {
             bcast = rx.recv() => {
                 match bcast {
                     Ok(json) => {
-                        if !syschat_may_see(&app, &user, &json).await { continue; }
+                        // Call-signaling messages are addressed to one user; chat
+                        // messages use channel membership.
+                        let route_ok = match serde_json::from_str::<serde_json::Value>(&json) {
+                            Ok(v) if v.get("type").and_then(|t| t.as_str()) == Some("signal") =>
+                                v.get("to").and_then(|t| t.as_str()) == Some(user.as_str()),
+                            _ => syschat_may_see(&app, &user, &json).await,
+                        };
+                        if !route_ok { continue; }
                         if socket.send(Message::Text(json)).await.is_err() { break; }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
@@ -2075,6 +2082,17 @@ async fn syschat_socket(mut socket: WebSocket, app: AppState, user: String) {
                     _ => continue,
                 };
                 let parsed = serde_json::from_str::<serde_json::Value>(&text).ok();
+                // WebRTC call signaling: stamp the sender and relay 1:1 to the
+                // addressed user. Not persisted, not rate-limited.
+                if parsed.as_ref().and_then(|v| v.get("type")).and_then(|t| t.as_str()) == Some("signal") {
+                    if let Some(mut v) = parsed.clone() {
+                        if let Some(obj) = v.as_object_mut() {
+                            obj.insert("from".to_owned(), serde_json::Value::String(user.clone()));
+                            let _ = app.syschat.tx.send(v.to_string());
+                        }
+                    }
+                    continue;
+                }
                 let body = parsed.as_ref()
                     .and_then(|v| v.get("body").and_then(|b| b.as_str()).map(str::to_owned))
                     .unwrap_or_else(|| text.clone());

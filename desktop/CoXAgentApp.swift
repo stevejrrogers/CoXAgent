@@ -183,6 +183,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         }
     }
 
+    // MARK: - Media capture (camera/mic) for WebRTC calls.
+    // Grant the web content access; macOS still gates the app itself via TCC
+    // using the Info.plist usage strings on first use.
+    @available(macOS 12.0, *)
+    func webView(_ webView: WKWebView,
+                 requestMediaCapturePermissionFor origin: WKSecurityOrigin,
+                 initiatedByFrame frame: WKFrameInfo,
+                 type: WKMediaCaptureType,
+                 decisionHandler: @escaping (WKPermissionDecision) -> Void) {
+        decisionHandler(.grant)
+    }
+
     // MARK: - Native notifications (bridged from the web page).
     // The page posts {title, body, channel} to `coxnotify`; we raise a macOS
     // notification via UNUserNotificationCenter.
