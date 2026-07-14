@@ -88,6 +88,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         return pw.isEmpty ? nil : pw
     }
 
+    /// Quick synchronous check: is a local MinIO answering on :9000?
+    func minioReachable() -> Bool {
+        var ok = false
+        let sem = DispatchSemaphore(value: 0)
+        var req = URLRequest(url: URL(string: "http://127.0.0.1:9000/minio/health/live")!)
+        req.timeoutInterval = 0.6
+        URLSession.shared.dataTask(with: req) { _, resp, _ in
+            if let http = resp as? HTTPURLResponse, http.statusCode == 200 { ok = true }
+            sem.signal()
+        }.resume()
+        _ = sem.wait(timeout: .now() + 1.0)
+        return ok
+    }
+
     func startHub() {
         let fm = FileManager.default
         let ws = workspace()
@@ -115,6 +129,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             try? ob.run(); ob.waitUntilExit()
             let json = "[{\"id\":\"default\",\"path\":\"\(ws)/default\"}]"
             try? json.write(toFile: reg, atomically: true, encoding: .utf8)
+        }
+
+        // If a local MinIO is running (scripts/minio.sh up), store uploaded files
+        // in it; otherwise the hub falls back to local disk. Reachability-gated
+        // so the app never breaks when MinIO is down.
+        if hubEnv["COXAGENT_S3_ENDPOINT"] == nil && minioReachable() {
+            hubEnv["COXAGENT_S3_ENDPOINT"] = "http://127.0.0.1:9000"
+            hubEnv["COXAGENT_S3_BUCKET"] = "coxagent"
+            hubEnv["COXAGENT_S3_ACCESS_KEY"] = "coxagent"
+            hubEnv["COXAGENT_S3_SECRET_KEY"] = "coxagent123"
         }
 
         let p = Process()
