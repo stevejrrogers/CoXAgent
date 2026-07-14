@@ -903,10 +903,15 @@ function renderDiscuss(){
 // (sprint open/close, ship, deploy) rather than a conversational bubble.
 function scrumEvent(c){
   const b=(c.body||"").trim();const a=c.author||"";
-  if(a==="DEPLOY"||/^deploy (ok|failed)/i.test(b)) return {icon:/failed/i.test(b)?"cloud-x":"cloud-check",col:/failed/i.test(b)?"var(--red)":"var(--green)",text:b};
-  if(/^sprint\b/i.test(b)) return {icon:"flag",col:"var(--accent2)",text:b};
-  if(/^shipped:/i.test(b)) return {icon:"rocket",col:"var(--green)",text:b};
-  if(/^(standup|retro|sprint (review|retro))/i.test(b)) return {icon:"users-group",col:"var(--accent2)",text:b};
+  // Strip a leading emoji/symbol so "📋 Sprint review…" still classifies.
+  const s=b.replace(/^[^\w]+/,"");
+  if(a==="DEPLOY"||/^deploy (ok|failed)/i.test(s)) return {icon:/failed/i.test(s)?"cloud-x":"cloud-check",col:/failed/i.test(s)?"var(--red)":"var(--green)",text:b};
+  if(/^shipped:/i.test(s)) return {icon:"rocket",col:"var(--green)",text:b};
+  if(/^sprint \d+ review/i.test(s)) return {icon:"clipboard-check",col:"var(--accent2)",text:b};
+  if(/^sprint \d+ retro/i.test(s)) return {icon:"refresh",col:"var(--amber)",text:b};
+  if(/^sprint \d+ planning/i.test(s)) return {icon:"run",col:"var(--accent2)",text:b};
+  if(/^(standup|retro|review)\b/i.test(s)) return {icon:"users-group",col:"var(--accent2)",text:b};
+  if(/^sprint\b/i.test(s)) return {icon:"flag",col:"var(--accent2)",text:b};
   return null;
 }
 async function runStandup(btn){

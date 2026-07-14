@@ -153,22 +153,108 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 crate::sprint::done_count(&state),
             )
         });
+        // Capture the closing sprint before `advance` replaces it, so we can run
+        // a real review + retro on it.
+        let closing = state.sprint.clone();
         if let Some(n) = crate::sprint::advance(&mut state, cycle, len) {
-            if let Some((pn, committed, done)) = prev {
-                state.log_activity(
-                    "SM",
-                    &format!("closed sprint {pn}: {done}/{committed} shipped"),
-                    None,
-                );
+            let _ = prev; // superseded by the richer review below
+            if let Some(cl) = &closing {
+                Self::sprint_review_and_retro(&mut state, cl);
             }
+            Self::sprint_planning(&mut state, n);
             state.log_activity("SM", "opened sprint", Some(format!("sprint {n}")));
-            let goal = state
-                .sprint
-                .as_ref()
-                .map_or_else(String::new, |s| s.goal.clone());
-            state.post_comment("SM", &format!("Sprint {n} started. Goal: {goal}"), None);
             let _ = self.store.save(&state).await;
         }
+    }
+
+    /// Sprint Review + Retrospective, posted to the team channel: what shipped
+    /// vs. what was committed, and a plain-spoken takeaway for next time.
+    fn sprint_review_and_retro(
+        state: &mut crate::state::ProjectState,
+        closing: &crate::state::Sprint,
+    ) {
+        use coxagent_domain::ticket::Status;
+        let is_done = |id: &coxagent_domain::TicketId| {
+            state
+                .tickets
+                .iter()
+                .any(|t| t.id() == id && matches!(t.status(), Status::Done | Status::Documented))
+        };
+        let shipped: Vec<String> = closing
+            .committed
+            .iter()
+            .filter(|id| is_done(id))
+            .map(ToString::to_string)
+            .collect();
+        let carry: Vec<String> = closing
+            .committed
+            .iter()
+            .filter(|id| !is_done(id))
+            .map(ToString::to_string)
+            .collect();
+        let total = closing.committed.len();
+        let pct = (shipped.len() * 100).checked_div(total).unwrap_or(100);
+        state.post_comment(
+            "SM",
+            &format!(
+                "📋 Sprint {} review — shipped {}/{}: {}.",
+                closing.number,
+                shipped.len(),
+                total,
+                if shipped.is_empty() {
+                    "nothing this time".to_owned()
+                } else {
+                    shipped.join(", ")
+                }
+            ),
+            None,
+        );
+        let takeaway = if carry.is_empty() {
+            "Clean sprint — everything committed shipped. Keep the scope realistic and this holds."
+                .to_owned()
+        } else {
+            format!(
+                "{} ticket(s) carried over ({}). Likely over-committed — pull a smaller, clearer slice next sprint.",
+                carry.len(),
+                carry.join(", ")
+            )
+        };
+        state.post_comment(
+            "SM",
+            &format!(
+                "🔄 Sprint {} retro — velocity {pct}%. {takeaway}",
+                closing.number
+            ),
+            None,
+        );
+        state.log_activity(
+            "SM",
+            &format!("sprint {} review & retro", closing.number),
+            None,
+        );
+    }
+
+    /// Sprint Planning: announce the goal and the committed tickets, so the plan
+    /// is visible rather than implicit.
+    fn sprint_planning(state: &mut crate::state::ProjectState, number: u32) {
+        let Some(sp) = state.sprint.clone() else {
+            return;
+        };
+        let committed: Vec<String> = sp.committed.iter().map(ToString::to_string).collect();
+        state.post_comment(
+            "SM",
+            &format!(
+                "🏃 Sprint {number} planning — goal: {}. Committed {} ticket(s) by priority: {}.",
+                sp.goal,
+                committed.len(),
+                if committed.is_empty() {
+                    "backlog empty".to_owned()
+                } else {
+                    committed.join(", ")
+                }
+            ),
+            None,
+        );
     }
 
     /// Emit an event to the notifier, if one is attached. Best-effort.
