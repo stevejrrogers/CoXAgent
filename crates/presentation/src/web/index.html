@@ -286,6 +286,24 @@
   .nav{display:flex;flex-direction:column;gap:2px;margin-top:6px}
   .nav a{display:flex;align-items:center;gap:11px;padding:9px 11px;border-radius:10px;color:var(--muted);text-decoration:none;font-size:13px;font-weight:500;cursor:pointer}
   .nav a:hover{background:var(--card);color:var(--text)} .nav a.on{background:var(--accentbg);color:var(--accent2)}
+  /* Workspace | Chat mode switch, below the brand */
+  .modeseg{display:flex;gap:3px;background:var(--card2);border:1px solid var(--border2);border-radius:11px;padding:3px;margin:4px 0 2px}
+  .modeseg button{flex:1;display:flex;align-items:center;justify-content:center;gap:6px;background:transparent;border:none;color:var(--muted);font-family:inherit;font-size:12.5px;font-weight:600;padding:8px 6px;border-radius:8px;cursor:pointer;position:relative}
+  .modeseg button.on{background:var(--accent);color:#fff}
+  .modeseg button:not(.on):hover{color:var(--text)}
+  .modeseg button i{font-size:15px}
+  .modeseg-badge{position:absolute;top:2px;right:9px;min-width:15px;height:15px;padding:0 4px;border-radius:8px;background:var(--red);color:#fff;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center}
+  .chatside{display:none;flex:1;min-height:0;flex-direction:column;overflow:hidden;margin-top:4px}
+  .chatside .chanrail-hd{padding:6px 4px 8px}
+  .chatside .chanlist{flex:1;overflow-y:auto;padding:2px 0}
+  #chat-main{display:none;flex:1;min-height:0;flex-direction:column}
+  #chat-main .chatwrap{flex:1;min-height:0;border:none;border-radius:0}
+  body.mode-chat #ws-nav{display:none}
+  body.mode-chat .chatside{display:flex}
+  body.mode-chat .runner{display:none}
+  body.mode-chat .main{display:flex;flex-direction:column;overflow:hidden}
+  body.mode-chat .content{display:none}
+  body.mode-chat #chat-main{display:flex}
   .runner{margin-top:auto;background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:13px}
   .runner .rt{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;margin-bottom:3px}
   .runner .rc{font-size:11px;color:var(--muted);margin-bottom:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -624,7 +642,16 @@ body:not(.manage) .manage-only { display: none !important; }
   </div></div>
   <aside class="side">
     <div class="brand"><div class="mk"><i class="ti ti-hexagon-letter-c"></i></div><div><div class="nm">CoXAgent</div><div class="tg">autonomous dev team</div></div></div>
-    <nav class="nav">
+    <div class="modeseg">
+      <button id="mode-ws" class="on" onclick="setMode('workspace')"><i class="ti ti-layout-grid"></i> Workspace</button>
+      <button id="mode-chat" onclick="setMode('chat')"><i class="ti ti-message-circle"></i> Chat<span class="modeseg-badge" id="mode-chat-badge" style="display:none"></span></button>
+    </div>
+    <!-- Chat mode: channel list replaces the workspace menu -->
+    <div class="chatside" id="chat-side">
+      <div class="chanrail-hd"><span>Channels</span><div class="chanrail-actions"><button class="chanadd" id="notif-toggle" onclick="toggleNotifs()" title="Enable desktop notifications"><i class="ti ti-bell"></i></button><button class="chanadd manage-only" onclick="createChannel()" title="Create channel (leads & admins)"><i class="ti ti-plus"></i></button></div></div>
+      <div class="chanlist" id="chan-list"></div>
+    </div>
+    <nav class="nav" id="ws-nav">
       <a data-v="overview" class="on" onclick="nav('overview')"><i class="ti ti-layout-dashboard"></i> Overview</a>
       <a data-v="team" onclick="nav('team')"><i class="ti ti-robot"></i> Agents</a>
       <a data-v="board" onclick="nav('board')"><i class="ti ti-columns"></i> Work</a>
@@ -850,33 +877,26 @@ body:not(.manage) .manage-only { display: none !important; }
         <div class="sec">Budget</div><div class="panel" id="cost-budget"></div></div>
       <div class="view" id="view-settings"><div id="settings-body"></div></div>
     </div>
-  </main>
-  <!-- Persistent team-chat dock (always visible alongside the workspace). -->
-  <aside class="chatdock" id="chatdock">
-    <div class="chatlayout">
-      <div class="chanrail">
-        <div class="chanrail-hd"><span>Channels</span><div class="chanrail-actions"><button class="chanadd" id="notif-toggle" onclick="toggleNotifs()" title="Enable desktop notifications"><i class="ti ti-bell"></i></button><button class="chanadd manage-only" onclick="createChannel()" title="Create channel (leads & admins)"><i class="ti ti-plus"></i></button><button class="chanadd" onclick="toggleChatDock()" title="Hide chat"><i class="ti ti-layout-sidebar-right-collapse"></i></button></div></div>
-        <div class="chanlist" id="chan-list"></div>
-      </div>
+    <!-- Chat conversation — fills the main area when the Chat tab is active -->
+    <div id="chat-main">
       <div class="chatwrap">
-        <div class="chathead">
-          <div class="chatchan"><span class="chatdot" style="background:var(--accent2)"></span><div><div class="chattitle" id="chat-title"># general</div><div class="chatsub" id="chat-sub">everyone in the workspace</div></div></div>
-          <button class="chaninvite" id="chat-invite" onclick="inviteToChannel()" style="display:none"><i class="ti ti-user-plus"></i> Invite</button>
-        </div>
-        <div id="chat-msgs" class="chatbody chatmsgs" ondragover="event.preventDefault();this.classList.add('dropping')" ondragleave="this.classList.remove('dropping')" ondrop="dropFiles('chat',event)"></div>
-        <div class="composewrap">
-          <div class="att-strip" id="chat-att"></div>
-          <div class="chatcompose">
-            <input type="file" id="chat-file" multiple hidden onchange="pickFiles('chat',this)">
-            <button class="att-btn" onclick="document.getElementById('chat-file').click()" title="Attach files"><i class="ti ti-paperclip"></i></button>
-            <input id="chat-input" placeholder="Message your team…  (Enter to send)" onkeydown="if(event.key==='Enter')sendChat()">
-            <button class="pri" onclick="sendChat()"><i class="ti ti-send"></i></button>
+          <div class="chathead">
+            <div class="chatchan"><span class="chatdot" style="background:var(--accent2)"></span><div><div class="chattitle" id="chat-title"># general</div><div class="chatsub" id="chat-sub">everyone in the workspace</div></div></div>
+            <button class="chaninvite" id="chat-invite" onclick="inviteToChannel()" style="display:none"><i class="ti ti-user-plus"></i> Invite</button>
+          </div>
+          <div id="chat-msgs" class="chatbody chatmsgs" ondragover="event.preventDefault();this.classList.add('dropping')" ondragleave="this.classList.remove('dropping')" ondrop="dropFiles('chat',event)"></div>
+          <div class="composewrap">
+            <div class="att-strip" id="chat-att"></div>
+            <div class="chatcompose">
+              <input type="file" id="chat-file" multiple hidden onchange="pickFiles('chat',this)">
+              <button class="att-btn" onclick="document.getElementById('chat-file').click()" title="Attach files"><i class="ti ti-paperclip"></i></button>
+              <input id="chat-input" placeholder="Message your team…  (Enter to send)" onkeydown="if(event.key==='Enter')sendChat()">
+              <button class="pri" onclick="sendChat()"><i class="ti ti-send"></i></button>
+            </div>
           </div>
         </div>
       </div>
-    </div>
-  </aside>
-  <button class="chatreopen" id="chatreopen" onclick="toggleChatDock()" title="Show chat" style="display:none"><i class="ti ti-message-circle"></i><span class="chatreopen-badge" id="chatreopen-badge" style="display:none"></span></button>
+  </main>
 
   <div class="cmdk" id="cmdk" onclick="if(event.target===this)closeCmdk()">
     <div class="cmdk-box">
@@ -987,6 +1007,8 @@ function setWorkTab(w){WORKTAB=w;
   renderActive();}
 
 function nav(v){
+  // Navigating a workspace view leaves Chat mode and shows the menu again.
+  if(isChatMode())setMode("workspace");
   // Management surfaces are Admin + lead only — bounce members to Overview.
   if((v==="settings"||v==="access")&&!canManage())v="overview";
   CUR=v;location.hash=v;
@@ -1485,7 +1507,7 @@ let CHANNELS=[], CURCHAN="general";
 // Initialise the always-visible chat dock: apply its collapsed state, load
 // channels, open the current one, and connect the live socket.
 async function openChat(){
-  applyDockState();
+  applyMode();
   await loadChannels();
   selectChannel(CURCHAN);
   openChatWS();
@@ -1561,24 +1583,32 @@ async function inviteToChannel(){
 // history that already existed when we connected.
 let UNREAD={}, NOTIF_ON=(localStorage.getItem("cox_notif")==="1");
 let SEEN=new Set(), chatPrimed=false;
-// The chat dock is docked on the right and shown by default; collapsible.
-let DOCK_OPEN=(localStorage.getItem("cox_dock")!=="0");
+// Sidebar mode: "workspace" (menu + views) or "chat" (channels + conversation).
+let MODE=(localStorage.getItem("cox_mode")==="chat")?"chat":"workspace";
+function isChatMode(){return MODE==="chat";}
 function markSeen(m){SEEN.add(chatKey(m));}
-function applyDockState(){
-  const d=document.getElementById("chatdock"),r=document.getElementById("chatreopen");
-  if(d)d.style.display=DOCK_OPEN?"":"none";
-  if(r)r.style.display=DOCK_OPEN?"none":"";
-  document.body.classList.toggle("dockopen",DOCK_OPEN);
-  if(DOCK_OPEN)clearUnread(CURCHAN);
-  updateReopenBadge();
+function setMode(m){
+  MODE=(m==="chat")?"chat":"workspace";
+  localStorage.setItem("cox_mode",MODE);
+  applyMode();
 }
-function toggleChatDock(){DOCK_OPEN=!DOCK_OPEN;localStorage.setItem("cox_dock",DOCK_OPEN?"1":"0");applyDockState();}
-// Ensure the dock is open and jump to a channel (from a notification click).
-function focusChannel(id){DOCK_OPEN=true;localStorage.setItem("cox_dock","1");applyDockState();selectChannel(id);}
-function updateReopenBadge(){
-  const b=document.getElementById("chatreopen-badge");if(!b)return;
+function applyMode(){
+  const chat=isChatMode();
+  document.body.classList.toggle("mode-chat",chat);
+  const ws=document.getElementById("mode-ws"),ch=document.getElementById("mode-chat");
+  if(ws)ws.classList.toggle("on",!chat);
+  if(ch)ch.classList.toggle("on",chat);
+  if(chat){renderChannels();selectChannel(CURCHAN);clearUnread(CURCHAN);
+    setTimeout(()=>{const i=document.getElementById("chat-input");if(i)i.focus();},40);}
+  updateModeBadge();
+}
+// Notification click / native bridge: jump into Chat mode on that channel.
+function focusChannel(id){setMode("chat");selectChannel(id);}
+// Unread count on the "Chat" segment button (shown while in Workspace mode).
+function updateModeBadge(){
+  const b=document.getElementById("mode-chat-badge");if(!b)return;
   const n=totalUnread();
-  b.textContent=n>99?"99+":n;b.style.display=(!DOCK_OPEN&&n>0)?"":"none";
+  b.textContent=n>99?"99+":n;b.style.display=(!isChatMode()&&n>0)?"":"none";
 }
 // Central handler for every incoming chat message (live socket or fallback).
 function onChatIncoming(m){
@@ -1586,7 +1616,7 @@ function onChatIncoming(m){
   const chan=m.channel||"general";
   const me=(ME&&ME.username)||"user";
   // Render into the open conversation if this message belongs there.
-  if(DOCK_OPEN&&chan===CURCHAN&&!chatHas(m)){
+  if(isChatMode()&&chan===CURCHAN&&!chatHas(m)){
     CHAT.push(m);CHAT.sort((a,b)=>(a.at||"").localeCompare(b.at||""));renderChatList();
   }
   if(SEEN.has(key))return;
@@ -1595,10 +1625,10 @@ function onChatIncoming(m){
   // is the focused window. hasFocus() (not just !hidden) distinguishes a
   // background-but-visible window — otherwise notifications never fire when the
   // app sits behind another window.
-  const active=(DOCK_OPEN&&chan===CURCHAN&&!document.hidden&&document.hasFocus());
+  const active=(isChatMode()&&chan===CURCHAN&&!document.hidden&&document.hasFocus());
   if(m.user!==me&&!active){
     UNREAD[chan]=(UNREAD[chan]||0)+1;
-    renderChannels();updateReopenBadge();
+    renderChannels();updateModeBadge();
     updateTitle();
     notifyMessage(chan,m);
   }
@@ -1619,7 +1649,7 @@ function initChatBackground(){
 }
 function channelName(id){const c=CHANNELS.find(x=>x.id===id);return c?c.name:id;}
 function totalUnread(){return Object.values(UNREAD).reduce((a,b)=>a+b,0);}
-function clearUnread(chan){if(UNREAD[chan]){delete UNREAD[chan];updateTitle();renderChannels();updateReopenBadge();}}
+function clearUnread(chan){if(UNREAD[chan]){delete UNREAD[chan];updateTitle();renderChannels();updateModeBadge();}}
 function updateTitle(){
   const n=totalUnread();
   const base=document.title.replace(/^\(\d+\)\s*/,"");
@@ -1686,8 +1716,8 @@ function updateNotifToggle(){
   b.title=on?"Desktop notifications on":"Enable desktop notifications";
 }
 // Keep the tab title honest when focus changes.
-document.addEventListener("visibilitychange",()=>{if(!document.hidden){updateTitle();if(DOCK_OPEN)clearUnread(CURCHAN);}});
-window.addEventListener("focus",()=>{updateTitle();if(DOCK_OPEN)clearUnread(CURCHAN);});
+document.addEventListener("visibilitychange",()=>{if(!document.hidden){updateTitle();if(isChatMode())clearUnread(CURCHAN);}});
+window.addEventListener("focus",()=>{updateTitle();if(isChatMode())clearUnread(CURCHAN);});
 function chatKey(m){return (m.at||"")+"|"+(m.channel||"general")+"|"+(m.user||"")+"|"+(m.body||"");}
 function chatHas(m){const k=chatKey(m);return CHAT.some(x=>chatKey(x)===k);}
 // Fallback path: merge chat carried on the 1s SSE snapshot into the live list,
