@@ -6,7 +6,8 @@ import WebKit
 
 let PORT = 4000
 
-final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate,
+                         WKScriptMessageHandler, NSUserNotificationCenterDelegate {
     var window: NSWindow!
     var web: WKWebView!
     var hub: Process?
@@ -14,7 +15,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     func applicationDidFinishLaunching(_ note: Notification) {
         startHub()
 
+        // Bridge web → native for notifications: the WKWebView has no web
+        // Notification API, so the page posts to `coxnotify` and we raise a real
+        // macOS notification instead.
         let cfg = WKWebViewConfiguration()
+        let ucc = WKUserContentController()
+        ucc.add(self, name: "coxnotify")
+        cfg.userContentController = ucc
+        NSUserNotificationCenter.default.delegate = self
+
         web = WKWebView(frame: NSMakeRect(0, 0, 1360, 860), configuration: cfg)
         web.navigationDelegate = self
         web.uiDelegate = self // present native panels for JS alert/confirm/prompt
@@ -164,6 +173,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         a.beginSheetModal(for: window) { resp in
             completionHandler(resp == .alertFirstButtonReturn ? field.stringValue : nil)
         }
+    }
+
+    // MARK: - Native notifications (bridged from the web page).
+    // The page posts {title, body, channel} to `coxnotify`; we deliver a macOS
+    // notification. NSUserNotification is deprecated but, unlike
+    // UNUserNotificationCenter, it works reliably for an ad-hoc-signed app run
+    // from outside /Applications — the exact case here.
+    func userContentController(_ ucc: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard message.name == "coxnotify", let d = message.body as? [String: Any] else { return }
+        let n = NSUserNotification()
+        n.title = d["title"] as? String ?? "CoXAgent"
+        n.informativeText = d["body"] as? String ?? ""
+        n.soundName = NSUserNotificationDefaultSoundName
+        if let ch = d["channel"] as? String, !ch.isEmpty { n.userInfo = ["channel": ch] }
+        NSUserNotificationCenter.default.deliver(n)
+    }
+
+    // Show the banner even when CoXAgent is the frontmost app.
+    func userNotificationCenter(_ center: NSUserNotificationCenter,
+                                shouldPresent notification: NSUserNotification) -> Bool { true }
+
+    // Clicking a notification focuses the app and jumps to that channel.
+    func userNotificationCenter(_ center: NSUserNotificationCenter,
+                                didActivate notification: NSUserNotification) {
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        guard let ch = notification.userInfo?["channel"] as? String, !ch.isEmpty else { return }
+        // Channel ids are URL-safe slugs; still escape quotes defensively.
+        let safe = ch.replacingOccurrences(of: "\\", with: "\\\\")
+                     .replacingOccurrences(of: "'", with: "\\'")
+        web.evaluateJavaScript("window.__coxOpenChannel && window.__coxOpenChannel('\(safe)')",
+                               completionHandler: nil)
     }
 }
 

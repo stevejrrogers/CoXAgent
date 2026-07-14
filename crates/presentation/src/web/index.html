@@ -1561,16 +1561,30 @@ function updateTitle(){
   const base=document.title.replace(/^\(\d+\)\s*/,"");
   document.title=(n>0&&document.hidden)?`(${n}) ${base}`:base;
 }
+// Notification transport. Inside the macOS shell (WKWebView) the web
+// Notification API doesn't exist, so we bridge to the native app, which posts a
+// real macOS notification. In a normal browser we use the Notification API.
+function nativeNotify(){return (window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.coxnotify)||null;}
+function notifSupported(){return !!nativeNotify()||("Notification"in window);}
+function notifGranted(){return nativeNotify()?NOTIF_ON:(("Notification"in window)&&Notification.permission==="granted");}
+// Called by the native shell when the user clicks a macOS notification.
+window.__coxOpenChannel=function(id){try{nav("chat");selectChannel(id);}catch(_){}}
 // Fire an OS desktop notification (when enabled + permitted) plus a soft chime.
 function notifyMessage(chan,m){
-  if(!NOTIF_ON||!("Notification"in window)||Notification.permission!=="granted")return;
+  if(!NOTIF_ON)return;
   const priv=chan!=="general";
   const title=(priv?"🔒 ":"# ")+channelName(chan)+" · "+(m.user||"someone");
   const body=m.body||(m.attachments&&m.attachments.length?"📎 sent an attachment":"");
-  try{
-    const n=new Notification(title,{body,tag:"cox-chat-"+chan,renotify:true,silent:false});
-    n.onclick=()=>{window.focus();nav("chat");selectChannel(chan);n.close();};
-  }catch(_){}
+  const nn=nativeNotify();
+  if(nn){
+    // Hand off to the macOS shell; it owns the native notification + click.
+    try{nn.postMessage({title,body,channel:chan});}catch(_){}
+  }else if(("Notification"in window)&&Notification.permission==="granted"){
+    try{
+      const n=new Notification(title,{body,tag:"cox-chat-"+chan,renotify:true,silent:false});
+      n.onclick=()=>{window.focus();nav("chat");selectChannel(chan);n.close();};
+    }catch(_){}
+  }
   chime();
 }
 let _actx=null;
@@ -1584,8 +1598,15 @@ function chime(){
   }catch(_){}
 }
 async function toggleNotifs(){
-  if(!("Notification"in window)){toasty("This browser can't show notifications","err");return;}
+  if(!notifSupported()){toasty("This app can't show notifications here","err");return;}
   if(NOTIF_ON){NOTIF_ON=false;localStorage.setItem("cox_notif","0");updateNotifToggle();toasty("Desktop notifications off","ok");return;}
+  if(nativeNotify()){
+    // macOS shell: it posts native notifications; the OS gates permission itself
+    // (System Settings › Notifications) the first time one is delivered.
+    NOTIF_ON=true;localStorage.setItem("cox_notif","1");updateNotifToggle();
+    try{nativeNotify().postMessage({title:"CoXAgent notifications enabled",body:"You'll be pinged about new chat messages.",channel:""});}catch(_){}
+    toasty("Desktop notifications on","ok");return;
+  }
   let perm=Notification.permission;
   if(perm!=="granted")perm=await Notification.requestPermission();
   if(perm!=="granted"){toasty("Notifications blocked — allow them in your browser settings","err");return;}
@@ -1595,7 +1616,7 @@ async function toggleNotifs(){
 }
 function updateNotifToggle(){
   const b=document.getElementById("notif-toggle");if(!b)return;
-  const on=NOTIF_ON&&("Notification"in window)&&Notification.permission==="granted";
+  const on=NOTIF_ON&&notifSupported();
   b.innerHTML=`<i class="ti ti-bell${on?'-ringing':'-off'}"></i>`;
   b.classList.toggle("on",on);
   b.title=on?"Desktop notifications on":"Enable desktop notifications";
