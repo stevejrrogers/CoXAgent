@@ -83,6 +83,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
                     priority: bug.priority,
                     complexity: bug.complexity,
                     has_ui: bug.has_ui,
+                    acceptance_criteria: Vec::new(),
                 })
                 .await?;
             filed.push(id);

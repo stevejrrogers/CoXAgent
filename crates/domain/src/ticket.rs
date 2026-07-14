@@ -113,6 +113,9 @@ pub struct Ticket {
     design: Design,
     parent_id: Option<TicketId>,
     depends_on: Vec<TicketId>,
+    /// Up to 5 acceptance criteria — the checklist that defines "done".
+    #[serde(default)]
+    acceptance_criteria: Vec<String>,
 }
 
 impl Ticket {
@@ -150,7 +153,24 @@ impl Ticket {
             design: Design::default(),
             parent_id: None,
             depends_on: Vec::new(),
+            acceptance_criteria: Vec::new(),
         })
+    }
+
+    /// The acceptance criteria checklist (at most 5 entries).
+    #[must_use]
+    pub fn acceptance_criteria(&self) -> &[String] {
+        &self.acceptance_criteria
+    }
+
+    /// Replace the acceptance criteria, trimming blanks and capping at 5.
+    pub fn set_acceptance_criteria(&mut self, criteria: Vec<String>) {
+        self.acceptance_criteria = criteria
+            .into_iter()
+            .map(|c| c.trim().to_owned())
+            .filter(|c| !c.is_empty())
+            .take(5)
+            .collect();
     }
 
     // --- Accessors ---

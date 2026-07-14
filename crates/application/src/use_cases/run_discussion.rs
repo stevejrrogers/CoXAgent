@@ -95,6 +95,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunDiscussionUseCa
                         priority: a.priority.unwrap_or(Priority::Medium),
                         complexity: Complexity::Medium,
                         has_ui: false,
+                        acceptance_criteria: Vec::new(),
                     })
                     .await?;
                 self.post("SM", &format!("Action: created {id} from this decision."))

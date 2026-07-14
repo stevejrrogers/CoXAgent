@@ -139,6 +139,9 @@
   .dupwarn{display:flex;gap:10px;align-items:flex-start;background:color-mix(in srgb,var(--amber) 12%,transparent);border:1px solid color-mix(in srgb,var(--amber) 40%,transparent);border-radius:10px;padding:11px 14px;margin-bottom:12px;font-size:12.5px;color:var(--text)}
   .dupwarn i{color:var(--amber);font-size:16px;margin-top:1px}
   .dupwarn .tk{background:var(--card2);padding:1px 7px;border-radius:5px;font-family:ui-monospace,monospace;font-size:11px}
+  .aclist{margin-top:8px;display:flex;flex-direction:column;gap:6px}
+  .acitem{display:flex;gap:8px;align-items:flex-start;font-size:13px;color:var(--text);line-height:1.5;background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:7px 11px}
+  .acitem i{color:var(--accent2);font-size:15px;margin-top:1px;flex:none}
   .chatwrap{display:flex;flex-direction:column;background:var(--card);border:1px solid var(--border);border-radius:var(--r);overflow:hidden;height:calc(100vh - 118px);min-height:540px}
   .cevent{display:flex;justify-content:center;margin:2px 0}
   .cev-pill{display:inline-flex;align-items:center;gap:7px;font-size:11.5px;color:var(--muted);background:var(--card2);border:1px solid var(--border2);border-left:3px solid var(--ec);border-radius:8px;padding:5px 12px;max-width:88%}
@@ -281,7 +284,7 @@ body:not(.admin) .admin-only { display: none !important; }
       <div class="pv"><span><i class="ti ti-tag" style="font-size:13px"></i> v<b id="ver">0.0.0</b></span><span id="pn-tickets">0 tickets</span></div></div>
     <nav class="nav">
       <a data-v="overview" class="on" onclick="nav('overview')"><i class="ti ti-layout-dashboard"></i> Overview</a>
-      <a data-v="team" onclick="nav('team')"><i class="ti ti-users"></i> Team</a>
+      <a data-v="team" onclick="nav('team')"><i class="ti ti-robot"></i> Agents</a>
       <a data-v="board" onclick="nav('board')"><i class="ti ti-columns"></i> Work</a>
       <a data-v="roadmap" onclick="nav('roadmap')"><i class="ti ti-timeline"></i> Roadmap</a>
       <a data-v="activity" onclick="nav('activity')"><i class="ti ti-activity"></i> Activity</a>
@@ -289,7 +292,7 @@ body:not(.admin) .admin-only { display: none !important; }
       <a data-v="insights" onclick="nav('insights')"><i class="ti ti-coin"></i> Cost</a>
       <a data-v="people" class="admin-only" onclick="nav('people')"><i class="ti ti-user-star"></i> People</a>
       <a data-v="audit" class="admin-only" onclick="nav('audit')"><i class="ti ti-shield-lock"></i> Audit</a>
-      <a data-v="access" class="admin-only" onclick="nav('access')"><i class="ti ti-key"></i> Access</a>
+      <a data-v="access" class="admin-only" onclick="nav('access')"><i class="ti ti-user-cog"></i> Users</a>
       <a data-v="settings" onclick="nav('settings')"><i class="ti ti-settings"></i> Settings</a>
     </nav>
     <div class="runner"><div class="rt"><span class="dot off" id="runmode"></span><span id="runlbl">idle</span></div>
@@ -456,6 +459,8 @@ body:not(.admin) .admin-only { display: none !important; }
       <div style="flex:1;min-width:90px;display:flex;flex-direction:column;gap:5px"><span class="lbl">Size</span><select id="nt-cx" class="sel"><option value="small">small</option><option value="medium" selected>medium</option><option value="large">large</option></select></div>
     </div>
     <label class="mrow" style="gap:8px;cursor:pointer"><input type="checkbox" id="nt-ui"> <span class="lbl" style="cursor:pointer">Has UI (PD will design UX)</span></label>
+    <div class="mrow" style="flex-direction:column;align-items:stretch;gap:5px"><span class="lbl">Acceptance criteria <span style="color:var(--dim);font-weight:400">· one per line, up to 5 — defines "done"</span></span>
+      <textarea id="nt-ac" rows="4" placeholder="e.g.&#10;User can send a message and see it delivered&#10;Message is end-to-end encrypted&#10;Works offline and syncs on reconnect" style="background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 11px;font-size:13px;font-family:inherit;resize:vertical"></textarea></div>
     <div id="nt-err" style="color:var(--red);font-size:12px;min-height:16px;margin:4px 0"></div>
     <button class="pri" onclick="createTicket()" style="width:100%;justify-content:center"><i class="ti ti-plus"></i> Create ticket</button>
   </div></div>
@@ -515,7 +520,7 @@ const KPI_IC={Shipped:"ti-rocket","In flight":"ti-plane-tilt","Open bugs":"ti-bu
 const money=n=>"$"+(Number(n)||0).toFixed(2);
 const fmtK=n=>{n=Number(n)||0;return n>=1000?(n/1000).toFixed(1)+"k":String(n);};
 const AC={BA:"--blue","DEV-FEATURE":"--green","DEV-BUG":"--red",SA:"--purple",TEST:"--teal",DOCS:"--blue",PO:"--amber",SM:"--teal",PD:"--purple",USER:"--accent"};
-const TITLES={overview:["Overview","project health at a glance"],team:["Team","nine agents, one loop"],board:["Work","board · sprint · backlog"],activity:["Activity","what the agents are doing"],roadmap:["Roadmap","now · next · later, auto-generated"],discuss:["Discussion","team threads & standups"],people:["People","per-user activity & productivity"],audit:["Audit","who did what, when"],access:["Access","API tokens & service accounts"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
+const TITLES={overview:["Overview","project health at a glance"],team:["Agents","your autonomous workers"],board:["Work","board · sprint · backlog"],activity:["Activity","what the agents are doing"],roadmap:["Roadmap","now · next · later, auto-generated"],discuss:["Discussion","team threads & standups"],people:["People","per-user activity & productivity"],audit:["Audit","who did what, when"],access:["Users","accounts, project access & tokens"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
 const esc=s=>(s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 const cvar=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim()||"#888";
 let STATE={}, CUR="overview", BF="all", INIT_ACT=false, WORKTAB="board";
@@ -820,7 +825,7 @@ function renderBacklogPanel(s){
   const committed=new Set((s.sprint&&s.sprint.committed)||[]);
   const pc={high:"var(--red)",medium:"var(--amber)",low:"var(--muted)"};
   const rows=items.map(t=>{const col=pc[t.priority]||"var(--muted)";const inSp=committed.has(t.id);
-    return `<div class="act"><div class="ad" style="background:${col}22;color:${col}"><i class="ti ti-${t.type==='bug'?'bug':'bulb'}" style="font-size:13px"></i></div>
+    return `<div class="act" onclick="showTicket('${t.id}')" style="cursor:pointer"><div class="ad" style="background:${col}22;color:${col}"><i class="ti ti-${t.type==='bug'?'bug':'bulb'}" style="font-size:13px"></i></div>
       <div class="atx"><span class="tk">${esc(t.id)}</span> ${esc(t.title)} <span class="fchip" style="padding:1px 8px;font-size:10px;border:none;background:${col}22;color:${col}">${esc(t.priority||'—')}</span>${inSp?' <span class="fchip" style="padding:1px 8px;font-size:10px;border:none;background:var(--accentbg);color:var(--accent2)">in sprint</span>':''}</div>
       <span class="tm">${esc(t.status)}</span></div>`;}).join("");
   el.innerHTML=`<div class="filters"><span style="font-size:12px;color:var(--muted)">Prioritised backlog — the PO pulls from the top into each sprint.</span><div style="flex:1"></div><span class="fchip">${items.length} waiting</span></div>
@@ -838,6 +843,13 @@ function renderDiscuss(){
   const msgs=(STATE.comments||[]).filter(c=>want?c.ticket===want:!c.ticket);
   const box=document.getElementById("disc-thread");
   const me=(ME&&ME.username)||"";
+  // Re-render only when the thread actually changed — otherwise every 1s SSE
+  // tick would rebuild the DOM and yank the scroll position to the bottom.
+  const sig=want+":"+msgs.length+":"+(msgs.length?(msgs[msgs.length-1].at||""):"");
+  if(box.dataset.sig===sig)return;
+  // Keep the reading position unless the user is already at the bottom.
+  const atBottom=box.scrollHeight-box.scrollTop-box.clientHeight<80;
+  box.dataset.sig=sig;
   if(!msgs.length){box.innerHTML='<div class="chatempty"><i class="ti ti-messages"></i><div>No messages yet</div><span>Send a message, or spin up an agent discussion.</span></div>';return;}
   let lastDay="";
   box.innerHTML=msgs.map(c=>{
@@ -857,7 +869,7 @@ function renderDiscuss(){
       <div class="cav" style="background:${col}22;color:${col}">${esc(initials(c.author))}</div>
       <div class="ccol"><div class="chead"><b>${esc(c.author)}</b>${badge}${tick}<span class="ctime">${esc(time)}</span></div>
         <div class="cbub">${esc(c.body)}</div></div></div>`;}).join("");
-  box.scrollTop=box.scrollHeight;
+  if(atBottom)box.scrollTop=box.scrollHeight;
 }
 // Classify SM/DEPLOY scrum notifications so they render as a timeline event
 // (sprint open/close, ship, deploy) rather than a conversational bubble.
@@ -903,7 +915,15 @@ function depChips(ids){
     const col=done?"var(--green)":(dt?"var(--amber)":"var(--dim)");
     return `<span onclick="showTicket('${id}')" title="${dt?esc(dt.title)+' · '+esc(dt.status):'unknown'}" style="cursor:pointer;display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:3px 8px;border-radius:7px;background:${col}22;color:${col};margin-right:5px">
       <i class="ti ti-${done?'check':'circle'}" style="font-size:11px"></i>${esc(id)}</span>`;}).join("");}
-function showTicket(id){const t=(STATE.tickets||[]).find(x=>x.id===id);if(!t)return;const d=t.design||{},tech=d.technical,ux=d.ux;
+async function showTicket(id){
+  // Full detail (incl. design specs stripped from list payloads) loads on demand.
+  const body=document.getElementById("ticket-body");
+  body.innerHTML='<span class="x" onclick="close_(\'ov-ticket\')"><i class="ti ti-x"></i></span><div class="empty">loading…</div>';
+  document.getElementById("ov-ticket").classList.add("open");
+  let t=null;try{t=await(await fetch(api("/ticket/"+encodeURIComponent(id)))).json();}catch(e){}
+  if(!t||!t.id){t=(STATE.tickets||[]).find(x=>x.id===id);}
+  if(!t){body.innerHTML='<span class="x" onclick="close_(\'ov-ticket\')"><i class="ti ti-x"></i></span><div class="empty">ticket not found</div>';return;}
+  const d=t.design||{},tech=d.technical,ux=d.ux,ac=t.acceptance_criteria||[];
   let h=`<span class="x" onclick="close_('ov-ticket')"><i class="ti ti-x"></i></span><h3>${esc(t.title)}</h3>
     <div class="msub">${esc(t.id)} · ${esc(t.type)}</div>
     <div class="mrow"><span class="lbl">Status</span><b>${esc(t.status)}</b></div>
@@ -913,11 +933,12 @@ function showTicket(id){const t=(STATE.tickets||[]).find(x=>x.id===id);if(!t)ret
         <span style="color:var(--dim);font-size:12px;margin-left:6px">· ${esc(t.complexity)}${t.has_ui?' · UI':''}</span></div></div>
     <div class="mrow"><span class="lbl">Blocked by</span>${depChips(t.depends_on)}</div>
     <div class="mrow"><span class="lbl">Blocks</span>${depChips((STATE.tickets||[]).filter(x=>(x.depends_on||[]).includes(t.id)).map(x=>x.id))}</div>
-    <div class="mrow" style="display:block"><span class="lbl">Description</span><div style="margin-top:7px;color:var(--muted);line-height:1.6">${esc(t.description)||'—'}</div></div>`;
-  if(tech)h+=`<div class="mrow" style="display:block;border:none"><span class="lbl">Technical design</span><pre>${esc(tech.approach)}\nfiles: ${esc((tech.files||[]).join(", "))}\napi: ${esc(tech.api_contract)}\ntest: ${esc(tech.test_plan)}</pre></div>`;
-  if(ux)h+=`<div class="mrow" style="display:block;border:none"><span class="lbl">UX design</span><pre>${esc(ux.user_flow)}\nscreens: ${esc((ux.screens||[]).join(", "))}</pre></div>`;
+    <div class="mrow" style="display:block"><span class="lbl">Description</span><div style="margin-top:7px;color:var(--muted);line-height:1.6">${esc(t.description)||'—'}</div></div>
+    <div class="mrow" style="display:block"><span class="lbl">Acceptance criteria</span>${ac.length?`<div class="aclist">${ac.map(c=>`<div class="acitem"><i class="ti ti-square-check"></i> ${esc(c)}</div>`).join("")}</div>`:'<div style="margin-top:6px;color:var(--dim);font-size:12px">— none defined yet</div>'}</div>`;
+  if(tech)h+=`<div class="mrow" style="display:block;border:none"><span class="lbl">Technical spec</span><pre>${esc(tech.approach)}\nfiles: ${esc((tech.files||[]).join(", "))}\napi: ${esc(tech.api_contract)}\ntest: ${esc(tech.test_plan)}</pre></div>`;
+  if(ux)h+=`<div class="mrow" style="display:block;border:none"><span class="lbl">UI/UX spec</span><pre>${esc(ux.user_flow)}\nscreens: ${esc((ux.screens||[]).join(", "))}</pre></div>`;
   if(t.status==="pending"||t.status==="open")h+=`<button onclick="rejectTicket('${t.id}')" style="margin-top:14px;background:transparent;color:var(--red);border:1px solid var(--red);border-radius:9px;padding:8px 15px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit"><i class="ti ti-ban" style="font-size:14px"></i> Reject ticket</button>`;
-  document.getElementById("ticket-body").innerHTML=h;document.getElementById("ov-ticket").classList.add("open");}
+  body.innerHTML=h;}
 async function rejectTicket(id){try{await fetch(api("/ticket/"+id+"/reject"),{method:"POST"});close_("ov-ticket");}catch(e){}}
 async function loadSettings(){let cfg={};try{cfg=await(await fetch(api("/config"))).json();}catch(e){}window._cfg=cfg;
   let detected=[];try{detected=await(await fetch("/api/engines")).json();}catch(e){}
@@ -1062,16 +1083,18 @@ async function baRefine(){
   }catch(e){err.textContent="Network error.";}
   lbl.textContent="Refine with BA";
 }
-function openNewTicket(){["nt-title","nt-desc"].forEach(i=>document.getElementById(i).value="");document.getElementById("nt-err").textContent="";document.getElementById("nt-ui").checked=false;document.getElementById("ov-newticket").classList.add("open");setTimeout(()=>document.getElementById("nt-title").focus(),50);}
+function openNewTicket(){["nt-title","nt-desc","nt-ac"].forEach(i=>document.getElementById(i).value="");document.getElementById("nt-err").textContent="";document.getElementById("nt-ui").checked=false;document.getElementById("ov-newticket").classList.add("open");setTimeout(()=>document.getElementById("nt-title").focus(),50);}
 async function createTicket(){
   const title=document.getElementById("nt-title").value.trim();
   const err=document.getElementById("nt-err");
   if(!title){err.textContent="Title is required.";return;}
+  const ac=(document.getElementById("nt-ac").value||"").split("\n").map(l=>l.trim()).filter(Boolean).slice(0,5);
   const body={title,description:document.getElementById("nt-desc").value,
     ticket_type:document.getElementById("nt-type").value,
     priority:document.getElementById("nt-prio").value,
     complexity:document.getElementById("nt-cx").value,
-    has_ui:document.getElementById("nt-ui").checked};
+    has_ui:document.getElementById("nt-ui").checked,
+    acceptance_criteria:ac};
   err.textContent="Creating…";
   try{
     const r=await fetch(api("/tickets"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});

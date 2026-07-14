@@ -14,6 +14,8 @@ pub struct AddTicketInput {
     pub priority: Priority,
     pub complexity: Complexity,
     pub has_ui: bool,
+    /// Up to 5 acceptance criteria (blanks trimmed, extras dropped).
+    pub acceptance_criteria: Vec<String>,
 }
 
 /// Adds a new ticket to the project backlog.
@@ -35,7 +37,7 @@ impl<S: StateStorePort + ?Sized> AddTicketUseCase<S> {
         let mut state = self.store.load().await?;
 
         let id = mint_id(input.ticket_type, &state)?;
-        let ticket = Ticket::new(
+        let mut ticket = Ticket::new(
             id.clone(),
             input.ticket_type,
             input.title,
@@ -44,6 +46,7 @@ impl<S: StateStorePort + ?Sized> AddTicketUseCase<S> {
             input.complexity,
             input.has_ui,
         )?;
+        ticket.set_acceptance_criteria(input.acceptance_criteria);
         state.tickets.push(ticket);
 
         state.validate().map_err(crate::error::PortError::Corrupt)?;
@@ -121,6 +124,7 @@ mod tests {
             priority: Priority::Medium,
             complexity: Complexity::Small,
             has_ui: false,
+            acceptance_criteria: Vec::new(),
         }
     }
 

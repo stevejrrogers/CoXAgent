@@ -252,6 +252,7 @@ pub async fn serve_full(
         .route("/api/projects/:pid/discuss", post(run_discussion_ep))
         .route("/api/projects/:pid/standup", post(standup_ep))
         .route("/api/projects/:pid/tickets", post(create_ticket))
+        .route("/api/projects/:pid/ticket/:id", get(ticket_detail_ep))
         .route("/api/projects/:pid/ticket/:id/priority", post(set_priority))
         .route("/api/projects/:pid/ticket/:id/reject", post(reject_ticket))
         .route(
@@ -430,6 +431,24 @@ async fn analyze_goal_ep(
     }
 }
 
+/// Serialize state for list views but drop each ticket's heavy `design` specs —
+/// the board/backlog/roadmap only need the summary fields. Full specs load
+/// on demand via [`ticket_detail_ep`], keeping the 1 Hz SSE payload small.
+fn lite_state_value(state: &coxagent_application::ProjectState) -> serde_json::Value {
+    let mut v = serde_json::to_value(state).unwrap_or_default();
+    if let Some(tickets) = v
+        .get_mut("tickets")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for t in tickets {
+            if let Some(obj) = t.as_object_mut() {
+                obj.remove("design");
+            }
+        }
+    }
+    v
+}
+
 async fn state_ep(
     State(app): State<AppState>,
     Path(pid): Path<String>,
@@ -438,7 +457,28 @@ async fn state_ep(
         return not_found();
     };
     match p.store.load().await {
-        Ok(state) => Json(serde_json::to_value(state).unwrap_or_default()).into_response(),
+        Ok(state) => Json(lite_state_value(&state)).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Full detail for one ticket — including the `design` specs stripped from list
+/// payloads — loaded only when the user opens it.
+async fn ticket_detail_ep(
+    State(app): State<AppState>,
+    Path((pid, id)): Path<(String, String)>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    match p.store.load().await {
+        Ok(state) => state
+            .tickets
+            .iter()
+            .find(|t| t.id().as_str() == id)
+            .map_or_else(not_found, |t| {
+                Json(serde_json::to_value(t).unwrap_or_default()).into_response()
+            }),
         Err(e) => internal_error(&e.to_string()),
     }
 }
@@ -547,6 +587,8 @@ struct CreateTicketReq {
     complexity: Option<coxagent_domain::Complexity>,
     #[serde(default)]
     has_ui: bool,
+    #[serde(default)]
+    acceptance_criteria: Vec<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -665,6 +707,7 @@ async fn create_ticket(
         priority: req.priority.unwrap_or(Priority::Medium),
         complexity: req.complexity.unwrap_or(Complexity::Medium),
         has_ui: req.has_ui,
+        acceptance_criteria: req.acceptance_criteria.clone(),
     };
     match AddTicketUseCase::new(Arc::clone(&p.store))
         .execute(input)
@@ -1027,7 +1070,7 @@ async fn events_ep(
         async move {
             let payload = match handle {
                 Some(p) => serde_json::json!({
-                    "state": p.store.load().await.ok(),
+                    "state": p.store.load().await.ok().as_ref().map(lite_state_value),
                     "runner": p.runner.snapshot(),
                     "viewers": count,
                 }),

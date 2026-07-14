@@ -67,6 +67,7 @@ impl<S: StateStorePort> RunConformanceUseCase<S> {
                     priority: Priority::High,
                     complexity: Complexity::Medium,
                     has_ui: false,
+                    acceptance_criteria: Vec::new(),
                 })
                 .await?;
             filed.push(id);

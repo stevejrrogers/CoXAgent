@@ -164,6 +164,7 @@ mod tests {
                 priority: Priority::High,
                 complexity: Complexity::Small,
                 has_ui: true,
+                acceptance_criteria: Vec::new(),
             })
             .await
             .expect("seed");

@@ -56,6 +56,7 @@ pub async fn greenfield<S: StateStorePort + 'static>(
             priority: Priority::High,
             complexity: Complexity::Small,
             has_ui: false,
+            acceptance_criteria: Vec::new(),
         })
         .await?;
 
@@ -129,6 +130,7 @@ pub async fn brownfield<S: StateStorePort + 'static>(
                 priority: Priority::High,
                 complexity: Complexity::Medium,
                 has_ui: false,
+                acceptance_criteria: Vec::new(),
             })
             .await?;
         seeded.push(format!("{id} (dockerize)"));

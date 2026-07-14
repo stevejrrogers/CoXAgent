@@ -363,6 +363,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 priority: Priority::High,
                 complexity: coxagent_domain::ticket::Complexity::Medium,
                 has_ui: false,
+                acceptance_criteria: Vec::new(),
             })
             .await
             .ok()
