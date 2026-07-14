@@ -130,6 +130,7 @@
   .toolok{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;padding:2px 8px;border-radius:20px;background:color-mix(in srgb,var(--green) 16%,transparent);color:var(--green)}
   .toolgrid{display:flex;flex-direction:column;gap:9px}
   .toolrow{display:flex;align-items:center;gap:11px}
+  .toolbrew{background:color-mix(in srgb,var(--amber) 8%,transparent);border:1px solid color-mix(in srgb,var(--amber) 25%,transparent);border-radius:9px;padding:9px 11px}
   .toolinfo{flex:1;min-width:0}
   .toolinfo b{font-size:13px;font-family:ui-monospace,monospace}
   .tooldim{font-size:12px;color:var(--muted)}
@@ -1490,14 +1491,19 @@ async function showTicket(id){
   body.innerHTML=h;}
 async function rejectTicket(id){try{await fetch(api("/ticket/"+id+"/reject"),{method:"POST"});close_("ov-ticket");}catch(e){}}
 async function loadSettings(){let cfg={};try{cfg=await(await fetch(api("/config"))).json();}catch(e){}window._cfg=cfg;
-  let tools=[];try{tools=await(await fetch("/api/tooling")).json();}catch(e){}
-  const missing=tools.filter(t=>!t.present).length;
+  let td={tools:[]};try{td=await(await fetch("/api/tooling")).json();}catch(e){}
+  const tools=td.tools||[];const missing=tools.filter(t=>!t.present).length;
+  const brewBanner=(td.os==="macos"&&!td.has_brew)
+    ? `<div class="toolrow toolbrew"><i class="ti ti-alert-triangle" style="color:var(--amber);font-size:17px"></i>
+        <div class="toolinfo"><div><b>Homebrew</b> <span class="tooldim">· the installer these commands use — not found</span></div>
+          <div class="toolinstall"><code>${esc(td.brew_install||'')}</code><button class="toolcopy" onclick="copyText(this,'${esc((td.brew_install||'').replace(/'/g,"\\'"))}')" title="Copy"><i class="ti ti-copy"></i></button></div></div></div>` : '';
+  const cp=s=>String(s||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
   const toolingHtml=`<div class="toolcard">
-    <div class="toolhead"><i class="ti ti-tools" style="color:var(--accent2)"></i> Developer tooling ${missing?`<span class="toolwarn">${missing} missing</span>`:'<span class="toolok">all present</span>'}</div>
-    <div class="toolgrid">${tools.map(t=>`<div class="toolrow">
+    <div class="toolhead"><i class="ti ti-tools" style="color:var(--accent2)"></i> Developer tooling <span class="tooldim" style="font-weight:400">· ${esc(td.os||'')}</span> ${missing?`<span class="toolwarn">${missing} missing</span>`:'<span class="toolok">all present</span>'}</div>
+    <div class="toolgrid">${brewBanner}${tools.map(t=>`<div class="toolrow">
       <i class="ti ti-${t.present?'circle-check-filled':'circle-x'}" style="color:${t.present?'var(--green)':'var(--red)'};font-size:17px"></i>
       <div class="toolinfo"><div><b>${esc(t.name)}</b> <span class="tooldim">· ${esc(t.purpose)}</span></div>
-        ${t.present?`<code class="toolpath">${esc(t.path)}</code>`:`<div class="toolinstall"><code>${esc(t.install)}</code><button class="toolcopy" onclick="copyText(this,'${esc(t.install)}')" title="Copy"><i class="ti ti-copy"></i></button></div>`}
+        ${t.present?`<code class="toolpath">${esc(t.path)}</code>`:`<div class="toolinstall"><code>${esc(t.install)}</code><button class="toolcopy" onclick="copyText(this,'${cp(t.install)}')" title="Copy"><i class="ti ti-copy"></i></button></div>`}
       </div>${t.needs_auth&&!t.present?'<span class="tooltag">needs your login</span>':''}</div>`).join("")}</div>
     ${missing?'<div class="toolnote"><i class="ti ti-info-circle"></i> Install the missing tools, then <b>sign them in</b> (e.g. <code>gh auth login</code>) — auth needs you, agents can\'t do it. Restart the app after installing.</div>':''}
   </div>`;

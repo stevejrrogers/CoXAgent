@@ -20,7 +20,7 @@ pub use auth::FileAuthService;
 pub use deploy::DockerComposeDeploy;
 pub use engine::{
     discover, discover_tooling, AnyEngine, ClaudeEngine, DetectedEngine, DetectedTool, MockEngine,
-    OpencodeEngine,
+    OpencodeEngine, Tooling,
 };
 pub use forge::{GhForge, GlForge};
 pub use git::SystemGit;
