@@ -302,6 +302,7 @@
   body.mode-chat .chatside{display:flex}
   body.mode-chat .runner{display:none}
   body.mode-chat .main{display:flex;flex-direction:column;overflow:hidden}
+  body.mode-chat .topbar{display:none}
   body.mode-chat .content{display:none}
   body.mode-chat #chat-main{display:flex}
   .runner{margin-top:auto;background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:13px}
@@ -1520,10 +1521,10 @@ async function loadChannels(){
 function renderChannels(){
   const box=document.getElementById("chan-list");if(!box)return;
   box.innerHTML=CHANNELS.map(c=>{
-    const priv=c.id!=="general";
+    const kind=c.kind||(c.id==="general"?"general":"private");
     const u=UNREAD[c.id]||0;
     return `<div class="chanitem${c.id===CURCHAN?' on':''}${u?' unread':''}" onclick="selectChannel('${esc(c.id)}')">
-      <i class="ti ti-${priv?'lock':'hash'}"></i><span class="channm">${esc(c.name)}</span>${u?`<span class="chanbadge">${u>99?'99+':u}</span>`:''}</div>`;}).join("");
+      <i class="ti ti-${kind==="private"?'lock':'hash'}"></i><span class="channm">${esc(c.name)}</span>${u?`<span class="chanbadge">${u>99?'99+':u}</span>`:''}</div>`;}).join("");
   updateNotifToggle();
 }
 function currentChannel(){return CHANNELS.find(c=>c.id===CURCHAN)||{id:"general",name:"general",owner:""};}
@@ -1531,15 +1532,16 @@ function selectChannel(id){
   CURCHAN=id;
   clearUnread(id);
   const ch=currentChannel();
-  const priv=id!=="general";
-  document.getElementById("chat-title").textContent=(priv?"🔒 ":"# ")+ch.name;
+  const kind=ch.kind||(id==="general"?"general":"private");
+  document.getElementById("chat-title").textContent=(kind==="private"?"🔒 ":"# ")+ch.name;
   const sub=document.getElementById("chat-sub");
-  const p=PROJECTS.find(x=>x.id===PID);
-  sub.textContent=priv?`private channel · ${(ch.members||[]).length} member${(ch.members||[]).length===1?'':'s'}`
-                       :((p?p.name:"this project")+" — everyone on the project");
-  // The owner and anyone they delegated to may invite.
+  const n=(ch.members||[]).length;
+  sub.textContent = kind==="general" ? "everyone in the workspace"
+    : kind==="project" ? `project channel · ${n} member${n===1?'':'s'}`
+    : `private channel · ${n} member${n===1?'':'s'}`;
+  // Only private channels take invites; project membership follows assignment.
   const me=(ME&&ME.username)||"user";
-  const canInvite=priv&&(ch.owner===me||(ch.inviters||[]).includes(me));
+  const canInvite=kind==="private"&&(ch.owner===me||(ch.inviters||[]).includes(me));
   document.getElementById("chat-invite").style.display=canInvite?"inline-flex":"none";
   renderChannels();
   loadChatHistory();
