@@ -15,3 +15,4 @@ auth.json
 
 # macOS app build artifacts
 desktop/build/
+/dist/
