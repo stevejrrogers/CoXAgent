@@ -108,6 +108,21 @@
   .rev-empty div{font-size:15px;font-weight:600;color:var(--text)}
   .rev-empty span{font-size:12.5px;display:block;margin-top:5px}
   .rev-empty a{color:var(--accent2);cursor:pointer}
+  /* Settings: sub-tabs + collapsible + sticky save */
+  .settabs{display:flex;gap:2px;margin-bottom:18px;border-bottom:1px solid var(--border)}
+  .settab-btn{display:inline-flex;align-items:center;gap:7px;background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);font-family:inherit;font-size:13px;font-weight:600;padding:10px 15px;cursor:pointer;margin-bottom:-1px}
+  .settab-btn:hover{color:var(--text)}
+  .settab-btn.on{color:var(--accent2);border-bottom-color:var(--accent2)}
+  .settab-btn i{font-size:16px}
+  .settab{animation:viewin .18s ease}
+  .set-expand{display:flex;align-items:center;gap:8px;width:100%;background:transparent;border:none;border-top:1px solid var(--border);color:var(--text);font-family:inherit;font-size:12.5px;font-weight:600;padding:13px 2px 3px;cursor:pointer;margin-top:8px}
+  .set-expand i{font-size:15px;transition:transform .15s}
+  .set-expand.open i{transform:rotate(90deg)}
+  .set-note{font-size:11.5px;color:var(--dim);line-height:1.6;margin-top:12px;padding:0 2px}
+  .set-footer{display:flex;align-items:center;gap:14px;margin-top:20px;padding:14px 0;border-top:1px solid var(--border);position:sticky;bottom:0;background:linear-gradient(180deg,transparent,var(--bg) 30%)}
+  .set-footer .save{margin:0}
+  .set-foothint{font-size:11px;color:var(--dim);margin-left:auto}
+  #save-note{font-size:12px;color:var(--green)}
   /* Users: richer create form + project picker + edit modal */
   .ainvite2{flex-wrap:wrap}
   .uprojpick-wrap{display:flex;align-items:flex-start;gap:12px;margin:2px 0 10px;flex-wrap:wrap}
@@ -752,7 +767,7 @@ body:not(.admin) .admin-only { display: none !important; }
       <div class="view" id="view-insights"><div class="kpis" id="cost-kpis"></div>
         <div class="sec">Cost by agent</div><div class="panel" id="cost-roles"></div>
         <div class="sec">Budget</div><div class="panel" id="cost-budget"></div></div>
-      <div class="view" id="view-settings"><div id="settings-body"></div><div id="ws-panel" style="margin-top:20px"></div></div>
+      <div class="view" id="view-settings"><div id="settings-body"></div></div>
     </div>
   </main>
 
@@ -1469,47 +1484,68 @@ async function loadSettings(){let cfg={};try{cfg=await(await fetch(api("/config"
       + detected.map(d=>`<div style="display:flex;align-items:center;gap:8px;font-size:12px;padding:2px 0"><span class="tk" style="background:var(--green)22;color:var(--green)">${esc(d.name)}</span><span style="color:var(--dim);font-family:ui-monospace,monospace">${esc(d.path)}</span></div>`).join("")
       + `</div>`
     : `<div class="panel" style="margin-bottom:12px"><div style="font-size:12px;color:var(--amber)"><i class="ti ti-alert-triangle"></i> No agent CLI detected on PATH. Install <b>claude</b> or <b>opencode</b> to run real agents (scripted/mock work offline).</div></div>`;
-  let rows=`<div class="fr"><span class="lbl">Default engine</span><select id="eng-default" onchange="onEngine('default')">${opt(def.engine)}</select>
+  const defRow=`<div class="fr"><span class="lbl">Default engine</span><select id="eng-default" onchange="onEngine('default')">${opt(def.engine)}</select>
     <span id="mc-default" style="flex:1;display:flex">${modelControl(def.engine,def.model,'default')}</span></div>`;
-  rows+=ROLES.map(r=>{const c=per[r]||{};return `<div class="fr"><span class="lbl">${r}</span>
+  const roleRows=ROLES.map(r=>{const c=per[r]||{};return `<div class="fr"><span class="lbl">${r}</span>
     <select id="eng-${r}" onchange="onEngine('${r}')"><option value="">(default)</option>${eng.map(e=>`<option value="${e}" ${c.engine===e?'selected':''}>${label(e)}</option>`).join("")}</select>
     <span id="mc-${r}" style="flex:1;display:flex">${modelControl(c.engine||"",c.model||"",r)}</span></div>`;}).join("");
+  const anyOverride=ROLES.some(r=>per[r]&&per[r].engine);
   document.getElementById("settings-body").innerHTML=`
-    <div class="sec">Engines &amp; models</div>
-    ${detBanner}
-    <div style="margin:-2px 0 10px"><button onclick="checkAgentSetup(true)" style="display:inline-flex;align-items:center;gap:6px;background:var(--card2);color:var(--accent2);border:1px solid var(--border2);border-radius:8px;padding:7px 12px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit"><i class="ti ti-robot"></i> Agent setup guide</button></div>
-    <div class="panel frm">${rows}</div>
-    <div class="sec">Workflow</div>
-    <div class="panel frm">
-      <div class="fr"><span class="lbl">Mode</span><select id="wf-mode"><option value="kanban" ${wf.mode!=='scrum'?'selected':''}>kanban</option><option value="scrum" ${wf.mode==='scrum'?'selected':''}>scrum</option></select><span class="hint">scrum groups cycles into sprints</span></div>
-      <div class="fr"><span class="lbl">Sprint length</span><input id="wf-sp" type="number" min="1" value="${wf.sprint_length_cycles??10}" style="width:90px"/><span class="hint">cycles per sprint</span></div>
-      <div class="fr"><span class="lbl">BA every N cycles</span><input id="wf-ba" type="number" min="0" value="${wf.ba_every_n_cycles??4}" style="width:90px"/><span class="hint">0 disables BA</span></div>
-      <div class="fr"><span class="lbl">Feature dev</span><select id="wf-fd"><option value="true" ${wf.feature_dev_enabled!==false?'selected':''}>enabled</option><option value="false" ${wf.feature_dev_enabled===false?'selected':''}>disabled</option></select></div>
-      <div class="fr"><span class="lbl">Sleep seconds</span><input id="wf-sl" type="number" min="0" value="${wf.sleep_seconds??30}" style="width:90px"/><span class="hint">between cycles</span></div>
-      <div class="fr"><span class="lbl">Budget — total (USD)</span><input id="wf-bg" type="number" min="0" step="0.5" value="${wf.budget_usd??''}" placeholder="unlimited" style="width:100px" ${wf.budget_usd==null?'disabled':''}/>
-        <label class="hint" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" id="wf-bg-unl" ${wf.budget_usd==null?'checked':''} onchange="document.getElementById('wf-bg').disabled=this.checked;if(this.checked)document.getElementById('wf-bg').value='';"> unlimited</label>
-        <span class="hint">lifetime cap · pauses loop · <b style="color:var(--accent2)">applies live</b></span></div>
-      <div class="fr"><span class="lbl">Budget — per day (USD)</span><input id="wf-dg" type="number" min="0" step="0.5" value="${pol.daily_budget_usd??''}" placeholder="unlimited" style="width:100px" ${pol.daily_budget_usd==null?'disabled':''}/>
-        <label class="hint" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" id="wf-dg-unl" ${pol.daily_budget_usd==null?'checked':''} onchange="document.getElementById('wf-dg').disabled=this.checked;if(this.checked)document.getElementById('wf-dg').value='';"> unlimited</label>
-        <span class="hint">resets at UTC midnight · <b style="color:var(--accent2)">applies live</b></span></div>
+    <div class="settabs">
+      <button class="settab-btn" data-t="engines" onclick="setSetTab('engines')"><i class="ti ti-cpu"></i> Engines</button>
+      <button class="settab-btn" data-t="workflow" onclick="setSetTab('workflow')"><i class="ti ti-adjustments"></i> Workflow</button>
+      <button class="settab-btn" data-t="git" onclick="setSetTab('git')"><i class="ti ti-git-branch"></i> Git</button>
+      <button class="settab-btn" data-t="workspace" onclick="setSetTab('workspace')"><i class="ti ti-folder"></i> Workspace</button>
     </div>
-    <div class="sec">Git &amp; version control</div>
-    <div class="panel frm">
-      <div class="fr"><span class="lbl">Integration</span><select id="git-en"><option value="false" ${!git.enabled?'selected':''}>disabled</option><option value="true" ${git.enabled?'selected':''}>enabled</option></select><span class="hint">off = agents never touch git; safe until you turn it on</span></div>
-      <div class="fr"><span class="lbl">Provider</span><select id="git-pv"><option value="github" ${git.provider!=='gitlab'?'selected':''}>GitHub</option><option value="gitlab" ${git.provider==='gitlab'?'selected':''}>GitLab</option></select><span class="hint">GitLab for testing, GitHub for real</span></div>
-      <div class="fr"><span class="lbl">Repository</span><input id="git-repo" value="${esc(git.repo||'')}" placeholder="owner/name — e.g. stevejrrogers/CoXChat" style="width:280px"/></div>
-      <div class="fr"><span class="lbl">Base URL</span><input id="git-url" value="${esc(git.base_url||'')}" placeholder="blank = provider default (self-hosted/enterprise only)" style="width:280px"/></div>
-      <div class="fr"><span class="lbl">Default branch</span><input id="git-br" value="${esc(git.default_branch||'main')}" style="width:120px"/><span class="hint">the repo's main branch</span></div>
-      <div class="fr"><span class="lbl">Target branch</span><input id="git-tb" value="${esc(git.target_branch||'')}" placeholder="blank = default branch" style="width:140px"/><span class="hint">agent PRs open into &amp; auto-merge here (e.g. <code>develop</code>) — leave blank for the default branch</span></div>
-      <div class="fr"><span class="lbl">Branch prefix</span><input id="git-bp" value="${esc(git.branch_prefix||'feat/')}" style="width:120px"/><span class="hint">→ ${esc(git.branch_prefix||'feat/')}CXC-123</span></div>
-      <div class="fr"><span class="lbl">Commit email</span><input id="git-em" value="${esc(git.commit_email||'')}" placeholder="…@users.noreply.github.com" style="width:280px"/><span class="hint">use a noreply email to avoid privacy blocks</span></div>
-      <div class="fr"><span class="lbl">Open PR/MR</span><select id="git-pr"><option value="true" ${git.auto_pr!==false?'selected':''}>automatically after push</option><option value="false" ${git.auto_pr===false?'selected':''}>manual</option></select></div>
-      <div class="fr"><span class="lbl">Auto-merge</span><select id="git-am"><option value="false" ${!git.auto_merge?'selected':''}>off — a human reviews in the Review tab</option><option value="true" ${git.auto_merge?'selected':''}>on — the SA agent deep-dives &amp; merges</option></select><span class="hint">SA reviews the diff, merges on approve (never on failing CI); leave off until you trust the flow</span></div>
+    <div class="settab" data-p="engines">
+      ${detBanner}
+      <div style="margin:-2px 0 12px"><button onclick="checkAgentSetup(true)" class="btn-ghost"><i class="ti ti-robot"></i> Agent setup guide</button></div>
+      <div class="panel frm">${defRow}
+        <button type="button" class="set-expand ${anyOverride?'open':''}" onclick="toggleRoleOverrides(this)"><i class="ti ti-chevron-right"></i> Per-agent model overrides <span style="color:var(--dim);font-weight:400">· optional — give any agent a different model</span></button>
+        <div class="role-overrides" ${anyOverride?'':'hidden'}>${roleRows}</div>
+      </div>
     </div>
-    <button class="save" onclick="saveSettings()">Save changes</button>
-    <span id="save-note" style="margin-left:12px;color:var(--muted);font-size:12px"></span>
-    <div style="color:var(--dim);font-size:11px;margin-top:10px">Budget caps apply <b style="color:var(--accent2)">immediately</b> (no restart). Other settings apply on the next serve restart. Leave a cap blank / tick <b>unlimited</b> for no limit. Note: the total cap is <b>cumulative</b> — to resume past a hit cap, set it above what's already spent (or unlimited).</div>`;
+    <div class="settab" data-p="workflow" hidden>
+      <div class="panel frm">
+        <div class="fr"><span class="lbl">Mode</span><select id="wf-mode"><option value="kanban" ${wf.mode!=='scrum'?'selected':''}>kanban</option><option value="scrum" ${wf.mode==='scrum'?'selected':''}>scrum</option></select><span class="hint">scrum groups cycles into sprints</span></div>
+        <div class="fr"><span class="lbl">Sprint length</span><input id="wf-sp" type="number" min="1" value="${wf.sprint_length_cycles??10}" style="width:90px"/><span class="hint">cycles per sprint</span></div>
+        <div class="fr"><span class="lbl">BA every N cycles</span><input id="wf-ba" type="number" min="0" value="${wf.ba_every_n_cycles??4}" style="width:90px"/><span class="hint">0 disables BA</span></div>
+        <div class="fr"><span class="lbl">Feature dev</span><select id="wf-fd"><option value="true" ${wf.feature_dev_enabled!==false?'selected':''}>enabled</option><option value="false" ${wf.feature_dev_enabled===false?'selected':''}>disabled</option></select></div>
+        <div class="fr"><span class="lbl">Sleep seconds</span><input id="wf-sl" type="number" min="0" value="${wf.sleep_seconds??30}" style="width:90px"/><span class="hint">between cycles</span></div>
+        <div class="fr"><span class="lbl">Budget — total (USD)</span><input id="wf-bg" type="number" min="0" step="0.5" value="${wf.budget_usd??''}" placeholder="unlimited" style="width:100px" ${wf.budget_usd==null?'disabled':''}/>
+          <label class="hint" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" id="wf-bg-unl" ${wf.budget_usd==null?'checked':''} onchange="document.getElementById('wf-bg').disabled=this.checked;if(this.checked)document.getElementById('wf-bg').value='';"> unlimited</label>
+          <span class="hint">lifetime cap · pauses loop · <b style="color:var(--accent2)">applies live</b></span></div>
+        <div class="fr"><span class="lbl">Budget — per day (USD)</span><input id="wf-dg" type="number" min="0" step="0.5" value="${pol.daily_budget_usd??''}" placeholder="unlimited" style="width:100px" ${pol.daily_budget_usd==null?'disabled':''}/>
+          <label class="hint" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" id="wf-dg-unl" ${pol.daily_budget_usd==null?'checked':''} onchange="document.getElementById('wf-dg').disabled=this.checked;if(this.checked)document.getElementById('wf-dg').value='';"> unlimited</label>
+          <span class="hint">resets at UTC midnight · <b style="color:var(--accent2)">applies live</b></span></div>
+      </div>
+      <div class="set-note">Budget caps apply <b style="color:var(--accent2)">immediately</b>; other settings on the next restart. The total cap is <b>cumulative</b> — to resume past a hit cap, set it above what's already spent (or tick unlimited).</div>
+    </div>
+    <div class="settab" data-p="git" hidden>
+      <div class="panel frm">
+        <div class="fr"><span class="lbl">Integration</span><select id="git-en"><option value="false" ${!git.enabled?'selected':''}>disabled</option><option value="true" ${git.enabled?'selected':''}>enabled</option></select><span class="hint">off = agents never touch git; safe until you turn it on</span></div>
+        <div class="fr"><span class="lbl">Provider</span><select id="git-pv"><option value="github" ${git.provider!=='gitlab'?'selected':''}>GitHub</option><option value="gitlab" ${git.provider==='gitlab'?'selected':''}>GitLab</option></select><span class="hint">GitHub via <code>gh</code> · GitLab via <code>glab</code></span></div>
+        <div class="fr"><span class="lbl">Repository</span><input id="git-repo" value="${esc(git.repo||'')}" placeholder="owner/name — e.g. stevejrrogers/CoXChat" style="width:280px"/></div>
+        <div class="fr"><span class="lbl">Base URL</span><input id="git-url" value="${esc(git.base_url||'')}" placeholder="blank = provider default (self-hosted only)" style="width:280px"/></div>
+        <div class="fr"><span class="lbl">Default branch</span><input id="git-br" value="${esc(git.default_branch||'main')}" style="width:120px"/><span class="hint">the repo's main branch</span></div>
+        <div class="fr"><span class="lbl">Target branch</span><input id="git-tb" value="${esc(git.target_branch||'')}" placeholder="blank = default" style="width:140px"/><span class="hint">agent PRs open into &amp; auto-merge here (e.g. <code>develop</code>)</span></div>
+        <div class="fr"><span class="lbl">Branch prefix</span><input id="git-bp" value="${esc(git.branch_prefix||'feat/')}" style="width:120px"/><span class="hint">→ ${esc(git.branch_prefix||'feat/')}CXC-123</span></div>
+        <div class="fr"><span class="lbl">Commit email</span><input id="git-em" value="${esc(git.commit_email||'')}" placeholder="…@users.noreply.github.com" style="width:280px"/><span class="hint">use a noreply email to avoid privacy blocks</span></div>
+        <div class="fr"><span class="lbl">Open PR/MR</span><select id="git-pr"><option value="true" ${git.auto_pr!==false?'selected':''}>automatically after push</option><option value="false" ${git.auto_pr===false?'selected':''}>manual</option></select></div>
+        <div class="fr"><span class="lbl">Auto-merge</span><select id="git-am"><option value="false" ${!git.auto_merge?'selected':''}>off — a human reviews in the Review tab</option><option value="true" ${git.auto_merge?'selected':''}>on — the SA agent deep-dives &amp; merges</option></select><span class="hint">SA reviews the diff, merges on approve (never on failing CI)</span></div>
+      </div>
+    </div>
+    <div class="settab" data-p="workspace" hidden><div id="ws-panel"></div></div>
+    <div class="set-footer"><button class="save" onclick="saveSettings()"><i class="ti ti-device-floppy"></i> Save changes</button><span id="save-note"></span><span class="set-foothint">Other settings apply on the next restart</span></div>`;
+  setSetTab(window._setTab||"engines");
   loadWorkspace("");}
+function setSetTab(name){window._setTab=name;
+  document.querySelectorAll(".settab-btn").forEach(b=>b.classList.toggle("on",b.dataset.t===name));
+  document.querySelectorAll(".settab").forEach(p=>{p.hidden=p.dataset.p!==name;});
+}
+function toggleRoleOverrides(btn){const box=btn.nextElementSibling;const open=box.hasAttribute("hidden");
+  if(open){box.removeAttribute("hidden");btn.classList.add("open");}else{box.setAttribute("hidden","");btn.classList.remove("open");}
+}
 async function saveSettings(){const cfg=window._cfg||{engine:{},workflow:{}};cfg.engine=cfg.engine||{};cfg.workflow=cfg.workflow||{};
   cfg.engine.default={engine:val("eng-default"),model:val("mdl-default")};
   const per={};ROLES.forEach(r=>{const e=val("eng-"+r),m=val("mdl-"+r);if(e)per[r]={engine:e,model:m||"sonnet"};});cfg.engine.per_role=per;
