@@ -12,6 +12,8 @@ Cargo.lock.orig
 # Local auth store — hashed credentials, never commit
 auth.json
 **/auth.json
+sessions.json
+**/sessions.json
 
 # macOS app build artifacts
 desktop/build/

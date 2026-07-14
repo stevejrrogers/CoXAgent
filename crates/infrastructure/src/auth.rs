@@ -61,13 +61,22 @@ struct UserFile {
     tokens: Vec<StoredToken>,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
 struct Session {
     user: AuthUser,
-    expires: Instant,
+    /// Expiry as a Unix timestamp (seconds), so sessions survive a restart.
+    expires: u64,
     /// Human device label ("Chrome on macOS"); empty until `attach_device`.
     label: String,
     /// RFC3339 login time.
     at: String,
+}
+
+/// Current Unix time in whole seconds.
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// Failed-login tracking for one account (brute-force throttle).
@@ -78,9 +87,11 @@ struct Attempts {
     locked_until: Option<Instant>,
 }
 
-/// File-backed auth service with in-memory sessions.
+/// File-backed auth service. Sessions persist to `sessions.json` beside the
+/// user file so a restart doesn't sign everyone out.
 pub struct FileAuthService {
     path: PathBuf,
+    sessions_path: PathBuf,
     users: Mutex<Vec<StoredUser>>,
     tokens: Mutex<Vec<StoredToken>>,
     sessions: Mutex<HashMap<String, Session>>,
@@ -100,11 +111,23 @@ impl FileAuthService {
             Ok(text) => serde_json::from_str(&text).map_err(|e| format!("bad auth file: {e}"))?,
             Err(_) => UserFile::default(),
         };
+        let sessions_path = path.with_file_name("sessions.json");
+        // Restore non-expired sessions so a restart doesn't sign users out.
+        let sessions: HashMap<String, Session> = std::fs::read_to_string(&sessions_path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<HashMap<String, Session>>(&t).ok())
+            .map(|mut m| {
+                let now = now_unix();
+                m.retain(|_, s| s.expires > now);
+                m
+            })
+            .unwrap_or_default();
         Ok(Self {
             path: path.to_path_buf(),
+            sessions_path,
             users: Mutex::new(file.users),
             tokens: Mutex::new(file.tokens),
-            sessions: Mutex::new(HashMap::new()),
+            sessions: Mutex::new(sessions),
             attempts: Mutex::new(HashMap::new()),
             pending_totp: Mutex::new(HashMap::new()),
         })
@@ -117,6 +140,17 @@ impl FileAuthService {
         let file = UserFile { users, tokens };
         let text = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
         std::fs::write(&self.path, text).map_err(|e| e.to_string())
+    }
+
+    /// Persist active sessions to `sessions.json` (best-effort). Called after
+    /// any change to the session map so tokens survive a restart.
+    fn persist_sessions(&self) {
+        let Ok(sessions) = self.sessions.lock() else {
+            return;
+        };
+        if let Ok(text) = serde_json::to_string(&*sessions) {
+            let _ = std::fs::write(&self.sessions_path, text);
+        }
     }
 
     /// Ensure an admin account with `username`/`password` exists in `path`,
@@ -303,13 +337,15 @@ impl AuthPort for FileAuthService {
                 role,
                 projects: Vec::new(),
             },
-            expires: Instant::now() + SESSION_TTL,
+            expires: now_unix() + SESSION_TTL.as_secs(),
             label: String::new(),
             at: now_rfc3339(),
         };
         match self.sessions.lock() {
             Ok(mut s) => {
                 s.insert(token.clone(), session);
+                drop(s);
+                self.persist_sessions();
                 LoginResult::Ok(token)
             }
             Err(_) => LoginResult::Denied,
@@ -319,8 +355,10 @@ impl AuthPort for FileAuthService {
     async fn user_for(&self, token: &str) -> Option<AuthUser> {
         let mut sessions = self.sessions.lock().ok()?;
         let session = sessions.get(token)?;
-        if session.expires <= Instant::now() {
+        if session.expires <= now_unix() {
             sessions.remove(token);
+            drop(sessions);
+            self.persist_sessions();
             return None;
         }
         Some(session.user.clone())
@@ -328,15 +366,26 @@ impl AuthPort for FileAuthService {
 
     async fn logout(&self, token: &str) {
         if let Ok(mut sessions) = self.sessions.lock() {
-            sessions.remove(token);
+            if sessions.remove(token).is_some() {
+                drop(sessions);
+                self.persist_sessions();
+            }
         }
     }
 
     async fn attach_device(&self, token: &str, device: &str) {
-        if let Ok(mut sessions) = self.sessions.lock() {
+        let changed = if let Ok(mut sessions) = self.sessions.lock() {
             if let Some(s) = sessions.get_mut(token) {
                 device.clone_into(&mut s.label);
+                true
+            } else {
+                false
             }
+        } else {
+            false
+        };
+        if changed {
+            self.persist_sessions();
         }
     }
 
@@ -344,7 +393,7 @@ impl AuthPort for FileAuthService {
         let Ok(sessions) = self.sessions.lock() else {
             return Vec::new();
         };
-        let now = Instant::now();
+        let now = now_unix();
         let mut out: Vec<SessionInfo> = sessions
             .iter()
             .filter(|(_, s)| s.user.username == username && s.expires > now)
