@@ -51,6 +51,20 @@ pub struct Comment {
 /// Keep discussion threads bounded per project.
 pub const MAX_COMMENTS: usize = 500;
 
+/// One human-to-human message in the project's team chat channel. Unlike
+/// [`Comment`] (which is dominated by agent scrum chatter), this is a plain
+/// channel for the people on the project to talk to each other.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatMsg {
+    pub at: String,
+    /// The authenticated username of the sender.
+    pub user: String,
+    pub body: String,
+}
+
+/// Keep the team chat bounded per project.
+pub const MAX_CHAT: usize = 500;
+
 /// The project-level design system authored once by PD. Injected into DEV
 /// prompts for UI tickets so implementation is visually consistent — the
 /// design analogue of architecture governance (proactive, in-prompt).
@@ -153,6 +167,9 @@ pub struct ProjectState {
     /// Discussion threads: per-ticket and team-channel comments.
     #[serde(default)]
     pub comments: Vec<Comment>,
+    /// Team chat: human-to-human messages among the people on the project.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chat: Vec<ChatMsg>,
     /// Project-level design system authored by PD (absent until a UI ticket
     /// prompts PD to create it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -183,6 +200,7 @@ impl Default for ProjectState {
             sprints: Vec::new(),
             deploy: None,
             comments: Vec::new(),
+            chat: Vec::new(),
             design_system: None,
             milestones: Vec::new(),
             spend_today_usd: 0.0,
@@ -229,6 +247,20 @@ impl ProjectState {
         let overflow = self.comments.len().saturating_sub(MAX_COMMENTS);
         if overflow > 0 {
             self.comments.drain(0..overflow);
+        }
+    }
+
+    /// Append a team-chat message from `user`, trimming the oldest beyond
+    /// [`MAX_CHAT`].
+    pub fn post_chat(&mut self, user: &str, body: &str) {
+        self.chat.push(ChatMsg {
+            at: now_rfc3339(),
+            user: user.to_owned(),
+            body: body.to_owned(),
+        });
+        let overflow = self.chat.len().saturating_sub(MAX_CHAT);
+        if overflow > 0 {
+            self.chat.drain(0..overflow);
         }
     }
 }

@@ -41,6 +41,48 @@
   .topbar-proj .projbtn{flex:0 0 auto;min-width:190px;max-width:240px}
   .topbar-proj .projmenu{left:auto;right:0;min-width:280px;z-index:60}
   .verchip b{color:var(--accent2)}
+  /* Header: title, status cluster, project pills */
+  .tb-title{display:flex;align-items:baseline;gap:8px;min-width:0}
+  .tb-status{display:flex;align-items:center;gap:8px;flex:none}
+  .tb-sep{width:1px;height:26px;background:var(--border);flex:none;margin:0 2px}
+  .statuschip{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);background:var(--card);border:1px solid var(--border);border-radius:20px;padding:5px 11px;white-space:nowrap}
+  .statuschip b{color:var(--accent2);font-weight:700}
+  .statuschip .stsep{color:var(--dim)}
+  .cmdk-hint{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);background:var(--card);border:1px solid var(--border);border-radius:20px;padding:5px 10px;cursor:pointer;font-family:inherit;transition:border-color .15s}
+  .cmdk-hint:hover{border-color:var(--accent)}
+  .cmdk-hint i{font-size:13px}
+  .projrail{display:flex;align-items:center;gap:6px;flex:none;max-width:min(42vw,520px);overflow-x:auto;scrollbar-width:none;padding:2px;-webkit-mask:linear-gradient(90deg,transparent 0,#000 14px,#000 calc(100% - 14px),transparent)}
+  .projrail::-webkit-scrollbar{display:none}
+  .projrail-empty{font-size:12px;color:var(--dim);padding:0 6px}
+  .ppill{flex:none;position:relative;display:inline-flex;align-items:center;gap:8px;background:var(--card2);border:1px solid var(--border2);border-radius:12px;padding:5px 12px 5px 6px;cursor:pointer;font-family:inherit;transition:border-color .15s,background .15s}
+  .ppill:hover{border-color:var(--accent)}
+  .ppill.on{background:var(--accentbg);border-color:var(--accent2)}
+  .ppill .pmk{flex:none;width:24px;height:24px;border-radius:7px;display:grid;place-items:center;font-size:11px;font-weight:700;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2))}
+  .ppill.on .pmk{box-shadow:0 0 0 3px color-mix(in srgb,var(--accent2) 26%,transparent)}
+  .ppill .pnm{font-size:12.5px;font-weight:600;color:var(--muted);white-space:nowrap;letter-spacing:.2px}
+  .ppill.on .pnm{color:var(--text)}
+  .ppill .pdel{position:absolute;top:-7px;right:-7px;width:17px;height:17px;border-radius:50%;background:var(--card);border:1px solid var(--border2);color:var(--muted);display:none;place-items:center;font-size:11px;line-height:1}
+  .ppill:hover .pdel{display:grid}
+  .ppill .pdel:hover{background:var(--red);border-color:var(--red);color:#fff}
+  .projadd{flex:none;display:grid;place-items:center;width:34px;height:34px;background:var(--card2);color:var(--accent);border:1px solid var(--border2);border-radius:11px;cursor:pointer;font-size:17px;font-family:inherit;transition:border-color .15s}
+  .projadd:hover{border-color:var(--accent)}
+  /* Team chat bubbles */
+  .chatmsgs{display:flex;flex-direction:column;gap:3px}
+  .tcmsg{display:flex;gap:9px;align-items:flex-start;max-width:74%}
+  .tcmsg.grp{margin-top:0}
+  .tcmsg:not(.grp){margin-top:11px}
+  .tcmsg.mine{align-self:flex-end;flex-direction:row-reverse}
+  .tcav,.tcav-sp{flex:none;width:30px}
+  .tcav{height:30px;border-radius:9px;display:grid;place-items:center;font-size:11px;font-weight:700}
+  .tccol{min-width:0;display:flex;flex-direction:column;gap:3px}
+  .tchead{display:flex;align-items:baseline;gap:8px;font-size:12px}
+  .tcmsg.mine .tchead{flex-direction:row-reverse}
+  .tchead b{font-weight:600;color:var(--text)}
+  .tctime{font-size:10.5px;color:var(--dim)}
+  .tcbub{background:var(--card2);border:1px solid var(--border);border-radius:4px 12px 12px 12px;padding:8px 12px;font-size:13.5px;line-height:1.5;color:var(--text);white-space:pre-wrap;word-break:break-word}
+  .tcmsg.grp .tcbub{border-radius:12px}
+  .tcmsg.mine .tcbub{background:var(--accent);border-color:transparent;color:#fff;border-radius:12px 4px 12px 12px}
+  .tcmsg.mine.grp .tcbub{border-radius:12px}
   /* View transition */
   .view.on{animation:viewin .22s ease}
   @keyframes viewin{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
@@ -402,6 +444,7 @@ body:not(.admin) .admin-only { display: none !important; }
       <a data-v="roadmap" onclick="nav('roadmap')"><i class="ti ti-timeline"></i> Roadmap</a>
       <a data-v="activity" onclick="nav('activity')"><i class="ti ti-activity"></i> Activity</a>
       <a data-v="discuss" onclick="nav('discuss')"><i class="ti ti-messages"></i> Discussion</a>
+      <a data-v="chat" onclick="nav('chat')"><i class="ti ti-message-circle"></i> Chat</a>
       <a data-v="insights" onclick="nav('insights')"><i class="ti ti-coin"></i> Cost</a>
       <a data-v="people" class="admin-only" onclick="nav('people')"><i class="ti ti-user-star"></i> People</a>
       <a data-v="audit" class="admin-only" onclick="nav('audit')"><i class="ti ti-shield-lock"></i> Audit</a>
@@ -421,18 +464,20 @@ body:not(.admin) .admin-only { display: none !important; }
   </aside>
 
   <main class="main">
-    <div class="topbar"><h1 id="pg-title">Overview</h1><span class="sub" id="pg-sub"></span><div class="sp"></div>
-      <div class="chip cmdk-hint" onclick="openCmdk()" title="Command palette — jump anywhere"><i class="ti ti-search" style="font-size:13px"></i> <kbd>⌘K</kbd></div>
-      <div class="chip" id="viewers-chip" title="distinct users viewing" style="display:none"><i class="ti ti-eye" style="font-size:13px"></i> <span id="viewers-n">1</span></div>
-      <div class="chip"><span class="dot off" id="conn"></span><span id="connlbl">connecting</span></div>
-      <div class="chip verchip" title="current version · tickets">v<b id="ver">0.0.0</b> · <span id="pn-tickets">0</span></div>
-      <div class="projpick topbar-proj">
-        <button id="proj-btn" class="projbtn" onclick="toggleProjMenu(event)">
-          <span class="projmk" id="proj-mk">P</span>
-          <span class="projmeta"><span class="projname" id="proj-name">Select project</span><span class="projsub" id="proj-count">—</span></span>
-          <i class="ti ti-selector projcar"></i>
-        </button>
-        <button onclick="openNewProject()" title="New project" class="ticket-actions projadd"><i class="ti ti-plus"></i></button>
+    <div class="topbar">
+      <div class="tb-title"><h1 id="pg-title">Overview</h1><span class="sub" id="pg-sub"></span></div>
+      <div class="sp"></div>
+      <div class="tb-status">
+        <span class="statuschip" title="live connection · version · tickets"><span class="dot off" id="conn"></span> v<b id="ver">0.0.0</b> <span class="stsep">·</span> <span id="pn-tickets">0</span></span>
+        <button class="cmdk-hint" onclick="openCmdk()" title="Command palette — jump anywhere"><i class="ti ti-search"></i> <kbd>⌘K</kbd></button>
+        <span class="statuschip" id="viewers-chip" title="distinct users viewing" style="display:none"><i class="ti ti-eye"></i> <span id="viewers-n">1</span></span>
+      </div>
+      <div class="tb-sep"></div>
+      <div class="projrail" id="proj-rail"></div>
+      <button onclick="openNewProject()" title="New project" class="projadd"><i class="ti ti-plus"></i></button>
+      <span id="connlbl" hidden></span>
+      <div class="projpick topbar-proj" style="display:none">
+        <button id="proj-btn"><span id="proj-mk">P</span><span id="proj-name"></span><span id="proj-count"></span></button>
         <div id="proj-menu" class="projmenu"></div>
       </div></div>
     <div class="content">
@@ -554,6 +599,18 @@ body:not(.admin) .admin-only { display: none !important; }
           </div>
         </div>
       </div>
+      <div class="view" id="view-chat">
+        <div class="chatwrap">
+          <div class="chathead">
+            <div class="chatchan"><span class="chatdot" style="background:var(--accent2)"></span><div><div class="chattitle">Team chat</div><div class="chatsub" id="chat-sub">the people on this project — humans only</div></div></div>
+          </div>
+          <div id="chat-msgs" class="chatbody chatmsgs"></div>
+          <div class="chatcompose">
+            <input id="chat-input" placeholder="Message your teammates…  (Enter to send)" onkeydown="if(event.key==='Enter')sendChat()">
+            <button class="pri" onclick="sendChat()"><i class="ti ti-send"></i></button>
+          </div>
+        </div>
+      </div>
       <div class="view" id="view-insights"><div class="kpis" id="cost-kpis"></div>
         <div class="sec">Cost by agent</div><div class="panel" id="cost-roles"></div>
         <div class="sec">Budget</div><div class="panel" id="cost-budget"></div></div>
@@ -658,7 +715,7 @@ const KPI_IC={Shipped:"ti-rocket","In flight":"ti-plane-tilt","Open bugs":"ti-bu
 const money=n=>"$"+(Number(n)||0).toFixed(2);
 const fmtK=n=>{n=Number(n)||0;return n>=1000?(n/1000).toFixed(1)+"k":String(n);};
 const AC={BA:"--blue","DEV-FEATURE":"--green","DEV-BUG":"--red",SA:"--purple",TEST:"--teal",DOCS:"--blue",PO:"--amber",SM:"--teal",PD:"--purple",USER:"--accent"};
-const TITLES={overview:["Overview","project health at a glance"],team:["Agents","your autonomous workers"],board:["Work","board · sprint · backlog"],activity:["Activity","what the agents are doing"],roadmap:["Roadmap","now · next · later, auto-generated"],discuss:["Discussion","team threads & standups"],people:["People","per-user activity & productivity"],audit:["Audit","who did what, when"],access:["Users","accounts, project access & tokens"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
+const TITLES={overview:["Overview","project health at a glance"],team:["Agents","your autonomous workers"],board:["Work","board · sprint · backlog"],activity:["Activity","what the agents are doing"],roadmap:["Roadmap","now · next · later, auto-generated"],discuss:["Discussion","team threads & standups"],chat:["Chat","talk with your teammates"],people:["People","per-user activity & productivity"],audit:["Audit","who did what, when"],access:["Users","accounts, project access & tokens"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
 const esc=s=>(s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 const cvar=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim()||"#888";
 let STATE={}, CUR="overview", BF="all", INIT_ACT=false, WORKTAB="board";
@@ -675,7 +732,7 @@ function nav(v){CUR=v;location.hash=v;
   document.querySelectorAll(".nav a").forEach(a=>a.classList.toggle("on",a.dataset.v===v));
   document.getElementById("pg-title").textContent=TITLES[v][0];
   document.getElementById("pg-sub").textContent=TITLES[v][1];
-  if(v==="settings")loadSettings(); else if(v==="discuss"){loadComments();} else if(v==="people"){renderPeople();} else if(v==="audit"){renderAudit();} else if(v==="access"){renderAccess();} else if(v==="roadmap"){renderRoadmap();} else renderActive();}
+  if(v==="settings")loadSettings(); else if(v==="discuss"){loadComments();} else if(v==="chat"){openChat();} else if(v==="people"){renderPeople();} else if(v==="audit"){renderAudit();} else if(v==="access"){renderAccess();} else if(v==="roadmap"){renderRoadmap();} else renderActive();}
 function initials(r){return r.replace("DEV-","").slice(0,2);}
 function metricsFrom(s){const t=s.tickets||[],h=s.history||[],isF=x=>x.type!=="bug";
   return {shipped:t.filter(x=>isF(x)&&(x.status==="done"||x.status==="documented")).length,
@@ -1021,7 +1078,7 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
         <div style="background:var(--card2);border-radius:6px;height:10px;overflow:hidden"><div style="width:${used}%;height:100%;background:${used>=90?'var(--red)':used>=70?'var(--amber)':'var(--accent2)'}"></div></div>
         <div style="color:var(--dim);font-size:11px;margin-top:8px">Loop auto-pauses when the cap is reached.</div>`;
     }else{document.getElementById("cost-budget").innerHTML='<div class="empty">no budget cap set — add "budget_usd" in coxagent.json</div>';}
-  }else if(CUR==="discuss"){renderDiscuss();}else if(CUR==="roadmap"){renderRoadmap();}}
+  }else if(CUR==="discuss"){renderDiscuss();}else if(CUR==="chat"){syncChat();}else if(CUR==="roadmap"){renderRoadmap();}}
 
 function cmpVer(a,b){const pa=(a||"0.0.0").split(".").map(Number),pb=(b||"0.0.0").split(".").map(Number);
   for(let i=0;i<3;i++){if((pa[i]||0)!==(pb[i]||0))return (pa[i]||0)-(pb[i]||0);}return 0;}
@@ -1156,6 +1213,41 @@ function sendComment(){const inp=document.getElementById("disc-input");const bod
   inp.value="";
   fetch(api("/comments"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({body,ticket})})
     .catch(()=>{});}
+// ── Team chat (human-to-human channel) ──────────────────────────────────────
+function openChat(){const p=PROJECTS.find(x=>x.id===PID);
+  document.getElementById("chat-sub").textContent=(p?p.name:"this project")+" — the people here, humans only";
+  syncChat();setTimeout(()=>{const i=document.getElementById("chat-input");if(i)i.focus();},40);}
+function syncChat(){
+  const box=document.getElementById("chat-msgs");if(!box)return;
+  const msgs=STATE.chat||[];const me=(ME&&ME.username)||"";
+  // Only rebuild when the thread changed, so the 1s SSE tick never yanks scroll.
+  const sig=msgs.length+":"+(msgs.length?(msgs[msgs.length-1].at||""):"");
+  if(box.dataset.sig===sig)return;
+  const atBottom=box.scrollHeight-box.scrollTop-box.clientHeight<90;
+  box.dataset.sig=sig;
+  if(!msgs.length){box.innerHTML='<div class="chatempty"><i class="ti ti-message-circle-2"></i><div>No messages yet</div><span>Say hello to your teammates.</span></div>';return;}
+  let lastDay="",lastUser="",html="";
+  msgs.forEach(m=>{
+    const t=m.at||"";const day=t.slice(0,10);const time=t.slice(11,16);
+    if(day&&day!==lastDay){lastDay=day;lastUser="";html+=`<div class="chatday"><span>${esc(day)}</span></div>`;}
+    const mine=m.user===me;
+    const grouped=m.user===lastUser;lastUser=m.user;
+    const col=userColor(m.user);
+    html+=`<div class="tcmsg${mine?' mine':''}${grouped?' grp':''}">
+      ${mine||grouped?'<div class="tcav-sp"></div>':`<div class="tcav" style="background:${col}22;color:${col}">${esc((m.user||"?").slice(0,2).toUpperCase())}</div>`}
+      <div class="tccol">${grouped?'':`<div class="tchead"><b>${mine?"You":esc(m.user)}</b><span class="tctime">${esc(time)}</span></div>`}
+        <div class="tcbub" title="${esc(m.user)} · ${esc(time)}">${esc(m.body)}</div></div></div>`;});
+  box.innerHTML=html;
+  if(atBottom)box.scrollTop=box.scrollHeight;
+}
+// Deterministic per-user accent so each teammate keeps a stable bubble color.
+function userColor(u){const pal=["#38bdf8","#a78bfa","#f472b6","#34d399","#fbbf24","#fb7185","#60a5fa","#c084fc"];
+  let h=0;for(let i=0;i<(u||"").length;i++)h=(h*31+u.charCodeAt(i))>>>0;return pal[h%pal.length];}
+function sendChat(){const inp=document.getElementById("chat-input");const body=inp.value.trim();if(!body)return;
+  inp.value="";
+  // Optimistic echo so the sender sees it instantly; SSE reconciles within ~1s.
+  if(ME&&ME.username){(STATE.chat=STATE.chat||[]).push({at:new Date().toISOString(),user:ME.username,body});syncChat();}
+  fetch(api("/chat"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({body})}).catch(()=>{});}
 function render(s){STATE=s;renderSidebar(s);renderActive();}
 function depChips(ids){
   if(!ids||!ids.length)return '<span style="color:var(--dim)">—</span>';
@@ -1317,6 +1409,19 @@ function renderProjBtn(){
   document.getElementById("proj-mk").textContent=p?projInitial(p):"P";
   document.getElementById("proj-name").textContent=p?p.name:(PROJECTS.length?"Select project":"No projects");
   document.getElementById("proj-count").textContent=p?(p.alias?p.alias:"active project"):(PROJECTS.length+" available");
+  renderProjRail();
+}
+// The header project switcher: one pill per project, active pill highlighted.
+// One click switches — no dropdown. Overflows scroll horizontally.
+function renderProjRail(){
+  const rail=document.getElementById("proj-rail");if(!rail)return;
+  if(!PROJECTS.length){rail.innerHTML='<span class="projrail-empty">No projects yet</span>';return;}
+  rail.innerHTML=PROJECTS.map(p=>{const on=p.id===PID;const label=p.alias||p.name;
+    return `<button class="ppill${on?' on':''}" title="${esc(p.name)}" onclick="switchProject('${esc(p.id)}')">
+      <span class="pmk">${esc(projInitial(p))}</span><span class="pnm">${esc(label)}</span>
+      <i class="ti ti-x pdel" title="Remove ${esc(p.name)}" onclick="event.stopPropagation();deleteProject('${esc(p.id)}')"></i>
+    </button>`;}).join("");
+  const act=rail.querySelector(".ppill.on");if(act)act.scrollIntoView({inline:"nearest",block:"nearest"});
 }
 function toggleProjMenu(e){e.stopPropagation();const m=document.getElementById("proj-menu");if(m.classList.contains("open")){closeProjMenu();return;}renderProjMenu();m.classList.add("open");}
 function closeProjMenu(){document.getElementById("proj-menu").classList.remove("open");}

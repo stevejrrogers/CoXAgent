@@ -261,6 +261,10 @@ pub async fn serve_full(
             "/api/projects/:pid/comments",
             get(list_comments).post(post_comment),
         )
+        .route(
+            "/api/projects/:pid/chat",
+            get(chat_list_ep).post(chat_post_ep),
+        )
         .route("/api/projects/:pid/transcripts", get(list_transcripts))
         .route("/api/projects/:pid/transcripts/:name", get(get_transcript))
         .route("/api/projects/:pid/events", get(events_ep))
@@ -838,6 +842,62 @@ async fn post_comment(
     }
 }
 
+/// List the project's team-chat messages (oldest first).
+async fn chat_list_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let chat = p.store.load().await.map(|s| s.chat).unwrap_or_default();
+    Json(chat).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct PostChatReq {
+    body: String,
+}
+
+/// Post a team-chat message as the signed-in user. Any authenticated principal
+/// may post (see the `/chat` carve-out in [`auth_mw`]); the author is the
+/// resolved username, or `"user"` when auth is disabled.
+async fn chat_post_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<PostChatReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let body = req.body.trim();
+    if body.is_empty() {
+        return (axum::http::StatusCode::BAD_REQUEST, "empty message").into_response();
+    }
+    if body.chars().count() > 2000 {
+        return (
+            axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+            "message too long",
+        )
+            .into_response();
+    }
+    let user = match &app.auth {
+        Some(auth) => resolve_principal(auth, &headers)
+            .await
+            .map_or_else(|| "user".to_owned(), |u| u.username),
+        None => "user".to_owned(),
+    };
+    let Ok(mut state) = p.store.load().await else {
+        return internal_error("load failed");
+    };
+    state.post_chat(&user, body);
+    match p.store.save(&state).await {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
 /// SM-run standup: posts a deterministic status roundup to the team channel and
 /// pulls in each agent's latest contribution. Zero engine cost — derived from
 /// state — so it can be triggered freely to see the team "gather".
@@ -1203,7 +1263,8 @@ async fn auth_mw(
             | axum::http::Method::DELETE
             | axum::http::Method::PATCH
     ) && path != "/api/auth/logout"
-        && !path.starts_with("/api/auth/2fa/"); // self-service, any signed-in user
+        && !path.starts_with("/api/auth/2fa/") // self-service, any signed-in user
+        && !path.ends_with("/chat"); // team chat is open to any signed-in user
     let method = req.method().clone();
     let username = user.username.clone();
     if is_write && !user.role.can_write() {
