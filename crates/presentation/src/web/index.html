@@ -41,7 +41,18 @@
   .topbar-proj .projbtn{flex:0 0 auto;min-width:190px;max-width:240px}
   .topbar-proj .projmenu{left:auto;right:0;min-width:280px;z-index:60}
   .verchip b{color:var(--accent2)}
-  /* Header: title · minimal status · segmented project switcher */
+  /* Header: project identity (left) · segmented switcher (right) */
+  .tb-idblock{display:flex;align-items:center;gap:12px;min-width:0}
+  .tb-mark{flex:none;width:42px;height:42px;border-radius:12px;display:grid;place-items:center;font-size:17px;font-weight:800;color:#fff;box-shadow:0 2px 8px rgba(0,0,0,.25)}
+  .tb-idtext{min-width:0}
+  .tb-l1{display:flex;align-items:center;gap:9px;min-width:0}
+  .tb-proj{font-size:20px;font-weight:800;letter-spacing:-.4px;white-space:nowrap;color:var(--text)}
+  .tb-sepi{flex:none;color:var(--dim);font-size:15px}
+  .tb-feat{font-size:15px;font-weight:600;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .tb-l2{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--muted);margin-top:2px;white-space:nowrap}
+  .topbar{flex-wrap:wrap;row-gap:10px}
+  .tb-idblock{flex:1 1 auto}
+  .tb-l2 .tb-dotsep{color:var(--dim)}
   .tb-title{display:flex;align-items:baseline;gap:8px;min-width:0}
   .tb-ver{display:inline-flex;align-items:center;gap:6px;flex:none;font-size:12px;color:var(--muted);white-space:nowrap}
   .tb-div{width:1px;height:22px;background:var(--border);flex:none;margin:0 4px}
@@ -525,15 +536,20 @@ body:not(.admin) .admin-only { display: none !important; }
 
   <main class="main">
     <div class="topbar">
-      <div class="tb-title"><h1 id="pg-title">Overview</h1><span class="sub" id="pg-sub"></span></div>
+      <div class="tb-idblock">
+        <div class="tb-mark" id="tb-mark">C</div>
+        <div class="tb-idtext">
+          <div class="tb-l1"><span class="tb-proj" id="tb-proj">—</span><i class="ti ti-chevron-right tb-sepi"></i><span class="tb-feat" id="pg-title">Overview</span></div>
+          <div class="tb-l2" title="live connection · version · tickets"><span class="dot off" id="conn"></span> v<span id="ver">0.0.0</span> <span class="tb-dotsep">·</span> <span id="pn-tickets">0 tickets</span></div>
+        </div>
+      </div>
       <div class="sp"></div>
-      <span class="tb-ver" title="live connection · current version"><span class="dot off" id="conn"></span> v<span id="ver">0.0.0</span></span>
       <button class="iconbtn" onclick="openCmdk()" title="Search &amp; jump — ⌘K"><i class="ti ti-search"></i></button>
       <span class="iconbtn viewers-pill" id="viewers-chip" title="distinct users viewing" style="display:none"><i class="ti ti-eye"></i> <span id="viewers-n">1</span></span>
       <div class="tb-div"></div>
       <div class="segproj" id="proj-rail"></div>
       <button onclick="openNewProject()" title="New project" class="iconbtn"><i class="ti ti-plus"></i></button>
-      <span id="connlbl" hidden></span><span id="pn-tickets" hidden></span>
+      <span id="connlbl" hidden></span><span id="pg-sub" hidden></span>
       <div class="topbar-proj" style="display:none">
         <button id="proj-btn"><span id="proj-mk">P</span><span id="proj-name"></span><span id="proj-count"></span></button>
         <div id="proj-menu" class="projmenu"></div>
@@ -1527,6 +1543,11 @@ function renderProjBtn(){
   document.getElementById("proj-mk").textContent=p?projInitial(p):"P";
   document.getElementById("proj-name").textContent=p?p.name:(PROJECTS.length?"Select project":"No projects");
   document.getElementById("proj-count").textContent=p?(p.alias?p.alias:"active project"):(PROJECTS.length+" available");
+  // Header identity block on the left: big project name + coloured mark.
+  const proj=document.getElementById("tb-proj");const mark=document.getElementById("tb-mark");
+  if(proj)proj.textContent=p?p.name:(PROJECTS.length?"Select project":"No project");
+  if(mark){mark.textContent=p?projInitial(p):"·";mark.style.background=p?`linear-gradient(135deg,${projColor(p.id)},color-mix(in srgb,${projColor(p.id)} 55%,#000))`:"var(--card2)";}
+  document.title="CoXAgent"+(p?" · "+p.name:"");
   renderProjRail();
 }
 // Header project switcher — a single segmented control (not floating pills, not
