@@ -172,7 +172,7 @@
   .msknob{flex:none;width:30px;height:30px;border-radius:50%;display:grid;place-items:center;font-size:15px;color:var(--kc);border:2px solid var(--kc);background:var(--card);margin:0 2px}
   .msknob.active{color:#fff;background:var(--accent2);box-shadow:0 0 0 4px color-mix(in srgb,var(--accent2) 22%,transparent)}
   .msknob.reached{color:#fff;background:var(--green)}
-  .mscard{margin:10px 8px 0;background:var(--card2);border:1px solid var(--border);border-radius:11px;padding:11px 12px}
+  .mscard{flex:1;display:flex;flex-direction:column;margin:10px 8px 0;background:var(--card2);border:1px solid var(--border);border-radius:11px;padding:11px 12px}
   .mscard.active{border-color:var(--accent2);background:var(--accentbg)}
   .mstitle{font-size:13px;font-weight:700;line-height:1.3;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
   .msmetaline{display:flex;align-items:center;gap:6px;margin-top:6px}
@@ -783,7 +783,7 @@ function roadmapGantt(s){
         <div class="msprog"><div style="width:${prog}%;background:${col}"></div></div>
         <div class="msgoaltxt" title="${esc(r.goal)}">${esc(r.goal)}</div></div></div>`;}).join("");
   return `<div class="sec" style="margin-top:22px">Milestone roadmap <span style="font-size:11px;color:var(--dim);font-weight:400">· ${esc(proj)} — shippable targets, when each delivers (by quarter)</span></div>
-    <div class="panel" style="overflow-x:auto"><div class="mstepper">${cols}</div></div>`;
+    <div class="panel" style="overflow-x:auto;margin-bottom:26px"><div class="mstepper">${cols}</div></div>`;
 }
 // Milestone roadmap — each is a shippable target (a version), spanning several
 // sprints. Status derived from the shipped version.
