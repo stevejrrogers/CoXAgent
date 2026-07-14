@@ -199,6 +199,7 @@ async fn deliver_chat(
     p: &ProjectHandle,
     user: &str,
     body: &str,
+    channel: &str,
     attachments: Vec<coxagent_application::Attachment>,
 ) -> bool {
     let ch = app.chat_channel(&p.id).await;
@@ -206,7 +207,12 @@ async fn deliver_chat(
     let Ok(mut state) = p.store.load().await else {
         return false;
     };
-    state.post_chat_att(user, body, attachments);
+    // Enforce membership: only people who can view a channel may post to it.
+    match state.channel(channel) {
+        Some(c) if c.can_view(user) => {}
+        _ => return false,
+    }
+    state.post_chat_in(user, body, channel, attachments);
     let msg = state.chat.last().cloned();
     if p.store.save(&state).await.is_err() {
         return false;
@@ -268,6 +274,8 @@ fn build_state(
 ///
 /// # Errors
 /// Returns an IO error if the port cannot be bound.
+// A flat registry of route → handler wiring; length is inherent, not complexity.
+#[allow(clippy::too_many_lines)]
 pub async fn serve_full(
     projects: Vec<ProjectHandle>,
     port: u16,
@@ -345,6 +353,14 @@ pub async fn serve_full(
             get(chat_list_ep).post(chat_post_ep),
         )
         .route("/api/projects/:pid/chat/ws", get(chat_ws_ep))
+        .route(
+            "/api/projects/:pid/channels",
+            get(channels_list_ep).post(channel_create_ep),
+        )
+        .route(
+            "/api/projects/:pid/channels/:cid/invite",
+            post(channel_invite_ep),
+        )
         .route("/api/projects/:pid/upload", post(upload_ep))
         .route("/api/projects/:pid/media/:file", get(media_ep))
         .route(
@@ -814,6 +830,17 @@ fn lite_state_value(state: &coxagent_application::ProjectState) -> serde_json::V
     // 1s SSE snapshot too as a fallback: it reaches clients whose WebSocket
     // didn't connect (e.g. a WKWebView) and keeps two hubs sharing one state
     // file in sync. The client merges both sources and de-duplicates.
+    //
+    // The SSE snapshot is broadcast to every viewer indiscriminately, so it may
+    // only carry `#general` — private-channel messages are access-controlled and
+    // reach members exclusively via the WebSocket / REST list, both of which
+    // enforce membership.
+    if let Some(chat) = v.get_mut("chat").and_then(serde_json::Value::as_array_mut) {
+        chat.retain(|m| {
+            m.get("channel").and_then(serde_json::Value::as_str)
+                == Some(coxagent_application::GENERAL_CHANNEL)
+        });
+    }
     v
 }
 
@@ -1244,21 +1271,141 @@ fn maybe_analyze_attachments(
     });
 }
 
-/// List the project's team-chat messages (oldest first).
+#[derive(serde::Deserialize)]
+struct ChatListQuery {
+    /// Which channel's history to return; defaults to `#general`.
+    channel: Option<String>,
+}
+
+/// List a channel's team-chat messages (oldest first). Filters to `?channel=`
+/// (default `#general`); returns empty for a channel the caller can't view.
 async fn chat_list_ep(
     State(app): State<AppState>,
     Path(pid): Path<String>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<ChatListQuery>,
 ) -> axum::response::Response {
     let Some(p) = app.project(&pid).await else {
         return not_found();
     };
-    let chat = p.store.load().await.map(|s| s.chat).unwrap_or_default();
+    let channel = q
+        .channel
+        .unwrap_or_else(|| coxagent_application::GENERAL_CHANNEL.to_owned());
+    let user = resolve_username(&app, &headers).await;
+    let Ok(state) = p.store.load().await else {
+        return Json(Vec::<coxagent_application::ChatMsg>::new()).into_response();
+    };
+    match state.channel(&channel) {
+        Some(c) if c.can_view(&user) => {}
+        _ => return Json(Vec::<coxagent_application::ChatMsg>::new()).into_response(),
+    }
+    let chat: Vec<_> = state
+        .chat
+        .into_iter()
+        .filter(|m| m.channel == channel)
+        .collect();
     Json(chat).into_response()
+}
+
+/// List the channels the signed-in user can see (`#general` first).
+async fn channels_list_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let user = resolve_username(&app, &headers).await;
+    let channels = p
+        .store
+        .load()
+        .await
+        .map(|s| s.channels_for(&user))
+        .unwrap_or_default();
+    Json(channels).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct CreateChannelReq {
+    name: String,
+}
+
+/// Create a private channel owned by the signed-in user.
+async fn channel_create_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<CreateChannelReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let user = resolve_username(&app, &headers).await;
+    let Ok(mut state) = p.store.load().await else {
+        return internal_error("load failed");
+    };
+    match state.create_channel(&req.name, &user) {
+        Ok(ch) => match p.store.save(&state).await {
+            Ok(()) => (StatusCode::CREATED, Json(ch)).into_response(),
+            Err(e) => internal_error(&e.to_string()),
+        },
+        Err(msg) => (StatusCode::BAD_REQUEST, msg).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ChannelMemberReq {
+    /// Username to invite or delegate to.
+    user: String,
+    /// When true, grant invite permission (owner only), not just membership.
+    #[serde(default)]
+    delegate: bool,
+}
+
+/// Invite a user to a channel, or (with `delegate`) grant them invite rights.
+async fn channel_invite_ep(
+    State(app): State<AppState>,
+    Path((pid, cid)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<ChannelMemberReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let actor = resolve_username(&app, &headers).await;
+    let Ok(mut state) = p.store.load().await else {
+        return internal_error("load failed");
+    };
+    let result = if req.delegate {
+        state.delegate_invite(&cid, &actor, &req.user)
+    } else {
+        state.invite_to_channel(&cid, &actor, &req.user)
+    };
+    match result {
+        Ok(()) => match p.store.save(&state).await {
+            Ok(()) => Json(state.channel(&cid)).into_response(),
+            Err(e) => internal_error(&e.to_string()),
+        },
+        Err(msg) => (StatusCode::FORBIDDEN, msg).into_response(),
+    }
+}
+
+/// Resolve the signed-in username, or `"user"` when auth is disabled.
+async fn resolve_username(app: &AppState, headers: &axum::http::HeaderMap) -> String {
+    match &app.auth {
+        Some(auth) => resolve_principal(auth, headers)
+            .await
+            .map_or_else(|| "user".to_owned(), |u| u.username),
+        None => "user".to_owned(),
+    }
 }
 
 #[derive(serde::Deserialize)]
 struct PostChatReq {
     body: String,
+    #[serde(default)]
+    channel: Option<String>,
     #[serde(default)]
     attachments: Vec<coxagent_application::Attachment>,
 }
@@ -1286,16 +1433,15 @@ async fn chat_post_ep(
         )
             .into_response();
     }
-    let user = match &app.auth {
-        Some(auth) => resolve_principal(auth, &headers)
-            .await
-            .map_or_else(|| "user".to_owned(), |u| u.username),
-        None => "user".to_owned(),
-    };
-    if deliver_chat(&app, &p, &user, body, req.attachments).await {
+    let user = resolve_username(&app, &headers).await;
+    let channel = req
+        .channel
+        .unwrap_or_else(|| coxagent_application::GENERAL_CHANNEL.to_owned());
+    if deliver_chat(&app, &p, &user, body, &channel, req.attachments).await {
         Json(serde_json::json!({ "ok": true })).into_response()
     } else {
-        internal_error("chat save failed")
+        // Either persistence failed or the user isn't a member of the channel.
+        (StatusCode::FORBIDDEN, "cannot post to this channel").into_response()
     }
 }
 
@@ -1659,10 +1805,14 @@ async fn chat_socket(
         std::collections::VecDeque::new();
     loop {
         tokio::select! {
-            // Server → client: forward a broadcast message.
+            // Server → client: forward a broadcast message, but never leak a
+            // private channel to a non-member — check membership per message.
             bcast = rx.recv() => {
                 match bcast {
                     Ok(json) => {
+                        if !user_may_see_broadcast(&p, &user, &json).await {
+                            continue;
+                        }
                         if socket.send(Message::Text(json)).await.is_err() {
                             break;
                         }
@@ -1686,6 +1836,10 @@ async fn chat_socket(
                     .as_ref()
                     .and_then(|v| v.get("body").and_then(|b| b.as_str()).map(str::to_owned))
                     .unwrap_or_else(|| text.clone());
+                let channel = parsed
+                    .as_ref()
+                    .and_then(|v| v.get("channel").and_then(|c| c.as_str()).map(str::to_owned))
+                    .unwrap_or_else(|| coxagent_application::GENERAL_CHANNEL.to_owned());
                 let attachments: Vec<coxagent_application::Attachment> = parsed
                     .as_ref()
                     .and_then(|v| v.get("attachments").cloned())
@@ -1703,9 +1857,26 @@ async fn chat_socket(
                     continue; // silently drop; client is flooding
                 }
                 recv_times.push_back(now);
-                deliver_chat(&app, &p, &user, body, attachments).await;
+                deliver_chat(&app, &p, &user, body, &channel, attachments).await;
             }
         }
+    }
+}
+
+/// Whether `user` may receive a broadcast chat message. `#general` (and any
+/// message with no channel tag) is open; private channels require membership,
+/// checked against current state so a live invite takes effect immediately.
+async fn user_may_see_broadcast(p: &ProjectHandle, user: &str, json: &str) -> bool {
+    let channel = serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|v| v.get("channel").and_then(|c| c.as_str()).map(str::to_owned))
+        .unwrap_or_else(|| coxagent_application::GENERAL_CHANNEL.to_owned());
+    if channel == coxagent_application::GENERAL_CHANNEL {
+        return true;
+    }
+    match p.store.load().await {
+        Ok(state) => state.channel(&channel).is_some_and(|c| c.can_view(user)),
+        Err(_) => false,
     }
 }
 
@@ -2076,6 +2247,7 @@ async fn auth_mw(
     ) && path != "/api/auth/logout"
         && !path.starts_with("/api/auth/2fa/") // self-service, any signed-in user
         && !path.ends_with("/chat") // team chat is open to any signed-in user
+        && !path.contains("/channels") // create/invite channels: any signed-in user
         && !path.ends_with("/upload"); // uploads are open to any signed-in user
     let method = req.method().clone();
     let username = user.username.clone();

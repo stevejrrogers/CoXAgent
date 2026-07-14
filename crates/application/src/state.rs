@@ -35,8 +35,6 @@ pub struct ActivityEntry {
 /// Keep the activity feed bounded.
 pub const MAX_ACTIVITY: usize = 60;
 
-/// One message on a discussion thread — an agent or the user commenting on a
-/// ticket (`ticket = Some`) or on the team channel (`ticket = None`). This is
 /// A file or image attached to a chat message or discussion comment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attachment {
@@ -50,6 +48,8 @@ pub struct Attachment {
     pub size: u64,
 }
 
+/// One message on a discussion thread — an agent or the user commenting on a
+/// ticket (`ticket = Some`) or on the team channel (`ticket = None`). This is
 /// the teamwork surface the original workflow lacked.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Comment {
@@ -76,6 +76,10 @@ pub struct ChatMsg {
     /// The authenticated username of the sender.
     pub user: String,
     pub body: String,
+    /// The channel this message belongs to. Defaults to [`GENERAL_CHANNEL`] for
+    /// messages written before channels existed.
+    #[serde(default = "general_channel")]
+    pub channel: String,
     /// Files/images attached to the message.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<Attachment>,
@@ -83,6 +87,54 @@ pub struct ChatMsg {
 
 /// Keep the team chat bounded per project.
 pub const MAX_CHAT: usize = 500;
+
+/// The id of the default channel every project has and everyone can see.
+pub const GENERAL_CHANNEL: &str = "general";
+
+fn general_channel() -> String {
+    GENERAL_CHANNEL.to_owned()
+}
+
+/// A Slack-style chat channel. `#general` is implicit (open to everyone, no
+/// owner); every other channel is private to its `members`, created and owned
+/// by one person who may delegate invite rights to others via `inviters`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Channel {
+    /// URL-safe slug used as the stable id (e.g. `design-review`).
+    pub id: String,
+    /// Human display name.
+    pub name: String,
+    /// Username of the owner. Empty for the system `#general` channel.
+    pub owner: String,
+    /// Members who can see and post. Empty for `#general` (everyone).
+    #[serde(default)]
+    pub members: Vec<String>,
+    /// Members the owner delegated invite permission to (owner always can).
+    #[serde(default)]
+    pub inviters: Vec<String>,
+    #[serde(default)]
+    pub created_at: String,
+}
+
+impl Channel {
+    /// The open, everyone-can-see `#general` channel.
+    #[must_use]
+    pub fn is_general(&self) -> bool {
+        self.id == GENERAL_CHANNEL
+    }
+
+    /// Whether `user` may see and read this channel.
+    #[must_use]
+    pub fn can_view(&self, user: &str) -> bool {
+        self.is_general() || self.owner == user || self.members.iter().any(|m| m == user)
+    }
+
+    /// Whether `user` may invite others (owner, or a delegated inviter).
+    #[must_use]
+    pub fn can_invite(&self, user: &str) -> bool {
+        self.is_general() || self.owner == user || self.inviters.iter().any(|m| m == user)
+    }
+}
 
 /// The project-level design system authored once by PD. Injected into DEV
 /// prompts for UI tickets so implementation is visually consistent — the
@@ -193,6 +245,9 @@ pub struct ProjectState {
     /// Team chat: human-to-human messages among the people on the project.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chat: Vec<ChatMsg>,
+    /// Slack-style chat channels beyond the implicit `#general`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub channels: Vec<Channel>,
     /// Project-level design system authored by PD (absent until a UI ticket
     /// prompts PD to create it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -225,6 +280,7 @@ impl Default for ProjectState {
             deploy: None,
             comments: Vec::new(),
             chat: Vec::new(),
+            channels: Vec::new(),
             design_system: None,
             milestones: Vec::new(),
             spend_today_usd: 0.0,
@@ -286,24 +342,230 @@ impl ProjectState {
         }
     }
 
-    /// Append a team-chat message from `user`, trimming the oldest beyond
-    /// [`MAX_CHAT`].
+    /// Append a `#general` team-chat message from `user`.
     pub fn post_chat(&mut self, user: &str, body: &str) {
         self.post_chat_att(user, body, Vec::new());
     }
 
-    /// Append a team-chat message with attachments.
+    /// Append a `#general` message with attachments.
     pub fn post_chat_att(&mut self, user: &str, body: &str, attachments: Vec<Attachment>) {
+        self.post_chat_in(user, body, GENERAL_CHANNEL, attachments);
+    }
+
+    /// Append a message to `channel`, trimming the oldest beyond [`MAX_CHAT`].
+    pub fn post_chat_in(
+        &mut self,
+        user: &str,
+        body: &str,
+        channel: &str,
+        attachments: Vec<Attachment>,
+    ) {
         self.chat.push(ChatMsg {
             at: now_rfc3339(),
             user: user.to_owned(),
             body: body.to_owned(),
+            channel: channel.to_owned(),
             attachments,
         });
         let overflow = self.chat.len().saturating_sub(MAX_CHAT);
         if overflow > 0 {
             self.chat.drain(0..overflow);
         }
+    }
+
+    /// Look up a channel by id (`#general` is synthesised on demand).
+    #[must_use]
+    pub fn channel(&self, id: &str) -> Option<Channel> {
+        if id == GENERAL_CHANNEL {
+            return Some(general_channel_record());
+        }
+        self.channels.iter().find(|c| c.id == id).cloned()
+    }
+
+    /// All channels `user` can see: `#general` first, then their private ones.
+    #[must_use]
+    pub fn channels_for(&self, user: &str) -> Vec<Channel> {
+        let mut out = vec![general_channel_record()];
+        out.extend(self.channels.iter().filter(|c| c.can_view(user)).cloned());
+        out
+    }
+
+    /// Create a private channel named `name`, owned by `owner`. The owner is the
+    /// first member. Returns the new channel, or an error string if the name is
+    /// empty or collides with an existing channel.
+    ///
+    /// # Errors
+    /// A human-readable message when the name is invalid or already taken.
+    pub fn create_channel(&mut self, name: &str, owner: &str) -> Result<Channel, String> {
+        let id = slugify(name);
+        if id.is_empty() {
+            return Err("channel name must contain letters or numbers".to_owned());
+        }
+        if id == GENERAL_CHANNEL || self.channels.iter().any(|c| c.id == id) {
+            return Err(format!("channel #{id} already exists"));
+        }
+        let ch = Channel {
+            id,
+            name: name.trim().to_owned(),
+            owner: owner.to_owned(),
+            members: vec![owner.to_owned()],
+            inviters: Vec::new(),
+            created_at: now_rfc3339(),
+        };
+        self.channels.push(ch.clone());
+        Ok(ch)
+    }
+
+    /// Add `invitee` to `channel_id`. `actor` must be the owner or a delegated
+    /// inviter. No-op if the invitee is already a member.
+    ///
+    /// # Errors
+    /// When the channel doesn't exist or `actor` lacks permission.
+    pub fn invite_to_channel(
+        &mut self,
+        channel_id: &str,
+        actor: &str,
+        invitee: &str,
+    ) -> Result<(), String> {
+        let ch = self
+            .channels
+            .iter_mut()
+            .find(|c| c.id == channel_id)
+            .ok_or("channel not found")?;
+        if !ch.can_invite(actor) {
+            return Err("you don't have permission to invite to this channel".to_owned());
+        }
+        let invitee = invitee.trim();
+        if invitee.is_empty() {
+            return Err("no user to invite".to_owned());
+        }
+        if ch.owner != invitee && !ch.members.iter().any(|m| m == invitee) {
+            ch.members.push(invitee.to_owned());
+        }
+        Ok(())
+    }
+
+    /// Grant `grantee` invite permission on `channel_id`. Only the owner may
+    /// delegate. Adds the grantee as a member too if they aren't one.
+    ///
+    /// # Errors
+    /// When the channel doesn't exist or `actor` isn't the owner.
+    pub fn delegate_invite(
+        &mut self,
+        channel_id: &str,
+        actor: &str,
+        grantee: &str,
+    ) -> Result<(), String> {
+        let ch = self
+            .channels
+            .iter_mut()
+            .find(|c| c.id == channel_id)
+            .ok_or("channel not found")?;
+        if ch.owner != actor {
+            return Err("only the channel owner can delegate invite permission".to_owned());
+        }
+        let grantee = grantee.trim();
+        if grantee.is_empty() {
+            return Err("no user to delegate to".to_owned());
+        }
+        if !ch.members.iter().any(|m| m == grantee) {
+            ch.members.push(grantee.to_owned());
+        }
+        if !ch.inviters.iter().any(|m| m == grantee) {
+            ch.inviters.push(grantee.to_owned());
+        }
+        Ok(())
+    }
+}
+
+/// The synthetic record for the implicit `#general` channel.
+fn general_channel_record() -> Channel {
+    Channel {
+        id: GENERAL_CHANNEL.to_owned(),
+        name: "general".to_owned(),
+        owner: String::new(),
+        members: Vec::new(),
+        inviters: Vec::new(),
+        created_at: String::new(),
+    }
+}
+
+/// Turn a display name into a URL-safe channel slug: lowercase, spaces and runs
+/// of punctuation collapsed to single hyphens, trimmed. `"Design Review!"` →
+/// `"design-review"`.
+fn slugify(name: &str) -> String {
+    let mut out = String::new();
+    let mut prev_dash = false;
+    for c in name.trim().chars() {
+        if c.is_ascii_alphanumeric() {
+            out.extend(c.to_lowercase());
+            prev_dash = false;
+        } else if !prev_dash && !out.is_empty() {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    out
+}
+
+#[cfg(test)]
+mod channel_tests {
+    use super::{slugify, ProjectState, GENERAL_CHANNEL};
+
+    #[test]
+    fn slugify_makes_safe_ids() {
+        assert_eq!(slugify("Design Review!"), "design-review");
+        assert_eq!(slugify("  Q4   Planning  "), "q4-planning");
+        assert_eq!(slugify("###"), "");
+    }
+
+    #[test]
+    fn create_and_view_permissions() {
+        let mut s = ProjectState::default();
+        let ch = s.create_channel("Design Review", "alice").expect("create");
+        assert_eq!(ch.id, "design-review");
+        assert!(ch.can_view("alice"));
+        assert!(!ch.can_view("bob"));
+        // general is always visible; alice sees general + hers, bob only general.
+        assert_eq!(s.channels_for("alice").len(), 2);
+        assert_eq!(s.channels_for("bob").len(), 1);
+        assert_eq!(s.channels_for("bob")[0].id, GENERAL_CHANNEL);
+    }
+
+    #[test]
+    fn duplicate_channel_rejected() {
+        let mut s = ProjectState::default();
+        s.create_channel("Design", "alice").expect("first");
+        assert!(s.create_channel("design", "bob").is_err());
+        assert!(s.create_channel("general", "bob").is_err());
+    }
+
+    #[test]
+    fn invite_requires_permission_then_grants_view() {
+        let mut s = ProjectState::default();
+        s.create_channel("Secret", "alice").expect("create");
+        // bob can't invite; alice can.
+        assert!(s.invite_to_channel("secret", "bob", "carol").is_err());
+        s.invite_to_channel("secret", "alice", "bob")
+            .expect("invite");
+        assert!(s.channel("secret").expect("ch").can_view("bob"));
+        // bob still can't invite (not delegated).
+        assert!(s.invite_to_channel("secret", "bob", "carol").is_err());
+    }
+
+    #[test]
+    fn delegation_lets_grantee_invite() {
+        let mut s = ProjectState::default();
+        s.create_channel("Secret", "alice").expect("create");
+        assert!(s.delegate_invite("secret", "bob", "carol").is_err());
+        s.delegate_invite("secret", "alice", "bob")
+            .expect("delegate");
+        s.invite_to_channel("secret", "bob", "carol")
+            .expect("bob invites");
+        assert!(s.channel("secret").expect("ch").can_view("carol"));
     }
 }
 

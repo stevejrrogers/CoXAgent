@@ -465,7 +465,21 @@
   .msname{font-size:13.5px;font-weight:700;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
   .msver{font-size:11px;font-family:ui-monospace,monospace;color:var(--accent2);background:var(--accentbg);padding:1px 7px;border-radius:5px}
   .msgoal{font-size:12px;color:var(--muted);margin-top:2px}
-  .chatwrap{display:flex;flex-direction:column;background:var(--card);border:1px solid var(--border);border-radius:var(--r);overflow:hidden;height:calc(100vh - 118px);min-height:540px}
+  .chatlayout{display:flex;gap:14px;height:calc(100vh - 118px);min-height:540px}
+  .chatwrap{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--card);border:1px solid var(--border);border-radius:var(--r);overflow:hidden;height:100%}
+  .chanrail{width:220px;flex:none;display:flex;flex-direction:column;background:var(--card);border:1px solid var(--border);border-radius:var(--r);overflow:hidden}
+  .chanrail-hd{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--dim)}
+  .chanadd{background:var(--card2);border:1px solid var(--border2);color:var(--muted);width:24px;height:24px;border-radius:7px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:14px}
+  .chanadd:hover{color:var(--accent);border-color:var(--accent)}
+  .chanlist{flex:1;overflow-y:auto;padding:2px 8px 10px}
+  .chanitem{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;cursor:pointer;color:var(--muted);font-size:13.5px;transition:background .12s}
+  .chanitem:hover{background:var(--card2)}
+  .chanitem.on{background:var(--accentbg);color:var(--accent2);font-weight:600}
+  .chanitem i{font-size:14px;opacity:.7;flex:none}
+  .chanitem .channm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .chaninvite{display:inline-flex;align-items:center;gap:6px;background:var(--card);border:1px solid var(--border2);color:var(--muted);border-radius:8px;padding:6px 11px;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;flex:none}
+  .chaninvite:hover{color:var(--accent);border-color:var(--accent)}
+  @media(max-width:760px){.chanrail{width:150px}}
   .cevent{display:flex;justify-content:center;margin:2px 0}
   .cev-pill{display:inline-flex;align-items:center;gap:7px;font-size:11.5px;color:var(--muted);background:var(--card2);border:1px solid var(--border2);border-left:3px solid var(--ec);border-radius:8px;padding:5px 12px;max-width:88%}
   .cev-pill i{color:var(--ec);font-size:13px}
@@ -817,18 +831,25 @@ body:not(.admin) .admin-only { display: none !important; }
         </div>
       </div>
       <div class="view" id="view-chat">
-        <div class="chatwrap">
-          <div class="chathead">
-            <div class="chatchan"><span class="chatdot" style="background:var(--accent2)"></span><div><div class="chattitle">Team chat</div><div class="chatsub" id="chat-sub">the people on this project — humans only</div></div></div>
+        <div class="chatlayout">
+          <div class="chanrail">
+            <div class="chanrail-hd"><span>Channels</span><button class="chanadd" onclick="createChannel()" title="Create channel"><i class="ti ti-plus"></i></button></div>
+            <div class="chanlist" id="chan-list"></div>
           </div>
-          <div id="chat-msgs" class="chatbody chatmsgs" ondragover="event.preventDefault();this.classList.add('dropping')" ondragleave="this.classList.remove('dropping')" ondrop="dropFiles('chat',event)"></div>
-          <div class="composewrap">
-            <div class="att-strip" id="chat-att"></div>
-            <div class="chatcompose">
-              <input type="file" id="chat-file" multiple hidden onchange="pickFiles('chat',this)">
-              <button class="att-btn" onclick="document.getElementById('chat-file').click()" title="Attach files"><i class="ti ti-paperclip"></i></button>
-              <input id="chat-input" placeholder="Message your teammates…  (Enter to send)" onkeydown="if(event.key==='Enter')sendChat()">
-              <button class="pri" onclick="sendChat()"><i class="ti ti-send"></i></button>
+          <div class="chatwrap">
+            <div class="chathead">
+              <div class="chatchan"><span class="chatdot" style="background:var(--accent2)"></span><div><div class="chattitle" id="chat-title"># general</div><div class="chatsub" id="chat-sub">the people on this project — humans only</div></div></div>
+              <button class="chaninvite" id="chat-invite" onclick="inviteToChannel()" style="display:none"><i class="ti ti-user-plus"></i> Invite</button>
+            </div>
+            <div id="chat-msgs" class="chatbody chatmsgs" ondragover="event.preventDefault();this.classList.add('dropping')" ondragleave="this.classList.remove('dropping')" ondrop="dropFiles('chat',event)"></div>
+            <div class="composewrap">
+              <div class="att-strip" id="chat-att"></div>
+              <div class="chatcompose">
+                <input type="file" id="chat-file" multiple hidden onchange="pickFiles('chat',this)">
+                <button class="att-btn" onclick="document.getElementById('chat-file').click()" title="Attach files"><i class="ti ti-paperclip"></i></button>
+                <input id="chat-input" placeholder="Message your teammates…  (Enter to send)" onkeydown="if(event.key==='Enter')sendChat()">
+                <button class="pri" onclick="sendChat()"><i class="ti ti-send"></i></button>
+              </div>
             </div>
           </div>
         </div>
@@ -1441,23 +1462,82 @@ function sendComment(){const inp=document.getElementById("disc-input");const bod
     .catch(()=>{});}
 // ── Team chat (human-to-human channel, live over WebSocket) ─────────────────
 let CHAT=[], CHATWS=null, CHATWS_PID=null, chatwsRetry=null;
-function openChat(){const p=PROJECTS.find(x=>x.id===PID);
-  document.getElementById("chat-sub").textContent=(p?p.name:"this project")+" — the people here, humans only";
-  loadChatHistory();openChatWS();
+let CHANNELS=[], CURCHAN="general";
+function openChat(){
+  loadChannels();
+  selectChannel(CURCHAN);
+  openChatWS();
   setTimeout(()=>{const i=document.getElementById("chat-input");if(i)i.focus();},40);}
+async function loadChannels(){
+  try{CHANNELS=await(await fetch(api("/channels"))).json();}catch(e){CHANNELS=[{id:"general",name:"general",owner:""}];}
+  if(!CHANNELS.some(c=>c.id===CURCHAN))CURCHAN="general";
+  renderChannels();
+}
+function renderChannels(){
+  const box=document.getElementById("chan-list");if(!box)return;
+  box.innerHTML=CHANNELS.map(c=>{
+    const priv=c.id!=="general";
+    return `<div class="chanitem${c.id===CURCHAN?' on':''}" onclick="selectChannel('${esc(c.id)}')">
+      <i class="ti ti-${priv?'lock':'hash'}"></i><span class="channm">${esc(c.name)}</span></div>`;}).join("");
+}
+function currentChannel(){return CHANNELS.find(c=>c.id===CURCHAN)||{id:"general",name:"general",owner:""};}
+function selectChannel(id){
+  CURCHAN=id;
+  const ch=currentChannel();
+  const priv=id!=="general";
+  document.getElementById("chat-title").textContent=(priv?"🔒 ":"# ")+ch.name;
+  const sub=document.getElementById("chat-sub");
+  const p=PROJECTS.find(x=>x.id===PID);
+  sub.textContent=priv?`private channel · ${(ch.members||[]).length} member${(ch.members||[]).length===1?'':'s'}`
+                       :((p?p.name:"this project")+" — everyone on the project");
+  // The owner and anyone they delegated to may invite.
+  const me=(ME&&ME.username)||"user";
+  const canInvite=priv&&(ch.owner===me||(ch.inviters||[]).includes(me));
+  document.getElementById("chat-invite").style.display=canInvite?"inline-flex":"none";
+  renderChannels();
+  loadChatHistory();
+}
 async function loadChatHistory(){
-  try{CHAT=await(await fetch(api("/chat"))).json();}catch(e){CHAT=[];}
+  const chan=CURCHAN;
+  try{CHAT=await(await fetch(api("/chat?channel="+encodeURIComponent(chan)))).json();}catch(e){CHAT=[];}
+  if(chan!==CURCHAN)return; // channel switched mid-flight
   renderChatList(true);
 }
-function chatKey(m){return (m.at||"")+"|"+(m.user||"")+"|"+(m.body||"");}
+async function createChannel(){
+  const name=prompt("New channel name (e.g. design-review):");
+  if(!name||!name.trim())return;
+  try{
+    const r=await fetch(api("/channels"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:name.trim()})});
+    if(!r.ok){toasty(await r.text()||"could not create channel","err");return;}
+    const ch=await r.json();
+    await loadChannels();
+    selectChannel(ch.id);
+    toasty("Channel #"+ch.name+" created","ok");
+  }catch(e){toasty("could not create channel","err");}
+}
+async function inviteToChannel(){
+  const who=prompt("Invite whom? (username)\nTip: append \"  +invite\" to also let them invite others.");
+  if(!who||!who.trim())return;
+  let user=who.trim(),delegate=false;
+  if(/\+invite\s*$/i.test(user)){delegate=true;user=user.replace(/\+invite\s*$/i,"").trim();}
+  try{
+    const r=await fetch(api("/channels/"+encodeURIComponent(CURCHAN)+"/invite"),
+      {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({user,delegate})});
+    if(!r.ok){toasty(await r.text()||"could not invite","err");return;}
+    await loadChannels();selectChannel(CURCHAN);
+    toasty((delegate?"Delegated invite to ":"Invited ")+user,"ok");
+  }catch(e){toasty("could not invite","err");}
+}
+function chatKey(m){return (m.at||"")+"|"+(m.channel||"general")+"|"+(m.user||"")+"|"+(m.body||"");}
 function chatHas(m){const k=chatKey(m);return CHAT.some(x=>chatKey(x)===k);}
 // Fallback path: merge chat carried on the 1s SSE snapshot into the live list,
 // deduped by key. Runs when the WebSocket is down (WKWebView) or when another
 // hub wrote to the shared state file. Keeps chronological order by timestamp.
 function mergeChat(list){
-  if(!Array.isArray(list)||!list.length)return;
+  // The SSE snapshot only carries #general, so it can only backfill that view.
+  if(CURCHAN!=="general"||!Array.isArray(list)||!list.length)return;
   let added=false;
-  list.forEach(m=>{if(!chatHas(m)){CHAT.push(m);added=true;}});
+  list.forEach(m=>{if((m.channel||"general")==="general"&&!chatHas(m)){CHAT.push(m);added=true;}});
   if(!added)return;
   CHAT.sort((a,b)=>(a.at||"").localeCompare(b.at||""));
   if(CUR==="chat")renderChatList();
@@ -1470,7 +1550,11 @@ function openChatWS(){
   const pid=PID;CHATWS_PID=pid;
   let ws;try{ws=new WebSocket(`${proto}://${location.host}/api/projects/${encodeURIComponent(pid)}/chat/ws`);}catch(e){return;}
   CHATWS=ws;
-  ws.onmessage=e=>{try{const m=JSON.parse(e.data);if(!chatHas(m)){CHAT.push(m);if(CUR==="chat")renderChatList();}}catch(_){}};
+  ws.onmessage=e=>{try{const m=JSON.parse(e.data);
+    // Only surface messages for the channel currently open; membership is
+    // already enforced server-side before the broadcast reaches this socket.
+    if((m.channel||"general")!==CURCHAN)return;
+    if(!chatHas(m)){CHAT.push(m);if(CUR==="chat")renderChatList();}}catch(_){}};
   ws.onclose=()=>{if(CHATWS===ws){CHATWS=null;
     // Auto-reconnect while the user is still on this project's chat.
     if(CUR==="chat"&&CHATWS_PID===pid&&PID===pid){clearTimeout(chatwsRetry);chatwsRetry=setTimeout(openChatWS,1500);}}};
@@ -1510,8 +1594,9 @@ function sendChat(){const inp=document.getElementById("chat-input");const body=i
   // Prefer the live socket; the server echoes the canonical message straight
   // back over WS (so no optimistic insert). Fall back to REST if the socket
   // isn't open — SSE-independent, still persisted server-side.
-  if(CHATWS&&CHATWS.readyState===1){CHATWS.send(JSON.stringify({body,attachments}));}
-  else{fetch(api("/chat"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({body,attachments})}).then(loadChatHistory).catch(()=>{});}}
+  const channel=CURCHAN;
+  if(CHATWS&&CHATWS.readyState===1){CHATWS.send(JSON.stringify({body,channel,attachments}));}
+  else{fetch(api("/chat"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({body,channel,attachments})}).then(loadChatHistory).catch(()=>{});}}
 // ── Shared attachment upload + rendering (chat + discussion) ────────────────
 let ATT={chat:[],disc:[]};
 async function uploadOne(file){const fd=new FormData();fd.append("file",file);
