@@ -142,6 +142,12 @@
   .aclist{margin-top:8px;display:flex;flex-direction:column;gap:6px}
   .acitem{display:flex;gap:8px;align-items:flex-start;font-size:13px;color:var(--text);line-height:1.5;background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:7px 11px}
   .acitem i{color:var(--accent2);font-size:15px;margin-top:1px;flex:none}
+  .agstats{display:flex;gap:12px;margin:6px 0 2px;font-size:11.5px;color:var(--muted)}
+  .agstats span{display:inline-flex;align-items:center;gap:4px}
+  .agstats i{font-size:13px;color:var(--accent2)}
+  .agtk{display:inline-flex;align-items:center;gap:4px;background:var(--accentbg);color:var(--accent2);border-radius:6px;padding:1px 8px;font-family:ui-monospace,monospace;font-size:11px;cursor:pointer}
+  .agtk i{font-size:12px}
+  .agidle{color:var(--dim)}
   .chatwrap{display:flex;flex-direction:column;background:var(--card);border:1px solid var(--border);border-radius:var(--r);overflow:hidden;height:calc(100vh - 118px);min-height:540px}
   .cevent{display:flex;justify-content:center;margin:2px 0}
   .cev-pill{display:inline-flex;align-items:center;gap:7px;font-size:11.5px;color:var(--muted);background:var(--card2);border:1px solid var(--border2);border-left:3px solid var(--ec);border-radius:8px;padding:5px 12px;max-width:88%}
@@ -325,6 +331,7 @@ body:not(.admin) .admin-only { display: none !important; }
         </div>
       </div>
       <div class="view" id="view-team">
+        <div class="kpis" id="team-summary"></div>
         <div id="team-dupwarn"></div>
         <div class="sec">Agents <span style="font-size:11px;color:var(--dim);font-weight:400">· your autonomous workers — click one to see its live log</span></div>
         <div class="agents" id="agents"></div>
@@ -752,14 +759,27 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
     const h=s.history||[];
     document.getElementById("ov-changelog").innerHTML=h.length?[...h].reverse().slice(0,6).map(r=>`<div class="rel"><span class="rv">v${esc(r.version)}</span><div class="rt">${esc(r.title)}<div class="rd">${esc((r.at||"").split("T")[0])} · ${esc(r.ticket)}</div></div></div>`).join(""):'<div class="empty">no releases yet</div>';
   }else if(CUR==="team"){
-    const active=(s.tickets||[]).filter(t=>t.status==="in_progress");
-    const counts={};(s.activity||[]).forEach(a=>counts[a.agent]=(counts[a.agent]||0)+1);
+    const acts=s.activity||[],tickets=s.tickets||[],spend=s.spend||{by_role:{}};
+    const inProg=tickets.filter(t=>t.status==="in_progress");
+    // Per-agent tallies from the activity trail.
+    const stat={};acts.forEach(a=>{const k=a.agent;(stat[k]=stat[k]||{n:0,tk:new Set(),last:null});stat[k].n++;if(a.ticket)stat[k].tk.add(a.ticket);stat[k].last=a;});
+    const shipped=tickets.filter(t=>t.status==="done"||t.status==="documented").length;
+    const totalActs=acts.length,totalCost=spend.total_cost_usd||0;
+    document.getElementById("team-summary")&&(document.getElementById("team-summary").innerHTML=
+      kpi("Agent actions",totalActs)+kpi("Tickets shipped",shipped)+kpi("Bugs open",tickets.filter(t=>t.type==="bug"&&t.status==="open").length)+kpi("Team cost",money(totalCost)));
     document.getElementById("agents").innerHTML=AGENTS.map(([r,d,c])=>{
-      const run=active.length&&(r==="DEV-FEATURE"||r==="DEV-BUG");const col=cvar(c);const n=counts[r]||0;
-      const work=run?active[0].id:null;
-      return `<div class="agent ${run?'run':''}" onclick="openAgent('${r}')" style="cursor:pointer"><div class="av" style="background:${col}22;color:${col}">${initials(r)}<span class="sr"></span></div>
-        <div style="flex:1"><div class="rl">${r} <i class="ti ti-terminal-2" style="font-size:12px;color:var(--dim);float:right"></i></div><div class="ds">${d}</div>
-        <div class="st">${run?`<i class="ti ti-loader-2" style="font-size:13px"></i> on ${work}`:`<i class="ti ti-checkbox" style="font-size:13px"></i> ${n} actions`}</div></div></div>`;}).join("");
+      const col=cvar(c);const st=stat[r]||{n:0,tk:new Set(),last:null};
+      const roleKey=r.toLowerCase().replace(/-/g,"_");
+      const cost=(spend.by_role||{})[roleKey]||0;
+      // Current ticket: an in-progress ticket for the DEVs, else the last one this agent touched.
+      let cur=null,live=false;
+      if(r==="DEV-FEATURE"||r==="DEV-BUG"){const w=inProg.find(t=>r==="DEV-BUG"?t.type==="bug":t.type!=="bug");if(w){cur=w.id;live=true;}}
+      if(!cur&&st.last&&st.last.ticket)cur=st.last.ticket;
+      const curHtml=cur?`<span class="agtk" onclick="event.stopPropagation();showTicket('${cur}')">${live?'<i class="ti ti-loader-2"></i>':'<i class="ti ti-history"></i>'} ${esc(cur)}</span>`:'<span class="agidle">idle</span>';
+      return `<div class="agent ${live?'run':''}" onclick="openAgent('${r}')" style="cursor:pointer"><div class="av" style="background:${col}22;color:${col}">${initials(r)}<span class="sr"></span></div>
+        <div style="flex:1;min-width:0"><div class="rl">${r} <i class="ti ti-terminal-2" style="font-size:12px;color:var(--dim);float:right"></i></div><div class="ds">${d}</div>
+        <div class="agstats"><span title="actions"><i class="ti ti-bolt"></i> ${st.n}</span><span title="tickets touched"><i class="ti ti-ticket"></i> ${st.tk.size}</span>${cost>0?`<span title="cost"><i class="ti ti-coin"></i> ${money(cost)}</span>`:''}</div>
+        <div class="st">${live?'<i class="ti ti-loader-2" style="font-size:13px"></i> working on ':'<i class="ti ti-point" style="font-size:13px"></i> last: '}${curHtml}</div></div></div>`;}).join("");
     renderDupWarn(s);
     if(ME&&ME.role==="admin")renderTeamPeople();
   }else if(CUR==="board"){
