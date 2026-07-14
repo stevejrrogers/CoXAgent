@@ -228,6 +228,7 @@ pub async fn serve_full(
         .route("/api/audit-log", get(audit_log_ep))
         .route("/api/people-analytics", get(people_analytics_ep))
         .route("/api/projects/:pid/workspace", get(workspace_ep))
+        .route("/api/projects/:pid/file", get(file_ep))
         .route(
             "/api/projects/:pid/members",
             get(list_members_ep).post(add_member_ep),
@@ -926,21 +927,45 @@ async fn standup_ep(
     }
 }
 
-/// Where a project's code and state live on disk, plus a shallow listing of the
-/// codebase root so the dashboard can answer "where is my source?".
+#[derive(serde::Deserialize)]
+struct PathQuery {
+    #[serde(default)]
+    path: String,
+}
+
+/// Resolve a user-supplied relative path under `root`, rejecting traversal
+/// outside it. Returns the canonicalized path when safe.
+fn safe_under(root: &std::path::Path, rel: &str) -> Option<PathBuf> {
+    // Reject absolute paths and any `..` component outright.
+    let candidate = root.join(rel.trim_start_matches('/'));
+    let root_c = root.canonicalize().ok()?;
+    let cand_c = candidate.canonicalize().ok()?;
+    cand_c.starts_with(&root_c).then_some(cand_c)
+}
+
+/// Browse the project codebase: lists the directory at `?path=` (relative to the
+/// codebase root, default root). Powers the in-app file browser.
 async fn workspace_ep(
     State(app): State<AppState>,
     Path(pid): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<PathQuery>,
 ) -> axum::response::Response {
     let Some(p) = app.project(&pid).await else {
         return not_found();
     };
     let codebase = p.work_dir.clone();
+    let dir = if q.path.is_empty() {
+        codebase.clone()
+    } else {
+        match safe_under(&codebase, &q.path) {
+            Some(d) if d.is_dir() => d,
+            _ => return (StatusCode::BAD_REQUEST, "bad path").into_response(),
+        }
+    };
     let mut entries: Vec<serde_json::Value> = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(&codebase) {
+    if let Ok(rd) = std::fs::read_dir(&dir) {
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
-            // Skip build/VCS noise — show the meaningful project files.
             if matches!(
                 name.as_str(),
                 "target" | ".git" | "node_modules" | ".DS_Store"
@@ -948,32 +973,58 @@ async fn workspace_ep(
                 continue;
             }
             let is_dir = e.file_type().is_ok_and(|t| t.is_dir());
-            entries.push(serde_json::json!({ "name": name, "dir": is_dir }));
+            let size = e.metadata().map_or(0, |m| m.len());
+            entries.push(serde_json::json!({ "name": name, "dir": is_dir, "size": size }));
         }
     }
     entries.sort_by(|a, b| {
-        let ad = a
-            .get("dir")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        let bd = b
-            .get("dir")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        bd.cmp(&ad).then_with(|| {
+        let d = |v: &serde_json::Value| {
+            v.get("dir")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        };
+        d(b).cmp(&d(a)).then_with(|| {
             a.get("name")
                 .and_then(serde_json::Value::as_str)
                 .cmp(&b.get("name").and_then(serde_json::Value::as_str))
         })
     });
-    let is_git = codebase.join(".git").exists();
     Json(serde_json::json!({
         "codebase": codebase.display().to_string(),
         "config": p.config_path.display().to_string(),
-        "is_git": is_git,
+        "is_git": codebase.join(".git").exists(),
+        "path": q.path,
         "entries": entries,
     }))
     .into_response()
+}
+
+/// Return the text content of one file under the codebase (path-guarded, capped
+/// so the browser stays responsive). Powers the in-app file viewer.
+async fn file_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<PathQuery>,
+) -> axum::response::Response {
+    const MAX: u64 = 512 * 1024;
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Some(file) = safe_under(&p.work_dir, &q.path).filter(|f| f.is_file()) else {
+        return (StatusCode::BAD_REQUEST, "bad path").into_response();
+    };
+    if file.metadata().map_or(0, |m| m.len()) > MAX {
+        return (StatusCode::PAYLOAD_TOO_LARGE, "file too large to preview").into_response();
+    }
+    match std::fs::read(&file) {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(text) => {
+                Json(serde_json::json!({ "path": q.path, "content": text })).into_response()
+            }
+            Err(_) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, "binary file").into_response(),
+        },
+        Err(e) => internal_error(&e.to_string()),
+    }
 }
 
 /// The transcript directory for a project: `<workspace>/logs/transcripts`.
