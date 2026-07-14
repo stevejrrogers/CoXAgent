@@ -51,6 +51,10 @@ impl AgentEnginePort for ScriptedEngine {
             return Ok(Self::ok("[]".to_owned()));
         }
 
+        if sp.contains("Product Owner") {
+            return Ok(Self::ok(PO_MILESTONES.to_owned()));
+        }
+
         if sp.contains("Solution Architect") {
             return Ok(Self::ok(SA_DESIGN.to_owned()));
         }
@@ -94,6 +98,12 @@ const BA_BACKLOG: &str = r#"[
   {"title":"Health endpoint","description":"GET /health returns {\"status\":\"ok\"}","priority":"high","complexity":"small","has_ui":false},
   {"title":"Random quote endpoint","description":"GET /quote returns a random quote with author","priority":"high","complexity":"small","has_ui":false},
   {"title":"Quotes by author filter","description":"GET /quote?author=X filters by author","priority":"medium","complexity":"small","has_ui":false}
+]"#;
+
+const PO_MILESTONES: &str = r#"[
+  {"name":"Walking skeleton","goal":"A deployable service with health + one real endpoint","target_version":"0.2.0"},
+  {"name":"Core API","goal":"All primary endpoints working with filters","target_version":"0.5.0"},
+  {"name":"Launch","goal":"Hardened, documented, production-ready v1","target_version":"1.0.0"}
 ]"#;
 
 const SA_DESIGN: &str = r#"{

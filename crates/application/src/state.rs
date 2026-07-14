@@ -118,6 +118,16 @@ pub struct SprintRecord {
     pub at: String,
 }
 
+/// A product milestone — a named delivery target that one or more sprints work
+/// toward. `target_version` is the release that marks it reached.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Milestone {
+    pub name: String,
+    pub goal: String,
+    /// Release version that completes this milestone, e.g. "0.5.0".
+    pub target_version: String,
+}
+
 /// The whole state of one managed project.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectState {
@@ -147,6 +157,9 @@ pub struct ProjectState {
     /// prompts PD to create it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub design_system: Option<DesignSystem>,
+    /// Product milestones the sprints work toward (authored once by the PO).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub milestones: Vec<Milestone>,
     /// Spend accumulated on the current calendar day (UTC), for the daily budget
     /// policy. Resets when the day rolls over.
     #[serde(default)]
@@ -171,6 +184,7 @@ impl Default for ProjectState {
             deploy: None,
             comments: Vec::new(),
             design_system: None,
+            milestones: Vec::new(),
             spend_today_usd: 0.0,
             spend_day: String::new(),
         }

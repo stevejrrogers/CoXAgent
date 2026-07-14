@@ -23,4 +23,4 @@ pub use config::{
     PolicyConfig, WorkflowConfig,
 };
 pub use error::{AppError, PortError};
-pub use state::{Comment, DesignSystem, ProjectState, Spend, Sprint, SCHEMA_VERSION};
+pub use state::{Comment, DesignSystem, Milestone, ProjectState, Spend, Sprint, SCHEMA_VERSION};

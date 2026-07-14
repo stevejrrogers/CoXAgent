@@ -325,6 +325,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // or dev touches them, and call it out so it's visible.
         self.dedup_backlog().await;
 
+        // PO lays out the milestone roadmap once the backlog exists.
+        if let Err(e) = self.milestones().execute().await {
+            report.errors.push(format!("PO milestones: {e}"));
+        }
+
         match self.sa().execute().await {
             Ok(id) => report.sa_readied = id,
             Err(e) => report.errors.push(format!("SA: {e}")),
@@ -698,6 +703,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         )
     }
 
+    fn milestones(&self) -> crate::use_cases::RunMilestonesUseCase<S, E> {
+        crate::use_cases::RunMilestonesUseCase::new(
+            Arc::clone(&self.store),
+            Arc::clone(&self.engine),
+            self.config.clone(),
+            self.work_dir.clone(),
+            self.context.clone(),
+        )
+    }
+
     fn design_system(&self) -> RunDesignSystemUseCase<S, E> {
         RunDesignSystemUseCase::new(
             Arc::clone(&self.store),
@@ -793,6 +808,8 @@ mod tests {
             } else if r.system_prompt.contains("Solution Architect") {
                 r#"{"approach":"a","files":["a.rs"],"api_contract":"","data_changes":"","test_plan":"t","ux":null}"#
                     .to_owned()
+            } else if r.system_prompt.contains("Product Owner") {
+                r#"[{"name":"MVP","goal":"ship it","target_version":"1.0.0"}]"#.to_owned()
             } else if r.system_prompt.contains("QA Engineer") {
                 "[]".to_owned()
             } else {
