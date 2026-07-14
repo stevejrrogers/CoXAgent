@@ -60,8 +60,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleDisplayName</key><string>CoXAgent</string>
   <key>CFBundleExecutable</key><string>CoXAgent</string>
   <key>CFBundleIdentifier</key><string>$ID</string>
-  <key>CFBundleVersion</key><string>3.2.0</string>
-  <key>CFBundleShortVersionString</key><string>3.2.0</string>
+  <key>CFBundleVersion</key><string>3.2.1</string>
+  <key>CFBundleShortVersionString</key><string>3.2.1</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>LSMinimumSystemVersion</key><string>12.0</string>
