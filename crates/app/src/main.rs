@@ -215,9 +215,14 @@ async fn build_project(
         if config.git.enabled && !config.git.repo.is_empty() {
             let repo = config.git.repo.clone();
             let base = config.git.base_url.clone();
+            let wd = work_dir.clone();
             match config.git.provider.as_str() {
-                "gitlab" => Some(Arc::new(coxagent_infrastructure::GlForge::new(repo, base))),
-                "github" => Some(Arc::new(coxagent_infrastructure::GhForge::new(repo, base))),
+                "gitlab" => Some(Arc::new(coxagent_infrastructure::GlForge::new(
+                    repo, base, wd,
+                ))),
+                "github" => Some(Arc::new(coxagent_infrastructure::GhForge::new(
+                    repo, base, wd,
+                ))),
                 _ => None,
             }
         } else {

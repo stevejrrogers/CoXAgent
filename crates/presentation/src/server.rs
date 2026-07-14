@@ -423,11 +423,17 @@ fn git_cli(provider: &str) -> (&'static str, &'static str) {
 
 /// Run `bin args...` (no stdin), returning `(success, combined stdout+stderr)`.
 async fn run_cli(bin: &str, args: &[&str]) -> (bool, String) {
-    let out = tokio::process::Command::new(bin)
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .await;
+    run_cli_env(bin, args, "", "").await
+}
+
+/// Like [`run_cli`], but sets one env var (e.g. `GITLAB_HOST`) when `key` is set.
+async fn run_cli_env(bin: &str, args: &[&str], key: &str, val: &str) -> (bool, String) {
+    let mut cmd = tokio::process::Command::new(bin);
+    cmd.args(args).stdin(std::process::Stdio::null());
+    if !key.is_empty() {
+        cmd.env(key, val);
+    }
+    let out = cmd.output().await;
     match out {
         Ok(o) => (
             o.status.success(),
@@ -531,22 +537,33 @@ async fn git_connect_ep(
         return not_found();
     };
     let (bin, host_env) = git_cli(&provider);
+    let is_http = base.trim().starts_with("http://");
     let host = base
         .trim_start_matches("https://")
         .trim_start_matches("http://")
         .trim_end_matches('/')
         .to_owned();
-    let login_args: &[&str] = if bin == "glab" {
-        &["auth", "login", "--stdin"]
+    // Build login args: token on stdin, explicit hostname for self-hosted, and
+    // the http protocol when the base URL isn't https (e.g. a local instance).
+    let mut login_args: Vec<&str> = vec!["auth", "login"];
+    if bin == "glab" {
+        login_args.push("--stdin");
     } else {
-        &["auth", "login", "--with-token"]
-    };
-    // Build the login command with the token on stdin + optional host.
+        login_args.push("--with-token");
+    }
+    if !host.is_empty() {
+        login_args.push("--hostname");
+        login_args.push(&host);
+    }
+    if bin == "glab" && is_http {
+        login_args.push("--api-protocol");
+        login_args.push("http");
+    }
     let host_env_val = if host.is_empty() { "" } else { host_env };
     let (ok, out) = {
         use tokio::io::AsyncWriteExt;
         let mut cmd = tokio::process::Command::new(bin);
-        cmd.args(login_args)
+        cmd.args(&login_args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
@@ -577,7 +594,7 @@ async fn git_connect_ep(
     // validating it, so a successful login command is not enough — require the
     // status to resolve an account. If it doesn't, log the bad token back out so
     // we never leave broken credentials behind.
-    let (status_ok, status_out) = run_cli(bin, &["auth", "status"]).await;
+    let (status_ok, status_out) = run_cli_env(bin, &["auth", "status"], host_env_val, &host).await;
     let account = parse_account(&status_out);
     if !status_ok || account.is_none() {
         let host_arg = if host.is_empty() {

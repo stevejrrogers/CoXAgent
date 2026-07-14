@@ -7,6 +7,7 @@
 use async_trait::async_trait;
 use coxagent_application::ports::outbound::{ForgePort, PullRequest};
 use coxagent_application::PortError;
+use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::process::Command;
 
@@ -15,11 +16,14 @@ pub struct GlForge {
     repo: String,
     /// Self-hosted host (empty = gitlab.com), passed via `GITLAB_HOST`.
     host: String,
+    /// The codebase directory — `glab` runs here so its remote checks resolve
+    /// (e.g. `glab mr create` requires a remote matching the host).
+    work_dir: PathBuf,
 }
 
 impl GlForge {
     #[must_use]
-    pub fn new(repo: impl Into<String>, base_url: impl Into<String>) -> Self {
+    pub fn new(repo: impl Into<String>, base_url: impl Into<String>, work_dir: PathBuf) -> Self {
         let base = base_url.into();
         let host = base
             .trim()
@@ -30,13 +34,21 @@ impl GlForge {
         Self {
             repo: repo.into(),
             host,
+            work_dir,
         }
+    }
+
+    async fn glab(&self, args: &[&str]) -> Result<String, PortError> {
+        glab(&self.host, &self.work_dir, args).await
     }
 }
 
-async fn glab(host: &str, args: &[&str]) -> Result<String, PortError> {
+async fn glab(host: &str, work_dir: &std::path::Path, args: &[&str]) -> Result<String, PortError> {
     let mut cmd = Command::new("glab");
     cmd.args(args).stdin(Stdio::null());
+    if work_dir.is_dir() {
+        cmd.current_dir(work_dir);
+    }
     if !host.is_empty() {
         cmd.env("GITLAB_HOST", host);
     }
@@ -132,41 +144,34 @@ impl ForgePort for GlForge {
         title: &str,
         body: &str,
     ) -> Result<PullRequest, PortError> {
-        glab(
-            &self.host,
-            &[
-                "mr",
-                "create",
-                "-R",
-                &self.repo,
-                "--source-branch",
-                head,
-                "--target-branch",
-                base,
-                "--title",
-                title,
-                "--description",
-                body,
-                "--yes",
-            ],
-        )
+        self.glab(&[
+            "mr",
+            "create",
+            "-R",
+            &self.repo,
+            "--source-branch",
+            head,
+            "--target-branch",
+            base,
+            "--title",
+            title,
+            "--description",
+            body,
+            "--yes",
+        ])
         .await?;
-        let json = glab(
-            &self.host,
-            &["mr", "view", head, "-R", &self.repo, "-F", "json"],
-        )
-        .await?;
+        let json = self
+            .glab(&["mr", "view", head, "-R", &self.repo, "-F", "json"])
+            .await?;
         let raw: RawMr = serde_json::from_str(&json)
             .map_err(|e| PortError::Backend(format!("glab mr view parse: {e}")))?;
         Ok(raw.into())
     }
 
     async fn list_open_prs(&self) -> Result<Vec<PullRequest>, PortError> {
-        let json = glab(
-            &self.host,
-            &["mr", "list", "-R", &self.repo, "--opened", "-F", "json"],
-        )
-        .await?;
+        let json = self
+            .glab(&["mr", "list", "-R", &self.repo, "--opened", "-F", "json"])
+            .await?;
         let raws: Vec<RawMr> = serde_json::from_str(&json)
             .map_err(|e| PortError::Backend(format!("glab mr list parse: {e}")))?;
         Ok(raws.into_iter().map(Into::into).collect())
@@ -174,33 +179,27 @@ impl ForgePort for GlForge {
 
     async fn pr_diff(&self, number: u64) -> Result<String, PortError> {
         let n = number.to_string();
-        glab(&self.host, &["mr", "diff", &n, "-R", &self.repo]).await
+        self.glab(&["mr", "diff", &n, "-R", &self.repo]).await
     }
 
     async fn merge_pr(&self, number: u64) -> Result<(), PortError> {
         let n = number.to_string();
-        glab(
-            &self.host,
-            &["mr", "merge", &n, "-R", &self.repo, "--squash", "--yes"],
-        )
-        .await
-        .map(|_| ())
+        self.glab(&["mr", "merge", &n, "-R", &self.repo, "--squash", "--yes"])
+            .await
+            .map(|_| ())
     }
 
     async fn request_changes(&self, number: u64, comment: &str) -> Result<(), PortError> {
         // GitLab has no "request changes" review verb; a note is the equivalent.
         let n = number.to_string();
-        glab(
-            &self.host,
-            &["mr", "note", &n, "-R", &self.repo, "-m", comment],
-        )
-        .await
-        .map(|_| ())
+        self.glab(&["mr", "note", &n, "-R", &self.repo, "-m", comment])
+            .await
+            .map(|_| ())
     }
 
     async fn close_pr(&self, number: u64) -> Result<(), PortError> {
         let n = number.to_string();
-        glab(&self.host, &["mr", "close", &n, "-R", &self.repo])
+        self.glab(&["mr", "close", &n, "-R", &self.repo])
             .await
             .map(|_| ())
     }

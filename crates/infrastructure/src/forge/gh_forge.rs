@@ -6,6 +6,7 @@
 use async_trait::async_trait;
 use coxagent_application::ports::outbound::{ForgePort, PullRequest};
 use coxagent_application::PortError;
+use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::process::Command;
 
@@ -14,11 +15,13 @@ pub struct GhForge {
     repo: String,
     /// GitHub Enterprise host (empty = github.com), passed via `GH_HOST`.
     host: String,
+    /// The codebase directory — `gh` runs here so its remote checks resolve.
+    work_dir: PathBuf,
 }
 
 impl GhForge {
     #[must_use]
-    pub fn new(repo: impl Into<String>, base_url: impl Into<String>) -> Self {
+    pub fn new(repo: impl Into<String>, base_url: impl Into<String>, work_dir: PathBuf) -> Self {
         // gh takes a bare hostname; strip any scheme from a configured base URL.
         let base = base_url.into();
         let host = base
@@ -30,14 +33,23 @@ impl GhForge {
         Self {
             repo: repo.into(),
             host,
+            work_dir,
         }
+    }
+
+    async fn gh(&self, args: &[&str]) -> Result<String, PortError> {
+        gh(&self.host, &self.work_dir, args).await
     }
 }
 
-/// Run `gh <args>` and return trimmed stdout, or a `Backend` error with stderr.
-async fn gh(host: &str, args: &[&str]) -> Result<String, PortError> {
+/// Run `gh <args>` in `work_dir`, returning trimmed stdout, or a `Backend`
+/// error with stderr.
+async fn gh(host: &str, work_dir: &std::path::Path, args: &[&str]) -> Result<String, PortError> {
     let mut cmd = Command::new("gh");
     cmd.args(args).stdin(Stdio::null());
+    if work_dir.is_dir() {
+        cmd.current_dir(work_dir);
+    }
     if !host.is_empty() {
         cmd.env("GH_HOST", host);
     }
@@ -149,35 +161,28 @@ impl ForgePort for GhForge {
         title: &str,
         body: &str,
     ) -> Result<PullRequest, PortError> {
-        gh(
-            &self.host,
-            &[
-                "pr", "create", "--repo", &self.repo, "--head", head, "--base", base, "--title",
-                title, "--body", body,
-            ],
-        )
+        self.gh(&[
+            "pr", "create", "--repo", &self.repo, "--head", head, "--base", base, "--title", title,
+            "--body", body,
+        ])
         .await?;
         // Fetch the freshly-created PR for the head branch to return its details.
-        let json = gh(
-            &self.host,
-            &[
+        let json = self
+            .gh(&[
                 "pr", "view", head, "--repo", &self.repo, "--json", PR_FIELDS,
-            ],
-        )
-        .await?;
+            ])
+            .await?;
         let raw: RawPr = serde_json::from_str(&json)
             .map_err(|e| PortError::Backend(format!("gh pr view parse: {e}")))?;
         Ok(raw.into())
     }
 
     async fn list_open_prs(&self) -> Result<Vec<PullRequest>, PortError> {
-        let json = gh(
-            &self.host,
-            &[
+        let json = self
+            .gh(&[
                 "pr", "list", "--repo", &self.repo, "--state", "open", "--json", PR_FIELDS,
-            ],
-        )
-        .await?;
+            ])
+            .await?;
         let raws: Vec<RawPr> = serde_json::from_str(&json)
             .map_err(|e| PortError::Backend(format!("gh pr list parse: {e}")))?;
         Ok(raws.into_iter().map(Into::into).collect())
@@ -185,49 +190,43 @@ impl ForgePort for GhForge {
 
     async fn pr_diff(&self, number: u64) -> Result<String, PortError> {
         let n = number.to_string();
-        gh(&self.host, &["pr", "diff", &n, "--repo", &self.repo]).await
+        self.gh(&["pr", "diff", &n, "--repo", &self.repo]).await
     }
 
     async fn merge_pr(&self, number: u64) -> Result<(), PortError> {
         let n = number.to_string();
-        gh(
-            &self.host,
-            &[
-                "pr",
-                "merge",
-                &n,
-                "--repo",
-                &self.repo,
-                "--squash",
-                "--delete-branch",
-            ],
-        )
+        self.gh(&[
+            "pr",
+            "merge",
+            &n,
+            "--repo",
+            &self.repo,
+            "--squash",
+            "--delete-branch",
+        ])
         .await
         .map(|_| ())
     }
 
     async fn request_changes(&self, number: u64, comment: &str) -> Result<(), PortError> {
         let n = number.to_string();
-        gh(
-            &self.host,
-            &[
-                "pr",
-                "review",
-                &n,
-                "--repo",
-                &self.repo,
-                "--request-changes",
-                "--body",
-                comment,
-            ],
-        )
+        self.gh(&[
+            "pr",
+            "review",
+            &n,
+            "--repo",
+            &self.repo,
+            "--request-changes",
+            "--body",
+            comment,
+        ])
         .await
         .map(|_| ())
     }
 
     async fn close_pr(&self, number: u64) -> Result<(), PortError> {
         let n = number.to_string();
-        gh(&self.host, &["pr", "close", &n, "--repo", &self.repo])
+        self.gh(&["pr", "close", &n, "--repo", &self.repo])
             .await
             .map(|_| ())
     }
