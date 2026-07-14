@@ -513,10 +513,10 @@ fn lite_state_value(state: &coxagent_application::ProjectState) -> serde_json::V
             }
         }
     }
-    // Team chat rides its own WebSocket, so keep it out of the 1s SSE snapshot.
-    if let Some(obj) = v.as_object_mut() {
-        obj.remove("chat");
-    }
+    // Team chat is delivered instantly over its WebSocket, but we KEEP it in the
+    // 1s SSE snapshot too as a fallback: it reaches clients whose WebSocket
+    // didn't connect (e.g. a WKWebView) and keeps two hubs sharing one state
+    // file in sync. The client merges both sources and de-duplicates.
     v
 }
 

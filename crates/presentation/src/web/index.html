@@ -1234,6 +1234,17 @@ async function loadChatHistory(){
 }
 function chatKey(m){return (m.at||"")+"|"+(m.user||"")+"|"+(m.body||"");}
 function chatHas(m){const k=chatKey(m);return CHAT.some(x=>chatKey(x)===k);}
+// Fallback path: merge chat carried on the 1s SSE snapshot into the live list,
+// deduped by key. Runs when the WebSocket is down (WKWebView) or when another
+// hub wrote to the shared state file. Keeps chronological order by timestamp.
+function mergeChat(list){
+  if(!Array.isArray(list)||!list.length)return;
+  let added=false;
+  list.forEach(m=>{if(!chatHas(m)){CHAT.push(m);added=true;}});
+  if(!added)return;
+  CHAT.sort((a,b)=>(a.at||"").localeCompare(b.at||""));
+  if(CUR==="chat")renderChatList();
+}
 function openChatWS(){
   // Reuse a live socket for the same project; otherwise (re)connect.
   if(CHATWS&&CHATWS_PID===PID&&CHATWS.readyState<=1)return;
@@ -1281,7 +1292,7 @@ function sendChat(){const inp=document.getElementById("chat-input");const body=i
   // isn't open — SSE-independent, still persisted server-side.
   if(CHATWS&&CHATWS.readyState===1){CHATWS.send(JSON.stringify({body}));}
   else{fetch(api("/chat"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({body})}).then(loadChatHistory).catch(()=>{});}}
-function render(s){STATE=s;renderSidebar(s);renderActive();}
+function render(s){STATE=s;renderSidebar(s);renderActive();if(CUR==="chat")mergeChat(s.chat);}
 function depChips(ids){
   if(!ids||!ids.length)return '<span style="color:var(--dim)">—</span>';
   return ids.map(id=>{const dt=(STATE.tickets||[]).find(x=>x.id===id);
