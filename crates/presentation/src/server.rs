@@ -408,6 +408,8 @@ pub async fn serve_full(
         )
         .route("/api/chat/channels/:cid/invite", post(syschat_invite_ep))
         .route("/api/chat/messages", get(syschat_messages_ep))
+        .route("/api/chat/members", get(syschat_members_ep))
+        .route("/api/chat/dm", post(syschat_dm_ep))
         .route("/api/chat/send", post(syschat_send_ep))
         .route("/api/chat/ws", get(syschat_ws_ep))
         .route("/api/chat/upload", post(syschat_upload_ep))
@@ -1973,6 +1975,43 @@ async fn syschat_send_ep(
     }
 }
 
+/// List workspace members (minimal fields) for @mentions, member lists, and DMs.
+/// Available to any signed-in user.
+async fn syschat_members_ep(State(app): State<AppState>) -> axum::response::Response {
+    let members: Vec<serde_json::Value> = match &app.auth {
+        Some(a) => a
+            .list_users()
+            .await
+            .into_iter()
+            .map(|u| serde_json::json!({ "username": u.username, "name": u.name }))
+            .collect(),
+        None => Vec::new(),
+    };
+    Json(members).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct DmReq {
+    user: String,
+}
+
+/// Open (or fetch) a direct-message channel with another user.
+async fn syschat_dm_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<DmReq>,
+) -> axum::response::Response {
+    let me = resolve_username(&app, &headers).await;
+    let result = { app.syschat.inner.lock().await.open_dm(&me, req.user.trim()) };
+    match result {
+        Ok(ch) => {
+            app.syschat.save().await;
+            (StatusCode::CREATED, Json(ch)).into_response()
+        }
+        Err(msg) => (StatusCode::BAD_REQUEST, msg).into_response(),
+    }
+}
+
 /// Whether `user` may receive a system-chat broadcast (membership per message).
 async fn syschat_may_see(app: &AppState, user: &str, json: &str) -> bool {
     let channel = serde_json::from_str::<serde_json::Value>(json)
@@ -2642,6 +2681,7 @@ async fn auth_mw(
         && !path.starts_with("/api/auth/2fa/") // self-service, any signed-in user
         && !path.ends_with("/chat") // team chat is open to any signed-in user
         && path != "/api/chat/send" // system chat send: any signed-in user
+        && path != "/api/chat/dm" // open a DM: any signed-in user
         && !path.contains("/channels") // create/invite channels: any signed-in user
         && !path.ends_with("/upload"); // uploads are open to any signed-in user
     let method = req.method().clone();

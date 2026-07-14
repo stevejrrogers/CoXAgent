@@ -237,6 +237,35 @@ impl SystemChat {
         Ok(())
     }
 
+    /// Open (or fetch) a direct-message channel between `me` and `other`. DMs are
+    /// private channels with a deterministic id so both users land in the same one.
+    ///
+    /// # Errors
+    /// When `me == other`.
+    pub fn open_dm(&mut self, me: &str, other: &str) -> Result<Channel, String> {
+        if me == other {
+            return Err("cannot DM yourself".to_owned());
+        }
+        let mut pair = [me, other];
+        pair.sort_unstable();
+        let id = format!("dm-{}-{}", slugify(pair[0]), slugify(pair[1]));
+        if let Some(c) = self.channels.iter().find(|c| c.id == id) {
+            return Ok(c.clone());
+        }
+        let ch = Channel {
+            id,
+            name: format!("{me} · {other}"),
+            owner: String::new(),
+            members: vec![me.to_owned(), other.to_owned()],
+            inviters: Vec::new(),
+            created_at: now_rfc3339(),
+            kind: "dm".to_owned(),
+            project: String::new(),
+        };
+        self.channels.push(ch.clone());
+        Ok(ch)
+    }
+
     /// Grant `grantee` invite permission on a private channel (owner only).
     ///
     /// # Errors

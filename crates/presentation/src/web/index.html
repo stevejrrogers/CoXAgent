@@ -305,6 +305,44 @@
   body.mode-chat .topbar{display:none}
   body.mode-chat .content{display:none}
   body.mode-chat #chat-main{display:flex}
+  /* In-app chat notification toasts (permission-free, clickable) */
+  #chat-toasts{position:fixed;right:18px;bottom:18px;z-index:70;display:flex;flex-direction:column;gap:8px;max-width:340px}
+  .ctoast{background:var(--panel);border:1px solid var(--border2);border-left:3px solid var(--accent);border-radius:10px;padding:10px 12px;box-shadow:0 8px 24px rgba(0,0,0,.35);cursor:pointer;animation:ctoastin .28s ease}
+  .ctoast:hover{border-color:var(--accent)}
+  .ctoast-h{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12.5px;font-weight:700;color:var(--text)}
+  .ctoast-x{color:var(--muted);font-size:14px;flex:none}
+  .ctoast-x:hover{color:var(--red)}
+  .ctoast-b{font-size:12.5px;color:var(--muted);margin-top:3px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+  .ctoast.out{opacity:0;transform:translateX(12px);transition:opacity .3s,transform .3s}
+  @keyframes ctoastin{from{opacity:0;transform:translateX(16px)}to{opacity:1;transform:none}}
+  /* Slack-style message formatting */
+  .tcbub .codeblock{background:var(--bg);border:1px solid var(--border2);border-radius:8px;padding:9px 11px;margin:4px 0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.5;white-space:pre;overflow-x:auto;color:var(--text)}
+  .tcmsg.mine .tcbub .codeblock{background:rgba(0,0,0,.22);border-color:rgba(255,255,255,.18)}
+  .inlinecode{background:var(--bg);border:1px solid var(--border2);border-radius:4px;padding:1px 5px;font-family:ui-monospace,monospace;font-size:12px}
+  .tcmsg.mine .inlinecode{background:rgba(0,0,0,.22);border-color:rgba(255,255,255,.18)}
+  .mention{background:var(--accentbg);color:var(--accent2);border-radius:4px;padding:0 3px;font-weight:600}
+  .mention.me{background:var(--amber);color:#1a1205}
+  .tcbub a{color:var(--accent2);text-decoration:underline}
+  .tcmsg.mine .tcbub a{color:#dff}
+  /* @mention autocomplete popup */
+  .mentionpop{position:absolute;bottom:100%;left:0;margin-bottom:6px;background:var(--panel);border:1px solid var(--border2);border-radius:10px;box-shadow:0 10px 28px rgba(0,0,0,.4);overflow:hidden;min-width:200px;max-height:220px;overflow-y:auto;z-index:40}
+  .mentionpop .mrow{display:flex;align-items:center;gap:9px;padding:8px 11px;cursor:pointer;font-size:13px}
+  .mentionpop .mrow.on,.mentionpop .mrow:hover{background:var(--accentbg)}
+  .mentionpop .mav{width:24px;height:24px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:#fff;flex:none}
+  .mentionpop .mnm{font-weight:600;color:var(--text)}
+  .mentionpop .mun{color:var(--muted);font-size:11.5px}
+  /* Members modal + DM */
+  .memsearch{display:flex;align-items:center;gap:8px;background:var(--card2);border:1px solid var(--border2);border-radius:9px;padding:8px 11px;margin:12px 0 10px;color:var(--muted)}
+  .memsearch input{flex:1;background:transparent;border:none;color:var(--text);font-family:inherit;font-size:13px;outline:none}
+  .memlist{max-height:52vh;overflow-y:auto;display:flex;flex-direction:column;gap:2px}
+  .memrow2{display:flex;align-items:center;gap:11px;padding:8px 6px;border-radius:9px}
+  .memrow2:hover{background:var(--card2)}
+  .memav{width:32px;height:32px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:#fff;flex:none}
+  .memmeta{flex:1;min-width:0}
+  .memnm{font-size:13.5px;font-weight:600;color:var(--text)}
+  .memun{font-size:12px;color:var(--muted)}
+  .memdm{display:inline-flex;align-items:center;gap:6px;background:var(--card);border:1px solid var(--border2);color:var(--muted);border-radius:8px;padding:6px 11px;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;flex:none}
+  .memdm:hover{color:var(--accent);border-color:var(--accent)}
   .runner{margin-top:auto;background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:13px}
   .runner .rt{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;margin-bottom:3px}
   .runner .rc{font-size:11px;color:var(--muted);margin-bottom:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -540,7 +578,7 @@
   .ctime{color:var(--dim)}
   .cbub{background:var(--card);border:1px solid var(--border);border-radius:12px;border-top-left-radius:3px;padding:9px 13px;font-size:13px;line-height:1.5;color:var(--text);white-space:pre-wrap;word-break:break-word}
   .cmsg.mine .cbub{background:var(--accent);border-color:var(--accent);color:#fff;border-radius:12px;border-top-right-radius:3px}
-  .chatcompose{display:flex;gap:8px;padding:12px 16px;border-top:1px solid var(--border);background:var(--card2)}
+  .chatcompose{display:flex;gap:8px;padding:12px 16px;border-top:1px solid var(--border);background:var(--card2);position:relative}
   .chatcompose input{flex:1;background:var(--card);color:var(--text);border:1px solid var(--border2);border-radius:10px;padding:11px 14px;font-size:13px;font-family:inherit}
   .chatcompose input:focus{outline:none;border-color:var(--accent)}
   .chatcompose .pri{padding:0 16px;border-radius:10px}
@@ -759,6 +797,13 @@ body:not(.manage) .manage-only { display: none !important; }
         <h3 id="tr-title" style="font-size:15px;word-break:break-all">transcript</h3>
         <pre id="tr-body" style="max-height:60vh;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:12px;background:var(--card2);padding:12px;border-radius:8px"></pre>
       </div></div>
+      <div class="ov" id="ov-members" onclick="if(event.target===this)close_('ov-members')"><div class="modal" style="max-width:440px">
+        <span class="x" onclick="close_('ov-members')"><i class="ti ti-x"></i></span>
+        <h3 id="mem-title">Members</h3>
+        <div class="msub" id="mem-sub">people you can message</div>
+        <div class="memsearch"><i class="ti ti-search"></i><input id="mem-search" placeholder="Search members…" autocomplete="off" oninput="renderMembersList()"></div>
+        <div id="mem-list" class="memlist"></div>
+      </div></div>
       <div class="ov" id="ov-file" onclick="if(event.target===this)close_('ov-file')"><div class="modal" style="max-width:900px">
         <span class="x" onclick="close_('ov-file')"><i class="ti ti-x"></i></span>
         <h3 id="file-title" style="font-size:14px;word-break:break-all;font-family:ui-monospace,monospace"><i class="ti ti-file-code" style="color:var(--accent2)"></i> file</h3>
@@ -883,7 +928,10 @@ body:not(.manage) .manage-only { display: none !important; }
       <div class="chatwrap">
           <div class="chathead">
             <div class="chatchan"><span class="chatdot" style="background:var(--accent2)"></span><div><div class="chattitle" id="chat-title"># general</div><div class="chatsub" id="chat-sub">everyone in the workspace</div></div></div>
-            <button class="chaninvite" id="chat-invite" onclick="inviteToChannel()" style="display:none"><i class="ti ti-user-plus"></i> Invite</button>
+            <div style="display:flex;gap:8px">
+              <button class="chaninvite" onclick="openMembers()" title="Members"><i class="ti ti-users"></i> <span id="chat-memcount">Members</span></button>
+              <button class="chaninvite" id="chat-invite" onclick="inviteToChannel()" style="display:none"><i class="ti ti-user-plus"></i> Invite</button>
+            </div>
           </div>
           <div id="chat-msgs" class="chatbody chatmsgs" ondragover="event.preventDefault();this.classList.add('dropping')" ondragleave="this.classList.remove('dropping')" ondrop="dropFiles('chat',event)"></div>
           <div class="composewrap">
@@ -891,7 +939,7 @@ body:not(.manage) .manage-only { display: none !important; }
             <div class="chatcompose">
               <input type="file" id="chat-file" multiple hidden onchange="pickFiles('chat',this)">
               <button class="att-btn" onclick="document.getElementById('chat-file').click()" title="Attach files"><i class="ti ti-paperclip"></i></button>
-              <input id="chat-input" placeholder="Message your team…  (Enter to send)" onkeydown="if(event.key==='Enter')sendChat()">
+              <input id="chat-input" placeholder="Message your team…  (Enter to send · @ to mention)" autocomplete="off" oninput="mentionOnInput(this)" onkeydown="chatInputKey(event)" onblur="setTimeout(closeMention,150)">
               <button class="pri" onclick="sendChat()"><i class="ti ti-send"></i></button>
             </div>
           </div>
@@ -992,7 +1040,7 @@ function modelControl(eng,cur,sid){
 function onEngine(sid){const eng=document.getElementById("eng-"+sid).value;
   const list=MODELS[eng];const def=(list&&list.length)?list[0]:"";
   document.getElementById("mc-"+sid).innerHTML=modelControl(eng,def,sid);}
-const KPI_IC={Shipped:"ti-rocket","In flight":"ti-plane-tilt","Open bugs":"ti-bug",Documented:"ti-book",Releases:"ti-versions",Cost:"ti-coin","Total spend":"ti-coin",Tokens:"ti-cpu",Runs:"ti-repeat"};
+const KPI_IC={Shipped:"ti-rocket","In flight":"ti-plane-tilt","Open bugs":"ti-bug",Documented:"ti-book",Releases:"ti-versions",Cost:"ti-coin","Total spend":"ti-coin",Tokens:"ti-cpu",Runs:"ti-repeat","Agent actions":"ti-bolt","Tickets shipped":"ti-rocket","Bugs open":"ti-bug","Team cost":"ti-coin"};
 const money=n=>"$"+(Number(n)||0).toFixed(2);
 const fmtK=n=>{n=Number(n)||0;return n>=1000?(n/1000).toFixed(1)+"k":String(n);};
 const AC={BA:"--blue","DEV-FEATURE":"--green","DEV-BUG":"--red",SA:"--purple",TEST:"--teal",DOCS:"--blue",PO:"--amber",SM:"--teal",PD:"--purple",USER:"--accent"};
@@ -1509,6 +1557,7 @@ let CHANNELS=[], CURCHAN="general";
 // channels, open the current one, and connect the live socket.
 async function openChat(){
   applyMode();
+  loadMembers();
   await loadChannels();
   selectChannel(CURCHAN);
   openChatWS();
@@ -1523,8 +1572,9 @@ function renderChannels(){
   box.innerHTML=CHANNELS.map(c=>{
     const kind=c.kind||(c.id==="general"?"general":"private");
     const u=UNREAD[c.id]||0;
+    const icon=kind==="dm"?"message-2":kind==="private"?"lock":"hash";
     return `<div class="chanitem${c.id===CURCHAN?' on':''}${u?' unread':''}" onclick="selectChannel('${esc(c.id)}')">
-      <i class="ti ti-${kind==="private"?'lock':'hash'}"></i><span class="channm">${esc(c.name)}</span>${u?`<span class="chanbadge">${u>99?'99+':u}</span>`:''}</div>`;}).join("");
+      <i class="ti ti-${icon}"></i><span class="channm">${esc(chanDisplay(c))}</span>${u?`<span class="chanbadge">${u>99?'99+':u}</span>`:''}</div>`;}).join("");
   updateNotifToggle();
 }
 function currentChannel(){return CHANNELS.find(c=>c.id===CURCHAN)||{id:"general",name:"general",owner:""};}
@@ -1533,12 +1583,16 @@ function selectChannel(id){
   clearUnread(id);
   const ch=currentChannel();
   const kind=ch.kind||(id==="general"?"general":"private");
-  document.getElementById("chat-title").textContent=(kind==="private"?"🔒 ":"# ")+ch.name;
+  const prefix=kind==="dm"?"@ ":kind==="private"?"🔒 ":"# ";
+  document.getElementById("chat-title").textContent=prefix+chanDisplay(ch);
   const sub=document.getElementById("chat-sub");
   const n=(ch.members||[]).length;
   sub.textContent = kind==="general" ? "everyone in the workspace"
+    : kind==="dm" ? "direct message"
     : kind==="project" ? `project channel · ${n} member${n===1?'':'s'}`
     : `private channel · ${n} member${n===1?'':'s'}`;
+  const mc=document.getElementById("chat-memcount");
+  if(mc)mc.textContent=kind==="general"?"Members":(n+" member"+(n===1?"":"s"));
   // Only private channels take invites; project membership follows assignment.
   const me=(ME&&ME.username)||"user";
   const canInvite=kind==="private"&&(ch.owner===me||(ch.inviters||[]).includes(me));
@@ -1583,7 +1637,7 @@ async function inviteToChannel(){
 // WebSocket plus the 1s SSE snapshot. SEEN dedups across both transports so a
 // message notifies exactly once; chatPrimed suppresses notifications for the
 // history that already existed when we connected.
-let UNREAD={}, NOTIF_ON=(localStorage.getItem("cox_notif")==="1");
+let UNREAD={}, NOTIF_ON=(localStorage.getItem("cox_notif")!=="0"); // on by default
 let SEEN=new Set(), chatPrimed=false;
 // Sidebar mode: "workspace" (menu + views) or "chat" (channels + conversation).
 let MODE=(localStorage.getItem("cox_mode")==="chat")?"chat":"workspace";
@@ -1649,6 +1703,108 @@ function initChatBackground(){
   SEEN=new Set();UNREAD={};chatPrimed=false;
   openChat();
 }
+// Workspace members (for @mentions, member list, DMs).
+let MEMBERS=[];
+async function loadMembers(){try{MEMBERS=await(await fetch("/api/chat/members")).json();}catch(e){MEMBERS=[];}}
+function memberName(u){const m=MEMBERS.find(x=>x.username===u);return (m&&m.name&&m.name.trim())?m.name:u;}
+// ── @mention autocomplete ───────────────────────────────────────────────────
+let MENTION={open:false,items:[],sel:0,start:-1};
+function mentionOnInput(inp){
+  const val=inp.value,pos=inp.selectionStart;
+  const m=val.slice(0,pos).match(/@([a-zA-Z0-9._-]*)$/);
+  if(!m){closeMention();return;}
+  const q=m[1].toLowerCase();
+  const items=(MEMBERS||[]).filter(u=>u.username.toLowerCase().includes(q)||(u.name||"").toLowerCase().includes(q)).slice(0,8);
+  if(!items.length){closeMention();return;}
+  MENTION={open:true,items,sel:0,start:pos-m[0].length};
+  renderMention();
+}
+function renderMention(){
+  let pop=document.getElementById("mention-pop");
+  if(!pop){pop=document.createElement("div");pop.id="mention-pop";pop.className="mentionpop";const c=document.querySelector("#chat-main .chatcompose");if(!c)return;c.appendChild(pop);}
+  pop.innerHTML=MENTION.items.map((u,i)=>`<div class="mrow${i===MENTION.sel?' on':''}" onmousedown="event.preventDefault();pickMention(${i})"><span class="mav" style="background:${userColor(u.username)}">${esc((u.name||u.username).slice(0,2).toUpperCase())}</span><span><span class="mnm">${esc(u.name||u.username)}</span> <span class="mun">@${esc(u.username)}</span></span></div>`).join("");
+  pop.style.display="block";
+}
+function closeMention(){MENTION.open=false;const p=document.getElementById("mention-pop");if(p)p.style.display="none";}
+function pickMention(i){
+  const inp=document.getElementById("chat-input");const u=MENTION.items[i];if(!u)return;
+  const val=inp.value,pos=inp.selectionStart;
+  inp.value=val.slice(0,MENTION.start)+"@"+u.username+" "+val.slice(pos);
+  const np=MENTION.start+u.username.length+2;inp.setSelectionRange(np,np);
+  closeMention();inp.focus();
+}
+function chatInputKey(e){
+  if(MENTION.open){
+    if(e.key==="ArrowDown"){e.preventDefault();MENTION.sel=(MENTION.sel+1)%MENTION.items.length;renderMention();return;}
+    if(e.key==="ArrowUp"){e.preventDefault();MENTION.sel=(MENTION.sel-1+MENTION.items.length)%MENTION.items.length;renderMention();return;}
+    if(e.key==="Enter"||e.key==="Tab"){e.preventDefault();pickMention(MENTION.sel);return;}
+    if(e.key==="Escape"){e.preventDefault();closeMention();return;}
+  }
+  if(e.key==="Enter")sendChat();
+}
+// ── Members list + direct messages ──────────────────────────────────────────
+function channelMembers(){
+  const ch=currentChannel();const kind=ch.kind||"private";
+  if(kind==="general")return (MEMBERS||[]).map(m=>m.username);
+  return ch.members||[];
+}
+function openMembers(){
+  document.getElementById("mem-search").value="";
+  const ch=currentChannel();
+  document.getElementById("mem-title").textContent="Members · "+((ch.kind==="dm")?"direct message":("#"+ch.name));
+  renderMembersList();
+  document.getElementById("ov-members").classList.add("open");
+  setTimeout(()=>document.getElementById("mem-search").focus(),40);
+}
+function renderMembersList(){
+  const q=(document.getElementById("mem-search").value||"").toLowerCase();
+  const me=(ME&&ME.username)||"user";
+  let users=channelMembers().map(u=>({username:u,name:memberName(u)}));
+  // #general: search the whole workspace directory.
+  if(q&&currentChannel().kind==="general")users=(MEMBERS||[]).map(m=>({username:m.username,name:m.name||m.username}));
+  users=users.filter(u=>u.username.toLowerCase().includes(q)||(u.name||"").toLowerCase().includes(q));
+  document.getElementById("mem-sub").textContent=users.length+" member"+(users.length===1?"":"s");
+  const box=document.getElementById("mem-list");
+  box.innerHTML=users.map(u=>`<div class="memrow2">
+    <span class="memav" style="background:${userColor(u.username)}">${esc((u.name||u.username).slice(0,2).toUpperCase())}</span>
+    <div class="memmeta"><div class="memnm">${esc(u.name||u.username)}${u.username===me?' <span class="memyou">you</span>':''}</div><div class="memun">@${esc(u.username)}</div></div>
+    ${u.username===me?'':`<button class="memdm" onclick="openDM('${esc(u.username)}')"><i class="ti ti-message-2"></i> Message</button>`}
+  </div>`).join("")||'<div class="empty">no members found</div>';
+}
+async function openDM(username){
+  try{
+    const r=await fetch("/api/chat/dm",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({user:username})});
+    if(!r.ok){toasty(await r.text()||"could not open DM","err");return;}
+    const ch=await r.json();
+    close_("ov-members");
+    await loadChannels();
+    focusChannel(ch.id);
+  }catch(e){toasty("could not open DM","err");}
+}
+// Display name for a channel: DMs show the other person, others show their name.
+function chanDisplay(c){
+  if((c.kind||"")!=="dm")return c.name;
+  const me=(ME&&ME.username)||"user";
+  const other=(c.members||[]).find(u=>u!==me)||c.name;
+  return memberName(other);
+}
+// Render a message body with Slack-style formatting: fenced/inline code,
+// **bold**, *italic*, links, and @mentions. HTML is escaped; code is verbatim.
+function formatMsg(raw){
+  if(!raw)return"";
+  const blocks=[],inline=[];
+  let s=raw.replace(/```([\s\S]*?)```/g,(_,c)=>{blocks.push('<pre class="codeblock">'+esc(c.replace(/^\n/,"").replace(/\n$/,""))+'</pre>');return "\x00"+(blocks.length-1)+"\x00";});
+  s=s.replace(/`([^`\n]+)`/g,(_,c)=>{inline.push('<code class="inlinecode">'+esc(c)+'</code>');return "\x01"+(inline.length-1)+"\x01";});
+  s=esc(s);
+  s=s.replace(/\*\*([^*\n]+)\*\*/g,"<b>$1</b>").replace(/(^|[^*\w])\*([^*\n]+)\*/g,"$1<i>$2</i>");
+  s=s.replace(/(https?:\/\/[^\s<]+)/g,'<a href="$1" target="_blank" rel="noopener">$1</a>');
+  s=s.replace(/@([a-zA-Z0-9._-]+)/g,(mm,u)=>{const known=(MEMBERS||[]).some(x=>x.username.toLowerCase()===u.toLowerCase());
+    if(!known)return mm;
+    const mine=ME&&ME.username&&ME.username.toLowerCase()===u.toLowerCase();
+    return `<span class="mention${mine?' me':''}">@${esc(u)}</span>`;});
+  s=s.replace(/\x01(\d+)\x01/g,(_,i)=>inline[+i]).replace(/\x00(\d+)\x00/g,(_,i)=>blocks[+i]);
+  return s;
+}
 function channelName(id){const c=CHANNELS.find(x=>x.id===id);return c?c.name:id;}
 function totalUnread(){return Object.values(UNREAD).reduce((a,b)=>a+b,0);}
 function clearUnread(chan){if(UNREAD[chan]){delete UNREAD[chan];updateTitle();renderChannels();updateModeBadge();}}
@@ -1665,12 +1821,15 @@ function notifSupported(){return !!nativeNotify()||("Notification"in window);}
 function notifGranted(){return nativeNotify()?NOTIF_ON:(("Notification"in window)&&Notification.permission==="granted");}
 // Called by the native shell when the user clicks a macOS notification.
 window.__coxOpenChannel=function(id){try{focusChannel(id);}catch(_){}}
-// Fire an OS desktop notification (when enabled + permitted) plus a soft chime.
+// Notify about a message the user isn't actively watching. An in-app toast
+// ALWAYS shows (the reliable, permission-free signal); on top of that, when
+// notifications are enabled we also raise an OS-level notification + chime.
 function notifyMessage(chan,m){
-  if(!NOTIF_ON)return;
   const priv=chan!=="general";
   const title=(priv?"🔒 ":"# ")+channelName(chan)+" · "+(m.user||"someone");
   const body=m.body||(m.attachments&&m.attachments.length?"📎 sent an attachment":"");
+  chatToast(chan,m,title);
+  if(!NOTIF_ON)return;
   const nn=nativeNotify();
   if(nn){
     // Hand off to the macOS shell; it owns the native notification + click.
@@ -1682,6 +1841,28 @@ function notifyMessage(chan,m){
     }catch(_){}
   }
   chime();
+}
+// A clickable in-app notification toast (works with no OS permission).
+function chatToast(chan,m,title){
+  let box=document.getElementById("chat-toasts");
+  if(!box){box=document.createElement("div");box.id="chat-toasts";document.body.appendChild(box);}
+  const el=document.createElement("div");
+  el.className="ctoast";
+  const preview=(m.body||"📎 sent an attachment").slice(0,140);
+  el.innerHTML=`<div class="ctoast-h"><span>${esc(title)}</span><i class="ti ti-x ctoast-x"></i></div><div class="ctoast-b">${esc(preview)}</div>`;
+  el.querySelector(".ctoast-x").onclick=(e)=>{e.stopPropagation();el.remove();};
+  el.onclick=()=>{focusChannel(chan);el.remove();};
+  box.appendChild(el);
+  while(box.children.length>4)box.firstChild.remove();
+  setTimeout(()=>{el.classList.add("out");setTimeout(()=>el.remove(),320);},6000);
+}
+// Ask for notification permission once (browser). The macOS shell prompts on
+// first delivery, so nothing to do there.
+function ensureNotifPermission(){
+  if(nativeNotify())return;
+  if(("Notification"in window)&&Notification.permission==="default"){
+    Notification.requestPermission().then(()=>updateNotifToggle()).catch(()=>{});
+  }
 }
 let _actx=null;
 function chime(){
@@ -1759,7 +1940,7 @@ function renderChatList(force){
     const mine=m.user===me;
     const grouped=m.user===lastUser;lastUser=m.user;
     const col=userColor(m.user);
-    const bodyH=m.body?`<div class="tcbub" title="${esc(m.user)} · ${esc(time)}">${esc(m.body)}</div>`:'';
+    const bodyH=m.body?`<div class="tcbub" title="${esc(m.user)} · ${esc(time)}">${formatMsg(m.body)}</div>`:'';
     html+=`<div class="tcmsg${mine?' mine':''}${grouped?' grp':''}">
       ${mine||grouped?'<div class="tcav-sp"></div>':`<div class="tcav" style="background:${col}22;color:${col}">${esc((m.user||"?").slice(0,2).toUpperCase())}</div>`}
       <div class="tccol">${grouped?'':`<div class="tchead"><b>${mine?"You":esc(m.user)}</b><span class="tctime">${esc(time)}</span></div>`}
@@ -2246,6 +2427,7 @@ function startApp(){
   const h=(location.hash||"").slice(1);if(TITLES[h])nav(h);else nav("overview");
   loadProjects();
   checkAgentSetup(false);
+  ensureNotifPermission();
 }
 const AGENT_CLIS={claude:{label:"Claude Code",desc:"Anthropic's coding agent",install:"curl -fsSL https://claude.ai/install.sh | bash",docs:"https://claude.com/claude-code"},
   opencode:{label:"opencode",desc:"open-source multi-model agent",install:"curl -fsSL https://opencode.ai/install | bash",docs:"https://opencode.ai"}};
