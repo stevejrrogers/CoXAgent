@@ -343,6 +343,8 @@ pub async fn serve_full(
             "/api/projects/:pid/context",
             get(context_ep).post(context_update_ep),
         )
+        .route("/api/projects/:pid/git/auth", get(git_auth_status_ep))
+        .route("/api/projects/:pid/git/connect", post(git_connect_ep))
         .route("/api/projects/:pid/prs", get(list_prs_ep))
         .route("/api/projects/:pid/prs/:num/diff", get(pr_diff_ep))
         .route("/api/projects/:pid/prs/:num/:action", post(pr_action_ep))
@@ -408,6 +410,172 @@ async fn engines_ep(State(app): State<AppState>) -> impl IntoResponse {
 /// are installed, and how to install the rest. Computed at startup and injected.
 async fn tooling_ep(State(app): State<AppState>) -> impl IntoResponse {
     Json((*app.tooling).clone())
+}
+
+/// The CLI + host env var for a git provider.
+fn git_cli(provider: &str) -> (&'static str, &'static str) {
+    if provider == "gitlab" {
+        ("glab", "GITLAB_HOST")
+    } else {
+        ("gh", "GH_HOST")
+    }
+}
+
+/// Run `bin args...` (no stdin), returning `(success, combined stdout+stderr)`.
+async fn run_cli(bin: &str, args: &[&str]) -> (bool, String) {
+    let out = tokio::process::Command::new(bin)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await;
+    match out {
+        Ok(o) => (
+            o.status.success(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            ),
+        ),
+        Err(_) => (false, format!("{bin} not found")),
+    }
+}
+
+/// Pull the signed-in account out of `gh`/`glab auth status` output.
+fn parse_account(out: &str) -> Option<String> {
+    for marker in ["account ", " as ", "Logged in to "] {
+        if let Some(i) = out.find(marker) {
+            let rest = &out[i + marker.len()..];
+            // Skip a leading host token for the "Logged in to" case.
+            let name: String = rest
+                .split_whitespace()
+                .find(|w| !w.contains('.') && *w != "as")
+                .unwrap_or("")
+                .trim_matches(|c: char| c == '@' || c == '(' || c == ')' || c == '.')
+                .to_owned();
+            if !name.is_empty() {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
+/// The provider + base URL configured for a project's git integration.
+async fn project_provider(app: &AppState, pid: &str) -> Option<(String, String)> {
+    let p = app.project(pid).await?;
+    let cfg = std::fs::read_to_string(&p.config_path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Config>(&t).ok())
+        .unwrap_or_default();
+    Some((cfg.git.provider, cfg.git.base_url))
+}
+
+/// Whether the project's git CLI is signed in, and as whom.
+async fn git_auth_status_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some((provider, base)) = project_provider(&app, &pid).await else {
+        return not_found();
+    };
+    let (bin, host_env) = git_cli(&provider);
+    let host = base
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_owned();
+    let mut cmd = tokio::process::Command::new(bin);
+    cmd.args(["auth", "status"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .stdin(std::process::Stdio::null());
+    if !host.is_empty() {
+        cmd.env(host_env, &host);
+    }
+    let (present, authed, account) = match cmd.output().await {
+        Ok(out) => {
+            let combined = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            (true, out.status.success(), parse_account(&combined))
+        }
+        Err(_) => (false, false, None),
+    };
+    Json(serde_json::json!({
+        "tool": bin, "present": present, "authenticated": authed, "account": account,
+    }))
+    .into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct ConnectReq {
+    token: String,
+}
+
+/// Sign the project's git CLI in with a user-supplied token, via stdin so the
+/// token never appears in the process list; it is not stored or logged by
+/// CoXAgent (the CLI keeps it in its own keyring). Admin-only.
+async fn git_connect_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    Json(req): Json<ConnectReq>,
+) -> axum::response::Response {
+    let token = req.token.trim().to_owned();
+    if token.is_empty() {
+        return (StatusCode::BAD_REQUEST, "token required").into_response();
+    }
+    let Some((provider, base)) = project_provider(&app, &pid).await else {
+        return not_found();
+    };
+    let (bin, host_env) = git_cli(&provider);
+    let host = base
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_owned();
+    let login_args: &[&str] = if bin == "glab" {
+        &["auth", "login", "--stdin"]
+    } else {
+        &["auth", "login", "--with-token"]
+    };
+    // Build the login command with the token on stdin + optional host.
+    let host_env_val = if host.is_empty() { "" } else { host_env };
+    let (ok, out) = {
+        use tokio::io::AsyncWriteExt;
+        let mut cmd = tokio::process::Command::new(bin);
+        cmd.args(login_args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        if !host_env_val.is_empty() {
+            cmd.env(host_env_val, &host);
+        }
+        match cmd.spawn() {
+            Ok(mut child) => {
+                if let Some(mut si) = child.stdin.take() {
+                    let _ = si.write_all(token.as_bytes()).await;
+                    let _ = si.shutdown().await;
+                }
+                match child.wait_with_output().await {
+                    Ok(o) => (
+                        o.status.success(),
+                        String::from_utf8_lossy(&o.stderr).trim().to_owned(),
+                    ),
+                    Err(e) => (false, e.to_string()),
+                }
+            }
+            Err(_) => (false, format!("{bin} not found")),
+        }
+    };
+    if !ok {
+        return (StatusCode::BAD_REQUEST, format!("sign-in failed: {out}")).into_response();
+    }
+    // Confirm and read back the account.
+    let (_a, status_out) = run_cli(bin, &["auth", "status"]).await;
+    Json(serde_json::json!({ "ok": true, "account": parse_account(&status_out) })).into_response()
 }
 
 /// List projects (id, name, alias, version, ticket count) in registration order.

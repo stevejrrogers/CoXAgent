@@ -131,6 +131,11 @@
   .toolgrid{display:flex;flex-direction:column;gap:9px}
   .toolrow{display:flex;align-items:center;gap:11px}
   .toolbrew{background:color-mix(in srgb,var(--amber) 8%,transparent);border:1px solid color-mix(in srgb,var(--amber) 25%,transparent);border-radius:9px;padding:9px 11px}
+  .toolauth{border-top:1px solid var(--border);padding-top:11px;margin-top:2px}
+  .toolauth .gc-btn{flex:none}
+  .cn-steps{display:flex;flex-direction:column;gap:10px;margin:16px 0}
+  .cn-step{display:flex;align-items:center;gap:9px;font-size:13px;color:var(--muted);flex-wrap:wrap}
+  .cn-num{flex:none;display:grid;place-items:center;width:20px;height:20px;border-radius:50%;background:var(--accentbg);color:var(--accent2);font-size:11px;font-weight:700}
   .toolinfo{flex:1;min-width:0}
   .toolinfo b{font-size:13px;font-family:ui-monospace,monospace}
   .tooldim{font-size:12px;color:var(--muted)}
@@ -716,6 +721,18 @@ body:not(.admin) .admin-only { display: none !important; }
         <div class="fld" style="margin-top:12px"><label>Project name</label><input id="rn-name" onkeydown="if(event.key==='Enter')saveRename()" placeholder="e.g. CoXChat"></div>
         <div class="eu-actions"><button class="gc-btn" onclick="close_('ov-rename')">Cancel</button><button class="gc-btn pri" onclick="saveRename()">Save</button></div>
         <div id="rn-msg" class="eu-msg"></div>
+      </div></div>
+      <div class="ov" id="ov-connect" onclick="if(event.target===this)close_('ov-connect')"><div class="modal" style="max-width:480px">
+        <span class="x" onclick="close_('ov-connect')"><i class="ti ti-x"></i></span>
+        <h3 style="font-size:15px"><i class="ti ti-plug" style="color:var(--accent2)"></i> Connect <span id="cn-prov">GitHub</span></h3>
+        <div class="msub">CoXAgent signs <code id="cn-cli">gh</code> in with a token you create. It's passed straight to the CLI and <b>never stored or logged here</b>.</div>
+        <div class="cn-steps">
+          <div class="cn-step"><span class="cn-num">1</span> <a id="cn-link" target="_blank" rel="noopener" class="gc-btn"><i class="ti ti-external-link"></i> Create a token on <span id="cn-prov2">GitHub</span></a> <span class="tooldim" id="cn-scope"></span></div>
+          <div class="cn-step"><span class="cn-num">2</span> Paste it here and connect:</div>
+        </div>
+        <input id="cn-token" type="password" class="eu-in" placeholder="paste your access token" onkeydown="if(event.key==='Enter')submitConnect()">
+        <div class="eu-actions"><button class="gc-btn" onclick="close_('ov-connect')">Cancel</button><button class="gc-btn pri" onclick="submitConnect()"><i class="ti ti-plug"></i> Connect</button></div>
+        <div id="cn-msg" class="eu-msg"></div>
       </div></div>
       <div class="view" id="view-roadmap"><div id="roadmap-body"></div></div>
       <div class="view" id="view-review"><div id="review-body"></div></div>
@@ -1492,7 +1509,14 @@ async function showTicket(id){
 async function rejectTicket(id){try{await fetch(api("/ticket/"+id+"/reject"),{method:"POST"});close_("ov-ticket");}catch(e){}}
 async function loadSettings(){let cfg={};try{cfg=await(await fetch(api("/config"))).json();}catch(e){}window._cfg=cfg;
   let td={tools:[]};try{td=await(await fetch("/api/tooling")).json();}catch(e){}
+  let ga={};try{ga=await(await fetch(api("/git/auth"))).json();}catch(e){}
   const tools=td.tools||[];const missing=tools.filter(t=>!t.present).length;
+  const gprov=(cfg.git&&cfg.git.provider)||"github";
+  const authRow=ga.present?`<div class="toolrow toolauth">
+    <i class="ti ti-${ga.authenticated?'user-check':'user-x'}" style="color:${ga.authenticated?'var(--green)':'var(--amber)'};font-size:17px"></i>
+    <div class="toolinfo"><div><b>${esc(ga.tool||gprov)} sign-in</b> <span class="tooldim">· ${ga.authenticated?('connected as '+esc(ga.account||'?')):'not signed in'}</span></div></div>
+    ${ga.authenticated?'<span class="toolok">connected</span>':`<button class="gc-btn pri" onclick="openConnect('${gprov}')"><i class="ti ti-plug"></i> Connect</button>`}
+  </div>`:'';
   const brewBanner=(td.os==="macos"&&!td.has_brew)
     ? `<div class="toolrow toolbrew"><i class="ti ti-alert-triangle" style="color:var(--amber);font-size:17px"></i>
         <div class="toolinfo"><div><b>Homebrew</b> <span class="tooldim">· the installer these commands use — not found</span></div>
@@ -1504,7 +1528,7 @@ async function loadSettings(){let cfg={};try{cfg=await(await fetch(api("/config"
       <i class="ti ti-${t.present?'circle-check-filled':'circle-x'}" style="color:${t.present?'var(--green)':'var(--red)'};font-size:17px"></i>
       <div class="toolinfo"><div><b>${esc(t.name)}</b> <span class="tooldim">· ${esc(t.purpose)}</span></div>
         ${t.present?`<code class="toolpath">${esc(t.path)}</code>`:`<div class="toolinstall"><code>${esc(t.install)}</code><button class="toolcopy" onclick="copyText(this,'${cp(t.install)}')" title="Copy"><i class="ti ti-copy"></i></button></div>`}
-      </div>${t.needs_auth&&!t.present?'<span class="tooltag">needs your login</span>':''}</div>`).join("")}</div>
+      </div>${t.needs_auth&&!t.present?'<span class="tooltag">needs your login</span>':''}</div>`).join("")}${authRow}</div>
     ${missing?'<div class="toolnote"><i class="ti ti-info-circle"></i> Install the missing tools, then <b>sign them in</b> (e.g. <code>gh auth login</code>) — auth needs you, agents can\'t do it. Restart the app after installing.</div>':''}
   </div>`;
   let detected=[];try{detected=await(await fetch("/api/engines")).json();}catch(e){}
@@ -1577,6 +1601,26 @@ async function loadSettings(){let cfg={};try{cfg=await(await fetch(api("/config"
   loadWorkspace("");}
 function copyText(btn,text){navigator.clipboard&&navigator.clipboard.writeText(text);
   const old=btn.innerHTML;btn.innerHTML='<i class="ti ti-check"></i>';setTimeout(()=>{btn.innerHTML=old;},1200);}
+function openConnect(provider){const gl=provider==="gitlab";
+  const base=(window._cfg&&window._cfg.git&&window._cfg.git.base_url||"").replace(/\/+$/,"");
+  const host=base||(gl?"https://gitlab.com":"https://github.com");
+  document.getElementById("cn-prov").textContent=gl?"GitLab":"GitHub";
+  document.getElementById("cn-prov2").textContent=gl?"GitLab":"GitHub";
+  document.getElementById("cn-cli").textContent=gl?"glab":"gh";
+  document.getElementById("cn-scope").textContent=gl?"scopes: api, write_repository":"scopes: repo, read:org";
+  const link=gl?host+"/-/user_settings/personal_access_tokens?name=CoXAgent"
+              :host+"/settings/tokens/new?scopes=repo,read:org&description=CoXAgent";
+  document.getElementById("cn-link").href=link;
+  document.getElementById("cn-token").value="";document.getElementById("cn-msg").textContent="";
+  document.getElementById("ov-connect").classList.add("open");
+  setTimeout(()=>document.getElementById("cn-token").focus(),40);}
+async function submitConnect(){const token=document.getElementById("cn-token").value.trim();const msg=document.getElementById("cn-msg");
+  if(!token){msg.style.color="var(--red)";msg.textContent="Paste a token first.";return;}
+  msg.style.color="var(--muted)";msg.textContent="Connecting…";
+  try{const r=await fetch(api("/git/connect"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({token})});
+    if(r.ok){const d=await r.json();close_("ov-connect");toasty("Connected"+(d.account?" as "+d.account:""),"ok");loadSettings();}
+    else{msg.style.color="var(--red)";msg.textContent=(await r.text())||"Sign-in failed.";}
+  }catch(e){msg.style.color="var(--red)";msg.textContent="Network error.";}}
 function setSetTab(name){window._setTab=name;
   document.querySelectorAll(".settab-btn").forEach(b=>b.classList.toggle("on",b.dataset.t===name));
   document.querySelectorAll(".settab").forEach(p=>{p.hidden=p.dataset.p!==name;});
