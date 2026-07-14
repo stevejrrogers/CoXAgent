@@ -1,6 +1,7 @@
 //! Use cases — application services orchestrating domain + ports.
 
 pub mod add_ticket;
+pub mod analyze_attachment;
 pub mod conformance_check;
 pub mod cycle;
 pub mod recover;
@@ -16,6 +17,7 @@ pub mod run_test;
 pub mod runner;
 
 pub use add_ticket::{AddTicketInput, AddTicketUseCase};
+pub use analyze_attachment::{AnalyzeAttachmentUseCase, ReadableAttachment};
 pub use conformance_check::RunConformanceUseCase;
 pub use cycle::{CycleReport, RunCycleUseCase};
 pub use recover::RecoverUseCase;

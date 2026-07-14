@@ -1194,11 +1194,54 @@ async fn post_comment(
     let Ok(mut state) = p.store.load().await else {
         return internal_error("load failed");
     };
-    state.post_comment_att("USER", body, req.ticket, req.attachments);
-    match p.store.save(&state).await {
-        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
-        Err(e) => internal_error(&e.to_string()),
+    state.post_comment_att("USER", body, req.ticket.clone(), req.attachments.clone());
+    if let Err(e) = p.store.save(&state).await {
+        return internal_error(&e.to_string());
     }
+    // If the user attached something an agent can read, let the SA agent read it
+    // and respond — answering if a question was asked, otherwise reading it
+    // proactively and asking back. Runs in the background so the post is instant.
+    maybe_analyze_attachments(&p, "USER", body, req.ticket, &req.attachments);
+    Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+/// Spawn a background SA turn that reads any readable attachments on a freshly
+/// posted comment and replies. No-op when there are no readable attachments.
+fn maybe_analyze_attachments(
+    p: &ProjectHandle,
+    author: &str,
+    body: &str,
+    ticket: Option<String>,
+    attachments: &[coxagent_application::Attachment],
+) {
+    use coxagent_application::use_cases::{AnalyzeAttachmentUseCase, ReadableAttachment};
+    let dir = media_dir(p);
+    let readable: Vec<ReadableAttachment> = attachments
+        .iter()
+        .filter_map(|a| {
+            // Resolve the browser URL back to the on-disk file the CLI can open.
+            let file = a.url.rsplit('/').next()?;
+            let path = dir.join(file);
+            (path.is_file()).then(|| ReadableAttachment {
+                name: a.name.clone(),
+                mime: a.mime.clone(),
+                path,
+            })
+        })
+        .collect();
+    if readable.is_empty() {
+        return;
+    }
+    let store = Arc::clone(&p.store);
+    let engine = Arc::clone(&p.engine);
+    let work_dir = p.work_dir.clone();
+    let (author, body) = (author.to_owned(), body.to_owned());
+    tokio::spawn(async move {
+        let uc = AnalyzeAttachmentUseCase::new(store, engine, work_dir);
+        if let Err(e) = uc.execute(&author, &body, ticket, &readable).await {
+            tracing::warn!("attachment analysis failed: {e}");
+        }
+    });
 }
 
 /// List the project's team-chat messages (oldest first).
