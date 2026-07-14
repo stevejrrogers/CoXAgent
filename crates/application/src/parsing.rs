@@ -14,6 +14,9 @@ pub struct ProposedItem {
     pub complexity: Complexity,
     #[serde(default)]
     pub has_ui: bool,
+    /// Up to 5 acceptance criteria the agent proposes as the "definition of done".
+    #[serde(default)]
+    pub acceptance_criteria: Vec<String>,
 }
 
 /// Extract the outermost JSON array from engine output, tolerating surrounding
@@ -22,6 +25,20 @@ pub struct ProposedItem {
 /// # Errors
 /// Returns a message when no array is present or the JSON is malformed.
 pub fn parse_items(raw: &str) -> Result<Vec<ProposedItem>, String> {
+    let start = raw.find('[').ok_or("no JSON array found")?;
+    let end = raw.rfind(']').ok_or("no closing bracket")?;
+    if end < start {
+        return Err("malformed array bounds".to_owned());
+    }
+    serde_json::from_str(&raw[start..=end]).map_err(|e| e.to_string())
+}
+
+/// Extract the outermost JSON array of strings (e.g. acceptance criteria),
+/// tolerating surrounding prose.
+///
+/// # Errors
+/// Returns a message when no array is present or the JSON is malformed.
+pub fn parse_string_list(raw: &str) -> Result<Vec<String>, String> {
     let start = raw.find('[').ok_or("no JSON array found")?;
     let end = raw.rfind(']').ok_or("no closing bracket")?;
     if end < start {

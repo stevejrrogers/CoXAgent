@@ -148,6 +148,14 @@
   .agtk{display:inline-flex;align-items:center;gap:4px;background:var(--accentbg);color:var(--accent2);border-radius:6px;padding:1px 8px;font-family:ui-monospace,monospace;font-size:11px;cursor:pointer}
   .agtk i{font-size:12px}
   .agidle{color:var(--dim)}
+  .pchart{display:flex;flex-direction:column;gap:10px}
+  .pcrow{display:flex;align-items:center;gap:12px}
+  .pclabel{flex:none;width:130px;display:flex;align-items:center;gap:7px;font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .pcbarwrap{flex:1;position:relative;height:22px;background:var(--card2);border-radius:6px;overflow:hidden;min-width:80px}
+  .pcbar{position:absolute;left:0;top:0;bottom:0;background:linear-gradient(90deg,var(--accent),var(--accent2));border-radius:6px}
+  .pcval{position:absolute;left:9px;top:0;line-height:22px;font-size:11px;color:var(--text);white-space:nowrap;font-family:ui-monospace,monospace}
+  .pcsuccess{flex:none;width:80px;height:6px;background:var(--card2);border-radius:3px;overflow:hidden}
+  .pcsuccessbar{height:100%;border-radius:3px}
   .chatwrap{display:flex;flex-direction:column;background:var(--card);border:1px solid var(--border);border-radius:var(--r);overflow:hidden;height:calc(100vh - 118px);min-height:540px}
   .cevent{display:flex;justify-content:center;margin:2px 0}
   .cev-pill{display:inline-flex;align-items:center;gap:7px;font-size:11.5px;color:var(--muted);background:var(--card2);border:1px solid var(--border2);border-left:3px solid var(--ec);border-radius:8px;padding:5px 12px;max-width:88%}
@@ -1472,7 +1480,17 @@ function renderPeople(){
     document.getElementById("people-kpis").innerHTML=
       kpi("Active 24h",active)+kpi("Contributors",working)+kpi("People",people.length)+kpi("Work actions",totalWork);
     if(!people.length){body.innerHTML='<div class="empty">no activity recorded yet</div>';return;}
-    body.innerHTML='<table class="ptbl"><thead><tr><th>User</th><th>Status</th><th>Work</th><th>Total</th><th>Active days</th><th>Success</th><th>Last active</th><th>Top actions</th></tr></thead><tbody>'+
+    const maxW=Math.max(1,...people.map(p=>p.work||0));
+    const chart=`<div class="sec" style="margin-bottom:8px">Productivity <span style="font-size:11px;color:var(--dim);font-weight:400">· work actions per person + success rate</span></div>
+      <div class="panel pchart">${people.map(p=>{const w=Math.round((p.work||0)/maxW*100);
+        const sc=p.success_rate>=95?"var(--green)":(p.success_rate>=80?"var(--amber)":"var(--red)");
+        return `<div class="pcrow">
+          <div class="pclabel"><span class="pav" style="width:22px;height:22px;font-size:10px">${esc((p.user||'?').charAt(0).toUpperCase())}</span> ${esc(p.user)}</div>
+          <div class="pcbarwrap"><div class="pcbar" style="width:${Math.max(2,w)}%"></div><span class="pcval">${p.work} work · ${p.actions} total</span></div>
+          <div class="pcsuccess" title="success rate ${p.success_rate}%"><div class="pcsuccessbar" style="width:${p.success_rate}%;background:${sc}"></div></div>
+          <div style="font-size:11px;color:${sc};min-width:40px;text-align:right">${p.success_rate}%</div></div>`;}).join("")}</div>
+      <div class="sec" style="margin-top:18px">Per-person detail</div>`;
+    body.innerHTML=chart+'<table class="ptbl"><thead><tr><th>User</th><th>Status</th><th>Work</th><th>Total</th><th>Active days</th><th>Success</th><th>Last active</th><th>Top actions</th></tr></thead><tbody>'+
       people.map(p=>{
         const live=isActiveRecent(p.last_active);
         const working=p.work>0;

@@ -3,7 +3,7 @@
 //! one bad run never stalls the team (matching the reference workflow).
 
 use crate::config::Config;
-use crate::ports::outbound::{AgentEnginePort, DeployPort, StateStorePort};
+use crate::ports::outbound::{AgentEnginePort, AgentRequest, DeployPort, StateStorePort};
 use crate::state::Spend;
 use crate::use_cases::run_dev::DevMode;
 use crate::use_cases::{
@@ -258,6 +258,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
 
         if self.config.workflow.feature_dev_enabled {
+            // Before building, make sure the next feature has a clear definition
+            // of done — DEV raises unclear tickets and the BA fills them in.
+            self.clarify_next_feature().await;
             match self.dev(DevMode::Feature).execute().await {
                 Ok(id) => report.feature_done = id,
                 Err(e) => report.errors.push(format!("DEV-FEATURE: {e}")),
@@ -367,6 +370,85 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             })
             .await
             .ok()
+    }
+
+    /// Clarification loop: if the next ready feature has no acceptance criteria,
+    /// DEV-FEATURE "raises it" on the ticket thread and the BA jumps in to pin
+    /// down the definition of done — so nobody builds against a fuzzy spec.
+    /// Best-effort, at most one clarification per cycle.
+    async fn clarify_next_feature(&self) {
+        use coxagent_domain::ticket::{Status, TicketType};
+        let Ok(state) = self.store.load().await else {
+            return;
+        };
+        let Some((id, title)) = state
+            .tickets
+            .iter()
+            .find(|t| {
+                t.ticket_type() == TicketType::Feature
+                    && t.status() == Status::Ready
+                    && t.acceptance_criteria().is_empty()
+            })
+            .map(|t| (t.id().clone(), t.title().to_owned()))
+        else {
+            return;
+        };
+
+        // DEV flags it — in a human tone — on the ticket thread.
+        if let Ok(mut s) = self.store.load().await {
+            s.post_comment(
+                "DEV-FEATURE",
+                &format!(
+                    "Hold on — {id} has no acceptance criteria. I'm not going to guess what \
+                     \"done\" means and risk building the wrong thing. BA, can you pin it down?"
+                ),
+                Some(id.to_string()),
+            );
+            let _ = self.store.save(&s).await;
+        }
+
+        // BA answers by generating concrete criteria.
+        let request = AgentRequest {
+            role: coxagent_domain::Role::Ba,
+            system_prompt: crate::prompts::system_prompt(crate::prompts::BA),
+            task_prompt: format!(
+                "A developer flagged that ticket {id} (\"{title}\") has no acceptance criteria \
+                 and won't start without them. Write 2-5 concrete, testable acceptance criteria \
+                 (user-visible behaviour, not implementation). Respond with ONLY a JSON array of \
+                 strings."
+            ),
+            work_dir: self.work_dir.clone(),
+            timeout: std::time::Duration::from_secs(300),
+        };
+        let Ok(outcome) = self.engine.run(request).await else {
+            return;
+        };
+        if !outcome.succeeded() {
+            return;
+        }
+        let Ok(criteria) = crate::parsing::parse_string_list(&outcome.stdout) else {
+            return;
+        };
+        let criteria: Vec<String> = criteria.into_iter().take(5).collect();
+        if criteria.is_empty() {
+            return;
+        }
+        if let Ok(mut s) = self.store.load().await {
+            if let Some(t) = s.ticket_mut(&id) {
+                t.set_acceptance_criteria(criteria.clone());
+            }
+            s.post_comment(
+                "BA",
+                &format!(
+                    "Good catch — my bad for leaving {id} fuzzy. Definition of done: {}. \
+                     Updated the ticket, you're clear to build.",
+                    criteria.join("; ")
+                ),
+                Some(id.to_string()),
+            );
+            s.log_activity("BA", "clarified acceptance criteria", Some(id.to_string()));
+            let _ = self.store.save(&s).await;
+        }
     }
 
     /// Append a human-readable activity trail plus drain the spend meter into

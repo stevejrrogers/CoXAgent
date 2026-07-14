@@ -14,7 +14,10 @@ You are the Business Analyst. Analyse the product goal and existing backlog, \
 then propose 1-3 valuable NEW features that fit the current scope.\n\n\
 Respond with ONLY a JSON array, no prose, each item exactly:\n\
 {\"title\": string, \"description\": string, \"priority\": \"low\"|\"medium\"|\"high\", \
-\"complexity\": \"small\"|\"medium\"|\"large\", \"has_ui\": boolean}";
+\"complexity\": \"small\"|\"medium\"|\"large\", \"has_ui\": boolean, \
+\"acceptance_criteria\": [string, ...]}\n\
+acceptance_criteria: 2-5 concrete, testable statements that define when the feature \
+is done (user-visible behaviour, not implementation).";
 
 /// Solution Architect — produces the technical design for one feature. UX is
 /// owned by the PD in a separate pass.

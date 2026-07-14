@@ -81,7 +81,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
                     priority: p.priority,
                     complexity: p.complexity,
                     has_ui: p.has_ui,
-                    acceptance_criteria: Vec::new(),
+                    acceptance_criteria: p.acceptance_criteria,
                 })
                 .await?;
             created.push(id);
