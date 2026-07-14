@@ -72,6 +72,14 @@ impl AuthRole {
         matches!(self, Self::Admin) || self.is_lead()
     }
 
+    /// Whether this role may access management surfaces — project Settings and
+    /// user administration: Admin and the lead tier (Director/Manager/*.Lead).
+    /// Member-tier roles (BA/FE/BE/…) can work and chat but not administer.
+    #[must_use]
+    pub fn can_manage(self) -> bool {
+        matches!(self, Self::Admin) || self.is_lead()
+    }
+
     /// Lowercase wire label. Compound roles collapse dots (e.g. `"techlead"`).
     #[must_use]
     pub fn as_str(self) -> &'static str {
@@ -182,6 +190,19 @@ mod role_tests {
         assert!(!AuthRole::De.can_create_channel());
         // Legacy Viewer is read-only.
         assert!(!AuthRole::Viewer.can_write());
+    }
+
+    #[test]
+    fn manage_is_admin_plus_leads_only() {
+        assert!(AuthRole::Admin.can_manage());
+        assert!(AuthRole::Manager.can_manage());
+        assert!(AuthRole::Director.can_manage());
+        assert!(AuthRole::TechLead.can_manage());
+        assert!(AuthRole::DsLead.can_manage());
+        // Member tier cannot access management surfaces.
+        assert!(!AuthRole::Ba.can_manage());
+        assert!(!AuthRole::Fe.can_manage());
+        assert!(!AuthRole::De.can_manage());
     }
 
     #[test]

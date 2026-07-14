@@ -2251,6 +2251,30 @@ async fn auth_mw(
         && !path.ends_with("/upload"); // uploads are open to any signed-in user
     let method = req.method().clone();
     let username = user.username.clone();
+    // Management surfaces — user administration, project Settings, and API
+    // tokens — are limited to Admin + lead tier (Director/Manager/*.Lead).
+    // Member-tier roles (BA/FE/BE/…) can work and chat but not administer.
+    let is_manage_surface = path.starts_with("/api/auth/users")
+        || path.starts_with("/api/auth/tokens")
+        || (path.ends_with("/config")
+            && matches!(
+                *req.method(),
+                axum::http::Method::PUT | axum::http::Method::POST | axum::http::Method::PATCH
+            ));
+    if is_manage_surface && !user.role.can_manage() {
+        audit_push(
+            &app.audit,
+            &username,
+            format!("{method} {path}"),
+            StatusCode::FORBIDDEN.as_u16(),
+        )
+        .await;
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "management role required" })),
+        )
+            .into_response();
+    }
     // PR review actions (merge / request-changes / close) are allowed for
     // reviewers as well as admins; every other write stays admin-only.
     let is_review_action = path.contains("/prs/");
@@ -2330,7 +2354,7 @@ async fn list_tokens_ep(
     };
     let is_admin = resolve_principal(&auth, &headers)
         .await
-        .is_some_and(|u| u.role.can_write());
+        .is_some_and(|u| u.role.can_manage());
     if !is_admin {
         return (StatusCode::FORBIDDEN, "admin role required").into_response();
     }
@@ -2381,7 +2405,7 @@ async fn list_users_ep(
     };
     let is_admin = resolve_principal(&auth, &headers)
         .await
-        .is_some_and(|u| u.role.can_write());
+        .is_some_and(|u| u.role.can_manage());
     if !is_admin {
         return (StatusCode::FORBIDDEN, "admin role required").into_response();
     }
@@ -2503,11 +2527,12 @@ async fn list_members_ep(
     let Some(auth) = app.auth.clone() else {
         return Json(serde_json::json!([])).into_response();
     };
-    let is_admin = resolve_principal(&auth, &headers)
+    // The People view lists a project's members to anyone on the project.
+    let allowed = resolve_principal(&auth, &headers)
         .await
         .is_some_and(|u| u.role.can_write());
-    if !is_admin {
-        return (StatusCode::FORBIDDEN, "admin role required").into_response();
+    if !allowed {
+        return (StatusCode::FORBIDDEN, "sign-in required").into_response();
     }
     let out: Vec<serde_json::Value> = auth
         .list_users()

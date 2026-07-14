@@ -573,6 +573,7 @@
   .modal pre{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:12px;font-size:12px;overflow:auto;white-space:pre-wrap;line-height:1.55;font-family:ui-monospace,monospace}
 body.viewer .ctlrow, body.viewer .projadd, body.viewer .pi-del, body.viewer .ticket-actions { display: none !important; }
 body:not(.admin) .admin-only { display: none !important; }
+body:not(.manage) .manage-only { display: none !important; }
 .pri{background:var(--accent);color:#fff;border:1px solid transparent;border-radius:9px;padding:9px 14px;font-size:13px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:6px;font-family:inherit}
 .pri:hover{background:var(--accenth)}
 .userbox{display:none;align-items:center;gap:10px;margin-top:10px;padding:8px 10px;background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--border2);border-radius:12px}
@@ -624,8 +625,8 @@ body:not(.admin) .admin-only { display: none !important; }
       <a data-v="insights" onclick="nav('insights')"><i class="ti ti-coin"></i> Cost</a>
       <a data-v="people" class="admin-only" onclick="nav('people')"><i class="ti ti-user-star"></i> People</a>
       <a data-v="audit" class="admin-only" onclick="nav('audit')"><i class="ti ti-shield-lock"></i> Audit</a>
-      <a data-v="access" class="admin-only" onclick="nav('access')"><i class="ti ti-user-cog"></i> Users</a>
-      <a data-v="settings" onclick="nav('settings')"><i class="ti ti-settings"></i> Settings</a>
+      <a data-v="access" class="manage-only" onclick="nav('access')"><i class="ti ti-user-cog"></i> Users</a>
+      <a data-v="settings" class="manage-only" onclick="nav('settings')"><i class="ti ti-settings"></i> Settings</a>
     </nav>
     <div class="runner"><div class="rt"><span class="dot off" id="runmode"></span><span id="runlbl">idle</span></div>
       <div class="rc" id="runsum">paused</div>
@@ -973,7 +974,10 @@ function setWorkTab(w){WORKTAB=w;
   document.getElementById("work-backlog").style.display=w==="backlog"?"":"none";
   renderActive();}
 
-function nav(v){CUR=v;location.hash=v;
+function nav(v){
+  // Management surfaces are Admin + lead only — bounce members to Overview.
+  if((v==="settings"||v==="access")&&!canManage())v="overview";
+  CUR=v;location.hash=v;
   document.querySelectorAll(".view").forEach(x=>x.classList.remove("on"));
   document.getElementById("view-"+v).classList.add("on");
   document.querySelectorAll(".nav a").forEach(a=>a.classList.toggle("on",a.dataset.v===v));
@@ -2252,6 +2256,9 @@ const ROLE_LABELS={admin:"Admin",director:"Director",manager:"Manager",techlead:
 function roleLabel(r){return ROLE_LABELS[r]||r;}
 function roleCanWrite(r){return r!=="viewer";}
 function roleCanCreateChannel(r){return r==="admin"||LEAD_ROLES.includes(r);}
+// Management surfaces (Settings, Users) are Admin + lead tier only.
+function roleCanManage(r){return r==="admin"||LEAD_ROLES.includes(r);}
+function canManage(){return !ME||!ME.auth||roleCanManage(ME.role);}
 // Only the legacy read-only Viewer gets a locked-down UI; every real role writes.
 function applyRole(){
   const isViewer=ME&&ME.auth&&ME.role==="viewer";
@@ -2259,6 +2266,7 @@ function applyRole(){
   const isAdmin=!ME||!ME.auth||ME.role==="admin";
   document.body.classList.toggle("viewer",!!isViewer);
   document.body.classList.toggle("admin",!!isAdmin);
+  document.body.classList.toggle("manage",canManage());
   const badge=document.getElementById("user-badge");
   if(ME&&ME.auth){badge.style.display="flex";
     document.getElementById("ub-initials").textContent=(ME.username||"?").slice(0,2).toUpperCase();
@@ -2657,6 +2665,7 @@ function cmdkBuild(){
   const items=[];const isAdmin=ME&&ME.role==="admin";
   Object.keys(TITLES).forEach(v=>{const a=document.querySelector(`.nav a[data-v="${v}"]`);if(!a)return;
     if(a.classList.contains("admin-only")&&!isAdmin)return;
+    if(a.classList.contains("manage-only")&&!canManage())return;
     items.push({cat:"Go to",label:TITLES[v][0],hint:TITLES[v][1],icon:NAV_IC[v]||"point",run:()=>nav(v)});});
   (PROJECTS||[]).forEach(p=>items.push({cat:"Switch project",label:p.name,hint:p.alias||p.id,icon:"hexagon-letter-c",run:()=>switchProject(p.id)}));
   items.push({cat:"Action",label:"New ticket",hint:"add to backlog",icon:"plus",run:()=>openNewTicket()});
