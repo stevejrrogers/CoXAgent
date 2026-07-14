@@ -326,6 +326,15 @@ body:not(.admin) .admin-only { display: none !important; }
         <div class="sec" style="margin-top:20px">Agent transcripts <span style="font-size:11px;color:var(--dim);font-weight:400">· full prompt + output per run</span></div>
         <div class="panel"><div id="transcript-list"></div></div>
       </div>
+      <div class="ov" id="ov-agent" onclick="if(event.target===this)close_('ov-agent')"><div class="modal" style="max-width:840px">
+        <span class="x" onclick="close_('ov-agent')"><i class="ti ti-x"></i></span>
+        <h3 id="agent-title" style="display:flex;align-items:center;gap:9px"></h3>
+        <div class="msub" id="agent-sub">recent actions &amp; latest run</div>
+        <div class="sec" style="margin-top:12px">Recent actions</div>
+        <div id="agent-acts" class="panel" style="max-height:22vh;overflow:auto"></div>
+        <div class="sec" style="margin-top:14px">Latest run <span style="font-size:11px;color:var(--dim);font-weight:400">· full prompt + output, like a CLI session</span></div>
+        <pre id="agent-transcript" style="max-height:46vh;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:12px;background:var(--card2);padding:12px;border-radius:8px">—</pre>
+      </div></div>
       <div class="ov" id="ov-transcript" onclick="if(event.target===this)close_('ov-transcript')"><div class="modal" style="max-width:760px">
         <span class="x" onclick="close_('ov-transcript')"><i class="ti ti-x"></i></span>
         <h3 id="tr-title" style="font-size:15px;word-break:break-all">transcript</h3>
@@ -714,8 +723,8 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
     document.getElementById("agents").innerHTML=AGENTS.map(([r,d,c])=>{
       const run=active.length&&(r==="DEV-FEATURE"||r==="DEV-BUG");const col=cvar(c);const n=counts[r]||0;
       const work=run?active[0].id:null;
-      return `<div class="agent ${run?'run':''}"><div class="av" style="background:${col}22;color:${col}">${initials(r)}<span class="sr"></span></div>
-        <div style="flex:1"><div class="rl">${r}</div><div class="ds">${d}</div>
+      return `<div class="agent ${run?'run':''}" onclick="openAgent('${r}')" style="cursor:pointer"><div class="av" style="background:${col}22;color:${col}">${initials(r)}<span class="sr"></span></div>
+        <div style="flex:1"><div class="rl">${r} <i class="ti ti-terminal-2" style="font-size:12px;color:var(--dim);float:right"></i></div><div class="ds">${d}</div>
         <div class="st">${run?`<i class="ti ti-loader-2" style="font-size:13px"></i> on ${work}`:`<i class="ti ti-checkbox" style="font-size:13px"></i> ${n} actions`}</div></div></div>`;}).join("");
   }else if(CUR==="board"){
     let feats=(s.tickets||[]).filter(t=>t.type!=="bug"),bugs=(s.tickets||[]).filter(t=>t.type==="bug");
@@ -1209,6 +1218,25 @@ function renderTranscripts(){
         <div class="ad" style="background:${col}22;color:${col}"><i class="ti ti-file-text" style="font-size:13px"></i></div>
         <div class="atx"><span class="who">${esc(t.name)}</span></div><span class="tm">${fmtBytes(t.size)}</span></div>`;}).join("");
   }).catch(()=>{el.innerHTML='<div class="empty">unable to load transcripts</div>';});
+}
+async function openAgent(role){
+  const meta=AGENTS.find(a=>a[0]===role);const col=cvar((meta&&meta[2])||"--muted");
+  document.getElementById("agent-title").innerHTML=`<span class="av" style="width:30px;height:30px;background:${col}22;color:${col}">${esc(initials(role))}</span> ${esc(role)}`;
+  document.getElementById("agent-sub").textContent=(meta&&meta[1])||"agent";
+  const acts=(STATE.activity||[]).filter(a=>a.agent===role).slice(-15).reverse();
+  document.getElementById("agent-acts").innerHTML=acts.length?acts.map(a=>
+    `<div class="act"><div class="atx"><span>${esc(a.action)}</span> ${a.ticket?`<span class="tk">${esc(a.ticket)}</span>`:''}</div><span class="tm">${esc((a.at||'').slice(11,16))}</span></div>`).join("")
+    :'<div class="empty">no recorded actions yet</div>';
+  const body=document.getElementById("agent-transcript");body.textContent="loading latest run…";
+  document.getElementById("ov-agent").classList.add("open");
+  try{
+    const rows=await(await fetch(api("/transcripts"))).json();
+    const token=role.toLowerCase().replace(/-/g,"_");
+    const match=(rows||[]).find(t=>{const m=t.name.match(/-(\w[\w-]*)\.md$/);return m&&m[1]===token;});
+    if(!match){body.textContent="(this agent hasn't run yet — no transcript)";return;}
+    const r=await fetch(api("/transcripts/"+encodeURIComponent(match.name)));
+    body.textContent=r.ok?await r.text():"(unavailable)";
+  }catch(e){body.textContent="(error loading transcript)";}
 }
 async function openTranscript(enc,name){
   document.getElementById("tr-title").textContent=name;
