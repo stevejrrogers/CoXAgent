@@ -6,52 +6,193 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-/// A coarse access role. `Admin` may mutate everything (control the runner,
-/// onboard, set priorities, edit config/users). `Reviewer` may review code —
-/// approve / merge / request changes on PRs & MRs — but not change config,
-/// tickets, or accounts. `Viewer` is read-only.
+/// A user's organisational role, which also gates access.
+///
+/// Tiers, from most to least privileged:
+/// - `Admin` — full control (runner, onboarding, config, users, everything).
+/// - **Lead tier** (`Director`, `Manager`, `TechLead`, `DsLead`, `DaLead`) —
+///   may write (create tickets, run agents, git actions), review code, and
+///   create chat channels.
+/// - **Member tier** (`Ba`, `Fe`, `Be`, `Aie`, `Ds`, `Da`, `De`) — may chat and
+///   view, but not mutate project data or create channels.
+/// - `Reviewer` / `Viewer` — legacy roles kept for existing accounts; Reviewer
+///   may review code, Viewer is read-only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AuthRole {
     Admin,
+    // Lead tier
+    Director,
+    Manager,
+    TechLead,
+    DsLead,
+    DaLead,
+    // Member tier (individual contributors)
+    Ba,
+    Fe,
+    Be,
+    Aie,
+    Ds,
+    Da,
+    De,
+    // Legacy
     Reviewer,
     Viewer,
 }
 
 impl AuthRole {
+    /// Whether this role is in the lead tier (Director/Manager/*.Lead). Leads may
+    /// write, review, and create channels.
+    #[must_use]
+    pub fn is_lead(self) -> bool {
+        matches!(
+            self,
+            Self::Director | Self::Manager | Self::TechLead | Self::DsLead | Self::DaLead
+        )
+    }
+
     /// Whether this role may perform mutating (write) actions on project data
-    /// and settings. Reviewers cannot — their power is scoped to code review.
+    /// and settings. Every real role can write; only the legacy read-only
+    /// `Viewer` cannot.
     #[must_use]
     pub fn can_write(self) -> bool {
-        matches!(self, Self::Admin)
+        !matches!(self, Self::Viewer)
     }
 
     /// Whether this role may act on code review (approve / merge / request
-    /// changes on pull/merge requests). Admins and reviewers can.
+    /// changes on pull/merge requests): Admin, leads, and the legacy Reviewer.
     #[must_use]
     pub fn can_review(self) -> bool {
-        matches!(self, Self::Admin | Self::Reviewer)
+        self.can_write() || matches!(self, Self::Reviewer)
     }
 
-    /// Lowercase wire label (`"admin"` / `"reviewer"` / `"viewer"`).
+    /// Whether this role may create chat channels: Admin and the lead tier.
+    #[must_use]
+    pub fn can_create_channel(self) -> bool {
+        matches!(self, Self::Admin) || self.is_lead()
+    }
+
+    /// Lowercase wire label. Compound roles collapse dots (e.g. `"techlead"`).
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Admin => "admin",
+            Self::Director => "director",
+            Self::Manager => "manager",
+            Self::TechLead => "techlead",
+            Self::DsLead => "dslead",
+            Self::DaLead => "dalead",
+            Self::Ba => "ba",
+            Self::Fe => "fe",
+            Self::Be => "be",
+            Self::Aie => "aie",
+            Self::Ds => "ds",
+            Self::Da => "da",
+            Self::De => "de",
             Self::Reviewer => "reviewer",
             Self::Viewer => "viewer",
         }
     }
 
+    /// Human-friendly display label (e.g. `"Tech.Lead"`, `"BA"`).
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Admin => "Admin",
+            Self::Director => "Director",
+            Self::Manager => "Manager",
+            Self::TechLead => "Tech.Lead",
+            Self::DsLead => "DS.Lead",
+            Self::DaLead => "DA.Lead",
+            Self::Ba => "BA",
+            Self::Fe => "FE",
+            Self::Be => "BE",
+            Self::Aie => "AIE",
+            Self::Ds => "DS",
+            Self::Da => "DA",
+            Self::De => "DE",
+            Self::Reviewer => "Reviewer",
+            Self::Viewer => "Viewer",
+        }
+    }
+
     /// Parse a wire label; unknown values fall back to the least-privileged
-    /// [`AuthRole::Viewer`].
+    /// [`AuthRole::Viewer`]. Accepts dotted/spaced forms (e.g. `"tech.lead"`).
     #[must_use]
     pub fn from_str_lenient(s: &str) -> Self {
-        match s {
+        let norm = s
+            .trim()
+            .to_ascii_lowercase()
+            .replace(['.', ' ', '-', '_'], "");
+        match norm.as_str() {
             "admin" => Self::Admin,
+            "director" => Self::Director,
+            "manager" => Self::Manager,
+            "techlead" => Self::TechLead,
+            "dslead" => Self::DsLead,
+            "dalead" => Self::DaLead,
+            "ba" => Self::Ba,
+            "fe" => Self::Fe,
+            "be" => Self::Be,
+            "aie" => Self::Aie,
+            "ds" => Self::Ds,
+            "da" => Self::Da,
+            "de" => Self::De,
             "reviewer" => Self::Reviewer,
             _ => Self::Viewer,
         }
+    }
+
+    /// All roles assignable in the UI, most privileged first.
+    #[must_use]
+    pub fn all() -> &'static [AuthRole] {
+        &[
+            Self::Admin,
+            Self::Director,
+            Self::Manager,
+            Self::TechLead,
+            Self::DsLead,
+            Self::DaLead,
+            Self::Ba,
+            Self::Fe,
+            Self::Be,
+            Self::Aie,
+            Self::Ds,
+            Self::Da,
+            Self::De,
+        ]
+    }
+}
+
+#[cfg(test)]
+mod role_tests {
+    use super::AuthRole;
+
+    #[test]
+    fn write_and_channel_capabilities() {
+        assert!(AuthRole::Admin.can_write() && AuthRole::Admin.can_create_channel());
+        // Every real role can write now.
+        for r in AuthRole::all() {
+            assert!(r.can_write(), "{} should write", r.as_str());
+        }
+        // Only Admin + lead tier create channels.
+        assert!(AuthRole::TechLead.can_create_channel());
+        assert!(AuthRole::Director.can_create_channel());
+        assert!(!AuthRole::Ba.can_create_channel());
+        assert!(!AuthRole::De.can_create_channel());
+        // Legacy Viewer is read-only.
+        assert!(!AuthRole::Viewer.can_write());
+    }
+
+    #[test]
+    fn round_trips_wire_labels() {
+        for r in AuthRole::all() {
+            assert_eq!(AuthRole::from_str_lenient(r.as_str()), *r);
+        }
+        // Dotted/spaced human forms parse too.
+        assert_eq!(AuthRole::from_str_lenient("Tech.Lead"), AuthRole::TechLead);
+        assert_eq!(AuthRole::from_str_lenient("DA.Lead"), AuthRole::DaLead);
+        assert_eq!(AuthRole::from_str_lenient("nonsense"), AuthRole::Viewer);
     }
 }
 

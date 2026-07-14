@@ -3,11 +3,12 @@
 // start by hand. Unsigned/ad-hoc — build & run locally without a cert.
 import Cocoa
 import WebKit
+import UserNotifications
 
 let PORT = 4000
 
 final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate,
-                         WKScriptMessageHandler, NSUserNotificationCenterDelegate {
+                         WKScriptMessageHandler, UNUserNotificationCenterDelegate {
     var window: NSWindow!
     var web: WKWebView!
     var hub: Process?
@@ -17,12 +18,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
         // Bridge web → native for notifications: the WKWebView has no web
         // Notification API, so the page posts to `coxnotify` and we raise a real
-        // macOS notification instead.
+        // macOS notification instead. UNUserNotificationCenter registers the app
+        // with the system (so it appears in System Settings › Notifications) and
+        // is the supported path on modern macOS.
+        let center = UNUserNotificationCenter.current()
+        center.delegate = self
+        center.requestAuthorization(options: [.alert, .sound]) { granted, err in
+            self.notifLog("authorization granted=\(granted) err=\(String(describing: err))")
+        }
+
         let cfg = WKWebViewConfiguration()
         let ucc = WKUserContentController()
         ucc.add(self, name: "coxnotify")
         cfg.userContentController = ucc
-        NSUserNotificationCenter.default.delegate = self
 
         web = WKWebView(frame: NSMakeRect(0, 0, 1360, 860), configuration: cfg)
         web.navigationDelegate = self
@@ -176,35 +184,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     // MARK: - Native notifications (bridged from the web page).
-    // The page posts {title, body, channel} to `coxnotify`; we deliver a macOS
-    // notification. NSUserNotification is deprecated but, unlike
-    // UNUserNotificationCenter, it works reliably for an ad-hoc-signed app run
-    // from outside /Applications — the exact case here.
+    // The page posts {title, body, channel} to `coxnotify`; we raise a macOS
+    // notification via UNUserNotificationCenter.
     func userContentController(_ ucc: WKUserContentController, didReceive message: WKScriptMessage) {
         guard message.name == "coxnotify", let d = message.body as? [String: Any] else { return }
-        let n = NSUserNotification()
-        n.title = d["title"] as? String ?? "CoXAgent"
-        n.informativeText = d["body"] as? String ?? ""
-        n.soundName = NSUserNotificationDefaultSoundName
-        if let ch = d["channel"] as? String, !ch.isEmpty { n.userInfo = ["channel": ch] }
-        NSUserNotificationCenter.default.deliver(n)
+        // Diagnostic pings from the page: log, don't raise a banner.
+        if let dbg = d["debug"] as? String { notifLog("JS: \(dbg)"); return }
+        let title = d["title"] as? String ?? "CoXAgent"
+        let body = d["body"] as? String ?? ""
+        let channel = d["channel"] as? String ?? ""
+        notifLog("coxnotify received: title=\(title) channel=\(channel)")
+
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        if !channel.isEmpty { content.userInfo = ["channel": channel] }
+        let req = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(req) { err in
+            if let err = err { self.notifLog("add() error: \(err)") }
+        }
     }
 
     // Show the banner even when CoXAgent is the frontmost app.
-    func userNotificationCenter(_ center: NSUserNotificationCenter,
-                                shouldPresent notification: NSUserNotification) -> Bool { true }
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler:
+                                    @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .sound])
+    }
 
     // Clicking a notification focuses the app and jumps to that channel.
-    func userNotificationCenter(_ center: NSUserNotificationCenter,
-                                didActivate notification: NSUserNotification) {
-        NSApp.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
-        guard let ch = notification.userInfo?["channel"] as? String, !ch.isEmpty else { return }
-        // Channel ids are URL-safe slugs; still escape quotes defensively.
-        let safe = ch.replacingOccurrences(of: "\\", with: "\\\\")
-                     .replacingOccurrences(of: "'", with: "\\'")
-        web.evaluateJavaScript("window.__coxOpenChannel && window.__coxOpenChannel('\(safe)')",
-                               completionHandler: nil)
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                didReceive response: UNNotificationResponse,
+                                withCompletionHandler completionHandler: @escaping () -> Void) {
+        let ch = response.notification.request.content.userInfo["channel"] as? String ?? ""
+        DispatchQueue.main.async {
+            NSApp.activate(ignoringOtherApps: true)
+            self.window.makeKeyAndOrderFront(nil)
+            if !ch.isEmpty {
+                // Channel ids are URL-safe slugs; still escape quotes defensively.
+                let safe = ch.replacingOccurrences(of: "\\", with: "\\\\")
+                             .replacingOccurrences(of: "'", with: "\\'")
+                self.web.evaluateJavaScript(
+                    "window.__coxOpenChannel && window.__coxOpenChannel('\(safe)')",
+                    completionHandler: nil)
+            }
+        }
+        completionHandler()
+    }
+
+    // Append a line to ~/CoXAgent/notif.log for diagnosing the notification path.
+    func notifLog(_ msg: String) {
+        let path = FileManager.default.homeDirectoryForCurrentUser.path + "/CoXAgent/notif.log"
+        let line = "\(Date()) \(msg)\n"
+        if let data = line.data(using: .utf8) {
+            if let fh = FileHandle(forWritingAtPath: path) {
+                fh.seekToEndOfFile(); fh.write(data); fh.closeFile()
+            } else {
+                try? line.write(toFile: path, atomically: true, encoding: .utf8)
+            }
+        }
     }
 }
 

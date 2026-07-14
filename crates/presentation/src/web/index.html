@@ -734,7 +734,7 @@ body:not(.admin) .admin-only { display: none !important; }
           <label class="eu-lbl">Email</label>
           <input id="eu-email" class="eu-in" type="email" placeholder="email">
           <label class="eu-lbl">Role</label>
-          <select id="eu-role" class="sel eu-in"><option value="viewer">viewer</option><option value="reviewer">reviewer</option><option value="admin">admin</option></select>
+          <select id="eu-role" class="sel eu-in"></select>
           <div class="eu-actions"><button class="gc-btn" onclick="close_('ov-user')">Cancel</button><button class="gc-btn pri" onclick="saveUser()">Save changes</button></div>
         </div>
         <div class="eu-sep"></div>
@@ -751,7 +751,7 @@ body:not(.admin) .admin-only { display: none !important; }
           <div class="fld"><label>Email</label><input id="usr-email" type="email" placeholder="ada@team.io"></div>
           <div class="fld"><label>Username</label><input id="usr-name" placeholder="ada"></div>
           <div class="fld"><label>Temporary password</label><input id="usr-pass" type="password" placeholder="they can change it later"></div>
-          <div class="fld fld-wide"><label>Role</label><select id="usr-role" class="sel"><option value="viewer">Viewer — read-only</option><option value="reviewer">Reviewer — review &amp; merge code</option><option value="admin">Admin — full access</option></select></div>
+          <div class="fld fld-wide"><label>Role</label><select id="usr-role" class="sel"></select></div>
         </div>
         <div class="fld" style="margin-top:12px"><label>Assign to projects</label><div class="uprojpick" id="usr-projpick"></div></div>
         <div class="invite-foot"><span id="usr-err" class="usr-err"></span><button class="gc-btn" onclick="close_('ov-invite')">Cancel</button><button class="pri" onclick="createUser()"><i class="ti ti-user-plus"></i> Invite member</button></div>
@@ -1508,6 +1508,7 @@ async function loadChatHistory(){
   const chan=CURCHAN;
   try{CHAT=await(await fetch(api("/chat?channel="+encodeURIComponent(chan)))).json();}catch(e){CHAT=[];}
   if(chan!==CURCHAN)return; // channel switched mid-flight
+  CHAT.forEach(markSeen); // history is not "new" — don't notify for it
   renderChatList(true);
 }
 async function createChannel(){
@@ -1536,22 +1537,51 @@ async function inviteToChannel(){
   }catch(e){toasty("could not invite","err");}
 }
 // ── Chat notifications: unread badges, desktop notifications, title flash ────
+// Notifications work app-wide (any page), driven by the always-on chat
+// WebSocket plus the 1s SSE snapshot. SEEN dedups across both transports so a
+// message notifies exactly once; chatPrimed suppresses notifications for the
+// history that already existed when we connected.
 let UNREAD={}, NOTIF_ON=(localStorage.getItem("cox_notif")==="1");
+let SEEN=new Set(), chatPrimed=false;
+function markSeen(m){SEEN.add(chatKey(m));}
 // Central handler for every incoming chat message (live socket or fallback).
 function onChatIncoming(m){
+  const key=chatKey(m);
   const chan=m.channel||"general";
   const me=(ME&&ME.username)||"user";
-  const active=(CUR==="chat"&&chan===CURCHAN&&!document.hidden);
-  if(chan===CURCHAN){
-    if(!chatHas(m)){CHAT.push(m);if(CUR==="chat")renderChatList();}
+  // Render into the open conversation if this message belongs there.
+  if(CUR==="chat"&&chan===CURCHAN&&!chatHas(m)){
+    CHAT.push(m);CHAT.sort((a,b)=>(a.at||"").localeCompare(b.at||""));renderChatList();
   }
-  // Notify for other people's messages that the user isn't actively watching.
+  if(SEEN.has(key))return;
+  SEEN.add(key);
+  // "Actively watching" means the Chat view is open on this channel AND the app
+  // is the focused window. hasFocus() (not just !hidden) is what distinguishes a
+  // background-but-visible window — otherwise notifications never fire when the
+  // app sits behind another window.
+  const active=(CUR==="chat"&&chan===CURCHAN&&!document.hidden&&document.hasFocus());
+  try{const nn=nativeNotify();if(nn)nn.postMessage({debug:`ingest chan=${chan} from=${m.user} me=${me} NOTIF_ON=${NOTIF_ON} active=${active} hidden=${document.hidden} focus=${document.hasFocus()}`});}catch(_){}
   if(m.user!==me&&!active){
     UNREAD[chan]=(UNREAD[chan]||0)+1;
     if(CUR==="chat")renderChannels();
     updateTitle();
     notifyMessage(chan,m);
   }
+}
+// Process the #general messages carried on each SSE snapshot (the fallback path
+// and the app-wide notification source while off the Chat view). Primes silently
+// on the first snapshot so pre-existing history doesn't fire notifications.
+function ingestChatSnapshot(list){
+  if(!Array.isArray(list))return;
+  if(!chatPrimed){list.forEach(markSeen);chatPrimed=true;return;}
+  list.forEach(m=>{if((m.channel||"general")==="general")onChatIncoming(m);});
+}
+// Start the live chat connection as soon as a project is active, so
+// notifications arrive on any page — not only while the Chat view is open.
+function initChatBackground(){
+  SEEN=new Set();UNREAD={};chatPrimed=false;
+  loadChannels();
+  openChatWS();
 }
 function channelName(id){const c=CHANNELS.find(x=>x.id===id);return c?c.name:id;}
 function totalUnread(){return Object.values(UNREAD).reduce((a,b)=>a+b,0);}
@@ -1629,17 +1659,6 @@ function chatHas(m){const k=chatKey(m);return CHAT.some(x=>chatKey(x)===k);}
 // Fallback path: merge chat carried on the 1s SSE snapshot into the live list,
 // deduped by key. Runs when the WebSocket is down (WKWebView) or when another
 // hub wrote to the shared state file. Keeps chronological order by timestamp.
-function mergeChat(list){
-  // The SSE snapshot only carries #general — the fallback path for clients whose
-  // WebSocket didn't connect (e.g. a WKWebView). Route each new message through
-  // the shared handler so unread badges and notifications work there too.
-  if(!Array.isArray(list)||!list.length)return;
-  const fresh=list.filter(m=>(m.channel||"general")==="general"&&!chatHas(m));
-  if(!fresh.length)return;
-  fresh.sort((a,b)=>(a.at||"").localeCompare(b.at||""));
-  fresh.forEach(onChatIncoming);
-  if(CURCHAN==="general"&&CUR==="chat"){CHAT.sort((a,b)=>(a.at||"").localeCompare(b.at||""));renderChatList();}
-}
 function openChatWS(){
   // Reuse a live socket for the same project; otherwise (re)connect.
   if(CHATWS&&CHATWS_PID===PID&&CHATWS.readyState<=1)return;
@@ -1652,8 +1671,10 @@ function openChatWS(){
     // The socket only carries channels this user may see (enforced server-side).
     onChatIncoming(m);}catch(_){}};
   ws.onclose=()=>{if(CHATWS===ws){CHATWS=null;
-    // Auto-reconnect while the user is still on this project's chat.
-    if(CUR==="chat"&&CHATWS_PID===pid&&PID===pid){clearTimeout(chatwsRetry);chatwsRetry=setTimeout(openChatWS,1500);}}};
+    // Keep the socket alive for the whole session (any page), so notifications
+    // arrive even when the user isn't on the Chat view. Reconnect while the
+    // same project is active.
+    if(PID===pid){clearTimeout(chatwsRetry);chatwsRetry=setTimeout(openChatWS,1500);}}};
   ws.onerror=()=>{try{ws.close();}catch(_){}};
 }
 function closeChatWS(){clearTimeout(chatwsRetry);if(CHATWS){try{CHATWS.onclose=null;CHATWS.close();}catch(_){}}CHATWS=null;}
@@ -1723,7 +1744,7 @@ function attHtml(atts){if(!atts||!atts.length)return"";
     if(a.mime&&a.mime.startsWith("image/"))return `<a href="${esc(a.url)}" target="_blank" rel="noopener" class="msg-img"><img src="${esc(a.url)}" alt="${esc(a.name)}" loading="lazy"></a>`;
     return `<a href="${esc(a.url)}" target="_blank" rel="noopener" download class="msg-file"><i class="ti ti-file-download"></i> <span>${esc(a.name)}</span> <em>${fmtBytes(a.size||0)}</em></a>`;
   }).join("")+`</div>`;}
-function render(s){STATE=s;renderSidebar(s);renderActive();if(CUR==="chat")mergeChat(s.chat);}
+function render(s){STATE=s;renderSidebar(s);renderActive();ingestChatSnapshot(s.chat);}
 function depChips(ids){
   if(!ids||!ids.length)return '<span style="color:var(--dim)">—</span>';
   return ids.map(id=>{const dt=(STATE.tickets||[]).find(x=>x.id===id);
@@ -2047,7 +2068,7 @@ async function loadProjects(){
   const saved=localStorage.getItem("coxpid");
   PID=(saved&&list.some(p=>p.id===saved))?saved:list[0].id;
   renderProjBtn();
-  loadBudget();loadComments();connect();
+  loadBudget();loadComments();connect();initChatBackground();
 }
 async function baRefine(){
   const idea=(document.getElementById("nt-desc").value||document.getElementById("nt-title").value).trim();
@@ -2225,10 +2246,16 @@ async function doLogin(){
   }catch(e){err.textContent="Network error.";}
 }
 async function doLogout(){try{await fetch("/api/auth/logout",{method:"POST"});}catch(e){}location.reload();}
-// Viewers get a read-only UI: hide runner controls, new-project, per-ticket actions.
+// Role capabilities (mirror of AuthRole in the backend).
+const LEAD_ROLES=["director","manager","techlead","dslead","dalead"];
+const ROLE_LABELS={admin:"Admin",director:"Director",manager:"Manager",techlead:"Tech.Lead",dslead:"DS.Lead",dalead:"DA.Lead",ba:"BA",fe:"FE",be:"BE",aie:"AIE",ds:"DS",da:"DA",de:"DE",reviewer:"Reviewer",viewer:"Viewer"};
+function roleLabel(r){return ROLE_LABELS[r]||r;}
+function roleCanWrite(r){return r!=="viewer";}
+function roleCanCreateChannel(r){return r==="admin"||LEAD_ROLES.includes(r);}
+// Only the legacy read-only Viewer gets a locked-down UI; every real role writes.
 function applyRole(){
-  const isViewer=ME&&ME.auth&&ME.role!=="admin";
-  // Admin surfaces (Audit) show for admins and in open/local mode; hidden for viewers.
+  const isViewer=ME&&ME.auth&&ME.role==="viewer";
+  // Admin surfaces (Audit, user mgmt) show for admins and in open/local mode.
   const isAdmin=!ME||!ME.auth||ME.role==="admin";
   document.body.classList.toggle("viewer",!!isViewer);
   document.body.classList.toggle("admin",!!isAdmin);
@@ -2236,8 +2263,13 @@ function applyRole(){
   if(ME&&ME.auth){badge.style.display="flex";
     document.getElementById("ub-initials").textContent=(ME.username||"?").slice(0,2).toUpperCase();
     document.getElementById("ub-name").textContent=ME.username;
-    const rc=document.getElementById("ub-role");rc.textContent=ME.role;rc.className="urole "+(ME.role==="admin"?"admin":"viewer");}
+    const rc=document.getElementById("ub-role");rc.textContent=roleLabel(ME.role);rc.className="urole "+(ME.role==="admin"?"admin":"viewer");}
   else{badge.style.display="none";}
+}
+// Build <option>s for a role <select> (excludes legacy reviewer/viewer).
+function roleOptions(sel){
+  return Object.keys(ROLE_LABELS).filter(r=>r!=="reviewer"&&r!=="viewer")
+    .map(r=>`<option value="${r}"${r===sel?' selected':''}>${roleLabel(r)}${r==="admin"?" — full access":(roleCanCreateChannel(r)?" — lead":"")}</option>`).join("");
 }
 let USERS=[];
 function renderUsers(){
@@ -2263,7 +2295,7 @@ function renderUsers(){
       const display=hasName?esc(u.name.trim()):esc(u.username);
       const sub=[hasName?'@'+esc(u.username):'',u.email?esc(u.email):''].filter(Boolean).join(' · ');
       return `<div class="memrow"><div class="memav" style="background:${grad}">${esc(av)}</div>
-        <div class="meminfo"><div class="memname">${display}${me?'<span class="memyou">you</span>':''}<span class="memrole ${admin?'admin':'viewer'}">${esc(u.role)}</span>${u.twofa?'<span class="mem2fa">2FA</span>':''}</div>
+        <div class="meminfo"><div class="memname">${display}${me?'<span class="memyou">you</span>':''}<span class="memrole ${admin?'admin':'viewer'}">${esc(roleLabel(u.role))}</span>${u.twofa?'<span class="mem2fa">2FA</span>':''}</div>
           ${sub?`<div class="memsub">${sub}</div>`:''}
           <div class="memchips">${chips}${addSel}</div></div>
         <div class="memacts"><button class="memicon" onclick="editUser('${un}')" title="Edit user"><i class="ti ti-pencil"></i></button>
@@ -2278,6 +2310,7 @@ function renderUserProjPicker(){
 }
 function openInvite(){
   renderUserProjPicker();
+  document.getElementById("usr-role").innerHTML=roleOptions("ba");
   ["usr-fullname","usr-email","usr-name","usr-pass"].forEach(id=>{const e=document.getElementById(id);if(e)e.value="";});
   document.getElementById("usr-err").textContent="";
   document.getElementById("ov-invite").classList.add("open");
@@ -2374,7 +2407,7 @@ function editUser(un){const username=decodeURIComponent(un);const u=USERS.find(x
   document.getElementById("eu-title").textContent=username;
   document.getElementById("eu-name").value=u.name||"";
   document.getElementById("eu-email").value=u.email||"";
-  document.getElementById("eu-role").value=u.role||"viewer";
+  document.getElementById("eu-role").innerHTML=roleOptions(u.role||"ba");
   document.getElementById("eu-pass").value="";
   document.getElementById("eu-msg").textContent="";
   document.getElementById("ov-user").classList.add("open");
@@ -2439,7 +2472,7 @@ async function renderTeamPeople(){
   const memHtml=members.length?members.map(u=>{const grad=isAdmin(u.role)?"linear-gradient(135deg,var(--amber),#b45309)":"linear-gradient(135deg,var(--accent),var(--accent2))";
     return `<div class="arow"><div class="aav" style="background:${grad}">${esc((u.username||'?').slice(0,2).toUpperCase())}</div>
       <div style="flex:1;min-width:0"><div class="aname">${esc(u.username)}</div><div class="ameta">on this project · <a onclick="nav('people')" style="color:var(--accent2);cursor:pointer">activity</a></div></div>
-      <span class="arole ${isAdmin(u.role)?'admin':'viewer'}">${esc(String(u.role).toLowerCase())}</span></div>`;}).join(""):'<div class="empty">no humans assigned yet</div>';
+      <span class="arole ${isAdmin(u.role)?'admin':'viewer'}">${esc(roleLabel(u.role))}</span></div>`;}).join(""):'<div class="empty">no humans assigned yet</div>';
   el.innerHTML=`<div class="alist">${memHtml}</div>
     <div style="font-size:11px;color:var(--dim);margin-top:10px">Manage who works on which project in <a onclick="nav('access')" style="color:var(--accent2);cursor:pointer">Users</a>.</div>`;
 }
