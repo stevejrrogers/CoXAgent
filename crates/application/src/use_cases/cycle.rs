@@ -4,7 +4,7 @@
 
 use crate::config::Config;
 use crate::ports::outbound::{
-    AgentEnginePort, AgentRequest, DeployPort, GitAuthor, GitPort, StateStorePort,
+    AgentEnginePort, AgentRequest, DeployPort, ForgePort, GitAuthor, GitPort, StateStorePort,
 };
 use crate::state::Spend;
 use crate::use_cases::run_dev::DevMode;
@@ -77,6 +77,8 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     budget: Option<crate::config::LiveBudget>,
     /// Local git, used for branch + commit per ticket when `config.git.enabled`.
     git: Option<Arc<dyn GitPort>>,
+    /// The code host, used to open PRs when `config.git.auto_pr`.
+    forge: Option<Arc<dyn ForgePort>>,
 }
 
 impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
@@ -98,6 +100,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             notifier: None,
             budget: None,
             git: None,
+            forge: None,
         }
     }
 
@@ -116,10 +119,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         self
     }
 
-    /// Commit the working tree for a just-completed ticket, when git integration
-    /// is enabled. This local-only step keeps a clean linear history on the
-    /// default branch (branch-per-ticket + push + PR arrive with the forge
-    /// integration). Best-effort: any failure is logged and never stalls the
+    /// Attach the code host so completed tickets open a PR when
+    /// `config.git.auto_pr`.
+    #[must_use]
+    pub fn with_forge(mut self, forge: Arc<dyn ForgePort>) -> Self {
+        self.forge = Some(forge);
+        self
+    }
+
+    /// Ship a just-completed ticket through the git flow, when enabled:
+    /// commit the work on a per-ticket branch (`feat/<id>`, stacked on the
+    /// current tip so nothing is lost while PRs await review), push it, and —
+    /// when `auto_pr` — open a PR into the default branch for a human to review.
+    /// Best-effort at every step: any failure is logged and never stalls the
     /// cycle. `kind` is `feat`/`fix`.
     async fn commit_for_ticket(&self, id: &TicketId, kind: &str) {
         if !self.config.git.enabled {
@@ -141,6 +153,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     .map(|t| t.title().to_owned())
             })
             .unwrap_or_else(|| id.to_string());
+
+        let branch = format!("{}{id}", self.config.git.branch_prefix);
+        if let Err(e) = git.checkout_branch(&self.work_dir, &branch).await {
+            self.log_git(&format!("branch {branch} failed: {e}")).await;
+            return;
+        }
         let email = if self.config.git.commit_email.trim().is_empty() {
             "coxagent-bot@users.noreply.github.com".to_owned()
         } else {
@@ -152,9 +170,45 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         };
         let msg = format!("{kind}({id}): {title}");
         match git.commit_all(&self.work_dir, &msg, &author).await {
-            Ok(Some(sha)) => self.log_git(&format!("committed {sha} — {id}")).await,
-            Ok(None) => {}
-            Err(e) => self.log_git(&format!("commit failed for {id}: {e}")).await,
+            Ok(Some(sha)) => self.log_git(&format!("committed {sha} on {branch}")).await,
+            Ok(None) => return, // nothing changed — no branch to push
+            Err(e) => {
+                self.log_git(&format!("commit failed for {id}: {e}")).await;
+                return;
+            }
+        }
+
+        if let Err(e) = git.push(&self.work_dir, &branch).await {
+            self.log_git(&format!("push {branch} failed: {e}")).await;
+            return;
+        }
+        self.log_git(&format!("pushed {branch}")).await;
+
+        if self.config.git.auto_pr {
+            if let Some(forge) = &self.forge {
+                let base = &self.config.git.default_branch;
+                let body = format!(
+                    "Automated by CoXAgent for **{id}** — {title}.\n\nReview and merge to ship."
+                );
+                match forge.open_pr(&branch, base, &msg, &body).await {
+                    Ok(pr) => {
+                        self.log_git(&format!("opened PR #{} for {id}", pr.number))
+                            .await;
+                        if let Ok(mut s) = self.store.load().await {
+                            s.post_comment(
+                                "GIT",
+                                &format!(
+                                    "Opened PR #{} for {id} — awaiting review. {}",
+                                    pr.number, pr.url
+                                ),
+                                Some(id.to_string()),
+                            );
+                            let _ = self.store.save(&s).await;
+                        }
+                    }
+                    Err(e) => self.log_git(&format!("open PR for {id} failed: {e}")).await,
+                }
+            }
         }
     }
 

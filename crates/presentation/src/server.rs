@@ -50,6 +50,9 @@ pub struct ProjectHandle {
     pub budget: coxagent_application::LiveBudget,
     /// The `project_context.md` brief (goal + tech stack) agents are seeded with.
     pub context_path: PathBuf,
+    /// The code host for review actions (list/merge/diff PRs); set when git
+    /// integration is configured with a provider.
+    pub forge: Option<Arc<dyn coxagent_application::ports::outbound::ForgePort>>,
 }
 
 /// Builds a fresh project on demand (scaffold + register), injected by the
@@ -226,6 +229,29 @@ pub struct HubExtras {
     )>,
 }
 
+/// Assemble the shared [`AppState`] from the registered projects and hub extras.
+fn build_state(
+    projects: Vec<ProjectHandle>,
+    audit: Arc<dyn AuditPort>,
+    extras: HubExtras,
+) -> AppState {
+    let order: Vec<String> = projects.iter().map(|p| p.id.clone()).collect();
+    let map: HashMap<String, ProjectHandle> =
+        projects.into_iter().map(|p| (p.id.clone(), p)).collect();
+    AppState {
+        projects: Arc::new(RwLock::new(map)),
+        chat_bus: Arc::new(RwLock::new(HashMap::new())),
+        order: Arc::new(RwLock::new(order)),
+        factory: extras.factory,
+        auth: extras.auth,
+        audit,
+        engines: Arc::new(extras.engines),
+        viewers: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        remover: extras.remover,
+        analyzer: extras.analyzer,
+    }
+}
+
 /// Serve the dashboard and API on `port`, with the security-audit sink and the
 /// optional hub capabilities in `extras`.
 ///
@@ -237,21 +263,7 @@ pub async fn serve_full(
     audit: Arc<dyn AuditPort>,
     extras: HubExtras,
 ) -> std::io::Result<()> {
-    let order: Vec<String> = projects.iter().map(|p| p.id.clone()).collect();
-    let map: HashMap<String, ProjectHandle> =
-        projects.into_iter().map(|p| (p.id.clone(), p)).collect();
-    let state = AppState {
-        projects: Arc::new(RwLock::new(map)),
-        chat_bus: Arc::new(RwLock::new(HashMap::new())),
-        order: Arc::new(RwLock::new(order)),
-        factory: extras.factory,
-        auth: extras.auth,
-        audit,
-        engines: Arc::new(extras.engines),
-        viewers: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        remover: extras.remover,
-        analyzer: extras.analyzer,
-    };
+    let state = build_state(projects, audit, extras);
 
     let app = Router::new()
         .route("/", get(index))
@@ -325,6 +337,9 @@ pub async fn serve_full(
             "/api/projects/:pid/context",
             get(context_ep).post(context_update_ep),
         )
+        .route("/api/projects/:pid/prs", get(list_prs_ep))
+        .route("/api/projects/:pid/prs/:num/diff", get(pr_diff_ep))
+        .route("/api/projects/:pid/prs/:num/:action", post(pr_action_ep))
         .route("/api/projects/:pid/transcripts", get(list_transcripts))
         .route("/api/projects/:pid/transcripts/:name", get(get_transcript))
         .route("/api/projects/:pid/events", get(events_ep))
@@ -1106,6 +1121,82 @@ fn replace_goal(md: &str, goal: &str) -> String {
     }
 }
 
+/// List open pull/merge requests for a project's repository.
+async fn list_prs_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Some(forge) = &p.forge else {
+        return Json(serde_json::json!({ "configured": false, "prs": [] })).into_response();
+    };
+    match forge.list_open_prs().await {
+        Ok(prs) => Json(serde_json::json!({ "configured": true, "prs": prs })).into_response(),
+        Err(e) => {
+            Json(serde_json::json!({ "configured": true, "error": e.to_string(), "prs": [] }))
+                .into_response()
+        }
+    }
+}
+
+/// The unified diff of one PR (for the in-app review view).
+async fn pr_diff_ep(
+    State(app): State<AppState>,
+    Path((pid, num)): Path<(String, u64)>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Some(forge) = &p.forge else {
+        return (StatusCode::NOT_IMPLEMENTED, "forge not configured").into_response();
+    };
+    match forge.pr_diff(num).await {
+        Ok(diff) => Json(serde_json::json!({ "diff": diff })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct PrActionReq {
+    #[serde(default)]
+    comment: String,
+}
+
+/// A review action on a PR (`merge` / `request-changes` / `close`). Requires a
+/// reviewer or admin (enforced by [`auth_mw`]).
+async fn pr_action_ep(
+    State(app): State<AppState>,
+    Path((pid, num, action)): Path<(String, u64, String)>,
+    body: Option<Json<PrActionReq>>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Some(forge) = &p.forge else {
+        return (StatusCode::NOT_IMPLEMENTED, "forge not configured").into_response();
+    };
+    let comment = body.map(|b| b.0.comment).unwrap_or_default();
+    let result = match action.as_str() {
+        "merge" => forge.merge_pr(num).await,
+        "request-changes" => {
+            let c = if comment.trim().is_empty() {
+                "Changes requested via CoXAgent review.".to_owned()
+            } else {
+                comment
+            };
+            forge.request_changes(num, &c).await
+        }
+        "close" => forge.close_pr(num).await,
+        _ => return (StatusCode::BAD_REQUEST, "unknown action").into_response(),
+    };
+    match result {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
 /// Max characters accepted in a single chat message.
 const CHAT_MAX_CHARS: usize = 2000;
 /// Sliding-window rate limit for a single WebSocket: at most this many messages
@@ -1589,7 +1680,15 @@ async fn auth_mw(
         && !path.ends_with("/chat"); // team chat is open to any signed-in user
     let method = req.method().clone();
     let username = user.username.clone();
-    if is_write && !user.role.can_write() {
+    // PR review actions (merge / request-changes / close) are allowed for
+    // reviewers as well as admins; every other write stays admin-only.
+    let is_review_action = path.contains("/prs/");
+    let write_ok = if is_review_action {
+        user.role.can_review()
+    } else {
+        user.role.can_write()
+    };
+    if is_write && !write_ok {
         audit_push(
             &app.audit,
             &username,
@@ -1599,7 +1698,7 @@ async fn auth_mw(
         .await;
         return (
             StatusCode::FORBIDDEN,
-            Json(serde_json::json!({ "error": "admin role required" })),
+            Json(serde_json::json!({ "error": "insufficient role" })),
         )
             .into_response();
     }

@@ -209,11 +209,25 @@ async fn build_project(
     let engine_for_handle: Arc<dyn coxagent_application::ports::outbound::AgentEnginePort> =
         engine.clone();
     let work_dir_for_handle = work_dir.clone();
+    // Open PRs on the configured forge when git integration + auto-PR are on.
+    let forge: Option<Arc<dyn coxagent_application::ports::outbound::ForgePort>> =
+        if config.git.enabled && config.git.provider == "github" && !config.git.repo.is_empty() {
+            Some(Arc::new(coxagent_infrastructure::GhForge::new(
+                config.git.repo.clone(),
+                config.git.base_url.clone(),
+            )))
+        } else {
+            None
+        };
+    let forge_for_handle = forge.clone();
     let mut cycle_uc = RunCycleUseCase::new(Arc::clone(&store), engine, config, work_dir, context)
         .with_meter(meter)
         .with_live_budget(Arc::clone(&live_budget))
         .with_deploy(Arc::new(DockerComposeDeploy::new()))
         .with_git(Arc::new(coxagent_infrastructure::SystemGit::new()));
+    if let Some(f) = forge {
+        cycle_uc = cycle_uc.with_forge(f);
+    }
     if let Some(url) = webhook.filter(|u| !u.is_empty()) {
         cycle_uc = cycle_uc.with_notifier(Arc::new(WebhookNotifier::new(url)));
     }
@@ -242,6 +256,7 @@ async fn build_project(
         work_dir: work_dir_for_handle,
         budget: live_budget,
         context_path: state_dir.join("project_context.md"),
+        forge: forge_for_handle,
     })
 }
 

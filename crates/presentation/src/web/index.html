@@ -88,6 +88,26 @@
   .gc-btn{background:var(--card2);color:var(--muted);border:1px solid var(--border2);border-radius:8px;padding:7px 13px;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit}
   .gc-btn:hover{color:var(--text)}
   .gc-btn.pri{background:var(--accent);color:#fff;border-color:transparent}
+  .gc-btn[disabled]{opacity:.45;cursor:not-allowed}
+  /* Code review */
+  .revlist{display:flex;flex-direction:column;gap:10px}
+  .revcard{display:flex;align-items:center;gap:14px;background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px 16px}
+  .revcard:hover{border-color:var(--border2)}
+  .revmain{flex:1;min-width:0}
+  .revtitle{font-size:14px;font-weight:600}
+  .revtitle a{color:var(--text);text-decoration:none}
+  .revtitle a:hover{color:var(--accent2)}
+  .revnum{color:var(--dim);font-weight:500;font-size:12.5px}
+  .revmeta{display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin-top:6px;font-size:12px;color:var(--muted)}
+  .revbranch{font-family:ui-monospace,monospace;display:inline-flex;align-items:center;gap:5px}
+  .rev-ci{display:inline-flex;align-items:center;gap:5px;font-weight:600}
+  .rev-conflict{display:inline-flex;align-items:center;gap:4px;color:var(--amber)}
+  .revacts{flex:none;display:flex;gap:7px}
+  .rev-empty{text-align:center;padding:46px 20px;color:var(--muted)}
+  .rev-empty i{font-size:34px;color:var(--accent2);display:block;margin-bottom:10px}
+  .rev-empty div{font-size:15px;font-weight:600;color:var(--text)}
+  .rev-empty span{font-size:12.5px;display:block;margin-top:5px}
+  .rev-empty a{color:var(--accent2);cursor:pointer}
   /* Users: richer create form + project picker + edit modal */
   .ainvite2{flex-wrap:wrap}
   .uprojpick-wrap{display:flex;align-items:flex-start;gap:12px;margin:2px 0 10px;flex-wrap:wrap}
@@ -517,6 +537,7 @@ body:not(.admin) .admin-only { display: none !important; }
       <a data-v="team" onclick="nav('team')"><i class="ti ti-robot"></i> Agents</a>
       <a data-v="board" onclick="nav('board')"><i class="ti ti-columns"></i> Work</a>
       <a data-v="roadmap" onclick="nav('roadmap')"><i class="ti ti-timeline"></i> Roadmap</a>
+      <a data-v="review" onclick="nav('review')"><i class="ti ti-git-pull-request"></i> Review</a>
       <a data-v="activity" onclick="nav('activity')"><i class="ti ti-activity"></i> Activity</a>
       <a data-v="discuss" onclick="nav('discuss')"><i class="ti ti-messages"></i> Discussion</a>
       <a data-v="chat" onclick="nav('chat')"><i class="ti ti-message-circle"></i> Chat</a>
@@ -663,6 +684,12 @@ body:not(.admin) .admin-only { display: none !important; }
         <div id="rn-msg" class="eu-msg"></div>
       </div></div>
       <div class="view" id="view-roadmap"><div id="roadmap-body"></div></div>
+      <div class="view" id="view-review"><div id="review-body"></div></div>
+      <div class="ov" id="ov-diff" onclick="if(event.target===this)close_('ov-diff')"><div class="modal" style="max-width:960px">
+        <span class="x" onclick="close_('ov-diff')"><i class="ti ti-x"></i></span>
+        <h3 id="diff-title" style="font-size:14px;font-family:ui-monospace,monospace"><i class="ti ti-git-pull-request" style="color:var(--accent2)"></i> diff</h3>
+        <pre id="diff-body" class="difful" style="max-height:66vh;overflow:auto;font-size:12px;line-height:1.5;background:var(--card2);padding:14px;border-radius:8px;font-family:ui-monospace,monospace">—</pre>
+      </div></div>
       <div class="view" id="view-people">
         <div class="filters"><span style="font-size:12px;color:var(--muted)">Derived from the security audit trail — who is actually working, how much, and how effectively.</span>
           <div style="flex:1"></div><span id="people-sample" class="fchip"></span></div>
@@ -826,7 +853,7 @@ const KPI_IC={Shipped:"ti-rocket","In flight":"ti-plane-tilt","Open bugs":"ti-bu
 const money=n=>"$"+(Number(n)||0).toFixed(2);
 const fmtK=n=>{n=Number(n)||0;return n>=1000?(n/1000).toFixed(1)+"k":String(n);};
 const AC={BA:"--blue","DEV-FEATURE":"--green","DEV-BUG":"--red",SA:"--purple",TEST:"--teal",DOCS:"--blue",PO:"--amber",SM:"--teal",PD:"--purple",USER:"--accent"};
-const TITLES={overview:["Overview","project health at a glance"],team:["Agents","your autonomous workers"],board:["Work","board · sprint · backlog"],activity:["Activity","what the agents are doing"],roadmap:["Roadmap","now · next · later, auto-generated"],discuss:["Discussion","team threads & standups"],chat:["Chat","talk with your teammates"],people:["People","per-user activity & productivity"],audit:["Audit","who did what, when"],access:["Users","accounts, project access & tokens"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
+const TITLES={overview:["Overview","project health at a glance"],team:["Agents","your autonomous workers"],board:["Work","board · sprint · backlog"],activity:["Activity","what the agents are doing"],roadmap:["Roadmap","now · next · later, auto-generated"],discuss:["Discussion","team threads & standups"],chat:["Chat","talk with your teammates"],review:["Review","open pull requests — approve & merge"],people:["People","per-user activity & productivity"],audit:["Audit","who did what, when"],access:["Users","accounts, project access & tokens"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
 const esc=s=>(s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 const cvar=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim()||"#888";
 let STATE={}, CUR="overview", BF="all", INIT_ACT=false, WORKTAB="board";
@@ -844,7 +871,7 @@ function nav(v){CUR=v;location.hash=v;
   document.getElementById("pg-title").textContent=TITLES[v][0];
   document.getElementById("pg-sub").textContent=TITLES[v][1];
   if(v!=="chat")closeChatWS();
-  if(v==="settings")loadSettings(); else if(v==="discuss"){loadComments();} else if(v==="chat"){openChat();} else if(v==="people"){renderPeople();} else if(v==="audit"){renderAudit();} else if(v==="access"){renderAccess();} else if(v==="roadmap"){renderRoadmap();} else renderActive();}
+  if(v==="settings")loadSettings(); else if(v==="discuss"){loadComments();} else if(v==="chat"){openChat();} else if(v==="people"){renderPeople();} else if(v==="audit"){renderAudit();} else if(v==="access"){renderAccess();} else if(v==="roadmap"){renderRoadmap();} else if(v==="review"){renderReview();} else renderActive();}
 function initials(r){return r.replace("DEV-","").slice(0,2);}
 function metricsFrom(s){const t=s.tickets||[],h=s.history||[],isF=x=>x.type!=="bug";
   return {shipped:t.filter(x=>isF(x)&&(x.status==="done"||x.status==="documented")).length,
@@ -1901,6 +1928,58 @@ async function saveRename(){const name=(document.getElementById("rn-name").value
     if(!r.ok){msg.style.color="var(--red)";msg.textContent=await r.text()||"Failed.";return;}
     close_("ov-rename");toasty("Project renamed","ok");await loadProjects();renderProjBtn();
   }catch(e){msg.style.color="var(--red)";msg.textContent="Network error.";}
+}
+// ── Code review: open PRs from the forge, approve / merge / request changes ──
+function canReview(){return ME&&(ME.role==="admin"||ME.role==="reviewer");}
+async function renderReview(){
+  const el=document.getElementById("review-body");if(!el)return;
+  el.innerHTML='<div class="empty">loading pull requests…</div>';
+  let d={};try{d=await(await fetch(api("/prs"))).json();}catch(e){el.innerHTML='<div class="empty">unable to load</div>';return;}
+  if(!d.configured){el.innerHTML=`<div class="rev-empty"><i class="ti ti-git-pull-request"></i><div>Git review isn't set up</div><span>Configure a repository in <a onclick="nav('settings')">Settings → Git &amp; version control</a> to open and review pull requests here.</span></div>`;return;}
+  const prs=d.prs||[];
+  const head=`<div class="sec">Pull requests <span style="font-size:11px;color:var(--dim);font-weight:400">· ${prs.length} open${d.error?' · <span style="color:var(--red)">'+esc(d.error)+'</span>':''}</span></div>`;
+  if(!prs.length){el.innerHTML=head+`<div class="rev-empty"><i class="ti ti-check"></i><div>No open pull requests</div><span>Agent-shipped tickets will appear here for review.</span></div>`;return;}
+  const ciBadge=c=>{const m={passing:["passing","var(--green)","circle-check"],failing:["failing","var(--red)","circle-x"],pending:["CI running","var(--amber)","loader"],none:["no CI","var(--dim)","minus"]}[c]||["",""];
+    return `<span class="rev-ci" style="color:${m[1]}"><i class="ti ti-${m[2]}"></i> ${m[0]}</span>`;};
+  const rev=canReview();
+  el.innerHTML=head+`<div class="revlist">`+prs.map(p=>`
+    <div class="revcard">
+      <div class="revmain">
+        <div class="revtitle"><a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.title)}</a> <span class="revnum">#${p.number}</span></div>
+        <div class="revmeta"><span class="revbranch"><i class="ti ti-git-branch"></i> ${esc(p.head)} → ${esc(p.base)}</span>
+          ${ciBadge(p.ci)}
+          ${p.mergeable?'':'<span class="rev-conflict"><i class="ti ti-alert-triangle"></i> conflicts</span>'}
+          <span class="revby">by ${esc(p.author||'—')}</span></div>
+      </div>
+      <div class="revacts">
+        <button class="gc-btn" onclick="viewDiff(${p.number},'${esc(p.head)}')"><i class="ti ti-file-diff"></i> Diff</button>
+        ${rev?`<button class="gc-btn" onclick="prAction(${p.number},'request-changes')"><i class="ti ti-arrow-back-up"></i> Changes</button>
+        <button class="gc-btn pri" ${p.mergeable?'':'disabled'} onclick="prAction(${p.number},'merge')"><i class="ti ti-git-merge"></i> Merge</button>`:''}
+      </div>
+    </div>`).join("")+`</div>`;
+}
+async function viewDiff(num,head){
+  document.getElementById("diff-title").innerHTML='<i class="ti ti-git-pull-request" style="color:var(--accent2)"></i> '+esc(head)+' · #'+num;
+  const body=document.getElementById("diff-body");body.textContent="loading…";body.innerHTML="loading…";
+  document.getElementById("ov-diff").classList.add("open");
+  try{const d=await(await fetch(api("/prs/"+num+"/diff"))).json();body.innerHTML=colorDiff(d.diff||"(empty)");}
+  catch(e){body.textContent="unable to load diff";}
+}
+// Minimal +/- colouring for a unified diff.
+function colorDiff(t){return t.split("\n").map(l=>{const e=esc(l);
+  if(l.startsWith("+")&&!l.startsWith("+++"))return '<span style="color:var(--green)">'+e+'</span>';
+  if(l.startsWith("-")&&!l.startsWith("---"))return '<span style="color:var(--red)">'+e+'</span>';
+  if(l.startsWith("@@"))return '<span style="color:var(--accent2)">'+e+'</span>';
+  if(l.startsWith("diff ")||l.startsWith("+++")||l.startsWith("---"))return '<span style="color:var(--muted)">'+e+'</span>';
+  return e;}).join("\n");}
+async function prAction(num,action){
+  let comment="";
+  if(action==="request-changes"){comment=prompt("What changes should the agent make?");if(comment===null)return;}
+  if(action==="merge"&&!confirm("Merge PR #"+num+"? This ships the code."))return;
+  try{const r=await fetch(api("/prs/"+num+"/"+action),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({comment})});
+    if(r.ok){toasty(action==="merge"?"Merged ✓":action==="request-changes"?"Changes requested":"Done","ok");renderReview();}
+    else{toasty("Failed: "+(await r.text()||r.status),"err");}
+  }catch(e){toasty("Network error","err");}
 }
 async function createUser(){
   const username=document.getElementById("usr-name").value.trim();

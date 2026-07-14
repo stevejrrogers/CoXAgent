@@ -1,0 +1,234 @@
+//! `GhForge` — a [`ForgePort`] backed by the GitHub CLI (`gh`). Uses the CLI's
+//! existing authentication on the host, so no token is stored by CoXAgent when
+//! it runs on a developer machine. Every call targets an explicit `--repo`
+//! slug, so it is independent of the process working directory.
+
+use async_trait::async_trait;
+use coxagent_application::ports::outbound::{ForgePort, PullRequest};
+use coxagent_application::PortError;
+use std::process::Stdio;
+use tokio::process::Command;
+
+/// GitHub forge for one repository (`owner/name`).
+pub struct GhForge {
+    repo: String,
+    /// GitHub Enterprise host (empty = github.com), passed via `GH_HOST`.
+    host: String,
+}
+
+impl GhForge {
+    #[must_use]
+    pub fn new(repo: impl Into<String>, base_url: impl Into<String>) -> Self {
+        // gh takes a bare hostname; strip any scheme from a configured base URL.
+        let base = base_url.into();
+        let host = base
+            .trim()
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/')
+            .to_owned();
+        Self {
+            repo: repo.into(),
+            host,
+        }
+    }
+}
+
+/// Run `gh <args>` and return trimmed stdout, or a `Backend` error with stderr.
+async fn gh(host: &str, args: &[&str]) -> Result<String, PortError> {
+    let mut cmd = Command::new("gh");
+    cmd.args(args).stdin(Stdio::null());
+    if !host.is_empty() {
+        cmd.env("GH_HOST", host);
+    }
+    let out = cmd
+        .output()
+        .await
+        .map_err(|e| PortError::Backend(format!("gh spawn (is gh installed?): {e}")))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+    } else {
+        Err(PortError::Backend(format!(
+            "gh {} failed: {}",
+            args.first().unwrap_or(&""),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )))
+    }
+}
+
+/// gh's `pr list --json` row.
+#[derive(serde::Deserialize)]
+struct RawPr {
+    number: u64,
+    title: String,
+    #[serde(default, rename = "headRefName")]
+    head_ref_name: String,
+    #[serde(default, rename = "baseRefName")]
+    base_ref_name: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    author: RawAuthor,
+    #[serde(default, rename = "createdAt")]
+    created_at: String,
+    #[serde(default)]
+    mergeable: String,
+    #[serde(default, rename = "statusCheckRollup")]
+    checks: Vec<RawCheck>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct RawAuthor {
+    #[serde(default)]
+    login: String,
+}
+
+#[derive(serde::Deserialize)]
+struct RawCheck {
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    conclusion: String,
+    #[serde(default)]
+    status: String,
+}
+
+/// Roll a list of individual checks up to one word for the dashboard.
+fn ci_rollup(checks: &[RawCheck]) -> String {
+    if checks.is_empty() {
+        return "none".to_owned();
+    }
+    let norm = |c: &RawCheck| {
+        // GitHub reports either state (CheckRun) or conclusion (StatusContext).
+        let s = format!("{} {} {}", c.state, c.conclusion, c.status).to_uppercase();
+        if s.contains("FAILURE") || s.contains("ERROR") || s.contains("CANCELLED") {
+            "fail"
+        } else if s.contains("PENDING") || s.contains("IN_PROGRESS") || s.contains("QUEUED") {
+            "pending"
+        } else if s.contains("SUCCESS") {
+            "pass"
+        } else {
+            "pending"
+        }
+    };
+    if checks.iter().any(|c| norm(c) == "fail") {
+        "failing".to_owned()
+    } else if checks.iter().any(|c| norm(c) == "pending") {
+        "pending".to_owned()
+    } else {
+        "passing".to_owned()
+    }
+}
+
+impl From<RawPr> for PullRequest {
+    fn from(r: RawPr) -> Self {
+        let ci = ci_rollup(&r.checks);
+        PullRequest {
+            number: r.number,
+            title: r.title,
+            head: r.head_ref_name,
+            base: r.base_ref_name,
+            url: r.url,
+            author: r.author.login,
+            ci,
+            mergeable: r.mergeable.eq_ignore_ascii_case("MERGEABLE"),
+            created: r.created_at,
+        }
+    }
+}
+
+const PR_FIELDS: &str =
+    "number,title,headRefName,baseRefName,url,author,createdAt,mergeable,statusCheckRollup";
+
+#[async_trait]
+impl ForgePort for GhForge {
+    async fn open_pr(
+        &self,
+        head: &str,
+        base: &str,
+        title: &str,
+        body: &str,
+    ) -> Result<PullRequest, PortError> {
+        gh(
+            &self.host,
+            &[
+                "pr", "create", "--repo", &self.repo, "--head", head, "--base", base, "--title",
+                title, "--body", body,
+            ],
+        )
+        .await?;
+        // Fetch the freshly-created PR for the head branch to return its details.
+        let json = gh(
+            &self.host,
+            &[
+                "pr", "view", head, "--repo", &self.repo, "--json", PR_FIELDS,
+            ],
+        )
+        .await?;
+        let raw: RawPr = serde_json::from_str(&json)
+            .map_err(|e| PortError::Backend(format!("gh pr view parse: {e}")))?;
+        Ok(raw.into())
+    }
+
+    async fn list_open_prs(&self) -> Result<Vec<PullRequest>, PortError> {
+        let json = gh(
+            &self.host,
+            &[
+                "pr", "list", "--repo", &self.repo, "--state", "open", "--json", PR_FIELDS,
+            ],
+        )
+        .await?;
+        let raws: Vec<RawPr> = serde_json::from_str(&json)
+            .map_err(|e| PortError::Backend(format!("gh pr list parse: {e}")))?;
+        Ok(raws.into_iter().map(Into::into).collect())
+    }
+
+    async fn pr_diff(&self, number: u64) -> Result<String, PortError> {
+        let n = number.to_string();
+        gh(&self.host, &["pr", "diff", &n, "--repo", &self.repo]).await
+    }
+
+    async fn merge_pr(&self, number: u64) -> Result<(), PortError> {
+        let n = number.to_string();
+        gh(
+            &self.host,
+            &[
+                "pr",
+                "merge",
+                &n,
+                "--repo",
+                &self.repo,
+                "--squash",
+                "--delete-branch",
+            ],
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn request_changes(&self, number: u64, comment: &str) -> Result<(), PortError> {
+        let n = number.to_string();
+        gh(
+            &self.host,
+            &[
+                "pr",
+                "review",
+                &n,
+                "--repo",
+                &self.repo,
+                "--request-changes",
+                "--body",
+                comment,
+            ],
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn close_pr(&self, number: u64) -> Result<(), PortError> {
+        let n = number.to_string();
+        gh(&self.host, &["pr", "close", &n, "--repo", &self.repo])
+            .await
+            .map(|_| ())
+    }
+}
