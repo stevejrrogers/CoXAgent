@@ -72,6 +72,9 @@ pub const MAX_COMMENTS: usize = 500;
 /// channel for the people on the project to talk to each other.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMsg {
+    /// Stable id (minted on post) so reactions can target a specific message.
+    #[serde(default)]
+    pub id: String,
     pub at: String,
     /// The authenticated username of the sender.
     pub user: String,
@@ -83,6 +86,16 @@ pub struct ChatMsg {
     /// Files/images attached to the message.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<Attachment>,
+    /// Emoji reactions, each with the users who reacted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reactions: Vec<Reaction>,
+}
+
+/// One emoji reaction on a message and the users who added it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reaction {
+    pub emoji: String,
+    pub users: Vec<String>,
 }
 
 /// Keep the team chat bounded per project.
@@ -372,11 +385,13 @@ impl ProjectState {
         attachments: Vec<Attachment>,
     ) {
         self.chat.push(ChatMsg {
+            id: mint_id(),
             at: now_rfc3339(),
             user: user.to_owned(),
             body: body.to_owned(),
             channel: channel.to_owned(),
             attachments,
+            reactions: Vec::new(),
         });
         let overflow = self.chat.len().saturating_sub(MAX_CHAT);
         if overflow > 0 {
@@ -582,6 +597,18 @@ mod channel_tests {
             .expect("bob invites");
         assert!(s.channel("secret").expect("ch").can_view("carol"));
     }
+}
+
+/// A short, collision-free message id (nanos + a process-local counter).
+pub(crate) fn mint_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("{nanos:x}{seq:x}")
 }
 
 pub(crate) fn now_rfc3339() -> String {

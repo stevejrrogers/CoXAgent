@@ -366,6 +366,35 @@
   .inc-av{width:64px;height:64px;border-radius:50%;background:var(--accentbg);color:var(--accent2);display:flex;align-items:center;justify-content:center;font-size:30px;margin:6px auto 0;animation:pulse 1.4s ease-in-out infinite}
   @keyframes pulse{0%,100%{box-shadow:0 0 0 0 var(--accentbg)}50%{box-shadow:0 0 0 12px transparent}}
   .inc-ctl{display:flex;gap:26px;justify-content:center;margin-top:20px}
+  /* Emoji picker */
+  .emojipop{position:fixed;z-index:80;background:var(--panel);border:1px solid var(--border2);border-radius:12px;box-shadow:0 14px 40px rgba(0,0,0,.45);display:none;flex-direction:column;overflow:hidden}
+  .emojipop .etabs{display:flex;gap:2px;padding:6px 8px;border-bottom:1px solid var(--border)}
+  .emojipop .etab{flex:1;background:transparent;border:none;color:var(--muted);cursor:pointer;padding:6px;border-radius:7px;font-size:16px}
+  .emojipop .etab.on,.emojipop .etab:hover{background:var(--accentbg);color:var(--accent2)}
+  .emojipop .esearch{display:flex;align-items:center;gap:7px;margin:8px;padding:7px 10px;background:var(--card2);border:1px solid var(--border2);border-radius:8px;color:var(--muted)}
+  .emojipop .esearch input{flex:1;background:transparent;border:none;color:var(--text);font-family:inherit;font-size:13px;outline:none}
+  .emojipop .egrid{display:grid;grid-template-columns:repeat(8,1fr);gap:2px;padding:0 8px 10px;overflow-y:auto;max-height:230px}
+  .emojipop .ecell{background:transparent;border:none;cursor:pointer;font-size:20px;line-height:1;padding:5px;border-radius:7px}
+  .emojipop .ecell:hover{background:var(--card2)}
+  /* Reactions */
+  .tcbubwrap{position:relative;display:inline-flex;flex-direction:column;max-width:min(560px,72%)}
+  .tcmsg.mine .tcbubwrap{align-items:flex-end;align-self:flex-end}
+  .reactadd{position:absolute;top:-10px;right:-10px;width:26px;height:26px;border-radius:50%;background:var(--panel);border:1px solid var(--border2);color:var(--muted);cursor:pointer;display:none;align-items:center;justify-content:center;font-size:15px;z-index:2}
+  .tcbubwrap:hover .reactadd{display:flex}
+  .reactadd:hover{color:var(--accent);border-color:var(--accent)}
+  .reactions{display:flex;flex-wrap:wrap;gap:5px;margin-top:5px}
+  .tcmsg.mine .reactions{justify-content:flex-end}
+  .react{display:inline-flex;align-items:center;gap:4px;background:var(--card2);border:1px solid var(--border2);border-radius:11px;padding:2px 8px;font-size:13px;cursor:pointer;color:var(--text)}
+  .react span{font-size:11.5px;color:var(--muted);font-weight:600}
+  .react.on{background:var(--accentbg);border-color:var(--accent2)}
+  .react.on span{color:var(--accent2)}
+  .react:hover{border-color:var(--accent)}
+  /* Webhooks modal */
+  .whlist{display:flex;flex-direction:column;gap:8px;margin-top:14px;max-height:44vh;overflow-y:auto}
+  .whrow{display:flex;align-items:center;gap:8px;background:var(--card2);border:1px solid var(--border2);border-radius:9px;padding:9px 11px}
+  .whmeta{flex:1;min-width:0}
+  .whnm{font-size:13.5px;font-weight:600;color:var(--text);display:flex;align-items:center;gap:6px}
+  .whurl{font-size:11.5px;color:var(--muted);font-family:ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .runner{margin-top:auto;background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:13px}
   .runner .rt{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;margin-bottom:3px}
   .runner .rc{font-size:11px;color:var(--muted);margin-bottom:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -827,6 +856,17 @@ body:not(.manage) .manage-only { display: none !important; }
         <div class="memsearch"><i class="ti ti-search"></i><input id="mem-search" placeholder="Search members…" autocomplete="off" oninput="renderMembersList()"></div>
         <div id="mem-list" class="memlist"></div>
       </div></div>
+      <!-- Incoming webhooks -->
+      <div class="ov" id="ov-webhooks" onclick="if(event.target===this)close_('ov-webhooks')"><div class="modal" style="max-width:520px">
+        <span class="x" onclick="close_('ov-webhooks')"><i class="ti ti-x"></i></span>
+        <h3>Incoming webhooks</h3>
+        <div class="msub">Let external systems (CI, monitors, bots) post into <b id="wh-chan">#general</b>. POST JSON <code>{"text":"…","username":"…"}</code> to the URL.</div>
+        <div id="wh-list" class="whlist"></div>
+        <div style="display:flex;gap:8px;margin-top:12px">
+          <input id="wh-label" placeholder="Label (e.g. GitHub, CI)" style="flex:1;background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 12px;font-size:13px;font-family:inherit">
+          <button class="pri" onclick="createWebhook()"><i class="ti ti-plus"></i> Create</button>
+        </div>
+      </div></div>
       <!-- Active call -->
       <div class="ov callov" id="ov-call"><div class="callbox">
         <video id="call-remote" class="call-remote" autoplay playsinline></video>
@@ -977,6 +1017,7 @@ body:not(.manage) .manage-only { display: none !important; }
             <div style="display:flex;gap:8px">
               <button class="chaninvite callbtn" id="chat-call" onclick="callCurrent(false)" title="Voice call" style="display:none"><i class="ti ti-phone"></i></button>
               <button class="chaninvite callbtn" id="chat-vcall" onclick="callCurrent(true)" title="Video call" style="display:none"><i class="ti ti-video"></i></button>
+              <button class="chaninvite callbtn" id="chat-hooks" onclick="openWebhooks()" title="Incoming webhooks"><i class="ti ti-webhook"></i></button>
               <button class="chaninvite" onclick="openMembers()" title="Members"><i class="ti ti-users"></i> <span id="chat-memcount">Members</span></button>
               <button class="chaninvite" id="chat-invite" onclick="inviteToChannel()" style="display:none"><i class="ti ti-user-plus"></i> Invite</button>
             </div>
@@ -987,6 +1028,7 @@ body:not(.manage) .manage-only { display: none !important; }
             <div class="chatcompose">
               <input type="file" id="chat-file" multiple hidden onchange="pickFiles('chat',this)">
               <button class="att-btn" onclick="document.getElementById('chat-file').click()" title="Attach files"><i class="ti ti-paperclip"></i></button>
+              <button class="att-btn" onclick="openComposeEmoji(event)" title="Emoji"><i class="ti ti-mood-smile"></i></button>
               <input id="chat-input" placeholder="Message your team…  (Enter to send · @ to mention)" autocomplete="off" oninput="mentionOnInput(this)" onkeydown="chatInputKey(event)" onblur="setTimeout(closeMention,150)">
               <button class="pri" onclick="sendChat()"><i class="ti ti-send"></i></button>
             </div>
@@ -1645,6 +1687,7 @@ function selectChannel(id){
   const dm=kind==="dm";
   document.getElementById("chat-call").style.display=dm?"inline-flex":"none";
   document.getElementById("chat-vcall").style.display=dm?"inline-flex":"none";
+  document.getElementById("chat-hooks").style.display=dm?"none":"inline-flex";
   // Only private channels take invites; project membership follows assignment.
   const me=(ME&&ME.username)||"user";
   const canInvite=kind==="private"&&(ch.owner===me||(ch.inviters||[]).includes(me));
@@ -1927,6 +1970,109 @@ function callCurrent(video){
   if(!other){toasty("Open a direct message to call","err");return;}
   startCall(other,video);
 }
+// ── Emoji picker (shared: composer insert + message reactions) ───────────────
+const EMOJI_CATS=[
+  {n:"Smileys",i:"mood-smile",e:"😀 😃 😄 😁 😆 😅 🤣 😂 🙂 🙃 😉 😊 😇 🥰 😍 🤩 😘 😗 😚 😙 😋 😛 😜 🤪 😝 🤑 🤗 🤭 🤫 🤔 🤐 😐 😑 😶 😏 😒 🙄 😬 😮‍💨 🤥 😌 😔 😪 🤤 😴 😷 🤒 🤕 🤢 🤮 🤧 🥵 🥶 🥴 😵 🤯 🤠 🥳 😎 🤓 🧐 😕 😟 🙁 😮 😯 😲 😳 🥺 😦 😧 😨 😰 😥 😢 😭 😱 😖 😣 😞 😓 😩 😫 🥱 😤 😡 😠 🤬 😈 👿 💀 💩 🤡 👻 👽 🤖".split(" ")},
+  {n:"Gestures",i:"hand-stop",e:"👍 👎 👌 🤌 🤏 ✌️ 🤞 🤟 🤘 🤙 👈 👉 👆 👇 ☝️ 👋 🤚 🖐️ ✋ 🖖 👏 🙌 🤝 🙏 💪 🦾 ✍️ 👀 🧠 👂 👃 👅 👄 💋 ❤️‍🔥 💯".split(" ")},
+  {n:"Hearts",i:"heart",e:"❤️ 🧡 💛 💚 💙 💜 🤎 🖤 🤍 💔 ❤️‍🩹 💕 💞 💓 💗 💖 💘 💝 💟 ✨ ⭐ 🌟 💫 🔥 🎉 🎊 🥂 🍾".split(" ")},
+  {n:"Animals",i:"paw",e:"🐶 🐱 🐭 🐹 🐰 🦊 🐻 🐼 🐨 🐯 🦁 🐮 🐷 🐸 🐵 🐔 🐧 🐦 🐤 🦆 🦅 🦉 🐺 🐗 🐴 🦄 🐝 🐛 🦋 🐌 🐞 🐢 🐍 🐙 🦑 🦐 🐠 🐟 🐬 🐳 🐋 🦈".split(" ")},
+  {n:"Food",i:"coffee",e:"🍏 🍎 🍐 🍊 🍋 🍌 🍉 🍇 🍓 🫐 🍒 🍑 🥭 🍍 🥥 🥝 🍅 🍆 🥑 🥦 🌽 🥕 🍞 🧀 🥚 🍳 🥞 🥓 🍔 🍟 🍕 🌭 🥪 🌮 🌯 🍜 🍝 🍣 🍱 🍚 🍦 🍰 🎂 🍩 🍪 🍫 🍿 ☕ 🍵 🍺 🍻 🥂 🍷 🥤".split(" ")},
+  {n:"Activity",i:"ball-football",e:"⚽ 🏀 🏈 ⚾ 🎾 🏐 🏉 🎱 🏓 🏸 🥅 🏒 🏑 🏏 ⛳ 🏹 🎣 🥊 🥋 🎽 ⛸️ 🎿 🛷 🏂 🏆 🏅 🥇 🥈 🥉 🎮 🎲 🎯 🎳 🎸 🎹 🥁 🎺 🎬 🎨".split(" ")},
+  {n:"Travel",i:"plane",e:"🚗 🚕 🚙 🚌 🏎️ 🚓 🚑 🚒 🚚 🚜 🏍️ 🚲 ✈️ 🚀 🛸 🚁 ⛵ 🚤 🚢 🗽 🗼 🏰 🏠 🏢 🏥 🏦 🏬 🌋 🏔️ 🏝️ 🏖️ 🌅 🌇 🌆 🌉 🌃 🎇".split(" ")},
+  {n:"Objects",i:"bulb",e:"💻 🖥️ 🖨️ ⌨️ 🖱️ 💾 💿 📱 ☎️ 📞 📟 📠 📺 📷 🎥 🔋 🔌 💡 🔦 📚 📖 📝 ✏️ 📌 📎 📏 🔒 🔑 🔨 🛠️ ⚙️ 🧲 🔬 🔭 📡 💊 💉 🩺 🧬 🚀 ⏰ 📅 📈 📉 📊 💰 💳 💎".split(" ")},
+  {n:"Symbols",i:"check",e:"✅ ❌ ❓ ❗ ‼️ ⁉️ ⚠️ 🚫 ✔️ ➕ ➖ ✖️ ➗ ♾️ 💲 🔴 🟠 🟡 🟢 🔵 🟣 ⚫ ⚪ 🟥 🟧 🟨 🟩 🟦 🟪 🔺 🔻 ▶️ ⏸️ ⏹️ 🔔 🔕 ✨ 🎵 🎶 ©️ ®️ ™️".split(" ")},
+];
+let EMOJI_TARGET={cat:0,cb:null};
+function openEmoji(anchorEl,cb){
+  EMOJI_TARGET={cat:0,cb};
+  let pop=document.getElementById("emoji-pop");
+  if(!pop){pop=document.createElement("div");pop.id="emoji-pop";pop.className="emojipop";document.body.appendChild(pop);
+    pop.addEventListener("click",e=>e.stopPropagation());}
+  renderEmoji("");
+  pop.style.display="block";
+  // position above the anchor, clamped to viewport
+  const r=anchorEl.getBoundingClientRect();
+  const w=320,h=Math.min(360,window.innerHeight-40);
+  let left=Math.min(Math.max(8,r.left),window.innerWidth-w-8);
+  let top=r.top-h-8; if(top<8)top=Math.min(r.bottom+8,window.innerHeight-h-8);
+  pop.style.left=left+"px";pop.style.top=top+"px";pop.style.width=w+"px";
+  setTimeout(()=>document.addEventListener("click",closeEmojiOnce),0);
+  setTimeout(()=>{const s=document.getElementById("emoji-search");if(s)s.focus();},30);
+}
+function closeEmojiOnce(){closeEmoji();document.removeEventListener("click",closeEmojiOnce);}
+function closeEmoji(){const p=document.getElementById("emoji-pop");if(p)p.style.display="none";}
+function renderEmoji(q){
+  const pop=document.getElementById("emoji-pop");if(!pop)return;
+  q=(q||"").trim().toLowerCase();
+  const tabs=EMOJI_CATS.map((c,i)=>`<button class="etab${i===EMOJI_TARGET.cat?' on':''}" title="${c.n}" onclick="EMOJI_TARGET.cat=${i};renderEmoji(document.getElementById('emoji-search').value)"><i class="ti ti-${c.i}"></i></button>`).join("");
+  let list;
+  if(q)list=EMOJI_CATS.flatMap(c=>c.e).filter((e,i,a)=>a.indexOf(e)===i);
+  else list=EMOJI_CATS[EMOJI_TARGET.cat].e;
+  const grid=list.map(e=>`<button class="ecell" onclick="pickEmoji('${e}')">${e}</button>`).join("");
+  pop.innerHTML=`<div class="etabs">${tabs}</div>
+    <div class="esearch"><i class="ti ti-search"></i><input id="emoji-search" placeholder="Search…" autocomplete="off" oninput="renderEmoji(this.value)" onclick="event.stopPropagation()"></div>
+    <div class="egrid">${grid}</div>`;
+  if(q){const s=document.getElementById("emoji-search");if(s)s.value=q;}
+}
+function pickEmoji(e){const cb=EMOJI_TARGET.cb;closeEmojiOnce();if(cb)cb(e);}
+// Composer: open picker and insert at cursor.
+function openComposeEmoji(ev){ev.stopPropagation();
+  openEmoji(ev.currentTarget,e=>{
+    const inp=document.getElementById("chat-input");const p=inp.selectionStart||inp.value.length;
+    inp.value=inp.value.slice(0,p)+e+inp.value.slice(p);const np=p+e.length;inp.setSelectionRange(np,np);inp.focus();
+  });
+}
+// ── Reactions ───────────────────────────────────────────────────────────────
+function reactionsHtml(m){
+  if(!m.reactions||!m.reactions.length)return"";
+  const me=(ME&&ME.username)||"user";
+  return `<div class="reactions">`+m.reactions.map(r=>{
+    const mine=(r.users||[]).includes(me);
+    const who=(r.users||[]).map(memberName).join(", ");
+    return `<button class="react${mine?' on':''}" title="${esc(who)}" onclick="toggleReact('${esc(m.id)}','${esc(r.emoji)}')">${r.emoji} <span>${(r.users||[]).length}</span></button>`;
+  }).join("")+`</div>`;
+}
+function openReactPicker(ev,id){ev.stopPropagation();openEmoji(ev.currentTarget,e=>toggleReact(id,e));}
+function toggleReact(id,emoji){
+  fetch("/api/chat/react",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id,emoji})}).catch(()=>{});
+}
+// Apply a reaction event from the socket to the in-memory list + re-render.
+function applyReaction(ev){
+  const m=CHAT.find(x=>x.id===ev.id);if(m){m.reactions=ev.reactions||[];if(isChatMode()&&ev.channel===CURCHAN)renderChatList(true);}
+}
+// ── Incoming webhooks ───────────────────────────────────────────────────────
+async function openWebhooks(){
+  document.getElementById("wh-chan").textContent="#"+chanDisplay(currentChannel());
+  document.getElementById("wh-label").value="";
+  await loadWebhooks();
+  document.getElementById("ov-webhooks").classList.add("open");
+}
+async function loadWebhooks(){
+  let hooks=[];
+  try{hooks=await(await fetch("/api/chat/webhooks?channel="+encodeURIComponent(CURCHAN))).json();}catch(e){}
+  const box=document.getElementById("wh-list");
+  box.innerHTML=hooks.length?hooks.map(w=>{
+    const url=location.origin+"/api/chat/hook/"+w.token;
+    return `<div class="whrow"><div class="whmeta"><div class="whnm"><i class="ti ti-webhook"></i> ${esc(w.label)}</div><div class="whurl" title="${esc(url)}">${esc(url)}</div></div>
+      <button class="memic" title="Copy URL" onclick="copyText('${esc(url)}')"><i class="ti ti-copy"></i></button>
+      <button class="memic" title="Revoke" onclick="revokeWebhook('${esc(w.token)}')"><i class="ti ti-trash"></i></button></div>`;
+  }).join(""):'<div class="empty">No webhooks yet.</div>';
+}
+async function createWebhook(){
+  const label=document.getElementById("wh-label").value.trim()||"Webhook";
+  try{
+    const r=await fetch("/api/chat/webhooks",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({channel:CURCHAN,label})});
+    if(!r.ok){toasty(await r.text()||"could not create","err");return;}
+    const w=await r.json();
+    document.getElementById("wh-label").value="";
+    await loadWebhooks();
+    copyText(location.origin+w.url);toasty("Webhook created — URL copied","ok");
+  }catch(e){toasty("could not create","err");}
+}
+async function revokeWebhook(token){
+  try{await fetch("/api/chat/webhooks/"+encodeURIComponent(token),{method:"DELETE"});loadWebhooks();}catch(e){}
+}
+function copyText(t){navigator.clipboard.writeText(t).then(()=>toasty("Copied","ok")).catch(()=>{});}
 // Render a message body with Slack-style formatting: fenced/inline code,
 // **bold**, *italic*, links, and @mentions. HTML is escaped; code is verbatim.
 function formatMsg(raw){
@@ -2055,6 +2201,7 @@ function openChatWS(){
   CHATWS=ws;
   ws.onmessage=e=>{try{const m=JSON.parse(e.data);
     if(m.type==="signal"){onSignal(m);return;}
+    if(m.type==="reaction"){applyReaction(m);return;}
     // The socket only carries channels this user may see (enforced server-side).
     onChatIncoming(m);}catch(_){}};
   ws.onclose=()=>{if(CHATWS===ws){CHATWS=null;
@@ -2084,7 +2231,8 @@ function renderChatList(force){
     html+=`<div class="tcmsg${mine?' mine':''}${grouped?' grp':''}">
       ${mine||grouped?'<div class="tcav-sp"></div>':`<div class="tcav" style="background:${col}22;color:${col}">${esc((m.user||"?").slice(0,2).toUpperCase())}</div>`}
       <div class="tccol">${grouped?'':`<div class="tchead"><b>${mine?"You":esc(m.user)}</b><span class="tctime">${esc(time)}</span></div>`}
-        ${bodyH}${attHtml(m.attachments)}</div></div>`;});
+        <div class="tcbubwrap">${bodyH}${attHtml(m.attachments)}${m.id?`<button class="reactadd" title="Add reaction" onclick="openReactPicker(event,'${esc(m.id)}')"><i class="ti ti-mood-plus"></i></button>`:''}</div>
+        ${reactionsHtml(m)}</div></div>`;});
   box.innerHTML=html;
   if(atBottom)box.scrollTop=box.scrollHeight;
 }

@@ -11,10 +11,24 @@
 //! users + project registry (passed in as [`ChatContext`]); only private
 //! channels and the messages are persisted here.
 
-use crate::state::{now_rfc3339, slugify, Attachment, Channel, ChatMsg, GENERAL_CHANNEL, MAX_CHAT};
+use crate::state::{
+    mint_id, now_rfc3339, slugify, Attachment, Channel, ChatMsg, Reaction, GENERAL_CHANNEL,
+    MAX_CHAT,
+};
 use serde::{Deserialize, Serialize};
 
-/// The persisted system-chat aggregate: private channels + all messages.
+/// An incoming webhook: a secret token that lets an external system post to a
+/// channel without a login.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Webhook {
+    pub token: String,
+    pub channel: String,
+    /// Display name messages are posted under (e.g. "GitHub").
+    pub label: String,
+    pub created_at: String,
+}
+
+/// The persisted system-chat aggregate: private channels + messages + webhooks.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SystemChat {
     /// Owner-created private channels (general + project channels are computed).
@@ -23,6 +37,9 @@ pub struct SystemChat {
     /// Every message across every channel, tagged by `channel` id.
     #[serde(default)]
     pub chat: Vec<ChatMsg>,
+    /// Incoming webhooks (external systems posting into channels).
+    #[serde(default)]
+    pub webhooks: Vec<Webhook>,
 }
 
 /// A project the hub knows about, for provisioning its channel.
@@ -161,18 +178,92 @@ impl SystemChat {
     }
 
     /// Append a message to `channel_id`, trimming the oldest beyond [`MAX_CHAT`].
-    pub fn post(&mut self, user: &str, body: &str, channel_id: &str, attachments: Vec<Attachment>) {
+    /// Returns the id of the new message.
+    pub fn post(
+        &mut self,
+        user: &str,
+        body: &str,
+        channel_id: &str,
+        attachments: Vec<Attachment>,
+    ) -> String {
+        let id = mint_id();
         self.chat.push(ChatMsg {
+            id: id.clone(),
             at: now_rfc3339(),
             user: user.to_owned(),
             body: body.to_owned(),
             channel: channel_id.to_owned(),
             attachments,
+            reactions: Vec::new(),
         });
         let overflow = self.chat.len().saturating_sub(MAX_CHAT);
         if overflow > 0 {
             self.chat.drain(0..overflow);
         }
+        id
+    }
+
+    /// Toggle `user`'s `emoji` reaction on message `id`. Returns the updated
+    /// message (so the caller can broadcast it), or `None` if not found.
+    pub fn react(&mut self, id: &str, user: &str, emoji: &str) -> Option<ChatMsg> {
+        let msg = self.chat.iter_mut().find(|m| m.id == id)?;
+        if let Some(r) = msg.reactions.iter_mut().find(|r| r.emoji == emoji) {
+            if let Some(pos) = r.users.iter().position(|u| u == user) {
+                r.users.remove(pos);
+            } else {
+                r.users.push(user.to_owned());
+            }
+        } else {
+            msg.reactions.push(Reaction {
+                emoji: emoji.to_owned(),
+                users: vec![user.to_owned()],
+            });
+        }
+        msg.reactions.retain(|r| !r.users.is_empty());
+        Some(msg.clone())
+    }
+
+    /// Create an incoming webhook for `channel` with the given `label`. Returns
+    /// the new webhook (its token is the URL secret).
+    pub fn create_webhook(&mut self, channel: &str, label: &str) -> Webhook {
+        let wh = Webhook {
+            token: format!("whk_{}{}", mint_id(), mint_id()),
+            channel: channel.to_owned(),
+            label: if label.trim().is_empty() {
+                "Webhook".to_owned()
+            } else {
+                label.trim().to_owned()
+            },
+            created_at: now_rfc3339(),
+        };
+        self.webhooks.push(wh.clone());
+        wh
+    }
+
+    /// Resolve a webhook token to its (channel, label), if valid.
+    #[must_use]
+    pub fn webhook(&self, token: &str) -> Option<(String, String)> {
+        self.webhooks
+            .iter()
+            .find(|w| w.token == token)
+            .map(|w| (w.channel.clone(), w.label.clone()))
+    }
+
+    /// Webhooks for a channel (metadata; the token is the secret).
+    #[must_use]
+    pub fn webhooks_for(&self, channel: &str) -> Vec<Webhook> {
+        self.webhooks
+            .iter()
+            .filter(|w| w.channel == channel)
+            .cloned()
+            .collect()
+    }
+
+    /// Revoke a webhook by token. Returns whether one was removed.
+    pub fn revoke_webhook(&mut self, token: &str) -> bool {
+        let before = self.webhooks.len();
+        self.webhooks.retain(|w| w.token != token);
+        self.webhooks.len() != before
     }
 
     /// Create a private channel owned by `owner`. Collides against general,

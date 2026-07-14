@@ -410,6 +410,16 @@ pub async fn serve_full(
         .route("/api/chat/messages", get(syschat_messages_ep))
         .route("/api/chat/members", get(syschat_members_ep))
         .route("/api/chat/dm", post(syschat_dm_ep))
+        .route("/api/chat/react", post(syschat_react_ep))
+        .route(
+            "/api/chat/webhooks",
+            get(syschat_webhooks_list_ep).post(syschat_webhook_create_ep),
+        )
+        .route(
+            "/api/chat/webhooks/:token",
+            axum::routing::delete(syschat_webhook_delete_ep),
+        )
+        .route("/api/chat/hook/:token", post(syschat_hook_ep))
         .route("/api/chat/send", post(syschat_send_ep))
         .route("/api/chat/ws", get(syschat_ws_ep))
         .route("/api/chat/upload", post(syschat_upload_ep))
@@ -2012,6 +2022,141 @@ async fn syschat_dm_ep(
     }
 }
 
+#[derive(serde::Deserialize)]
+struct ReactReq {
+    id: String,
+    emoji: String,
+}
+
+/// Toggle the caller's emoji reaction on a message; broadcast the update.
+async fn syschat_react_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<ReactReq>,
+) -> axum::response::Response {
+    let user = resolve_username(&app, &headers).await;
+    let emoji = req.emoji.chars().take(8).collect::<String>();
+    let updated = { app.syschat.inner.lock().await.react(&req.id, &user, &emoji) };
+    let Some(msg) = updated else {
+        return not_found();
+    };
+    app.syschat.save().await;
+    // Broadcast a reaction event so every client updates the message in place.
+    let evt = serde_json::json!({
+        "type": "reaction", "channel": msg.channel, "id": msg.id, "reactions": msg.reactions,
+    });
+    let _ = app.syschat.tx.send(evt.to_string());
+    Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct WebhookReq {
+    channel: String,
+    #[serde(default)]
+    label: String,
+}
+
+/// Create an incoming webhook for a channel (any member). Returns the token +
+/// the full post URL.
+async fn syschat_webhook_create_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<WebhookReq>,
+) -> axum::response::Response {
+    let user = resolve_username(&app, &headers).await;
+    let ctx = app.chat_context().await;
+    let wh = {
+        let mut sc = app.syschat.inner.lock().await;
+        if !sc.can_view(&req.channel, &user, &ctx) {
+            return (StatusCode::FORBIDDEN, "not a member of this channel").into_response();
+        }
+        sc.create_webhook(&req.channel, &req.label)
+    };
+    app.syschat.save().await;
+    Json(serde_json::json!({
+        "token": wh.token, "channel": wh.channel, "label": wh.label,
+        "url": format!("/api/chat/hook/{}", wh.token),
+    }))
+    .into_response()
+}
+
+/// List a channel's webhooks (members only).
+async fn syschat_webhooks_list_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<ChatListQuery>,
+) -> axum::response::Response {
+    let channel = q
+        .channel
+        .unwrap_or_else(|| coxagent_application::GENERAL_CHANNEL.to_owned());
+    let user = resolve_username(&app, &headers).await;
+    let ctx = app.chat_context().await;
+    let sc = app.syschat.inner.lock().await;
+    if !sc.can_view(&channel, &user, &ctx) {
+        return Json(Vec::<coxagent_application::Webhook>::new()).into_response();
+    }
+    Json(sc.webhooks_for(&channel)).into_response()
+}
+
+/// Revoke a webhook by token.
+async fn syschat_webhook_delete_ep(
+    State(app): State<AppState>,
+    Path(token): Path<String>,
+) -> axum::response::Response {
+    let removed = { app.syschat.inner.lock().await.revoke_webhook(&token) };
+    if removed {
+        app.syschat.save().await;
+    }
+    Json(serde_json::json!({ "ok": removed })).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct HookPostReq {
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    username: String,
+}
+
+/// Public webhook endpoint: an external system posts a message to a channel
+/// using only the secret token (no login). The token is the credential.
+async fn syschat_hook_ep(
+    State(app): State<AppState>,
+    Path(token): Path<String>,
+    Json(req): Json<HookPostReq>,
+) -> axum::response::Response {
+    let Some((channel, label)) = ({ app.syschat.inner.lock().await.webhook(&token) }) else {
+        return not_found();
+    };
+    let text = req.text.trim();
+    if text.is_empty() {
+        return (StatusCode::BAD_REQUEST, "empty text").into_response();
+    }
+    let author = if req.username.trim().is_empty() {
+        label
+    } else {
+        req.username.trim().to_owned()
+    };
+    let msg = {
+        let mut sc = app.syschat.inner.lock().await;
+        let id = sc.post(
+            &author,
+            &text.chars().take(4000).collect::<String>(),
+            &channel,
+            Vec::new(),
+        );
+        sc.chat.iter().find(|m| m.id == id).cloned()
+    };
+    app.syschat.save().await;
+    if let Some(m) = msg {
+        let _ = app
+            .syschat
+            .tx
+            .send(serde_json::to_string(&m).unwrap_or_default());
+    }
+    Json(serde_json::json!({ "ok": true })).into_response()
+}
+
 /// Whether `user` may receive a system-chat broadcast (membership per message).
 async fn syschat_may_see(app: &AppState, user: &str, json: &str) -> bool {
     let channel = serde_json::from_str::<serde_json::Value>(json)
@@ -2679,7 +2824,13 @@ async fn auth_mw(
         return next.run(req).await;
     };
     let path = req.uri().path().to_owned();
-    if path == "/" || path == "/api/health" || path == "/api/auth/login" {
+    // Public routes: the SPA shell, health, login, and incoming webhooks (the
+    // webhook token is the credential, so no session is required).
+    if path == "/"
+        || path == "/api/health"
+        || path == "/api/auth/login"
+        || path.starts_with("/api/chat/hook/")
+    {
         return next.run(req).await;
     }
     let Some(user) = resolve_principal(&auth, req.headers()).await else {
