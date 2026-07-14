@@ -112,6 +112,22 @@
   .gantt-lbl span{font-size:10.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .gantt-track{flex:1;position:relative;height:22px;background:var(--card2);border-radius:6px}
   .gantt-bar{position:absolute;top:3px;height:16px;border-radius:5px;display:flex;align-items:center;justify-content:center;min-width:6px}
+  .gm-row,.gm-axis{display:flex;align-items:center;gap:12px;margin:5px 0}
+  .gm-lbl{flex:none;width:180px;display:flex;flex-direction:column;line-height:1.25;overflow:hidden}
+  .gm-lbl b{font-size:12.5px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .gm-lbl span{font-size:10.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .gm-track{flex:1;position:relative;height:26px}
+  .gm-bar{position:absolute;top:4px;height:18px;border-radius:5px;display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;min-width:6px;z-index:2}
+  .gq{position:absolute;top:0;bottom:0;width:1px;background:var(--border2);opacity:.7}
+  .gwk{position:absolute;top:0;bottom:0;width:1px;background:var(--border);opacity:.4}
+  .gqlab{position:absolute;top:0;transform:translateX(3px);font-size:9.5px;color:var(--dim);white-space:nowrap}
+  .gm-now{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--accent2);opacity:.6;z-index:3}
+  .gm-nowlab{position:absolute;transform:translateX(-50%);font-size:9px;color:var(--accent2)}
+  .gm-marktrack{height:34px}
+  .gm-mark{position:absolute;top:2px;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;color:var(--green);z-index:2}
+  .gm-mark i{font-size:12px}
+  .gm-mark span{font-size:8.5px;font-family:ui-monospace,monospace;color:var(--muted)}
+  .gm-qaxis{height:18px}
   .wspath{display:flex;align-items:center;gap:8px;background:var(--bg);border:1px solid var(--border2);border-radius:8px;padding:8px 10px}
   .wspath code{flex:1;min-width:0;font-family:ui-monospace,monospace;font-size:12px;color:var(--accent2);overflow-x:auto;white-space:nowrap}
   .wspath button{flex:none;background:var(--card2);border:1px solid var(--border2);color:var(--muted);border-radius:6px;padding:4px 8px;cursor:pointer}
@@ -636,6 +652,56 @@ function chartsHtml(s){
     <div style="display:flex;align-items:flex-end;height:80px;gap:2px;margin-top:6px">${bars}</div></div>`;
   return statusChart+throughput;
 }
+// Merged Gantt + milestones on a real time axis with quarter/week gridlines:
+// each milestone is a bar (start → its target-version delivery date), releases
+// are markers, and future targets are projected from shipping velocity.
+function vnum(v){const p=String(v||"0.0.0").split(".").map(Number);return (p[0]||0)*10000+(p[1]||0)*100+(p[2]||0);}
+function roadmapGantt(s){
+  const ms=s.milestones||[];if(!ms.length)return "";
+  const proj=(PROJECTS.find(p=>p.id===PID)||{}).name||PID;
+  const hist=(s.history||[]).map(r=>({v:r.version,title:r.title,t:Date.parse(r.at)})).filter(r=>!isNaN(r.t)).sort((a,b)=>a.t-b.t);
+  const now=Date.now(),cur=vnum(s.current_version);
+  const DAY=864e5;
+  // ms per numeric version-unit (a minor bump = 100 units), floored so future
+  // targets still spread out even for fast-shipping projects.
+  let perUnit=3*DAY/100;
+  if(hist.length>=2){const span=hist[hist.length-1].t-hist[0].t,steps=Math.max(1,vnum(hist[hist.length-1].v)-vnum(hist[0].v));perUnit=Math.max(perUnit,span/steps);}
+  const relDate=tv=>{const n=vnum(tv);const past=hist.filter(r=>vnum(r.v)<=n);return past.length?past[past.length-1].t:null;};
+  const t0=hist.length?hist[0].t:now;
+  let prev=t0,firstActive=true;
+  const rows=ms.map(m=>{const reached=cur>=vnum(m.target_version);
+    const end=reached?(relDate(m.target_version)||now):now+(vnum(m.target_version)-cur)*perUnit;
+    const start=Math.min(prev,end);prev=end;
+    let st="planned";if(reached)st="reached";else if(firstActive){st="active";firstActive=false;}
+    return {name:m.name,goal:m.goal,ver:m.target_version,start,end,st};});
+  const min=Math.min(t0,...rows.map(r=>r.start)),max=Math.max(now,...rows.map(r=>r.end));
+  const span=Math.max(DAY,max-min),pct=t=>((t-min)/span*100);
+  const shortSpan=span<=140*DAY; // show week gridlines only when zoomed-in enough
+  // Quarter gridlines + labels.
+  let grid="",labels="";const d=new Date(min);d.setDate(1);d.setMonth(Math.floor(d.getMonth()/3)*3);
+  for(let q=new Date(d);q.getTime()<max;q.setMonth(q.getMonth()+3)){const x=pct(q.getTime());if(x>=0&&x<=100){
+    grid+=`<div class="gq" style="left:${x}%"></div>`;labels+=`<div class="gqlab" style="left:${x}%">Q${Math.floor(q.getMonth()/3)+1} ${q.getFullYear()}</div>`;}}
+  // Week gridlines (light) when the horizon is short.
+  if(shortSpan){const w=new Date(min);w.setDate(w.getDate()-w.getDay());for(let x=new Date(w);x.getTime()<max;x.setDate(x.getDate()+7)){const p=pct(x.getTime());if(p>=0&&p<=100)grid+=`<div class="gwk" style="left:${p}%"></div>`;}}
+  const nowX=pct(now);
+  const fmt=t=>new Date(t).toLocaleDateString([],{month:"short",day:"numeric",year:"numeric"});
+  const bars=rows.map(r=>{const l=pct(r.start),wd=Math.max(1.5,pct(r.end)-l);
+    const col=r.st==="reached"?"var(--green)":(r.st==="active"?"var(--accent2)":"var(--muted)");
+    const stripe=r.st==="planned"?`background:repeating-linear-gradient(45deg,${col}88,${col}88 6px,transparent 6px,transparent 12px);border:1px solid ${col}`:`background:${col}`;
+    const tag=r.st==="reached"?'reached':(r.st==="active"?'in progress':'planned');
+    return `<div class="gm-row">
+      <div class="gm-lbl" title="${esc(r.goal)}"><b>${esc(r.name)}</b><span>v${esc(r.ver)} · ${fmt(r.end)}</span></div>
+      <div class="gm-track">${grid}<div class="gm-now" style="left:${nowX}%"></div>
+        <div class="gm-bar" style="left:${l}%;width:${wd}%;${stripe}" title="${esc(r.name)} → v${esc(r.ver)} · ${fmt(r.end)} (${tag})">${r.st==="reached"?'<i class="ti ti-check"></i>':''}</div></div></div>`;}).join("");
+  // Delivery markers (shipped versions) on a top axis track.
+  const marks=hist.map(h=>{const x=pct(h.t);if(x<0||x>100)return'';return `<div class="gm-mark" style="left:${x}%" title="v${esc(h.v)} — ${esc(h.title||'')} · ${fmt(h.t)}"><i class="ti ti-rocket"></i><span>v${esc(h.v)}</span></div>`;}).join("");
+  return `<div class="sec" style="margin-top:22px">Roadmap Gantt <span style="font-size:11px;color:var(--dim);font-weight:400">· ${esc(proj)} — milestones & deliveries over time (${shortSpan?'weeks':'quarters'})</span></div>
+    <div class="panel" style="overflow-x:auto"><div style="min-width:640px">
+      <div class="gm-axis"><div class="gm-lbl"></div><div class="gm-track gm-marktrack">${grid}<div class="gm-now" style="left:${nowX}%"></div>${marks}</div></div>
+      ${bars}
+      <div class="gm-axis gm-qaxis"><div class="gm-lbl"></div><div class="gm-track" style="height:16px">${grid}${labels}<div class="gm-nowlab" style="left:${nowX}%">now</div></div></div>
+    </div></div>`;
+}
 // Milestone roadmap — each is a shippable target (a version), spanning several
 // sprints. Status derived from the shipped version.
 function milestonesHtml(s){
@@ -731,7 +797,7 @@ function renderRoadmap(){
           <div style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.title)}">${esc(r.title)}</div>
           <div style="font-size:10px;color:var(--dim)">${esc((r.at||'').slice(0,10))}</div></div>`).join("")}</div></div>`;
   }
-  el.innerHTML=header+milestonesHtml(s)+ganttHtml(s)+board+timeline;
+  el.innerHTML=header+timeline+roadmapGantt(s)+board;
 }
 // A Gantt-style delivery chart on a real time axis: each shipped version is a
 // bar spanning the time it took to ship (previous release → its own release),
