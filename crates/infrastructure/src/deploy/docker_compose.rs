@@ -78,11 +78,24 @@ impl DeployPort for DockerComposeDeploy {
                 _ => "docker compose up -d --build succeeded".to_owned(),
             }
         } else {
+            // Compose prints the real cause somewhere in stderr, but the final
+            // line is often blank; surface the last *non-empty* line (falling
+            // back to stdout, then the exit code) so the reason is never empty.
             let err = String::from_utf8_lossy(&output.stderr);
-            format!(
-                "docker compose failed: {}",
-                err.lines().last().unwrap_or("").trim()
-            )
+            let out = String::from_utf8_lossy(&output.stdout);
+            let last_meaningful = |s: &str| -> Option<String> {
+                s.lines()
+                    .map(str::trim)
+                    .rev()
+                    .find(|l| !l.is_empty())
+                    .map(ToOwned::to_owned)
+            };
+            let detail = last_meaningful(&err)
+                .or_else(|| last_meaningful(&out))
+                .unwrap_or_else(|| {
+                    format!("exit {} (no output)", output.status.code().unwrap_or(-1))
+                });
+            format!("docker compose failed: {detail}")
         };
         Ok(DeployReport {
             success,
