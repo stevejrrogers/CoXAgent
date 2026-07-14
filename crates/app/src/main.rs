@@ -277,6 +277,7 @@ async fn serve_with_runner(
     let extras = coxagent_presentation::HubExtras {
         auth,
         engines: detected_engines(),
+        tooling: detected_tooling(),
         ..Default::default()
     };
     coxagent_presentation::serve_full(vec![project], port, audit, extras).await?;
@@ -289,6 +290,11 @@ fn detected_engines() -> Vec<(String, String)> {
         .into_iter()
         .map(|d| (d.kind.as_binary().to_owned(), d.path.display().to_string()))
         .collect()
+}
+
+/// Developer tooling status (git/gh/glab/docker) serialized for the dashboard.
+fn detected_tooling() -> serde_json::Value {
+    serde_json::to_value(coxagent_infrastructure::discover_tooling()).unwrap_or_default()
 }
 
 /// Build the security-audit sink: Postgres when `COXAGENT_DB_DSN` is set (the
@@ -386,6 +392,7 @@ async fn run_hub(registry: &Path, port: u16) -> Result<(), Box<dyn std::error::E
         remover: Some(remover),
         auth,
         engines: detected_engines(),
+        tooling: detected_tooling(),
         analyzer,
     };
     coxagent_presentation::serve_full(projects, port, audit, extras).await?;

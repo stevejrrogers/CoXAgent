@@ -123,6 +123,24 @@
   .set-footer .save{margin:0}
   .set-foothint{font-size:11px;color:var(--dim);margin-left:auto}
   #save-note{font-size:12px;color:var(--green)}
+  /* Developer tooling checklist */
+  .toolcard{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:15px 17px;margin-bottom:14px}
+  .toolhead{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;margin-bottom:12px}
+  .toolwarn{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;padding:2px 8px;border-radius:20px;background:color-mix(in srgb,var(--red) 16%,transparent);color:var(--red)}
+  .toolok{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;padding:2px 8px;border-radius:20px;background:color-mix(in srgb,var(--green) 16%,transparent);color:var(--green)}
+  .toolgrid{display:flex;flex-direction:column;gap:9px}
+  .toolrow{display:flex;align-items:center;gap:11px}
+  .toolinfo{flex:1;min-width:0}
+  .toolinfo b{font-size:13px;font-family:ui-monospace,monospace}
+  .tooldim{font-size:12px;color:var(--muted)}
+  .toolpath{font-size:11px;color:var(--dim);font-family:ui-monospace,monospace}
+  .toolinstall{display:inline-flex;align-items:center;gap:6px;margin-top:3px}
+  .toolinstall code{font-size:11.5px;background:var(--card2);border:1px solid var(--border2);border-radius:6px;padding:3px 8px;color:var(--accent2);font-family:ui-monospace,monospace}
+  .toolcopy{display:grid;place-items:center;width:26px;height:26px;background:transparent;border:1px solid var(--border2);border-radius:6px;color:var(--muted);cursor:pointer;font-size:13px}
+  .toolcopy:hover{color:var(--text);border-color:var(--accent)}
+  .tooltag{font-size:10px;font-weight:600;color:var(--amber);background:color-mix(in srgb,var(--amber) 14%,transparent);padding:2px 8px;border-radius:20px;flex:none}
+  .toolnote{font-size:11.5px;color:var(--muted);line-height:1.6;margin-top:12px;padding-top:11px;border-top:1px solid var(--border);display:flex;gap:7px}
+  .toolnote code{background:var(--card2);border-radius:4px;padding:1px 5px;font-family:ui-monospace,monospace;color:var(--accent2)}
   /* Users: richer create form + project picker + edit modal */
   .ainvite2{flex-wrap:wrap}
   .uprojpick-wrap{display:flex;align-items:flex-start;gap:12px;margin:2px 0 10px;flex-wrap:wrap}
@@ -1472,6 +1490,17 @@ async function showTicket(id){
   body.innerHTML=h;}
 async function rejectTicket(id){try{await fetch(api("/ticket/"+id+"/reject"),{method:"POST"});close_("ov-ticket");}catch(e){}}
 async function loadSettings(){let cfg={};try{cfg=await(await fetch(api("/config"))).json();}catch(e){}window._cfg=cfg;
+  let tools=[];try{tools=await(await fetch("/api/tooling")).json();}catch(e){}
+  const missing=tools.filter(t=>!t.present).length;
+  const toolingHtml=`<div class="toolcard">
+    <div class="toolhead"><i class="ti ti-tools" style="color:var(--accent2)"></i> Developer tooling ${missing?`<span class="toolwarn">${missing} missing</span>`:'<span class="toolok">all present</span>'}</div>
+    <div class="toolgrid">${tools.map(t=>`<div class="toolrow">
+      <i class="ti ti-${t.present?'circle-check-filled':'circle-x'}" style="color:${t.present?'var(--green)':'var(--red)'};font-size:17px"></i>
+      <div class="toolinfo"><div><b>${esc(t.name)}</b> <span class="tooldim">· ${esc(t.purpose)}</span></div>
+        ${t.present?`<code class="toolpath">${esc(t.path)}</code>`:`<div class="toolinstall"><code>${esc(t.install)}</code><button class="toolcopy" onclick="copyText(this,'${esc(t.install)}')" title="Copy"><i class="ti ti-copy"></i></button></div>`}
+      </div>${t.needs_auth&&!t.present?'<span class="tooltag">needs your login</span>':''}</div>`).join("")}</div>
+    ${missing?'<div class="toolnote"><i class="ti ti-info-circle"></i> Install the missing tools, then <b>sign them in</b> (e.g. <code>gh auth login</code>) — auth needs you, agents can\'t do it. Restart the app after installing.</div>':''}
+  </div>`;
   let detected=[];try{detected=await(await fetch("/api/engines")).json();}catch(e){}
   if(!Array.isArray(detected))detected=[];
   const detNames=new Set(detected.map(d=>d.name));window._detected=detNames;
@@ -1522,6 +1551,7 @@ async function loadSettings(){let cfg={};try{cfg=await(await fetch(api("/config"
       <div class="set-note">Budget caps apply <b style="color:var(--accent2)">immediately</b>; other settings on the next restart. The total cap is <b>cumulative</b> — to resume past a hit cap, set it above what's already spent (or tick unlimited).</div>
     </div>
     <div class="settab" data-p="git" hidden>
+      ${toolingHtml}
       <div class="panel frm">
         <div class="fr"><span class="lbl">Integration</span><select id="git-en"><option value="false" ${!git.enabled?'selected':''}>disabled</option><option value="true" ${git.enabled?'selected':''}>enabled</option></select><span class="hint">off = agents never touch git; safe until you turn it on</span></div>
         <div class="fr"><span class="lbl">Provider</span><select id="git-pv"><option value="github" ${git.provider!=='gitlab'?'selected':''}>GitHub</option><option value="gitlab" ${git.provider==='gitlab'?'selected':''}>GitLab</option></select><span class="hint">GitHub via <code>gh</code> · GitLab via <code>glab</code></span></div>
@@ -1539,6 +1569,8 @@ async function loadSettings(){let cfg={};try{cfg=await(await fetch(api("/config"
     <div class="set-footer"><button class="save" onclick="saveSettings()"><i class="ti ti-device-floppy"></i> Save changes</button><span id="save-note"></span><span class="set-foothint">Other settings apply on the next restart</span></div>`;
   setSetTab(window._setTab||"engines");
   loadWorkspace("");}
+function copyText(btn,text){navigator.clipboard&&navigator.clipboard.writeText(text);
+  const old=btn.innerHTML;btn.innerHTML='<i class="ti ti-check"></i>';setTimeout(()=>{btn.innerHTML=old;},1200);}
 function setSetTab(name){window._setTab=name;
   document.querySelectorAll(".settab-btn").forEach(b=>b.classList.toggle("on",b.dataset.t===name));
   document.querySelectorAll(".settab").forEach(p=>{p.hidden=p.dataset.p!==name;});

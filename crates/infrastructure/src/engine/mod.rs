@@ -14,6 +14,6 @@ pub use claude::ClaudeEngine;
 pub use metering::{Meter, MeteringEngine};
 pub use mock::MockEngine;
 pub use opencode::OpencodeEngine;
-pub use registry::{discover, discover_in, DetectedEngine};
+pub use registry::{discover, discover_in, discover_tooling, DetectedEngine, DetectedTool};
 pub use scripted::ScriptedEngine;
 pub use transcript::TranscriptEngine;

@@ -32,6 +32,73 @@ pub fn discover_in(dirs: &[PathBuf]) -> Vec<DetectedEngine> {
     found
 }
 
+/// A developer tool the git/deploy flow may need, and whether it is installed.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DetectedTool {
+    /// Binary name (`git`, `gh`, `glab`, `docker`).
+    pub name: &'static str,
+    /// What CoXAgent uses it for.
+    pub purpose: &'static str,
+    /// Whether it was found on `PATH`.
+    pub present: bool,
+    /// Full path when present.
+    pub path: String,
+    /// Shell command to install it (macOS/Homebrew).
+    pub install: &'static str,
+    /// Whether it needs an interactive auth step only the user can do.
+    pub needs_auth: bool,
+}
+
+/// The tools the git flow and deploy step rely on.
+const TOOLING: &[(&str, &str, &str, bool)] = &[
+    (
+        "git",
+        "version control (branch/commit)",
+        "brew install git",
+        false,
+    ),
+    (
+        "gh",
+        "GitHub PRs & auth",
+        "brew install gh && gh auth login",
+        true,
+    ),
+    (
+        "glab",
+        "GitLab MRs & auth",
+        "brew install glab && glab auth login",
+        true,
+    ),
+    (
+        "docker",
+        "deploy (docker compose)",
+        "brew install --cask docker",
+        false,
+    ),
+];
+
+/// Detect the developer tooling on `PATH`, so the dashboard can show what's
+/// missing and how to install it.
+#[must_use]
+pub fn discover_tooling() -> Vec<DetectedTool> {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
+    TOOLING
+        .iter()
+        .map(|&(name, purpose, install, needs_auth)| {
+            let found = find_binary(&dirs, name);
+            DetectedTool {
+                name,
+                purpose,
+                present: found.is_some(),
+                path: found.map(|p| p.display().to_string()).unwrap_or_default(),
+                install,
+                needs_auth,
+            }
+        })
+        .collect()
+}
+
 /// Return the first directory containing an executable named `name`.
 fn find_binary(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
     dirs.iter().find_map(|dir| {

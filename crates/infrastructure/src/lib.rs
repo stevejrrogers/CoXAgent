@@ -18,7 +18,10 @@ pub mod totp;
 pub use audit_sink::{MemoryAuditSink, SqlAuditSink};
 pub use auth::FileAuthService;
 pub use deploy::DockerComposeDeploy;
-pub use engine::{discover, AnyEngine, ClaudeEngine, DetectedEngine, MockEngine, OpencodeEngine};
+pub use engine::{
+    discover, discover_tooling, AnyEngine, ClaudeEngine, DetectedEngine, DetectedTool, MockEngine,
+    OpencodeEngine,
+};
 pub use forge::{GhForge, GlForge};
 pub use git::SystemGit;
 pub use notifier::WebhookNotifier;

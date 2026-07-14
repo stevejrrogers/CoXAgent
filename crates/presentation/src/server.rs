@@ -116,6 +116,8 @@ struct AppState {
     audit: Arc<dyn AuditPort>,
     /// Agent CLIs detected on this machine's PATH: `(name, path)`.
     engines: Arc<Vec<(String, String)>>,
+    /// Developer tooling status (git/gh/glab/docker), computed at startup.
+    tooling: Arc<serde_json::Value>,
     /// Live viewers keyed by username → open-connection count. Distinct users =
     /// map length, so one person in the app + a browser tab counts once.
     viewers: Arc<std::sync::Mutex<HashMap<String, usize>>>,
@@ -222,6 +224,8 @@ pub struct HubExtras {
     pub auth: Option<Arc<dyn AuthPort>>,
     /// Agent CLIs detected on this machine's PATH: `(name, path)`.
     pub engines: Vec<(String, String)>,
+    /// Developer tooling status JSON (git/gh/glab/docker); `Null` when unknown.
+    pub tooling: serde_json::Value,
     /// A hub-level engine + work dir for cross-project drafting (project goals).
     pub analyzer: Option<(
         Arc<dyn coxagent_application::ports::outbound::AgentEnginePort>,
@@ -246,6 +250,7 @@ fn build_state(
         auth: extras.auth,
         audit,
         engines: Arc::new(extras.engines),
+        tooling: Arc::new(extras.tooling),
         viewers: Arc::new(std::sync::Mutex::new(HashMap::new())),
         remover: extras.remover,
         analyzer: extras.analyzer,
@@ -305,6 +310,7 @@ pub async fn serve_full(
             axum::routing::delete(remove_member_ep),
         )
         .route("/api/engines", get(engines_ep))
+        .route("/api/tooling", get(tooling_ep))
         .route("/api/analyze-goal", post(analyze_goal_ep))
         .route("/api/projects", get(list_projects).post(create_project))
         .route(
@@ -396,6 +402,12 @@ async fn engines_ep(State(app): State<AppState>) -> impl IntoResponse {
         .map(|(name, path)| serde_json::json!({ "name": name, "path": path }))
         .collect();
     Json(list)
+}
+
+/// Developer tooling the git/deploy flow needs (git, gh, glab, docker) — which
+/// are installed, and how to install the rest. Computed at startup and injected.
+async fn tooling_ep(State(app): State<AppState>) -> impl IntoResponse {
+    Json((*app.tooling).clone())
 }
 
 /// List projects (id, name, alias, version, ticket count) in registration order.
