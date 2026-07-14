@@ -33,6 +33,25 @@ pub fn parse_items(raw: &str) -> Result<Vec<ProposedItem>, String> {
     serde_json::from_str(&raw[start..=end]).map_err(|e| e.to_string())
 }
 
+/// Normalise a ticket title for duplicate detection: lowercase, keep only
+/// alphanumerics, collapse runs to single spaces. So "Key Verification (Safety
+/// Numbers)" and "key verification safety numbers" compare equal.
+#[must_use]
+pub fn normalize_title(title: &str) -> String {
+    let mut out = String::with_capacity(title.len());
+    let mut prev_space = false;
+    for c in title.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.extend(c.to_lowercase());
+            prev_space = false;
+        } else if !prev_space && !out.is_empty() {
+            out.push(' ');
+            prev_space = true;
+        }
+    }
+    out.trim().to_owned()
+}
+
 /// Extract the outermost JSON array of strings (e.g. acceptance criteria),
 /// tolerating surrounding prose.
 ///

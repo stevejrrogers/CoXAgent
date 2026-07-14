@@ -4,7 +4,7 @@
 
 use crate::config::Config;
 use crate::error::AppError;
-use crate::parsing::parse_items;
+use crate::parsing::{normalize_title, parse_items};
 use crate::ports::outbound::{AgentEnginePort, AgentRequest, StateStorePort};
 use crate::prompts;
 use crate::use_cases::{AddTicketInput, AddTicketUseCase};
@@ -46,12 +46,35 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
     /// - [`AppError::Domain`] when a proposed feature is invalid.
     pub async fn execute(&self) -> Result<Vec<TicketId>, AppError> {
         let _choice = self.config.engine.resolve(Role::Ba);
+
+        // Show the BA what already exists so it doesn't re-propose duplicates.
+        let existing = self.store.load().await?;
+        let backlog: Vec<String> = existing
+            .tickets
+            .iter()
+            .filter(|t| t.status() != coxagent_domain::Status::Rejected)
+            .map(|t| format!("- {} {}", t.id(), t.title()))
+            .collect();
+        let backlog_block = if backlog.is_empty() {
+            "(empty — this is a fresh project)".to_owned()
+        } else {
+            backlog.join("\n")
+        };
+        let taken: std::collections::HashSet<String> = existing
+            .tickets
+            .iter()
+            .filter(|t| t.status() != coxagent_domain::Status::Rejected)
+            .map(|t| normalize_title(t.title()))
+            .collect();
+
         let request = AgentRequest {
             role: Role::Ba,
             system_prompt: prompts::system_prompt(prompts::BA),
             task_prompt: format!(
-                "Product context and current backlog:\n{}\n\nPropose new features now.",
-                self.context
+                "Product goal:\n{}\n\nEXISTING BACKLOG — do NOT re-propose anything already \
+                 here (same or similar title/scope):\n{}\n\nPropose only genuinely NEW features \
+                 that are not already covered above.",
+                self.context, backlog_block
             ),
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(600),
@@ -72,7 +95,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
 
         let adder = AddTicketUseCase::new(Arc::clone(&self.store));
         let mut created = Vec::with_capacity(proposals.len());
+        let mut seen = taken;
         for p in proposals {
+            // Belt-and-suspenders: never file a feature whose title already
+            // exists (or was just proposed this run) — no duplicate work.
+            let key = normalize_title(&p.title);
+            if key.is_empty() || !seen.insert(key) {
+                continue;
+            }
             let id = adder
                 .execute(AddTicketInput {
                     ticket_type: TicketType::Feature,

@@ -235,6 +235,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             }
         }
 
+        // Team hygiene: reject any duplicate tickets (same title) before design
+        // or dev touches them, and call it out so it's visible.
+        self.dedup_backlog().await;
+
         match self.sa().execute().await {
             Ok(id) => report.sa_readied = id,
             Err(e) => report.errors.push(format!("SA: {e}")),
@@ -370,6 +374,64 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             })
             .await
             .ok()
+    }
+
+    /// Reject duplicate tickets (same normalised title) that haven't started
+    /// real work yet, keeping the earliest, and call it out on the thread — so a
+    /// blind re-proposal never gets designed or built twice.
+    async fn dedup_backlog(&self) {
+        use coxagent_domain::ticket::Status;
+        let Ok(mut state) = self.store.load().await else {
+            return;
+        };
+        let mut first: std::collections::HashMap<String, TicketId> =
+            std::collections::HashMap::new();
+        let mut dupes: Vec<(TicketId, TicketId, String)> = Vec::new();
+        for t in &state.tickets {
+            if t.status() == Status::Rejected {
+                continue;
+            }
+            let key = crate::parsing::normalize_title(t.title());
+            if key.is_empty() {
+                continue;
+            }
+            if let Some(orig) = first.get(&key) {
+                dupes.push((t.id().clone(), orig.clone(), t.title().to_owned()));
+            } else {
+                first.insert(key, t.id().clone());
+            }
+        }
+        let mut rejected = Vec::new();
+        for (dup, orig, title) in dupes {
+            if let Some(t) = state.ticket_mut(&dup) {
+                // Only reject work that hasn't been picked up yet.
+                if matches!(t.status(), Status::Pending | Status::Ready | Status::Open)
+                    && t.transition_to(coxagent_domain::Role::User, Status::Rejected)
+                        .is_ok()
+                {
+                    rejected.push((dup, orig, title));
+                }
+            }
+        }
+        if rejected.is_empty() {
+            return;
+        }
+        for (dup, orig, title) in &rejected {
+            state.post_comment(
+                "SM",
+                &format!(
+                    "Heads up — {dup} duplicates {orig} (\"{title}\"). Rejecting {dup} so we don't \
+                     build the same thing twice. BA, please check the backlog before proposing."
+                ),
+                Some(dup.to_string()),
+            );
+        }
+        state.log_activity(
+            "SM",
+            &format!("rejected {} duplicate ticket(s)", rejected.len()),
+            None,
+        );
+        let _ = self.store.save(&state).await;
     }
 
     /// Clarification loop: if the next ready feature has no acceptance criteria,
