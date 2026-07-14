@@ -297,7 +297,7 @@ pub async fn serve_full(
         .route("/api/projects", get(list_projects).post(create_project))
         .route(
             "/api/projects/:pid",
-            axum::routing::delete(delete_project_ep),
+            axum::routing::delete(delete_project_ep).patch(rename_project_ep),
         )
         .route("/api/projects/:pid/state", get(state_ep))
         .route("/api/projects/:pid/metrics", get(metrics_ep))
@@ -457,6 +457,39 @@ async fn create_project(
         app.order.write().await.push(id.clone());
     }
     Json(serde_json::json!({ "ok": true, "id": id })).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct RenameProjectReq {
+    name: String,
+}
+
+/// Rename a project: persist the custom display name in its state and update the
+/// in-memory handle so the change is live (no restart). Admin-only.
+async fn rename_project_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    Json(req): Json<RenameProjectReq>,
+) -> axum::response::Response {
+    let name = req.name.trim();
+    if name.is_empty() || name.chars().count() > 60 {
+        return (StatusCode::BAD_REQUEST, "name must be 1–60 chars").into_response();
+    }
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Ok(mut state) = p.store.load().await else {
+        return internal_error("load failed");
+    };
+    state.display_name = Some(name.to_owned());
+    if let Err(e) = p.store.save(&state).await {
+        return internal_error(&e.to_string());
+    }
+    // Reflect the new name in the live handle so list_projects returns it now.
+    if let Some(h) = app.projects.write().await.get_mut(&pid) {
+        name.clone_into(&mut h.name);
+    }
+    Json(serde_json::json!({ "ok": true, "name": name })).into_response()
 }
 
 /// Delete (deregister) a project: stop its runner, remove it from the hub, and

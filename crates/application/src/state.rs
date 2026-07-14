@@ -150,6 +150,10 @@ pub struct ProjectState {
     /// backward compatibility (ids then read `FEAT-001` with no prefix).
     #[serde(default)]
     pub alias: String,
+    /// Custom display name set by the user (overrides the auto-generated
+    /// `"<alias> project"`). Absent until the project is renamed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     pub current_version: SemVer,
     pub tickets: Vec<Ticket>,
     #[serde(default)]
@@ -191,6 +195,7 @@ impl Default for ProjectState {
         Self {
             schema_version: SCHEMA_VERSION,
             alias: String::new(),
+            display_name: None,
             current_version: SemVer::default(),
             tickets: Vec::new(),
             history: Vec::new(),

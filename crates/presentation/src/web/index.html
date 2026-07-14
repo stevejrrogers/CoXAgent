@@ -47,6 +47,9 @@
   .tb-idtext{min-width:0}
   .tb-l1{display:flex;align-items:center;gap:9px;min-width:0}
   .tb-proj{font-size:20px;font-weight:800;letter-spacing:-.4px;white-space:nowrap;color:var(--text)}
+  .tb-rename{flex:none;display:grid;place-items:center;width:26px;height:26px;background:transparent;border:none;border-radius:7px;color:var(--dim);cursor:pointer;font-size:14px;opacity:0;transition:opacity .15s,background .15s,color .15s}
+  .tb-idblock:hover .tb-rename{opacity:1}
+  .tb-rename:hover{background:var(--card2);color:var(--text)}
   .tb-sepi{flex:none;color:var(--dim);font-size:15px}
   .tb-feat{font-size:15px;font-weight:600;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .tb-l2{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--muted);margin-top:2px;white-space:nowrap}
@@ -539,7 +542,7 @@ body:not(.admin) .admin-only { display: none !important; }
       <div class="tb-idblock">
         <div class="tb-mark" id="tb-mark">C</div>
         <div class="tb-idtext">
-          <div class="tb-l1"><span class="tb-proj" id="tb-proj">—</span><i class="ti ti-chevron-right tb-sepi"></i><span class="tb-feat" id="pg-title">Overview</span></div>
+          <div class="tb-l1"><span class="tb-proj" id="tb-proj">—</span><button class="tb-rename admin-only" title="Rename project" onclick="openRename()"><i class="ti ti-pencil"></i></button><i class="ti ti-chevron-right tb-sepi"></i><span class="tb-feat" id="pg-title">Overview</span></div>
           <div class="tb-l2" title="live connection · version · tickets"><span class="dot off" id="conn"></span> v<span id="ver">0.0.0</span> <span class="tb-dotsep">·</span> <span id="pn-tickets">0 tickets</span></div>
         </div>
       </div>
@@ -637,6 +640,27 @@ body:not(.admin) .admin-only { display: none !important; }
         <div class="eu-pwrow"><input id="eu-pass" class="eu-in" type="password" placeholder="new temporary password"><button class="gc-btn" onclick="resetUserPassword()">Reset</button></div>
         <div id="eu-msg" class="eu-msg"></div>
       </div></div>
+      <div class="ov" id="ov-invite" onclick="if(event.target===this)close_('ov-invite')"><div class="modal" style="max-width:580px">
+        <span class="x" onclick="close_('ov-invite')"><i class="ti ti-x"></i></span>
+        <h3 style="font-size:15px"><i class="ti ti-user-plus" style="color:var(--accent2)"></i> Add team member</h3>
+        <div class="msub">They can sign in with these credentials and join any projects you pick.</div>
+        <div class="invite-grid">
+          <div class="fld"><label>Full name</label><input id="usr-fullname" placeholder="e.g. Ada Lovelace"></div>
+          <div class="fld"><label>Email</label><input id="usr-email" type="email" placeholder="ada@team.io"></div>
+          <div class="fld"><label>Username</label><input id="usr-name" placeholder="ada"></div>
+          <div class="fld"><label>Temporary password</label><input id="usr-pass" type="password" placeholder="they can change it later"></div>
+          <div class="fld fld-wide"><label>Role</label><select id="usr-role" class="sel"><option value="viewer">Viewer — read-only</option><option value="admin">Admin — full access</option></select></div>
+        </div>
+        <div class="fld" style="margin-top:12px"><label>Assign to projects</label><div class="uprojpick" id="usr-projpick"></div></div>
+        <div class="invite-foot"><span id="usr-err" class="usr-err"></span><button class="gc-btn" onclick="close_('ov-invite')">Cancel</button><button class="pri" onclick="createUser()"><i class="ti ti-user-plus"></i> Invite member</button></div>
+      </div></div>
+      <div class="ov" id="ov-rename" onclick="if(event.target===this)close_('ov-rename')"><div class="modal" style="max-width:420px">
+        <span class="x" onclick="close_('ov-rename')"><i class="ti ti-x"></i></span>
+        <h3 style="font-size:15px"><i class="ti ti-edit" style="color:var(--accent2)"></i> Rename project</h3>
+        <div class="fld" style="margin-top:12px"><label>Project name</label><input id="rn-name" onkeydown="if(event.key==='Enter')saveRename()" placeholder="e.g. CoXChat"></div>
+        <div class="eu-actions"><button class="gc-btn" onclick="close_('ov-rename')">Cancel</button><button class="gc-btn pri" onclick="saveRename()">Save</button></div>
+        <div id="rn-msg" class="eu-msg"></div>
+      </div></div>
       <div class="view" id="view-roadmap"><div id="roadmap-body"></div></div>
       <div class="view" id="view-people">
         <div class="filters"><span style="font-size:12px;color:var(--muted)">Derived from the security audit trail — who is actually working, how much, and how effectively.</span>
@@ -652,18 +676,7 @@ body:not(.admin) .admin-only { display: none !important; }
       <div class="view" id="view-access">
         <div class="acard">
           <div class="acard-h"><div><h4><i class="ti ti-users"></i> Team members</h4><span>People who can sign in — a person can join many projects.</span></div>
-            <button class="btn-ghost" id="invite-toggle" onclick="toggleInvite()"><i class="ti ti-user-plus"></i> Add member</button></div>
-          <div class="invitebox" id="invitebox" hidden>
-            <div class="invite-grid">
-              <div class="fld"><label>Full name</label><input id="usr-fullname" placeholder="e.g. Ada Lovelace"></div>
-              <div class="fld"><label>Email</label><input id="usr-email" type="email" placeholder="ada@team.io"></div>
-              <div class="fld"><label>Username</label><input id="usr-name" placeholder="ada"></div>
-              <div class="fld"><label>Temporary password</label><input id="usr-pass" type="password" placeholder="they can change it later"></div>
-              <div class="fld fld-wide"><label>Role</label><select id="usr-role" class="sel"><option value="viewer">Viewer — read-only</option><option value="admin">Admin — full access</option></select></div>
-            </div>
-            <div class="fld"><label>Assign to projects</label><div class="uprojpick" id="usr-projpick"></div></div>
-            <div class="invite-foot"><span id="usr-err" class="usr-err"></span><button class="pri" onclick="createUser()"><i class="ti ti-user-plus"></i> Invite member</button></div>
-          </div>
+            <button class="btn-ghost" id="invite-toggle" onclick="openInvite()"><i class="ti ti-user-plus"></i> Add member</button></div>
           <div id="usr-list" class="memlist"></div>
         </div>
         <div class="acard">
@@ -1849,11 +1862,27 @@ function renderUserProjPicker(){
   if(!PROJECTS.length){el.innerHTML='<span style="font-size:12px;color:var(--dim)">no projects yet</span>';return;}
   el.innerHTML=PROJECTS.map(p=>`<label class="uprojchk"><input type="checkbox" value="${esc(p.id)}"><span class="sdot" style="background:${projColor(p.id)}"></span>${esc(p.name)}</label>`).join("");
 }
-function toggleInvite(force){
-  const box=document.getElementById("invitebox");const btn=document.getElementById("invite-toggle");if(!box)return;
-  const open=force===undefined?box.hasAttribute("hidden"):force;
-  if(open){box.removeAttribute("hidden");btn.classList.add("on");setTimeout(()=>{const f=document.getElementById("usr-fullname");if(f)f.focus();},30);}
-  else{box.setAttribute("hidden","");btn.classList.remove("on");}
+function openInvite(){
+  renderUserProjPicker();
+  ["usr-fullname","usr-email","usr-name","usr-pass"].forEach(id=>{const e=document.getElementById(id);if(e)e.value="";});
+  document.getElementById("usr-err").textContent="";
+  document.getElementById("ov-invite").classList.add("open");
+  setTimeout(()=>{const f=document.getElementById("usr-fullname");if(f)f.focus();},40);
+}
+// Rename the current project (admin-only pencil in the header).
+function openRename(){const p=PROJECTS.find(x=>x.id===PID);if(!p)return;
+  const inp=document.getElementById("rn-name");inp.value=p.name||"";
+  document.getElementById("rn-msg").textContent="";
+  document.getElementById("ov-rename").classList.add("open");
+  setTimeout(()=>{inp.focus();inp.select();},40);
+}
+async function saveRename(){const name=(document.getElementById("rn-name").value||"").trim();
+  const msg=document.getElementById("rn-msg");
+  if(!name){msg.style.color="var(--red)";msg.textContent="Name can't be empty.";return;}
+  try{const r=await fetch("/api/projects/"+encodeURIComponent(PID),{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({name})});
+    if(!r.ok){msg.style.color="var(--red)";msg.textContent=await r.text()||"Failed.";return;}
+    close_("ov-rename");toasty("Project renamed","ok");await loadProjects();renderProjBtn();
+  }catch(e){msg.style.color="var(--red)";msg.textContent="Network error.";}
 }
 async function createUser(){
   const username=document.getElementById("usr-name").value.trim();
@@ -1870,7 +1899,7 @@ async function createUser(){
     if(!r.ok){err.textContent=await r.text()||"Failed.";return;}
     ["usr-name","usr-pass","usr-fullname","usr-email"].forEach(id=>document.getElementById(id).value="");
     document.querySelectorAll("#usr-projpick input:checked").forEach(c=>c.checked=false);
-    toggleInvite(false);toasty("Member added","ok");renderUsers();
+    close_("ov-invite");toasty("Member added","ok");renderUsers();
   }catch(e){err.textContent="Network error.";}
 }
 let EU_USER=null;

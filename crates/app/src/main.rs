@@ -193,7 +193,9 @@ async fn build_project(
         tracing::info!("[{id}] recovered {} orphaned claim(s)", recovered.len());
     }
 
-    let alias = store.load().await.map(|s| s.alias).unwrap_or_default();
+    let loaded = store.load().await.ok();
+    let alias = loaded.as_ref().map(|s| s.alias.clone()).unwrap_or_default();
+    let custom_name = loaded.as_ref().and_then(|s| s.display_name.clone());
     let context = std::fs::read_to_string(state_dir.join("project_context.md")).unwrap_or_default();
     let webhook = config.workflow.webhook_url.clone();
     // Shared, live-adjustable budget caps — seeded from config, updated by the
@@ -224,11 +226,13 @@ async fn build_project(
         .join("coxagent.json");
     Ok(coxagent_presentation::ProjectHandle {
         id: id.to_owned(),
-        name: if alias.is_empty() {
-            id.to_owned()
-        } else {
-            format!("{alias} project")
-        },
+        name: custom_name.unwrap_or_else(|| {
+            if alias.is_empty() {
+                id.to_owned()
+            } else {
+                format!("{alias} project")
+            }
+        }),
         alias,
         store,
         runner: handle,
