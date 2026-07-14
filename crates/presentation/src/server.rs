@@ -274,8 +274,13 @@ pub async fn serve_full(
     axum::serve(listener, app).await
 }
 
-async fn index() -> Html<&'static str> {
-    Html(INDEX_HTML)
+async fn index() -> impl IntoResponse {
+    // Always revalidate so a rebuilt dashboard is picked up on reload (the SPA is
+    // small; no-cache avoids stale UI after an upgrade).
+    (
+        [(header::CACHE_CONTROL, "no-cache, must-revalidate")],
+        Html(INDEX_HTML),
+    )
 }
 
 async fn health() -> impl IntoResponse {
