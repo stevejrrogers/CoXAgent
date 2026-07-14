@@ -7,6 +7,8 @@ members = [
     "crates/presentation",
     "crates/app",
 ]
+# The desktop shell pulls heavy GUI deps (tao/wry) and is built separately.
+exclude = ["desktop/coxagent-desktop"]
 
 [workspace.package]
 version = "0.0.0"

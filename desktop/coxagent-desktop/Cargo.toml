@@ -1,0 +1,23 @@
+[package]
+name = "coxagent-desktop"
+version = "0.1.0"
+edition = "2021"
+description = "Cross-platform desktop shell for CoXAgent — boots the bundled hub and opens the dashboard in a native webview window."
+license = "MIT"
+
+# Standalone crate: not part of the main workspace (it pulls heavy GUI deps).
+[workspace]
+
+[[bin]]
+name = "coxagent-desktop"
+path = "src/main.rs"
+
+[dependencies]
+tao = "0.30"
+wry = "0.46"
+dirs = "5"
+
+[profile.release]
+strip = true
+opt-level = "z"
+lto = true

@@ -1,0 +1,90 @@
+name: Desktop apps
+
+# Builds the desktop apps on each OS's native runner (GUI apps can't be
+# cross-compiled from one OS to another). Fires on a version tag, or manually.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build .app + .dmg (Swift shell)
+        run: bash scripts/build-macos-app.sh
+      - name: Rename
+        run: cp desktop/build/CoXAgent.dmg CoXAgent-macos.dmg
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: CoXAgent-macos.dmg
+          generate_release_notes: true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CoXAgent-macos
+          path: CoXAgent-macos.dmg
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build hub
+        run: cargo build --release --locked -p coxagent-app
+      - name: Build desktop shell
+        run: cargo build --release --manifest-path desktop/coxagent-desktop/Cargo.toml
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist/CoXAgent
+          cp target/release/coxagent.exe dist/CoXAgent/
+          cp desktop/coxagent-desktop/target/release/coxagent-desktop.exe dist/CoXAgent/CoXAgent.exe
+          cd dist && 7z a ../CoXAgent-windows-x64.zip CoXAgent
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: CoXAgent-windows-x64.zip
+          generate_release_notes: true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CoXAgent-windows-x64
+          path: CoXAgent-windows-x64.zip
+
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: WebKitGTK + GTK dev libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev
+      - name: Build hub
+        run: cargo build --release --locked -p coxagent-app
+      - name: Build desktop shell
+        run: cargo build --release --manifest-path desktop/coxagent-desktop/Cargo.toml
+      - name: Package
+        run: |
+          mkdir -p dist/CoXAgent
+          cp target/release/coxagent dist/CoXAgent/
+          cp desktop/coxagent-desktop/target/release/coxagent-desktop dist/CoXAgent/CoXAgent
+          tar czf CoXAgent-linux-x64.tar.gz -C dist CoXAgent
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: CoXAgent-linux-x64.tar.gz
+          generate_release_notes: true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CoXAgent-linux-x64
+          path: CoXAgent-linux-x64.tar.gz
