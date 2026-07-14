@@ -6,7 +6,7 @@ import WebKit
 
 let PORT = 4000
 
-final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate {
     var window: NSWindow!
     var web: WKWebView!
     var hub: Process?
@@ -17,6 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         let cfg = WKWebViewConfiguration()
         web = WKWebView(frame: NSMakeRect(0, 0, 1360, 860), configuration: cfg)
         web.navigationDelegate = self
+        web.uiDelegate = self // present native panels for JS alert/confirm/prompt
 
         window = NSWindow(
             contentRect: NSMakeRect(0, 0, 1360, 860),
@@ -134,6 +135,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
 
     func applicationWillTerminate(_ note: Notification) { hub?.terminate() }
     func applicationShouldTerminateAfterLastWindowClosed(_ s: NSApplication) -> Bool { true }
+
+    // MARK: - WKUIDelegate: native panels for JS alert()/confirm()/prompt().
+    // Without these, WKWebView silently returns default values — so in-app
+    // confirms (e.g. "Remove project?") would resolve to false and never fire.
+    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
+        let a = NSAlert(); a.messageText = "CoXAgent"; a.informativeText = message
+        a.addButton(withTitle: "OK")
+        a.beginSheetModal(for: window) { _ in completionHandler() }
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+        let a = NSAlert(); a.messageText = "CoXAgent"; a.informativeText = message
+        a.addButton(withTitle: "OK"); a.addButton(withTitle: "Cancel")
+        a.beginSheetModal(for: window) { resp in completionHandler(resp == .alertFirstButtonReturn) }
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String,
+                 defaultText: String?, initiatedByFrame frame: WKFrameInfo,
+                 completionHandler: @escaping (String?) -> Void) {
+        let a = NSAlert(); a.messageText = "CoXAgent"; a.informativeText = prompt
+        a.addButton(withTitle: "OK"); a.addButton(withTitle: "Cancel")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        field.stringValue = defaultText ?? ""
+        a.accessoryView = field; a.window.initialFirstResponder = field
+        a.beginSheetModal(for: window) { resp in
+            completionHandler(resp == .alertFirstButtonReturn ? field.stringValue : nil)
+        }
+    }
 }
 
 let app = NSApplication.shared
