@@ -37,6 +37,10 @@
   .projadd:hover{border-color:var(--accent)}
   .projmenu{display:none;position:absolute;top:calc(100% + 5px);left:0;right:0;z-index:40;background:var(--card);border:1px solid var(--border2);border-radius:11px;box-shadow:0 12px 34px rgba(0,0,0,.32);padding:5px;max-height:320px;overflow-y:auto}
   .projmenu.open{display:block}
+  .topbar-proj{flex:none;position:relative}
+  .topbar-proj .projbtn{flex:0 0 auto;min-width:190px;max-width:240px}
+  .topbar-proj .projmenu{left:auto;right:0;min-width:280px;z-index:60}
+  .verchip b{color:var(--accent2)}
   .projitem{display:flex;align-items:center;gap:9px;padding:7px 8px;border-radius:8px;cursor:pointer}
   .projitem:hover{background:var(--card2)}
   .projitem.sel{background:var(--accentbg)}
@@ -348,17 +352,6 @@ body:not(.admin) .admin-only { display: none !important; }
   </div></div>
   <aside class="side">
     <div class="brand"><div class="mk"><i class="ti ti-hexagon-letter-c"></i></div><div><div class="nm">CoXAgent</div><div class="tg">autonomous dev team</div></div></div>
-    <div class="proj">
-      <div class="projpick">
-        <button id="proj-btn" class="projbtn" onclick="toggleProjMenu(event)">
-          <span class="projmk" id="proj-mk">P</span>
-          <span class="projmeta"><span class="projname" id="proj-name">Select project</span><span class="projsub" id="proj-count">—</span></span>
-          <i class="ti ti-selector projcar"></i>
-        </button>
-        <button onclick="openNewProject()" title="New project" class="ticket-actions projadd"><i class="ti ti-plus"></i></button>
-        <div id="proj-menu" class="projmenu"></div>
-      </div>
-      <div class="pv"><span><i class="ti ti-tag" style="font-size:13px"></i> v<b id="ver">0.0.0</b></span><span id="pn-tickets">0 tickets</span></div></div>
     <nav class="nav">
       <a data-v="overview" class="on" onclick="nav('overview')"><i class="ti ti-layout-dashboard"></i> Overview</a>
       <a data-v="team" onclick="nav('team')"><i class="ti ti-robot"></i> Agents</a>
@@ -386,8 +379,18 @@ body:not(.admin) .admin-only { display: none !important; }
 
   <main class="main">
     <div class="topbar"><h1 id="pg-title">Overview</h1><span class="sub" id="pg-sub"></span><div class="sp"></div>
-      <div class="chip" id="viewers-chip" title="live dashboard connections (desktop window + browser tabs share one hub)" style="display:none"><i class="ti ti-eye" style="font-size:13px"></i> <span id="viewers-n">1</span></div>
-      <div class="chip"><span class="dot off" id="conn"></span><span id="connlbl">connecting</span></div></div>
+      <div class="chip" id="viewers-chip" title="distinct users viewing" style="display:none"><i class="ti ti-eye" style="font-size:13px"></i> <span id="viewers-n">1</span></div>
+      <div class="chip"><span class="dot off" id="conn"></span><span id="connlbl">connecting</span></div>
+      <div class="chip verchip" title="current version · tickets">v<b id="ver">0.0.0</b> · <span id="pn-tickets">0</span></div>
+      <div class="projpick topbar-proj">
+        <button id="proj-btn" class="projbtn" onclick="toggleProjMenu(event)">
+          <span class="projmk" id="proj-mk">P</span>
+          <span class="projmeta"><span class="projname" id="proj-name">Select project</span><span class="projsub" id="proj-count">—</span></span>
+          <i class="ti ti-selector projcar"></i>
+        </button>
+        <button onclick="openNewProject()" title="New project" class="ticket-actions projadd"><i class="ti ti-plus"></i></button>
+        <div id="proj-menu" class="projmenu"></div>
+      </div></div>
     <div class="content">
       <div class="view on" id="view-overview">
         <div id="ov-alerts"></div>
@@ -874,7 +877,8 @@ function column([k,l,c],ts){const items=ts.filter(t=>t.status===k);
 
 function renderSidebar(s){
   document.getElementById("ver").textContent=s.current_version||"0.0.0";
-  document.getElementById("pn-tickets").textContent=(s.tickets||[]).length+" tickets";}
+  document.getElementById("pn-tickets").textContent=(s.tickets||[]).length+" tickets";
+  document.title="CoXAgent · "+(document.getElementById("proj-name").textContent||"");}
 function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
   if(CUR==="overview"){
     if(!(s.tickets||[]).length&&!(s.activity||[]).length){
