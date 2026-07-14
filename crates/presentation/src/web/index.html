@@ -732,6 +732,7 @@ function nav(v){CUR=v;location.hash=v;
   document.querySelectorAll(".nav a").forEach(a=>a.classList.toggle("on",a.dataset.v===v));
   document.getElementById("pg-title").textContent=TITLES[v][0];
   document.getElementById("pg-sub").textContent=TITLES[v][1];
+  if(v!=="chat")closeChatWS();
   if(v==="settings")loadSettings(); else if(v==="discuss"){loadComments();} else if(v==="chat"){openChat();} else if(v==="people"){renderPeople();} else if(v==="audit"){renderAudit();} else if(v==="access"){renderAccess();} else if(v==="roadmap"){renderRoadmap();} else renderActive();}
 function initials(r){return r.replace("DEV-","").slice(0,2);}
 function metricsFrom(s){const t=s.tickets||[],h=s.history||[],isF=x=>x.type!=="bug";
@@ -1078,7 +1079,7 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
         <div style="background:var(--card2);border-radius:6px;height:10px;overflow:hidden"><div style="width:${used}%;height:100%;background:${used>=90?'var(--red)':used>=70?'var(--amber)':'var(--accent2)'}"></div></div>
         <div style="color:var(--dim);font-size:11px;margin-top:8px">Loop auto-pauses when the cap is reached.</div>`;
     }else{document.getElementById("cost-budget").innerHTML='<div class="empty">no budget cap set — add "budget_usd" in coxagent.json</div>';}
-  }else if(CUR==="discuss"){renderDiscuss();}else if(CUR==="chat"){syncChat();}else if(CUR==="roadmap"){renderRoadmap();}}
+  }else if(CUR==="discuss"){renderDiscuss();}else if(CUR==="roadmap"){renderRoadmap();}}
 
 function cmpVer(a,b){const pa=(a||"0.0.0").split(".").map(Number),pb=(b||"0.0.0").split(".").map(Number);
   for(let i=0;i<3;i++){if((pa[i]||0)!==(pb[i]||0))return (pa[i]||0)-(pb[i]||0);}return 0;}
@@ -1213,16 +1214,38 @@ function sendComment(){const inp=document.getElementById("disc-input");const bod
   inp.value="";
   fetch(api("/comments"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({body,ticket})})
     .catch(()=>{});}
-// ── Team chat (human-to-human channel) ──────────────────────────────────────
+// ── Team chat (human-to-human channel, live over WebSocket) ─────────────────
+let CHAT=[], CHATWS=null, CHATWS_PID=null, chatwsRetry=null;
 function openChat(){const p=PROJECTS.find(x=>x.id===PID);
   document.getElementById("chat-sub").textContent=(p?p.name:"this project")+" — the people here, humans only";
-  syncChat();setTimeout(()=>{const i=document.getElementById("chat-input");if(i)i.focus();},40);}
-function syncChat(){
+  loadChatHistory();openChatWS();
+  setTimeout(()=>{const i=document.getElementById("chat-input");if(i)i.focus();},40);}
+async function loadChatHistory(){
+  try{CHAT=await(await fetch(api("/chat"))).json();}catch(e){CHAT=[];}
+  renderChatList(true);
+}
+function chatKey(m){return (m.at||"")+"|"+(m.user||"")+"|"+(m.body||"");}
+function chatHas(m){const k=chatKey(m);return CHAT.some(x=>chatKey(x)===k);}
+function openChatWS(){
+  // Reuse a live socket for the same project; otherwise (re)connect.
+  if(CHATWS&&CHATWS_PID===PID&&CHATWS.readyState<=1)return;
+  closeChatWS();
+  const proto=location.protocol==="https:"?"wss":"ws";
+  const pid=PID;CHATWS_PID=pid;
+  let ws;try{ws=new WebSocket(`${proto}://${location.host}/api/projects/${encodeURIComponent(pid)}/chat/ws`);}catch(e){return;}
+  CHATWS=ws;
+  ws.onmessage=e=>{try{const m=JSON.parse(e.data);if(!chatHas(m)){CHAT.push(m);if(CUR==="chat")renderChatList();}}catch(_){}};
+  ws.onclose=()=>{if(CHATWS===ws){CHATWS=null;
+    // Auto-reconnect while the user is still on this project's chat.
+    if(CUR==="chat"&&CHATWS_PID===pid&&PID===pid){clearTimeout(chatwsRetry);chatwsRetry=setTimeout(openChatWS,1500);}}};
+  ws.onerror=()=>{try{ws.close();}catch(_){}};
+}
+function closeChatWS(){clearTimeout(chatwsRetry);if(CHATWS){try{CHATWS.onclose=null;CHATWS.close();}catch(_){}}CHATWS=null;}
+function renderChatList(force){
   const box=document.getElementById("chat-msgs");if(!box)return;
-  const msgs=STATE.chat||[];const me=(ME&&ME.username)||"";
-  // Only rebuild when the thread changed, so the 1s SSE tick never yanks scroll.
-  const sig=msgs.length+":"+(msgs.length?(msgs[msgs.length-1].at||""):"");
-  if(box.dataset.sig===sig)return;
+  const msgs=CHAT;const me=(ME&&ME.username)||"";
+  const sig=msgs.length+":"+(msgs.length?chatKey(msgs[msgs.length-1]):"");
+  if(!force&&box.dataset.sig===sig)return;
   const atBottom=box.scrollHeight-box.scrollTop-box.clientHeight<90;
   box.dataset.sig=sig;
   if(!msgs.length){box.innerHTML='<div class="chatempty"><i class="ti ti-message-circle-2"></i><div>No messages yet</div><span>Say hello to your teammates.</span></div>';return;}
@@ -1245,9 +1268,11 @@ function userColor(u){const pal=["#38bdf8","#a78bfa","#f472b6","#34d399","#fbbf2
   let h=0;for(let i=0;i<(u||"").length;i++)h=(h*31+u.charCodeAt(i))>>>0;return pal[h%pal.length];}
 function sendChat(){const inp=document.getElementById("chat-input");const body=inp.value.trim();if(!body)return;
   inp.value="";
-  // Optimistic echo so the sender sees it instantly; SSE reconciles within ~1s.
-  if(ME&&ME.username){(STATE.chat=STATE.chat||[]).push({at:new Date().toISOString(),user:ME.username,body});syncChat();}
-  fetch(api("/chat"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({body})}).catch(()=>{});}
+  // Prefer the live socket; the server echoes the canonical message straight
+  // back over WS (so no optimistic insert). Fall back to REST if the socket
+  // isn't open — SSE-independent, still persisted server-side.
+  if(CHATWS&&CHATWS.readyState===1){CHATWS.send(JSON.stringify({body}));}
+  else{fetch(api("/chat"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({body})}).then(loadChatHistory).catch(()=>{});}}
 function render(s){STATE=s;renderSidebar(s);renderActive();}
 function depChips(ids){
   if(!ids||!ids.length)return '<span style="color:var(--dim)">—</span>';
@@ -1364,7 +1389,7 @@ function connect(){if(ES)ES.close();if(poll){clearInterval(poll);poll=null;}
 function loadBudget(){fetch(api("/config")).then(r=>r.json()).then(c=>{window._budget=(c.workflow&&c.workflow.budget_usd)||null;if(CUR==="insights")renderActive();}).catch(()=>{});}
 let PROJECTS=[];
 function projInitial(p){return (p.alias||p.name||"P").trim().charAt(0).toUpperCase()||"P";}
-function switchProject(id){PID=id;INIT_ACT=false;localStorage.setItem("coxpid",id);closeProjMenu();renderProjBtn();loadBudget();loadComments();connect();if(CUR==="settings")loadWorkspace("");}
+function switchProject(id){PID=id;INIT_ACT=false;localStorage.setItem("coxpid",id);closeProjMenu();renderProjBtn();loadBudget();loadComments();connect();closeChatWS();if(CUR==="settings")loadWorkspace("");if(CUR==="chat")openChat();}
 function fileIcon(name){const e=(name.split(".").pop()||"").toLowerCase();
   if(["rs"].includes(e))return "brand-rust";if(["ts","tsx","js","jsx"].includes(e))return "brand-javascript";
   if(["json"].includes(e))return "braces";if(["md"].includes(e))return "markdown";

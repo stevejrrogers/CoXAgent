@@ -3,6 +3,7 @@
 //! ticket actions. A single-project `serve` registers one project; `hub`
 //! registers many. Routes are scoped `/api/projects/:pid/...`.
 
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
 use axum::http::{header, Request, StatusCode};
 use axum::middleware::Next;
@@ -90,9 +91,20 @@ fn now_rfc3339() -> String {
         .unwrap_or_default()
 }
 
+/// A project's live team-chat channel: a broadcast fan-out to every connected
+/// WebSocket, plus a mutex that serializes the load→append→save of chat writes
+/// so two simultaneous messages can't clobber each other.
+#[derive(Clone)]
+struct ChatChannel {
+    tx: tokio::sync::broadcast::Sender<String>,
+    write_lock: Arc<tokio::sync::Mutex<()>>,
+}
+
 #[derive(Clone)]
 struct AppState {
     projects: Arc<RwLock<HashMap<String, ProjectHandle>>>,
+    /// Per-project team-chat channels, created lazily on first use.
+    chat_bus: Arc<RwLock<HashMap<String, ChatChannel>>>,
     order: Arc<RwLock<Vec<String>>>,
     factory: Option<ProjectFactory>,
     auth: Option<Arc<dyn AuthPort>>,
@@ -155,6 +167,42 @@ impl AppState {
     async fn project(&self, pid: &str) -> Option<ProjectHandle> {
         self.projects.read().await.get(pid).cloned()
     }
+
+    /// Get (or lazily create) the live chat channel for a project.
+    async fn chat_channel(&self, pid: &str) -> ChatChannel {
+        if let Some(ch) = self.chat_bus.read().await.get(pid) {
+            return ch.clone();
+        }
+        let mut bus = self.chat_bus.write().await;
+        bus.entry(pid.to_owned())
+            .or_insert_with(|| ChatChannel {
+                tx: tokio::sync::broadcast::channel(256).0,
+                write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            })
+            .clone()
+    }
+}
+
+/// Persist one chat message and fan it out to every live WebSocket. The
+/// per-project `write_lock` serializes the load→append→save so concurrent
+/// senders can't lose each other's messages. Returns `false` if persistence
+/// fails. `body` must already be validated (non-empty, length-capped).
+async fn deliver_chat(app: &AppState, p: &ProjectHandle, user: &str, body: &str) -> bool {
+    let ch = app.chat_channel(&p.id).await;
+    let _guard = ch.write_lock.lock().await;
+    let Ok(mut state) = p.store.load().await else {
+        return false;
+    };
+    state.post_chat(user, body);
+    let msg = state.chat.last().cloned();
+    if p.store.save(&state).await.is_err() {
+        return false;
+    }
+    if let Some(m) = msg {
+        // Ignore send errors: a broadcast with no live receivers is fine.
+        let _ = ch.tx.send(serde_json::to_string(&m).unwrap_or_default());
+    }
+    true
 }
 
 /// Optional hub capabilities injected by the composition root, keeping the
@@ -192,6 +240,7 @@ pub async fn serve_full(
         projects.into_iter().map(|p| (p.id.clone(), p)).collect();
     let state = AppState {
         projects: Arc::new(RwLock::new(map)),
+        chat_bus: Arc::new(RwLock::new(HashMap::new())),
         order: Arc::new(RwLock::new(order)),
         factory: extras.factory,
         auth: extras.auth,
@@ -265,6 +314,7 @@ pub async fn serve_full(
             "/api/projects/:pid/chat",
             get(chat_list_ep).post(chat_post_ep),
         )
+        .route("/api/projects/:pid/chat/ws", get(chat_ws_ep))
         .route("/api/projects/:pid/transcripts", get(list_transcripts))
         .route("/api/projects/:pid/transcripts/:name", get(get_transcript))
         .route("/api/projects/:pid/events", get(events_ep))
@@ -456,6 +506,10 @@ fn lite_state_value(state: &coxagent_application::ProjectState) -> serde_json::V
                 obj.remove("design");
             }
         }
+    }
+    // Team chat rides its own WebSocket, so keep it out of the 1s SSE snapshot.
+    if let Some(obj) = v.as_object_mut() {
+        obj.remove("chat");
     }
     v
 }
@@ -888,13 +942,124 @@ async fn chat_post_ep(
             .map_or_else(|| "user".to_owned(), |u| u.username),
         None => "user".to_owned(),
     };
-    let Ok(mut state) = p.store.load().await else {
-        return internal_error("load failed");
+    if deliver_chat(&app, &p, &user, body).await {
+        Json(serde_json::json!({ "ok": true })).into_response()
+    } else {
+        internal_error("chat save failed")
+    }
+}
+
+/// Max characters accepted in a single chat message.
+const CHAT_MAX_CHARS: usize = 2000;
+/// Sliding-window rate limit for a single WebSocket: at most this many messages
+/// per [`CHAT_RATE_WINDOW`].
+const CHAT_RATE_MAX: usize = 12;
+const CHAT_RATE_WINDOW: Duration = Duration::from_secs(10);
+
+/// Live team-chat WebSocket. Requires an authenticated principal (enforced by
+/// `auth_mw` on the upgrade GET, re-resolved here for the username) and — as
+/// defense-in-depth against cross-site WebSocket hijacking on top of the
+/// `SameSite=Strict` session cookie — a same-origin `Origin` header.
+async fn chat_ws_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    headers: axum::http::HeaderMap,
+    ws: WebSocketUpgrade,
+) -> axum::response::Response {
+    if !origin_ok(&headers) {
+        return (StatusCode::FORBIDDEN, "cross-origin websocket rejected").into_response();
+    }
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
     };
-    state.post_chat(&user, body);
-    match p.store.save(&state).await {
-        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
-        Err(e) => internal_error(&e.to_string()),
+    // Re-resolve the principal so the socket is attributed to a real user. When
+    // auth is disabled (local mode) everyone is "user".
+    let user = match &app.auth {
+        Some(auth) => match resolve_principal(auth, &headers).await {
+            Some(u) => u.username,
+            None => {
+                return (StatusCode::UNAUTHORIZED, "unauthenticated").into_response();
+            }
+        },
+        None => "user".to_owned(),
+    };
+    let ch = app.chat_channel(&pid).await;
+    let mut ws = ws;
+    ws = ws.max_message_size(64 * 1024);
+    ws.on_upgrade(move |socket| chat_socket(socket, app, p, user, ch))
+}
+
+/// Same-origin guard: allow when there is no `Origin` (non-browser client) or
+/// when its host matches the request `Host`. Blocks browser sockets opened from
+/// a different site even if the session cookie were somehow attached.
+fn origin_ok(headers: &axum::http::HeaderMap) -> bool {
+    let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) else {
+        return true;
+    };
+    let origin_host = origin.split("://").nth(1).unwrap_or(origin);
+    match headers.get(header::HOST).and_then(|v| v.to_str().ok()) {
+        Some(host) => origin_host == host,
+        None => false,
+    }
+}
+
+/// Drive one chat WebSocket in a single task: fan broadcast messages out to the
+/// client while accepting validated, rate-limited messages from it. Using one
+/// `select!` loop (rather than splitting the socket) avoids a `futures-util`
+/// dependency — axum's `WebSocket` exposes async `recv`/`send` directly.
+async fn chat_socket(
+    mut socket: WebSocket,
+    app: AppState,
+    p: ProjectHandle,
+    user: String,
+    ch: ChatChannel,
+) {
+    let mut rx = ch.tx.subscribe();
+    let mut recv_times: std::collections::VecDeque<std::time::Instant> =
+        std::collections::VecDeque::new();
+    loop {
+        tokio::select! {
+            // Server → client: forward a broadcast message.
+            bcast = rx.recv() => {
+                match bcast {
+                    Ok(json) => {
+                        if socket.send(Message::Text(json)).await.is_err() {
+                            break;
+                        }
+                    }
+                    // Lagged (slow client) — skip missed messages, keep going.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(_) => break,
+                }
+            }
+            // Client → server: validate, rate-limit, persist + broadcast.
+            incoming = socket.recv() => {
+                let Some(Ok(msg)) = incoming else { break };
+                let text = match msg {
+                    Message::Text(t) => t,
+                    Message::Close(_) => break,
+                    _ => continue, // ignore binary/ping/pong
+                };
+                // Accept either a raw string or {"body": "..."}.
+                let body = serde_json::from_str::<serde_json::Value>(&text)
+                    .ok()
+                    .and_then(|v| v.get("body").and_then(|b| b.as_str()).map(str::to_owned))
+                    .unwrap_or(text);
+                let body = body.trim();
+                if body.is_empty() || body.chars().count() > CHAT_MAX_CHARS {
+                    continue;
+                }
+                let now = std::time::Instant::now();
+                while recv_times.front().is_some_and(|t| now.duration_since(*t) > CHAT_RATE_WINDOW) {
+                    recv_times.pop_front();
+                }
+                if recv_times.len() >= CHAT_RATE_MAX {
+                    continue; // silently drop; client is flooding
+                }
+                recv_times.push_back(now);
+                deliver_chat(&app, &p, &user, body).await;
+            }
+        }
     }
 }
 
