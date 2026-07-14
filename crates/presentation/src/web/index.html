@@ -41,6 +41,37 @@
   .topbar-proj .projbtn{flex:0 0 auto;min-width:190px;max-width:240px}
   .topbar-proj .projmenu{left:auto;right:0;min-width:280px;z-index:60}
   .verchip b{color:var(--accent2)}
+  /* View transition */
+  .view.on{animation:viewin .22s ease}
+  @keyframes viewin{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+  /* Command palette */
+  .cmdk{position:fixed;inset:0;z-index:200;display:none;justify-content:center;align-items:flex-start;padding-top:12vh;background:rgba(6,8,12,.55);backdrop-filter:blur(4px)}
+  .cmdk.open{display:flex;animation:viewin .12s ease}
+  .cmdk-box{width:min(600px,92vw);background:var(--card);border:1px solid var(--border2);border-radius:14px;box-shadow:0 24px 70px rgba(0,0,0,.5);overflow:hidden}
+  .cmdk-inp{display:flex;align-items:center;gap:10px;padding:14px 16px;border-bottom:1px solid var(--border)}
+  .cmdk-inp i{color:var(--muted);font-size:18px}
+  .cmdk-inp input{flex:1;background:none;border:none;outline:none;color:var(--text);font-size:15px;font-family:inherit}
+  .cmdk-inp kbd{font-size:10px;color:var(--dim);background:var(--card2);border:1px solid var(--border2);border-radius:5px;padding:2px 6px}
+  .cmdk-list{max-height:56vh;overflow-y:auto;padding:6px}
+  .cmdk-cat{font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:var(--dim);padding:8px 10px 4px}
+  .cmdk-item{display:flex;align-items:center;gap:11px;padding:9px 11px;border-radius:9px;cursor:pointer}
+  .cmdk-item.sel{background:var(--accentbg)}
+  .cmdk-item .ci-ic{flex:none;width:28px;height:28px;border-radius:8px;display:grid;place-items:center;background:var(--card2);color:var(--accent2);font-size:15px}
+  .cmdk-item.sel .ci-ic{background:var(--accent);color:#fff}
+  .cmdk-item .ci-t{flex:1;min-width:0;font-size:13.5px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .cmdk-item .ci-h{font-size:10px;color:var(--dim)}
+  .cmdk-empty{padding:22px;text-align:center;color:var(--dim);font-size:13px}
+  .cmdk-hint{display:inline-flex;align-items:center;gap:5px;cursor:pointer}
+  .cmdk-hint kbd{font-size:10px;color:var(--muted);background:var(--card2);border:1px solid var(--border2);border-radius:5px;padding:1px 5px}
+  /* Toasts */
+  .toasts{position:fixed;right:18px;bottom:18px;z-index:300;display:flex;flex-direction:column;gap:9px;max-width:340px}
+  .toast{display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--border2);border-left:3px solid var(--accent2);border-radius:10px;padding:11px 14px;box-shadow:0 10px 30px rgba(0,0,0,.35);font-size:13px;color:var(--text);animation:toastin .2s ease}
+  .toast.ok{border-left-color:var(--green)} .toast.ok i{color:var(--green)}
+  .toast.err{border-left-color:var(--red)} .toast.err i{color:var(--red)}
+  .toast i{font-size:17px;color:var(--accent2);flex:none}
+  .toast.hide{animation:toastout .2s ease forwards}
+  @keyframes toastin{from{opacity:0;transform:translateX(20px)}to{opacity:1;transform:none}}
+  @keyframes toastout{to{opacity:0;transform:translateX(20px)}}
   .projitem{display:flex;align-items:center;gap:9px;padding:7px 8px;border-radius:8px;cursor:pointer}
   .projitem:hover{background:var(--card2)}
   .projitem.sel{background:var(--accentbg)}
@@ -379,6 +410,7 @@ body:not(.admin) .admin-only { display: none !important; }
 
   <main class="main">
     <div class="topbar"><h1 id="pg-title">Overview</h1><span class="sub" id="pg-sub"></span><div class="sp"></div>
+      <div class="chip cmdk-hint" onclick="openCmdk()" title="Command palette — jump anywhere"><i class="ti ti-search" style="font-size:13px"></i> <kbd>⌘K</kbd></div>
       <div class="chip" id="viewers-chip" title="distinct users viewing" style="display:none"><i class="ti ti-eye" style="font-size:13px"></i> <span id="viewers-n">1</span></div>
       <div class="chip"><span class="dot off" id="conn"></span><span id="connlbl">connecting</span></div>
       <div class="chip verchip" title="current version · tickets">v<b id="ver">0.0.0</b> · <span id="pn-tickets">0</span></div>
@@ -512,6 +544,14 @@ body:not(.admin) .admin-only { display: none !important; }
       <div class="view" id="view-settings"><div id="settings-body"></div></div>
     </div>
   </main>
+
+  <div class="cmdk" id="cmdk" onclick="if(event.target===this)closeCmdk()">
+    <div class="cmdk-box">
+      <div class="cmdk-inp"><i class="ti ti-search"></i><input id="cmdk-input" placeholder="Search or jump to… (projects, pages, actions)" autocomplete="off" oninput="cmdkFilter()" onkeydown="cmdkKey(event)"><kbd>esc</kbd></div>
+      <div class="cmdk-list" id="cmdk-list"></div>
+    </div>
+  </div>
+  <div class="toasts" id="toasts"></div>
 
   <div class="ov" id="ov-ticket" onclick="if(event.target===this)close_('ov-ticket')"><div class="modal" id="ticket-body"></div></div>
   <div class="ov" id="ov-setup"><div class="modal" style="max-width:460px">
@@ -1229,7 +1269,7 @@ async function loadWorkspace(){
     <div class="wsfiles">${files}</div></div>`;
 }
 function copyText(id,btn){const el=document.getElementById(id);if(!el)return;
-  navigator.clipboard.writeText(el.textContent).then(()=>{const o=btn.innerHTML;btn.innerHTML='<i class="ti ti-check"></i>';setTimeout(()=>btn.innerHTML=o,1200);}).catch(()=>{});}
+  navigator.clipboard.writeText(el.textContent).then(()=>{const o=btn.innerHTML;btn.innerHTML='<i class="ti ti-check"></i>';setTimeout(()=>btn.innerHTML=o,1200);toast("Copied to clipboard","ok");}).catch(()=>{});}
 function renderProjBtn(){
   const p=PROJECTS.find(x=>x.id===PID);
   document.getElementById("proj-mk").textContent=p?projInitial(p):"P";
@@ -1292,7 +1332,7 @@ async function createTicket(){
   try{
     const r=await fetch(api("/tickets"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
     if(!r.ok){err.textContent=await r.text()||"Failed.";return;}
-    close_("ov-newticket");
+    close_("ov-newticket");toast("Ticket created","ok");
     const s=await(await fetch(api("/state"))).json();render(s);
   }catch(e){err.textContent="Network error.";}
 }
@@ -1333,7 +1373,7 @@ async function createProject(){
     const r=await fetch("/api/projects",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
     if(!r.ok){err.textContent=await r.text()||"Failed.";return;}
     const {id}=await r.json();
-    close_("ov-newproj");
+    close_("ov-newproj");toast("Project created","ok");
     await loadProjects();
     if(id){switchProject(id);}
   }catch(e){err.textContent="Network error.";}
@@ -1698,6 +1738,51 @@ function renderPeople(){
       }).join("")+'</tbody></table>';
   }).catch(()=>{body.innerHTML='<div class="empty">unable to load analytics</div>';});
 }
+/* ---- Toasts ---- */
+function toast(msg,type){const c=document.getElementById("toasts");if(!c)return;
+  const ic=type==="ok"?"circle-check":(type==="err"?"alert-triangle":"info-circle");
+  const el=document.createElement("div");el.className="toast "+(type||"");el.innerHTML=`<i class="ti ti-${ic}"></i><span>${esc(msg)}</span>`;
+  c.appendChild(el);setTimeout(()=>{el.classList.add("hide");setTimeout(()=>el.remove(),220);},3000);}
+/* ---- Command palette (⌘K) ---- */
+const NAV_IC={overview:"layout-dashboard",team:"robot",board:"columns",roadmap:"timeline",activity:"activity",discuss:"messages",insights:"coin",people:"user-star",audit:"shield-lock",access:"user-cog",settings:"settings"};
+let CMDK_ITEMS=[],CMDK_SEL=0;
+function cmdkBuild(){
+  const items=[];const isAdmin=ME&&ME.role==="admin";
+  Object.keys(TITLES).forEach(v=>{const a=document.querySelector(`.nav a[data-v="${v}"]`);if(!a)return;
+    if(a.classList.contains("admin-only")&&!isAdmin)return;
+    items.push({cat:"Go to",label:TITLES[v][0],hint:TITLES[v][1],icon:NAV_IC[v]||"point",run:()=>nav(v)});});
+  (PROJECTS||[]).forEach(p=>items.push({cat:"Switch project",label:p.name,hint:p.alias||p.id,icon:"hexagon-letter-c",run:()=>switchProject(p.id)}));
+  items.push({cat:"Action",label:"New ticket",hint:"add to backlog",icon:"plus",run:()=>openNewTicket()});
+  if(isAdmin)items.push({cat:"Action",label:"New project",hint:"scaffold / import",icon:"folder-plus",run:()=>openNewProject()});
+  items.push({cat:"Action",label:"Start / Resume the loop",icon:"player-play",run:()=>ctl("resume")});
+  items.push({cat:"Action",label:"Pause the loop",icon:"player-pause",run:()=>ctl("pause")});
+  items.push({cat:"Action",label:"Run one step",icon:"player-track-next",run:()=>ctl("step")});
+  items.push({cat:"Action",label:"Sign out",icon:"logout",run:()=>doLogout()});
+  return items;}
+function openCmdk(){CMDK_ITEMS=cmdkBuild();CMDK_SEL=0;
+  document.getElementById("cmdk").classList.add("open");const i=document.getElementById("cmdk-input");i.value="";cmdkFilter();setTimeout(()=>i.focus(),30);}
+function closeCmdk(){document.getElementById("cmdk").classList.remove("open");}
+function cmdkFilter(){
+  const q=(document.getElementById("cmdk-input").value||"").toLowerCase().trim();
+  const matches=CMDK_ITEMS.filter(it=>!q||it.label.toLowerCase().includes(q)||(it.hint||"").toLowerCase().includes(q)||it.cat.toLowerCase().includes(q));
+  CMDK_SEL=Math.min(CMDK_SEL,Math.max(0,matches.length-1));
+  const el=document.getElementById("cmdk-list");
+  if(!matches.length){el.innerHTML='<div class="cmdk-empty">No matches</div>';window._cmdkMatches=[];return;}
+  window._cmdkMatches=matches;let html="",lastCat="";
+  matches.forEach((it,i)=>{if(it.cat!==lastCat){lastCat=it.cat;html+=`<div class="cmdk-cat">${esc(it.cat)}</div>`;}
+    html+=`<div class="cmdk-item ${i===CMDK_SEL?'sel':''}" onmousemove="cmdkSel(${i})" onclick="cmdkRun(${i})">
+      <span class="ci-ic"><i class="ti ti-${it.icon}"></i></span><span class="ci-t">${esc(it.label)}</span>${it.hint?`<span class="ci-h">${esc(it.hint)}</span>`:''}</div>`;});
+  el.innerHTML=html;}
+function cmdkSel(i){CMDK_SEL=i;document.querySelectorAll("#cmdk-list .cmdk-item").forEach((x,j)=>x.classList.toggle("sel",j===i));}
+function cmdkRun(i){const m=window._cmdkMatches||[];if(m[i]){closeCmdk();try{m[i].run();}catch(e){}}}
+function cmdkKey(e){const m=window._cmdkMatches||[];
+  if(e.key==="Escape")closeCmdk();
+  else if(e.key==="ArrowDown"){e.preventDefault();cmdkSel(Math.min(CMDK_SEL+1,m.length-1));scrollSel();}
+  else if(e.key==="ArrowUp"){e.preventDefault();cmdkSel(Math.max(CMDK_SEL-1,0));scrollSel();}
+  else if(e.key==="Enter"){e.preventDefault();cmdkRun(CMDK_SEL);}}
+function scrollSel(){const s=document.querySelector("#cmdk-list .cmdk-item.sel");if(s)s.scrollIntoView({block:"nearest"});}
+document.addEventListener("keydown",e=>{if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==="k"){e.preventDefault();
+  document.getElementById("cmdk").classList.contains("open")?closeCmdk():openCmdk();}});
 boot();
 </script>
 </body>
