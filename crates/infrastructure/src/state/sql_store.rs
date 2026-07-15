@@ -10,10 +10,13 @@ use async_trait::async_trait;
 use coxagent_application::ports::outbound::StateStorePort;
 use coxagent_application::state::{ProjectState, SCHEMA_VERSION};
 use coxagent_application::PortError;
+use coxagent_domain::{Role, TicketId};
 use deadpool_postgres::{Config, Pool, Runtime};
 use tokio_postgres::NoTls;
 
-/// Schema for the shared project table. Idempotent; run on connect.
+/// Schema for the shared project + coordination tables. Idempotent; run on
+/// connect. `project_coord` is the cross-machine coordination row set: one
+/// `leader` per project and one lease per `(ticket, stage)`.
 const INIT_SQL: &str = "
 CREATE TABLE IF NOT EXISTS project_state (
     project_id     TEXT PRIMARY KEY,
@@ -21,7 +24,21 @@ CREATE TABLE IF NOT EXISTS project_state (
     revision       BIGINT  NOT NULL DEFAULT 0,
     data           JSONB   NOT NULL,
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS project_coord (
+    project_id TEXT NOT NULL,
+    kind       TEXT NOT NULL,          -- 'leader' | 'stage'
+    coord_key  TEXT NOT NULL,          -- '' for leader, 'ticket|stage' for a lease
+    worker     TEXT NOT NULL,
+    at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (project_id, kind, coord_key)
 );";
+
+/// Leader lease lifetime (seconds) — a runner must renew within this or another
+/// takes over. Matches the JSON store.
+const LEADER_TTL_SECS: f64 = 90.0;
+/// Per-ticket stage lease lifetime (seconds).
+const STAGE_TTL_SECS: f64 = 1800.0;
 
 /// A [`StateStorePort`] storing one project aggregate per row in Postgres.
 pub struct SqlStateStore {
@@ -138,5 +155,100 @@ impl StateStorePort for SqlStateStore {
             ));
         }
         Ok(())
+    }
+
+    async fn claim_ticket(
+        &self,
+        id: &TicketId,
+        worker: &str,
+        now: &str,
+    ) -> Result<bool, PortError> {
+        // Serialize claims cluster-wide with a row lock: the whole
+        // read-check-set-write runs in one transaction, so two machines racing
+        // on the same backlog can never both win the ticket.
+        let mut client = self.client().await?;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(|e| PortError::Backend(format!("begin: {e}")))?;
+        let Some(row) = tx
+            .query_opt(
+                "SELECT data FROM project_state WHERE project_id = $1 FOR UPDATE",
+                &[&self.project_id],
+            )
+            .await
+            .map_err(|e| PortError::Backend(format!("select for update: {e}")))?
+        else {
+            return Ok(false);
+        };
+        let value: serde_json::Value = row.get(0);
+        let mut state: ProjectState = serde_json::from_value(value)
+            .map_err(|e| PortError::Corrupt(format!("row not decodable: {e}")))?;
+        let Some(ticket) = state.ticket_mut(id) else {
+            return Ok(false);
+        };
+        if ticket.claimed_by().is_some() || ticket.claim(Role::System, worker, now).is_err() {
+            return Ok(false);
+        }
+        let newval =
+            serde_json::to_value(&state).map_err(|e| PortError::Backend(format!("encode: {e}")))?;
+        tx.execute(
+            "UPDATE project_state
+                SET data = $1, revision = revision + 1, updated_at = now()
+              WHERE project_id = $2",
+            &[&newval, &self.project_id],
+        )
+        .await
+        .map_err(|e| PortError::Backend(format!("update: {e}")))?;
+        tx.commit()
+            .await
+            .map_err(|e| PortError::Backend(format!("commit: {e}")))?;
+        Ok(true)
+    }
+
+    async fn acquire_leader(&self, worker: &str, _now: &str) -> Result<bool, PortError> {
+        self.upsert_lease("leader", "", worker, LEADER_TTL_SECS)
+            .await
+    }
+
+    async fn claim_stage(
+        &self,
+        id: &TicketId,
+        stage: &str,
+        worker: &str,
+        _now: &str,
+    ) -> Result<bool, PortError> {
+        let key = format!("{id}|{stage}");
+        self.upsert_lease("stage", &key, worker, STAGE_TTL_SECS)
+            .await
+    }
+}
+
+impl SqlStateStore {
+    /// Atomically take or renew a coordination lease. Wins (`true`) when the row
+    /// is absent, already ours, or its lease has expired — all decided inside one
+    /// conditional UPSERT so concurrent machines agree on a single holder.
+    async fn upsert_lease(
+        &self,
+        kind: &str,
+        key: &str,
+        worker: &str,
+        ttl_secs: f64,
+    ) -> Result<bool, PortError> {
+        let client = self.client().await?;
+        let row = client
+            .query_opt(
+                "INSERT INTO project_coord (project_id, kind, coord_key, worker, at)
+                 VALUES ($1, $2, $3, $4, now())
+                 ON CONFLICT (project_id, kind, coord_key) DO UPDATE
+                    SET worker = EXCLUDED.worker, at = now()
+                    WHERE project_coord.worker = $4
+                       OR project_coord.at < now() - make_interval(secs => $5)
+                 RETURNING worker",
+                &[&self.project_id, &kind, &key, &worker, &ttl_secs],
+            )
+            .await
+            .map_err(|e| PortError::Backend(format!("lease upsert: {e}")))?;
+        Ok(row.is_some_and(|r| r.get::<_, String>(0) == worker))
     }
 }
