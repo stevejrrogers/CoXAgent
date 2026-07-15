@@ -233,6 +233,14 @@ impl ViewerGuard {
     fn count(&self) -> usize {
         self.viewers.lock().map_or(1, |m| m.len().max(1))
     }
+
+    /// The usernames currently connected (for per-channel online presence).
+    fn online_users(&self) -> Vec<String> {
+        self.viewers
+            .lock()
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
+    }
 }
 
 impl Drop for ViewerGuard {
@@ -2876,6 +2884,7 @@ async fn events_ep(
     let stream = IntervalStream::new(tokio::time::interval(STREAM_INTERVAL)).then(move |_| {
         // `guard` is owned by this closure, so the count drops when the stream ends.
         let count = guard.count();
+        let online = guard.online_users();
         let handle = handle.clone();
         async move {
             let payload = match handle {
@@ -2883,6 +2892,7 @@ async fn events_ep(
                     "state": p.store.load().await.ok().as_ref().map(lite_state_value),
                     "runner": p.runner.snapshot(),
                     "viewers": count,
+                    "online": online,
                 }),
                 None => serde_json::json!({ "error": "no such project" }),
             };
