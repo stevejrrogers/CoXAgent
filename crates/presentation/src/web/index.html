@@ -2694,12 +2694,18 @@ async function deleteDoc(){
 }
 async function generateDocs(){
   const btn=document.getElementById("docs-gen");const old=btn.innerHTML;btn.innerHTML='<i class="ti ti-loader-2 att-spin"></i>';btn.disabled=true;
+  // Generation runs DOCS/SA/TEST agents — it can take 1–3 minutes. Show a
+  // clear in-pane progress state (with an elapsed timer) so it never looks stuck.
+  const main=document.getElementById("docs-main");
+  const t0=Date.now();
+  const paint=()=>{if(main)main.innerHTML=`<div class="docs-empty"><i class="ti ti-loader-2 att-spin" style="font-size:30px"></i><div>DOCS, SA &amp; TEST agents are writing…</div><span>Product, Technical, Flows &amp; Testing pages · ${Math.round((Date.now()-t0)/1000)}s elapsed — this can take a minute or two.</span></div>`;};
+  paint();const tick=setInterval(paint,1000);
   try{
     const r=await fetch(api("/docs/generate"),{method:"POST"});
     if(!r.ok){toasty("Docs generation failed: "+(await r.text()||r.status)+" (needs a configured engine).","err");}
     else{const j=await r.json();toasty("Generated "+(j.pages||0)+" pages","ok");await loadDocs();}
   }catch(e){toasty("Docs generation failed","err");}
-  btn.innerHTML=old;btn.disabled=false;
+  clearInterval(tick);btn.innerHTML=old;btn.disabled=false;renderDocMain();
 }
 // Minimal Markdown → HTML for doc pages (headings, lists, code, links).
 function mdRender(md){
