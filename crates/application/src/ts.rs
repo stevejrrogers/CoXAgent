@@ -212,6 +212,123 @@ fn collect_symbols(
     }
 }
 
+/// One call site: `caller` (with its `caller_scope`) invokes `callee`.
+pub struct TsCall {
+    pub caller: String,
+    pub caller_scope: Option<String>,
+    pub callee: String,
+    pub line: usize,
+}
+
+/// Extract the call graph (function → function it calls). `None` for
+/// unsupported languages / parse failure.
+#[must_use]
+pub fn calls(lang: &str, source: &str) -> Option<Vec<TsCall>> {
+    let tree = parse(lang, source)?;
+    let mut out = Vec::new();
+    collect_calls(lang, tree.root_node(), source, None, None, &mut out);
+    Some(out)
+}
+
+/// The trailing identifier of a callee expression: `self.build` → `build`,
+/// `Mod::run` → `run`, `pkg.Fn` → `Fn`, `foo` → `foo`.
+fn last_ident(s: &str) -> String {
+    let rev: String = s
+        .chars()
+        .rev()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    rev.chars().rev().collect()
+}
+
+/// The type/class a node introduces as a scope (rust impl, py/js/ts class).
+fn type_scope_intro(lang: &str, node: Node, src: &str) -> Option<String> {
+    match (lang, node.kind()) {
+        ("rust", "impl_item") => node
+            .child_by_field_name("type")
+            .map(|t| text(t, src).to_owned()),
+        ("python", "class_definition") | ("javascript" | "typescript", "class_declaration") => {
+            name_field(node, src)
+        }
+        _ => None,
+    }
+}
+
+/// If `node` is a function/method definition, its `(name, scope)`.
+fn fn_identity(
+    lang: &str,
+    node: Node,
+    src: &str,
+    type_scope: Option<&str>,
+) -> Option<(String, Option<String>)> {
+    let scoped = |n: String| (n, type_scope.map(str::to_owned));
+    match (lang, node.kind()) {
+        ("rust", "function_item")
+        | ("python", "function_definition")
+        | ("javascript" | "typescript", "function_declaration" | "method_definition") => {
+            name_field(node, src).map(scoped)
+        }
+        ("go", "function_declaration") => name_field(node, src).map(|n| (n, None)),
+        ("go", "method_declaration") => {
+            let recv = node.child_by_field_name("receiver").map(|r| {
+                text(r, src)
+                    .trim_matches(['(', ')', ' '])
+                    .rsplit([' ', '*'])
+                    .next()
+                    .unwrap_or("")
+                    .to_owned()
+            });
+            name_field(node, src).map(|n| (n, recv))
+        }
+        _ => None,
+    }
+}
+
+/// If `node` is a call/macro invocation, its `(callee, line)`.
+fn call_target(lang: &str, node: Node, src: &str) -> Option<(String, usize)> {
+    let line = node.start_position().row + 1;
+    let callee = match node.kind() {
+        "call_expression" if matches!(lang, "rust" | "javascript" | "typescript" | "go") => {
+            node.child_by_field_name("function").map(|f| text(f, src))
+        }
+        "call" if lang == "python" => node.child_by_field_name("function").map(|f| text(f, src)),
+        "macro_invocation" if lang == "rust" => {
+            node.child_by_field_name("macro").map(|m| text(m, src))
+        }
+        _ => None,
+    }?;
+    let name = last_ident(callee);
+    (!name.is_empty()).then_some((name, line))
+}
+
+fn collect_calls(
+    lang: &str,
+    node: Node,
+    src: &str,
+    type_scope: Option<&str>,
+    cur: Option<&(String, Option<String>)>,
+    out: &mut Vec<TsCall>,
+) {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if let Some((callee, line)) = call_target(lang, child, src) {
+            if let Some((cn, cs)) = cur {
+                out.push(TsCall {
+                    caller: cn.clone(),
+                    caller_scope: cs.clone(),
+                    callee,
+                    line,
+                });
+            }
+        }
+        let child_scope = type_scope_intro(lang, child, src);
+        let next_scope = child_scope.as_deref().or(type_scope);
+        let this_fn = fn_identity(lang, child, src, type_scope);
+        let next_cur = this_fn.as_ref().or(cur);
+        collect_calls(lang, child, src, next_scope, next_cur, out);
+    }
+}
+
 /// Lines where `name` occurs as an identifier (not in a comment or string).
 /// Returns `None` for unsupported languages / parse failure.
 #[must_use]

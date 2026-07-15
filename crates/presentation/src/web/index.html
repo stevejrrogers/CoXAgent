@@ -136,6 +136,7 @@
   .cgi-ref code mark{background:color-mix(in srgb,var(--accent2) 28%,transparent);color:var(--text);border-radius:3px;padding:0 1px}
   .cgi-ln{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--dim);min-width:30px;text-align:right;flex:none}
   .cgi-badge{background:var(--accent2);color:#fff;font-size:9px;font-weight:700;text-transform:uppercase;border-radius:4px;padding:1px 5px;flex:none}
+  .cgi-cf{margin-left:auto;font-family:ui-monospace,Menlo,monospace;font-size:10.5px;color:var(--dim);flex:none}
   .rev-verdict b{font-weight:700}
   .rev-vsum{color:var(--muted);margin-top:3px;font-size:12px}
   .revtitle{font-size:14px;font-weight:600}
@@ -3719,8 +3720,15 @@ async function cgImpact(name){
   const byFile={};refs.forEach(r=>{(byFile[r.file]=byFile[r.file]||[]).push(r);});
   const files=Object.keys(byFile).sort((a,b)=>{const da=byFile[a].some(r=>r.is_def),db=byFile[b].some(r=>r.is_def);return (db-da)||a.localeCompare(b);});
   const esc2=t=>esc(t).replace(new RegExp("("+name.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")+")","g"),'<mark>$1</mark>');
+  // Call graph: who calls this fn (impact) and what it calls.
+  const callers=(d.callers||[]),callees=(d.callees||[]);
+  const callList=(arr,dir)=>arr.length?`<div class="cgi-file"><div class="cgi-fp"><i class="ti ti-${dir==='in'?'arrow-down-left':'arrow-up-right'}" style="font-size:13px;color:var(--accent2)"></i> ${dir==='in'?'Called by':'Calls'} <span style="color:var(--dim)">· ${arr.length}</span></div>`+
+    arr.map(c=>`<div class="cgi-ref"><span class="cgi-ln">${c.line}</span><code>${esc(c.label)}</code><span class="cgi-cf">${esc(c.file.split('/').slice(-1)[0])}</span></div>`).join("")+`</div>`:'';
+  const callGraph=(callers.length||callees.length)?`<div class="sec" style="margin:14px 0 6px;font-size:12px">Call graph</div><div class="cgi-list">${callList(callers,'in')}${callList(callees,'out')}</div>`:'';
   body.innerHTML=`<h3 style="display:flex;align-items:center;gap:8px"><i class="ti ti-sitemap" style="color:var(--accent2)"></i> <code style="font-family:ui-monospace,monospace">${esc(name)}</code></h3>
-    <div class="msub">${d.uses} usage${d.uses===1?'':'s'} · ${d.defs} definition${d.defs===1?'':'s'} across ${files.length} file${files.length===1?'':'s'}</div>
+    <div class="msub">${d.uses} usage${d.uses===1?'':'s'} · ${d.defs} definition${d.defs===1?'':'s'} across ${files.length} file${files.length===1?'':'s'}${callers.length?` · called by ${callers.length}`:''}</div>
+    ${callGraph}
+    <div class="sec" style="margin:14px 0 6px;font-size:12px">All references</div>
     <div class="cgi-list">`+files.map(f=>`
       <div class="cgi-file"><div class="cgi-fp"><i class="ti ti-file-code" style="font-size:13px"></i> ${esc(f)} <span style="color:var(--dim)">· ${byFile[f].length}</span></div>`+
       byFile[f].map(r=>`<div class="cgi-ref${r.is_def?' def':''}"><span class="cgi-ln">${r.line}</span>${r.is_def?'<span class="cgi-badge">def</span>':''}<code>${esc2(r.text)}</code></div>`).join("")+`</div>`).join("")+`</div>`;

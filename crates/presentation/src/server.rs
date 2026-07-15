@@ -2248,18 +2248,33 @@ async fn codegraph_refs_ep(
         return (StatusCode::BAD_REQUEST, "name too short").into_response();
     }
     let work_dir = p.work_dir.clone();
+    let scan_name = name.clone();
     let refs = tokio::task::spawn_blocking(move || {
-        coxagent_application::codegraph::references(&work_dir, &name, 200)
+        coxagent_application::codegraph::references(&work_dir, &scan_name, 200)
     })
     .await
     .unwrap_or_default();
     let defs = refs.iter().filter(|r| r.is_def).count();
+    // Call graph (from the persisted index): who calls this fn, and what it calls.
+    let (inbound, outbound) = coxagent_application::codegraph::CodeGraph::load(&p.work_dir)
+        .map(|g| (g.callers(&name), g.callees(&name)))
+        .unwrap_or_default();
+    let cg = |v: Vec<(String, String, usize)>| -> Vec<serde_json::Value> {
+        v.into_iter()
+            .take(100)
+            .map(|(label, file, line)| serde_json::json!({ "label": label, "file": file, "line": line }))
+            .collect()
+    };
+    let inbound_n = inbound.len();
     Json(serde_json::json!({
         "name": query.name.trim(),
         "total": refs.len(),
         "defs": defs,
         "uses": refs.len() - defs,
         "refs": refs,
+        "callers": cg(inbound),
+        "callees": cg(outbound),
+        "caller_count": inbound_n,
     }))
     .into_response()
 }

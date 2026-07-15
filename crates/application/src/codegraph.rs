@@ -38,6 +38,21 @@ pub struct FileNode {
     pub imports: Vec<String>,
 }
 
+/// One function-call edge in the call graph.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Call {
+    /// File the call site is in.
+    pub file: String,
+    /// Calling function's name.
+    pub caller: String,
+    /// Calling function's scope (type/class), when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_scope: Option<String>,
+    /// Name of the function being called.
+    pub callee: String,
+    pub line: usize,
+}
+
 /// The whole graph, persisted to `.coxagent/codegraph.json`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CodeGraph {
@@ -46,6 +61,9 @@ pub struct CodeGraph {
     pub symbols: Vec<Symbol>,
     /// `(from_file, imported)` import edges.
     pub edges: Vec<(String, String)>,
+    /// Function-call edges (caller → callee).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub calls: Vec<Call>,
     /// Language → file count.
     pub languages: BTreeMap<String, usize>,
 }
@@ -138,6 +156,18 @@ impl CodeGraph {
                 }
             }
         }
+        // Call graph (function → function), where the grammar supports it.
+        if let Some(calls) = crate::ts::calls(lang, text) {
+            for c in calls {
+                self.calls.push(Call {
+                    file: rel.to_owned(),
+                    caller: c.caller,
+                    caller_scope: c.caller_scope,
+                    callee: c.callee,
+                    line: c.line,
+                });
+            }
+        }
         *self.languages.entry(lang.to_owned()).or_insert(0) += 1;
         self.files.push(FileNode {
             path: rel.to_owned(),
@@ -208,6 +238,41 @@ impl CodeGraph {
                 }
             }
         }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Functions that call `name` — "if I change `name`, these break". Each entry
+    /// is `(caller_label, file, line)`, deduped, sorted.
+    #[must_use]
+    pub fn callers(&self, name: &str) -> Vec<(String, String, usize)> {
+        let mut out: Vec<(String, String, usize)> = self
+            .calls
+            .iter()
+            .filter(|c| c.callee == name)
+            .map(|c| {
+                (
+                    label(&c.caller, c.caller_scope.as_deref()),
+                    c.file.clone(),
+                    c.line,
+                )
+            })
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Functions that `name` (a function) calls. `(callee, file, line)`.
+    #[must_use]
+    pub fn callees(&self, name: &str) -> Vec<(String, String, usize)> {
+        let mut out: Vec<(String, String, usize)> = self
+            .calls
+            .iter()
+            .filter(|c| c.caller == name)
+            .map(|c| (c.callee.clone(), c.file.clone(), c.line))
+            .collect();
         out.sort();
         out.dedup();
         out
@@ -373,6 +438,14 @@ pub fn references(root: &Path, name: &str, limit: usize) -> Vec<Reference> {
         }
     }
     sort_refs(out)
+}
+
+/// `scope::name` when a scope is known, else `name`.
+fn label(name: &str, scope: Option<&str>) -> String {
+    match scope {
+        Some(s) if !s.is_empty() => format!("{s}::{name}"),
+        _ => name.to_owned(),
+    }
 }
 
 /// Definitions first, then by file/line.
@@ -577,6 +650,28 @@ mod tests {
         assert_eq!(refs.len(), 2, "comment + string usages must be excluded");
         assert!(refs.iter().any(|r| r.is_def && r.line == 1));
         assert!(refs.iter().any(|r| !r.is_def && r.line == 2));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn call_graph_links_callers_and_callees() {
+        let dir = std::env::temp_dir().join(format!("cgcall-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("mk");
+        std::fs::write(
+            dir.join("src/a.rs"),
+            "fn helper() {}\nfn run() { helper(); helper(); }\nfn main() { run(); }\n",
+        )
+        .expect("w");
+        let g = CodeGraph::index(&dir);
+        let callers = g.callers("helper");
+        assert!(
+            callers.iter().any(|(who, _, _)| who == "run"),
+            "run calls helper"
+        );
+        let run_calls: Vec<String> = g.callees("run").into_iter().map(|(c, _, _)| c).collect();
+        assert!(run_calls.contains(&"helper".to_owned()));
+        assert!(g.callers("run").iter().any(|(who, _, _)| who == "main"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
