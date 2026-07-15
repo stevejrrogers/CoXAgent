@@ -337,6 +337,35 @@
   .docedit .doc-t{background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:10px 13px;font-size:17px;font-weight:600;font-family:inherit}
   .docedit .doc-b{flex:1;min-height:300px;background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:13px;font-family:ui-monospace,Menlo,monospace;font-size:13px;line-height:1.6;resize:none}
   .doc-actions{display:flex;gap:8px;align-items:center}
+  /* Confluence-like rich editor */
+  .rt-tools{display:flex;flex-wrap:wrap;gap:2px;align-items:center;background:var(--card2);border:1px solid var(--border2);border-radius:8px;padding:5px 7px;position:sticky;top:-26px;z-index:5}
+  .rt-tools button{width:30px;height:30px;border:none;background:transparent;color:var(--muted);border-radius:6px;cursor:pointer;font-size:14px;display:inline-flex;align-items:center;justify-content:center}
+  .rt-tools button:hover{background:var(--card);color:var(--text)} .rt-tools button.on{background:var(--accentbg);color:var(--accent2)}
+  .rt-tools .sep{width:1px;height:18px;background:var(--border2);margin:0 4px}
+  .rt-edit{flex:1;min-height:340px;background:var(--card);border:1px solid var(--border2);border-radius:8px;padding:16px 20px;font-size:14px;line-height:1.7;color:var(--text);overflow-y:auto;outline:none;max-width:100%}
+  .rt-edit:focus{border-color:var(--accent2)}
+  .rt-edit[data-empty]:empty:before{content:attr(data-empty);color:var(--dim)}
+  .rt-edit h1{font-size:24px;margin:18px 0 10px} .rt-edit h2{font-size:19px;margin:18px 0 9px;border-bottom:1px solid var(--border);padding-bottom:5px} .rt-edit h3{font-size:16px;margin:15px 0 7px}
+  .rt-edit p{margin:8px 0} .rt-edit ul,.rt-edit ol{margin:8px 0;padding-left:24px} .rt-edit blockquote{border-left:3px solid var(--accent2);margin:10px 0;padding:2px 14px;color:var(--muted);background:var(--card2);border-radius:0 8px 8px 0}
+  .rt-edit pre,.rt-edit .codeblock{background:var(--bg);border:1px solid var(--border2);border-radius:8px;padding:11px 13px;margin:11px 0;font-family:ui-monospace,Menlo,monospace;font-size:12.5px;white-space:pre-wrap}
+  .rt-edit a{color:var(--accent2);text-decoration:underline}
+  /* Shared table + tasklist styling for view + edit */
+  .doc-body.md table,.rt-edit table{border-collapse:collapse;margin:12px 0;width:auto;font-size:13px}
+  .doc-body.md td,.doc-body.md th,.rt-edit td,.rt-edit th{border:1px solid var(--border2);padding:6px 11px;text-align:left}
+  .doc-body.md th,.rt-edit th{background:var(--card2);font-weight:600}
+  .doc-body.md ul.tasklist,.rt-edit ul.tasklist{list-style:none;padding-left:4px}
+  .doc-body.md ul.tasklist li,.rt-edit ul.tasklist li{position:relative;padding-left:26px;margin:5px 0}
+  .doc-body.md ul.tasklist li:before,.rt-edit ul.tasklist li:before{content:"";position:absolute;left:0;top:3px;width:15px;height:15px;border:1.5px solid var(--border2);border-radius:4px;background:var(--card)}
+  .doc-body.md ul.tasklist li[data-checked="true"],.rt-edit ul.tasklist li[data-checked="true"]{color:var(--dim);text-decoration:line-through}
+  .rt-edit ul.tasklist li:before{cursor:pointer}
+  .doc-body.md ul.tasklist li[data-checked="true"]:before,.rt-edit ul.tasklist li[data-checked="true"]:before{background:var(--accent2);border-color:var(--accent2)}
+  .doc-body.md ul.tasklist li[data-checked="true"]:after,.rt-edit ul.tasklist li[data-checked="true"]:after{content:"✓";position:absolute;left:2.5px;top:1.5px;font-size:11px;color:#fff;font-weight:700}
+  /* Live presence */
+  .rt-presence{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted)}
+  .rt-av{width:24px;height:24px;border-radius:50%;background:var(--accent2);color:#fff;display:inline-flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;border:2px solid var(--card);margin-left:-8px}
+  .rt-av:first-child{margin-left:0}
+  .rt-live{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;color:var(--green)} .rt-live i{font-size:9px}
+  .rt-saved{font-size:11.5px;color:var(--dim)}
   #chat-main{display:none;flex:1;min-height:0;flex-direction:column}
   #chat-main .chatwrap{flex:1;min-height:0;border:none;border-radius:0}
   body.mode-chat #ws-nav{display:none}
@@ -2629,7 +2658,7 @@ function renderDocsList(){
   }).join("");
   box.innerHTML=html;
 }
-function openDoc(id){DOC_CUR=id;DOC_EDIT=false;renderDocsList();renderDocMain();}
+function openDoc(id){if(typeof docsWsClose==="function")docsWsClose();DOC_CUR=id;DOC_EDIT=false;renderDocsList();renderDocMain();}
 function currentDoc(){return DOCS.find(d=>d.id===DOC_CUR);}
 // Distinct folder paths already in use, for the editor's datalist.
 function knownFolders(){return [...new Set(DOCS.map(docFolder))].sort();}
@@ -2640,13 +2669,33 @@ function renderDocMain(){
   const canEdit=!(ME&&ME.auth)||roleCanWrite(ME.role);
   if(DOC_EDIT){
     const opts=knownFolders().map(f=>`<option value="${esc(f)}">`).join("");
+    const tb=(cmd,ic,ti,arg)=>`<button type="button" title="${ti}" onmousedown="event.preventDefault()" onclick="${cmd}"><i class="ti ${ic}"></i></button>`;
     el.innerHTML=`<div class="docedit">
-      <input id="doc-title" class="doc-t" value="${esc(d.title)}" placeholder="Title">
-      <input id="doc-folder" class="doc-t" style="font-size:13px;color:var(--dim)" list="doc-folders" value="${esc(docFolder(d))}" placeholder="Folder (e.g. Technical/Architecture)">
+      <input id="doc-title" class="doc-t" value="${esc(d.title)}" placeholder="Title" oninput="rtDirty()">
+      <input id="doc-folder" class="doc-t" style="font-size:13px;color:var(--dim)" list="doc-folders" value="${esc(docFolder(d))}" placeholder="Folder (e.g. Technical/Architecture)" oninput="rtDirty()">
       <datalist id="doc-folders">${opts}</datalist>
-      <textarea id="doc-body" class="doc-b" placeholder="Markdown…">${esc(d.body)}</textarea>
-      <div class="doc-actions"><button class="pri" onclick="saveDoc()"><i class="ti ti-check"></i> Save</button><button class="gc-btn" onclick="DOC_EDIT=false;renderDocMain()">Cancel</button><button class="gc-btn" style="margin-left:auto;color:var(--red)" onclick="deleteDoc()"><i class="ti ti-trash"></i> Delete</button></div>
-    </div>`;return;
+      <div class="rt-tools">
+        ${tb("rtBlock('h1')","ti-h-1","Heading 1")}${tb("rtBlock('h2')","ti-h-2","Heading 2")}${tb("rtBlock('h3')","ti-h-3","Heading 3")}${tb("rtBlock('p')","ti-pilcrow","Paragraph")}
+        <span class="sep"></span>
+        ${tb("rtCmd('bold')","ti-bold","Bold")}${tb("rtCmd('italic')","ti-italic","Italic")}${tb("rtCmd('strikeThrough')","ti-strikethrough","Strikethrough")}${tb("rtInlineCode()","ti-code","Inline code")}
+        <span class="sep"></span>
+        ${tb("rtCmd('insertUnorderedList')","ti-list","Bullet list")}${tb("rtCmd('insertOrderedList')","ti-list-numbers","Numbered list")}${tb("rtChecklist()","ti-checkbox","Task list")}${tb("rtBlock('blockquote')","ti-quote","Quote")}
+        <span class="sep"></span>
+        ${tb("rtCodeBlock()","ti-source-code","Code block")}${tb("rtTable()","ti-table","Table")}${tb("rtLink()","ti-link","Link")}${tb("rtHr()","ti-separator-horizontal","Divider")}
+      </div>
+      <div id="doc-rich" class="rt-edit" contenteditable="true" data-empty="Start writing… use the toolbar to format."></div>
+      <div class="doc-actions">
+        <button class="pri" onclick="saveDoc()"><i class="ti ti-check"></i> Done</button>
+        <button class="gc-btn" onclick="cancelEdit()">Cancel</button>
+        <span id="rt-status" class="rt-saved"></span>
+        <span id="rt-people" class="rt-presence" style="margin-left:auto"></span>
+        <button class="gc-btn" style="color:var(--red)" onclick="deleteDoc()"><i class="ti ti-trash"></i> Delete</button>
+      </div>
+    </div>`;
+    const rich=document.getElementById("doc-rich");
+    rich.innerHTML=mdRender(d.body)||"<p><br></p>";
+    docEditInit(d);
+    return;
   }
   const meta=d.updated_by?`<span class="doc-meta">Updated by ${esc(d.updated_by)}${d.updated_at?" · "+esc(d.updated_at.slice(0,10)):""}</span>`:"";
   const crumb=docFolder(d).split("/").map(esc).join(' <i class="ti ti-chevron-right" style="font-size:11px;opacity:.5"></i> ');
@@ -2658,12 +2707,159 @@ async function newDoc(){
   const folder=(prompt("Folder path (e.g. Product, Technical/Architecture):","Product")||"Product").trim()||"Product";
   await putDoc("", folder, title.trim(), "# "+title.trim()+"\n\nWrite here…");DOC_EDIT=true;renderDocMain();
 }
+// ---- Rich-text (Confluence-like) editor + live collaboration --------------
+let DOCWS=null, DOCWS_ID=null, RT_CONN=Math.random().toString(36).slice(2),
+    RT_TYPING=0, RT_SAVE_T=null, RT_PING_T=null, RT_APPLYING=false;
+function rtRich(){return document.getElementById("doc-rich");}
+function rtFocusEdit(){const r=rtRich();if(r){r.focus();}}
+function rtCmd(cmd,val){document.execCommand(cmd,false,val||null);rtFocusEdit();rtDirty();}
+function rtBlock(tag){document.execCommand("formatBlock",false,tag);rtFocusEdit();rtDirty();}
+function rtInsert(html){document.execCommand("insertHTML",false,html);rtDirty();}
+function rtInlineCode(){const s=window.getSelection();const t=s&&s.toString();if(t)rtInsert('<code>'+esc(t)+'</code>&nbsp;');else rtInsert('<code>code</code>&nbsp;');}
+function rtCodeBlock(){rtInsert('<pre class="codeblock">code</pre><p><br></p>');}
+function rtChecklist(){rtInsert('<ul class="tasklist"><li data-checked="false">To do</li></ul><p><br></p>');}
+function rtHr(){rtInsert('<hr><p><br></p>');}
+function rtTable(){let h='<table><tbody>';for(let r=0;r<3;r++){h+='<tr>';for(let c=0;c<3;c++){h+=(r===0?'<th>Head '+(c+1)+'</th>':'<td>&nbsp;</td>');}h+='</tr>';}h+='</tbody></table><p><br></p>';rtInsert(h);}
+function rtLink(){const url=prompt("Link URL:","https://");if(!url)return;const s=window.getSelection();const t=(s&&s.toString())||url;if(s&&s.toString())document.execCommand("createLink",false,url);else rtInsert('<a href="'+esc(url)+'" target="_blank" rel="noopener">'+esc(t)+'</a>&nbsp;');rtDirty();}
+function docEditInit(d){
+  const rich=rtRich();if(!rich)return;
+  // Enter makes <p> (not <div>) so the HTML→Markdown pass is predictable.
+  try{document.execCommand("defaultParagraphSeparator",false,"p");}catch(e){}
+  rich.addEventListener("input",rtDirty);
+  // Toggle a task-list checkbox by clicking its box (left gutter).
+  rich.addEventListener("click",ev=>{
+    const li=ev.target.closest&&ev.target.closest("li");
+    if(li&&li.parentElement&&li.parentElement.classList.contains("tasklist")&&ev.offsetX<22){
+      li.setAttribute("data-checked",li.getAttribute("data-checked")==="true"?"false":"true");rtDirty();
+    }
+  });
+  docsWsConnect(d.id);
+  setTimeout(rtFocusEdit,30);
+}
+function rtDirty(){
+  if(RT_APPLYING)return;
+  RT_TYPING=Date.now();
+  const st=document.getElementById("rt-status");if(st)st.textContent="Editing…";
+  clearTimeout(RT_SAVE_T);RT_SAVE_T=setTimeout(rtAutosave,600);
+}
+function rtCollect(){
+  const d=currentDoc();
+  const title=(document.getElementById("doc-title")||{}).value||"";
+  const folder=(document.getElementById("doc-folder")||{}).value||"";
+  const body=htmlToMd(rtRich());
+  return {id:(d&&d.id)||DOCWS_ID,title:title.trim()||(d&&d.title)||"Untitled",folder:folder.trim(),body};
+}
+function rtAutosave(){
+  const p=rtCollect();if(!p.id)return;
+  const st=document.getElementById("rt-status");
+  // Prefer the live socket (persists + fans out); fall back to REST.
+  if(DOCWS&&DOCWS.readyState===1){
+    DOCWS.send(JSON.stringify({op:"save",origin:RT_CONN,title:p.title,folder:p.folder,body:p.body}));
+    if(st)st.innerHTML='<i class="ti ti-cloud-check"></i> Saved';
+  }else{
+    putDoc(p.id,p.folder,p.title,p.body).then(()=>{if(st)st.textContent="Saved (offline)";});
+  }
+  // Keep the local model fresh so the reader view matches on exit.
+  const d=currentDoc();if(d){d.title=p.title;d.folder=p.folder;d.body=p.body;}
+}
 async function saveDoc(){
-  const d=currentDoc();if(!d)return;
-  const title=document.getElementById("doc-title").value.trim()||d.title;
-  const folder=document.getElementById("doc-folder").value.trim()||docFolder(d);
-  const body=document.getElementById("doc-body").value;
-  await putDoc(d.id, folder, title, body);DOC_EDIT=false;renderDocMain();
+  clearTimeout(RT_SAVE_T);
+  const p=rtCollect();
+  if(!(DOCWS&&DOCWS.readyState===1)){await putDoc(p.id,p.folder,p.title,p.body);}
+  else{rtAutosave();}
+  docsWsClose();DOC_EDIT=false;
+  try{DOCS=await(await fetch(api("/docs"))).json();}catch(e){}
+  renderDocsList();renderDocMain();
+}
+function cancelEdit(){docsWsClose();DOC_EDIT=false;loadDocs();}
+// ---- Live collaboration socket --------------------------------------------
+function docsWsClose(){if(RT_PING_T){clearInterval(RT_PING_T);RT_PING_T=null;}if(DOCWS){try{DOCWS.close();}catch(e){}DOCWS=null;}DOCWS_ID=null;}
+function docsWsConnect(id){
+  docsWsClose();DOCWS_ID=id;
+  try{
+    const proto=location.protocol==="https:"?"wss":"ws";
+    DOCWS=new WebSocket(proto+"://"+location.host+api("/docs/"+encodeURIComponent(id)+"/ws"));
+    DOCWS.onmessage=e=>{try{onDocWs(JSON.parse(e.data));}catch(_){}};
+    DOCWS.onopen=()=>{RT_PING_T=setInterval(()=>{if(DOCWS&&DOCWS.readyState===1)DOCWS.send(JSON.stringify({op:"ping"}));},15000);};
+  }catch(e){}
+}
+function onDocWs(m){
+  if(m.op==="presence"){renderPresence(m.editors||[]);return;}
+  if(m.op==="doc"){
+    if(m.id!==DOC_CUR)return;
+    if(m.origin===RT_CONN)return; // our own echo
+    // Update local model + list from a teammate's edit.
+    const d=currentDoc();if(d){d.title=m.title;d.folder=m.folder;d.body=m.body;}
+    renderDocsList();
+    if(!DOC_EDIT){renderDocMain();return;}
+    // While editing: apply the incoming content only when we're idle, so we
+    // never yank the caret mid-keystroke (last-writer, non-destructive).
+    if(Date.now()-RT_TYPING>1400){
+      RT_APPLYING=true;
+      const rich=rtRich();if(rich)rich.innerHTML=mdRender(m.body)||"<p><br></p>";
+      const tt=document.getElementById("doc-title");if(tt&&document.activeElement!==tt)tt.value=m.title;
+      RT_APPLYING=false;
+      const st=document.getElementById("rt-status");if(st)st.innerHTML='<i class="ti ti-users"></i> Updated by '+esc(m.by);
+    }else{
+      const st=document.getElementById("rt-status");if(st)st.innerHTML='<i class="ti ti-users"></i> '+esc(m.by)+' is editing…';
+    }
+  }
+}
+function renderPresence(editors){
+  const box=document.getElementById("rt-people");if(!box)return;
+  const n=editors.length; // unique usernames currently editing this page
+  const avs=editors.slice(0,5).map(u=>`<span class="rt-av" title="${esc(u)}">${esc((u[0]||"?").toUpperCase())}</span>`).join("");
+  const label=n>1?`<span class="rt-live"><i class="ti ti-point-filled"></i>${n} editing live</span>`:`<span class="rt-live"><i class="ti ti-point-filled"></i>Live</span>`;
+  box.innerHTML=`<div style="display:flex">${avs}</div>${label}`;
+}
+// ---- HTML (contenteditable DOM) → Markdown --------------------------------
+function htmlToMd(root){
+  if(!root)return"";
+  const inline=node=>{
+    let out="";
+    node.childNodes.forEach(n=>{
+      if(n.nodeType===3){out+=n.nodeValue;return;}
+      if(n.nodeType!==1)return;
+      const t=n.tagName.toLowerCase(),inner=inline(n);
+      if(t==="br")out+="\n";
+      else if(t==="b"||t==="strong")out+=inner.trim()?"**"+inner+"**":"";
+      else if(t==="i"||t==="em")out+=inner.trim()?"*"+inner+"*":"";
+      else if(t==="del"||t==="s"||t==="strike")out+=inner.trim()?"~~"+inner+"~~":"";
+      else if(t==="code")out+="`"+n.textContent+"`";
+      else if(t==="a")out+="["+inner+"]("+(n.getAttribute("href")||"")+")";
+      else out+=inner;
+    });
+    return out;
+  };
+  const cellText=n=>inline(n).replace(/\n/g," ").replace(/\|/g,"\\|").trim();
+  let md="";
+  const block=el=>{
+    el.childNodes.forEach(n=>{
+      if(n.nodeType===3){const tx=n.nodeValue.trim();if(tx)md+=tx+"\n\n";return;}
+      if(n.nodeType!==1)return;
+      const t=n.tagName.toLowerCase();
+      if(/^h[1-6]$/.test(t)){md+="#".repeat(+t[1])+" "+inline(n).trim()+"\n\n";}
+      else if(t==="p"||t==="div"){const s=inline(n).trim();md+=s?s+"\n\n":"";}
+      else if(t==="br"){md+="\n";}
+      else if(t==="ul"&&n.classList.contains("tasklist")){n.querySelectorAll(":scope>li").forEach(li=>{md+="- ["+(li.getAttribute("data-checked")==="true"?"x":" ")+"] "+inline(li).trim()+"\n";});md+="\n";}
+      else if(t==="ul"){n.querySelectorAll(":scope>li").forEach(li=>{md+="- "+inline(li).trim()+"\n";});md+="\n";}
+      else if(t==="ol"){let i=1;n.querySelectorAll(":scope>li").forEach(li=>{md+=(i++)+". "+inline(li).trim()+"\n";});md+="\n";}
+      else if(t==="blockquote"){inline(n).trim().split("\n").forEach(l=>{md+="> "+l+"\n";});md+="\n";}
+      else if(t==="pre"){md+="```\n"+n.textContent.replace(/\n$/,"")+"\n```\n\n";}
+      else if(t==="hr"){md+="---\n\n";}
+      else if(t==="table"){
+        const rows=[...n.querySelectorAll("tr")];if(!rows.length)return;
+        const cells=r=>[...r.children].map(cellText);
+        const head=cells(rows[0]);
+        md+="| "+head.join(" | ")+" |\n| "+head.map(()=>"---").join(" | ")+" |\n";
+        rows.slice(1).forEach(r=>{md+="| "+cells(r).join(" | ")+" |\n";});
+        md+="\n";
+      }
+      else{const s=inline(n).trim();md+=s?s+"\n\n":"";}
+    });
+  };
+  block(root);
+  return md.replace(/\n{3,}/g,"\n\n").trim()+"\n";
 }
 async function putDoc(id, folder, title, body){
   try{
@@ -2717,15 +2913,27 @@ function mdRender(md){
     .replace(/\*\*([^*]+)\*\*/g,"<b>$1</b>").replace(/(^|[^*])\*([^*\n]+)\*/g,"$1<i>$2</i>")
     .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>')
     .replace(/(^|[^"'>])(https?:\/\/[^\s<]+)/g,'$1<a href="$2" target="_blank" rel="noopener">$2</a>');
-  const lines=s.split(/\r?\n/);let out="",inUl=false,inOl=false;
-  const closeLists=()=>{if(inUl){out+="</ul>";inUl=false;}if(inOl){out+="</ol>";inOl=false;}};
-  for(const ln of lines){
+  const lines=s.split(/\r?\n/);let out="",inUl=false,inOl=false,inTask=false;
+  const closeLists=()=>{if(inUl){out+="</ul>";inUl=false;}if(inOl){out+="</ol>";inOl=false;}if(inTask){out+="</ul>";inTask=false;}};
+  const cells=r=>r.trim().replace(/^\|/,"").replace(/\|$/,"").split("|").map(c=>c.trim());
+  for(let i=0;i<lines.length;i++){
+    const ln=lines[i];
     const ph=ln.match(/^ZZCODEBLK(\d+)ZZ$/);if(ph){closeLists();out+=blocks[+ph[1]];continue;}
+    // Markdown table: a "| … |" row followed by a "| --- |" separator.
+    if(/^\s*\|.*\|\s*$/.test(ln)&&i+1<lines.length&&/^\s*\|?[\s:|-]+\|?\s*$/.test(lines[i+1])&&/-/.test(lines[i+1])){
+      closeLists();let j=i;const rows=[];
+      while(j<lines.length&&/^\s*\|.*\|\s*$/.test(lines[j])){rows.push(lines[j]);j++;}
+      out+="<table><thead><tr>"+cells(rows[0]).map(c=>"<th>"+inline(c)+"</th>").join("")+"</tr></thead><tbody>";
+      for(let k=2;k<rows.length;k++){out+="<tr>"+cells(rows[k]).map(c=>"<td>"+inline(c)+"</td>").join("")+"</tr>";}
+      out+="</tbody></table>";i=j-1;continue;
+    }
     let m;
     if(m=ln.match(/^(#{1,4})\s+(.*)$/)){closeLists();const n=m[1].length;out+="<h"+n+">"+inline(m[2])+"</h"+n+">";continue;}
+    if(m=ln.match(/^\s*[-*]\s+\[([ xX])\]\s+(.*)$/)){if(!inTask){closeLists();out+='<ul class="tasklist">';inTask=true;}out+='<li data-checked="'+(m[1].toLowerCase()==="x"?"true":"false")+'">'+inline(m[2])+"</li>";continue;}
     if(/^\s*[-*]\s+/.test(ln)){if(!inUl){closeLists();out+="<ul>";inUl=true;}out+="<li>"+inline(ln.replace(/^\s*[-*]\s+/,""))+"</li>";continue;}
     if(/^\s*\d+\.\s+/.test(ln)){if(!inOl){closeLists();out+="<ol>";inOl=true;}out+="<li>"+inline(ln.replace(/^\s*\d+\.\s+/,""))+"</li>";continue;}
     if(/^\s*>\s?/.test(ln)){closeLists();out+="<blockquote>"+inline(ln.replace(/^\s*>\s?/,""))+"</blockquote>";continue;}
+    if(/^\s*(---|\*\*\*|___)\s*$/.test(ln)){closeLists();out+="<hr>";continue;}
     if(!ln.trim()){closeLists();continue;}
     closeLists();out+="<p>"+inline(ln)+"</p>";
   }

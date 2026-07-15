@@ -186,6 +186,10 @@ struct AppState {
     projects: Arc<RwLock<HashMap<String, ProjectHandle>>>,
     /// Per-project team-chat channels, created lazily on first use.
     chat_bus: Arc<RwLock<HashMap<String, ChatChannel>>>,
+    /// Per-document collaboration channels (live edit), keyed `"<pid>/<docid>"`.
+    docs_bus: Arc<RwLock<HashMap<String, tokio::sync::broadcast::Sender<String>>>>,
+    /// Live editors per document room: room → (username → open-connection count).
+    docs_editors: Arc<std::sync::Mutex<HashMap<String, HashMap<String, usize>>>>,
     order: Arc<RwLock<Vec<String>>>,
     factory: Option<ProjectFactory>,
     auth: Option<Arc<dyn AuthPort>>,
@@ -333,6 +337,42 @@ impl AppState {
         Ok(removed)
     }
 
+    /// Get (or lazily create) the live-edit broadcast channel for a doc room.
+    async fn docs_room(&self, room: &str) -> tokio::sync::broadcast::Sender<String> {
+        if let Some(tx) = self.docs_bus.read().await.get(room) {
+            return tx.clone();
+        }
+        self.docs_bus
+            .write()
+            .await
+            .entry(room.to_owned())
+            .or_insert_with(|| tokio::sync::broadcast::channel(64).0)
+            .clone()
+    }
+
+    /// Register/deregister a live editor in a room; returns the current roster.
+    fn docs_presence(&self, room: &str, user: &str, joined: bool) -> Vec<String> {
+        let mut map = match self.docs_editors.lock() {
+            Ok(m) => m,
+            Err(p) => p.into_inner(),
+        };
+        let room_map = map.entry(room.to_owned()).or_default();
+        if joined {
+            *room_map.entry(user.to_owned()).or_insert(0) += 1;
+        } else if let Some(n) = room_map.get_mut(user) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                room_map.remove(user);
+            }
+        }
+        let mut names: Vec<String> = room_map.keys().cloned().collect();
+        names.sort();
+        if room_map.is_empty() {
+            map.remove(room);
+        }
+        names
+    }
+
     /// Get (or lazily create) the live chat channel for a project.
     async fn chat_channel(&self, pid: &str) -> ChatChannel {
         if let Some(ch) = self.chat_bus.read().await.get(pid) {
@@ -457,6 +497,8 @@ fn build_state(
     AppState {
         projects: Arc::new(RwLock::new(map)),
         chat_bus: Arc::new(RwLock::new(HashMap::new())),
+        docs_bus: Arc::new(RwLock::new(HashMap::new())),
+        docs_editors: Arc::new(std::sync::Mutex::new(HashMap::new())),
         order: Arc::new(RwLock::new(order)),
         factory: extras.factory,
         auth: extras.auth,
@@ -577,6 +619,7 @@ pub async fn serve_full(
             axum::routing::put(doc_upsert_ep).delete(doc_delete_ep),
         )
         .route("/api/projects/:pid/docs/:id/ai-edit", post(doc_ai_edit_ep))
+        .route("/api/projects/:pid/docs/:id/ws", get(docs_ws_ep))
         .route("/api/projects/:pid/standup", post(standup_ep))
         .route("/api/projects/:pid/tickets", post(create_ticket))
         .route("/api/projects/:pid/ticket/:id", get(ticket_detail_ep))
@@ -1900,6 +1943,98 @@ async fn docs_generate_ep(
         }
     }
     Json(serde_json::json!({ "ok": true, "pages": written })).into_response()
+}
+
+/// Live collaborative-edit WebSocket for one documentation page. Same-origin
+/// guarded + authenticated. Peers in the room see each other's edits and a live
+/// presence roster; every save is persisted through the active doc store.
+async fn docs_ws_ep(
+    State(app): State<AppState>,
+    Path((pid, id)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+    ws: WebSocketUpgrade,
+) -> axum::response::Response {
+    if !origin_ok(&headers) {
+        return (StatusCode::FORBIDDEN, "cross-origin websocket rejected").into_response();
+    }
+    let user = match &app.auth {
+        Some(auth) => match resolve_principal(auth, &headers).await {
+            Some(u) => u.username,
+            None => return (StatusCode::UNAUTHORIZED, "unauthenticated").into_response(),
+        },
+        None => "user".to_owned(),
+    };
+    if app.project(&pid).await.is_none() {
+        return not_found();
+    }
+    let ws = ws.max_message_size(256 * 1024);
+    ws.on_upgrade(move |socket| docs_socket(socket, app, pid, id, user))
+}
+
+/// Drive one live-edit socket: broadcast presence on join/leave, persist + fan
+/// out each save to the room.
+async fn docs_socket(mut socket: WebSocket, app: AppState, pid: String, id: String, user: String) {
+    let room = format!("{pid}/{id}");
+    let tx = app.docs_room(&room).await;
+    let mut rx = tx.subscribe();
+    // Announce arrival and push the fresh roster to everyone (incl. this socket).
+    let roster = app.docs_presence(&room, &user, true);
+    let _ = tx.send(presence_json(&roster));
+    loop {
+        tokio::select! {
+            bcast = rx.recv() => {
+                match bcast {
+                    Ok(json) => {
+                        if socket.send(Message::Text(json)).await.is_err() { break; }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(_) => break,
+                }
+            }
+            incoming = socket.recv() => {
+                let Some(Ok(msg)) = incoming else { break };
+                let text = match msg {
+                    Message::Text(t) => t,
+                    Message::Close(_) => break,
+                    _ => continue,
+                };
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+                match v.get("op").and_then(|o| o.as_str()) {
+                    Some("save") => {
+                        let title = v.get("title").and_then(|x| x.as_str()).unwrap_or_default();
+                        let folder = v.get("folder").and_then(|x| x.as_str()).unwrap_or_default();
+                        let body = v.get("body").and_then(|x| x.as_str()).unwrap_or_default();
+                        let origin = v.get("origin").and_then(|x| x.as_str()).unwrap_or_default();
+                        if title.trim().is_empty() { continue; }
+                        let Some(p) = app.project(&pid).await else { continue };
+                        if app.doc_upsert(&pid, &p, &id, folder, title, body, &user).await.is_ok() {
+                            let out = serde_json::json!({
+                                "op": "doc", "id": id, "title": title, "folder": folder,
+                                "body": body, "by": user, "origin": origin,
+                            });
+                            let _ = tx.send(out.to_string());
+                        }
+                    }
+                    // A pure "typing" ping keeps presence lively without a save.
+                    Some("ping") => {
+                        let roster = {
+                            let mut m = match app.docs_editors.lock() { Ok(m) => m, Err(p) => p.into_inner() };
+                            m.entry(room.clone()).or_default().keys().cloned().collect::<Vec<_>>()
+                        };
+                        let _ = tx.send(presence_json(&roster));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    let roster = app.docs_presence(&room, &user, false);
+    let _ = tx.send(presence_json(&roster));
+}
+
+/// Serialise a presence roster broadcast.
+fn presence_json(editors: &[String]) -> String {
+    serde_json::json!({ "op": "presence", "editors": editors }).to_string()
 }
 
 #[derive(serde::Deserialize)]
