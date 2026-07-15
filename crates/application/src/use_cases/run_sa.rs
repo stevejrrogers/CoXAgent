@@ -7,7 +7,7 @@ use crate::config::Config;
 use crate::error::{AppError, PortError};
 use crate::ports::outbound::{AgentEnginePort, AgentRequest, StateStorePort};
 use crate::prompts;
-use crate::selection::next_feature_needing_design;
+use crate::selection::design_candidates;
 use coxagent_domain::{Role, Status, TechnicalDesign, TicketId};
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -74,23 +74,24 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
     /// [`AppError`] on engine failure, unparseable output, or a DoR violation.
     pub async fn execute(&self) -> Result<Option<TicketId>, AppError> {
         let state = self.store.load().await?;
-        let Some(id) = next_feature_needing_design(&state) else {
-            return Ok(None);
-        };
-        // Claim the SA stage for this ticket; if another runner already has it,
-        // skip and let this cycle pick up something else next time.
+        // Walk the SA queue best-first and claim the first ticket no other runner
+        // holds — so a second runner grabs a *different* ticket instead of idling.
         let worker = if self.worker.is_empty() {
             "local".to_owned()
         } else {
             self.worker.clone()
         };
-        if !self
-            .store
-            .claim_stage(&id, "sa", &worker, &crate::state::now_rfc3339())
-            .await?
-        {
-            return Ok(None);
+        let now = crate::state::now_rfc3339();
+        let mut chosen = None;
+        for cand in design_candidates(&state) {
+            if self.store.claim_stage(&cand, "sa", &worker, &now).await? {
+                chosen = Some(cand);
+                break;
+            }
         }
+        let Some(id) = chosen else {
+            return Ok(None);
+        };
         if let Some(p) = &self.phase {
             p(Some(("SA".to_owned(), id.to_string())));
         }

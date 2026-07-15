@@ -8,7 +8,7 @@
 use crate::config::Config;
 use crate::error::{AppError, PortError};
 use crate::ports::outbound::{AgentEnginePort, AgentRequest, StateStorePort};
-use crate::selection::{next_open_bug, next_ready_feature};
+use crate::selection::{open_bug_candidates, ready_feature_candidates};
 use crate::{prompts, state::ProjectState};
 use coxagent_domain::{Bump, Role, Status, TicketId};
 use std::path::PathBuf;
@@ -101,25 +101,26 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
     /// [`AppError`] on engine failure or an unexpected state transition error.
     pub async fn execute(&self) -> Result<Option<TicketId>, AppError> {
         let state = self.store.load().await?;
-        let Some(id) = self.pick(&state) else {
-            return Ok(None);
-        };
-
-        // Atomic claim: `account@host` wins the ticket under a cross-process lock,
-        // so a second runner racing on the same backlog cannot also take it. A
-        // lost race (already claimed) yields `None` — pick again next cycle.
+        // Walk the work queue best-first and atomically claim the first ticket no
+        // other runner holds (cross-process lock). A second runner thus grabs a
+        // *different* ticket and builds in parallel, rather than idling on a lost
+        // race for the same top ticket.
         let worker = if self.worker.is_empty() {
             "local".to_owned()
         } else {
             self.worker.clone()
         };
-        if !self
-            .store
-            .claim_ticket(&id, &worker, &now_rfc3339())
-            .await?
-        {
-            return Ok(None);
+        let now = now_rfc3339();
+        let mut chosen = None;
+        for cand in self.candidates(&state) {
+            if self.store.claim_ticket(&cand, &worker, &now).await? {
+                chosen = Some(cand);
+                break;
+            }
         }
+        let Some(id) = chosen else {
+            return Ok(None);
+        };
         if let Some(p) = &self.phase {
             let role = match self.mode {
                 DevMode::Bug => "DEV-BUG",
@@ -163,10 +164,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         Ok(Some(id))
     }
 
-    fn pick(&self, state: &ProjectState) -> Option<TicketId> {
+    fn candidates(&self, state: &ProjectState) -> Vec<TicketId> {
         match self.mode {
-            DevMode::Bug => next_open_bug(state),
-            DevMode::Feature => next_ready_feature(state),
+            DevMode::Bug => open_bug_candidates(state),
+            DevMode::Feature => ready_feature_candidates(state),
         }
     }
 

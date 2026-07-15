@@ -6,7 +6,7 @@ use crate::config::Config;
 use crate::error::{AppError, PortError};
 use crate::ports::outbound::{AgentEnginePort, AgentRequest, StateStorePort};
 use crate::prompts;
-use crate::selection::next_documentable;
+use crate::selection::documentable_candidates;
 use coxagent_domain::{Role, Status, TicketId};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -56,21 +56,22 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
     /// [`AppError`] on engine failure or an unexpected transition error.
     pub async fn execute(&self) -> Result<Option<TicketId>, AppError> {
         let state = self.store.load().await?;
-        let Some(id) = next_documentable(&state) else {
-            return Ok(None);
-        };
         let worker = if self.worker.is_empty() {
             "local".to_owned()
         } else {
             self.worker.clone()
         };
-        if !self
-            .store
-            .claim_stage(&id, "docs", &worker, &crate::state::now_rfc3339())
-            .await?
-        {
-            return Ok(None);
+        let now = crate::state::now_rfc3339();
+        let mut chosen = None;
+        for cand in documentable_candidates(&state) {
+            if self.store.claim_stage(&cand, "docs", &worker, &now).await? {
+                chosen = Some(cand);
+                break;
+            }
         }
+        let Some(id) = chosen else {
+            return Ok(None);
+        };
         if let Some(p) = &self.phase {
             p(Some(("DOCS".to_owned(), id.to_string())));
         }

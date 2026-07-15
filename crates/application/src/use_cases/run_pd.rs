@@ -8,7 +8,7 @@ use crate::config::Config;
 use crate::error::{AppError, PortError};
 use crate::ports::outbound::{AgentEnginePort, AgentRequest, StateStorePort};
 use crate::prompts;
-use crate::selection::next_feature_needing_ux;
+use crate::selection::ux_candidates;
 use coxagent_domain::{Role, Status, TicketId, UxDesign};
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -72,21 +72,22 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
     /// [`AppError`] on engine failure, unparseable output, or a DoR violation.
     pub async fn execute(&self) -> Result<Option<TicketId>, AppError> {
         let state = self.store.load().await?;
-        let Some(id) = next_feature_needing_ux(&state) else {
-            return Ok(None);
-        };
         let worker = if self.worker.is_empty() {
             "local".to_owned()
         } else {
             self.worker.clone()
         };
-        if !self
-            .store
-            .claim_stage(&id, "pd", &worker, &crate::state::now_rfc3339())
-            .await?
-        {
-            return Ok(None);
+        let now = crate::state::now_rfc3339();
+        let mut chosen = None;
+        for cand in ux_candidates(&state) {
+            if self.store.claim_stage(&cand, "pd", &worker, &now).await? {
+                chosen = Some(cand);
+                break;
+            }
         }
+        let Some(id) = chosen else {
+            return Ok(None);
+        };
         if let Some(p) = &self.phase {
             p(Some(("PD".to_owned(), id.to_string())));
         }
