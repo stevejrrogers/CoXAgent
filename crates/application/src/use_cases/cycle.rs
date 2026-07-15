@@ -327,6 +327,35 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
     }
 
+    /// (Re)index the working tree into the code graph + `REPO_MAP.md`, so agents
+    /// can orient from it. Gated by the token-saver; refreshed on the first cycle
+    /// and periodically (indexing off the async runtime). Best-effort.
+    async fn refresh_codegraph(&self, cycle: u64) {
+        if !self.config.workflow.token_saver {
+            return;
+        }
+        // Only index a real project root (marked by coxagent.json) — never a
+        // bare/arbitrary working directory.
+        if !self.work_dir.join("coxagent.json").exists() {
+            return;
+        }
+        let map = self.work_dir.join(".coxagent").join("codegraph.json");
+        let missing = !map.exists();
+        if !(missing || cycle % 3 == 1) {
+            return;
+        }
+        let root = self.work_dir.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            let g = crate::codegraph::CodeGraph::index(&root);
+            let _ = g.save(&root);
+            let _ = std::fs::write(
+                root.join(".coxagent").join("REPO_MAP.md"),
+                g.repo_map(40_000),
+            );
+        })
+        .await;
+    }
+
     /// Persist the SA's verdict so the Review tab can show it as a suggestion.
     async fn record_review(&self, number: u64, decision: &str, summary: &str) {
         if let Ok(mut s) = self.store.load().await {
@@ -586,6 +615,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         if self.model_policy_blocks(&mut report).await {
             return report;
         }
+
+        // Keep the code map fresh so `.coxagent/REPO_MAP.md` reflects the tree
+        // the agents are about to work on (best-effort, token-saver-gated).
+        self.refresh_codegraph(cycle).await;
 
         // Scrum: open/roll over the sprint at the start of the cycle.
         self.advance_sprint_if_scrum(cycle).await;
