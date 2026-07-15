@@ -94,6 +94,12 @@
   .revcard{display:flex;align-items:center;gap:14px;background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px 16px}
   .revcard:hover{border-color:var(--border2)}
   .revmain{flex:1;min-width:0}
+  .rev-verdict{display:flex;gap:8px;margin-top:9px;padding:8px 11px;border-radius:9px;font-size:12px;line-height:1.45}
+  .rev-verdict i{font-size:15px;margin-top:1px;flex:none}
+  .rev-verdict.ok{background:color-mix(in srgb,var(--green) 12%,transparent);color:var(--green)}
+  .rev-verdict.chg{background:color-mix(in srgb,var(--amber) 13%,transparent);color:var(--amber)}
+  .rev-verdict b{font-weight:700}
+  .rev-vsum{color:var(--muted);margin-top:3px;font-size:12px}
   .revtitle{font-size:14px;font-weight:600}
   .revtitle a{color:var(--text);text-decoration:none}
   .revtitle a:hover{color:var(--accent2)}
@@ -2687,7 +2693,8 @@ async function loadSettings(){let cfg={};try{cfg=await(await fetch(api("/config"
         <div class="fr"><span class="lbl">Branch prefix</span><input id="git-bp" value="${esc(git.branch_prefix||'feat/')}" style="width:120px"/><span class="hint">→ ${esc(git.branch_prefix||'feat/')}CXC-123</span></div>
         <div class="fr"><span class="lbl">Commit email</span><input id="git-em" value="${esc(git.commit_email||'')}" placeholder="…@users.noreply.github.com" style="width:280px"/><span class="hint">use a noreply email to avoid privacy blocks</span></div>
         <div class="fr"><span class="lbl">Open PR/MR</span><select id="git-pr"><option value="true" ${git.auto_pr!==false?'selected':''}>automatically after push</option><option value="false" ${git.auto_pr===false?'selected':''}>manual</option></select></div>
-        <div class="fr"><span class="lbl">Auto-merge</span><select id="git-am"><option value="false" ${!git.auto_merge?'selected':''}>off — a human reviews in the Review tab</option><option value="true" ${git.auto_merge?'selected':''}>on — the SA agent deep-dives &amp; merges</option></select><span class="hint">SA reviews the diff, merges on approve (never on failing CI)</span></div>
+        <div class="fr"><span class="lbl">Auto-review</span><select id="git-ar"><option value="true" ${git.auto_review!==false?'selected':''}>on — the SA agent reviews every PR &amp; suggests</option><option value="false" ${git.auto_review===false?'selected':''}>off — no automatic review</option></select><span class="hint">SA deep-dives each PR and posts approve / request-changes as a suggestion</span></div>
+        <div class="fr"><span class="lbl">Auto-merge</span><select id="git-am"><option value="false" ${!git.auto_merge?'selected':''}>off — you merge from the Review tab</option><option value="true" ${git.auto_merge?'selected':''}>on — SA approves &amp; merges automatically</option></select><span class="hint">On: SA merges on approve (never on failing CI). Off: approval is only a suggestion; request-changes still loops back to the agent to fix.</span></div>
       </div>
     </div>
     <div class="settab" data-p="workspace" hidden><div id="ws-panel"></div></div>
@@ -2739,7 +2746,7 @@ async function saveSettings(){const cfg=window._cfg||{engine:{},workflow:{}};cfg
     base_url:val("git-url").trim(),default_branch:val("git-br").trim()||"main",
     target_branch:val("git-tb").trim(),
     branch_prefix:val("git-bp").trim()||"feat/",commit_email:val("git-em").trim(),
-    auto_pr:val("git-pr")==="true",auto_merge:val("git-am")==="true"});
+    auto_pr:val("git-pr")==="true",auto_review:val("git-ar")==="true",auto_merge:val("git-am")==="true"});
   try{const res=await(await fetch(api("/config"),{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(cfg)})).json();
     window._budget=cfg.workflow.budget_usd;if(CUR==="insights")renderActive();
     document.getElementById("save-note").textContent=res.ok?(res.note||"saved"):"error";}catch(e){document.getElementById("save-note").textContent="error";}}
@@ -3529,6 +3536,10 @@ async function renderReview(){
   const ciBadge=c=>{const m={passing:["passing","var(--green)","circle-check"],failing:["failing","var(--red)","circle-x"],pending:["CI running","var(--amber)","loader"],none:["no CI","var(--dim)","minus"]}[c]||["",""];
     return `<span class="rev-ci" style="color:${m[1]}"><i class="ti ti-${m[2]}"></i> ${m[0]}</span>`;};
   const rev=canReview();
+  // The SA's review verdict (a suggestion when auto-merge is off).
+  const reviewBanner=r=>{if(!r)return"";const ok=r.decision==="approve";
+    return `<div class="rev-verdict ${ok?'ok':'chg'}"><i class="ti ti-${ok?'circle-check':'arrow-back-up'}"></i>
+      <div><b>SA ${ok?'approved':'requested changes'}</b>${d.auto_merge?'':(ok?' · awaiting your merge':' · agent will fix')}<div class="rev-vsum">${esc(r.summary||'')}</div></div></div>`;};
   el.innerHTML=head+`<div class="revlist">`+prs.map(p=>`
     <div class="revcard">
       <div class="revmain">
@@ -3537,6 +3548,7 @@ async function renderReview(){
           ${ciBadge(p.ci)}
           ${p.mergeable?'':'<span class="rev-conflict"><i class="ti ti-alert-triangle"></i> conflicts</span>'}
           <span class="revby">by ${esc(p.author||'—')}</span></div>
+        ${reviewBanner(p.review)}
       </div>
       <div class="revacts">
         <button class="gc-btn" onclick="viewDiff(${p.number},'${esc(p.head)}')"><i class="ti ti-file-diff"></i> Diff</button>

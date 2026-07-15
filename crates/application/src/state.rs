@@ -254,6 +254,17 @@ pub struct SprintRecord {
     pub at: String,
 }
 
+/// The SA agent's latest review verdict on an open pull request — surfaced in
+/// the Review tab so the user sees the assessment before merging.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrReview {
+    pub number: u64,
+    /// `"approve"` or `"request_changes"`.
+    pub decision: String,
+    pub summary: String,
+    pub at: String,
+}
+
 /// A product milestone — a named delivery target that one or more sprints work
 /// toward. `target_version` is the release that marks it reached.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -293,6 +304,9 @@ pub struct ProjectState {
     /// Discussion threads: per-ticket and team-channel comments.
     #[serde(default)]
     pub comments: Vec<Comment>,
+    /// The SA agent's latest review verdict per open PR (by number).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reviews: Vec<PrReview>,
     /// Team chat: human-to-human messages among the people on the project.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chat: Vec<ChatMsg>,
@@ -333,6 +347,7 @@ impl Default for ProjectState {
             sprints: Vec::new(),
             deploy: None,
             comments: Vec::new(),
+            reviews: Vec::new(),
             chat: Vec::new(),
             channels: Vec::new(),
             design_system: None,
@@ -396,6 +411,26 @@ impl ProjectState {
         let overflow = self.comments.len().saturating_sub(MAX_COMMENTS);
         if overflow > 0 {
             self.comments.drain(0..overflow);
+        }
+    }
+
+    /// Record (or replace) the SA agent's latest review verdict for a PR.
+    pub fn upsert_review(&mut self, number: u64, decision: &str, summary: &str) {
+        let review = PrReview {
+            number,
+            decision: decision.to_owned(),
+            summary: summary.to_owned(),
+            at: now_rfc3339(),
+        };
+        if let Some(r) = self.reviews.iter_mut().find(|r| r.number == number) {
+            *r = review;
+        } else {
+            self.reviews.push(review);
+        }
+        // Keep the list bounded to recent PRs.
+        let overflow = self.reviews.len().saturating_sub(50);
+        if overflow > 0 {
+            self.reviews.drain(0..overflow);
         }
     }
 

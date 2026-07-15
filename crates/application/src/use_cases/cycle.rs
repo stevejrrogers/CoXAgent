@@ -245,7 +245,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// CI (never merges a failing or conflicting PR) and bounded per cycle to
     /// keep cost predictable. Best-effort throughout.
     async fn review_open_prs(&self) {
-        if !self.config.git.enabled || !self.config.git.auto_merge {
+        // `auto_review` (default on) drives SA review; `auto_merge` additionally
+        // lets an approval merge. With neither, humans review by hand.
+        let auto_merge = self.config.git.auto_merge;
+        let auto_review = self.config.git.auto_review || auto_merge;
+        if !self.config.git.enabled || !auto_review {
             return;
         }
         let Some(forge) = &self.forge else { return };
@@ -259,8 +263,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let target = self.flow_base();
         // Bound cost: review a few PRs per cycle, oldest first.
         for pr in prs.into_iter().rev().take(3) {
-            // Only auto-merge PRs into the configured target branch; leave PRs
-            // aimed elsewhere (e.g. an integration → main promotion) to humans.
+            // Only review PRs into the configured target branch; leave PRs aimed
+            // elsewhere (e.g. an integration → main promotion) to humans.
             if pr.base != target {
                 continue;
             }
@@ -276,6 +280,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             };
             if let Some(reason) = blocked {
                 let _ = forge.request_changes(pr.number, &reason).await;
+                self.record_review(pr.number, "request_changes", &reason)
+                    .await;
                 self.log_git(&format!(
                     "SA requested changes on PR #{} ({reason})",
                     pr.number
@@ -287,23 +293,45 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 continue;
             };
             match self.sa_review(&pr.title, &pr.head, &diff).await {
-                Some((true, _)) => match forge.merge_pr(pr.number).await {
-                    Ok(()) => {
-                        self.log_git(&format!("SA approved & merged PR #{}", pr.number))
-                            .await;
+                Some((true, summary)) => {
+                    self.record_review(pr.number, "approve", &summary).await;
+                    if auto_merge {
+                        match forge.merge_pr(pr.number).await {
+                            Ok(()) => {
+                                self.log_git(&format!("SA approved & merged PR #{}", pr.number))
+                                    .await;
+                            }
+                            Err(e) => {
+                                self.log_git(&format!("merge PR #{} failed: {e}", pr.number))
+                                    .await;
+                            }
+                        }
+                    } else {
+                        // Suggestion only — the user merges from the Review tab.
+                        self.log_git(&format!(
+                            "SA approved PR #{} — awaiting your merge",
+                            pr.number
+                        ))
+                        .await;
                     }
-                    Err(e) => {
-                        self.log_git(&format!("merge PR #{} failed: {e}", pr.number))
-                            .await;
-                    }
-                },
+                }
                 Some((false, comment)) => {
                     let _ = forge.request_changes(pr.number, &comment).await;
+                    self.record_review(pr.number, "request_changes", &comment)
+                        .await;
                     self.log_git(&format!("SA requested changes on PR #{}", pr.number))
                         .await;
                 }
                 None => {}
             }
+        }
+    }
+
+    /// Persist the SA's verdict so the Review tab can show it as a suggestion.
+    async fn record_review(&self, number: u64, decision: &str, summary: &str) {
+        if let Ok(mut s) = self.store.load().await {
+            s.upsert_review(number, decision, summary);
+            let _ = self.store.save(&s).await;
         }
     }
 

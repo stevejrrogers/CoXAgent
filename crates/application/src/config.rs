@@ -170,6 +170,7 @@ pub struct DeployConfig {
 /// off by default, so an existing project's repo is never touched until the
 /// user opts in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)] // config flags, not a state machine
 pub struct GitConfig {
     /// Master switch. When false, the agent loop performs no git operations.
     #[serde(default)]
@@ -201,9 +202,19 @@ pub struct GitConfig {
     /// Open a PR/MR automatically after pushing a ticket branch.
     #[serde(default)]
     pub auto_pr: bool,
-    /// Auto-merge when CI passes (opt-in; default off — a human reviews first).
+    /// The SA agent reviews each open PR and posts its verdict as a suggestion
+    /// (on by default). With `auto_merge` off, an approval is only a suggestion —
+    /// the user merges; a request-changes feeds the fix-and-re-review loop.
+    #[serde(default = "default_true")]
+    pub auto_review: bool,
+    /// Auto-merge when the SA approves and CI passes (opt-in; default off — the
+    /// user merges). Implies `auto_review`.
     #[serde(default)]
     pub auto_merge: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_provider() -> String {
@@ -228,6 +239,7 @@ impl Default for GitConfig {
             branch_prefix: default_branch_prefix(),
             commit_email: String::new(),
             auto_pr: false,
+            auto_review: true,
             auto_merge: false,
         }
     }

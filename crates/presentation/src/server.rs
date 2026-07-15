@@ -2193,8 +2193,31 @@ async fn list_prs_ep(
     let Some(forge) = &p.forge else {
         return Json(serde_json::json!({ "configured": false, "prs": [] })).into_response();
     };
+    // The SA's stored review verdict per PR, so the UI can show the suggestion.
+    let reviews = p.store.load().await.map(|s| s.reviews).unwrap_or_default();
+    let auto_merge = std::fs::read_to_string(&p.config_path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Config>(&t).ok())
+        .is_some_and(|c| c.git.auto_merge);
     match forge.list_open_prs().await {
-        Ok(prs) => Json(serde_json::json!({ "configured": true, "prs": prs })).into_response(),
+        Ok(prs) => {
+            let enriched: Vec<serde_json::Value> = prs
+                .iter()
+                .map(|pr| {
+                    let mut v = serde_json::to_value(pr).unwrap_or_default();
+                    if let Some(r) = reviews.iter().find(|r| r.number == pr.number) {
+                        v["review"] = serde_json::json!({
+                            "decision": r.decision, "summary": r.summary, "at": r.at,
+                        });
+                    }
+                    v
+                })
+                .collect();
+            Json(serde_json::json!({
+                "configured": true, "auto_merge": auto_merge, "prs": enriched
+            }))
+            .into_response()
+        }
         Err(e) => {
             Json(serde_json::json!({ "configured": true, "error": e.to_string(), "prs": [] }))
                 .into_response()
