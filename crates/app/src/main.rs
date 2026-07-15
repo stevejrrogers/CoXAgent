@@ -824,12 +824,46 @@ async fn run_loop(
     }
 
     let webhook = config.workflow.webhook_url.clone();
+    // Forge for PRs/merges — so a headless `coxagent run` box is a full team
+    // (commits, opens PRs, merges), not just a designer. Same wiring as the hub.
+    let forge: Option<Arc<dyn coxagent_application::ports::outbound::ForgePort>> =
+        if config.git.enabled && !config.git.repo.is_empty() {
+            let (repo, base, wd) = (
+                config.git.repo.clone(),
+                config.git.base_url.clone(),
+                work_dir.clone(),
+            );
+            match config.git.provider.as_str() {
+                "gitlab" => Some(Arc::new(coxagent_infrastructure::GlForge::new(
+                    repo, base, wd,
+                ))),
+                "github" => Some(Arc::new(coxagent_infrastructure::GhForge::new(
+                    repo, base, wd,
+                ))),
+                _ => None,
+            }
+        } else {
+            None
+        };
     let mut uc = RunCycleUseCase::new(Arc::clone(&store), engine, config, work_dir, context)
         .with_meter(meter)
-        .with_deploy(std::sync::Arc::new(DockerComposeDeploy::new()));
+        .with_deploy(std::sync::Arc::new(DockerComposeDeploy::new()))
+        .with_git(std::sync::Arc::new(
+            coxagent_infrastructure::SystemGit::new(),
+        ));
+    if let Some(f) = forge {
+        uc = uc.with_forge(f);
+    }
     if let Some(url) = webhook.filter(|u| !u.is_empty()) {
         uc = uc.with_notifier(std::sync::Arc::new(WebhookNotifier::new(url)));
     }
+    // Worker identity for the shared registry + claim ownership. A headless
+    // worker has no web login, so it takes its name from COXAGENT_OPERATOR.
+    let operator = std::env::var("COXAGENT_OPERATOR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "worker".to_owned());
+    uc.set_worker(format!("{operator}@{}", worker_host()));
     let shutdown = shutdown::Shutdown::listen();
     tracing::info!("cycle loop started");
 
@@ -853,6 +887,18 @@ async fn run_loop(
 
     tracing::info!("cycle loop stopped after {cycle} cycle(s)");
     Ok(format!("stopped after {cycle} cycle(s)\n"))
+}
+
+/// This machine's hostname (the "machine" a headless worker runs on), or
+/// `"local"`. Used to name the worker `operator@host` in the shared registry.
+fn worker_host() -> String {
+    std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "local".to_owned())
 }
 
 fn render_discovery() -> String {
