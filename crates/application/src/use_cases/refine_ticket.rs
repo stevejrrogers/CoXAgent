@@ -43,6 +43,8 @@ pub struct RefineTicketUseCase<S: StateStorePort + ?Sized, E: AgentEnginePort + 
     store: Arc<S>,
     engine: Arc<E>,
     work_dir: PathBuf,
+    /// Compress context and ask agents for terse output (token-saver).
+    terse: bool,
 }
 
 impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RefineTicketUseCase<S, E> {
@@ -51,6 +53,22 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RefineTicketUseCas
             store,
             engine,
             work_dir,
+            terse: true,
+        }
+    }
+
+    /// Toggle the token-saver (compress context + terse agent output).
+    #[must_use]
+    pub fn with_token_saver(mut self, on: bool) -> Self {
+        self.terse = on;
+        self
+    }
+
+    fn terse_tag(&self) -> &'static str {
+        if self.terse {
+            crate::tokens::TERSE
+        } else {
+            ""
         }
     }
 
@@ -59,6 +77,15 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RefineTicketUseCas
     /// # Errors
     /// [`AppError`] when the BA synthesis step fails or returns nothing usable.
     pub async fn execute(&self, idea: &str, context: &str) -> Result<RefinedTicket, AppError> {
+        // Trim the project brief to the essential head/tail when the token-saver
+        // is on — the advisors don't need the whole document.
+        let ctx = if self.terse {
+            crate::tokens::compress(context, 6_000)
+        } else {
+            context.to_owned()
+        };
+        let context = ctx.as_str();
+        let tag = self.terse_tag();
         // Round 1 — the three advisors weigh in concurrently.
         let (po, sa, pd) = tokio::join!(
             self.advise(Role::Po, "PO", PO_GUIDE, idea, context),
@@ -86,7 +113,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RefineTicketUseCas
              \"acceptance_criteria\":[3-6 concrete, testable \"done\" conditions],\
              \"team_notes\":[{{\"role\":\"PO\"|\"SA\"|\"PD\",\"note\":one-line takeaway}}]}}\n\
              Ground everything in the idea and the advice; never invent scope the \
-             stakeholder didn't ask for."
+             stakeholder didn't ask for.{tag}"
         );
         let request = AgentRequest {
             role: Role::Ba,
@@ -134,7 +161,8 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RefineTicketUseCas
     ) -> String {
         let task = format!(
             "{guide}\n\n## The idea\n{idea}\n\n## Project context\n{context}\n\n\
-             Reply with 2-4 short bullet points — concrete and specific. No preamble."
+             Reply with 2-4 short bullet points — concrete and specific. No preamble.{}",
+            self.terse_tag()
         );
         let request = AgentRequest {
             role,

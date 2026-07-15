@@ -778,6 +778,14 @@ fn parse_account(out: &str) -> Option<String> {
 }
 
 /// The provider + base URL configured for a project's git integration.
+/// Whether the token-saver is enabled for a project (default on).
+fn project_token_saver(p: &ProjectHandle) -> bool {
+    std::fs::read_to_string(&p.config_path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Config>(&t).ok())
+        .map_or(true, |c| c.workflow.token_saver)
+}
+
 async fn project_provider(app: &AppState, pid: &str) -> Option<(String, String)> {
     let p = app.project(pid).await?;
     let cfg = std::fs::read_to_string(&p.config_path)
@@ -1382,7 +1390,8 @@ async fn ticket_refine(
         Arc::clone(&p.store),
         Arc::clone(&p.engine),
         p.work_dir.clone(),
-    );
+    )
+    .with_token_saver(project_token_saver(&p));
     match uc.execute(idea, &context).await {
         Ok(t) => Json(t).into_response(),
         Err(e) => internal_error(&format!("ticket refine failed: {e}")),
@@ -1985,7 +1994,8 @@ async fn docs_generate_ep(
         Arc::clone(&p.store),
         Arc::clone(&p.engine),
         p.work_dir.clone(),
-    );
+    )
+    .with_token_saver(project_token_saver(&p));
     let pages = match uc.execute(&md).await {
         Ok(pages) => pages,
         Err(e) => return internal_error(&format!("docs generation failed: {e}")),

@@ -31,6 +31,8 @@ pub struct GenerateDocsUseCase<S: StateStorePort + ?Sized, E: AgentEnginePort + 
     store: Arc<S>,
     engine: Arc<E>,
     work_dir: PathBuf,
+    /// Compress context and ask agents for terse output (token-saver).
+    terse: bool,
 }
 
 impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> GenerateDocsUseCase<S, E> {
@@ -39,7 +41,16 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> GenerateDocsUseCas
             store,
             engine,
             work_dir,
+            terse: true,
         }
+    }
+
+    /// Toggle the token-saver (compress context; docs still need full prose so
+    /// only the context/tickets embed is trimmed, not the output directive).
+    #[must_use]
+    pub fn with_token_saver(mut self, on: bool) -> Self {
+        self.terse = on;
+        self
     }
 
     /// Generate/refresh the documentation from `context_md` (the project brief)
@@ -70,6 +81,19 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> GenerateDocsUseCas
             s
         };
 
+        // With the token-saver on, trim the brief + ticket list embed (the
+        // agents write full prose regardless — only the input is compressed).
+        let (ctx_owned, tickets) = if self.terse {
+            (
+                crate::tokens::compress(context_md, 8_000),
+                crate::tokens::compress(&tickets, 4_000),
+            )
+        } else {
+            (context_md.to_owned(), tickets)
+        };
+        let context_md = ctx_owned.as_str();
+        let tickets = tickets.as_str();
+
         // Fan out to the relevant agents concurrently; a section that fails
         // just contributes no pages (the others still land).
         let (product, technical, qa) = tokio::join!(
@@ -79,16 +103,16 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> GenerateDocsUseCas
                 SYSTEM_DOCS,
                 PROMPT_PRODUCT,
                 context_md,
-                &tickets
+                tickets
             ),
-            self.section(Role::Sa, "SA", SYSTEM_SA, PROMPT_TECH, context_md, &tickets),
+            self.section(Role::Sa, "SA", SYSTEM_SA, PROMPT_TECH, context_md, tickets),
             self.section(
                 Role::Test,
                 "TEST",
                 SYSTEM_TEST,
                 PROMPT_QA,
                 context_md,
-                &tickets
+                tickets
             ),
         );
 
