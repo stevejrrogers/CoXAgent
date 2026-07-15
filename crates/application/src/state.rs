@@ -53,6 +53,9 @@ pub struct Attachment {
 /// the teamwork surface the original workflow lacked.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Comment {
+    /// Stable id (minted on post) so reactions can target a specific comment.
+    #[serde(default)]
+    pub id: String,
     pub at: String,
     /// Author: an agent role (e.g. `SM`, `PO`) or `USER`.
     pub author: String,
@@ -62,6 +65,9 @@ pub struct Comment {
     /// Files/images attached to the comment.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<Attachment>,
+    /// Emoji reactions, each with the users who reacted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reactions: Vec<Reaction>,
 }
 
 /// Keep discussion threads bounded per project.
@@ -379,16 +385,38 @@ impl ProjectState {
         attachments: Vec<Attachment>,
     ) {
         self.comments.push(Comment {
+            id: mint_id(),
             at: now_rfc3339(),
             author: author.to_owned(),
             body: body.to_owned(),
             ticket,
             attachments,
+            reactions: Vec::new(),
         });
         let overflow = self.comments.len().saturating_sub(MAX_COMMENTS);
         if overflow > 0 {
             self.comments.drain(0..overflow);
         }
+    }
+
+    /// Toggle `user`'s `emoji` reaction on comment `id`; returns the updated
+    /// comment (or `None` if no such comment).
+    pub fn react_comment(&mut self, id: &str, user: &str, emoji: &str) -> Option<Comment> {
+        let c = self.comments.iter_mut().find(|c| c.id == id)?;
+        if let Some(r) = c.reactions.iter_mut().find(|r| r.emoji == emoji) {
+            if let Some(pos) = r.users.iter().position(|u| u == user) {
+                r.users.remove(pos);
+            } else {
+                r.users.push(user.to_owned());
+            }
+        } else {
+            c.reactions.push(Reaction {
+                emoji: emoji.to_owned(),
+                users: vec![user.to_owned()],
+            });
+        }
+        c.reactions.retain(|r| !r.users.is_empty());
+        Some(c.clone())
     }
 
     /// Append a `#general` team-chat message from `user`.

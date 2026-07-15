@@ -631,6 +631,10 @@ pub async fn serve_full(
             get(list_comments).post(post_comment),
         )
         .route(
+            "/api/projects/:pid/comments/:id/react",
+            post(comment_react_ep),
+        )
+        .route(
             "/api/projects/:pid/chat",
             get(chat_list_ep).post(chat_post_ep),
         )
@@ -1516,6 +1520,11 @@ struct PostCommentReq {
     attachments: Vec<coxagent_application::Attachment>,
 }
 
+#[derive(serde::Deserialize)]
+struct CommentReactReq {
+    emoji: String,
+}
+
 /// Post a comment (as the user) to a ticket thread or the team channel.
 async fn post_comment(
     State(app): State<AppState>,
@@ -1541,6 +1550,33 @@ async fn post_comment(
     // proactively and asking back. Runs in the background so the post is instant.
     maybe_analyze_attachments(&app, &p, "USER", body, req.ticket, &req.attachments);
     Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+/// Toggle the caller's emoji reaction on a ticket/discussion comment.
+async fn comment_react_ep(
+    State(app): State<AppState>,
+    Path((pid, id)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<CommentReactReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let user = resolve_username(&app, &headers).await;
+    let emoji = req.emoji.chars().take(8).collect::<String>();
+    if emoji.is_empty() {
+        return (StatusCode::BAD_REQUEST, "emoji required").into_response();
+    }
+    let Ok(mut state) = p.store.load().await else {
+        return internal_error("load failed");
+    };
+    let Some(updated) = state.react_comment(&id, &user, &emoji) else {
+        return not_found();
+    };
+    if let Err(e) = p.store.save(&state).await {
+        return internal_error(&e.to_string());
+    }
+    Json(updated).into_response()
 }
 
 /// Spawn a background SA turn that reads any readable attachments on a freshly

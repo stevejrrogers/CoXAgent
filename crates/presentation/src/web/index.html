@@ -457,6 +457,24 @@
   /* Reactions */
   .tcbubwrap{position:relative}
   .tcbubwrap .msg-att{margin-top:5px}
+  /* Ticket comment thread */
+  .tkc{display:flex;gap:9px;padding:9px 0;border-top:1px solid var(--border)}
+  .tkc:first-child{border-top:none}
+  .tkc-av{width:28px;height:28px;border-radius:50%;flex:none;background:var(--card2);color:var(--muted);display:grid;place-items:center;font-size:11px;font-weight:700}
+  .tkc-av.me{background:var(--accent);color:#fff}
+  .tkc-main{flex:1;min-width:0}
+  .tkc-h{font-size:12px;color:var(--text)} .tkc-h .tkc-t{color:var(--dim);font-size:11px;margin-left:6px}
+  .tkc-b{font-size:13px;color:var(--muted);line-height:1.5;margin-top:2px;white-space:pre-wrap;word-break:break-word}
+  .tkc-react{display:flex;flex-wrap:wrap;gap:4px;margin-top:5px;align-items:center}
+  .tkc-addr{width:24px;height:22px;border-radius:6px;background:var(--card2);border:1px solid var(--border2);color:var(--muted);cursor:pointer;font-size:13px;display:inline-flex;align-items:center;justify-content:center;opacity:0;transition:opacity .1s}
+  .tkc:hover .tkc-addr{opacity:1}
+  .tkc-addr:hover{color:var(--accent2);border-color:var(--accent2)}
+  .tkc-compose{display:flex;gap:7px;margin-top:10px}
+  .tkc-compose input{flex:1;background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:9px;padding:9px 12px;font-size:13px;font-family:inherit}
+  .tkc-compose .pri{padding:0 14px}
+  .tkc-menu{position:fixed;z-index:200;background:var(--panel);border:1px solid var(--border2);border-radius:10px;padding:5px;display:flex;gap:2px;box-shadow:0 8px 24px rgba(0,0,0,.35)}
+  .tkc-menu button{background:transparent;border:none;cursor:pointer;font-size:17px;padding:4px 6px;border-radius:7px}
+  .tkc-menu button:hover{background:var(--card2)}
   .reactadd{position:absolute;top:-10px;right:-10px;width:26px;height:26px;border-radius:50%;background:var(--panel);border:1px solid var(--border2);color:var(--muted);cursor:pointer;display:none;align-items:center;justify-content:center;font-size:15px;z-index:2}
   .tcbubwrap:hover .reactadd{display:flex}
   .reactadd:hover{color:var(--accent);border-color:var(--accent)}
@@ -2542,8 +2560,48 @@ async function showTicket(id){
   if(tech)h+=`<div class="mrow" style="display:block;border:none"><span class="lbl">Technical spec</span><pre>${esc(tech.approach)}\nfiles: ${esc((tech.files||[]).join(", "))}\napi: ${esc(tech.api_contract)}\ntest: ${esc(tech.test_plan)}</pre></div>`;
   if(ux)h+=`<div class="mrow" style="display:block;border:none"><span class="lbl">UI/UX spec</span><pre>${esc(ux.user_flow)}\nscreens: ${esc((ux.screens||[]).join(", "))}</pre></div>`;
   if(t.status==="pending"||t.status==="open")h+=`<button onclick="rejectTicket('${t.id}')" style="margin-top:14px;background:transparent;color:var(--red);border:1px solid var(--red);border-radius:9px;padding:8px 15px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit"><i class="ti ti-ban" style="font-size:14px"></i> Reject ticket</button>`;
-  body.innerHTML=h;}
+  h+=`<div class="mrow" style="display:block;border:none;margin-top:6px"><span class="lbl">Comments</span><div id="tk-comments" style="margin-top:8px">${'<div class="empty" style="padding:8px">loading…</div>'}</div>
+    <div class="tkc-compose"><input id="tkc-input" placeholder="Add a comment…  (Enter to post · @ to mention)" onkeydown="if(event.key==='Enter')postTicketComment('${t.id}')"><button class="pri" onclick="postTicketComment('${t.id}')"><i class="ti ti-send"></i></button></div></div>`;
+  body.innerHTML=h;
+  renderTicketComments(t.id);}
 async function rejectTicket(id){try{await fetch(api("/ticket/"+id+"/reject"),{method:"POST"});close_("ov-ticket");}catch(e){}}
+const TKC_QUICK=["👍","❤️","🎉","🚀","👀","✅"];
+async function renderTicketComments(tid){
+  const box=document.getElementById("tk-comments");if(!box)return;
+  let list=[];try{list=await(await fetch(api("/comments?ticket="+encodeURIComponent(tid)))).json();}catch(e){}
+  if(!Array.isArray(list)||!list.length){box.innerHTML='<div class="empty" style="padding:8px;font-size:12px">No comments yet — start the thread.</div>';return;}
+  const me=(ME&&ME.username)||"user";
+  box.innerHTML=list.map(c=>{
+    const mine=c.author==="USER"||c.author===me;
+    const av=(c.author||"?").slice(0,2).toUpperCase();
+    const chips=(c.reactions||[]).map(r=>{const on=(r.users||[]).includes(me);
+      return `<button class="react${on?' on':''}" title="${esc((r.users||[]).join(', '))}" onclick="reactComment('${tid}','${esc(c.id)}','${esc(r.emoji)}')">${r.emoji} <span>${(r.users||[]).length}</span></button>`;}).join("");
+    return `<div class="tkc">
+      <div class="tkc-av${mine?' me':''}">${esc(av)}</div>
+      <div class="tkc-main"><div class="tkc-h"><b>${esc(c.author==='USER'?'You':c.author)}</b> <span class="tkc-t">${esc((c.at||'').slice(0,16).replace('T',' '))}</span></div>
+        <div class="tkc-b">${formatMsg(c.body)}</div>
+        ${attHtml(c.attachments)}
+        <div class="tkc-react">${chips}<button class="tkc-addr" onclick="tkcReactMenu(event,'${tid}','${esc(c.id)}')" title="React"><i class="ti ti-mood-plus"></i></button></div></div>
+    </div>`;}).join("");
+}
+function tkcReactMenu(ev,tid,cid){ev.stopPropagation();
+  const old=document.getElementById("tkc-menu");if(old)old.remove();
+  const m=document.createElement("div");m.id="tkc-menu";m.className="tkc-menu";
+  m.innerHTML=TKC_QUICK.map(e=>`<button onclick="reactComment('${tid}','${cid}','${e}');document.getElementById('tkc-menu').remove()">${e}</button>`).join("");
+  document.body.appendChild(m);const r=ev.currentTarget.getBoundingClientRect();
+  m.style.left=Math.min(r.left,window.innerWidth-m.offsetWidth-10)+"px";m.style.top=(r.bottom+4)+"px";
+  setTimeout(()=>document.addEventListener("click",function h(){m.remove();document.removeEventListener("click",h);},{once:true}),0);
+}
+async function reactComment(tid,cid,emoji){
+  try{await fetch(api("/comments/"+encodeURIComponent(cid)+"/react"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({emoji})});}catch(e){}
+  renderTicketComments(tid);
+}
+async function postTicketComment(tid){
+  const inp=document.getElementById("tkc-input");const body=(inp.value||"").trim();if(!body)return;
+  inp.value="";inp.disabled=true;
+  try{await fetch(api("/comments"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({body,ticket:tid})});}catch(e){}
+  inp.disabled=false;await renderTicketComments(tid);inp.focus();
+}
 async function loadSettings(){let cfg={};try{cfg=await(await fetch(api("/config"))).json();}catch(e){}window._cfg=cfg;
   let td={tools:[]};try{td=await(await fetch("/api/tooling")).json();}catch(e){}
   let ga={};try{ga=await(await fetch(api("/git/auth"))).json();}catch(e){}
