@@ -621,6 +621,11 @@ pub async fn serve_full(
         )
         .route("/api/projects/:pid/docs/:id/ai-edit", post(doc_ai_edit_ep))
         .route("/api/projects/:pid/docs/:id/ws", get(docs_ws_ep))
+        .route("/api/projects/:pid/codegraph", get(codegraph_ep))
+        .route(
+            "/api/projects/:pid/codegraph/build",
+            post(codegraph_build_ep),
+        )
         .route("/api/projects/:pid/standup", post(standup_ep))
         .route("/api/projects/:pid/tickets", post(create_ticket))
         .route("/api/projects/:pid/ticket/:id", get(ticket_detail_ep))
@@ -2111,6 +2116,90 @@ async fn docs_socket(mut socket: WebSocket, app: AppState, pid: String, id: Stri
 /// Serialise a presence roster broadcast.
 fn presence_json(editors: &[String]) -> String {
     serde_json::json!({ "op": "presence", "editors": editors }).to_string()
+}
+
+/// A compact overview of a loaded code graph (never the full node list).
+fn codegraph_summary(g: &coxagent_application::codegraph::CodeGraph) -> serde_json::Value {
+    let mut top: Vec<&coxagent_application::codegraph::FileNode> = g.files.iter().collect();
+    top.sort_by(|a, b| b.symbols.cmp(&a.symbols).then(b.loc.cmp(&a.loc)));
+    let top_files: Vec<serde_json::Value> = top
+        .iter()
+        .take(40)
+        .map(|f| {
+            serde_json::json!({
+                "path": f.path, "lang": f.lang, "loc": f.loc,
+                "symbols": f.symbols, "imports": f.imports.len(),
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "built": true,
+        "built_at": g.built_at,
+        "files": g.files.len(),
+        "symbols": g.symbols.len(),
+        "edges": g.edges.len(),
+        "languages": g.languages,
+        "top_files": top_files,
+    })
+}
+
+#[derive(serde::Deserialize)]
+struct CodeGraphQuery {
+    #[serde(default)]
+    q: Option<String>,
+    #[serde(default)]
+    map: Option<u8>,
+}
+
+/// Read the code graph: overview, `?q=` symbol search, or `?map=1` repo map.
+async fn codegraph_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<CodeGraphQuery>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Some(g) = coxagent_application::codegraph::CodeGraph::load(&p.work_dir) else {
+        return Json(serde_json::json!({ "built": false })).into_response();
+    };
+    if let Some(q) = query.q.filter(|q| !q.trim().is_empty()) {
+        let results: Vec<_> = g.search(&q, 60);
+        return Json(serde_json::json!({ "built": true, "results": results })).into_response();
+    }
+    if query.map.unwrap_or(0) == 1 {
+        return Json(serde_json::json!({ "built": true, "map": g.repo_map(20_000) }))
+            .into_response();
+    }
+    Json(codegraph_summary(&g)).into_response()
+}
+
+/// (Re)build the code graph for a project by indexing its working tree.
+async fn codegraph_build_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let work_dir = p.work_dir.clone();
+    // Indexing is pure file I/O + string work — run it off the async runtime.
+    let result = tokio::task::spawn_blocking(move || {
+        let g = coxagent_application::codegraph::CodeGraph::index(&work_dir);
+        g.save(&work_dir)?;
+        // Also drop a readable repo map the CLI agents will find naturally.
+        let _ = std::fs::write(
+            work_dir.join(".coxagent").join("REPO_MAP.md"),
+            g.repo_map(40_000),
+        );
+        std::io::Result::Ok(g)
+    })
+    .await;
+    match result {
+        Ok(Ok(g)) => Json(codegraph_summary(&g)).into_response(),
+        Ok(Err(e)) => internal_error(&format!("codegraph save failed: {e}")),
+        Err(e) => internal_error(&format!("codegraph build failed: {e}")),
+    }
 }
 
 #[derive(serde::Deserialize)]

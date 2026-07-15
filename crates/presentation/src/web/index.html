@@ -98,6 +98,27 @@
   .rev-verdict i{font-size:15px;margin-top:1px;flex:none}
   .rev-verdict.ok{background:color-mix(in srgb,var(--green) 12%,transparent);color:var(--green)}
   .rev-verdict.chg{background:color-mix(in srgb,var(--amber) 13%,transparent);color:var(--amber)}
+  /* Code map */
+  .cg-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
+  .cg-stats{display:flex;gap:22px}
+  .cg-stats>div{display:flex;flex-direction:column} .cg-stats b{font-size:22px;font-weight:800;line-height:1} .cg-stats span{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.03em;margin-top:2px}
+  .cg-langs{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 12px}
+  .cg-lang{background:var(--card2);border:1px solid var(--border2);border-radius:20px;padding:3px 11px;font-size:12px;color:var(--muted)} .cg-lang b{color:var(--text)}
+  .cg-search{display:flex;align-items:center;gap:8px;background:var(--card2);border:1px solid var(--border2);border-radius:9px;padding:9px 12px}
+  .cg-search i{color:var(--dim)} .cg-search input{flex:1;background:none;border:none;color:var(--text);font-size:13px;font-family:inherit;outline:none}
+  .cg-syms{margin-top:8px;border:1px solid var(--border);border-radius:10px;overflow:hidden}
+  .cg-sym{display:flex;align-items:center;gap:10px;padding:8px 12px;border-top:1px solid var(--border);font-size:13px} .cg-sym:first-child{border-top:none}
+  .cg-sym b{color:var(--text)} .cg-loc{margin-left:auto;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--dim)}
+  .cg-k{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.3px;padding:2px 7px;border-radius:5px;background:var(--card2);color:var(--muted);min-width:56px;text-align:center}
+  .cg-k-fn{background:color-mix(in srgb,var(--accent2) 16%,transparent);color:var(--accent2)}
+  .cg-k-struct,.cg-k-class{background:color-mix(in srgb,var(--purple) 18%,transparent);color:var(--purple)}
+  .cg-k-enum,.cg-k-type,.cg-k-interface{background:color-mix(in srgb,var(--amber) 16%,transparent);color:var(--amber)}
+  .cg-k-trait{background:color-mix(in srgb,var(--green) 16%,transparent);color:var(--green)}
+  .cg-files{display:flex;flex-direction:column;gap:6px}
+  .cg-file{background:var(--card);border:1px solid var(--border);border-radius:9px;padding:9px 12px}
+  .cg-fp{font-family:ui-monospace,Menlo,monospace;font-size:12.5px;color:var(--text)}
+  .cg-fm{font-size:11.5px;color:var(--dim);margin-top:3px;display:flex;align-items:center;gap:6px}
+  .cg-badge{background:var(--card2);border-radius:5px;padding:1px 7px;font-size:10px;color:var(--muted)}
   .rev-verdict b{font-weight:700}
   .rev-vsum{color:var(--muted);margin-top:3px;font-size:12px}
   .revtitle{font-size:14px;font-weight:600}
@@ -879,6 +900,7 @@ body:not(.manage) .manage-only { display: none !important; }
       <a data-v="activity" onclick="nav('activity')"><i class="ti ti-activity"></i> Activity</a>
       <a data-v="discuss" onclick="nav('discuss')"><i class="ti ti-messages"></i> Discussion</a>
       <a data-v="docs" onclick="nav('docs')"><i class="ti ti-book-2"></i> Docs</a>
+      <a data-v="codemap" onclick="nav('codemap')"><i class="ti ti-sitemap"></i> Code map</a>
       <a data-v="insights" onclick="nav('insights')"><i class="ti ti-coin"></i> Cost</a>
       <a data-v="people" class="admin-only" onclick="nav('people')"><i class="ti ti-user-star"></i> People</a>
       <a data-v="audit" class="admin-only" onclick="nav('audit')"><i class="ti ti-shield-lock"></i> Audit</a>
@@ -1035,6 +1057,7 @@ body:not(.manage) .manage-only { display: none !important; }
       </div></div>
       <div class="view" id="view-roadmap"><div id="roadmap-body"></div></div>
       <div class="view" id="view-review"><div id="review-body"></div></div>
+      <div class="view" id="view-codemap"><div id="codemap-body"></div></div>
       <div class="ov" id="ov-diff" onclick="if(event.target===this)close_('ov-diff')"><div class="modal" style="max-width:960px">
         <span class="x" onclick="close_('ov-diff')"><i class="ti ti-x"></i></span>
         <h3 id="diff-title" style="font-size:14px;font-family:ui-monospace,monospace"><i class="ti ti-git-pull-request" style="color:var(--accent2)"></i> diff</h3>
@@ -1296,7 +1319,7 @@ const KPI_IC={Shipped:"ti-rocket","In flight":"ti-plane-tilt","Open bugs":"ti-bu
 const money=n=>"$"+(Number(n)||0).toFixed(2);
 const fmtK=n=>{n=Number(n)||0;return n>=1000?(n/1000).toFixed(1)+"k":String(n);};
 const AC={BA:"--blue","DEV-FEATURE":"--green","DEV-BUG":"--red",SA:"--purple",TEST:"--teal",DOCS:"--blue",PO:"--amber",SM:"--teal",PD:"--purple",USER:"--accent"};
-const TITLES={overview:["Overview","project health at a glance"],team:["Agents","your autonomous workers"],board:["Work","board · sprint · backlog"],activity:["Activity","what the agents are doing"],roadmap:["Roadmap","now · next · later, auto-generated"],discuss:["Discussion","team threads & standups"],docs:["Docs","product & technical documentation"],chat:["Chat","talk with your teammates"],review:["Review","open pull requests — approve & merge"],people:["People","per-user activity & productivity"],audit:["Audit","who did what, when"],access:["Users","accounts, project access & tokens"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
+const TITLES={overview:["Overview","project health at a glance"],team:["Agents","your autonomous workers"],board:["Work","board · sprint · backlog"],activity:["Activity","what the agents are doing"],roadmap:["Roadmap","now · next · later, auto-generated"],discuss:["Discussion","team threads & standups"],docs:["Docs","product & technical documentation"],codemap:["Code map","symbols & dependencies the agents navigate"],chat:["Chat","talk with your teammates"],review:["Review","open pull requests — approve & merge"],people:["People","per-user activity & productivity"],audit:["Audit","who did what, when"],access:["Users","accounts, project access & tokens"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
 const esc=s=>(s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 const cvar=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim()||"#888";
 let STATE={}, CUR="overview", BF="all", INIT_ACT=false, WORKTAB="board";
@@ -1318,7 +1341,7 @@ function nav(v){
   document.querySelectorAll(".nav a").forEach(a=>a.classList.toggle("on",a.dataset.v===v));
   document.getElementById("pg-title").textContent=TITLES[v][0];
   document.getElementById("pg-sub").textContent=TITLES[v][1];
-  if(v==="settings")loadSettings(); else if(v==="discuss"){loadComments();} else if(v==="docs"){loadDocs();} else if(v==="people"){renderPeople();} else if(v==="audit"){renderAudit();} else if(v==="access"){renderAccess();} else if(v==="roadmap"){renderRoadmap();} else if(v==="review"){renderReview();} else renderActive();}
+  if(v==="settings")loadSettings(); else if(v==="discuss"){loadComments();} else if(v==="docs"){loadDocs();} else if(v==="people"){renderPeople();} else if(v==="audit"){renderAudit();} else if(v==="access"){renderAccess();} else if(v==="roadmap"){renderRoadmap();} else if(v==="review"){renderReview();} else if(v==="codemap"){renderCodeMap();} else renderActive();}
 function initials(r){return r.replace("DEV-","").slice(0,2);}
 function metricsFrom(s){const t=s.tickets||[],h=s.history||[],isF=x=>x.type!=="bug";
   return {shipped:t.filter(x=>isF(x)&&(x.status==="done"||x.status==="documented")).length,
@@ -3582,6 +3605,46 @@ async function prAction(num,action){
     else{toasty("Failed: "+(await r.text()||r.status),"err");}
   }catch(e){toasty("Network error","err");}
 }
+// ── Code map: symbol & dependency graph the agents navigate ──────────────────
+let CG=null,cgT=null;
+async function renderCodeMap(){
+  const el=document.getElementById("codemap-body");if(!el)return;
+  el.innerHTML='<div class="empty">loading…</div>';
+  let d={};try{d=await(await fetch(api("/codegraph"))).json();}catch(e){}
+  CG=d;
+  if(!d.built){
+    el.innerHTML=`<div class="rev-empty"><i class="ti ti-sitemap"></i><div>No code map yet</div><span>Index this project's source into a symbol &amp; dependency map — so agents (and you) can navigate the codebase fast instead of reading it blindly.</span><button class="pri" style="margin-top:16px" onclick="buildCodeMap(this)"><i class="ti ti-refresh"></i> Build code map</button></div>`;return;
+  }
+  renderCodeMapMain(d);
+}
+function renderCodeMapMain(d){
+  const el=document.getElementById("codemap-body");if(!el)return;
+  const langs=Object.entries(d.languages||{}).sort((a,b)=>b[1]-a[1]);
+  const langChips=langs.map(([l,n])=>`<span class="cg-lang">${esc(l)} <b>${n}</b></span>`).join("");
+  const files=(d.top_files||[]).map(f=>`<div class="cg-file"><div class="cg-fp">${esc(f.path)}</div><div class="cg-fm"><span class="cg-badge">${esc(f.lang)}</span> ${f.symbols} sym · ${f.loc} loc · ${f.imports} imports</div></div>`).join("");
+  el.innerHTML=`
+   <div class="cg-head">
+     <div class="cg-stats"><div><b>${d.files}</b><span>files</span></div><div><b>${d.symbols}</b><span>symbols</span></div><div><b>${d.edges}</b><span>imports</span></div></div>
+     <button class="gc-btn" onclick="buildCodeMap(this)"><i class="ti ti-refresh"></i> Rebuild</button>
+   </div>
+   <div style="font-size:11px;color:var(--dim);margin:4px 0 12px">built ${esc((d.built_at||'').slice(0,16).replace('T',' '))} · agents also read <code style="font-family:ui-monospace,monospace">.coxagent/REPO_MAP.md</code></div>
+   <div class="cg-langs">${langChips}</div>
+   <div class="cg-search"><i class="ti ti-search"></i><input id="cg-q" placeholder="Search symbols — functions, structs, classes…" oninput="cgSearch(this.value)" autocomplete="off"></div>
+   <div id="cg-results"></div>
+   <div class="sec" style="margin-top:16px">Top files <span style="font-size:11px;color:var(--dim);font-weight:400">· most symbols first</span></div>
+   <div class="cg-files">${files||'<div class="empty">no source files found</div>'}</div>`;
+}
+async function buildCodeMap(btn){const o=btn.innerHTML;btn.innerHTML='<i class="ti ti-loader-2 att-spin"></i> Indexing…';btn.disabled=true;
+  try{const d=await(await fetch(api("/codegraph/build"),{method:"POST"})).json();CG=d;renderCodeMapMain(d);toasty("Code map built — "+d.files+" files, "+d.symbols+" symbols","ok");}
+  catch(e){toasty("Build failed","err");btn.innerHTML=o;btn.disabled=false;}
+}
+function cgSearch(q){clearTimeout(cgT);cgT=setTimeout(async()=>{
+  const box=document.getElementById("cg-results");if(!box)return;
+  if(!q.trim()){box.innerHTML="";return;}
+  let d={};try{d=await(await fetch(api("/codegraph?q="+encodeURIComponent(q)))).json();}catch(e){}
+  const r=(d&&d.results)||[];
+  box.innerHTML=r.length?`<div class="cg-syms">`+r.map(s=>`<div class="cg-sym"><span class="cg-k cg-k-${esc(s.kind)}">${esc(s.kind)}</span><b>${esc(s.name)}</b><span class="cg-loc">${esc(s.file)}:${s.line}</span></div>`).join("")+`</div>`:'<div class="empty" style="padding:10px;font-size:12px">no symbols match</div>';
+},250);}
 async function createUser(){
   const username=document.getElementById("usr-name").value.trim();
   const password=document.getElementById("usr-pass").value;
