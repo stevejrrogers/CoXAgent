@@ -103,6 +103,10 @@ pub struct WorkflowConfig {
     /// Empty = no notifications. Slack/Teams incoming webhooks work directly.
     #[serde(default)]
     pub webhook_url: Option<String>,
+    /// Compress large prompt embeds (diffs, logs) and ask agents for terse
+    /// output to cut token spend. On by default; disable for maximum verbosity.
+    #[serde(default = "default_true")]
+    pub token_saver: bool,
 }
 
 fn default_sprint_len() -> u64 {
@@ -133,6 +137,7 @@ impl Default for WorkflowConfig {
             mode: Mode::Kanban,
             sprint_length_cycles: default_sprint_len(),
             webhook_url: None,
+            token_saver: true,
         }
     }
 }

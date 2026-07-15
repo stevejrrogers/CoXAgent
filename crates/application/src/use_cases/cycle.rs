@@ -341,14 +341,22 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     async fn sa_review(&self, title: &str, head: &str, diff: &str) -> Option<(bool, String)> {
         use coxagent_domain::Role;
         let _ = self.config.engine.resolve(Role::Sa);
-        // Cap the diff so a huge PR doesn't blow the prompt budget.
-        let clipped: String = diff.chars().take(16_000).collect();
+        // Cap the diff so a huge PR doesn't blow the prompt budget. With the
+        // token-saver on, compress (dedupe + drop index noise) rather than a
+        // blunt truncation, so more of the real change survives the cap.
+        let saver = self.config.workflow.token_saver;
+        let clipped: String = if saver {
+            crate::tokens::compress_diff(diff, 16_000)
+        } else {
+            diff.chars().take(16_000).collect()
+        };
+        let terse = if saver { crate::tokens::TERSE } else { "" };
         let task = format!(
             "You are the reviewer on a pull request before merge. Do a deep code review for \
              correctness, completeness, safety, and architecture fit.\n\nPR: {title}\nBranch: \
              {head}\n\nUnified diff:\n```\n{clipped}\n```\n\nRespond with ONLY JSON: \
              {{\"decision\": \"approve\" | \"request_changes\", \"summary\": \"one short \
-             paragraph; if request_changes, list the concrete fixes\"}}."
+             paragraph; if request_changes, list the concrete fixes\"}}.{terse}"
         );
         let request = AgentRequest {
             role: Role::Sa,
