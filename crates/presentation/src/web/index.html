@@ -3918,9 +3918,12 @@ async function renderTeamsOnline(){
   if(!Array.isArray(ws)||!ws.length){el.innerHTML="";return;}
   el.innerHTML=`<div class="teamson"><div class="tso-h"><i class="ti ti-server-bolt"></i> Teams online <span>${ws.length}</span></div>`
     +`<div class="tso-list">`+ws.map(w=>{
-      const lead=w.role==="leader";
+      // Show what each team is doing right now: the live agent role (SA/DEV…),
+      // or leader/worker between phases. Highlight an actual running agent.
+      const role=(w.role||'idle');
+      const busy=!/^(leader|worker|idle)$/i.test(role);
       return `<div class="tso"><span class="tso-dot"></span><span class="tso-id">${esc(w.worker)}</span>`
-        +`<span class="tso-role ${lead?'lead':''}">${lead?'leader':'worker'}</span>`
+        +`<span class="tso-role ${busy?'lead':''}">${esc(role.replace(/_/g,'-').toUpperCase())}</span>`
         +(w.ticket?`<span class="tso-tk">${esc(w.ticket)}</span>`:'')+`</div>`;
     }).join("")+`</div></div>`;
 }
