@@ -993,13 +993,13 @@ fn isolate_worktree(work_dir: PathBuf, worker: &str) -> PathBuf {
 /// savings log, so the dashboard can report the token-saver's effectiveness.
 /// Best-effort and cheap; skips no-op passes and when no shim dir is set.
 fn record_compression(before: usize, after: usize) {
+    use std::io::Write as _;
     if before == 0 || after >= before {
         return;
     }
     let Ok(dir) = std::env::var("COXAGENT_SHIM_DIR") else {
         return;
     };
-    use std::io::Write as _;
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
