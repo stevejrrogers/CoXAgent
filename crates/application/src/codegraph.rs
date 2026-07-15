@@ -288,7 +288,8 @@ impl CodeGraph {
         let mut s = String::new();
         let _ = writeln!(
             s,
-            "# Repo map — {} files, {} symbols",
+            "# Repo map — {} files, {} symbols\n\
+             Query it (if `coxagent` is on PATH): `coxagent codegraph search|impact|callers <name>`.",
             self.files.len(),
             self.symbols.len()
         );

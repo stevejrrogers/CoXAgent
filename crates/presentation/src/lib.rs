@@ -7,7 +7,7 @@
 pub mod cli;
 pub mod server;
 
-pub use cli::{parse, Cli, Command};
+pub use cli::{parse, Cli, CodegraphQuery, Command};
 pub use server::{
     serve_full, HubExtras, NewProjectReq, ProjectFactory, ProjectHandle, ProjectRemover,
 };

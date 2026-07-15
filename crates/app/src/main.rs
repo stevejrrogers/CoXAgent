@@ -154,7 +154,84 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
             )
             .await
         }
+        Command::Codegraph { query, work_dir } => codegraph_query(&work_dir, &query),
     }
+}
+
+/// Answer a code-graph query for agents (and humans) — structured, token-cheap
+/// output instead of grepping the tree by hand.
+fn codegraph_query(
+    work_dir: &Path,
+    query: &coxagent_presentation::CodegraphQuery,
+) -> Result<String, Box<dyn std::error::Error>> {
+    use coxagent_application::codegraph::{references, CodeGraph};
+    use coxagent_presentation::CodegraphQuery as Q;
+    use std::fmt::Write as _;
+
+    // Build fresh for `build`; otherwise use the persisted index (build if absent).
+    let graph = || CodeGraph::load(work_dir).unwrap_or_else(|| CodeGraph::index(work_dir));
+    let mut out = String::new();
+    match query {
+        Q::Build => {
+            let g = CodeGraph::index(work_dir);
+            g.save(work_dir)?;
+            let _ = std::fs::write(
+                work_dir.join(".coxagent").join("REPO_MAP.md"),
+                g.repo_map(40_000),
+            );
+            let _ = writeln!(
+                out,
+                "indexed {} files, {} symbols, {} calls",
+                g.files.len(),
+                g.symbols.len(),
+                g.calls.len()
+            );
+        }
+        Q::Search { query: q } => {
+            let g = graph();
+            for s in g.search(q, 50) {
+                let scope = s
+                    .scope
+                    .as_deref()
+                    .map_or(String::new(), |sc| format!("{sc}::"));
+                let _ = writeln!(out, "{} {scope}{}  {}:{}", s.kind, s.name, s.file, s.line);
+            }
+        }
+        Q::Impact { name } => {
+            let refs = references(work_dir, name, 200);
+            let (defs, uses): (Vec<_>, Vec<_>) = refs.iter().partition(|r| r.is_def);
+            let _ = writeln!(
+                out,
+                "{} definition(s), {} usage(s):",
+                defs.len(),
+                uses.len()
+            );
+            for r in &refs {
+                let tag = if r.is_def { "def" } else { "use" };
+                let _ = writeln!(out, "  {tag} {}:{}  {}", r.file, r.line, r.text);
+            }
+        }
+        Q::Callers { name } => {
+            let g = graph();
+            let callers = g.callers(name);
+            if callers.is_empty() {
+                let _ = writeln!(out, "no callers found for `{name}`");
+            }
+            for (who, file, line) in callers {
+                let _ = writeln!(out, "{who}  {file}:{line}");
+            }
+        }
+        Q::Deps { file } => {
+            let g = graph();
+            for f in g.dependents(file) {
+                let _ = writeln!(out, "{f}");
+            }
+        }
+        Q::Map => {
+            out.push_str(&graph().repo_map(40_000));
+        }
+    }
+    Ok(out.trim_end().to_owned())
 }
 
 /// Load `coxagent.json` from the workspace root (parent of the state dir), or

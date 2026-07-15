@@ -87,6 +87,33 @@ pub enum Command {
         #[arg(long, default_value_t = 4000)]
         port: u16,
     },
+    /// Query the code knowledge graph (for agents + humans): symbol search,
+    /// impact/references, callers, and file dependencies.
+    Codegraph {
+        #[command(subcommand)]
+        query: CodegraphQuery,
+        /// Codebase directory (defaults to the current directory). Accepted
+        /// before or after the subcommand.
+        #[arg(long, default_value = ".", global = true)]
+        work_dir: PathBuf,
+    },
+}
+
+/// Code-graph query subcommands.
+#[derive(Subcommand, Debug)]
+pub enum CodegraphQuery {
+    /// (Re)build the index for the working tree.
+    Build,
+    /// Find symbols whose name contains QUERY.
+    Search { query: String },
+    /// Every usage of NAME across the tree (comment/string-free), with callers.
+    Impact { name: String },
+    /// Functions that call NAME (what breaks if you change it).
+    Callers { name: String },
+    /// Files that import FILE's module.
+    Deps { file: String },
+    /// The compact repo map agents read to orient.
+    Map,
 }
 
 /// Parse process arguments into a [`Cli`].
