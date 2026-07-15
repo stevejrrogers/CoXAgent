@@ -1196,7 +1196,9 @@ body:not(.manage) .manage-only { display: none !important; }
       </div>
       <div class="view" id="view-insights"><div class="kpis" id="cost-kpis"></div>
         <div class="sec">Cost by agent</div><div class="panel" id="cost-roles"></div>
-        <div class="sec">Budget</div><div class="panel" id="cost-budget"></div></div>
+        <div class="sec">Budget</div><div class="panel" id="cost-budget"></div>
+        <div class="sec">Token-saver <span style="font-size:11px;color:var(--dim);font-weight:400">· rtk-style compression on tool output before agents read it</span></div>
+        <div class="panel" id="cost-tokensaver"></div></div>
       <div class="view" id="view-settings"><div id="settings-body"></div></div>
       <div class="view" id="view-docs">
         <div class="docslayout">
@@ -1807,7 +1809,19 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
         <div style="background:var(--card2);border-radius:6px;height:10px;overflow:hidden"><div style="width:${used}%;height:100%;background:${used>=90?'var(--red)':used>=70?'var(--amber)':'var(--accent2)'}"></div></div>
         <div style="color:var(--dim);font-size:11px;margin-top:8px">Loop auto-pauses when the cap is reached.</div>`;
     }else{document.getElementById("cost-budget").innerHTML='<div class="empty">no budget cap set — add "budget_usd" in coxagent.json</div>';}
+    renderTokenSaver();
   }else if(CUR==="discuss"){renderDiscuss();}else if(CUR==="roadmap"){renderRoadmap();}}
+async function renderTokenSaver(){
+  const el=document.getElementById("cost-tokensaver");if(!el)return;
+  let d={};try{d=await(await fetch("/api/token-saver")).json();}catch(e){return;}
+  if(!d.samples){el.innerHTML='<div class="empty" style="padding:6px">No compressions recorded yet — the saver kicks in on large/noisy tool output while agents run.</div>';return;}
+  const fc=n=>n>=1e6?(n/1e6).toFixed(1)+"M":n>=1e3?(n/1e3).toFixed(1)+"K":String(n);
+  el.innerHTML=`<div style="display:flex;gap:26px;flex-wrap:wrap;align-items:flex-end">
+    <div><div style="font-size:27px;font-weight:700;color:var(--green);letter-spacing:-.02em;line-height:1">${d.pct}%</div><div style="font-size:12px;color:var(--muted);margin-top:4px">output shrunk</div></div>
+    <div><div style="font-size:20px;font-weight:600">${fc(d.saved)}</div><div style="font-size:12px;color:var(--muted)">chars saved</div></div>
+    <div><div style="font-size:20px;font-weight:600">${fc(d.before)} → ${fc(d.after)}</div><div style="font-size:12px;color:var(--muted)">before → after</div></div>
+    <div><div style="font-size:20px;font-weight:600">${d.samples}</div><div style="font-size:12px;color:var(--muted)">tool outputs compressed</div></div>
+  </div><div style="margin-top:14px;background:var(--card2);border-radius:6px;height:8px;overflow:hidden"><div style="width:${Math.min(100,d.pct)}%;height:100%;background:var(--green)"></div></div>`;}
 
 function cmpVer(a,b){const pa=(a||"0.0.0").split(".").map(Number),pb=(b||"0.0.0").split(".").map(Number);
   for(let i=0;i<3;i++){if((pa[i]||0)!==(pb[i]||0))return (pa[i]||0)-(pb[i]||0);}return 0;}

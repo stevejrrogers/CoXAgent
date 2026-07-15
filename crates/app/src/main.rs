@@ -166,7 +166,11 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
             use std::io::Read as _;
             let mut input = String::new();
             std::io::stdin().read_to_string(&mut input).ok();
-            Ok(coxagent_application::tokens::proxy_compress(&input))
+            let out = coxagent_application::tokens::proxy_compress(&input);
+            // Record the saving so the dashboard can show how effective the
+            // token-saver is (appends "before after" to the shim dir's log).
+            record_compression(input.len(), out.len());
+            Ok(out)
         }
     }
 }
@@ -982,6 +986,26 @@ fn isolate_worktree(work_dir: PathBuf, worker: &str) -> PathBuf {
         wt
     } else {
         work_dir
+    }
+}
+
+/// Append one compression sample (`before after` bytes) to the shim dir's
+/// savings log, so the dashboard can report the token-saver's effectiveness.
+/// Best-effort and cheap; skips no-op passes and when no shim dir is set.
+fn record_compression(before: usize, after: usize) {
+    if before == 0 || after >= before {
+        return;
+    }
+    let Ok(dir) = std::env::var("COXAGENT_SHIM_DIR") else {
+        return;
+    };
+    use std::io::Write as _;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(std::path::Path::new(&dir).join("savings.log"))
+    {
+        let _ = writeln!(f, "{before} {after}");
     }
 }
 

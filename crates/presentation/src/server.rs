@@ -608,6 +608,7 @@ pub async fn serve_full(
         .route("/api/projects/:pid/metrics", get(metrics_ep))
         .route("/api/projects/:pid/runner", get(runner_ep))
         .route("/api/projects/:pid/workers", get(workers_ep))
+        .route("/api/token-saver", get(token_saver_ep))
         .route("/api/projects/:pid/audit", get(audit_ep))
         .route("/api/projects/:pid/config", get(get_config).put(put_config))
         .route("/api/projects/:pid/control/:action", post(control_ep))
@@ -1218,6 +1219,38 @@ async fn runner_ep(
         return not_found();
     };
     Json(p.runner.snapshot()).into_response()
+}
+
+/// Token-saver effectiveness: aggregate the shim compression log (bytes before
+/// vs after) into a headline "how much did we save" for the Cost view.
+#[allow(clippy::cast_precision_loss)]
+async fn token_saver_ep() -> axum::response::Response {
+    let (mut samples, mut before, mut after) = (0u64, 0u64, 0u64);
+    if let Ok(dir) = std::env::var("COXAGENT_SHIM_DIR") {
+        if let Ok(text) = std::fs::read_to_string(std::path::Path::new(&dir).join("savings.log")) {
+            for line in text.lines() {
+                let mut it = line.split_whitespace();
+                if let (Some(b), Some(a)) = (it.next(), it.next()) {
+                    if let (Ok(b), Ok(a)) = (b.parse::<u64>(), a.parse::<u64>()) {
+                        samples += 1;
+                        before += b;
+                        after += a;
+                    }
+                }
+            }
+        }
+    }
+    let saved = before.saturating_sub(after);
+    let pct = if before > 0 {
+        (saved as f64 / before as f64) * 100.0
+    } else {
+        0.0
+    };
+    Json(serde_json::json!({
+        "samples": samples, "before": before, "after": after,
+        "saved": saved, "pct": (pct * 10.0).round() / 10.0,
+    }))
+    .into_response()
 }
 
 /// The shared worker registry: every team (`account@host`) currently online for
