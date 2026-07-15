@@ -295,7 +295,15 @@
   .modeseg-badge{position:absolute;top:2px;right:9px;min-width:15px;height:15px;padding:0 4px;border-radius:8px;background:var(--red);color:#fff;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center}
   .chatside{display:none;flex:1;min-height:0;flex-direction:column;overflow:hidden;margin-top:4px}
   .chatside .chanrail-hd{padding:6px 4px 8px}
-  .chatside .chanlist{flex:1;overflow-y:auto;padding:2px 0}
+  .chatside .chanlist{overflow-y:auto;padding:2px 0}
+  .chatside #chan-list{flex:0 1 auto;max-height:38vh}
+  .chatside #dm-list{flex:1 1 auto;min-height:70px}
+  .dmsearch{display:flex;align-items:center;gap:6px;margin:2px 0 6px;padding:6px 9px;background:var(--card2);border:1px solid var(--border2);border-radius:8px;color:var(--muted);font-size:12px}
+  .dmsearch input{flex:1;min-width:0;background:transparent;border:none;color:var(--text);font-family:inherit;font-size:12.5px;outline:none}
+  .dmitem .dmav{position:relative;width:24px;height:24px;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#fff;flex:none}
+  .dmpres{position:absolute;right:-2px;bottom:-2px;width:9px;height:9px;border-radius:50%;background:var(--dim);border:2px solid var(--panel)}
+  .dmpres.on{background:var(--green)}
+  .dm-empty{color:var(--dim);font-size:12px;padding:8px 10px}
   #chat-main{display:none;flex:1;min-height:0;flex-direction:column}
   #chat-main .chatwrap{flex:1;min-height:0;border:none;border-radius:0}
   body.mode-chat #ws-nav{display:none}
@@ -542,7 +550,10 @@
   .sessrow:last-child{border-bottom:none}
   .sessic{flex:none;width:34px;height:34px;border-radius:9px;display:grid;place-items:center;background:var(--accentbg);color:var(--accent2);font-size:17px}
   .sessname{font-size:13px;font-weight:600;display:flex;align-items:center;gap:8px}
-  .dupwarn{display:flex;gap:10px;align-items:flex-start;background:color-mix(in srgb,var(--amber) 12%,transparent);border:1px solid color-mix(in srgb,var(--amber) 40%,transparent);border-radius:10px;padding:11px 14px;margin-bottom:12px;font-size:12.5px;color:var(--text)}
+  #team-dupwarn:not(:empty){margin-top:18px}
+  .dupwarn{display:flex;gap:10px;align-items:flex-start;background:color-mix(in srgb,var(--amber) 12%,transparent);border:1px solid color-mix(in srgb,var(--amber) 40%,transparent);border-radius:10px;padding:11px 14px;margin-bottom:10px;font-size:12.5px;color:var(--text)}
+  .dupwarn .dup-dismiss{margin-left:auto;background:none;border:none;color:var(--muted);cursor:pointer;font-size:15px;padding:0 2px;flex:none}
+  .dupwarn .dup-dismiss:hover{color:var(--red)}
   .dupwarn i{color:var(--amber);font-size:16px;margin-top:1px}
   .dupwarn .tk{background:var(--card2);padding:1px 7px;border-radius:5px;font-family:ui-monospace,monospace;font-size:11px}
   .aclist{margin-top:8px;display:flex;flex-direction:column;gap:6px}
@@ -745,6 +756,9 @@ body:not(.manage) .manage-only { display: none !important; }
     <div class="chatside" id="chat-side">
       <div class="chanrail-hd"><span>Channels</span><div class="chanrail-actions"><button class="chanadd manage-only" onclick="createChannel()" title="Create channel (leads & admins)"><i class="ti ti-plus"></i></button></div></div>
       <div class="chanlist" id="chan-list"></div>
+      <div class="chanrail-hd" style="margin-top:10px"><span>Direct messages</span></div>
+      <div class="dmsearch"><i class="ti ti-search"></i><input id="dm-search" placeholder="Find a teammate…" autocomplete="off" oninput="renderDMList()"></div>
+      <div class="chanlist" id="dm-list"></div>
     </div>
     <nav class="nav" id="ws-nav">
       <a data-v="overview" class="on" onclick="nav('overview')"><i class="ti ti-layout-dashboard"></i> Overview</a>
@@ -1699,7 +1713,7 @@ function selectChannel(id){
   const me=(ME&&ME.username)||"user";
   const canInvite=kind==="private"&&(ch.owner===me||(ch.inviters||[]).includes(me));
   document.getElementById("chat-invite").style.display=canInvite?"inline-flex":"none";
-  renderChannels();
+  renderChannels();renderDMList();
   loadChatHistory();
 }
 async function loadChatHistory(){
@@ -1807,8 +1821,28 @@ function initChatBackground(){
 }
 // Workspace members (for @mentions, member list, DMs).
 let MEMBERS=[];
-async function loadMembers(){try{MEMBERS=await(await fetch("/api/chat/members")).json();}catch(e){MEMBERS=[];}}
+async function loadMembers(){try{MEMBERS=await(await fetch("/api/chat/members")).json();}catch(e){MEMBERS=[];}renderDMList();}
 function memberName(u){const m=MEMBERS.find(x=>x.username===u);return (m&&m.name&&m.name.trim())?m.name:u;}
+// Slack-style direct-messages list in the sidebar: every teammate, online dot,
+// click to open a 1:1 DM. The active DM is highlighted.
+function renderDMList(){
+  const box=document.getElementById("dm-list");if(!box)return;
+  const me=(ME&&ME.username)||"user";
+  const si=document.getElementById("dm-search");const q=(si?si.value:"").toLowerCase();
+  const online=new Set(ONLINE||[]);
+  const cur=currentChannel();
+  const curOther=(cur.kind==="dm")?(cur.members||[]).find(x=>x!==me):null;
+  let users=(MEMBERS||[]).filter(u=>u.username!==me);
+  if(q)users=users.filter(u=>u.username.toLowerCase().includes(q)||(u.name||"").toLowerCase().includes(q));
+  // Online first, then alphabetical.
+  users.sort((a,b)=>(online.has(b.username)-online.has(a.username))||(a.name||a.username).localeCompare(b.name||b.username));
+  box.innerHTML=users.length?users.map(u=>{
+    const on=online.has(u.username);const active=curOther===u.username;
+    return `<div class="chanitem dmitem${active?' on':''}" onclick="openDM('${esc(u.username)}')" title="@${esc(u.username)}">
+      <span class="dmav" style="background:${userColor(u.username)}">${esc((u.name||u.username).slice(0,2).toUpperCase())}<span class="dmpres${on?' on':''}"></span></span>
+      <span class="channm">${esc(u.name||u.username)}</span></div>`;
+  }).join(""):'<div class="dm-empty">No teammates yet</div>';
+}
 // ── @mention autocomplete ───────────────────────────────────────────────────
 let MENTION={open:false,items:[],sel:0,start:-1};
 function mentionOnInput(inp){
@@ -2510,6 +2544,9 @@ function updateOnline(){
   const n=members.filter(u=>set.has(u)).length || (currentChannel().kind==="general"?set.size:0);
   el.style.display=n>0?"inline-flex":"none";
   document.getElementById("chat-online-n").textContent=n;
+  // Refresh the DM presence dots when the online set changes.
+  const sig=[...set].sort().join(",");
+  if(sig!==updateOnline._sig){updateOnline._sig=sig;renderDMList();}
 }
 function startPoll(){if(poll)return;poll=setInterval(async()=>{try{const s=await(await fetch(api("/state"))).json();const rn=await(await fetch(api("/runner"))).json();render(s);renderRunner(rn);setConn(false);}catch(e){}},3000);}
 function connect(){if(ES)ES.close();if(poll){clearInterval(poll);poll=null;}
@@ -3058,12 +3095,19 @@ async function assignMember(){const s=document.getElementById("member-add");if(!
   try{await fetch(api("/members"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:s.value})});renderTeamPeople();}catch(e){}}
 async function unassignMember(u){try{await fetch(api("/members/"+u),{method:"DELETE"});renderTeamPeople();}catch(e){}}
 // Flag tickets that share a normalised title — likely duplicate work.
+// The warning clears automatically once the duplicate is gone (a ticket rejected
+// or its title changed), or the user can dismiss a specific pair manually.
+let DUP_DISMISSED=(()=>{try{return new Set(JSON.parse(localStorage.getItem("cox_dupx")||"[]"));}catch(e){return new Set();}})();
+function dismissDup(key){DUP_DISMISSED.add(key);localStorage.setItem("cox_dupx",JSON.stringify([...DUP_DISMISSED]));renderDupWarn(STATE);}
 function renderDupWarn(s){
   const el=document.getElementById("team-dupwarn");if(!el)return;
   const norm=t=>(t.title||"").toLowerCase().replace(/[^a-z0-9]+/g," ").trim();
   const g={};(s.tickets||[]).forEach(t=>{const k=norm(t);if(k)(g[k]=g[k]||[]).push(t);});
-  const dups=Object.values(g).filter(x=>x.length>1);
-  el.innerHTML=dups.length?dups.map(x=>`<div class="dupwarn"><i class="ti ti-copy-check"></i><div><b>Possible duplicate work:</b> ${x.map(t=>`<span class="tk" style="cursor:pointer" onclick="showTicket('${t.id}')">${esc(t.id)}</span>`).join(" ")} share the title “${esc(x[0].title)}”.</div></div>`).join(""):"";
+  // Key a group by its members so a dismissal only sticks while that exact set persists.
+  const dups=Object.values(g).filter(x=>x.length>1)
+    .map(x=>({x,key:x.map(t=>t.id).sort().join("+")}))
+    .filter(d=>!DUP_DISMISSED.has(d.key));
+  el.innerHTML=dups.length?dups.map(({x,key})=>`<div class="dupwarn"><i class="ti ti-copy-check"></i><div><b>Possible duplicate work:</b> ${x.map(t=>`<span class="tk" style="cursor:pointer" onclick="showTicket('${t.id}')">${esc(t.id)}</span>`).join(" ")} share the title “${esc(x[0].title)}”.</div><button class="dup-dismiss" title="Dismiss this warning" onclick="dismissDup('${key}')"><i class="ti ti-x"></i></button></div>`).join(""):"";
 }
 async function openAgent(role){
   const meta=AGENTS.find(a=>a[0]===role);const col=cvar((meta&&meta[2])||"--muted");
