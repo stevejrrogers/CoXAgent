@@ -1056,7 +1056,23 @@ async fn rename_project_ep(
 async fn delete_project_ep(
     State(app): State<AppState>,
     Path(pid): Path<String>,
+    headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
+    // Deleting a project is destructive — restrict to admins and the lead tier
+    // (Director/Manager/*Lead). Everyone else is forbidden.
+    if let Some(auth) = &app.auth {
+        let allowed = match resolve_principal(auth, &headers).await {
+            Some(u) => u.role == coxagent_application::auth::AuthRole::Admin || u.role.is_lead(),
+            None => false,
+        };
+        if !allowed {
+            return (
+                StatusCode::FORBIDDEN,
+                "only an admin or manager may delete a project",
+            )
+                .into_response();
+        }
+    }
     let Some(p) = app.project(&pid).await else {
         return not_found();
     };

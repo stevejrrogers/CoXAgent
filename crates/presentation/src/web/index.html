@@ -958,8 +958,8 @@ body:not(.manage) .manage-only { display: none !important; }
       <a data-v="roadmap" onclick="nav('roadmap')"><i class="ti ti-timeline"></i> Roadmap</a>
       <a data-v="review" onclick="nav('review')"><i class="ti ti-git-pull-request"></i> Review</a>
       <a data-v="activity" onclick="nav('activity')"><i class="ti ti-activity"></i> Activity</a>
-      <a data-v="discuss" onclick="nav('discuss')"><i class="ti ti-messages"></i> Discussion</a>
-      <a data-v="docs" onclick="nav('docs')"><i class="ti ti-book-2"></i> Docs</a>
+      <a data-v="discuss" onclick="nav('discuss')"><i class="ti ti-messages"></i> Scrum</a>
+      <a data-v="docs" onclick="nav('docs')"><i class="ti ti-book-2"></i> Wiki</a>
       <a data-v="codemap" onclick="nav('codemap')"><i class="ti ti-sitemap"></i> Code map</a>
       <a data-v="insights" onclick="nav('insights')"><i class="ti ti-coin"></i> Cost</a>
       <a data-v="people" class="admin-only" onclick="nav('people')"><i class="ti ti-user-star"></i> People</a>
@@ -1036,8 +1036,7 @@ body:not(.manage) .manage-only { display: none !important; }
         </div>
         <div id="work-board">
           <div class="filters" id="board-filters" style="margin:0 0 10px"></div>
-          <div class="sec">Features</div><div class="cols" id="features"></div>
-          <div class="sec">Bugs</div><div class="cols" id="bugs"></div>
+          <div class="cols" id="board-cols"></div>
         </div>
         <div id="work-sprint" style="display:none"><div id="sprint-body"></div></div>
         <div id="work-backlog" style="display:none"><div id="backlog-body"></div></div>
@@ -1365,6 +1364,14 @@ const AGENTS=[["BA","proposes features","--blue"],["PO","owns priority","--amber
   ["DEV-FEATURE","builds features","--green"],["TEST","verifies work","--teal"],["DOCS","writes guides","--blue"]];
 const FCOLS=[["pending","Pending","--muted"],["ready","Ready","--blue"],["in_progress","In progress","--amber"],["done","Done","--green"],["documented","Documented","--teal"]];
 const BCOLS=[["open","Open","--red"],["fixed","Fixed","--amber"],["verified","Verified","--green"]];
+// Unified board: one lifecycle for features + bugs, each column collecting both.
+const UCOLS=[
+  ["backlog","Backlog","--muted",["pending","open"]],
+  ["ready","Ready","--accent2",["ready"]],
+  ["in_progress","In Progress","--amber",["in_progress"]],
+  ["done","Done","--green",["done","fixed"]],
+  ["shipped","Shipped","--teal",["documented","verified"]],
+];
 const ROLES=["ba","po","sm","sa","pd","dev_bug","dev_feature","test","docs"];
 const MODELS={claude:["sonnet","opus","haiku"],scripted:["n/a"],mock:["n/a"],opencode:null};
 // Common opencode provider/model choices (it accepts any, incl. local ollama).
@@ -1386,7 +1393,7 @@ const KPI_IC={Shipped:"ti-rocket","In flight":"ti-plane-tilt","Open bugs":"ti-bu
 const money=n=>"$"+(Number(n)||0).toFixed(2);
 const fmtK=n=>{n=Number(n)||0;return n>=1000?(n/1000).toFixed(1)+"k":String(n);};
 const AC={BA:"--blue","DEV-FEATURE":"--green","DEV-BUG":"--red",SA:"--purple",TEST:"--teal",DOCS:"--blue",PO:"--amber",SM:"--teal",PD:"--purple",USER:"--accent"};
-const TITLES={overview:["Overview","project health at a glance"],team:["Agents","your autonomous workers"],board:["Work","board · sprint · backlog"],activity:["Activity","what the agents are doing"],roadmap:["Roadmap","now · next · later, auto-generated"],discuss:["Discussion","team threads & standups"],docs:["Docs","product & technical documentation"],codemap:["Code map","symbols & dependencies the agents navigate"],chat:["Chat","talk with your teammates"],review:["Review","open pull requests — approve & merge"],people:["People","per-user activity & productivity"],audit:["Audit","who did what, when"],access:["Users","accounts, project access & tokens"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
+const TITLES={overview:["Overview","project health at a glance"],team:["Agents","your autonomous workers"],board:["Work","board · sprint · backlog"],activity:["Activity","what the agents are doing"],roadmap:["Roadmap","now · next · later, auto-generated"],discuss:["Scrum","standups, sprint events & team threads"],docs:["Wiki","product & technical knowledge base"],codemap:["Code map","symbols & dependencies the agents navigate"],chat:["Chat","talk with your teammates"],review:["Review","open pull requests — approve & merge"],people:["People","per-user activity & productivity"],audit:["Audit","who did what, when"],access:["Users","accounts, project access & tokens"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
 const esc=s=>(s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 const cvar=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim()||"#888";
 let STATE={}, CUR="overview", BF="all", INIT_ACT=false, WORKTAB="board";
@@ -1663,6 +1670,10 @@ function card(t){const a={high:"var(--red)",medium:"var(--amber)",low:"var(--dim
     <div class="ct">${esc(t.title)}</div><div class="badges"><span class="b ${t.priority}">${t.priority}</span>${ui}${bug}</div></div>`;}
 function column([k,l,c],ts){const items=ts.filter(t=>t.status===k);
   return `<div class="col"><h3><span class="dot" style="background:var(${c})"></span>${l}<span class="n">${items.length}</span></h3>${items.length?items.map(card).join(""):'<div class="empty">—</div>'}</div>`;}
+// Unified column: collects both features and bugs whose status maps to this stage.
+function ucolumn([k,l,c,statuses],ts){const items=ts.filter(t=>statuses.includes(t.status))
+    .sort((a,b)=>(a.type==="bug")-(b.type==="bug")); // bugs after features in the same column
+  return `<div class="col"><h3><span class="dot" style="background:var(${c})"></span>${l}<span class="n">${items.length}</span></h3>${items.length?items.map(card).join(""):'<div class="empty">—</div>'}</div>`;}
 
 function renderSidebar(s){
   document.getElementById("ver").textContent=s.current_version||"0.0.0";
@@ -1755,8 +1766,9 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
     if(BF!=="all"){feats=feats.filter(t=>t.priority===BF);bugs=bugs.filter(t=>t.priority===BF);}
     const fc=["all","high","medium","low"];
     document.getElementById("board-filters").innerHTML=fc.map(f=>`<span class="fchip ${BF===f?'on':''}" onclick="BF='${f}';renderActive()">${f==='all'?'all priorities':f}</span>`).join("");
-    document.getElementById("features").innerHTML=FCOLS.map(c=>column(c,feats)).join("");
-    document.getElementById("bugs").innerHTML=BCOLS.map(c=>column(c,bugs)).join("");
+    // One unified board: features + bugs share columns mapped by lifecycle stage.
+    let all=(s.tickets||[]);if(BF!=="all")all=all.filter(t=>t.priority===BF);
+    document.getElementById("board-cols").innerHTML=UCOLS.map(c=>ucolumn(c,all)).join("");
     renderSprintPanel(s);
     renderBacklogPanel(s);
   }else if(CUR==="activity"){
@@ -3911,7 +3923,10 @@ function dismissDup(key){DUP_DISMISSED.add(key);localStorage.setItem("cox_dupx",
 function renderDupWarn(s){
   const el=document.getElementById("team-dupwarn");if(!el)return;
   const norm=t=>(t.title||"").toLowerCase().replace(/[^a-z0-9]+/g," ").trim();
-  const g={};(s.tickets||[]).forEach(t=>{const k=norm(t);if(k)(g[k]=g[k]||[]).push(t);});
+  // Only warn about duplicates that can still be cleaned up (not yet built).
+  // Already-shipped/in-progress dupes are water under the bridge — don't nag.
+  const actionable=t=>["pending","ready","open"].includes(t.status);
+  const g={};(s.tickets||[]).filter(actionable).forEach(t=>{const k=norm(t);if(k)(g[k]=g[k]||[]).push(t);});
   // Key a group by its members so a dismissal only sticks while that exact set persists.
   const dups=Object.values(g).filter(x=>x.length>1)
     .map(x=>({x,key:x.map(t=>t.id).sort().join("+")}))
