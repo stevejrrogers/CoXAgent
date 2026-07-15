@@ -699,6 +699,8 @@
   .agstats span{display:inline-flex;align-items:center;gap:4px}
   .agstats i{font-size:13px;color:var(--accent2)}
   .agtk{display:inline-flex;align-items:center;gap:4px;background:var(--accentbg);color:var(--accent2);border-radius:6px;padding:1px 8px;font-family:ui-monospace,monospace;font-size:11px;cursor:pointer}
+  .agtk.agwork{background:color-mix(in srgb,var(--green) 16%,transparent);color:var(--green);cursor:default;font-family:inherit}
+  .agent.run{border-color:color-mix(in srgb,var(--green) 42%,var(--border));box-shadow:0 0 0 1px color-mix(in srgb,var(--green) 22%,transparent)}
   .agtk i{font-size:12px}
   .agidle{color:var(--dim)}
   .pchart{display:flex;flex-direction:column;gap:10px}
@@ -1675,11 +1677,16 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
       const col=cvar(c);const st=stat[r]||{n:0,tk:new Set(),last:null};
       const roleKey=r.toLowerCase().replace(/-/g,"_");
       const cost=(spend.by_role||{})[roleKey]||0;
+      // Live "working now": the runner reports which agent is executing.
+      const activeRole=(window.RUNNER&&RUNNER.mode==="running")?(RUNNER.active_role||"").replace(/_/g,"-").toUpperCase():"";
+      const working=activeRole===r;
       // Current ticket: an in-progress ticket for the DEVs, else the last one this agent touched.
-      let cur=null,live=false;
-      if(r==="DEV-FEATURE"||r==="DEV-BUG"){const w=inProg.find(t=>r==="DEV-BUG"?t.type==="bug":t.type!=="bug");if(w){cur=w.id;live=true;}}
+      let cur=null,live=working;
+      if(r==="DEV-FEATURE"||r==="DEV-BUG"){const w=inProg.find(t=>r==="DEV-BUG"?t.type==="bug":t.type!=="bug");if(w){cur=w.id;}}
       if(!cur&&st.last&&st.last.ticket)cur=st.last.ticket;
-      const curHtml=cur?`<span class="agtk" onclick="event.stopPropagation();showTicket('${cur}')">${live?'<i class="ti ti-loader-2"></i>':'<i class="ti ti-history"></i>'} ${esc(cur)}</span>`:'<span class="agidle">idle</span>';
+      const curHtml=working
+        ?`<span class="agtk agwork"><i class="ti ti-loader-2 att-spin"></i> ${esc((RUNNER.active_note||'working')+(cur?' · '+cur:''))}</span>`
+        :(cur?`<span class="agtk" onclick="event.stopPropagation();showTicket('${cur}')"><i class="ti ti-history"></i> ${esc(cur)}</span>`:'<span class="agidle">idle</span>');
       return `<div class="agent ${live?'run':''}" onclick="openAgent('${r}')" style="cursor:pointer"><div class="av" style="background:${col}22;color:${col}">${initials(r)}<span class="sr"></span></div>
         <div style="flex:1;min-width:0"><div class="rl">${r} <i class="ti ti-terminal-2" style="font-size:12px;color:var(--dim);float:right"></i></div><div class="ds">${d}</div>
         <div class="agstats"><span title="actions"><i class="ti ti-bolt"></i> ${st.n}</span><span title="tickets touched"><i class="ti ti-ticket"></i> ${st.tk.size}</span>${cost>0?`<span title="cost"><i class="ti ti-coin"></i> ${money(cost)}</span>`:''}</div>
@@ -2815,8 +2822,9 @@ function close_(id){document.getElementById(id).classList.remove("open");}
 function setConn(on){document.getElementById("conn").className="dot "+(on?"live":"off");document.getElementById("connlbl").textContent=on?"live":"reconnecting";}
 function renderRunner(r){if(!r)return;window.RUNNER=r;const running=r.mode==="running";const c=running?"live":(r.mode==="paused"?"paused":"off");
   const dot=document.getElementById("runmode");if(dot)dot.className="dot "+c;
-  const lbl=document.getElementById("runlbl");if(lbl)lbl.textContent=running?("cycle "+r.cycle):(r.cycle>0?("paused · "+r.cycle):"idle");
-  const pill=document.getElementById("runpill");if(pill)pill.title=r.last_summary||(running?"running":(r.cycle>0?"paused":"idle"));
+  const lbl=document.getElementById("runlbl");
+  if(lbl)lbl.textContent=running?(r.active_role?r.active_role.replace(/_/g,'-'):("cycle "+r.cycle)):(r.cycle>0?("paused · "+r.cycle):"idle");
+  const pill=document.getElementById("runpill");if(pill)pill.title=(running&&r.active_note)?(r.active_role+" — "+r.active_note):(r.last_summary||(running?"running":(r.cycle>0?"paused":"idle")));
   // Primary toggles Start/Pause; it's the accent "go" button unless running.
   const prim=document.getElementById("ctl-primary"),ic=document.getElementById("ctl-primary-ic");
   if(prim&&ic){ic.className="ti ti-player-"+(running?"pause":"play");prim.title=running?"Pause":(r.cycle>0?"Resume":"Start");prim.classList.toggle("rp-go",!running);}

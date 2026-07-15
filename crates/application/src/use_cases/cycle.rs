@@ -87,6 +87,8 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     git: Option<Arc<dyn GitPort>>,
     /// The code host, used to open PRs when `config.git.auto_pr`.
     forge: Option<Arc<dyn ForgePort>>,
+    /// Reports the currently executing agent to the runner (live "working now").
+    phase: Option<crate::use_cases::runner::PhaseReporter>,
 }
 
 impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
@@ -109,6 +111,27 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             budget: None,
             git: None,
             forge: None,
+            phase: None,
+        }
+    }
+
+    /// Set the live phase reporter (called by `run_forever`).
+    pub fn set_phase_reporter(&mut self, reporter: crate::use_cases::runner::PhaseReporter) {
+        self.phase = Some(reporter);
+    }
+
+    /// Report the agent about to run (live "working now"). `note` is a short
+    /// context like a ticket id; empty when there's none.
+    fn report(&self, role: &str, note: &str) {
+        if let Some(p) = &self.phase {
+            p(Some((role.to_owned(), note.to_owned())));
+        }
+    }
+
+    /// Clear the live indicator between phases.
+    fn report_idle(&self) {
+        if let Some(p) = &self.phase {
+            p(None);
         }
     }
 
@@ -651,6 +674,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
 
     /// Run one cycle. Never returns `Err`: agent failures are collected into the
     /// report so the outer loop keeps going.
+    #[allow(clippy::too_many_lines)] // a linear sequence of agent phases; splitting hurts readability
     pub async fn run_cycle(&self, cycle: u64) -> CycleReport {
         let mut report = CycleReport {
             cycle,
@@ -674,6 +698,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // correct for every n including 1 (unlike `cycle % n == 1`).
         let ba_every = self.config.workflow.ba_every_n_cycles;
         if ba_every > 0 && (cycle - 1) % ba_every == 0 {
+            self.report("BA", "proposing features");
             match self.ba().execute().await {
                 Ok(ids) => report.ba_created = ids,
                 Err(e) => report.errors.push(format!("BA: {e}")),
@@ -685,16 +710,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         self.dedup_backlog().await;
 
         // PO lays out the milestone roadmap once the backlog exists.
+        self.report("PO", "planning milestones");
         if let Err(e) = self.milestones().execute().await {
             report.errors.push(format!("PO milestones: {e}"));
         }
 
+        self.report("SA", "designing");
         match self.sa().execute().await {
             Ok(id) => report.sa_readied = id,
             Err(e) => report.errors.push(format!("SA: {e}")),
         }
 
         // PD establishes the project design system once UI work appears.
+        self.report("PD", "designing UX");
         match self.design_system().execute().await {
             Ok(created) => report.design_system_created = created,
             Err(e) => report.errors.push(format!("PD design-system: {e}")),
@@ -706,6 +734,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             Err(e) => report.errors.push(format!("PD: {e}")),
         }
 
+        self.report("DEV-BUG", "fixing bugs");
         match self.dev(DevMode::Bug).execute().await {
             Ok(id) => {
                 if let Some(tid) = &id {
@@ -720,6 +749,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // Before building, make sure the next feature has a clear definition
             // of done — DEV raises unclear tickets and the BA fills them in.
             self.clarify_next_feature().await;
+            self.report("DEV-FEATURE", "building feature");
             match self.dev(DevMode::Feature).execute().await {
                 Ok(id) => {
                     if let Some(tid) = &id {
@@ -757,11 +787,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             }
         }
 
+        self.report("TEST", "verifying build");
         match self.test().execute().await {
             Ok(ids) => report.bugs_filed = ids,
             Err(e) => report.errors.push(format!("TEST: {e}")),
         }
 
+        self.report("DOCS", "writing docs");
         match self.docs().execute().await {
             Ok(id) => report.documented = id,
             Err(e) => report.errors.push(format!("DOCS: {e}")),
@@ -774,7 +806,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
 
         // Auto-merge: the SA deep-dives open PRs and merges or requests changes.
+        self.report("SA", "reviewing PRs");
         self.review_open_prs().await;
+        self.report_idle();
 
         report.over_budget = self.record_activity(&report).await;
         if report.over_budget {
