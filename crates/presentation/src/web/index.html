@@ -619,6 +619,19 @@
   .ed-in,.ed-ta{width:100%;margin-top:7px;background:var(--card2);border:1px solid var(--border);border-radius:9px;padding:10px 12px;color:var(--text);font-size:13px;font-family:inherit;box-sizing:border-box}
   .ed-ta{resize:vertical;line-height:1.6}
   .ed-in:focus,.ed-ta:focus{outline:none;border-color:var(--accent2)}
+  /* Activity timeline */
+  .timeline{position:relative;padding:4px 0 4px 8px}
+  .timeline:before{content:"";position:absolute;left:23px;top:10px;bottom:10px;width:2px;background:var(--border)}
+  .tl-day{font-size:11px;font-weight:600;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;margin:16px 0 8px 40px}
+  .tl-day:first-child{margin-top:2px}
+  .tlrow{display:flex;gap:14px;align-items:flex-start;padding:5px 0;position:relative}
+  .tl-node{width:32px;height:32px;flex-shrink:0;border-radius:50%;display:flex;align-items:center;justify-content:center;background:color-mix(in srgb,var(--nc) 16%,var(--bg));color:var(--nc);border:2px solid var(--bg);z-index:1}
+  .tl-node i{font-size:15px}
+  .tl-body{flex:1;min-width:0;padding-top:2px}
+  .tl-line{font-size:13px;line-height:1.5}
+  .tl-who{font-weight:600}
+  .tl-act{color:var(--muted)}
+  .tl-t{font-size:11px;color:var(--dim);margin-top:1px}
   .cols{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:14px}
   .col{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:13px;min-height:120px}
   .col h3{margin:0 0 12px;font-size:12px;display:flex;align-items:center;gap:7px;font-weight:600}
@@ -1675,10 +1688,21 @@ function ganttHtml(s){
       <div class="gantt-axis" style="margin-top:6px"><div class="gantt-lbl"></div><div class="gantt-track" style="height:0"><div style="position:absolute;left:${nowPct}%;transform:translateX(-50%);font-size:9px;color:var(--accent2)">now</div></div></div>
     </div></div>`;
 }
+function actIcon(action){const s=(action||"").toLowerCase();
+  if(/propos/.test(s))return"bulb";if(/design|readied|ux/.test(s))return"ruler-2";
+  if(/implement|built|feature/.test(s))return"code";if(/fix/.test(s))return"bug";
+  if(/document/.test(s))return"book-2";if(/merg/.test(s))return"git-merge";
+  if(/commit|push|branch|pr |pull request|opened pr/.test(s))return"git-commit";
+  if(/reject|duplicate/.test(s))return"ban";if(/ship|deploy/.test(s))return"rocket";
+  if(/review/.test(s))return"eye-check";if(/verif|test/.test(s))return"checkup-list";
+  if(/priorit|edit/.test(s))return"adjustments";if(/sprint|standup|retro/.test(s))return"users-group";
+  return"point";}
+function relTime(at){if(!at)return"";const d=new Date(at.replace(" ","T"));const s=(Date.now()-d.getTime())/1000;
+  if(s<60)return"just now";if(s<3600)return Math.floor(s/60)+"m ago";if(s<86400)return Math.floor(s/3600)+"h ago";return Math.floor(s/86400)+"d ago";}
 function actItem(a){const col=cvar(AC[a.agent]||"--muted");
-  return `<div class="act"><div class="ad" style="background:${col}22;color:${col}">${initials(a.agent)}</div>
-    <div class="atx"><span class="who">${esc(a.agent)}</span> ${esc(a.action)} ${a.ticket?`<span class="tk">${esc(a.ticket)}</span>`:''}</div>
-    <span class="tm">${esc((a.at||"").slice(11,16))}</span></div>`;}
+  return `<div class="tlrow"><div class="tl-node" style="--nc:${col}"><i class="ti ti-${actIcon(a.action)}"></i></div>
+    <div class="tl-body"><div class="tl-line"><span class="tl-who" style="color:${col}">${esc(a.agent)}</span> <span class="tl-act">${esc(a.action)}</span>${a.ticket?` <span class="tk" onclick="showTicket('${esc(a.ticket)}')" style="cursor:pointer">${esc(a.ticket)}</span>`:''}</div>
+      <div class="tl-t" title="${esc(a.at||'')}">${esc(relTime(a.at))}</div></div></div>`;}
 function card(t){const a={high:"var(--red)",medium:"var(--amber)",low:"var(--dim)"}[t.priority]||"var(--dim)";
   const ui=t.has_ui?'<span class="b ui">UI</span>':'',bug=t.type==="bug"?'<span class="b bug">bug</span>':'';
   return `<div class="card-t" onclick="showTicket('${t.id}')"><div class="cid">${esc(t.id)}</div>
@@ -1791,7 +1815,11 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
     if(!INIT_ACT){const agents=[...new Set((s.activity||[]).map(a=>a.agent))];
       sel.innerHTML='<option value="">all agents</option>'+agents.map(a=>`<option>${esc(a)}</option>`).join("");INIT_ACT=true;}
     const f=sel.value;let act=[...(s.activity||[])].reverse();if(f)act=act.filter(a=>a.agent===f);
-    document.getElementById("activity-full").innerHTML=act.length?act.map(actItem).join(""):'<div class="empty">no activity</div>';
+    let html="",lastDay="";
+    for(const a of act){const day=(a.at||"").slice(0,10);
+      if(day&&day!==lastDay){lastDay=day;html+=`<div class="tl-day">${esc(day)}</div>`;}
+      html+=actItem(a);}
+    document.getElementById("activity-full").innerHTML=act.length?`<div class="timeline">${html}</div>`:'<div class="empty">no activity yet</div>';
     renderTranscripts();
   }else if(CUR==="insights"){
     const sp=s.spend||{by_role:{}};const tok=(sp.input_tokens||0)+(sp.output_tokens||0);
