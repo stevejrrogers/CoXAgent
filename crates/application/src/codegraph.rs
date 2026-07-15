@@ -161,6 +161,36 @@ impl CodeGraph {
         out
     }
 
+    /// Resolve import edges to `(from_file, to_file)` where the import points at
+    /// another indexed file (matched by file stem). Deduped. This is the
+    /// internal dependency graph, ready to visualise.
+    #[must_use]
+    pub fn resolved_edges(&self) -> Vec<(String, String)> {
+        // stem -> file path (first wins; ambiguous stems are best-effort).
+        let mut by_stem: BTreeMap<String, String> = BTreeMap::new();
+        for f in &self.files {
+            if let Some(stem) = Path::new(&f.path).file_stem() {
+                by_stem
+                    .entry(stem.to_string_lossy().to_string())
+                    .or_insert_with(|| f.path.clone());
+            }
+        }
+        let mut out: Vec<(String, String)> = Vec::new();
+        for (from, imp) in &self.edges {
+            for seg in imp.split(['/', '.', ':', '\\']).rev() {
+                if let Some(target) = by_stem.get(seg) {
+                    if target != from {
+                        out.push((from.clone(), target.clone()));
+                    }
+                    break;
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// A compact, token-bounded overview for agents: languages, then each file
     /// with its symbols. Truncated to `max_chars`.
     #[must_use]
@@ -489,6 +519,21 @@ mod tests {
         assert!(word_matches("build(a, b)", "build"));
         assert!(!word_matches("let x = rebuild();", "build"));
         assert!(!word_matches("building = 1", "build"));
+    }
+
+    #[test]
+    fn resolved_edges_link_files() {
+        let dir = std::env::temp_dir().join(format!("cgdep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("mk");
+        std::fs::write(dir.join("src/tokens.rs"), "pub fn compress() {}\n").expect("w");
+        std::fs::write(dir.join("src/user.rs"), "use crate::tokens::compress;\n").expect("w2");
+        let g = CodeGraph::index(&dir);
+        let e = g.resolved_edges();
+        assert!(e
+            .iter()
+            .any(|(f, t)| f == "src/user.rs" && t == "src/tokens.rs"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

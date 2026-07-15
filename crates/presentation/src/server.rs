@@ -623,6 +623,7 @@ pub async fn serve_full(
         .route("/api/projects/:pid/docs/:id/ws", get(docs_ws_ep))
         .route("/api/projects/:pid/codegraph", get(codegraph_ep))
         .route("/api/projects/:pid/codegraph/refs", get(codegraph_refs_ep))
+        .route("/api/projects/:pid/codegraph/deps", get(codegraph_deps_ep))
         .route(
             "/api/projects/:pid/codegraph/build",
             post(codegraph_build_ep),
@@ -2173,6 +2174,59 @@ async fn codegraph_ep(
             .into_response();
     }
     Json(codegraph_summary(&g)).into_response()
+}
+
+/// The internal dependency graph (file → file import edges) for visualisation.
+/// Bounded to the most-connected files so the picture stays legible.
+async fn codegraph_deps_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Some(g) = coxagent_application::codegraph::CodeGraph::load(&p.work_dir) else {
+        return Json(serde_json::json!({ "built": false })).into_response();
+    };
+    let edges = g.resolved_edges();
+    // Degree per file (in + out) to pick the interesting nodes.
+    let mut degree: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for (a, b) in &edges {
+        *degree.entry(a.as_str()).or_insert(0) += 1;
+        *degree.entry(b.as_str()).or_insert(0) += 1;
+    }
+    let mut ranked: Vec<(&str, usize)> = degree.into_iter().collect();
+    ranked.sort_by_key(|&(_, d)| std::cmp::Reverse(d));
+    let keep: std::collections::HashSet<&str> = ranked.iter().take(60).map(|(f, _)| *f).collect();
+    let sym_of: std::collections::HashMap<&str, usize> = g
+        .files
+        .iter()
+        .map(|f| (f.path.as_str(), f.symbols))
+        .collect();
+    let lang_of: std::collections::HashMap<&str, &str> = g
+        .files
+        .iter()
+        .map(|f| (f.path.as_str(), f.lang.as_str()))
+        .collect();
+    let nodes: Vec<serde_json::Value> = keep
+        .iter()
+        .map(|f| {
+            serde_json::json!({
+                "id": f,
+                "lang": lang_of.get(f).copied().unwrap_or(""),
+                "symbols": sym_of.get(f).copied().unwrap_or(0),
+            })
+        })
+        .collect();
+    let links: Vec<serde_json::Value> = edges
+        .iter()
+        .filter(|(a, b)| keep.contains(a.as_str()) && keep.contains(b.as_str()))
+        .map(|(a, b)| serde_json::json!({ "source": a, "target": b }))
+        .collect();
+    Json(serde_json::json!({
+        "built": true, "nodes": nodes, "links": links, "total_files": g.files.len(),
+    }))
+    .into_response()
 }
 
 #[derive(serde::Deserialize)]

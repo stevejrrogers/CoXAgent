@@ -120,6 +120,13 @@
   .cg-fm{font-size:11.5px;color:var(--dim);margin-top:3px;display:flex;align-items:center;gap:6px}
   .cg-badge{background:var(--card2);border-radius:5px;padding:1px 7px;font-size:10px;color:var(--muted)}
   .cg-sym{cursor:pointer} .cg-sym:hover{background:var(--card2)}
+  .cg-graph{background:var(--card);border:1px solid var(--border);border-radius:10px;overflow:hidden}
+  .cg-svg{width:100%;height:auto;display:block}
+  .cg-edges line{stroke:var(--border2);stroke-width:1}
+  .cg-edges line.hot{stroke:var(--accent2);stroke-width:2}
+  .cgn{cursor:default;transition:opacity .1s} .cgn.dim{opacity:.18}
+  .cgn circle{stroke:var(--card);stroke-width:1.5}
+  .cgl{font-size:9px;fill:var(--muted);font-family:ui-monospace,Menlo,monospace}
   .cgi-list{margin-top:12px;max-height:62vh;overflow:auto;display:flex;flex-direction:column;gap:10px}
   .cgi-file{border:1px solid var(--border);border-radius:9px;overflow:hidden}
   .cgi-fp{background:var(--card2);padding:7px 11px;font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--text);display:flex;align-items:center;gap:6px}
@@ -3643,10 +3650,51 @@ function renderCodeMapMain(d){
    </div>
    <div style="font-size:11px;color:var(--dim);margin:4px 0 12px">built ${esc((d.built_at||'').slice(0,16).replace('T',' '))} · agents also read <code style="font-family:ui-monospace,monospace">.coxagent/REPO_MAP.md</code></div>
    <div class="cg-langs">${langChips}</div>
-   <div class="cg-search"><i class="ti ti-search"></i><input id="cg-q" placeholder="Search symbols — functions, structs, classes…" oninput="cgSearch(this.value)" autocomplete="off"></div>
+   <div class="sec" style="margin-top:6px">Dependency graph <span style="font-size:11px;color:var(--dim);font-weight:400">· how files import each other — hover a node</span></div>
+   <div id="cg-graph" class="cg-graph"><div class="empty" style="padding:20px">loading graph…</div></div>
+   <div class="cg-search" style="margin-top:14px"><i class="ti ti-search"></i><input id="cg-q" placeholder="Search symbols — functions, structs, classes…" oninput="cgSearch(this.value)" autocomplete="off"></div>
    <div id="cg-results"></div>
    <div class="sec" style="margin-top:16px">Top files <span style="font-size:11px;color:var(--dim);font-weight:400">· most symbols first</span></div>
    <div class="cg-files">${files||'<div class="empty">no source files found</div>'}</div>`;
+  cgLoadGraph();
+}
+const CG_LANGCOL={rust:"#dea584",python:"#4b8bbe",typescript:"#3178c6",javascript:"#e8d44d",go:"#00add8",java:"#e76f00",ruby:"#cc342d"};
+async function cgLoadGraph(){
+  const box=document.getElementById("cg-graph");if(!box)return;
+  let d={};try{d=await(await fetch(api("/codegraph/deps"))).json();}catch(e){}
+  if(!d.nodes||!d.nodes.length){box.innerHTML='<div class="empty" style="padding:20px;font-size:12px">no import relationships detected between files</div>';return;}
+  cgRenderGraph(box,d.nodes,d.links||[]);
+}
+// Tiny force-directed layout (no libs): repulsion + link springs + centering.
+function cgRenderGraph(box,rawNodes,rawLinks){
+  const W=800,H=460,cx=W/2,cy=H/2;
+  const nodes=rawNodes.map(n=>({...n,x:cx+(Math.random()-.5)*W*.6,y:cy+(Math.random()-.5)*H*.6,vx:0,vy:0}));
+  const idx={};nodes.forEach((n,i)=>idx[n.id]=i);
+  const links=rawLinks.filter(l=>idx[l.source]!=null&&idx[l.target]!=null).map(l=>({s:idx[l.source],t:idx[l.target]}));
+  const deg={};links.forEach(l=>{deg[l.s]=(deg[l.s]||0)+1;deg[l.t]=(deg[l.t]||0)+1;});
+  for(let it=0;it<220;it++){
+    const k=it<160?1:.4;
+    for(let i=0;i<nodes.length;i++){let fx=0,fy=0;
+      for(let j=0;j<nodes.length;j++){if(i===j)continue;let dx=nodes[i].x-nodes[j].x,dy=nodes[i].y-nodes[j].y;let d2=dx*dx+dy*dy+.01;let f=2600/d2;fx+=dx*f;fy+=dy*f;}
+      fx+=(cx-nodes[i].x)*.012;fy+=(cy-nodes[i].y)*.012;
+      nodes[i].vx=(nodes[i].vx+fx*k)*.82;nodes[i].vy=(nodes[i].vy+fy*k)*.82;}
+    for(const l of links){const a=nodes[l.s],b=nodes[l.t];let dx=b.x-a.x,dy=b.y-a.y,dist=Math.sqrt(dx*dx+dy*dy)||1;let f=(dist-90)*.02*k;let ux=dx/dist*f,uy=dy/dist*f;a.vx+=ux;a.vy+=uy;b.vx-=ux;b.vy-=uy;}
+    for(const n of nodes){n.x+=n.vx;n.y+=n.vy;n.x=Math.max(24,Math.min(W-24,n.x));n.y=Math.max(20,Math.min(H-20,n.y));}
+  }
+  const short=p=>p.split("/").slice(-1)[0];
+  const line=links.map(l=>`<line class="cge" data-s="${l.s}" data-t="${l.t}" x1="${nodes[l.s].x.toFixed(1)}" y1="${nodes[l.s].y.toFixed(1)}" x2="${nodes[l.t].x.toFixed(1)}" y2="${nodes[l.t].y.toFixed(1)}"/>`).join("");
+  const circ=nodes.map((n,i)=>{const r=Math.max(4,Math.min(13,4+Math.sqrt(n.symbols||0)*1.3));const col=CG_LANGCOL[n.lang]||"#888";
+    const showLabel=(deg[i]||0)>=2;
+    return `<g class="cgn" data-i="${i}" transform="translate(${n.x.toFixed(1)},${n.y.toFixed(1)})"><title>${esc(n.id)} · ${n.symbols} symbols · ${deg[i]||0} links</title>
+      <circle r="${r.toFixed(1)}" fill="${col}"/>${showLabel?`<text x="${(r+3).toFixed(1)}" y="3" class="cgl">${esc(short(n.id))}</text>`:''}</g>`;}).join("");
+  box.innerHTML=`<svg viewBox="0 0 ${W} ${H}" class="cg-svg"><g class="cg-edges">${line}</g><g class="cg-nodes">${circ}</g></svg>`;
+  // Hover a node → highlight its edges + neighbours.
+  box.querySelectorAll(".cgn").forEach(g=>{
+    g.addEventListener("mouseenter",()=>{const i=+g.dataset.i;const nb=new Set([i]);
+      box.querySelectorAll(".cge").forEach(e=>{const s=+e.dataset.s,t=+e.dataset.t;const on=s===i||t===i;e.classList.toggle("hot",on);if(on){nb.add(s);nb.add(t);}});
+      box.querySelectorAll(".cgn").forEach(n=>n.classList.toggle("dim",!nb.has(+n.dataset.i)));});
+    g.addEventListener("mouseleave",()=>{box.querySelectorAll(".cge").forEach(e=>e.classList.remove("hot"));box.querySelectorAll(".cgn").forEach(n=>n.classList.remove("dim"));});
+  });
 }
 async function buildCodeMap(btn){const o=btn.innerHTML;btn.innerHTML='<i class="ti ti-loader-2 att-spin"></i> Indexing…';btn.disabled=true;
   try{const d=await(await fetch(api("/codegraph/build"),{method:"POST"})).json();CG=d;renderCodeMapMain(d);toasty("Code map built — "+d.files+" files, "+d.symbols+" symbols","ok");}
