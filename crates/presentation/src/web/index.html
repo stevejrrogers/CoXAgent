@@ -3659,7 +3659,7 @@ function renderCodeMapMain(d){
    <div class="cg-files">${files||'<div class="empty">no source files found</div>'}</div>`;
   cgLoadGraph();
 }
-const CG_LANGCOL={rust:"#dea584",python:"#4b8bbe",typescript:"#3178c6",javascript:"#e8d44d",go:"#00add8",java:"#e76f00",csharp:"#68217a",swift:"#f05138",ruby:"#cc342d"};
+const CG_LANGCOL={rust:"#dea584",python:"#4b8bbe",typescript:"#3178c6",tsx:"#3178c6",javascript:"#e8d44d",go:"#00add8",java:"#e76f00",csharp:"#68217a",swift:"#f05138",ruby:"#cc342d",c:"#8a8a8a",cpp:"#f34b7d",php:"#777bb4"};
 async function cgLoadGraph(){
   const box=document.getElementById("cg-graph");if(!box)return;
   let d={};try{d=await(await fetch(api("/codegraph/deps"))).json();}catch(e){}

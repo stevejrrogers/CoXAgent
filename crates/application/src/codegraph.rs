@@ -494,6 +494,9 @@ fn lang_of(name: &str) -> Option<&'static str> {
         "swift" => "swift",
         "cs" => "csharp",
         "rb" => "ruby",
+        "php" => "php",
+        "c" | "h" => "c",
+        "cpp" | "cc" | "cxx" | "hpp" | "hh" => "cpp",
         _ => return None,
     })
 }
@@ -656,6 +659,55 @@ mod tests {
         assert_eq!(refs.len(), 2, "comment + string usages must be excluded");
         assert!(refs.iter().any(|r| r.is_def && r.line == 1));
         assert!(refs.iter().any(|r| !r.is_def && r.line == 2));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn c_cpp_ruby_php_symbols_and_calls() {
+        let dir = std::env::temp_dir().join(format!("cgccrp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("mk");
+        std::fs::write(
+            dir.join("src/a.c"),
+            "int help(){return 0;}\nint run(){return help();}",
+        )
+        .expect("c");
+        std::fs::write(
+            dir.join("src/b.cpp"),
+            "class Foo { public: void bar(){ baz(); } };\nvoid baz(){}",
+        )
+        .expect("cpp");
+        std::fs::write(
+            dir.join("src/c.rb"),
+            "class Foo\n  def bar\n    helper\n  end\n  def helper\n  end\nend",
+        )
+        .expect("rb");
+        std::fs::write(
+            dir.join("src/d.php"),
+            "<?php\nclass Foo { function bar(){ baz(); } }\nfunction baz(){}",
+        )
+        .expect("php");
+        let g = CodeGraph::index(&dir);
+        // C free function + call.
+        assert!(g.symbols.iter().any(|s| s.name == "help" && s.kind == "fn"));
+        assert!(g.callers("help").iter().any(|(w, _, _)| w == "run"));
+        // C++ method scope + call.
+        assert!(g
+            .symbols
+            .iter()
+            .any(|s| s.name == "bar" && s.scope.as_deref() == Some("Foo")));
+        assert!(g.callers("baz").iter().any(|(w, _, _)| w == "Foo::bar"));
+        // Ruby method scope + call.
+        assert!(g
+            .symbols
+            .iter()
+            .any(|s| s.name == "helper" && s.scope.as_deref() == Some("Foo")));
+        // PHP method scope + call.
+        assert!(g
+            .symbols
+            .iter()
+            .any(|s| s.name == "bar" && s.lang == "php" && s.scope.as_deref() == Some("Foo")));
+        assert!(g.callers("baz").iter().any(|(w, _, _)| w == "Foo::bar"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

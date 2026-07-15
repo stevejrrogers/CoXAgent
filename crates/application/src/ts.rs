@@ -1,7 +1,8 @@
 //! Tree-sitter parsing for the code graph — accurate, scope-aware symbol and
 //! reference extraction that the line/regex heuristic can't match. Supports
-//! Rust, Python, JavaScript, TypeScript, Go, Java, C# and Swift; other languages
-//! fall back to the heuristic. Never executes code — it only parses.
+//! Rust, Python, JavaScript, TypeScript/TSX, Go, Java, C#, Swift, C, C++, Ruby
+//! and PHP; other languages fall back to the heuristic. Never executes code — it
+//! only parses.
 
 use tree_sitter::{Language, Node, Parser};
 
@@ -25,6 +26,10 @@ fn language_for(lang: &str) -> Option<Language> {
         "java" => tree_sitter_java::language(),
         "csharp" => tree_sitter_c_sharp::language(),
         "swift" => tree_sitter_swift::language(),
+        "c" => tree_sitter_c::language(),
+        "cpp" => tree_sitter_cpp::language(),
+        "ruby" => tree_sitter_ruby::language(),
+        "php" => tree_sitter_php::language_php(),
         _ => return None,
     })
 }
@@ -43,6 +48,10 @@ pub fn supported(lang: &str) -> bool {
             | "java"
             | "csharp"
             | "swift"
+            | "c"
+            | "cpp"
+            | "ruby"
+            | "php"
     )
 }
 
@@ -61,6 +70,30 @@ fn name_field(node: Node, src: &str) -> Option<String> {
     node.child_by_field_name("name")
         .map(|n| text(n, src).to_owned())
         .filter(|s| !s.is_empty())
+}
+
+/// First identifier-ish descendant's text — for grammars (C/C++) that bury the
+/// name inside a declarator rather than a `name` field.
+fn descend_name(node: Node, src: &str) -> Option<String> {
+    if matches!(
+        node.kind(),
+        "identifier" | "field_identifier" | "type_identifier"
+    ) {
+        return Some(text(node, src).to_owned());
+    }
+    let mut cursor = node.walk();
+    for c in node.named_children(&mut cursor) {
+        if let Some(n) = descend_name(c, src) {
+            return Some(n);
+        }
+    }
+    None
+}
+
+/// The function name from a C/C++ `function_definition` (via its declarator).
+fn c_fn_name(node: Node, src: &str) -> Option<String> {
+    node.child_by_field_name("declarator")
+        .and_then(|d| descend_name(d, src))
 }
 
 /// Extract definitions with scope. Returns `None` for unsupported languages or a
@@ -262,6 +295,49 @@ fn collect_symbols(
                 }
                 _ => {}
             },
+            "c" | "cpp" => match kind {
+                "function_definition" => {
+                    def = c_fn_name(child, src).map(|n| ("fn", n, scope.map(str::to_owned)));
+                }
+                "class_specifier" => {
+                    if let Some(n) = name_field(child, src) {
+                        new_scope = Some(n.clone());
+                        def = Some(("class", n, None));
+                    }
+                }
+                "struct_specifier" => def = name_field(child, src).map(|n| ("struct", n, None)),
+                "enum_specifier" => def = name_field(child, src).map(|n| ("enum", n, None)),
+                _ => {}
+            },
+            "ruby" => match kind {
+                "method" | "singleton_method" => {
+                    def = name_field(child, src).map(|n| ("fn", n, scope.map(str::to_owned)));
+                }
+                "class" | "module" => {
+                    if let Some(n) = name_field(child, src) {
+                        new_scope = Some(n.clone());
+                        def = Some((if kind == "module" { "module" } else { "class" }, n, None));
+                    }
+                }
+                _ => {}
+            },
+            "php" => match kind {
+                "method_declaration" | "function_definition" => {
+                    def = name_field(child, src).map(|n| ("fn", n, scope.map(str::to_owned)));
+                }
+                "class_declaration" => {
+                    if let Some(n) = name_field(child, src) {
+                        new_scope = Some(n.clone());
+                        def = Some(("class", n, None));
+                    }
+                }
+                "interface_declaration" => {
+                    def = name_field(child, src).map(|n| ("interface", n, None));
+                }
+                "trait_declaration" => def = name_field(child, src).map(|n| ("trait", n, None)),
+                "enum_declaration" => def = name_field(child, src).map(|n| ("enum", n, None)),
+                _ => {}
+            },
             _ => {}
         }
         if let Some((k, n, sc)) = def {
@@ -306,6 +382,7 @@ fn last_ident(s: &str) -> String {
 }
 
 /// The type/class a node introduces as a scope (rust impl, py/js/ts class).
+#[allow(clippy::unnested_or_patterns)] // per-language (lang, kind) pairs read clearer flat
 fn type_scope_intro(lang: &str, node: Node, src: &str) -> Option<String> {
     match (lang, node.kind()) {
         ("rust", "impl_item") => node
@@ -313,6 +390,9 @@ fn type_scope_intro(lang: &str, node: Node, src: &str) -> Option<String> {
             .map(|t| text(t, src).to_owned()),
         ("python", "class_definition")
         | ("javascript" | "typescript" | "tsx" | "swift", "class_declaration")
+        | ("php", "class_declaration")
+        | ("cpp", "class_specifier")
+        | ("ruby", "class" | "module")
         | ("java" | "csharp", "class_declaration" | "struct_declaration" | "record_declaration") => {
             name_field(node, src)
         }
@@ -321,6 +401,7 @@ fn type_scope_intro(lang: &str, node: Node, src: &str) -> Option<String> {
 }
 
 /// If `node` is a function/method definition, its `(name, scope)`.
+#[allow(clippy::unnested_or_patterns)] // per-language (lang, kind) pairs read clearer flat
 fn fn_identity(
     lang: &str,
     node: Node,
@@ -332,10 +413,13 @@ fn fn_identity(
         ("rust", "function_item")
         | ("python", "function_definition")
         | ("swift", "function_declaration")
+        | ("ruby", "method" | "singleton_method")
+        | ("php", "method_declaration" | "function_definition")
         | ("javascript" | "typescript" | "tsx", "function_declaration" | "method_definition")
         | ("java" | "csharp", "method_declaration" | "constructor_declaration") => {
             name_field(node, src).map(scoped)
         }
+        ("c" | "cpp", "function_definition") => c_fn_name(node, src).map(scoped),
         ("go", "function_declaration") => name_field(node, src).map(|n| (n, None)),
         ("go", "method_declaration") => {
             let recv = node.child_by_field_name("receiver").map(|r| {
@@ -373,6 +457,17 @@ fn call_target(lang: &str, node: Node, src: &str) -> Option<(String, usize)> {
         }
         // Swift: `(call_expression (simple_identifier) (call_suffix …))`.
         "call_expression" if lang == "swift" => node.named_child(0).map(|f| text(f, src)),
+        "call_expression" if matches!(lang, "c" | "cpp") => {
+            node.child_by_field_name("function").map(|f| text(f, src))
+        }
+        "call" if lang == "ruby" => node.child_by_field_name("method").map(|m| text(m, src)),
+        "function_call_expression" | "member_call_expression" | "scoped_call_expression"
+            if lang == "php" =>
+        {
+            node.child_by_field_name("function")
+                .or_else(|| node.child_by_field_name("name"))
+                .map(|f| text(f, src))
+        }
         _ => None,
     }?;
     let name = last_ident(callee);
@@ -427,6 +522,8 @@ const IDENT_KINDS: &[&str] = &[
     "shorthand_property_identifier",
     "package_identifier",
     "simple_identifier", // Swift
+    "constant",          // Ruby
+    "name",              // PHP
 ];
 
 fn collect_refs(node: Node, src: &str, name: &str, out: &mut Vec<usize>) {
