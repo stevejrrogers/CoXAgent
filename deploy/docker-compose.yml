@@ -1,0 +1,76 @@
+# One-shot CoXAgent deploy: app + MinIO (file storage) + coturn (calls) + Caddy
+# (automatic HTTPS). Run on a Linux host with a PUBLIC IP and a DOMAIN pointing
+# at it. Copy .env.example to .env, fill it in, then:  docker compose up -d
+#
+# Firewall: open 80/tcp, 443/tcp (Caddy), 3478/tcp+udp and 49160-49200/udp
+# (coturn). MinIO is internal-only (the app proxies file bytes).
+name: coxagent
+
+services:
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY}
+    volumes:
+      - minio:/data
+    restart: unless-stopped
+
+  coturn:
+    image: coturn/coturn
+    # Host networking: coturn needs the public IP and a wide UDP relay range.
+    network_mode: host
+    command:
+      - -n
+      - --use-auth-secret
+      - --static-auth-secret=${TURN_SECRET}
+      - --realm=coxagent
+      - --no-tls
+      - --no-dtls
+      - --min-port=49160
+      - --max-port=49200
+      - --external-ip=${PUBLIC_IP}
+    restart: unless-stopped
+
+  app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment:
+      COXAGENT_ADMIN_USER: ${ADMIN_USER}
+      COXAGENT_ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      # File storage → MinIO (over the internal docker network).
+      COXAGENT_S3_ENDPOINT: http://minio:9000
+      COXAGENT_S3_BUCKET: coxagent
+      COXAGENT_S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      COXAGENT_S3_SECRET_KEY: ${S3_SECRET_KEY}
+      # TURN for calls — the browser reaches coturn at the PUBLIC IP directly.
+      COXAGENT_TURN_URL: turn:${PUBLIC_IP}:3478
+      COXAGENT_TURN_SECRET: ${TURN_SECRET}
+    volumes:
+      - appdata:/data
+    depends_on:
+      - minio
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+    restart: unless-stopped
+
+volumes:
+  minio:
+  appdata:
+  caddy_data:
+  caddy_config:
