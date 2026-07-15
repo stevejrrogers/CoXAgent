@@ -124,7 +124,7 @@ fn collect_symbols(
                     }
                 }
                 "interface_declaration" => {
-                    def = name_field(child, src).map(|n| ("interface", n, None))
+                    def = name_field(child, src).map(|n| ("interface", n, None));
                 }
                 "type_alias_declaration" => def = name_field(child, src).map(|n| ("type", n, None)),
                 "enum_declaration" => def = name_field(child, src).map(|n| ("enum", n, None)),
