@@ -467,6 +467,7 @@ pub async fn serve_full(
             axum::routing::delete(syschat_webhook_delete_ep),
         )
         .route("/api/chat/hook/:token", post(syschat_hook_ep))
+        .route("/api/chat/ice", get(ice_config_ep))
         .route("/api/chat/send", post(syschat_send_ep))
         .route("/api/chat/ws", get(syschat_ws_ep))
         .route("/api/chat/upload", post(syschat_upload_ep))
@@ -2198,6 +2199,74 @@ async fn syschat_hook_ep(
             .send(serde_json::to_string(&m).unwrap_or_default());
     }
     Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+/// WebRTC ICE servers for calls: a public STUN server, plus a TURN relay with
+/// short-lived HMAC credentials when `COXAGENT_TURN_URL`/`_SECRET` are set
+/// (coturn's `use-auth-secret` REST scheme). TURN lets calls traverse NATs that
+/// block direct peer connections.
+async fn ice_config_ep() -> axum::response::Response {
+    let mut servers = vec![serde_json::json!({ "urls": "stun:stun.l.google.com:19302" })];
+    if let (Ok(url), Ok(secret)) = (
+        std::env::var("COXAGENT_TURN_URL"),
+        std::env::var("COXAGENT_TURN_SECRET"),
+    ) {
+        let ttl: u64 = std::env::var("COXAGENT_TURN_TTL")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(3600);
+        let exp = now_unix_secs() + ttl;
+        let username = format!("{exp}:cox");
+        let credential = base64_std(&hmac_sha1(secret.as_bytes(), username.as_bytes()));
+        // Offer the relay over both UDP and TCP for reachability.
+        let base = url.trim_end_matches("?transport=udp").to_owned();
+        servers.push(serde_json::json!({
+            "urls": [format!("{base}?transport=udp"), format!("{base}?transport=tcp")],
+            "username": username,
+            "credential": credential,
+        }));
+    }
+    Json(serde_json::json!({ "iceServers": servers })).into_response()
+}
+
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// HMAC-SHA1 (coturn's long-term-credential scheme).
+fn hmac_sha1(key: &[u8], msg: &[u8]) -> Vec<u8> {
+    use hmac::Mac;
+    let Ok(mut mac) = hmac::Hmac::<sha1::Sha1>::new_from_slice(key) else {
+        return Vec::new();
+    };
+    mac.update(msg);
+    mac.finalize().into_bytes().to_vec()
+}
+
+/// Standard Base64 (for the TURN credential).
+fn base64_std(data: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = chunk.get(1).copied().unwrap_or(0);
+        let b2 = chunk.get(2).copied().unwrap_or(0);
+        out.push(A[(b0 >> 2) as usize] as char);
+        out.push(A[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            A[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            A[(b2 & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
 }
 
 /// Whether `user` may receive a system-chat broadcast (membership per message).

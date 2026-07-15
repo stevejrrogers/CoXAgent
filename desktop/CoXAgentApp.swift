@@ -102,6 +102,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         return ok
     }
 
+    /// Quick TCP connect check to 127.0.0.1:<port> (used to detect coturn).
+    func tcpReachable(port: UInt16) -> Bool {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        if fd < 0 { return false }
+        defer { close(fd) }
+        var tv = timeval(tv_sec: 0, tv_usec: 400_000)
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = port.bigEndian
+        inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr)
+        let ok = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
+            }
+        }
+        return ok
+    }
+
     func startHub() {
         let fm = FileManager.default
         let ws = workspace()
@@ -139,6 +158,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             hubEnv["COXAGENT_S3_BUCKET"] = "coxagent"
             hubEnv["COXAGENT_S3_ACCESS_KEY"] = "coxagent"
             hubEnv["COXAGENT_S3_SECRET_KEY"] = "coxagent123"
+        }
+        // If a local coturn is up (scripts/turn.sh up), advertise it for TURN so
+        // calls traverse NATs; secret matches the script's default.
+        if hubEnv["COXAGENT_TURN_URL"] == nil && tcpReachable(port: 3478) {
+            hubEnv["COXAGENT_TURN_URL"] = "turn:127.0.0.1:3478"
+            hubEnv["COXAGENT_TURN_SECRET"] = "coxturn_dev_secret_change_me"
         }
 
         let p = Process()
