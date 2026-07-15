@@ -119,6 +119,16 @@
   .cg-fp{font-family:ui-monospace,Menlo,monospace;font-size:12.5px;color:var(--text)}
   .cg-fm{font-size:11.5px;color:var(--dim);margin-top:3px;display:flex;align-items:center;gap:6px}
   .cg-badge{background:var(--card2);border-radius:5px;padding:1px 7px;font-size:10px;color:var(--muted)}
+  .cg-sym{cursor:pointer} .cg-sym:hover{background:var(--card2)}
+  .cgi-list{margin-top:12px;max-height:62vh;overflow:auto;display:flex;flex-direction:column;gap:10px}
+  .cgi-file{border:1px solid var(--border);border-radius:9px;overflow:hidden}
+  .cgi-fp{background:var(--card2);padding:7px 11px;font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--text);display:flex;align-items:center;gap:6px}
+  .cgi-ref{display:flex;align-items:baseline;gap:9px;padding:5px 11px;border-top:1px solid var(--border);font-size:12px}
+  .cgi-ref code{font-family:ui-monospace,Menlo,monospace;color:var(--muted);white-space:pre-wrap;word-break:break-word}
+  .cgi-ref.def{background:color-mix(in srgb,var(--accent2) 8%,transparent)}
+  .cgi-ref code mark{background:color-mix(in srgb,var(--accent2) 28%,transparent);color:var(--text);border-radius:3px;padding:0 1px}
+  .cgi-ln{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--dim);min-width:30px;text-align:right;flex:none}
+  .cgi-badge{background:var(--accent2);color:#fff;font-size:9px;font-weight:700;text-transform:uppercase;border-radius:4px;padding:1px 5px;flex:none}
   .rev-verdict b{font-weight:700}
   .rev-vsum{color:var(--muted);margin-top:3px;font-size:12px}
   .revtitle{font-size:14px;font-weight:600}
@@ -1062,6 +1072,10 @@ body:not(.manage) .manage-only { display: none !important; }
         <span class="x" onclick="close_('ov-diff')"><i class="ti ti-x"></i></span>
         <h3 id="diff-title" style="font-size:14px;font-family:ui-monospace,monospace"><i class="ti ti-git-pull-request" style="color:var(--accent2)"></i> diff</h3>
         <pre id="diff-body" class="difful" style="max-height:66vh;overflow:auto;font-size:12px;line-height:1.5;background:var(--card2);padding:14px;border-radius:8px;font-family:ui-monospace,monospace">—</pre>
+      </div></div>
+      <div class="ov" id="ov-cgimpact" onclick="if(event.target===this)close_('ov-cgimpact')"><div class="modal" style="max-width:820px">
+        <span class="x" onclick="close_('ov-cgimpact')"><i class="ti ti-x"></i></span>
+        <div id="cgimpact-body"><div class="empty">loading…</div></div>
       </div></div>
       <div class="view" id="view-people">
         <div class="filters"><span style="font-size:12px;color:var(--muted)">Derived from the security audit trail — who is actually working, how much, and how effectively.</span>
@@ -3643,8 +3657,26 @@ function cgSearch(q){clearTimeout(cgT);cgT=setTimeout(async()=>{
   if(!q.trim()){box.innerHTML="";return;}
   let d={};try{d=await(await fetch(api("/codegraph?q="+encodeURIComponent(q)))).json();}catch(e){}
   const r=(d&&d.results)||[];
-  box.innerHTML=r.length?`<div class="cg-syms">`+r.map(s=>`<div class="cg-sym"><span class="cg-k cg-k-${esc(s.kind)}">${esc(s.kind)}</span><b>${esc(s.name)}</b><span class="cg-loc">${esc(s.file)}:${s.line}</span></div>`).join("")+`</div>`:'<div class="empty" style="padding:10px;font-size:12px">no symbols match</div>';
+  box.innerHTML=r.length?`<div class="cg-syms">`+r.map(s=>`<div class="cg-sym" onclick="cgImpact('${esc(s.name)}')" title="See where ${esc(s.name)} is used"><span class="cg-k cg-k-${esc(s.kind)}">${esc(s.kind)}</span><b>${esc(s.name)}</b><span class="cg-loc">${esc(s.file)}:${s.line}</span><i class="ti ti-arrow-right" style="margin-left:6px;color:var(--dim);font-size:13px"></i></div>`).join("")+`</div>`:'<div class="empty" style="padding:10px;font-size:12px">no symbols match</div>';
 },250);}
+// Impact analysis: where is this symbol used across the tree?
+async function cgImpact(name){
+  const body=document.getElementById("cgimpact-body");
+  body.innerHTML='<div class="empty" style="padding:24px">scanning usages…</div>';
+  document.getElementById("ov-cgimpact").classList.add("open");
+  let d={};try{d=await(await fetch(api("/codegraph/refs?name="+encodeURIComponent(name)))).json();}catch(e){}
+  const refs=(d&&d.refs)||[];
+  if(!refs.length){body.innerHTML=`<h3><code>${esc(name)}</code></h3><div class="empty" style="padding:16px">no usages found</div>`;return;}
+  // Group by file, definitions first.
+  const byFile={};refs.forEach(r=>{(byFile[r.file]=byFile[r.file]||[]).push(r);});
+  const files=Object.keys(byFile).sort((a,b)=>{const da=byFile[a].some(r=>r.is_def),db=byFile[b].some(r=>r.is_def);return (db-da)||a.localeCompare(b);});
+  const esc2=t=>esc(t).replace(new RegExp("("+name.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")+")","g"),'<mark>$1</mark>');
+  body.innerHTML=`<h3 style="display:flex;align-items:center;gap:8px"><i class="ti ti-sitemap" style="color:var(--accent2)"></i> <code style="font-family:ui-monospace,monospace">${esc(name)}</code></h3>
+    <div class="msub">${d.uses} usage${d.uses===1?'':'s'} · ${d.defs} definition${d.defs===1?'':'s'} across ${files.length} file${files.length===1?'':'s'}</div>
+    <div class="cgi-list">`+files.map(f=>`
+      <div class="cgi-file"><div class="cgi-fp"><i class="ti ti-file-code" style="font-size:13px"></i> ${esc(f)} <span style="color:var(--dim)">· ${byFile[f].length}</span></div>`+
+      byFile[f].map(r=>`<div class="cgi-ref${r.is_def?' def':''}"><span class="cgi-ln">${r.line}</span>${r.is_def?'<span class="cgi-badge">def</span>':''}<code>${esc2(r.text)}</code></div>`).join("")+`</div>`).join("")+`</div>`;
+}
 async function createUser(){
   const username=document.getElementById("usr-name").value.trim();
   const password=document.getElementById("usr-pass").value;

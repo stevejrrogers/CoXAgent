@@ -622,6 +622,7 @@ pub async fn serve_full(
         .route("/api/projects/:pid/docs/:id/ai-edit", post(doc_ai_edit_ep))
         .route("/api/projects/:pid/docs/:id/ws", get(docs_ws_ep))
         .route("/api/projects/:pid/codegraph", get(codegraph_ep))
+        .route("/api/projects/:pid/codegraph/refs", get(codegraph_refs_ep))
         .route(
             "/api/projects/:pid/codegraph/build",
             post(codegraph_build_ep),
@@ -2172,6 +2173,41 @@ async fn codegraph_ep(
             .into_response();
     }
     Json(codegraph_summary(&g)).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct RefsQuery {
+    name: String,
+}
+
+/// Impact analysis: every whole-word usage of a symbol across the working tree.
+async fn codegraph_refs_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<RefsQuery>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let name = query.name.trim().to_owned();
+    if name.len() < 2 {
+        return (StatusCode::BAD_REQUEST, "name too short").into_response();
+    }
+    let work_dir = p.work_dir.clone();
+    let refs = tokio::task::spawn_blocking(move || {
+        coxagent_application::codegraph::references(&work_dir, &name, 200)
+    })
+    .await
+    .unwrap_or_default();
+    let defs = refs.iter().filter(|r| r.is_def).count();
+    Json(serde_json::json!({
+        "name": query.name.trim(),
+        "total": refs.len(),
+        "defs": defs,
+        "uses": refs.len() - defs,
+        "refs": refs,
+    }))
+    .into_response()
 }
 
 /// (Re)build the code graph for a project by indexing its working tree.

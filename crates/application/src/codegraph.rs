@@ -219,6 +219,103 @@ impl CodeGraph {
     }
 }
 
+/// One usage of a symbol found by an on-demand text scan.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Reference {
+    pub file: String,
+    pub line: usize,
+    pub text: String,
+    /// True when this line is the symbol's own definition.
+    pub is_def: bool,
+}
+
+/// Whether `name` occurs in `line` as a whole identifier (word boundaries).
+fn word_matches(line: &str, name: &str) -> bool {
+    let bytes = line.as_bytes();
+    let mut from = 0;
+    while let Some(pos) = line[from..].find(name) {
+        let i = from + pos;
+        let before_ok = i == 0 || !is_ident(bytes[i - 1]);
+        let after = i + name.len();
+        let after_ok = after >= bytes.len() || !is_ident(bytes[after]);
+        if before_ok && after_ok {
+            return true;
+        }
+        from = i + name.len();
+    }
+    false
+}
+
+fn is_ident(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Impact analysis: scan the tree for whole-word usages of `name`. On-demand
+/// (re-reads source), so it reflects the current tree without a rebuild.
+#[must_use]
+pub fn references(root: &Path, name: &str, limit: usize) -> Vec<Reference> {
+    let name = name.trim();
+    if name.is_empty() || name.len() < 2 {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let fname = entry.file_name().to_string_lossy().to_string();
+            if path.is_dir() {
+                if !is_skipped_dir(&fname) {
+                    stack.push(path);
+                }
+            } else if let Some(lang) = lang_of(&fname) {
+                if entry.metadata().map_or(0, |m| m.len()) > 1_500_000 {
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                let rel = path
+                    .strip_prefix(root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                for (i, raw) in text.lines().enumerate() {
+                    if word_matches(raw, name) {
+                        let is_def =
+                            extract_symbol(lang, raw.trim()).is_some_and(|(_, n)| n == name);
+                        let text: String = raw.trim().chars().take(200).collect();
+                        out.push(Reference {
+                            file: rel.clone(),
+                            line: i + 1,
+                            text,
+                            is_def,
+                        });
+                        if out.len() >= limit {
+                            return sort_refs(out);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    sort_refs(out)
+}
+
+/// Definitions first, then by file/line.
+fn sort_refs(mut refs: Vec<Reference>) -> Vec<Reference> {
+    refs.sort_by(|a, b| {
+        b.is_def
+            .cmp(&a.is_def)
+            .then(a.file.cmp(&b.file))
+            .then(a.line.cmp(&b.line))
+    });
+    refs
+}
+
 fn is_skipped_dir(name: &str) -> bool {
     matches!(
         name,
@@ -384,6 +481,32 @@ mod tests {
             extract_import("typescript", "import { x } from './foo'"),
             Some("./foo".to_owned())
         );
+    }
+
+    #[test]
+    fn word_matches_respects_boundaries() {
+        assert!(word_matches("let x = build();", "build"));
+        assert!(word_matches("build(a, b)", "build"));
+        assert!(!word_matches("let x = rebuild();", "build"));
+        assert!(!word_matches("building = 1", "build"));
+    }
+
+    #[test]
+    fn references_finds_usages_and_marks_def() {
+        let dir = std::env::temp_dir().join(format!("cgref-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("mk");
+        std::fs::write(dir.join("src/a.rs"), "pub fn widget() {}\n").expect("w");
+        std::fs::write(
+            dir.join("src/b.rs"),
+            "fn main() { widget(); let w = widget(); }\n",
+        )
+        .expect("w2");
+        let refs = references(&dir, "widget", 50);
+        assert!(refs.iter().any(|r| r.is_def && r.file == "src/a.rs"));
+        assert!(refs.iter().filter(|r| !r.is_def).count() >= 1);
+        assert!(refs[0].is_def, "definition should sort first");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
