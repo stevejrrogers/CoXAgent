@@ -228,6 +228,10 @@
   .att-chip .att-rm:hover{color:var(--red)}
   .att-spin{animation:spin 1s linear infinite}
   @keyframes spin{to{transform:rotate(360deg)}}
+  .tk-notes{background:var(--card2);border:1px solid var(--border2);border-radius:9px;padding:9px 11px;display:flex;flex-direction:column;gap:5px}
+  .tk-notes-h{font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;display:flex;align-items:center;gap:5px;margin-bottom:2px}
+  .tk-note{display:flex;gap:8px;font-size:12.5px;color:var(--text);line-height:1.45}
+  .tk-role{font-weight:700;font-size:11px;min-width:26px;flex-shrink:0}
   .att-btn{background:transparent;border:none;color:var(--muted);cursor:pointer;font-size:17px;padding:0 8px;display:flex;align-items:center}
   .att-btn:hover{color:var(--accent)}
   .dropping{outline:2px dashed var(--accent);outline-offset:-4px;background:var(--accent)08}
@@ -1153,26 +1157,31 @@ body:not(.manage) .manage-only { display: none !important; }
   <div class="ov" id="ov-newticket" onclick="if(event.target===this)close_('ov-newticket')"><div class="modal">
     <span class="x" onclick="close_('ov-newticket')"><i class="ti ti-x"></i></span>
     <h3>New ticket</h3>
-    <div class="msub">added to the backlog — SA designs it, DEV builds it, highest priority first</div>
+    <div class="msub">Write the idea — the team (BA · PO · SA · PD) shapes it into a build-ready ticket. Everything stays editable.</div>
     <div class="mrow" style="flex-direction:column;align-items:stretch;gap:6px">
-      <span class="lbl">Title</span>
+      <span class="lbl">Idea / title</span>
       <input id="nt-title" placeholder="e.g. Add password reset" style="background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 11px;font-size:13px;font-family:inherit">
     </div>
     <div class="mrow" style="flex-direction:column;align-items:stretch;gap:6px">
-      <div style="display:flex;align-items:center;gap:8px"><span class="lbl">Description</span><div style="flex:1"></div>
-        <button onclick="baRefine()" title="Let the BA agent refine this into a ticket" style="background:var(--card2);color:var(--accent2);border:1px solid var(--border2);border-radius:8px;padding:5px 10px;font-size:11px;font-weight:600;cursor:pointer;font-family:inherit"><i class="ti ti-sparkles"></i> <span id="nt-ba-label">Refine with BA</span></button></div>
-      <textarea id="nt-desc" rows="4" placeholder="Describe the idea — or write a rough note and click Refine with BA" style="background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 11px;font-size:13px;font-family:inherit;resize:vertical"></textarea>
+      <span class="lbl">Details</span>
+      <textarea id="nt-desc" rows="3" placeholder="A rough note is enough — click ✨ and the team will refine it." style="background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 11px;font-size:13px;font-family:inherit;resize:vertical"></textarea>
     </div>
+    <button id="nt-analyze" class="pri" onclick="teamAnalyze()" style="width:100%;justify-content:center"><i class="ti ti-sparkles"></i> <span id="nt-analyze-label">Let the team analyze &amp; refine</span></button>
+    <div id="nt-notes" class="tk-notes" style="display:none"></div>
     <div class="mrow" style="gap:8px;flex-wrap:wrap">
       <div style="flex:1;min-width:90px;display:flex;flex-direction:column;gap:5px"><span class="lbl">Type</span><select id="nt-type" class="sel"><option value="feature">feature</option><option value="bug">bug</option><option value="chore">chore</option></select></div>
       <div style="flex:1;min-width:90px;display:flex;flex-direction:column;gap:5px"><span class="lbl">Priority</span><select id="nt-prio" class="sel"><option value="high">high</option><option value="medium" selected>medium</option><option value="low">low</option></select></div>
       <div style="flex:1;min-width:90px;display:flex;flex-direction:column;gap:5px"><span class="lbl">Size</span><select id="nt-cx" class="sel"><option value="small">small</option><option value="medium" selected>medium</option><option value="large">large</option></select></div>
     </div>
     <label class="mrow" style="gap:8px;cursor:pointer"><input type="checkbox" id="nt-ui"> <span class="lbl" style="cursor:pointer">Has UI (PD will design UX)</span></label>
-    <div class="mrow" style="flex-direction:column;align-items:stretch;gap:5px"><span class="lbl">Acceptance criteria <span style="color:var(--dim);font-weight:400">· one per line, up to 5 — defines "done"</span></span>
+    <div class="mrow" style="flex-direction:column;align-items:stretch;gap:5px"><span class="lbl">Acceptance criteria <span style="color:var(--dim);font-weight:400">· one per line, up to 6 — defines "done"</span></span>
       <textarea id="nt-ac" rows="4" placeholder="e.g.&#10;User can send a message and see it delivered&#10;Message is end-to-end encrypted&#10;Works offline and syncs on reconnect" style="background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 11px;font-size:13px;font-family:inherit;resize:vertical"></textarea></div>
     <div id="nt-err" style="color:var(--red);font-size:12px;min-height:16px;margin:4px 0"></div>
-    <button class="pri" onclick="createTicket()" style="width:100%;justify-content:center"><i class="ti ti-plus"></i> Create ticket</button>
+    <div class="mrow" style="gap:8px;align-items:center">
+      <button class="gc-btn" onclick="close_('ov-newticket')"><i class="ti ti-x"></i> Cancel</button>
+      <button class="gc-btn" style="margin-left:auto" onclick="saveTicket(false)"><i class="ti ti-device-floppy"></i> Save</button>
+      <button class="pri" onclick="saveTicket(true)" title="Save and kick off the autonomous build cycle"><i class="ti ti-rocket"></i> Save &amp; Start Flow</button>
+    </div>
   </div></div>
   <div class="ov" id="ov-newproj" onclick="if(event.target===this)close_('ov-newproj')"><div class="modal">
     <span class="x" onclick="close_('ov-newproj')"><i class="ti ti-x"></i></span>
@@ -3071,43 +3080,59 @@ async function loadProjects(){
   renderProjBtn();
   loadBudget();loadComments();connect();initChatBackground();
 }
-async function baRefine(){
+const TK_ROLE_COLOR={BA:"var(--accent2)",PO:"var(--amber)",SA:"var(--purple)",PD:"var(--green)"};
+async function teamAnalyze(){
   const idea=(document.getElementById("nt-desc").value||document.getElementById("nt-title").value).trim();
-  const err=document.getElementById("nt-err");const lbl=document.getElementById("nt-ba-label");
-  if(!idea){err.textContent="Write an idea first, then Refine with BA.";return;}
-  lbl.textContent="Analysing…";err.textContent="";
+  const err=document.getElementById("nt-err");const btn=document.getElementById("nt-analyze");const lbl=document.getElementById("nt-analyze-label");
+  if(!idea){err.textContent="Write the idea first, then let the team analyze.";return;}
+  err.textContent="";btn.disabled=true;
+  const t0=Date.now();const tick=setInterval(()=>{lbl.innerHTML='BA · PO · SA · PD refining… '+Math.round((Date.now()-t0)/1000)+'s';},1000);
+  lbl.textContent="BA · PO · SA · PD refining…";btn.querySelector("i").className="ti ti-loader-2 att-spin";
   try{
-    const r=await fetch(api("/ba-analyze"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({description:idea})});
-    if(!r.ok){err.textContent="BA analysis failed: "+(await r.text()||r.status)+" (needs a configured engine).";lbl.textContent="Refine with BA";return;}
-    const p=await r.json();
-    if(p.title)document.getElementById("nt-title").value=p.title;
-    if(p.description)document.getElementById("nt-desc").value=p.description;
-    if(p.priority)document.getElementById("nt-prio").value=p.priority;
-    if(p.complexity)document.getElementById("nt-cx").value=p.complexity;
-    document.getElementById("nt-ui").checked=!!p.has_ui;
-    err.style.color="var(--green)";err.textContent="Refined by BA — review and create.";
-    setTimeout(()=>{err.style.color="var(--red)";err.textContent="";},4000);
+    const r=await fetch(api("/ticket-refine"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({description:idea})});
+    if(!r.ok){err.textContent="Refine failed: "+(await r.text()||r.status)+" (needs a configured engine).";}
+    else{
+      const p=await r.json();
+      if(p.title)document.getElementById("nt-title").value=p.title;
+      if(p.description)document.getElementById("nt-desc").value=p.description;
+      if(p.priority)document.getElementById("nt-prio").value=p.priority;
+      if(p.complexity)document.getElementById("nt-cx").value=p.complexity;
+      document.getElementById("nt-ui").checked=!!p.has_ui;
+      if(p.acceptance_criteria&&p.acceptance_criteria.length)document.getElementById("nt-ac").value=p.acceptance_criteria.join("\n");
+      const nb=document.getElementById("nt-notes");
+      if(p.team_notes&&p.team_notes.length){
+        nb.style.display="block";
+        nb.innerHTML='<div class="tk-notes-h"><i class="ti ti-users"></i> The team weighed in</div>'+p.team_notes.map(n=>
+          `<div class="tk-note"><span class="tk-role" style="color:${TK_ROLE_COLOR[n.role]||'var(--muted)'}">${esc(n.role)}</span><span>${esc(n.note)}</span></div>`).join("");
+      }
+      err.style.color="var(--green)";err.textContent="Refined by the team — review, then Save or Save & Start Flow.";
+      setTimeout(()=>{err.style.color="var(--red)";err.textContent="";},5000);
+    }
   }catch(e){err.textContent="Network error.";}
-  lbl.textContent="Refine with BA";
+  clearInterval(tick);btn.disabled=false;btn.querySelector("i").className="ti ti-sparkles";lbl.textContent="Re-analyze with the team";
 }
-function openNewTicket(){["nt-title","nt-desc","nt-ac"].forEach(i=>document.getElementById(i).value="");document.getElementById("nt-err").textContent="";document.getElementById("nt-ui").checked=false;document.getElementById("ov-newticket").classList.add("open");setTimeout(()=>document.getElementById("nt-title").focus(),50);}
-async function createTicket(){
+function openNewTicket(){["nt-title","nt-desc","nt-ac"].forEach(i=>document.getElementById(i).value="");document.getElementById("nt-err").textContent="";document.getElementById("nt-ui").checked=false;const nb=document.getElementById("nt-notes");nb.style.display="none";nb.innerHTML="";document.getElementById("nt-analyze-label").textContent="Let the team analyze & refine";document.getElementById("ov-newticket").classList.add("open");setTimeout(()=>document.getElementById("nt-title").focus(),50);}
+async function saveTicket(startFlow){
   const title=document.getElementById("nt-title").value.trim();
   const err=document.getElementById("nt-err");
-  if(!title){err.textContent="Title is required.";return;}
-  const ac=(document.getElementById("nt-ac").value||"").split("\n").map(l=>l.trim()).filter(Boolean).slice(0,5);
+  if(!title){err.textContent="Title is required — write an idea or let the team analyze.";return;}
+  const ac=(document.getElementById("nt-ac").value||"").split("\n").map(l=>l.trim()).filter(Boolean).slice(0,6);
   const body={title,description:document.getElementById("nt-desc").value,
     ticket_type:document.getElementById("nt-type").value,
     priority:document.getElementById("nt-prio").value,
     complexity:document.getElementById("nt-cx").value,
     has_ui:document.getElementById("nt-ui").checked,
     acceptance_criteria:ac};
-  err.textContent="Creating…";
+  err.style.color="var(--red)";err.textContent=startFlow?"Saving & starting…":"Saving…";
   try{
     const r=await fetch(api("/tickets"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
     if(!r.ok){err.textContent=await r.text()||"Failed.";return;}
-    close_("ov-newticket");toast("Ticket created","ok");
+    if(startFlow){
+      try{await fetch(api("/control/resume"),{method:"POST"});}catch(e){}
+    }
+    close_("ov-newticket");toast(startFlow?"Ticket created — flow started":"Ticket created","ok");
     const s=await(await fetch(api("/state"))).json();render(s);
+    if(startFlow){try{const rn=await(await fetch(api("/runner"))).json();renderRunner(rn);}catch(e){}}
   }catch(e){err.textContent="Network error.";}
 }
 let PROJ_MODE="new";

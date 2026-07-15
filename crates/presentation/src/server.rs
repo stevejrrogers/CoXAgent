@@ -611,6 +611,7 @@ pub async fn serve_full(
         .route("/api/projects/:pid/config", get(get_config).put(put_config))
         .route("/api/projects/:pid/control/:action", post(control_ep))
         .route("/api/projects/:pid/ba-analyze", post(ba_analyze))
+        .route("/api/projects/:pid/ticket-refine", post(ticket_refine))
         .route("/api/projects/:pid/discuss", post(run_discussion_ep))
         .route("/api/projects/:pid/docs", get(docs_list_ep))
         .route("/api/projects/:pid/docs/generate", post(docs_generate_ep))
@@ -1352,6 +1353,35 @@ async fn ba_analyze(
         }
         Ok(_) => (StatusCode::UNPROCESSABLE_ENTITY, "BA returned no proposal").into_response(),
         Err(e) => internal_error(&format!("could not parse BA output: {e}")),
+    }
+}
+
+/// Collaborative refine: PO/SA/PD advise, then the BA synthesises a polished,
+/// build-ready ticket for the user to review. Nothing is saved.
+async fn ticket_refine(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    Json(req): Json<AnalyzeReq>,
+) -> axum::response::Response {
+    use coxagent_application::use_cases::RefineTicketUseCase;
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let idea = req.description.trim();
+    if idea.is_empty() {
+        return (StatusCode::BAD_REQUEST, "description is required").into_response();
+    }
+    let context = tokio::fs::read_to_string(&p.context_path)
+        .await
+        .unwrap_or_default();
+    let uc = RefineTicketUseCase::new(
+        Arc::clone(&p.store),
+        Arc::clone(&p.engine),
+        p.work_dir.clone(),
+    );
+    match uc.execute(idea, &context).await {
+        Ok(t) => Json(t).into_response(),
+        Err(e) => internal_error(&format!("ticket refine failed: {e}")),
     }
 }
 
