@@ -62,6 +62,10 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunDiscussionUseCa
     pub async fn execute(&self, topic: &str) -> Result<DiscussionOutcome, AppError> {
         let mut turns: Vec<Turn> = Vec::new();
 
+        // Open the discussion with a marked topic so the Scrum feed frames the
+        // whole exchange as one ceremony.
+        self.post("SM", &format!("💬 Discussion — {topic}")).await;
+
         // Opinion turns — each role reacts to the topic and the thread so far.
         for (role, persona) in [
             (
@@ -81,7 +85,8 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunDiscussionUseCa
         // Decision turn — the SM concludes and may propose an action.
         let raw = self.decision(topic, &turns).await?;
         let (decision, action) = split_action(&raw);
-        self.post("SM", &decision).await;
+        self.post("SM", &format!("✅ Decision: {}", decision.trim()))
+            .await;
 
         // Enact a decided action through the guarded AddTicket path.
         let mut created_ticket = None;
@@ -98,8 +103,11 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunDiscussionUseCa
                         acceptance_criteria: Vec::new(),
                     })
                     .await?;
-                self.post("SM", &format!("Action: created {id} from this decision."))
-                    .await;
+                self.post(
+                    "SM",
+                    &format!("🎫 Action: created {id} from this decision."),
+                )
+                .await;
                 created_ticket = Some(id.to_string());
             }
         }

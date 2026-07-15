@@ -813,6 +813,10 @@
   .cevent{display:flex;justify-content:center;margin:2px 0}
   .cev-pill{display:inline-flex;align-items:center;gap:7px;font-size:11.5px;color:var(--muted);background:var(--card2);border:1px solid var(--border2);border-left:3px solid var(--ec);border-radius:8px;padding:5px 12px;max-width:88%}
   .cev-pill i{color:var(--ec);font-size:13px}
+  /* scrum discussion emphasis: topic banner, filled decision, action chip */
+  .cev-disc{background:color-mix(in srgb,var(--accent2) 12%,var(--card2));border-color:color-mix(in srgb,var(--accent2) 30%,var(--border2));color:var(--text);font-weight:600;max-width:94%}
+  .cev-decision{background:color-mix(in srgb,var(--green) 14%,var(--card2));border-color:color-mix(in srgb,var(--green) 34%,var(--border2));color:var(--text);font-weight:600}
+  .cev-action{background:color-mix(in srgb,var(--amber) 12%,var(--card2));border-color:color-mix(in srgb,var(--amber) 32%,var(--border2))}
   .cev-t{color:var(--dim);font-size:10px;margin-left:2px}
   .chathead{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--border);background:var(--card2)}
   .chatchan{display:flex;align-items:center;gap:10px;flex:1;min-width:0}
@@ -1924,7 +1928,7 @@ function renderDiscuss(){
     if(day&&day!==lastDay){lastDay=day;sep=`<div class="chatday"><span>${esc(day)}</span></div>`;}
     const ev=scrumEvent(c);
     if(ev){ // scrum / system event → centered timeline pill, not a chat bubble
-      return `${sep}<div class="cevent"><span class="cev-pill" style="--ec:${ev.col}"><i class="ti ti-${ev.icon}"></i> ${esc(ev.text)}<span class="cev-t">${esc(time)}</span></span></div>`;
+      return `${sep}<div class="cevent"><span class="cev-pill ${ev.kind?'cev-'+ev.kind:''}" style="--ec:${ev.col}"><i class="ti ti-${ev.icon}"></i> ${esc(ev.text)}<span class="cev-t">${esc(time)}</span></span></div>`;
     }
     const isAgent=!!AC[c.author];
     const mine=!isAgent&&c.author===me;
@@ -1945,6 +1949,11 @@ function scrumEvent(c){
   const s=b.replace(/^[^\w]+/,"");
   if(a==="DEPLOY"||/^deploy (ok|failed)/i.test(s)) return {icon:/failed/i.test(s)?"cloud-x":"cloud-check",col:/failed/i.test(s)?"var(--red)":"var(--green)",text:b};
   if(/^shipped:/i.test(s)) return {icon:"rocket",col:"var(--green)",text:b};
+  // Facilitated scrum discussion: topic → decision → action stand out.
+  if(/^discussion\b/i.test(s)) return {icon:"messages",col:"var(--accent2)",text:b,kind:"disc"};
+  if(/^decision:/i.test(s)) return {icon:"circle-check",col:"var(--green)",text:b,kind:"decision"};
+  if(/^action:/i.test(s)) return {icon:"ticket",col:"var(--amber)",text:b,kind:"action"};
+  if(/^(blocker|blocked|heads up)\b/i.test(s)||/rejecting/i.test(s)) return {icon:"alert-triangle",col:"var(--amber)",text:b};
   if(/^sprint \d+ review/i.test(s)) return {icon:"clipboard-check",col:"var(--accent2)",text:b};
   if(/^sprint \d+ retro/i.test(s)) return {icon:"refresh",col:"var(--amber)",text:b};
   if(/^sprint \d+ planning/i.test(s)) return {icon:"run",col:"var(--accent2)",text:b};
