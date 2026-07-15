@@ -17,5 +17,5 @@ pub use engine::{AgentEnginePort, AgentOutcome, AgentRequest, Usage};
 pub use forge::{ForgePort, PullRequest};
 pub use git::{GitAuthor, GitPort};
 pub use notify::{NotifierPort, NotifyEvent, NullNotifier};
-pub use state_store::StateStorePort;
+pub use state_store::{StateStorePort, WorkerEntry};
 pub use storage::StoragePort;

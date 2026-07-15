@@ -7,7 +7,7 @@
 //! concurrency (a monotonic `revision`) rejects lost updates from two writers.
 
 use async_trait::async_trait;
-use coxagent_application::ports::outbound::StateStorePort;
+use coxagent_application::ports::outbound::{StateStorePort, WorkerEntry};
 use coxagent_application::state::{ProjectState, SCHEMA_VERSION};
 use coxagent_application::PortError;
 use coxagent_domain::{Role, TicketId};
@@ -27,18 +27,24 @@ CREATE TABLE IF NOT EXISTS project_state (
 );
 CREATE TABLE IF NOT EXISTS project_coord (
     project_id TEXT NOT NULL,
-    kind       TEXT NOT NULL,          -- 'leader' | 'stage'
-    coord_key  TEXT NOT NULL,          -- '' for leader, 'ticket|stage' for a lease
+    kind       TEXT NOT NULL,          -- 'leader' | 'stage' | 'worker'
+    coord_key  TEXT NOT NULL,          -- '' leader, 'ticket|stage' lease, worker id
     worker     TEXT NOT NULL,
     at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    role       TEXT,                   -- worker registry: current role
+    ticket     TEXT,                   -- worker registry: current ticket
     PRIMARY KEY (project_id, kind, coord_key)
-);";
+);
+ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS role TEXT;
+ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS ticket TEXT;";
 
 /// Leader lease lifetime (seconds) — a runner must renew within this or another
 /// takes over. Matches the JSON store.
 const LEADER_TTL_SECS: f64 = 90.0;
 /// Per-ticket stage lease lifetime (seconds).
 const STAGE_TTL_SECS: f64 = 1800.0;
+/// How long a worker is shown online after its last heartbeat (seconds).
+const WORKER_TTL_SECS: f64 = 120.0;
 
 /// A [`StateStorePort`] storing one project aggregate per row in Postgres.
 pub struct SqlStateStore {
@@ -221,6 +227,52 @@ impl StateStorePort for SqlStateStore {
         let key = format!("{id}|{stage}");
         self.upsert_lease("stage", &key, worker, STAGE_TTL_SECS)
             .await
+    }
+
+    async fn heartbeat_worker(
+        &self,
+        worker: &str,
+        role: &str,
+        ticket: &str,
+        _now: &str,
+    ) -> Result<(), PortError> {
+        let client = self.client().await?;
+        client
+            .execute(
+                "INSERT INTO project_coord (project_id, kind, coord_key, worker, at, role, ticket)
+                 VALUES ($1, 'worker', $2, $2, now(), $3, $4)
+                 ON CONFLICT (project_id, kind, coord_key) DO UPDATE
+                    SET at = now(), role = EXCLUDED.role, ticket = EXCLUDED.ticket",
+                &[&self.project_id, &worker, &role, &ticket],
+            )
+            .await
+            .map_err(|e| PortError::Backend(format!("heartbeat: {e}")))?;
+        Ok(())
+    }
+
+    async fn workers(&self) -> Result<Vec<WorkerEntry>, PortError> {
+        let client = self.client().await?;
+        let rows = client
+            .query(
+                "SELECT worker, coalesce(role,''), coalesce(ticket,''),
+                        to_char(at, 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')
+                   FROM project_coord
+                  WHERE project_id = $1 AND kind = 'worker'
+                    AND at > now() - make_interval(secs => $2)
+                  ORDER BY worker",
+                &[&self.project_id, &WORKER_TTL_SECS],
+            )
+            .await
+            .map_err(|e| PortError::Backend(format!("workers: {e}")))?;
+        Ok(rows
+            .into_iter()
+            .map(|r| WorkerEntry {
+                worker: r.get(0),
+                role: r.get(1),
+                ticket: r.get(2),
+                at: r.get(3),
+            })
+            .collect())
     }
 }
 

@@ -6,6 +6,19 @@ use crate::error::PortError;
 use crate::state::ProjectState;
 use async_trait::async_trait;
 use coxagent_domain::{Role, TicketId};
+use serde::{Deserialize, Serialize};
+
+/// A live entry in the cross-machine worker registry: which runner (`account@
+/// host`) is online, whether it currently leads, and what it last reported doing.
+/// Lets any dashboard show every team working the project, even on other hosts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerEntry {
+    pub worker: String,
+    pub role: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ticket: String,
+    pub at: String,
+}
 
 /// Persistence port for the project aggregate.
 ///
@@ -81,5 +94,30 @@ pub trait StateStorePort: Send + Sync {
         _now: &str,
     ) -> Result<bool, PortError> {
         Ok(true)
+    }
+
+    /// Record this runner's live presence (`account@host`, current role, current
+    /// ticket) in the shared worker registry, so every dashboard can show all
+    /// teams. Best-effort; the default is a no-op (single-runner needs none).
+    ///
+    /// # Errors
+    /// [`PortError`] on a coordination-store failure.
+    async fn heartbeat_worker(
+        &self,
+        _worker: &str,
+        _role: &str,
+        _ticket: &str,
+        _now: &str,
+    ) -> Result<(), PortError> {
+        Ok(())
+    }
+
+    /// The registry of workers seen alive recently (stale entries pruned). The
+    /// default is empty (single-runner shows only its own live snapshot).
+    ///
+    /// # Errors
+    /// [`PortError`] on a coordination-store failure.
+    async fn workers(&self) -> Result<Vec<WorkerEntry>, PortError> {
+        Ok(Vec::new())
     }
 }

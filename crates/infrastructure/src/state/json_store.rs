@@ -6,7 +6,7 @@
 //! recovered.
 
 use async_trait::async_trait;
-use coxagent_application::ports::outbound::StateStorePort;
+use coxagent_application::ports::outbound::{StateStorePort, WorkerEntry};
 use coxagent_application::state::{ProjectState, SCHEMA_VERSION};
 use coxagent_application::PortError;
 use coxagent_domain::{Role, TicketId};
@@ -34,7 +34,12 @@ struct Coord {
     leader: Option<Lease>,
     #[serde(default)]
     leases: Vec<StageLease>,
+    #[serde(default)]
+    workers: Vec<WorkerEntry>,
 }
+
+/// How long a worker is shown as online after its last heartbeat.
+const WORKER_TTL_SECS: i64 = 120;
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Lease {
@@ -255,6 +260,39 @@ impl JsonStateStore {
         outcome
     }
 
+    /// Upsert this worker's presence under the lock, pruning stale entries.
+    fn heartbeat_blocking(
+        &self,
+        worker: &str,
+        role: &str,
+        ticket: &str,
+        now: &str,
+    ) -> Result<(), PortError> {
+        let lock = acquire_lock(&self.lock_path())?;
+        let mut coord = self.read_coord();
+        coord
+            .workers
+            .retain(|w| w.worker != worker && age_secs(&w.at, now) <= WORKER_TTL_SECS);
+        coord.workers.push(WorkerEntry {
+            worker: worker.to_owned(),
+            role: role.to_owned(),
+            ticket: ticket.to_owned(),
+            at: now.to_owned(),
+        });
+        let outcome = self.write_coord(&coord);
+        drop(lock);
+        outcome
+    }
+
+    /// Live worker registry (stale entries dropped) relative to `now`.
+    fn workers_blocking(&self, now: &str) -> Vec<WorkerEntry> {
+        self.read_coord()
+            .workers
+            .into_iter()
+            .filter(|w| age_secs(&w.at, now) <= WORKER_TTL_SECS)
+            .collect()
+    }
+
     /// Copy the current state file into a timestamped, pruned backup set.
     fn snapshot_backup(&self, current: &Path) -> Result<(), PortError> {
         let dir = self.root.join(BACKUP_DIR);
@@ -331,6 +369,37 @@ impl StateStorePort for JsonStateStore {
         })
         .await
         .map_err(|e| PortError::Backend(e.to_string()))?
+    }
+
+    async fn heartbeat_worker(
+        &self,
+        worker: &str,
+        role: &str,
+        ticket: &str,
+        now: &str,
+    ) -> Result<(), PortError> {
+        let root = self.root.clone();
+        let (worker, role, ticket, now) = (
+            worker.to_owned(),
+            role.to_owned(),
+            ticket.to_owned(),
+            now.to_owned(),
+        );
+        tokio::task::spawn_blocking(move || {
+            JsonStateStore { root }.heartbeat_blocking(&worker, &role, &ticket, &now)
+        })
+        .await
+        .map_err(|e| PortError::Backend(e.to_string()))?
+    }
+
+    async fn workers(&self) -> Result<Vec<WorkerEntry>, PortError> {
+        let root = self.root.clone();
+        let now = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default();
+        tokio::task::spawn_blocking(move || Ok(JsonStateStore { root }.workers_blocking(&now)))
+            .await
+            .map_err(|e| PortError::Backend(e.to_string()))?
     }
 }
 

@@ -591,6 +591,17 @@
   .ag-task .tid{font-family:ui-monospace,monospace;font-size:11px;opacity:.85}
   .ag-task.idle{background:var(--card2);color:var(--muted)} .ag-task.idle:hover{color:var(--text)}
   .agent .agstats{margin:0}
+  /* cross-machine teams-online strip */
+  .teamson{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:13px 15px;margin:14px 0 4px}
+  .tso-h{font-size:12px;font-weight:600;color:var(--muted);display:flex;align-items:center;gap:7px;margin-bottom:10px}
+  .tso-h span{background:var(--accentbg);color:var(--accent2);border-radius:20px;padding:1px 8px;font-size:11px}
+  .tso-list{display:flex;flex-wrap:wrap;gap:8px}
+  .tso{display:inline-flex;align-items:center;gap:7px;background:var(--card2);border:1px solid var(--border);border-radius:9px;padding:6px 10px;font-size:12px}
+  .tso-dot{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 0 3px color-mix(in srgb,var(--green) 22%,transparent)}
+  .tso-id{font-family:ui-monospace,monospace;color:var(--text)}
+  .tso-role{font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--dim);border:1px solid var(--border);border-radius:5px;padding:1px 6px}
+  .tso-role.lead{color:var(--green);border-color:color-mix(in srgb,var(--green) 45%,var(--border))}
+  .tso-tk{font-family:ui-monospace,monospace;font-size:11px;color:var(--accent2)}
   .ag-by{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--dim);font-family:ui-monospace,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
   .ag-by i{flex-shrink:0}
   .cols{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:14px}
@@ -999,6 +1010,7 @@ body:not(.manage) .manage-only { display: none !important; }
       </div>
       <div class="view" id="view-team">
         <div class="kpis" id="team-summary"></div>
+        <div id="team-online"></div>
         <div id="team-dupwarn"></div>
         <div id="team-sessions"></div>
         <div class="sec">Agents <span style="font-size:11px;color:var(--dim);font-weight:400">· your autonomous workers — click one to see its live log</span></div>
@@ -1720,6 +1732,7 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
         <div class="agstats"><span title="actions"><i class="ti ti-bolt"></i> ${st.n}</span><span title="tickets touched"><i class="ti ti-ticket"></i> ${st.tk.size}</span>${cost>0?`<span title="cost"><i class="ti ti-coin"></i> ${money(cost)}</span>`:''}</div>
         <div class="ag-status">${statusHtml}</div></div>`;}).join("");
     renderDupWarn(s);
+    renderTeamsOnline();
     renderSessions();
     if(ME&&ME.role==="admin")renderTeamPeople();
   }else if(CUR==="board"){
@@ -3889,6 +3902,21 @@ function renderDupWarn(s){
     .map(x=>({x,key:x.map(t=>t.id).sort().join("+")}))
     .filter(d=>!DUP_DISMISSED.has(d.key));
   el.innerHTML=dups.length?dups.map(({x,key})=>`<div class="dupwarn"><i class="ti ti-copy-check"></i><div><b>Possible duplicate work:</b> ${x.map(t=>`<span class="tk" style="cursor:pointer" onclick="showTicket('${t.id}')">${esc(t.id)}</span>`).join(" ")} share the title “${esc(x[0].title)}”.</div><button class="dup-dismiss" title="Dismiss this warning" onclick="dismissDup('${key}')"><i class="ti ti-x"></i></button></div>`).join(""):"";
+}
+
+// Cross-machine "teams online": every runner (account@host) working this project
+// right now, from the shared worker registry — so one dashboard shows them all.
+async function renderTeamsOnline(){
+  const el=document.getElementById("team-online");if(!el)return;
+  let ws=[];try{ws=await (await fetch(api("/workers"))).json();}catch(e){return;}
+  if(!Array.isArray(ws)||!ws.length){el.innerHTML="";return;}
+  el.innerHTML=`<div class="teamson"><div class="tso-h"><i class="ti ti-server-bolt"></i> Teams online <span>${ws.length}</span></div>`
+    +`<div class="tso-list">`+ws.map(w=>{
+      const lead=w.role==="leader";
+      return `<div class="tso"><span class="tso-dot"></span><span class="tso-id">${esc(w.worker)}</span>`
+        +`<span class="tso-role ${lead?'lead':''}">${lead?'leader':'worker'}</span>`
+        +(w.ticket?`<span class="tso-tk">${esc(w.ticket)}</span>`:'')+`</div>`;
+    }).join("")+`</div></div>`;
 }
 async function openAgent(role){
   const meta=AGENTS.find(a=>a[0]===role);const col=cvar((meta&&meta[2])||"--muted");

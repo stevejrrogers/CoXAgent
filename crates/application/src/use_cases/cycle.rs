@@ -709,6 +709,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         };
         let now = crate::state::now_rfc3339();
         let leader = self.store.acquire_leader(&me, &now).await.unwrap_or(true);
+        // Announce presence in the shared registry so every dashboard (even on
+        // another machine) can list this team as online.
+        let _ = self
+            .store
+            .heartbeat_worker(&me, if leader { "leader" } else { "worker" }, "", &now)
+            .await;
 
         // Keep the code map fresh so `.coxagent/REPO_MAP.md` reflects the tree
         // the agents are about to work on (best-effort, token-saver-gated).

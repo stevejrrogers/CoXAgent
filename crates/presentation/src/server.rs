@@ -607,6 +607,7 @@ pub async fn serve_full(
         .route("/api/projects/:pid/state", get(state_ep))
         .route("/api/projects/:pid/metrics", get(metrics_ep))
         .route("/api/projects/:pid/runner", get(runner_ep))
+        .route("/api/projects/:pid/workers", get(workers_ep))
         .route("/api/projects/:pid/audit", get(audit_ep))
         .route("/api/projects/:pid/config", get(get_config).put(put_config))
         .route("/api/projects/:pid/control/:action", post(control_ep))
@@ -1200,6 +1201,19 @@ async fn runner_ep(
         return not_found();
     };
     Json(p.runner.snapshot()).into_response()
+}
+
+/// The shared worker registry: every team (`account@host`) currently online for
+/// this project, across all machines. Powers the dashboard's cross-machine view.
+async fn workers_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let workers = p.store.workers().await.unwrap_or_default();
+    Json(workers).into_response()
 }
 
 async fn audit_ep(
