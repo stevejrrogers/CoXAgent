@@ -2208,6 +2208,8 @@ function openChatWS(){
   const pid=PID;CHATWS_PID=pid;
   let ws;try{ws=new WebSocket(`${proto}://${location.host}/api/chat/ws`);}catch(e){return;}
   CHATWS=ws;
+  // On (re)connect, resync the open channel so nothing sent during a gap is lost.
+  ws.onopen=()=>{if(CHATWS===ws&&isChatMode())loadChatHistory();};
   ws.onmessage=e=>{try{const m=JSON.parse(e.data);
     if(m.type==="signal"){onSignal(m);return;}
     if(m.type==="reaction"){applyReaction(m);return;}
@@ -2219,6 +2221,17 @@ function openChatWS(){
     // same project is active.
     if(PID===pid){clearTimeout(chatwsRetry);chatwsRetry=setTimeout(openChatWS,1500);}}};
   ws.onerror=()=>{try{ws.close();}catch(_){}};
+  startChatPoll();
+}
+// Fallback for environments where the WebSocket is flaky (e.g. some WKWebViews):
+// while the socket isn't OPEN, refresh the current channel every few seconds so
+// messages never appear "stuck". No-op when the socket is healthy.
+let chatPoll=null;
+function startChatPoll(){
+  if(chatPoll)return;
+  chatPoll=setInterval(()=>{
+    if(isChatMode()&&!(CHATWS&&CHATWS.readyState===1))loadChatHistory();
+  },2500);
 }
 function closeChatWS(){clearTimeout(chatwsRetry);if(CHATWS){try{CHATWS.onclose=null;CHATWS.close();}catch(_){}}CHATWS=null;}
 function renderChatList(force){
