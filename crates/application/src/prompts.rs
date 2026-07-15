@@ -116,6 +116,25 @@ pub fn system_prompt(role_section: &str) -> String {
     format!("{BASE}\n\n{role_section}")
 }
 
+/// A compact repo-map context block for code-touching agents: the file/symbol
+/// layout so they locate code without exploring blind (fewer tool calls / tokens).
+/// Empty when the token-saver is off or no map has been built yet.
+#[must_use]
+pub fn repo_map_block(work_dir: &std::path::Path, enabled: bool) -> String {
+    if !enabled {
+        return String::new();
+    }
+    let path = work_dir.join(".coxagent").join("REPO_MAP.md");
+    let Ok(map) = std::fs::read_to_string(&path) else {
+        return String::new();
+    };
+    let compact: String = map.chars().take(3000).collect();
+    format!(
+        "\n\n## Repo map — files & their symbols (use this to locate code fast, \
+         don't re-scan the whole tree)\n{compact}\n"
+    )
+}
+
 /// Render architecture stack rules as prompt constraints, so DEV/SA follow the
 /// stack proactively (governance also enforces it reactively).
 #[must_use]
@@ -140,9 +159,27 @@ pub fn stack_constraints(rules: &[crate::conformance::StackRule]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{deploy_constraints, design_constraints};
+    use super::{deploy_constraints, design_constraints, repo_map_block};
     use crate::config::DeployConfig;
     use crate::state::DesignSystem;
+
+    #[test]
+    fn repo_map_block_gated_and_present() {
+        let dir = std::env::temp_dir().join(format!("rmb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".coxagent")).expect("mk");
+        std::fs::write(
+            dir.join(".coxagent/REPO_MAP.md"),
+            "# Repo map\n## src/x.rs (rust)\n  fn go",
+        )
+        .expect("w");
+        assert!(repo_map_block(&dir, false).is_empty(), "off = empty");
+        let on = repo_map_block(&dir, true);
+        assert!(on.contains("src/x.rs") && on.contains("Repo map"));
+        // Missing map = empty even when enabled.
+        assert!(repo_map_block(std::path::Path::new("/no/such/dir"), true).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn deploy_constraint_names_the_assigned_port() {

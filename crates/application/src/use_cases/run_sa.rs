@@ -94,7 +94,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
         AgentRequest {
             role: Role::Sa,
             system_prompt: prompts::system_prompt(prompts::SA),
-            task_prompt: format!("Design feature {id}: {title}"),
+            task_prompt: format!(
+                "Design feature {id}: {title}{}",
+                prompts::repo_map_block(&self.work_dir, self.config.workflow.token_saver)
+            ),
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(1200),
         }
