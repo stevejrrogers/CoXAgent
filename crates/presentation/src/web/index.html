@@ -645,6 +645,26 @@
   .sprintpct{text-align:right;flex:none}
   .sprintpct .v{font-size:26px;font-weight:800;color:var(--accent2);line-height:1}
   .sprintpct .k{font-size:10.5px;color:var(--dim);margin-top:2px}
+  /* Proper sprint view: ring, stats, board columns, burndown */
+  .sp-ring{--p:0;width:74px;height:74px;border-radius:50%;flex:none;display:grid;place-items:center;background:conic-gradient(var(--accent2) calc(var(--p)*1%),var(--card2) 0)}
+  .sp-ring .in{width:58px;height:58px;border-radius:50%;background:var(--card);display:grid;place-items:center;text-align:center}
+  .sp-ring .in b{font-size:18px;font-weight:800;color:var(--text);line-height:1}
+  .sp-ring .in span{font-size:8.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.04em}
+  .sp-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(84px,1fr));gap:8px;margin-top:14px}
+  .sp-stat{background:var(--card2);border:1px solid var(--border2);border-radius:9px;padding:9px 11px}
+  .sp-stat .v{font-size:19px;font-weight:700;line-height:1.1} .sp-stat .k{font-size:10.5px;color:var(--dim);margin-top:3px;text-transform:uppercase;letter-spacing:.03em}
+  .sp-board{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:8px}
+  .sp-col{background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:9px;min-height:80px;display:flex;flex-direction:column;gap:7px}
+  .sp-colh{display:flex;align-items:center;gap:6px;font-size:11.5px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.03em;padding:1px 2px}
+  .sp-colh .n{margin-left:auto;background:var(--card);border-radius:20px;padding:0 7px;font-size:11px;color:var(--dim)}
+  .sp-colh .dot2{width:7px;height:7px;border-radius:50%}
+  .sp-card{background:var(--card);border:1px solid var(--border2);border-left-width:3px;border-radius:8px;padding:8px 10px;cursor:pointer;transition:transform .08s}
+  .sp-card:hover{transform:translateY(-1px);border-color:var(--accent2)}
+  .sp-card .t{font-size:12.5px;color:var(--text);line-height:1.35;margin-bottom:5px}
+  .sp-card .m{display:flex;align-items:center;gap:6px;font-size:10px;color:var(--dim)}
+  .sp-card .m .id{font-family:ui-monospace,Menlo,monospace}
+  .sp-col .empty{font-size:11px;color:var(--dim);text-align:center;padding:12px 4px}
+  .sp-burn{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-top:8px}
   .msbadge{display:inline-flex;align-items:center;gap:5px;margin-top:8px;font-size:11px;font-weight:600;color:var(--accent2);background:var(--accentbg);border-radius:20px;padding:3px 10px}
   .msbadge i{font-size:13px}
   .msline{display:flex;flex-direction:column;gap:2px}
@@ -1621,31 +1641,80 @@ function renderSprintPanel(s){
   if(!sp){el.innerHTML='<div class="panel" style="text-align:center;padding:32px 20px"><i class="ti ti-run" style="font-size:30px;color:var(--accent2)"></i><div style="font-size:15px;font-weight:600;margin:10px 0 4px">Kanban mode</div><div class="empty" style="padding:0">No sprints in kanban flow. Switch the workflow to <b style="color:var(--text)">scrum</b> in <a onclick="nav(\'settings\')" style="color:var(--accent2);cursor:pointer">Settings</a> so the PO plans sprints by priority.</div></div>';return;}
   const byId=id=>(s.tickets||[]).find(x=>x.id===id)||{id,title:"(removed)",status:"?"};
   const committed=(sp.committed||[]).map(byId);
-  const done=committed.filter(t=>t.status==="done"||t.status==="documented");
+  const isDone=t=>["done","documented","verified"].includes(t.status);
+  const isProg=t=>["in_progress","fixed"].includes(t.status);
+  const done=committed.filter(isDone),prog=committed.filter(isProg);
+  const todo=committed.filter(t=>!isDone(t)&&!isProg(t));
   const total=committed.length,pct=total?Math.round(done.length/total*100):0;
-  // Milestone this sprint ladders up to: first target not yet reached.
+  // Sprint window from cycles: length, elapsed, remaining.
+  const cyc=(window.RUNNER&&window.RUNNER.cycle)||0;
+  const len=sp.length_cycles||sp.length||0;
+  const elapsed=Math.max(0,cyc-(sp.started_cycle||0));
+  const left=len?Math.max(0,len-elapsed):null;
+  // Velocity: average shipped over closed sprints.
+  const hist=(s.sprints||[]).filter(x=>x.done!=null);
+  const vel=hist.length?Math.round(hist.reduce((a,x)=>a+x.done,0)/hist.length*10)/10:null;
   const ms=s.milestones||[],cur=String(s.current_version||"0.0.0");
   const activeMs=ms.find(m=>cmpVer(m.target_version,cur)>0)||ms[ms.length-1];
   const msBadge=activeMs?`<span class="msbadge"><i class="ti ti-target"></i> ${esc(activeMs.name)} · v${esc(activeMs.target_version)}</span>`:'';
-  // "Up next": top-priority backlog not in this sprint — the next sprint preview.
   const rank={high:0,medium:1,low:2};
   const inSp=new Set(sp.committed||[]);
   const upnext=(s.tickets||[]).filter(t=>["pending","ready"].includes(t.status)&&t.type!=="bug"&&!inSp.has(t.id))
     .sort((a,b)=>(rank[a.priority]??3)-(rank[b.priority]??3)).slice(0,total||5);
-  const activeRows=committed.map(t=>tRow(t,t.status==="in_progress")).join("")||'<div class="empty">nothing committed</div>';
-  const nextRows=upnext.map(t=>tRow(t,false)).join("")||'<div class="empty">backlog clear — nothing queued</div>';
+  const pc={high:"var(--red)",medium:"var(--amber)",low:"var(--muted)"};
+  const card=t=>{const col=pc[t.priority]||"var(--border2)";
+    return `<div class="sp-card" style="border-left-color:${col}" onclick="showTicket('${t.id}')">
+      <div class="t">${esc(t.title||'(removed)')}</div>
+      <div class="m"><span class="id">${esc(t.id)}</span><i class="ti ti-${t.type==='bug'?'bug':'bulb'}" style="font-size:11px"></i><span style="margin-left:auto;color:${col}">${esc(t.priority||'—')}</span></div></div>`;};
+  const colHtml=(label,dot,items)=>`<div class="sp-col"><div class="sp-colh"><span class="dot2" style="background:${dot}"></span>${label}<span class="n">${items.length}</span></div>${items.map(card).join("")||'<div class="empty">—</div>'}</div>`;
+  const stat=(v,k,c)=>`<div class="sp-stat"><div class="v"${c?` style="color:${c}"`:""}>${v}</div><div class="k">${k}</div></div>`;
   el.innerHTML=`
     <div class="panel sprintcard">
-      <div class="sprinthead"><div><div class="sprintno">Sprint #${sp.number} <span class="pbadge on" style="margin-left:6px">● active</span></div>
-        <div class="sprintgoal">${esc(sp.goal)}</div>${msBadge}</div>
-        <div class="sprintpct"><div class="v">${pct}%</div><div class="k">${done.length}/${total} shipped</div></div></div>
-      <div style="background:var(--card2);border-radius:8px;height:10px;overflow:hidden;margin-top:12px"><div style="width:${pct}%;height:100%;background:linear-gradient(90deg,var(--accent),var(--accent2))"></div></div>
+      <div class="sprinthead">
+        <div><div class="sprintno">Sprint #${sp.number} <span class="pbadge on" style="margin-left:6px">● active</span></div>
+          <div class="sprintgoal">${esc(sp.goal)}</div>${msBadge}</div>
+        <div class="sp-ring" style="--p:${pct}"><div class="in"><b>${pct}%</b><span>done</span></div></div>
+      </div>
+      <div class="sp-stats">
+        ${stat(total,"Committed")}
+        ${stat(prog.length,"In progress","var(--accent2)")}
+        ${stat(done.length,"Shipped","var(--green)")}
+        ${stat(total-done.length,"Remaining","var(--amber)")}
+        ${stat(left==null?"—":left,"Cycles left")}
+        ${stat(vel==null?"—":vel,"Velocity avg")}
+      </div>
     </div>
-    <div class="sec">In this sprint <span style="font-size:11px;color:var(--dim);font-weight:400">· ${total} committed ticket(s)</span></div>
-    <div class="panel">${activeRows}</div>
-    <div class="sec">Up next <span style="font-size:11px;color:var(--dim);font-weight:400">· what the PO pulls into the next sprint</span></div>
-    <div class="panel">${nextRows}</div>
+    ${spBurndown(total,done.length,elapsed,len)}
+    <div class="sec">Sprint board</div>
+    <div class="sp-board">
+      ${colHtml("To do","var(--muted)",todo)}
+      ${colHtml("In progress","var(--accent2)",prog)}
+      ${colHtml("Done","var(--green)",done)}
+    </div>
+    <div class="sec" style="margin-top:16px">Up next <span style="font-size:11px;color:var(--dim);font-weight:400">· top of the backlog the PO pulls into the next sprint</span></div>
+    <div class="panel">${upnext.map(t=>tRow(t,false)).join("")||'<div class="empty">backlog clear — nothing queued</div>'}</div>
     ${velocityHtml(s.sprints||[])}`;
+}
+// Burndown: ideal line (committed→0 across the cycle window) vs work actually
+// remaining now. Cycle-based, so it reads even before any sprint has closed.
+function spBurndown(total,doneN,elapsed,len){
+  if(!len||!total)return"";
+  const W=560,H=140,pl=34,pr=12,pt=12,pb=24,iw=W-pl-pr,ih=H-pt-pb;
+  const x=c=>pl+(len?c/len:0)*iw, y=v=>pt+(1-(total?v/total:0))*ih;
+  const remaining=total-doneN,ex=Math.min(elapsed,len);
+  const ideal=`${x(0)},${y(total)} ${x(len)},${y(0)}`;
+  const actual=`${x(0)},${y(total)} ${x(ex)},${y(remaining)}`;
+  const yticks=[0,Math.ceil(total/2),total].filter((v,i,a)=>a.indexOf(v)===i);
+  return `<div class="sp-burn"><div style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:6px">Burndown <span style="color:var(--dim);font-weight:400">· work remaining vs the ideal pace</span></div>
+    <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block">
+      ${yticks.map(v=>`<line x1="${pl}" y1="${y(v)}" x2="${W-pr}" y2="${y(v)}" stroke="var(--border2)" stroke-width="1"/><text x="${pl-6}" y="${y(v)+3}" text-anchor="end" font-size="9" fill="var(--dim)">${v}</text>`).join("")}
+      <polyline points="${ideal}" fill="none" stroke="var(--border2)" stroke-width="1.5" stroke-dasharray="4 4"/>
+      <polyline points="${actual}" fill="none" stroke="var(--accent2)" stroke-width="2.5" stroke-linecap="round"/>
+      <circle cx="${x(ex)}" cy="${y(remaining)}" r="4" fill="var(--accent2)"/>
+      <text x="${pl}" y="${H-8}" font-size="9" fill="var(--dim)">cycle ${(RUNNER&&RUNNER.cycle-elapsed)||0}</text>
+      <text x="${W-pr}" y="${H-8}" text-anchor="end" font-size="9" fill="var(--dim)">+${len} cycles</text>
+    </svg>
+    <div style="display:flex;gap:16px;font-size:10.5px;color:var(--dim);margin-top:2px"><span><b style="color:var(--accent2)">━</b> remaining (${remaining})</span><span><b style="color:var(--muted)">┄</b> ideal</span></div></div>`;
 }
 function renderBacklogPanel(s){
   const el=document.getElementById("backlog-body");
@@ -2604,7 +2673,7 @@ async function setPriority(id,p){
 }
 function close_(id){document.getElementById(id).classList.remove("open");}
 function setConn(on){document.getElementById("conn").className="dot "+(on?"live":"off");document.getElementById("connlbl").textContent=on?"live":"reconnecting";}
-function renderRunner(r){if(!r)return;const running=r.mode==="running";const c=running?"live":(r.mode==="paused"?"paused":"off");
+function renderRunner(r){if(!r)return;window.RUNNER=r;const running=r.mode==="running";const c=running?"live":(r.mode==="paused"?"paused":"off");
   document.getElementById("runmode").className="dot "+c;document.getElementById("runlbl").textContent=r.mode+" · cycle "+r.cycle;
   document.getElementById("runsum").textContent=r.last_summary||"idle";
   // Start (never run) → Resume (paused after running); disabled while running.
