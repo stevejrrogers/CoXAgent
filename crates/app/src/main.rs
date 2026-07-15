@@ -824,6 +824,18 @@ async fn run_loop(
     }
 
     let webhook = config.workflow.webhook_url.clone();
+    // Worker identity for the shared registry + claim ownership. A headless
+    // worker has no web login, so it takes its name from COXAGENT_OPERATOR.
+    let operator = std::env::var("COXAGENT_OPERATOR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "worker".to_owned());
+    let worker = format!("{operator}@{}", worker_host());
+    // Isolate this worker's git checkout (when COXAGENT_WORKTREE is set) so
+    // several workers can share one machine without racing on a single working
+    // tree. On separate machines each already has its own clone, so this is a
+    // no-op there.
+    let work_dir = isolate_worktree(work_dir, &worker);
     // Forge for PRs/merges — so a headless `coxagent run` box is a full team
     // (commits, opens PRs, merges), not just a designer. Same wiring as the hub.
     let forge: Option<Arc<dyn coxagent_application::ports::outbound::ForgePort>> =
@@ -857,13 +869,7 @@ async fn run_loop(
     if let Some(url) = webhook.filter(|u| !u.is_empty()) {
         uc = uc.with_notifier(std::sync::Arc::new(WebhookNotifier::new(url)));
     }
-    // Worker identity for the shared registry + claim ownership. A headless
-    // worker has no web login, so it takes its name from COXAGENT_OPERATOR.
-    let operator = std::env::var("COXAGENT_OPERATOR")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "worker".to_owned());
-    uc.set_worker(format!("{operator}@{}", worker_host()));
+    uc.set_worker(worker);
     let shutdown = shutdown::Shutdown::listen();
     tracing::info!("cycle loop started");
 
@@ -899,6 +905,68 @@ fn worker_host() -> String {
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "local".to_owned())
+}
+
+/// When `COXAGENT_WORKTREE` is set and `work_dir` is a git repo, give this
+/// worker its own detached git worktree (a sibling dir keyed by worker id) so
+/// several workers on one machine never edit the same working tree at once. The
+/// worktree shares the repo's objects/refs, so branches and pushes still land in
+/// the same history. Returns the isolated path, or the original `work_dir` when
+/// disabled or on any error (a best-effort convenience, never fatal).
+fn isolate_worktree(work_dir: PathBuf, worker: &str) -> PathBuf {
+    if std::env::var("COXAGENT_WORKTREE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .is_none()
+    {
+        return work_dir;
+    }
+    let is_repo = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&work_dir)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !is_repo {
+        return work_dir;
+    }
+    let slug: String = worker
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    // Sibling of the repo, so it is never inside the tree the agent commits.
+    let wt = work_dir
+        .parent()
+        .unwrap_or(&work_dir)
+        .join(".coxagent-worktrees")
+        .join(&slug);
+    if wt.exists() {
+        return wt;
+    }
+    let base = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&work_dir)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "main".to_owned());
+    let ok = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&work_dir)
+        .args(["worktree", "add", "--detach"])
+        .arg(&wt)
+        .arg(&base)
+        .status()
+        .is_ok_and(|s| s.success());
+    if ok {
+        tracing::info!("worker checkout isolated at {}", wt.display());
+        wt
+    } else {
+        work_dir
+    }
 }
 
 fn render_discovery() -> String {
