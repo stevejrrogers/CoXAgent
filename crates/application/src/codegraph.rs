@@ -485,7 +485,8 @@ fn lang_of(name: &str) -> Option<&'static str> {
     Some(match ext {
         "rs" => "rust",
         "py" => "python",
-        "ts" | "tsx" => "typescript",
+        "ts" => "typescript",
+        "tsx" => "tsx",
         "js" | "jsx" | "mjs" | "cjs" => "javascript",
         "go" => "go",
         "java" => "java",

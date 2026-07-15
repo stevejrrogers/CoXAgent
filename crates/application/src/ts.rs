@@ -20,6 +20,7 @@ fn language_for(lang: &str) -> Option<Language> {
         "python" => tree_sitter_python::language(),
         "javascript" => tree_sitter_javascript::language(),
         "typescript" => tree_sitter_typescript::language_typescript(),
+        "tsx" => tree_sitter_typescript::language_tsx(),
         "go" => tree_sitter_go::language(),
         "java" => tree_sitter_java::language(),
         "csharp" => tree_sitter_c_sharp::language(),
@@ -33,7 +34,15 @@ fn language_for(lang: &str) -> Option<Language> {
 pub fn supported(lang: &str) -> bool {
     matches!(
         lang,
-        "rust" | "python" | "javascript" | "typescript" | "go" | "java" | "csharp" | "swift"
+        "rust"
+            | "python"
+            | "javascript"
+            | "typescript"
+            | "tsx"
+            | "go"
+            | "java"
+            | "csharp"
+            | "swift"
     )
 }
 
@@ -114,7 +123,7 @@ fn collect_symbols(
                 }
                 _ => {}
             },
-            "javascript" | "typescript" => match kind {
+            "javascript" | "typescript" | "tsx" => match kind {
                 "function_declaration" | "generator_function_declaration" => {
                     if let Some(n) = name_field(child, src) {
                         def = Some(("fn", n, scope.map(str::to_owned)));
@@ -303,7 +312,7 @@ fn type_scope_intro(lang: &str, node: Node, src: &str) -> Option<String> {
             .child_by_field_name("type")
             .map(|t| text(t, src).to_owned()),
         ("python", "class_definition")
-        | ("javascript" | "typescript" | "swift", "class_declaration")
+        | ("javascript" | "typescript" | "tsx" | "swift", "class_declaration")
         | ("java" | "csharp", "class_declaration" | "struct_declaration" | "record_declaration") => {
             name_field(node, src)
         }
@@ -323,7 +332,7 @@ fn fn_identity(
         ("rust", "function_item")
         | ("python", "function_definition")
         | ("swift", "function_declaration")
-        | ("javascript" | "typescript", "function_declaration" | "method_definition")
+        | ("javascript" | "typescript" | "tsx", "function_declaration" | "method_definition")
         | ("java" | "csharp", "method_declaration" | "constructor_declaration") => {
             name_field(node, src).map(scoped)
         }
@@ -347,7 +356,9 @@ fn fn_identity(
 fn call_target(lang: &str, node: Node, src: &str) -> Option<(String, usize)> {
     let line = node.start_position().row + 1;
     let callee = match node.kind() {
-        "call_expression" if matches!(lang, "rust" | "javascript" | "typescript" | "go") => {
+        "call_expression"
+            if matches!(lang, "rust" | "javascript" | "typescript" | "tsx" | "go") =>
+        {
             node.child_by_field_name("function").map(|f| text(f, src))
         }
         "call" if lang == "python" => node.child_by_field_name("function").map(|f| text(f, src)),
