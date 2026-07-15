@@ -835,7 +835,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 }
             }
 
-            self.report("TEST", "verifying build");
+            // Show what TEST is verifying: the ticket that just shipped into this
+            // build (falls back to a generic build check).
+            let verifying = report
+                .feature_done
+                .as_ref()
+                .or(report.bug_fixed.as_ref())
+                .map_or_else(|| "build".to_owned(), ToString::to_string);
+            self.report("TEST", &verifying);
             match self.test().execute().await {
                 Ok(ids) => report.bugs_filed = ids,
                 Err(e) => report.errors.push(format!("TEST: {e}")),

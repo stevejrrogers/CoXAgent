@@ -88,6 +88,34 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
                 .await?;
             filed.push(id);
         }
+
+        // Close the QA loop: a bug that was Fixed and did NOT resurface as a new
+        // bug this run has passed regression — promote it to Verified.
+        let just_filed: HashSet<String> = filed.iter().map(ToString::to_string).collect();
+        let mut state = self.store.load().await?;
+        let passed: Vec<TicketId> = state
+            .tickets
+            .iter()
+            .filter(|t| {
+                t.ticket_type() == TicketType::Bug
+                    && t.status() == coxagent_domain::Status::Fixed
+                    && !just_filed.contains(&t.id().to_string())
+            })
+            .map(|t| t.id().clone())
+            .collect();
+        let mut promoted = false;
+        for id in passed {
+            if let Some(t) = state.ticket_mut(&id) {
+                if t.transition_to(Role::Test, coxagent_domain::Status::Verified)
+                    .is_ok()
+                {
+                    promoted = true;
+                }
+            }
+        }
+        if promoted {
+            let _ = self.store.save(&state).await;
+        }
         Ok(filed)
     }
 }

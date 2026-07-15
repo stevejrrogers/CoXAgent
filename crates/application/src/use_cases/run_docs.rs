@@ -104,6 +104,25 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
             .ticket_mut(&id)
             .ok_or_else(|| PortError::Corrupt(format!("ticket {id} vanished")))?;
         ticket.transition_to(Role::Docs, Status::Documented)?;
+        // Surface the documentation in the Wiki: one page per documented feature,
+        // so the knowledge base actually fills up as the team ships (not just
+        // markdown buried in the codebase).
+        let body = {
+            let out = outcome.stdout.trim();
+            if out.len() > 40 {
+                out.to_owned()
+            } else {
+                format!("Documentation for **{title}** ({id}). See the codebase docs for details.")
+            }
+        };
+        state.upsert_doc(
+            &format!("feat-{id}"),
+            "Features",
+            "product",
+            &title,
+            &body,
+            "DOCS",
+        );
         self.store.save(&state).await?;
         Ok(Some(id))
     }

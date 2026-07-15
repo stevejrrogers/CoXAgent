@@ -276,16 +276,28 @@ impl AppState {
 
     /// All documentation pages for a project.
     async fn doc_list(&self, pid: &str, p: &ProjectHandle) -> Vec<DocPage> {
+        // The DOCS agent writes pages into project state; a Mongo store (when
+        // configured) holds user-authored/collab pages. Merge both so the Wiki
+        // shows everything, agent pages included, deduped by id.
+        let mut pages = p.store.load().await.map(|s| s.docs).unwrap_or_default();
         if let Some(ds) = &self.doc_store {
-            return ds.list(pid).await.unwrap_or_default();
+            for page in ds.list(pid).await.unwrap_or_default() {
+                if let Some(existing) = pages.iter_mut().find(|d| d.id == page.id) {
+                    *existing = page;
+                } else {
+                    pages.push(page);
+                }
+            }
         }
-        p.store.load().await.map(|s| s.docs).unwrap_or_default()
+        pages
     }
 
     /// One documentation page by id.
     async fn doc_get(&self, pid: &str, p: &ProjectHandle, id: &str) -> Option<DocPage> {
         if let Some(ds) = &self.doc_store {
-            return ds.get(pid, id).await.ok().flatten();
+            if let Ok(Some(page)) = ds.get(pid, id).await {
+                return Some(page);
+            }
         }
         p.store.load().await.ok().and_then(|s| s.doc(id))
     }
