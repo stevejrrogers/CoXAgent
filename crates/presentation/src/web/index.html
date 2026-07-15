@@ -59,6 +59,13 @@
   .tb-title{display:flex;align-items:baseline;gap:8px;min-width:0}
   .tb-ver{display:inline-flex;align-items:center;gap:6px;flex:none;font-size:12px;color:var(--muted);white-space:nowrap}
   .tb-div{width:1px;height:22px;background:var(--border);flex:none;margin:0 4px}
+  /* Compact runner control in the header (replaces the bulky sidebar card) */
+  .runpill{display:flex;align-items:center;gap:8px;background:var(--card);border:1px solid var(--border);border-radius:20px;padding:3px 4px 3px 12px;flex:none}
+  .runpill .rp-lbl{font-size:12px;font-weight:600;color:var(--muted);white-space:nowrap}
+  .rp-ctl{width:28px;height:28px;border-radius:50%;border:none;background:var(--card2);color:var(--text);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;font-size:14px;transition:background .15s}
+  .rp-ctl:hover{background:var(--hover)}
+  .rp-ctl.rp-go{background:var(--accent);color:#fff} .rp-ctl.rp-go:hover{background:var(--accenth)}
+  body.mode-chat .runpill{display:none}
   .iconbtn{flex:none;display:inline-flex;align-items:center;gap:5px;justify-content:center;min-width:32px;height:32px;padding:0 8px;background:transparent;border:1px solid transparent;border-radius:9px;color:var(--muted);cursor:pointer;font-family:inherit;font-size:15px;transition:background .15s,color .15s,border-color .15s}
   .iconbtn:hover{background:var(--card2);color:var(--text)}
   .viewers-pill{font-size:12px}
@@ -860,7 +867,7 @@ body:not(.admin) .admin-only { display: none !important; }
 body:not(.manage) .manage-only { display: none !important; }
 .pri{background:var(--accent);color:#fff;border:1px solid transparent;border-radius:9px;padding:9px 14px;font-size:13px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:6px;font-family:inherit}
 .pri:hover{background:var(--accenth)}
-.userbox{display:none;align-items:center;gap:10px;margin-top:10px;padding:8px 10px;background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--border2);border-radius:12px}
+.userbox{display:none;align-items:center;gap:10px;margin-top:auto;padding:8px 10px;background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--border2);border-radius:12px}
 .uavatar{width:34px;height:34px;flex-shrink:0;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2))}
 .uinfo{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
 .uname{font-size:13px;font-weight:600;line-height:1.1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -925,11 +932,6 @@ body:not(.manage) .manage-only { display: none !important; }
       <a data-v="access" class="manage-only" onclick="nav('access')"><i class="ti ti-user-cog"></i> Users</a>
       <a data-v="settings" class="manage-only" onclick="nav('settings')"><i class="ti ti-settings"></i> Settings</a>
     </nav>
-    <div class="runner"><div class="rt"><span class="dot off" id="runmode"></span><span id="runlbl">idle</span></div>
-      <div class="rc" id="runsum">paused</div>
-      <div class="ctlrow"><button class="pri" id="ctl-primary" onclick="ctl('resume')"><i class="ti ti-player-play"></i> <span id="ctl-primary-label">Start</span></button>
-        <button onclick="ctl('step')"><i class="ti ti-player-track-next"></i> Step</button>
-        <button id="ctl-pause" onclick="ctl('pause')"><i class="ti ti-player-pause"></i> Pause</button></div></div>
     <div id="user-badge" class="userbox">
       <div class="uavatar"><span id="ub-initials">U</span></div>
       <div class="uinfo"><div id="ub-name" class="uname"></div><span id="ub-role" class="urole"></span></div>
@@ -947,6 +949,13 @@ body:not(.manage) .manage-only { display: none !important; }
         </div>
       </div>
       <div class="sp"></div>
+      <div class="runpill" id="runpill" title="autonomous run control">
+        <span class="dot off" id="runmode"></span>
+        <span class="rp-lbl" id="runlbl">idle</span>
+        <button class="rp-ctl rp-go" id="ctl-primary" onclick="toggleRun()" title="Start"><i class="ti ti-player-play" id="ctl-primary-ic"></i></button>
+        <button class="rp-ctl" id="ctl-step" onclick="ctl('step')" title="Step one cycle"><i class="ti ti-player-track-next"></i></button>
+      </div>
+      <div class="tb-div"></div>
       <button class="iconbtn" onclick="openCmdk()" title="Search &amp; jump — ⌘K"><i class="ti ti-search"></i></button>
       <span class="iconbtn viewers-pill" id="viewers-chip" title="distinct users viewing" style="display:none"><i class="ti ti-eye"></i> <span id="viewers-n">1</span></span>
       <div class="tb-div"></div>
@@ -2805,13 +2814,14 @@ async function setPriority(id,p){
 function close_(id){document.getElementById(id).classList.remove("open");}
 function setConn(on){document.getElementById("conn").className="dot "+(on?"live":"off");document.getElementById("connlbl").textContent=on?"live":"reconnecting";}
 function renderRunner(r){if(!r)return;window.RUNNER=r;const running=r.mode==="running";const c=running?"live":(r.mode==="paused"?"paused":"off");
-  document.getElementById("runmode").className="dot "+c;document.getElementById("runlbl").textContent=r.mode+" · cycle "+r.cycle;
-  document.getElementById("runsum").textContent=r.last_summary||"idle";
-  // Start (never run) → Resume (paused after running); disabled while running.
-  const label=running?"Running":(r.cycle>0?"Resume":"Start");
-  document.getElementById("ctl-primary-label").textContent=label;
-  const prim=document.getElementById("ctl-primary");prim.disabled=running;prim.style.opacity=running?".5":"";prim.style.cursor=running?"default":"pointer";
-  const pz=document.getElementById("ctl-pause");pz.disabled=!running;pz.style.opacity=running?"":".5";}
+  const dot=document.getElementById("runmode");if(dot)dot.className="dot "+c;
+  const lbl=document.getElementById("runlbl");if(lbl)lbl.textContent=running?("cycle "+r.cycle):(r.cycle>0?("paused · "+r.cycle):"idle");
+  const pill=document.getElementById("runpill");if(pill)pill.title=r.last_summary||(running?"running":(r.cycle>0?"paused":"idle"));
+  // Primary toggles Start/Pause; it's the accent "go" button unless running.
+  const prim=document.getElementById("ctl-primary"),ic=document.getElementById("ctl-primary-ic");
+  if(prim&&ic){ic.className="ti ti-player-"+(running?"pause":"play");prim.title=running?"Pause":(r.cycle>0?"Resume":"Start");prim.classList.toggle("rp-go",!running);}
+  const step=document.getElementById("ctl-step");if(step)step.style.display=running?"none":"";}
+function toggleRun(){ctl((window.RUNNER&&RUNNER.mode==="running")?"pause":"resume");}
 async function ctl(a){try{renderRunner(await(await fetch(api("/control/"+a),{method:"POST"})).json());}catch(e){}}
 let PID=null, ES=null, poll=null;
 const api=p=>"/api/projects/"+encodeURIComponent(PID)+p;
