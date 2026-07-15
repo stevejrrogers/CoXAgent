@@ -39,7 +39,7 @@ struct Coord {
 }
 
 /// How long a worker is shown as online after its last heartbeat.
-const WORKER_TTL_SECS: i64 = 120;
+const WORKER_TTL_SECS: i64 = 600;
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Lease {

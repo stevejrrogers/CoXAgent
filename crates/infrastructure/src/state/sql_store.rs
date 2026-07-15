@@ -44,7 +44,7 @@ const LEADER_TTL_SECS: f64 = 90.0;
 /// Per-ticket stage lease lifetime (seconds).
 const STAGE_TTL_SECS: f64 = 1800.0;
 /// How long a worker is shown online after its last heartbeat (seconds).
-const WORKER_TTL_SECS: f64 = 120.0;
+const WORKER_TTL_SECS: f64 = 600.0;
 
 /// A [`StateStorePort`] storing one project aggregate per row in Postgres.
 ///

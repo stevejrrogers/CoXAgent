@@ -15,7 +15,7 @@ const LEADER_TTL_MS: u64 = 90_000;
 /// Per-ticket stage lease (ms).
 const STAGE_TTL_MS: u64 = 1_800_000;
 /// Worker presence (ms) — how long a team shows online after its last beat.
-const WORKER_TTL_MS: u64 = 120_000;
+const WORKER_TTL_MS: u64 = 600_000;
 
 /// Redis coordinator scoped to one project id. Cloneable-cheap (holds a client).
 pub struct RedisCoord {
