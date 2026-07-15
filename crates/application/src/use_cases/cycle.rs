@@ -364,6 +364,50 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
     }
 
+    /// From a unified diff, list the functions it touches and who calls them
+    /// (from the code graph). Empty when no graph or nothing recognised — a
+    /// best-effort blast-radius hint for the reviewer.
+    fn diff_impact(&self, diff: &str) -> String {
+        use std::fmt::Write as _;
+        let Some(g) = crate::codegraph::CodeGraph::load(&self.work_dir) else {
+            return String::new();
+        };
+        // Files the diff changes (`+++ b/path`), normalised.
+        let changed: std::collections::HashSet<String> = diff
+            .lines()
+            .filter_map(|l| l.strip_prefix("+++ b/").or_else(|| l.strip_prefix("+++ ")))
+            .map(|p| p.trim().replace('\\', "/"))
+            .collect();
+        if changed.is_empty() {
+            return String::new();
+        }
+        // Symbols defined in a changed file whose name appears on a changed line.
+        let touched: Vec<&crate::codegraph::Symbol> = g
+            .symbols
+            .iter()
+            .filter(|s| changed.iter().any(|c| c.ends_with(&s.file) || &s.file == c))
+            .filter(|s| {
+                diff.lines().any(|l| {
+                    (l.starts_with('+') || l.starts_with('-')) && l.contains(s.name.as_str())
+                })
+            })
+            .collect();
+        let mut out = String::new();
+        for s in touched.iter().take(10) {
+            let callers = g.callers(&s.name);
+            if callers.is_empty() {
+                continue;
+            }
+            let who: Vec<String> = callers.into_iter().take(8).map(|(w, _, _)| w).collect();
+            let _ = writeln!(out, "- `{}` is called by: {}", s.name, who.join(", "));
+        }
+        if out.is_empty() {
+            String::new()
+        } else {
+            format!("\nCall-graph impact — verify the change does not break these callers:\n{out}")
+        }
+    }
+
     /// Run the SA engine as a code reviewer over a PR diff. Returns
     /// `Some((approved, comment))`, or `None` if the engine failed / was
     /// unparseable (in which case the PR is left untouched for a human).
@@ -380,10 +424,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             diff.chars().take(16_000).collect()
         };
         let terse = if saver { crate::tokens::TERSE } else { "" };
+        // Call-graph impact: functions this diff touches, and who calls them —
+        // so the reviewer checks the change doesn't break existing callers.
+        let impact = self.diff_impact(diff);
         let task = format!(
             "You are the reviewer on a pull request before merge. Do a deep code review for \
              correctness, completeness, safety, and architecture fit.\n\nPR: {title}\nBranch: \
-             {head}\n\nUnified diff:\n```\n{clipped}\n```\n\nRespond with ONLY JSON: \
+             {head}\n\nUnified diff:\n```\n{clipped}\n```\n{impact}\nRespond with ONLY JSON: \
              {{\"decision\": \"approve\" | \"request_changes\", \"summary\": \"one short \
              paragraph; if request_changes, list the concrete fixes\"}}.{terse}"
         );
