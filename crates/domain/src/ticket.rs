@@ -116,6 +116,16 @@ pub struct Ticket {
     /// Up to 5 acceptance criteria — the checklist that defines "done".
     #[serde(default)]
     acceptance_criteria: Vec<String>,
+    /// Worker that holds the in-progress claim (`account@host`), or `None` when
+    /// unclaimed. Set atomically when the ticket enters `InProgress`; cleared on
+    /// completion or release. Lets concurrent runners on a shared backlog avoid
+    /// working the same ticket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    claimed_by: Option<String>,
+    /// RFC3339 time the claim was taken — a lease timestamp so recovery can tell
+    /// a fresh claim from one orphaned by a crashed worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    claimed_at: Option<String>,
 }
 
 impl Ticket {
@@ -154,6 +164,8 @@ impl Ticket {
             parent_id: None,
             depends_on: Vec::new(),
             acceptance_criteria: Vec::new(),
+            claimed_by: None,
+            claimed_at: None,
         })
     }
 
@@ -215,7 +227,42 @@ impl Ticket {
         &self.title
     }
 
+    /// The worker holding the in-progress claim (`account@host`), or `None`.
+    #[must_use]
+    pub fn claimed_by(&self) -> Option<&str> {
+        self.claimed_by.as_deref()
+    }
+
+    /// RFC3339 time the current claim was taken, or `None` when unclaimed.
+    #[must_use]
+    pub fn claimed_at(&self) -> Option<&str> {
+        self.claimed_at.as_deref()
+    }
+
     // --- Guarded mutations ---
+
+    /// Atomically claim the ticket for `worker` (`account@host`) by moving it
+    /// into `InProgress` and stamping ownership. Fails if the ticket is already
+    /// claimed or the transition is not legal — so two concurrent runners racing
+    /// on a shared backlog cannot both win the same ticket.
+    ///
+    /// # Errors
+    /// - [`DomainError::AlreadyClaimed`] if another worker already holds it.
+    /// - Any error from [`Ticket::transition_to`] for an illegal claim.
+    pub fn claim(
+        &mut self,
+        actor: Role,
+        worker: impl Into<String>,
+        now: impl Into<String>,
+    ) -> Result<(), DomainError> {
+        if let Some(holder) = &self.claimed_by {
+            return Err(DomainError::AlreadyClaimed { by: holder.clone() });
+        }
+        self.transition_to(actor, Status::InProgress)?;
+        self.claimed_by = Some(worker.into());
+        self.claimed_at = Some(now.into());
+        Ok(())
+    }
 
     /// Change priority. Only PO (or a `User` acting as super-PO) may do so.
     ///
@@ -313,6 +360,11 @@ impl Ticket {
             self.check_ready()?;
         }
         self.status = to;
+        // Leaving InProgress (completion or reject) frees the claim.
+        if to != Status::InProgress {
+            self.claimed_by = None;
+            self.claimed_at = None;
+        }
         Ok(())
     }
 
@@ -344,6 +396,8 @@ impl Ticket {
             TicketType::Bug => Status::Open,
             TicketType::Feature | TicketType::Chore => Status::Ready,
         };
+        self.claimed_by = None;
+        self.claimed_at = None;
         Ok(())
     }
 
@@ -474,6 +528,37 @@ mod tests {
         // Crash happens here; recovery releases the claim.
         t.release_claim(Role::System).expect("release");
         assert_eq!(t.status(), Status::Ready);
+    }
+
+    #[test]
+    fn claim_stamps_owner_and_rejects_second_claimer() {
+        let mut t = feature(false);
+        t.set_technical_design(Role::Sa, tech_design())
+            .expect("set");
+        t.transition_to(Role::Sa, Status::Ready).expect("ready");
+        t.claim(Role::DevFeature, "alice@mac", "2026-07-15T00:00:00Z")
+            .expect("first claim wins");
+        assert_eq!(t.status(), Status::InProgress);
+        assert_eq!(t.claimed_by(), Some("alice@mac"));
+        // A second worker cannot steal an in-progress claim.
+        assert!(matches!(
+            t.claim(Role::DevFeature, "bob@pc", "2026-07-15T00:01:00Z"),
+            Err(DomainError::AlreadyClaimed { .. })
+        ));
+        assert_eq!(t.claimed_by(), Some("alice@mac"));
+    }
+
+    #[test]
+    fn completing_clears_the_claim() {
+        let mut t = feature(false);
+        t.set_technical_design(Role::Sa, tech_design())
+            .expect("set");
+        t.transition_to(Role::Sa, Status::Ready).expect("ready");
+        t.claim(Role::DevFeature, "alice@mac", "2026-07-15T00:00:00Z")
+            .expect("claim");
+        t.transition_to(Role::DevFeature, Status::Done)
+            .expect("done");
+        assert_eq!(t.claimed_by(), None);
     }
 
     #[test]

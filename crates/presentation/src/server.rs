@@ -3539,15 +3539,33 @@ async fn get_transcript(
     }
 }
 
+/// This machine's hostname (the "machine" the agents run on), or `"local"`.
+fn machine_host() -> String {
+    std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "local".to_owned())
+}
+
 async fn control_ep(
     State(app): State<AppState>,
     Path((pid, action)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
     let Some(p) = app.project(&pid).await else {
         return not_found();
     };
     match action.as_str() {
-        "resume" => p.runner.resume(),
+        "resume" => {
+            // Attribute the run to whoever started it, on this machine, so the
+            // agent cards can show "account@host" and claims are owned correctly.
+            let account = resolve_username(&app, &headers).await;
+            p.runner.set_operator(&account, &machine_host());
+            p.runner.resume();
+        }
         "pause" => p.runner.pause(),
         "step" => p.runner.step(),
         "stop" => p.runner.stop(),

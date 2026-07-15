@@ -30,4 +30,7 @@ pub enum DomainError {
 
     #[error("invalid version string `{0}`")]
     InvalidVersion(String),
+
+    #[error("ticket already claimed by `{by}`")]
+    AlreadyClaimed { by: String },
 }

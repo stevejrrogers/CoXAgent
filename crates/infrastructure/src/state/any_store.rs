@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use coxagent_application::ports::outbound::StateStorePort;
 use coxagent_application::state::ProjectState;
 use coxagent_application::PortError;
+use coxagent_domain::TicketId;
 
 use super::{JsonStateStore, SqlStateStore};
 
@@ -29,6 +30,18 @@ impl StateStorePort for AnyStateStore {
         match self {
             Self::Json(s) => s.save(state).await,
             Self::Sql(s) => s.save(state).await,
+        }
+    }
+
+    async fn claim_ticket(
+        &self,
+        id: &TicketId,
+        worker: &str,
+        now: &str,
+    ) -> Result<bool, PortError> {
+        match self {
+            Self::Json(s) => s.claim_ticket(id, worker, now).await,
+            Self::Sql(s) => s.claim_ticket(id, worker, now).await,
         }
     }
 }

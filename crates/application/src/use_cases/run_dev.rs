@@ -55,6 +55,9 @@ pub struct RunDevUseCase<S: StateStorePort, E: AgentEnginePort> {
     config: Config,
     work_dir: PathBuf,
     mode: DevMode,
+    /// Identity of this runner (`account@host`) recorded as the ticket's claim
+    /// owner, so concurrent runners never work the same ticket.
+    worker: String,
 }
 
 impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
@@ -71,7 +74,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             config,
             work_dir,
             mode,
+            worker: String::new(),
         }
+    }
+
+    /// Set the runner identity (`account@host`) recorded as the claim owner.
+    #[must_use]
+    pub fn with_worker(mut self, worker: impl Into<String>) -> Self {
+        self.worker = worker.into();
+        self
     }
 
     /// Execute one developer pass.
@@ -79,16 +90,28 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
     /// # Errors
     /// [`AppError`] on engine failure or an unexpected state transition error.
     pub async fn execute(&self) -> Result<Option<TicketId>, AppError> {
-        let mut state = self.store.load().await?;
+        let state = self.store.load().await?;
         let Some(id) = self.pick(&state) else {
             return Ok(None);
         };
 
-        // Claim: System moves the ticket into progress and we persist before
-        // running, so a crash leaves a recoverable in-progress claim.
-        transition(&mut state, &id, Role::System, Status::InProgress)?;
-        self.store.save(&state).await?;
+        // Atomic claim: `account@host` wins the ticket under a cross-process lock,
+        // so a second runner racing on the same backlog cannot also take it. A
+        // lost race (already claimed) yields `None` — pick again next cycle.
+        let worker = if self.worker.is_empty() {
+            "local".to_owned()
+        } else {
+            self.worker.clone()
+        };
+        if !self
+            .store
+            .claim_ticket(&id, &worker, &now_rfc3339())
+            .await?
+        {
+            return Ok(None);
+        }
 
+        let state = self.store.load().await?;
         let outcome = self.engine.run(self.build_request(&state, &id)).await?;
         if !outcome.succeeded() {
             return Err(PortError::Backend(format!(

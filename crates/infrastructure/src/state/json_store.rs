@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use coxagent_application::ports::outbound::StateStorePort;
 use coxagent_application::state::{ProjectState, SCHEMA_VERSION};
 use coxagent_application::PortError;
+use coxagent_domain::{Role, TicketId};
 use fs4::fs_std::FileExt;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -82,13 +83,21 @@ impl JsonStateStore {
             .find_map(|p| std::fs::read(p).ok().and_then(|b| parse_checked(&b).ok()))
     }
 
-    /// Blocking save — lock, validate, atomic rename, snapshot backup.
+    /// Blocking save — lock, then write the state under the lock.
     fn save_blocking(&self, state: &ProjectState) -> Result<(), PortError> {
+        let lock = acquire_lock(&self.lock_path())?;
+        let result = self.write_locked(state);
+        // Lock releases on drop; keep it explicitly alive until here.
+        drop(lock);
+        result
+    }
+
+    /// Validate + atomic-rename + snapshot. The caller must already hold the
+    /// exclusive lock (so `claim_blocking` can read-modify-write in one section).
+    fn write_locked(&self, state: &ProjectState) -> Result<(), PortError> {
         state
             .validate()
             .map_err(|e| PortError::Corrupt(format!("refusing to save invalid state: {e}")))?;
-
-        let lock = acquire_lock(&self.lock_path())?;
 
         let json =
             serde_json::to_vec_pretty(state).map_err(|e| PortError::Backend(e.to_string()))?;
@@ -97,11 +106,30 @@ impl JsonStateStore {
         if final_path.exists() {
             self.snapshot_backup(&final_path)?;
         }
-        atomic_write(&self.root, &final_path, &json)?;
+        atomic_write(&self.root, &final_path, &json)
+    }
 
-        // Lock releases on drop; keep it explicitly alive until here.
+    /// Blocking atomic claim — the whole load/check/set/write runs inside one
+    /// held lock, so two processes racing on the same backlog serialize and only
+    /// one wins the ticket.
+    fn claim_blocking(&self, id: &TicketId, worker: &str, now: &str) -> Result<bool, PortError> {
+        let lock = acquire_lock(&self.lock_path())?;
+        let outcome = (|| {
+            let mut state = self.load_blocking()?;
+            let Some(ticket) = state.ticket_mut(id) else {
+                return Ok(false);
+            };
+            if ticket.claimed_by().is_some() {
+                return Ok(false);
+            }
+            if ticket.claim(Role::System, worker, now).is_err() {
+                return Ok(false);
+            }
+            self.write_locked(&state)?;
+            Ok(true)
+        })();
         drop(lock);
-        Ok(())
+        outcome
     }
 
     /// Copy the current state file into a timestamped, pruned backup set.
@@ -131,6 +159,23 @@ impl StateStorePort for JsonStateStore {
         tokio::task::spawn_blocking(move || JsonStateStore { root }.save_blocking(&state))
             .await
             .map_err(|e| PortError::Backend(e.to_string()))?
+    }
+
+    async fn claim_ticket(
+        &self,
+        id: &TicketId,
+        worker: &str,
+        now: &str,
+    ) -> Result<bool, PortError> {
+        let root = self.root.clone();
+        let id = id.clone();
+        let worker = worker.to_owned();
+        let now = now.to_owned();
+        tokio::task::spawn_blocking(move || {
+            JsonStateStore { root }.claim_blocking(&id, &worker, &now)
+        })
+        .await
+        .map_err(|e| PortError::Backend(e.to_string()))?
     }
 }
 

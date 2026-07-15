@@ -52,6 +52,42 @@ pub fn normalize_title(title: &str) -> String {
     out.trim().to_owned()
 }
 
+/// Content tokens of a title for semantic duplicate detection: normalise, split
+/// on spaces, and drop short stop-words so "Delivery and read receipts" and
+/// "Read receipts for delivery" share `{delivery, read, receipts}`.
+#[must_use]
+pub fn title_tokens(title: &str) -> std::collections::HashSet<String> {
+    const STOP: &[&str] = &[
+        "the", "and", "for", "with", "a", "an", "of", "to", "in", "on", "per", "via", "your",
+        "our", "support", "feature", "add", "enable",
+    ];
+    normalize_title(title)
+        .split(' ')
+        .filter(|w| w.len() > 2 && !STOP.contains(w))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+/// Jaccard similarity (|A∩B| / |A∪B|) of two token sets, in `0.0..=1.0`. Empty
+/// sets are treated as dissimilar (`0.0`) so blank titles never match.
+#[must_use]
+#[allow(clippy::implicit_hasher, clippy::cast_precision_loss)]
+pub fn jaccard<S: std::hash::BuildHasher>(
+    a: &std::collections::HashSet<String, S>,
+    b: &std::collections::HashSet<String, S>,
+) -> f64 {
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let inter = a.intersection(b).count();
+    let union = a.union(b).count();
+    if union == 0 {
+        0.0
+    } else {
+        inter as f64 / union as f64
+    }
+}
+
 /// Extract the outermost JSON array of strings (e.g. acceptance criteria),
 /// tolerating surrounding prose.
 ///
@@ -69,6 +105,22 @@ pub fn parse_string_list(raw: &str) -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jaccard_flags_paraphrased_titles() {
+        let a = title_tokens("Delivery and read receipts");
+        let b = title_tokens("Read receipts for delivery");
+        assert!(jaccard(&a, &b) >= 0.6, "paraphrase should be a near-dupe");
+        let c = title_tokens("Disappearing messages timer");
+        assert!(jaccard(&a, &c) < 0.6, "unrelated titles stay distinct");
+    }
+
+    #[test]
+    fn title_tokens_drops_stopwords() {
+        let t = title_tokens("Add support for group chats");
+        assert!(t.contains("group") && t.contains("chats"));
+        assert!(!t.contains("add") && !t.contains("for") && !t.contains("support"));
+    }
 
     #[test]
     fn parses_array_amid_prose() {

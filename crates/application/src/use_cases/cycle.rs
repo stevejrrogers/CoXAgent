@@ -89,6 +89,9 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     forge: Option<Arc<dyn ForgePort>>,
     /// Reports the currently executing agent to the runner (live "working now").
     phase: Option<crate::use_cases::runner::PhaseReporter>,
+    /// This runner's identity (`account@host`) — recorded as the ticket claim
+    /// owner so concurrent runners on a shared backlog never collide.
+    worker: String,
 }
 
 impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
@@ -112,7 +115,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             git: None,
             forge: None,
             phase: None,
+            worker: String::new(),
         }
+    }
+
+    /// Set this runner's identity (`account@host`), used as the ticket claim
+    /// owner. Called by `run_forever` from the live operator each cycle.
+    pub fn set_worker(&mut self, worker: impl Into<String>) {
+        self.worker = worker.into();
     }
 
     /// Set the live phase reporter (called by `run_forever`).
@@ -873,16 +883,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .ok()
     }
 
-    /// Reject duplicate tickets (same normalised title) that haven't started
-    /// real work yet, keeping the earliest, and call it out on the thread — so a
-    /// blind re-proposal never gets designed or built twice.
+    /// Reject duplicate tickets (same normalised title, or a semantic near-match)
+    /// that haven't started real work yet, keeping the earliest, and call it out
+    /// on the thread — so a blind re-proposal never gets designed or built twice.
     async fn dedup_backlog(&self) {
         use coxagent_domain::ticket::Status;
         let Ok(mut state) = self.store.load().await else {
             return;
         };
+        // Kept tickets carry their title token-set so we can flag not only exact
+        // re-titles but semantic near-duplicates (paraphrases) too.
         let mut first: std::collections::HashMap<String, TicketId> =
             std::collections::HashMap::new();
+        let mut kept: Vec<(TicketId, std::collections::HashSet<String>)> = Vec::new();
         let mut dupes: Vec<(TicketId, TicketId, String)> = Vec::new();
         for t in &state.tickets {
             if t.status() == Status::Rejected {
@@ -894,9 +907,21 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             }
             if let Some(orig) = first.get(&key) {
                 dupes.push((t.id().clone(), orig.clone(), t.title().to_owned()));
-            } else {
-                first.insert(key, t.id().clone());
+                continue;
             }
+            // Semantic pass: reject when the title overlaps an earlier ticket's
+            // heavily (Jaccard ≥ 0.6 on content tokens), e.g. "Disappearing
+            // Messages" vs "Auto-deleting messages".
+            let tokens = crate::parsing::title_tokens(t.title());
+            if let Some((orig, _)) = kept
+                .iter()
+                .find(|(_, seen)| crate::parsing::jaccard(&tokens, seen) >= 0.6)
+            {
+                dupes.push((t.id().clone(), orig.clone(), t.title().to_owned()));
+                continue;
+            }
+            first.insert(key, t.id().clone());
+            kept.push((t.id().clone(), tokens));
         }
         let mut rejected = Vec::new();
         for (dup, orig, title) in dupes {
@@ -1145,6 +1170,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             self.work_dir.clone(),
             mode,
         )
+        .with_worker(self.worker.clone())
     }
 
     fn test(&self) -> RunTestUseCase<S, E> {

@@ -28,6 +28,12 @@ pub struct RunnerSnapshot {
     /// A short note on what the active agent is doing (e.g. a ticket id).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_note: Option<String>,
+    /// The account that resumed this runner (who the agents are working for).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operator: Option<String>,
+    /// The host this runner executes on — the "machine" the agents run on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
 }
 
 /// Shared control + status handle. Cloneable across the server and the loop via
@@ -51,6 +57,8 @@ impl Default for RunnerHandle {
                 last_summary: "idle".to_owned(),
                 active_role: None,
                 active_note: None,
+                operator: None,
+                host: None,
             }),
         }
     }
@@ -125,6 +133,28 @@ impl RunnerHandle {
             s.active_note = None;
         }
     }
+
+    /// Record who resumed this runner and on which host. Drives the per-card
+    /// "account@host" attribution and the ticket claim owner.
+    pub fn set_operator(&self, account: &str, host: &str) {
+        if let Ok(mut s) = self.status.lock() {
+            s.operator = (!account.is_empty()).then(|| account.to_owned());
+            s.host = (!host.is_empty()).then(|| host.to_owned());
+        }
+    }
+
+    /// This runner's claim identity, `account@host` (falls back to `host` alone,
+    /// then `"local"`), for stamping ticket claims.
+    #[must_use]
+    pub fn worker_id(&self) -> String {
+        let s = self.snapshot();
+        match (s.operator, s.host) {
+            (Some(a), Some(h)) => format!("{a}@{h}"),
+            (Some(a), None) => a,
+            (None, Some(h)) => h,
+            (None, None) => "local".to_owned(),
+        }
+    }
 }
 
 /// A reporter the cycle calls as it enters/leaves each agent phase.
@@ -160,6 +190,9 @@ pub async fn run_forever<S: StateStorePort, E: AgentEnginePort>(
         };
 
         cycle += 1;
+        // Stamp the live operator identity so ticket claims are owned by whoever
+        // resumed this runner, on this host.
+        cycle_uc.set_worker(handle.worker_id());
         let report = cycle_uc.run_cycle(cycle).await;
         handle.update(cycle, report.summary());
         handle.clear_active();

@@ -700,6 +700,7 @@
   .agstats i{font-size:13px;color:var(--accent2)}
   .agtk{display:inline-flex;align-items:center;gap:4px;background:var(--accentbg);color:var(--accent2);border-radius:6px;padding:1px 8px;font-family:ui-monospace,monospace;font-size:11px;cursor:pointer}
   .agtk.agwork{background:color-mix(in srgb,var(--green) 16%,transparent);color:var(--green);cursor:default;font-family:inherit}
+  .agby{display:inline-flex;align-items:center;gap:3px;margin-left:6px;color:var(--dim);font-family:ui-monospace,monospace;font-size:10px}
   .agent.run{border-color:color-mix(in srgb,var(--green) 42%,var(--border));box-shadow:0 0 0 1px color-mix(in srgb,var(--green) 22%,transparent)}
   .agtk i{font-size:12px}
   .agidle{color:var(--dim)}
@@ -1680,12 +1681,14 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
       // Live "working now": the runner reports which agent is executing.
       const activeRole=(window.RUNNER&&RUNNER.mode==="running")?(RUNNER.active_role||"").replace(/_/g,"-").toUpperCase():"";
       const working=activeRole===r;
+      // Who started this run and on which machine — "account@host" attribution.
+      const opHost=(window.RUNNER&&RUNNER.mode==="running")?((RUNNER.operator||'')+(RUNNER.host?'@'+RUNNER.host:'')):'';
       // Current ticket: an in-progress ticket for the DEVs, else the last one this agent touched.
       let cur=null,live=working;
       if(r==="DEV-FEATURE"||r==="DEV-BUG"){const w=inProg.find(t=>r==="DEV-BUG"?t.type==="bug":t.type!=="bug");if(w){cur=w.id;}}
       if(!cur&&st.last&&st.last.ticket)cur=st.last.ticket;
       const curHtml=working
-        ?`<span class="agtk agwork"><i class="ti ti-loader-2 att-spin"></i> ${esc((RUNNER.active_note||'working')+(cur?' · '+cur:''))}</span>`
+        ?`<span class="agtk agwork"><i class="ti ti-loader-2 att-spin"></i> ${esc((RUNNER.active_note||'working')+(cur?' · '+cur:''))}</span>${opHost?`<span class="agby"><i class="ti ti-user-cog" style="font-size:11px"></i> ${esc(opHost)}</span>`:''}`
         :(cur?`<span class="agtk" onclick="event.stopPropagation();showTicket('${cur}')"><i class="ti ti-history"></i> ${esc(cur)}</span>`:'<span class="agidle">idle</span>');
       return `<div class="agent ${live?'run':''}" onclick="openAgent('${r}')" style="cursor:pointer"><div class="av" style="background:${col}22;color:${col}">${initials(r)}<span class="sr"></span></div>
         <div style="flex:1;min-width:0"><div class="rl">${r} <i class="ti ti-terminal-2" style="font-size:12px;color:var(--dim);float:right"></i></div><div class="ds">${d}</div>
