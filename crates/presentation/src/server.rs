@@ -1679,10 +1679,11 @@ async fn doc_upsert_ep(
     let Ok(mut state) = p.store.load().await else {
         return internal_error("load failed");
     };
-    let cat = if req.category.eq_ignore_ascii_case("technical") {
-        "technical"
-    } else {
-        "product"
+    let cat = match req.category.trim().to_ascii_lowercase().as_str() {
+        "technical" => "technical",
+        "flows" | "flow" => "flows",
+        "qa" | "test" | "tests" | "testing" => "qa",
+        _ => "product",
     };
     let page = state.upsert_doc(&id, cat, req.title.trim(), &req.body, &author);
     match p.store.save(&state).await {
