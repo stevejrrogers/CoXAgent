@@ -502,6 +502,7 @@ pub async fn serve_full(
             "/api/projects/:pid/docs/:id",
             axum::routing::put(doc_upsert_ep).delete(doc_delete_ep),
         )
+        .route("/api/projects/:pid/docs/:id/ai-edit", post(doc_ai_edit_ep))
         .route("/api/projects/:pid/standup", post(standup_ep))
         .route("/api/projects/:pid/tickets", post(create_ticket))
         .route("/api/projects/:pid/ticket/:id", get(ticket_detail_ep))
@@ -1656,10 +1657,28 @@ async fn docs_list_ep(
 #[derive(serde::Deserialize)]
 struct DocUpsertReq {
     #[serde(default)]
-    category: String,
+    folder: String,
     title: String,
     #[serde(default)]
     body: String,
+}
+
+/// Colour bucket from a folder path's top segment.
+fn doc_category(folder: &str) -> &'static str {
+    match folder
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "technical" => "technical",
+        "flows" => "flows",
+        "testing" | "qa" | "test" | "tests" => "qa",
+        "operations" | "ops" => "ops",
+        _ => "product",
+    }
 }
 
 /// Create or update a documentation page.
@@ -1679,16 +1698,74 @@ async fn doc_upsert_ep(
     let Ok(mut state) = p.store.load().await else {
         return internal_error("load failed");
     };
-    let cat = match req.category.trim().to_ascii_lowercase().as_str() {
-        "technical" => "technical",
-        "flows" | "flow" => "flows",
-        "qa" | "test" | "tests" | "testing" => "qa",
-        _ => "product",
-    };
-    let page = state.upsert_doc(&id, cat, req.title.trim(), &req.body, &author);
+    let folder = req.folder.trim();
+    let page = state.upsert_doc(
+        &id,
+        folder,
+        doc_category(folder),
+        req.title.trim(),
+        &req.body,
+        &author,
+    );
     match p.store.save(&state).await {
         Ok(()) => Json(page).into_response(),
         Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct DocEditReq {
+    instruction: String,
+}
+
+/// Ask the DOCS agent to revise one page per a human instruction.
+async fn doc_ai_edit_ep(
+    State(app): State<AppState>,
+    Path((pid, id)): Path<(String, String)>,
+    Json(req): Json<DocEditReq>,
+) -> axum::response::Response {
+    use coxagent_application::use_cases::GenerateDocsUseCase;
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Some(page) = p.store.load().await.ok().and_then(|s| s.doc(&id)) else {
+        return not_found();
+    };
+    if req.instruction.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "instruction required").into_response();
+    }
+    let uc = GenerateDocsUseCase::new(
+        Arc::clone(&p.store),
+        Arc::clone(&p.engine),
+        p.work_dir.clone(),
+    );
+    match uc
+        .revise(
+            &page.folder,
+            &page.title,
+            &page.body,
+            req.instruction.trim(),
+        )
+        .await
+    {
+        Ok(body) => {
+            let Ok(mut state) = p.store.load().await else {
+                return internal_error("load failed");
+            };
+            let saved = state.upsert_doc(
+                &id,
+                &page.folder,
+                &page.category,
+                &page.title,
+                &body,
+                "DOCS",
+            );
+            match p.store.save(&state).await {
+                Ok(()) => Json(saved).into_response(),
+                Err(e) => internal_error(&e.to_string()),
+            }
+        }
+        Err(e) => internal_error(&format!("doc edit failed: {e}")),
     }
 }
 

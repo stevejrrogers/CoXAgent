@@ -17,8 +17,9 @@ use std::time::Duration;
 /// One page as returned by the engine.
 #[derive(Debug, Deserialize)]
 struct GenPage {
+    /// Folder path, e.g. `"Technical/Architecture"`.
     #[serde(default)]
-    category: String,
+    folder: String,
     #[serde(default)]
     title: String,
     #[serde(default)]
@@ -101,18 +102,57 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> GenerateDocsUseCas
         let mut state = self.store.load().await?;
         for (agent, pages) in sections {
             for p in pages {
-                let category = normalise_category(&p.category);
+                let folder = p.folder.trim();
                 let title = p.title.trim();
                 if title.is_empty() || p.body.trim().is_empty() {
                     continue;
                 }
-                let id = format!("{category}-{}", slugify(title));
-                state.upsert_doc(&id, category, title, p.body.trim(), agent);
+                let category = cat_from_folder(folder);
+                let id = format!("{}-{}", slugify(folder), slugify(title));
+                state.upsert_doc(&id, folder, category, title, p.body.trim(), agent);
             }
         }
         let count = state.docs.len();
         self.store.save(&state).await?;
         Ok(count)
+    }
+
+    /// Revise a single page's Markdown per a human instruction (AI edit).
+    ///
+    /// # Errors
+    /// [`AppError`] when the engine fails or returns nothing.
+    pub async fn revise(
+        &self,
+        folder: &str,
+        title: &str,
+        current: &str,
+        instruction: &str,
+    ) -> Result<String, AppError> {
+        let task = format!(
+            "You are editing one documentation page.\n\nFolder: {folder}\nTitle: {title}\n\n\
+             ## Current Markdown\n{current}\n\n## Instruction\n{instruction}\n\n\
+             Rewrite the FULL page applying the instruction. Keep it accurate to the project \
+             (never invent facts), well-structured Markdown, dual-audience (human + AI agent). \
+             Output ONLY the new Markdown body — no code fence around the whole thing, no preamble."
+        );
+        let request = AgentRequest {
+            role: Role::Docs,
+            system_prompt: SYSTEM_DOCS.to_owned(),
+            task_prompt: task,
+            work_dir: self.work_dir.clone(),
+            timeout: Duration::from_secs(180),
+        };
+        let outcome = self.engine.run(request).await?;
+        if !outcome.succeeded() {
+            return Err(
+                PortError::Backend(format!("doc edit failed: {}", outcome.stderr.trim())).into(),
+            );
+        }
+        let body = strip_outer_fence(outcome.stdout.trim());
+        if body.is_empty() {
+            return Err(PortError::Backend("doc edit produced nothing".to_owned()).into());
+        }
+        Ok(body)
     }
 
     /// Run one documentation section with a specific agent role + prompt.
@@ -143,14 +183,36 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> GenerateDocsUseCas
     }
 }
 
-/// Clamp an engine-supplied category to the known set.
-fn normalise_category(raw: &str) -> &'static str {
-    match raw.trim().to_ascii_lowercase().as_str() {
+/// Colour bucket derived from a folder path's top segment.
+fn cat_from_folder(folder: &str) -> &'static str {
+    match folder
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "technical" => "technical",
-        "flows" | "flow" => "flows",
-        "qa" | "test" | "tests" | "testing" => "qa",
+        "flows" => "flows",
+        "testing" | "qa" | "test" | "tests" => "qa",
+        "operations" | "ops" => "ops",
         _ => "product",
     }
+}
+
+/// Drop a single ```` ``` ```` fence wrapping the whole body, if present.
+fn strip_outer_fence(s: &str) -> String {
+    let t = s.trim();
+    if let Some(rest) = t.strip_prefix("```") {
+        if let Some(end) = rest.rfind("```") {
+            // Skip an optional language tag on the first line.
+            let inner = &rest[..end];
+            let inner = inner.split_once('\n').map_or(inner, |(_, b)| b);
+            return inner.trim().to_owned();
+        }
+    }
+    t.to_owned()
 }
 
 /// Extract the JSON page array from the engine output (tolerant of code fences
@@ -179,25 +241,28 @@ const SYSTEM_DOCS: &str = "You are DOCS, the documentation writer on an autonomo
 
 const PROMPT_PRODUCT: &str =
     "Write the PRODUCT documentation as a JSON array of pages. Each item: \
-{\"category\":\"product\",\"title\":string,\"body\":markdown}. Produce exactly:\n\
+{\"folder\":string,\"title\":string,\"body\":markdown}. Put every page in folder \"Product\". \
+Produce exactly these titles:\n\
 - \"Overview\": what the product is, who it's for, the problem it solves — in plain language.\n\
 - \"Features\": each capability, what it does and why it matters, from the user's point of view.\n\
-- \"User Guide\": how a user accomplishes the main tasks, step by step.";
+- \"User Guide\": how a user accomplishes the main tasks, step by step.\n\
+- \"FAQ\": likely questions with clear answers.";
 
 const SYSTEM_SA: &str = "You are SA (Solution Architect) on an autonomous software team, writing \
     the technical documentation and system flows. Be precise; name real components/files/flows \
     you can infer. You never invent facts.";
 
 const PROMPT_TECH: &str = "Write the TECHNICAL and FLOWS documentation as a JSON array of pages. \
-Each item: {\"category\":\"technical\"|\"flows\",\"title\":string,\"body\":markdown}. Produce:\n\
-category \"technical\":\n\
-- \"Architecture\": components and how they interact; a small text/mermaid diagram if it helps.\n\
+Each item: {\"folder\":string,\"title\":string,\"body\":markdown}. Produce:\n\
+folder \"Technical\":\n\
+- \"Architecture\": components and how they interact; a small mermaid diagram if it helps.\n\
 - \"Tech Stack\": languages, frameworks, key libraries, each with a one-line reason.\n\
 - \"How It Works\": important end-to-end paths (e.g. request → handler → store), conventions, \
 and where things live.\n\
+- \"Data Model\": the main entities/records and their relationships.\n\
 - \"Development\": how to build, run, test, and safely extend the project.\n\
-category \"flows\":\n\
-- \"User Flows\": the main user journeys step by step (use a mermaid flowchart where useful).\n\
+folder \"Flows\":\n\
+- \"User Flows\": the main user journeys step by step (mermaid flowchart where useful).\n\
 - \"System Flows\": key runtime sequences between components (mermaid sequence diagrams help).";
 
 const SYSTEM_TEST: &str = "You are TEST (QA) on an autonomous software team, writing the test \
@@ -205,7 +270,8 @@ const SYSTEM_TEST: &str = "You are TEST (QA) on an autonomous software team, wri
     facts about what exists.";
 
 const PROMPT_QA: &str = "Write the TEST documentation as a JSON array of pages. Each item: \
-{\"category\":\"qa\",\"title\":string,\"body\":markdown}. Produce:\n\
+{\"folder\":string,\"title\":string,\"body\":markdown}. Put every page in folder \"Testing\". \
+Produce these titles:\n\
 - \"Test Strategy\": what to test and how (levels: unit, integration, e2e), and priorities.\n\
 - \"Test Cases\": concrete cases as a checklist/table — for each: scenario, steps, expected \
 result. Cover the main features.\n\

@@ -2598,7 +2598,11 @@ function updateOnline(){
 }
 // ── Documentation ───────────────────────────────────────────────────────────
 let DOCS=[], DOC_CUR=null, DOC_EDIT=false;
-function docCatLabel(c){return {product:"Product",technical:"Technical",flows:"Flows",qa:"Test cases"}[c]||c;}
+function docCatLabel(c){return {product:"Product",technical:"Technical",flows:"Flows",qa:"Testing",ops:"Operations"}[c]||c;}
+// A doc's folder is a "/"-separated path (e.g. "Technical/Architecture").
+// Legacy pages with no folder fall back to their category label.
+function docFolder(d){return (d.folder&&d.folder.trim())||docCatLabel(d.category);}
+const FOLDER_ICON={Product:"ti-package",Technical:"ti-code",Flows:"ti-route",Testing:"ti-checklist",Operations:"ti-server-cog"};
 async function loadDocs(){
   try{DOCS=await(await fetch(api("/docs"))).json();}catch(e){DOCS=[];}
   if(DOC_CUR&&!DOCS.some(d=>d.id===DOC_CUR))DOC_CUR=null;
@@ -2607,54 +2611,81 @@ async function loadDocs(){
 }
 function renderDocsList(){
   const box=document.getElementById("docs-list");if(!box)return;
-  const cats=[["product","Product","ti-package"],["technical","Technical","ti-code"],["flows","Flows","ti-route"],["qa","Test cases","ti-checklist"]];
-  const html=cats.map(([c,label,icon])=>{
-    const items=DOCS.filter(d=>d.category===c);
-    if(!items.length)return "";
-    return `<div class="docs-cat"><i class="ti ${icon}"></i> ${label}</div>`+items.map(d=>
-      `<div class="docitem${d.id===DOC_CUR?' on':''}" onclick="openDoc('${esc(d.id)}')">${esc(d.title)}</div>`).join("");
+  if(!DOCS.length){box.innerHTML='<div class="empty" style="padding:14px 8px;font-size:12px">No pages yet.</div>';return;}
+  // Group pages by their full folder path, then render folders in sorted order.
+  const groups={};
+  for(const d of DOCS){const f=docFolder(d);(groups[f]=groups[f]||[]).push(d);}
+  const paths=Object.keys(groups).sort((a,b)=>a.localeCompare(b));
+  const html=paths.map(path=>{
+    const depth=path.split("/").length-1;
+    const top=path.split("/")[0];
+    const leaf=path.split("/").slice(-1)[0];
+    const icon=FOLDER_ICON[top]||"ti-folder";
+    const pad=8+depth*12;
+    const head=`<div class="docs-cat" style="padding-left:${pad}px"><i class="ti ${depth?"ti-folder":icon}"></i> ${esc(leaf)}</div>`;
+    const items=groups[path].slice().sort((a,b)=>a.title.localeCompare(b.title)).map(d=>
+      `<div class="docitem${d.id===DOC_CUR?' on':''}" style="padding-left:${pad+18}px" onclick="openDoc('${esc(d.id)}')">${esc(d.title)}</div>`).join("");
+    return head+items;
   }).join("");
-  box.innerHTML=html||'<div class="empty" style="padding:14px 8px;font-size:12px">No pages yet.</div>';
+  box.innerHTML=html;
 }
 function openDoc(id){DOC_CUR=id;DOC_EDIT=false;renderDocsList();renderDocMain();}
 function currentDoc(){return DOCS.find(d=>d.id===DOC_CUR);}
+// Distinct folder paths already in use, for the editor's datalist.
+function knownFolders(){return [...new Set(DOCS.map(docFolder))].sort();}
 function renderDocMain(){
   const el=document.getElementById("docs-main");if(!el)return;
   const d=currentDoc();
   if(!d){el.innerHTML='<div class="docs-empty"><i class="ti ti-book-2"></i><div>No page selected</div><span>Generate docs with the DOCS agent (✨) or add a page (＋).</span></div>';return;}
   const canEdit=!(ME&&ME.auth)||roleCanWrite(ME.role);
   if(DOC_EDIT){
+    const opts=knownFolders().map(f=>`<option value="${esc(f)}">`).join("");
     el.innerHTML=`<div class="docedit">
       <input id="doc-title" class="doc-t" value="${esc(d.title)}" placeholder="Title">
-      <select id="doc-cat" class="sel" style="max-width:180px">${["product","technical","flows","qa"].map(c=>`<option value="${c}"${d.category===c?" selected":""}>${docCatLabel(c)}</option>`).join("")}</select>
+      <input id="doc-folder" class="doc-t" style="font-size:13px;color:var(--dim)" list="doc-folders" value="${esc(docFolder(d))}" placeholder="Folder (e.g. Technical/Architecture)">
+      <datalist id="doc-folders">${opts}</datalist>
       <textarea id="doc-body" class="doc-b" placeholder="Markdown…">${esc(d.body)}</textarea>
       <div class="doc-actions"><button class="pri" onclick="saveDoc()"><i class="ti ti-check"></i> Save</button><button class="gc-btn" onclick="DOC_EDIT=false;renderDocMain()">Cancel</button><button class="gc-btn" style="margin-left:auto;color:var(--red)" onclick="deleteDoc()"><i class="ti ti-trash"></i> Delete</button></div>
     </div>`;return;
   }
   const meta=d.updated_by?`<span class="doc-meta">Updated by ${esc(d.updated_by)}${d.updated_at?" · "+esc(d.updated_at.slice(0,10)):""}</span>`:"";
-  el.innerHTML=`<div class="doc-head"><div><span class="doc-cat-tag ${esc(d.category)}">${esc(docCatLabel(d.category))}</span><h2>${esc(d.title)}</h2>${meta}</div>${canEdit?`<button class="gc-btn" onclick="DOC_EDIT=true;renderDocMain()"><i class="ti ti-pencil"></i> Edit</button>`:""}</div><div class="doc-body md">${mdRender(d.body)}</div>`;
+  const crumb=docFolder(d).split("/").map(esc).join(' <i class="ti ti-chevron-right" style="font-size:11px;opacity:.5"></i> ');
+  const actions=canEdit?`<div style="display:flex;gap:6px"><button class="gc-btn" onclick="askAiEdit()" title="Ask the DOCS agent to revise this page"><i class="ti ti-sparkles"></i> Ask AI</button><button class="gc-btn" onclick="DOC_EDIT=true;renderDocMain()"><i class="ti ti-pencil"></i> Edit</button></div>`:"";
+  el.innerHTML=`<div class="doc-head"><div><span class="doc-cat-tag ${esc(d.category)}">${crumb}</span><h2>${esc(d.title)}</h2>${meta}</div>${actions}</div><div class="doc-body md">${mdRender(d.body)}</div>`;
 }
 async function newDoc(){
   const title=prompt("New page title:");if(!title||!title.trim())return;
-  let cat=(prompt("Category — product / technical / flows / qa:","product")||"product").trim().toLowerCase();
-  if(!["product","technical","flows","qa"].includes(cat))cat="product";
-  await putDoc("", cat, title.trim(), "# "+title.trim()+"\n\nWrite here…");DOC_EDIT=true;renderDocMain();
+  const folder=(prompt("Folder path (e.g. Product, Technical/Architecture):","Product")||"Product").trim()||"Product";
+  await putDoc("", folder, title.trim(), "# "+title.trim()+"\n\nWrite here…");DOC_EDIT=true;renderDocMain();
 }
 async function saveDoc(){
   const d=currentDoc();if(!d)return;
   const title=document.getElementById("doc-title").value.trim()||d.title;
-  const cat=document.getElementById("doc-cat").value;
+  const folder=document.getElementById("doc-folder").value.trim()||docFolder(d);
   const body=document.getElementById("doc-body").value;
-  await putDoc(d.id, cat, title, body);DOC_EDIT=false;renderDocMain();
+  await putDoc(d.id, folder, title, body);DOC_EDIT=false;renderDocMain();
 }
-async function putDoc(id, category, title, body){
+async function putDoc(id, folder, title, body){
   try{
-    const r=await fetch(api("/docs/"+encodeURIComponent(id||("new-"+Date.now()))),{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({category,title,body})});
+    const r=await fetch(api("/docs/"+encodeURIComponent(id||("new-"+Date.now()))),{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({folder,title,body})});
     if(!r.ok){toasty(await r.text()||"save failed","err");return;}
     const page=await r.json();DOC_CUR=page.id;
     try{DOCS=await(await fetch(api("/docs"))).json();}catch(e){}
     renderDocsList();
   }catch(e){toasty("save failed","err");}
+}
+async function askAiEdit(){
+  const d=currentDoc();if(!d)return;
+  const instruction=prompt("How should the AI revise this page?\n(e.g. \"add a section on error handling\", \"make it shorter and clearer\")");
+  if(!instruction||!instruction.trim())return;
+  const el=document.getElementById("docs-main");
+  el.innerHTML='<div class="docs-empty"><i class="ti ti-loader-2 att-spin"></i><div>DOCS agent is revising…</div></div>';
+  try{
+    const r=await fetch(api("/docs/"+encodeURIComponent(d.id)+"/ai-edit"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({instruction:instruction.trim()})});
+    if(!r.ok){toasty("AI edit failed: "+(await r.text()||r.status)+" (needs a configured engine).","err");}
+    else{const page=await r.json();DOC_CUR=page.id;try{DOCS=await(await fetch(api("/docs"))).json();}catch(e){}toasty("Page revised by DOCS agent","ok");}
+  }catch(e){toasty("AI edit failed","err");}
+  renderDocsList();renderDocMain();
 }
 async function deleteDoc(){
   const d=currentDoc();if(!d||!confirm("Delete this page?"))return;

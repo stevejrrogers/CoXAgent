@@ -192,7 +192,11 @@ impl DesignSystem {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocPage {
     pub id: String,
-    /// `"product"` or `"technical"`.
+    /// Folder path the page lives under, `/`-separated for nesting
+    /// (e.g. `"Technical/Architecture"`). Empty = root.
+    #[serde(default)]
+    pub folder: String,
+    /// Coarse colour bucket for the tag: `product`/`technical`/`flows`/`qa`/`ops`.
     pub category: String,
     pub title: String,
     /// Markdown body.
@@ -425,6 +429,7 @@ impl ProjectState {
     pub fn upsert_doc(
         &mut self,
         id: &str,
+        folder: &str,
         category: &str,
         title: &str,
         body: &str,
@@ -432,6 +437,7 @@ impl ProjectState {
     ) -> DocPage {
         let now = now_rfc3339();
         if let Some(p) = self.docs.iter_mut().find(|d| d.id == id) {
+            folder.clone_into(&mut p.folder);
             category.clone_into(&mut p.category);
             title.clone_into(&mut p.title);
             body.clone_into(&mut p.body);
@@ -445,6 +451,7 @@ impl ProjectState {
             } else {
                 id.to_owned()
             },
+            folder: folder.to_owned(),
             category: category.to_owned(),
             title: title.to_owned(),
             body: body.to_owned(),
@@ -453,6 +460,12 @@ impl ProjectState {
         };
         self.docs.push(page.clone());
         page
+    }
+
+    /// Look up a documentation page by id.
+    #[must_use]
+    pub fn doc(&self, id: &str) -> Option<DocPage> {
+        self.docs.iter().find(|d| d.id == id).cloned()
     }
 
     /// Remove a documentation page by id. Returns whether one was removed.
