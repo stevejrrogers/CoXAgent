@@ -632,6 +632,23 @@
   .tl-who{font-weight:600}
   .tl-act{color:var(--muted)}
   .tl-t{font-size:11px;color:var(--dim);margin-top:1px}
+  /* structured code diff */
+  .difful{background:transparent}
+  .df-file{border:1px solid var(--border);border-radius:10px;overflow:hidden;margin-bottom:14px}
+  .df-head{display:flex;align-items:center;gap:8px;background:var(--card2);padding:9px 13px;font-size:12.5px;font-weight:600;border-bottom:1px solid var(--border);position:sticky;top:0}
+  .df-name{font-family:ui-monospace,monospace;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .df-stat{margin-left:auto;display:flex;gap:8px;font-family:ui-monospace,monospace;font-size:11px}
+  .df-a{color:var(--green)} .df-d{color:var(--red)}
+  .df-body{font-family:ui-monospace,monospace;font-size:12px;line-height:1.55;overflow-x:auto}
+  .df-row,.df-hunk{display:flex;white-space:pre}
+  .df-ln{flex:0 0 44px;text-align:right;padding:0 8px;color:var(--dim);user-select:none;background:color-mix(in srgb,var(--card2) 55%,transparent)}
+  .df-tx{flex:1;padding:0 12px;white-space:pre;min-width:0}
+  .df-row.add{background:color-mix(in srgb,var(--green) 11%,transparent)} .df-row.add .df-tx{color:color-mix(in srgb,var(--green) 92%,var(--text))}
+  .df-row.del{background:color-mix(in srgb,var(--red) 11%,transparent)} .df-row.del .df-tx{color:color-mix(in srgb,var(--red) 88%,var(--text))}
+  .df-row.add .df-tx:before{content:"+";margin-right:6px;opacity:.6} .df-row.del .df-tx:before{content:"−";margin-right:6px;opacity:.6}
+  .df-row.ctx .df-tx:before{content:" ";margin-right:6px}
+  .df-hunk{background:color-mix(in srgb,var(--accent2) 10%,transparent);color:var(--accent2)}
+  .df-hunk .df-tx{padding:2px 12px;font-weight:600}
   .cols{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:14px}
   .col{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:13px;min-height:120px}
   .col h3{margin:0 0 12px;font-size:12px;display:flex;align-items:center;gap:7px;font-weight:600}
@@ -1149,7 +1166,7 @@ body:not(.manage) .manage-only { display: none !important; }
       <div class="ov" id="ov-diff" onclick="if(event.target===this)close_('ov-diff')"><div class="modal" style="max-width:960px">
         <span class="x" onclick="close_('ov-diff')"><i class="ti ti-x"></i></span>
         <h3 id="diff-title" style="font-size:14px;font-family:ui-monospace,monospace"><i class="ti ti-git-pull-request" style="color:var(--accent2)"></i> diff</h3>
-        <pre id="diff-body" class="difful" style="max-height:66vh;overflow:auto;font-size:12px;line-height:1.5;background:var(--card2);padding:14px;border-radius:8px;font-family:ui-monospace,monospace">—</pre>
+        <div id="diff-body" class="difful" style="max-height:66vh;overflow:auto">—</div>
       </div></div>
       <div class="ov" id="ov-cgimpact" onclick="if(event.target===this)close_('ov-cgimpact')"><div class="modal" style="max-width:820px">
         <span class="x" onclick="close_('ov-cgimpact')"><i class="ti ti-x"></i></span>
@@ -3781,16 +3798,27 @@ async function viewDiff(num,head){
   document.getElementById("diff-title").innerHTML='<i class="ti ti-git-pull-request" style="color:var(--accent2)"></i> '+esc(head)+' · #'+num;
   const body=document.getElementById("diff-body");body.textContent="loading…";body.innerHTML="loading…";
   document.getElementById("ov-diff").classList.add("open");
-  try{const d=await(await fetch(api("/prs/"+num+"/diff"))).json();body.innerHTML=colorDiff(d.diff||"(empty)");}
+  try{const d=await(await fetch(api("/prs/"+num+"/diff"))).json();body.innerHTML=renderDiff(d.diff||"(empty)");}
   catch(e){body.textContent="unable to load diff";}
 }
 // Minimal +/- colouring for a unified diff.
-function colorDiff(t){return t.split("\n").map(l=>{const e=esc(l);
-  if(l.startsWith("+")&&!l.startsWith("+++"))return '<span style="color:var(--green)">'+e+'</span>';
-  if(l.startsWith("-")&&!l.startsWith("---"))return '<span style="color:var(--red)">'+e+'</span>';
-  if(l.startsWith("@@"))return '<span style="color:var(--accent2)">'+e+'</span>';
-  if(l.startsWith("diff ")||l.startsWith("+++")||l.startsWith("---"))return '<span style="color:var(--muted)">'+e+'</span>';
-  return e;}).join("\n");}
+// Structured diff: grouped per file with +/- gutters and old/new line numbers.
+function renderDiff(t){
+  if(!t||t==="(empty)")return '<div class="empty" style="padding:20px">no changes</div>';
+  const lines=t.split("\n");let out="",inFile=false,body="",fname="",adds=0,dels=0,oldN=0,newN=0;
+  const flush=()=>{if(inFile)out+=`<div class="df-file"><div class="df-head"><i class="ti ti-file-code"></i> <span class="df-name">${esc(fname)}</span><span class="df-stat"><span class="df-a">+${adds}</span><span class="df-d">−${dels}</span></span></div><div class="df-body">${body}</div></div>`;};
+  for(const l of lines){
+    if(l.startsWith("diff --git")){flush();inFile=true;body="";adds=0;dels=0;fname=((l.match(/ b\/(.+)$/)||[])[1])||l;continue;}
+    if(/^(index |new file|deleted file|similarity|rename |\+\+\+|---|Binary )/.test(l))continue;
+    if(l.startsWith("@@")){const m=l.match(/@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)/);if(m){oldN=+m[1];newN=+m[2];}
+      body+=`<div class="df-hunk"><span class="df-ln"></span><span class="df-ln"></span><span class="df-tx">${esc(m?('@@ '+(m[3]||'').trim()):l)}</span></div>`;continue;}
+    let cls="ctx",g1="",g2="",tx=l.slice(1);
+    if(l.startsWith("+")){cls="add";adds++;g2=newN++;}
+    else if(l.startsWith("-")){cls="del";dels++;g1=oldN++;}
+    else{g1=oldN++;g2=newN++;if(!l.length)tx="";}
+    body+=`<div class="df-row ${cls}"><span class="df-ln">${g1}</span><span class="df-ln">${g2}</span><span class="df-tx">${esc(tx)}</span></div>`;
+  }
+  flush();return out||'<div class="empty" style="padding:20px">no changes</div>';}
 async function prAction(num,action){
   let comment="";
   if(action==="request-changes"){comment=prompt("What changes should the agent make?");if(comment===null)return;}
