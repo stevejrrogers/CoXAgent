@@ -850,6 +850,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // Auto-merge: SA deep-dives open PRs and merges or requests changes.
             self.report("SA", "reviewing PRs");
             self.review_open_prs().await;
+
+            // Scrum comes alive: when there's a real tension (deploy failure, a
+            // bug pile-up, or a periodic check-in), the team actually discusses
+            // it — PO & SA weigh in, SM decides, and a decision can spawn a
+            // ticket. Posts land in the Scrum feed.
+            self.scrum_discussion(&report, cycle).await;
         }
         self.report_idle();
 
@@ -987,6 +993,79 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             None,
         );
         let _ = self.store.save(&state).await;
+    }
+
+    /// Make Scrum lively: when a real tension exists, run a facilitated
+    /// discussion (PO & SA weigh in, SM decides, a decision may create a ticket),
+    /// posting the whole exchange to the Scrum feed.
+    async fn scrum_discussion(&self, report: &CycleReport, cycle: u64) {
+        let Ok(state) = self.store.load().await else {
+            return;
+        };
+        let Some(topic) = Self::scrum_topic(&state, report, cycle) else {
+            return;
+        };
+        self.report("SM", "scrum discussion");
+        let uc = crate::use_cases::RunDiscussionUseCase::new(
+            Arc::clone(&self.store),
+            Arc::clone(&self.engine),
+            self.work_dir.clone(),
+        );
+        if let Err(e) = uc.execute(&topic).await {
+            tracing::warn!("scrum discussion: {e}");
+        }
+    }
+
+    /// Pick the most pressing thing worth a team discussion this cycle, or `None`
+    /// when there's nothing to talk about (so the team isn't noisy for no reason).
+    fn scrum_topic(
+        state: &crate::state::ProjectState,
+        report: &CycleReport,
+        cycle: u64,
+    ) -> Option<String> {
+        use coxagent_domain::{Status, TicketType};
+        // A failed deploy is the loudest signal — discuss root cause + prevention.
+        if report.errors.iter().any(|e| e.contains("DEPLOY")) || !report.bugs_filed.is_empty() {
+            return Some(
+                "The last deploy or test run surfaced failures. What's the likely root cause, \
+                 and what should we change to stop it recurring?"
+                    .to_owned(),
+            );
+        }
+        let open_bugs = state
+            .tickets
+            .iter()
+            .filter(|t| t.ticket_type() == TicketType::Bug && t.status() == Status::Open)
+            .count();
+        if open_bugs >= 3 {
+            return Some(format!(
+                "We have {open_bugs} open bugs. Should we pause new features and burn down the \
+                 bug backlog first, or keep shipping? Decide and, if useful, create a tracking ticket."
+            ));
+        }
+        // A stalled in-progress ticket is worth flagging as a possible blocker.
+        if let Some(t) = state
+            .tickets
+            .iter()
+            .find(|t| t.status() == Status::InProgress)
+        {
+            if cycle % 4 == 0 {
+                return Some(format!(
+                    "{} has been in progress for a while. Is it blocked or too big? \
+                     Should we split it or unblock it?",
+                    t.id()
+                ));
+            }
+        }
+        // Otherwise a light periodic check-in keeps the sprint honest.
+        if cycle % 6 == 0 {
+            return Some(
+                "Sprint check-in: are we on track for the sprint goal? Any risks, scope creep, \
+                 or blockers to raise? Decide on one concrete next step."
+                    .to_owned(),
+            );
+        }
+        None
     }
 
     /// Clarification loop: if the next ready feature has no acceptance criteria,
