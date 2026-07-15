@@ -604,6 +604,12 @@
   .tso-tk{font-family:ui-monospace,monospace;font-size:11px;color:var(--accent2)}
   .ag-by{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--dim);font-family:ui-monospace,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
   .ag-by i{flex-shrink:0}
+  .ag-nteams{margin-left:auto;background:color-mix(in srgb,var(--green) 18%,transparent);color:var(--green);border-radius:20px;padding:1px 8px;font-size:10px;font-weight:600;letter-spacing:0}
+  .ag-now{width:100%}
+  .ag-runs{display:flex;flex-direction:column;gap:7px}
+  .ag-run{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:7px 9px;border-radius:9px;background:color-mix(in srgb,var(--green) 8%,transparent);border:1px solid color-mix(in srgb,var(--green) 16%,transparent)}
+  .ag-run .ag-task{background:transparent;border:0;padding:0;font-weight:600}
+  .ag-run .ag-by{margin-left:auto}
   .cols{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:14px}
   .col{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:13px;min-height:120px}
   .col h3{margin:0 0 12px;font-size:12px;display:flex;align-items:center;gap:7px;font-weight:600}
@@ -1705,27 +1711,31 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
       const col=cvar(c);const st=stat[r]||{n:0,tk:new Set(),last:null};
       const roleKey=r.toLowerCase().replace(/-/g,"_");
       const cost=(spend.by_role||{})[roleKey]||0;
-      // Live "working now" from the SHARED worker registry — so this card lights
-      // up whichever team (this hub OR another machine) is running this agent.
+      // Live "working now" from the SHARED registry — EVERY team (this hub or
+      // another machine) running this agent, so one card shows N users at once.
       const localActive=(window.RUNNER&&RUNNER.mode==="running")?(RUNNER.active_role||"").replace(/_/g,"-").toUpperCase():"";
-      const reg=(window.WORKERS||[]).find(w=>(w.role||"").replace(/_/g,"-").toUpperCase()===r);
-      const working=localActive===r||!!reg;
-      // Who + where + which ticket is running it (account@host).
-      let opHost="",regTicket=null;
-      if(localActive===r&&window.RUNNER){opHost=(RUNNER.operator||'')+(RUNNER.host?'@'+RUNNER.host:'');regTicket=RUNNER.active_note||null;}
-      else if(reg){opHost=reg.worker;regTicket=reg.ticket||null;}
-      // Current ticket: registry ticket if working, else in-progress (DEV), else last touched.
+      const runners=(window.WORKERS||[]).filter(w=>(w.role||"").replace(/_/g,"-").toUpperCase()===r)
+        .map(w=>({who:w.worker,ticket:w.ticket||""}));
+      // Ensure the local runner is present (its snapshot is freshest).
+      if(localActive===r&&window.RUNNER){
+        const me=(RUNNER.operator||'')+(RUNNER.host?'@'+RUNNER.host:'');
+        const mine=runners.find(x=>x.who===me);
+        if(mine){mine.ticket=RUNNER.active_note||mine.ticket;} else {runners.unshift({who:me,ticket:RUNNER.active_note||''});}
+      }
+      const working=runners.length>0;
+      // Fallback ticket for the idle "last touched" line.
       let cur=null,live=working;
       if(r==="DEV-FEATURE"||r==="DEV-BUG"){const w=inProg.find(t=>r==="DEV-BUG"?t.type==="bug":t.type!=="bug");if(w){cur=w.id;}}
       if(!cur&&st.last&&st.last.ticket)cur=st.last.ticket;
-      const workTicket=regTicket||cur;
-      // Status zone: when working, a task chip + who/where; otherwise last touch.
-      const taskChip=(note,tid,cls)=>`<span class="ag-task ${cls}"${tid&&!working?` onclick="event.stopPropagation();showTicket('${tid}')" style="cursor:pointer"`:''}>${note?esc(note):''}${tid?`<span class="tid">${esc(tid)}</span>`:''}</span>`;
+      const short=w=>(w||'').split('@')[0];
+      const taskChip=(note,tid,cls)=>`<span class="ag-task ${cls}"${tid?` onclick="event.stopPropagation();showTicket('${tid}')" style="cursor:pointer"`:''}>${note?esc(note):''}${tid?`<span class="tid">${esc(tid)}</span>`:''}</span>`;
       let statusHtml;
       if(working){
-        statusHtml=`<div class="ag-now"><i class="ti ti-loader-2 att-spin"></i> working now</div>
-          ${taskChip('working',workTicket,'')}
-          ${opHost?`<div class="ag-by"><i class="ti ti-user-cog"></i> ${esc(opHost)}</div>`:''}`;
+        const rows=runners.map(rn=>`<div class="ag-run">`
+          +`<span class="ag-task">${rn.ticket?`<span class="tid">${esc(rn.ticket)}</span>`:'working'}</span>`
+          +`<span class="ag-by" title="${esc(rn.who)}"><i class="ti ti-user-cog"></i> ${esc(short(rn.who))}</span></div>`).join("");
+        statusHtml=`<div class="ag-now"><i class="ti ti-loader-2 att-spin"></i> working now${runners.length>1?`<span class="ag-nteams">${runners.length} teams</span>`:''}</div>
+          <div class="ag-runs">${rows}</div>`;
       }else{
         statusHtml=`<div class="ag-last"><i class="ti ti-point"></i> ${cur?'last touched':'idle'}</div>
           ${cur?taskChip('',cur,'idle'):''}`;

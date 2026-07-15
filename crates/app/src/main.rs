@@ -874,13 +874,16 @@ async fn run_loop(
     let hb_store = Arc::clone(&store);
     let hb_worker = worker.clone();
     uc.set_phase_reporter(std::sync::Arc::new(move |info| {
-        if let Some((role, note)) = info {
-            let (s, w) = (Arc::clone(&hb_store), hb_worker.clone());
-            tokio::spawn(async move {
-                let now = coxagent_application::state::now_rfc3339();
-                let _ = s.heartbeat_worker(&w, &role, &note, &now).await;
-            });
-        }
+        // Beat the live role+ticket on a phase, "idle" between — never stale.
+        let (role, note) = match info {
+            Some((role, note)) => (role, note),
+            None => ("idle".to_owned(), String::new()),
+        };
+        let (s, w) = (Arc::clone(&hb_store), hb_worker.clone());
+        tokio::spawn(async move {
+            let now = coxagent_application::state::now_rfc3339();
+            let _ = s.heartbeat_worker(&w, &role, &note, &now).await;
+        });
     }));
     uc.set_worker(worker);
     let shutdown = shutdown::Shutdown::listen();

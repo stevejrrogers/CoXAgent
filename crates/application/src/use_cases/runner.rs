@@ -173,17 +173,22 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
     // agent on which ticket.
     let h = std::sync::Arc::clone(&handle);
     let store = cycle_uc.store();
-    cycle_uc.set_phase_reporter(std::sync::Arc::new(move |info| match info {
-        Some((role, note)) => {
-            h.set_active(&role, &note);
-            let (store, worker, role, note) =
-                (std::sync::Arc::clone(&store), h.worker_id(), role, note);
-            tokio::spawn(async move {
-                let now = crate::state::now_rfc3339();
-                let _ = store.heartbeat_worker(&worker, &role, &note, &now).await;
-            });
+    cycle_uc.set_phase_reporter(std::sync::Arc::new(move |info| {
+        // `Some` = entering a phase (role + ticket); `None` = idle between phases.
+        // Beat both so the registry reflects reality and never shows stale work.
+        let (role, note) = match &info {
+            Some((role, note)) => (role.clone(), note.clone()),
+            None => ("idle".to_owned(), String::new()),
+        };
+        match info {
+            Some((role, note)) => h.set_active(&role, &note),
+            None => h.clear_active(),
         }
-        None => h.clear_active(),
+        let (store, worker) = (std::sync::Arc::clone(&store), h.worker_id());
+        tokio::spawn(async move {
+            let now = crate::state::now_rfc3339();
+            let _ = store.heartbeat_worker(&worker, &role, &note, &now).await;
+        });
     }));
     let mut cycle = 0u64;
     loop {
