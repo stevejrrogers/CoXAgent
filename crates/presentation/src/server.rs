@@ -496,6 +496,12 @@ pub async fn serve_full(
         .route("/api/projects/:pid/control/:action", post(control_ep))
         .route("/api/projects/:pid/ba-analyze", post(ba_analyze))
         .route("/api/projects/:pid/discuss", post(run_discussion_ep))
+        .route("/api/projects/:pid/docs", get(docs_list_ep))
+        .route("/api/projects/:pid/docs/generate", post(docs_generate_ep))
+        .route(
+            "/api/projects/:pid/docs/:id",
+            axum::routing::put(doc_upsert_ep).delete(doc_delete_ep),
+        )
         .route("/api/projects/:pid/standup", post(standup_ep))
         .route("/api/projects/:pid/tickets", post(create_ticket))
         .route("/api/projects/:pid/ticket/:id", get(ticket_detail_ep))
@@ -1633,6 +1639,97 @@ async fn context_ep(
         .await
         .unwrap_or_default();
     Json(serde_json::json!({ "goal": extract_goal(&md), "full": md })).into_response()
+}
+
+/// List the project's documentation pages.
+async fn docs_list_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let docs = p.store.load().await.map(|s| s.docs).unwrap_or_default();
+    Json(docs).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct DocUpsertReq {
+    #[serde(default)]
+    category: String,
+    title: String,
+    #[serde(default)]
+    body: String,
+}
+
+/// Create or update a documentation page.
+async fn doc_upsert_ep(
+    State(app): State<AppState>,
+    Path((pid, id)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<DocUpsertReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    if req.title.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "title required").into_response();
+    }
+    let author = resolve_username(&app, &headers).await;
+    let Ok(mut state) = p.store.load().await else {
+        return internal_error("load failed");
+    };
+    let cat = if req.category.eq_ignore_ascii_case("technical") {
+        "technical"
+    } else {
+        "product"
+    };
+    let page = state.upsert_doc(&id, cat, req.title.trim(), &req.body, &author);
+    match p.store.save(&state).await {
+        Ok(()) => Json(page).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Delete a documentation page.
+async fn doc_delete_ep(
+    State(app): State<AppState>,
+    Path((pid, id)): Path<(String, String)>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Ok(mut state) = p.store.load().await else {
+        return internal_error("load failed");
+    };
+    let removed = state.remove_doc(&id);
+    match p.store.save(&state).await {
+        Ok(()) => Json(serde_json::json!({ "ok": removed })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Generate/refresh the documentation with the DOCS agent.
+async fn docs_generate_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    use coxagent_application::use_cases::GenerateDocsUseCase;
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let md = tokio::fs::read_to_string(&p.context_path)
+        .await
+        .unwrap_or_default();
+    let uc = GenerateDocsUseCase::new(
+        Arc::clone(&p.store),
+        Arc::clone(&p.engine),
+        p.work_dir.clone(),
+    );
+    match uc.execute(&md).await {
+        Ok(n) => Json(serde_json::json!({ "ok": true, "pages": n })).into_response(),
+        Err(e) => internal_error(&format!("docs generation failed: {e}")),
+    }
 }
 
 #[derive(serde::Deserialize)]

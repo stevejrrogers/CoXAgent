@@ -186,6 +186,23 @@ impl DesignSystem {
     }
 }
 
+/// One living documentation page. `category` is `"product"` or `"technical"`;
+/// `body` is Markdown. Pages are written by the DOCS agent and editable by
+/// humans, and are structured so both people and agents can read them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocPage {
+    pub id: String,
+    /// `"product"` or `"technical"`.
+    pub category: String,
+    pub title: String,
+    /// Markdown body.
+    pub body: String,
+    #[serde(default)]
+    pub updated_at: String,
+    #[serde(default)]
+    pub updated_by: String,
+}
+
 /// Accumulated engine spend — the FinOps view of the autonomous team.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Spend {
@@ -279,6 +296,9 @@ pub struct ProjectState {
     /// Product milestones the sprints work toward (authored once by the PO).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub milestones: Vec<Milestone>,
+    /// Living documentation pages (product + technical) written by agents/humans.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub docs: Vec<DocPage>,
     /// Spend accumulated on the current calendar day (UTC), for the daily budget
     /// policy. Resets when the day rolls over.
     #[serde(default)]
@@ -307,6 +327,7 @@ impl Default for ProjectState {
             channels: Vec::new(),
             design_system: None,
             milestones: Vec::new(),
+            docs: Vec::new(),
             spend_today_usd: 0.0,
             spend_day: String::new(),
         }
@@ -397,6 +418,48 @@ impl ProjectState {
         if overflow > 0 {
             self.chat.drain(0..overflow);
         }
+    }
+
+    /// Create or update a documentation page. Matches on `id`; a new page is
+    /// appended. Returns the stored page.
+    pub fn upsert_doc(
+        &mut self,
+        id: &str,
+        category: &str,
+        title: &str,
+        body: &str,
+        author: &str,
+    ) -> DocPage {
+        let now = now_rfc3339();
+        if let Some(p) = self.docs.iter_mut().find(|d| d.id == id) {
+            category.clone_into(&mut p.category);
+            title.clone_into(&mut p.title);
+            body.clone_into(&mut p.body);
+            p.updated_at = now;
+            author.clone_into(&mut p.updated_by);
+            return p.clone();
+        }
+        let page = DocPage {
+            id: if id.is_empty() {
+                mint_id()
+            } else {
+                id.to_owned()
+            },
+            category: category.to_owned(),
+            title: title.to_owned(),
+            body: body.to_owned(),
+            updated_at: now,
+            updated_by: author.to_owned(),
+        };
+        self.docs.push(page.clone());
+        page
+    }
+
+    /// Remove a documentation page by id. Returns whether one was removed.
+    pub fn remove_doc(&mut self, id: &str) -> bool {
+        let before = self.docs.len();
+        self.docs.retain(|d| d.id != id);
+        self.docs.len() != before
     }
 
     /// Look up a channel by id (`#general` is synthesised on demand).
