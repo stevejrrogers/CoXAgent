@@ -634,6 +634,7 @@ pub async fn serve_full(
         .route("/api/projects/:pid/ticket/:id", get(ticket_detail_ep))
         .route("/api/projects/:pid/ticket/:id/priority", post(set_priority))
         .route("/api/projects/:pid/ticket/:id/reject", post(reject_ticket))
+        .route("/api/projects/:pid/ticket/:id/edit", post(edit_ticket))
         .route(
             "/api/projects/:pid/comments",
             get(list_comments).post(post_comment),
@@ -1501,6 +1502,41 @@ async fn set_priority(
         return (axum::http::StatusCode::FORBIDDEN, e.to_string()).into_response();
     }
     state.log_activity("USER", "set priority", Some(id));
+    match p.store.save(&state).await {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct EditReq {
+    title: String,
+    #[serde(default)]
+    description: String,
+}
+
+/// Edit a ticket's title + description (scope owner action).
+async fn edit_ticket(
+    State(app): State<AppState>,
+    Path((pid, id)): Path<(String, String)>,
+    Json(req): Json<EditReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Ok(tid) = coxagent_domain::TicketId::new(id.clone()) else {
+        return (axum::http::StatusCode::BAD_REQUEST, "bad id").into_response();
+    };
+    let Ok(mut state) = p.store.load().await else {
+        return internal_error("load failed");
+    };
+    let Some(ticket) = state.ticket_mut(&tid) else {
+        return (axum::http::StatusCode::NOT_FOUND, "no such ticket").into_response();
+    };
+    if let Err(e) = ticket.edit(coxagent_domain::Role::User, req.title, req.description) {
+        return (axum::http::StatusCode::BAD_REQUEST, e.to_string()).into_response();
+    }
+    state.log_activity("USER", "edited ticket", Some(id));
     match p.store.save(&state).await {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => internal_error(&e.to_string()),

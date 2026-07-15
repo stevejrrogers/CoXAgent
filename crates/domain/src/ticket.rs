@@ -241,6 +241,33 @@ impl Ticket {
 
     // --- Guarded mutations ---
 
+    /// Edit the human text (title + description). Only PO or a `User` acting as
+    /// super-PO may — the same authority that owns scope.
+    ///
+    /// # Errors
+    /// - [`DomainError::FieldNotPermitted`] if `actor` may not edit scope text.
+    /// - [`DomainError::Empty`] if the new title is blank.
+    pub fn edit(
+        &mut self,
+        actor: Role,
+        title: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Result<(), DomainError> {
+        if !matches!(actor, Role::Po | Role::User) {
+            return Err(DomainError::FieldNotPermitted {
+                role: actor,
+                field: "title",
+            });
+        }
+        let title = title.into();
+        if title.trim().is_empty() {
+            return Err(DomainError::Empty { field: "title" });
+        }
+        self.title = title;
+        self.description = description.into();
+        Ok(())
+    }
+
     /// Atomically claim the ticket for `worker` (`account@host`) by moving it
     /// into `InProgress` and stamping ownership. Fails if the ticket is already
     /// claimed or the transition is not legal — so two concurrent runners racing
