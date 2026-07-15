@@ -58,6 +58,7 @@ impl AgentEnginePort for ClaudeEngine {
             // No stdin: claude -p otherwise waits for piped input and warns/exits.
             .stdin(std::process::Stdio::null())
             .kill_on_drop(true);
+        crate::engine::apply_shim_path(&mut cmd);
 
         let output = tokio::time::timeout(request.timeout, cmd.output())
             .await

@@ -87,6 +87,14 @@ pub enum Command {
         #[arg(long, default_value_t = 4000)]
         port: u16,
     },
+    /// Read stdin and print a compressed version (rtk-style) — used by the
+    /// command shims to shrink noisy tool output before an agent reads it.
+    /// Deterministic: no model, no network.
+    Compress {
+        /// The wrapped command's name (for the summary line).
+        #[arg(long)]
+        cmd: Option<String>,
+    },
     /// Query the code knowledge graph (for agents + humans): symbol search,
     /// impact/references, callers, and file dependencies.
     Codegraph {

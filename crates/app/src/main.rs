@@ -155,6 +155,73 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
             .await
         }
         Command::Codegraph { query, work_dir } => codegraph_query(&work_dir, &query),
+        Command::Compress { cmd: _ } => {
+            use std::io::Read as _;
+            let mut input = String::new();
+            std::io::stdin().read_to_string(&mut input).ok();
+            Ok(coxagent_application::tokens::proxy_compress(&input))
+        }
+    }
+}
+
+/// Write the command-output shims (rtk-style) into a temp dir and return it.
+/// Each shim runs the real command and pipes its output through
+/// `coxagent compress` (only for non-tty, large output — small/exact output is
+/// untouched). Applied to agent subprocesses only, so the hub's own tooling is
+/// never affected.
+/// Verbose, output-heavy commands worth compressing. `git` is included but the
+/// small-output passthrough keeps porcelain (rev-parse/status) exact.
+const SHIM_CMDS: &[&str] = &[
+    "cargo", "npm", "pnpm", "yarn", "pip", "pip3", "pytest", "go", "gradle", "mvn", "make",
+    "docker", "git", "node", "python", "python3", "tsc", "jest", "vitest",
+];
+
+fn setup_command_shims() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = std::env::temp_dir().join("coxagent-shims");
+    std::fs::create_dir_all(&dir).ok()?;
+    let dir_disp = dir.display().to_string();
+    let exe_disp = exe.display().to_string();
+    for cmd in SHIM_CMDS {
+        let script = format!(
+            "#!/usr/bin/env bash\n\
+             cmd=\"{cmd}\"\n\
+             real=\"\"\n\
+             _IFS=\"$IFS\"; IFS=:\n\
+             for d in $PATH; do\n\
+             \x20 [ \"$d\" = \"{dir_disp}\" ] && continue\n\
+             \x20 if [ -x \"$d/$cmd\" ]; then real=\"$d/$cmd\"; break; fi\n\
+             done\n\
+             IFS=\"$_IFS\"\n\
+             [ -z \"$real\" ] && {{ echo \"cox-shim: $cmd not found\" >&2; exit 127; }}\n\
+             if [ \"${{COX_COMPRESS:-1}}\" = \"1\" ] && [ ! -t 1 ]; then\n\
+             \x20 set -o pipefail\n\
+             \x20 \"$real\" \"$@\" 2>&1 | \"{exe_disp}\" compress --cmd \"$cmd\"\n\
+             \x20 exit \"${{PIPESTATUS[0]:-0}}\"\n\
+             fi\n\
+             exec \"$real\" \"$@\"\n"
+        );
+        let p = dir.join(cmd);
+        if std::fs::write(&p, script).is_ok() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755));
+            }
+        }
+    }
+    Some(dir)
+}
+
+/// Generate the shims and advertise them to agent subprocesses via
+/// `COXAGENT_SHIM_DIR` (the engine prepends it to the child's PATH). Opt-out
+/// with `COX_COMPRESS=0`. Best-effort — never fatal.
+fn enable_command_shims() {
+    if std::env::var("COX_COMPRESS").as_deref() == Ok("0") {
+        return;
+    }
+    if let Some(dir) = setup_command_shims() {
+        std::env::set_var("COXAGENT_SHIM_DIR", dir);
     }
 }
 
@@ -352,6 +419,7 @@ async fn serve_with_runner(
     work_dir: PathBuf,
     port: u16,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    enable_command_shims();
     let project = build_project("default", state_dir, work_dir).await?;
     let audit = build_audit().await;
     // Single-project serve honors the same RBAC env vars as the hub.
@@ -443,6 +511,7 @@ async fn run_hub(registry: &Path, port: u16) -> Result<(), Box<dyn std::error::E
         id: String,
         path: PathBuf,
     }
+    enable_command_shims();
     let text = std::fs::read_to_string(registry)
         .map_err(|e| format!("cannot read hub registry {}: {e}", registry.display()))?;
     let entries: Vec<Entry> = serde_json::from_str(&text)?;

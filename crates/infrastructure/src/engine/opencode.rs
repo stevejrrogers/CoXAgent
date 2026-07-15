@@ -57,6 +57,7 @@ impl AgentEnginePort for OpencodeEngine {
             .current_dir(&request.work_dir)
             .stdin(std::process::Stdio::null())
             .kill_on_drop(true);
+        crate::engine::apply_shim_path(&mut cmd);
 
         let fut = cmd.output();
         let output = tokio::time::timeout(request.timeout, fut)

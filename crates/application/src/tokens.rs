@@ -86,6 +86,26 @@ pub fn compress(text: &str, max_chars: usize) -> String {
     clip_middle(&dedupe_lines(text), max_chars)
 }
 
+/// rtk-style command-output compressor for the shell shims: pass small output
+/// through untouched (so exact/short results are never altered), otherwise
+/// dedupe + clip and note the saving. Deterministic — no model involved.
+#[must_use]
+pub fn proxy_compress(text: &str) -> String {
+    // Leave short output exactly as-is: agents parse these verbatim.
+    if text.lines().count() < 30 && text.len() < 2500 {
+        return text.to_owned();
+    }
+    let out = compress(text, 6000);
+    if out.len() + 60 >= text.len() {
+        return text.to_owned(); // not worth it
+    }
+    format!(
+        "{out}\n[coxagent: output compressed {} → {} chars]",
+        text.len(),
+        out.len()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,6 +134,18 @@ mod tests {
     #[test]
     fn clip_middle_noop_when_small() {
         assert_eq!(clip_middle("short", 500), "short");
+    }
+
+    #[test]
+    fn proxy_compress_passes_small_and_shrinks_large() {
+        // Small/exact output is never altered.
+        let small = "git version 2.50\n";
+        assert_eq!(proxy_compress(small), small);
+        // Large repetitive output collapses.
+        let big = "warning: unused\n".repeat(200);
+        let out = proxy_compress(&big);
+        assert!(out.len() < big.len() / 2);
+        assert!(out.contains("(×200)"));
     }
 
     #[test]
