@@ -53,10 +53,17 @@ async fn make_store(
 ) -> Result<Arc<AnyStateStore>, Box<dyn std::error::Error>> {
     match std::env::var("COXAGENT_DB_DSN") {
         Ok(dsn) if !dsn.is_empty() => {
-            tracing::info!("[{id}] state store: Postgres");
-            Ok(Arc::new(AnyStateStore::Sql(
-                SqlStateStore::connect(&dsn, id).await?,
-            )))
+            let mut store = SqlStateStore::connect(&dsn, id).await?;
+            // Route the ephemeral leases (leader / stage / worker registry)
+            // through Redis when configured — fast TTL keys; Postgres keeps state.
+            match std::env::var("COXAGENT_REDIS_URL") {
+                Ok(url) if !url.is_empty() => {
+                    store = store.with_redis(&url)?;
+                    tracing::info!("[{id}] state store: Postgres + Redis coordination");
+                }
+                _ => tracing::info!("[{id}] state store: Postgres"),
+            }
+            Ok(Arc::new(AnyStateStore::Sql(store)))
         }
         _ => Ok(Arc::new(AnyStateStore::Json(JsonStateStore::new(
             state_dir,

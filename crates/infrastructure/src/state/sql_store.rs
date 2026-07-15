@@ -47,9 +47,15 @@ const STAGE_TTL_SECS: f64 = 1800.0;
 const WORKER_TTL_SECS: f64 = 120.0;
 
 /// A [`StateStorePort`] storing one project aggregate per row in Postgres.
+///
+/// Durable state (and the transactional `claim_ticket`) live in Postgres. When a
+/// [`RedisCoord`] is attached, the ephemeral leases (leader, per-stage, worker
+/// registry) route to Redis instead of `project_coord` — the fast path for
+/// short-lived TTL keys. Without Redis they fall back to Postgres.
 pub struct SqlStateStore {
     pool: Pool,
     project_id: String,
+    redis: Option<super::RedisCoord>,
 }
 
 impl SqlStateStore {
@@ -68,9 +74,21 @@ impl SqlStateStore {
         let store = Self {
             pool,
             project_id: project_id.into(),
+            redis: None,
         };
         store.migrate().await?;
         Ok(store)
+    }
+
+    /// Route the ephemeral leases (leader / stage / worker registry) through
+    /// Redis at `url` instead of Postgres. Ticket claims stay transactional in
+    /// Postgres. A no-op-friendly builder: pass the project id it should scope to.
+    ///
+    /// # Errors
+    /// [`PortError::Backend`] if the Redis URL is invalid.
+    pub fn with_redis(mut self, url: &str) -> Result<Self, PortError> {
+        self.redis = Some(super::RedisCoord::connect(url, self.project_id.clone())?);
+        Ok(self)
     }
 
     async fn client(&self) -> Result<deadpool_postgres::Client, PortError> {
@@ -213,6 +231,9 @@ impl StateStorePort for SqlStateStore {
     }
 
     async fn acquire_leader(&self, worker: &str, _now: &str) -> Result<bool, PortError> {
+        if let Some(r) = &self.redis {
+            return r.acquire_leader(worker).await;
+        }
         self.upsert_lease("leader", "", worker, LEADER_TTL_SECS)
             .await
     }
@@ -224,6 +245,9 @@ impl StateStorePort for SqlStateStore {
         worker: &str,
         _now: &str,
     ) -> Result<bool, PortError> {
+        if let Some(r) = &self.redis {
+            return r.claim_stage(&id.to_string(), stage, worker).await;
+        }
         let key = format!("{id}|{stage}");
         self.upsert_lease("stage", &key, worker, STAGE_TTL_SECS)
             .await
@@ -234,8 +258,11 @@ impl StateStorePort for SqlStateStore {
         worker: &str,
         role: &str,
         ticket: &str,
-        _now: &str,
+        now: &str,
     ) -> Result<(), PortError> {
+        if let Some(r) = &self.redis {
+            return r.heartbeat_worker(worker, role, ticket, now).await;
+        }
         let client = self.client().await?;
         client
             .execute(
@@ -251,6 +278,9 @@ impl StateStorePort for SqlStateStore {
     }
 
     async fn workers(&self) -> Result<Vec<WorkerEntry>, PortError> {
+        if let Some(r) = &self.redis {
+            return r.workers().await;
+        }
         let client = self.client().await?;
         let rows = client
             .query(
