@@ -869,6 +869,19 @@ async fn run_loop(
     if let Some(url) = webhook.filter(|u| !u.is_empty()) {
         uc = uc.with_notifier(std::sync::Arc::new(WebhookNotifier::new(url)));
     }
+    // Heartbeat the shared worker registry with the live role + ticket each phase,
+    // so every dashboard shows this headless team's current agent.
+    let hb_store = Arc::clone(&store);
+    let hb_worker = worker.clone();
+    uc.set_phase_reporter(std::sync::Arc::new(move |info| {
+        if let Some((role, note)) = info {
+            let (s, w) = (Arc::clone(&hb_store), hb_worker.clone());
+            tokio::spawn(async move {
+                let now = coxagent_application::state::now_rfc3339();
+                let _ = s.heartbeat_worker(&w, &role, &note, &now).await;
+            });
+        }
+    }));
     uc.set_worker(worker);
     let shutdown = shutdown::Shutdown::listen();
     tracing::info!("cycle loop started");

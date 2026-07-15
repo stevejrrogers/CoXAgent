@@ -130,6 +130,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         self.phase = Some(reporter);
     }
 
+    /// A clone of the shared store handle — lets the loop wire a phase reporter
+    /// that heartbeats the worker registry with the live role + ticket.
+    #[must_use]
+    pub fn store(&self) -> Arc<S> {
+        Arc::clone(&self.store)
+    }
+
     /// Report the agent about to run (live "working now"). `note` is a short
     /// context like a ticket id; empty when there's none.
     fn report(&self, role: &str, note: &str) {

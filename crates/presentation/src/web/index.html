@@ -1705,21 +1705,26 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
       const col=cvar(c);const st=stat[r]||{n:0,tk:new Set(),last:null};
       const roleKey=r.toLowerCase().replace(/-/g,"_");
       const cost=(spend.by_role||{})[roleKey]||0;
-      // Live "working now": the runner reports which agent is executing.
-      const activeRole=(window.RUNNER&&RUNNER.mode==="running")?(RUNNER.active_role||"").replace(/_/g,"-").toUpperCase():"";
-      const working=activeRole===r;
-      // Who started this run and on which machine — "account@host" attribution.
-      const opHost=(window.RUNNER&&RUNNER.mode==="running")?((RUNNER.operator||'')+(RUNNER.host?'@'+RUNNER.host:'')):'';
-      // Current ticket: an in-progress ticket for the DEVs, else the last one this agent touched.
+      // Live "working now" from the SHARED worker registry — so this card lights
+      // up whichever team (this hub OR another machine) is running this agent.
+      const localActive=(window.RUNNER&&RUNNER.mode==="running")?(RUNNER.active_role||"").replace(/_/g,"-").toUpperCase():"";
+      const reg=(window.WORKERS||[]).find(w=>(w.role||"").replace(/_/g,"-").toUpperCase()===r);
+      const working=localActive===r||!!reg;
+      // Who + where + which ticket is running it (account@host).
+      let opHost="",regTicket=null;
+      if(localActive===r&&window.RUNNER){opHost=(RUNNER.operator||'')+(RUNNER.host?'@'+RUNNER.host:'');regTicket=RUNNER.active_note||null;}
+      else if(reg){opHost=reg.worker;regTicket=reg.ticket||null;}
+      // Current ticket: registry ticket if working, else in-progress (DEV), else last touched.
       let cur=null,live=working;
       if(r==="DEV-FEATURE"||r==="DEV-BUG"){const w=inProg.find(t=>r==="DEV-BUG"?t.type==="bug":t.type!=="bug");if(w){cur=w.id;}}
       if(!cur&&st.last&&st.last.ticket)cur=st.last.ticket;
+      const workTicket=regTicket||cur;
       // Status zone: when working, a task chip + who/where; otherwise last touch.
       const taskChip=(note,tid,cls)=>`<span class="ag-task ${cls}"${tid&&!working?` onclick="event.stopPropagation();showTicket('${tid}')" style="cursor:pointer"`:''}>${note?esc(note):''}${tid?`<span class="tid">${esc(tid)}</span>`:''}</span>`;
       let statusHtml;
       if(working){
         statusHtml=`<div class="ag-now"><i class="ti ti-loader-2 att-spin"></i> working now</div>
-          ${taskChip(RUNNER.active_note||'working',cur,'')}
+          ${taskChip('working',workTicket,'')}
           ${opHost?`<div class="ag-by"><i class="ti ti-user-cog"></i> ${esc(opHost)}</div>`:''}`;
       }else{
         statusHtml=`<div class="ag-last"><i class="ti ti-point"></i> ${cur?'last touched':'idle'}</div>
@@ -3909,6 +3914,7 @@ function renderDupWarn(s){
 async function renderTeamsOnline(){
   const el=document.getElementById("team-online");if(!el)return;
   let ws=[];try{ws=await (await fetch(api("/workers"))).json();}catch(e){return;}
+  window.WORKERS=Array.isArray(ws)?ws:[];
   if(!Array.isArray(ws)||!ws.length){el.innerHTML="";return;}
   el.innerHTML=`<div class="teamson"><div class="tso-h"><i class="ti ti-server-bolt"></i> Teams online <span>${ws.length}</span></div>`
     +`<div class="tso-list">`+ws.map(w=>{

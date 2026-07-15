@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::map_unwrap_or)]
 //! Live integration test for the distributed coordination path: Postgres for
 //! durable state + transactional ticket claims, Redis for leader/stage leases.
 //!

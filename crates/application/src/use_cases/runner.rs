@@ -162,15 +162,27 @@ pub type PhaseReporter = std::sync::Arc<dyn Fn(Option<(String, String)>) + Send 
 
 /// Drive the cycle loop under the handle's control until stopped. Waits while
 /// paused; runs one cycle per `step`; sleeps `sleep` between cycles when running.
-pub async fn run_forever<S: StateStorePort, E: AgentEnginePort>(
+pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
     handle: std::sync::Arc<RunnerHandle>,
     mut cycle_uc: RunCycleUseCase<S, E>,
     sleep: Duration,
 ) {
-    // Let the cycle report which agent is running, live.
+    // Let the cycle report which agent is running, live — both to the local
+    // snapshot AND to the shared worker registry (with the real role + ticket),
+    // so every dashboard, on any machine, shows which account is running which
+    // agent on which ticket.
     let h = std::sync::Arc::clone(&handle);
+    let store = cycle_uc.store();
     cycle_uc.set_phase_reporter(std::sync::Arc::new(move |info| match info {
-        Some((role, note)) => h.set_active(&role, &note),
+        Some((role, note)) => {
+            h.set_active(&role, &note);
+            let (store, worker, role, note) =
+                (std::sync::Arc::clone(&store), h.worker_id(), role, note);
+            tokio::spawn(async move {
+                let now = crate::state::now_rfc3339();
+                let _ = store.heartbeat_worker(&worker, &role, &note, &now).await;
+            });
+        }
         None => h.clear_active(),
     }));
     let mut cycle = 0u64;
