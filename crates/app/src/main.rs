@@ -286,10 +286,28 @@ async fn serve_with_runner(
         // System chat + its media live alongside the project state.
         hub_dir: Some(state_dir.parent().unwrap_or(state_dir).to_path_buf()),
         storage: build_storage().await,
+        doc_store: build_doc_store().await,
         ..Default::default()
     };
     coxagent_presentation::serve_full(vec![project], port, audit, extras).await?;
     Ok(())
+}
+
+/// Documentation store: MongoDB when `COXAGENT_MONGO_URL` is set, else `None`
+/// (docs fall back to per-project `state.json`).
+async fn build_doc_store(
+) -> Option<std::sync::Arc<dyn coxagent_application::ports::outbound::DocStorePort>> {
+    match coxagent_infrastructure::MongoDocStore::from_env().await {
+        Ok(Some(store)) => {
+            tracing::info!("documentation store: MongoDB");
+            Some(std::sync::Arc::new(store))
+        }
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!("MongoDB configured but unreachable ({e}); using per-project state");
+            None
+        }
+    }
 }
 
 /// Blob storage backend: S3/MinIO when `COXAGENT_S3_*` is configured, else the
@@ -416,6 +434,7 @@ async fn run_hub(registry: &Path, port: u16) -> Result<(), Box<dyn std::error::E
         // System-wide chat lives at the hub root (next to the registry).
         hub_dir: Some(base.clone()),
         storage: build_storage().await,
+        doc_store: build_doc_store().await,
     };
     coxagent_presentation::serve_full(projects, port, audit, extras).await?;
     Ok(())

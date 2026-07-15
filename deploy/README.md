@@ -4,6 +4,7 @@ One `docker compose` brings up the full stack on a Linux host with a public IP:
 
 - **app** — the CoXAgent server (dashboard, chat, API, WebSocket).
 - **MinIO** — S3-compatible file storage (chat + ticket uploads).
+- **MongoDB** — server-side documentation store (the living docs system of record).
 - **coturn** — TURN/STUN relay so 1:1 voice/video calls traverse NATs.
 - **Caddy** — automatic HTTPS (Let's Encrypt) reverse proxy.
 

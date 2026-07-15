@@ -687,7 +687,8 @@ pub(crate) fn mint_id() -> String {
     format!("{nanos:x}{seq:x}")
 }
 
-pub(crate) fn now_rfc3339() -> String {
+#[must_use]
+pub fn now_rfc3339() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default()

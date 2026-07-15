@@ -23,6 +23,7 @@ sha1.workspace = true
 reqwest.workspace = true
 tokio-postgres.workspace = true
 deadpool-postgres.workspace = true
+mongodb.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -17,6 +17,15 @@ services:
       - minio:/data
     restart: unless-stopped
 
+  mongo:
+    image: mongo:7
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD}
+    volumes:
+      - mongo:/data/db
+    restart: unless-stopped
+
   coturn:
     image: coturn/coturn
     # Host networking: coturn needs the public IP and a wide UDP relay range.
@@ -45,6 +54,9 @@ services:
       COXAGENT_S3_BUCKET: coxagent
       COXAGENT_S3_ACCESS_KEY: ${S3_ACCESS_KEY}
       COXAGENT_S3_SECRET_KEY: ${S3_SECRET_KEY}
+      # Documentation store → MongoDB (server-side system of record for docs).
+      COXAGENT_MONGO_URL: mongodb://${MONGO_USER}:${MONGO_PASSWORD}@mongo:27017/?authSource=admin
+      COXAGENT_MONGO_DB: coxagent
       # TURN for calls — the browser reaches coturn at the PUBLIC IP directly.
       COXAGENT_TURN_URL: turn:${PUBLIC_IP}:3478
       COXAGENT_TURN_SECRET: ${TURN_SECRET}
@@ -52,6 +64,7 @@ services:
       - appdata:/data
     depends_on:
       - minio
+      - mongo
     restart: unless-stopped
 
   caddy:
@@ -71,6 +84,7 @@ services:
 
 volumes:
   minio:
+  mongo:
   appdata:
   caddy_data:
   caddy_config:

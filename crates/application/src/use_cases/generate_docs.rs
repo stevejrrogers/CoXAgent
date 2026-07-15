@@ -6,7 +6,7 @@
 
 use crate::error::{AppError, PortError};
 use crate::ports::outbound::{AgentEnginePort, AgentRequest, StateStorePort};
-use crate::state::slugify;
+use crate::state::{slugify, DocPage};
 use coxagent_domain::Role;
 use serde::Deserialize;
 use std::fmt::Write as _;
@@ -45,11 +45,12 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> GenerateDocsUseCas
     /// Generate/refresh the documentation from `context_md` (the project brief)
     /// plus the current tickets. Each section is written by the relevant agent —
     /// DOCS (product), SA (technical + flows), TEST (test cases) — in parallel.
-    /// Writes pages into state. Returns the number of pages written.
+    /// Returns the produced pages (id/folder/category stamped); the caller
+    /// persists them via whichever document store is active.
     ///
     /// # Errors
     /// [`AppError`] when every section fails to produce output.
-    pub async fn execute(&self, context_md: &str) -> Result<usize, AppError> {
+    pub async fn execute(&self, context_md: &str) -> Result<Vec<DocPage>, AppError> {
         let tickets = {
             let state = self.store.load().await?;
             let mut s = String::new();
@@ -99,7 +100,8 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> GenerateDocsUseCas
             .into());
         }
 
-        let mut state = self.store.load().await?;
+        let now = crate::state::now_rfc3339();
+        let mut out: Vec<DocPage> = Vec::new();
         for (agent, pages) in sections {
             for p in pages {
                 let folder = p.folder.trim();
@@ -107,14 +109,21 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> GenerateDocsUseCas
                 if title.is_empty() || p.body.trim().is_empty() {
                     continue;
                 }
-                let category = cat_from_folder(folder);
                 let id = format!("{}-{}", slugify(folder), slugify(title));
-                state.upsert_doc(&id, folder, category, title, p.body.trim(), agent);
+                // De-dupe within one pass (last write wins on a repeated id).
+                out.retain(|d| d.id != id);
+                out.push(DocPage {
+                    id,
+                    folder: folder.to_owned(),
+                    category: cat_from_folder(folder).to_owned(),
+                    title: title.to_owned(),
+                    body: p.body.trim().to_owned(),
+                    updated_at: now.clone(),
+                    updated_by: agent.to_owned(),
+                });
             }
         }
-        let count = state.docs.len();
-        self.store.save(&state).await?;
-        Ok(count)
+        Ok(out)
     }
 
     /// Revise a single page's Markdown per a human instruction (AI edit).

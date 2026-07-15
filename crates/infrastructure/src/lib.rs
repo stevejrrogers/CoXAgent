@@ -7,6 +7,7 @@
 pub mod audit_sink;
 pub mod auth;
 pub mod deploy;
+pub mod docs_store;
 pub mod engine;
 pub mod forge;
 pub mod git;
@@ -19,6 +20,7 @@ pub mod totp;
 pub use audit_sink::{MemoryAuditSink, SqlAuditSink};
 pub use auth::FileAuthService;
 pub use deploy::DockerComposeDeploy;
+pub use docs_store::MongoDocStore;
 pub use engine::{
     discover, discover_tooling, AnyEngine, ClaudeEngine, DetectedEngine, DetectedTool, MockEngine,
     OpencodeEngine, Tooling,

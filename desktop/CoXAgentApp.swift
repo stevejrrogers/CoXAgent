@@ -159,6 +159,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             hubEnv["COXAGENT_S3_ACCESS_KEY"] = "coxagent"
             hubEnv["COXAGENT_S3_SECRET_KEY"] = "coxagent123"
         }
+        // If a local MongoDB is up (scripts/mongo.sh up), use it as the server-side
+        // documentation store so docs persist independently of project state.
+        if hubEnv["COXAGENT_MONGO_URL"] == nil && tcpReachable(port: 27017) {
+            hubEnv["COXAGENT_MONGO_URL"] = "mongodb://127.0.0.1:27017"
+            hubEnv["COXAGENT_MONGO_DB"] = "coxagent"
+        }
         // If a local coturn is up (scripts/turn.sh up), advertise it for TURN so
         // calls traverse NATs; secret matches the script's default.
         if hubEnv["COXAGENT_TURN_URL"] == nil && tcpReachable(port: 3478) {

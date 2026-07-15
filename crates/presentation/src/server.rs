@@ -16,6 +16,7 @@ use coxagent_application::metrics;
 use coxagent_application::ports::outbound::{AuditPort, AuditRecord, StateStorePort};
 use coxagent_application::use_cases::RunnerHandle;
 use coxagent_application::Config;
+use coxagent_application::DocPage;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::future::Future;
@@ -202,6 +203,9 @@ struct AppState {
     syschat: SysChat,
     /// Blob storage for uploaded files (local disk by default, or S3/MinIO).
     storage: Arc<dyn coxagent_application::ports::outbound::StoragePort>,
+    /// Server-side documentation store (MongoDB) when configured; `None` falls
+    /// back to per-project `state.json`.
+    doc_store: Option<Arc<dyn coxagent_application::ports::outbound::DocStorePort>>,
     /// A hub-level engine for cross-project drafting (e.g. project goals), with a
     /// working directory to run it in.
     analyzer: Option<(
@@ -260,6 +264,73 @@ impl AppState {
     /// Clone out the handle for a project id (cheap — all fields are `Arc`).
     async fn project(&self, pid: &str) -> Option<ProjectHandle> {
         self.projects.read().await.get(pid).cloned()
+    }
+
+    // --- Documentation persistence -------------------------------------------
+    // These route through the MongoDB doc store when configured, else the
+    // project's `state.json`. Callers never branch on the backend themselves.
+
+    /// All documentation pages for a project.
+    async fn doc_list(&self, pid: &str, p: &ProjectHandle) -> Vec<DocPage> {
+        if let Some(ds) = &self.doc_store {
+            return ds.list(pid).await.unwrap_or_default();
+        }
+        p.store.load().await.map(|s| s.docs).unwrap_or_default()
+    }
+
+    /// One documentation page by id.
+    async fn doc_get(&self, pid: &str, p: &ProjectHandle, id: &str) -> Option<DocPage> {
+        if let Some(ds) = &self.doc_store {
+            return ds.get(pid, id).await.ok().flatten();
+        }
+        p.store.load().await.ok().and_then(|s| s.doc(id))
+    }
+
+    /// Create or replace a page; returns the stored page (id minted if empty).
+    #[allow(clippy::too_many_arguments)]
+    async fn doc_upsert(
+        &self,
+        pid: &str,
+        p: &ProjectHandle,
+        id: &str,
+        folder: &str,
+        title: &str,
+        body: &str,
+        author: &str,
+    ) -> Result<DocPage, String> {
+        let category = doc_category(folder).to_owned();
+        if let Some(ds) = &self.doc_store {
+            let page = DocPage {
+                id: if id.is_empty() {
+                    mint_doc_id()
+                } else {
+                    id.to_owned()
+                },
+                folder: folder.to_owned(),
+                category,
+                title: title.to_owned(),
+                body: body.to_owned(),
+                updated_at: coxagent_application::state::now_rfc3339(),
+                updated_by: author.to_owned(),
+            };
+            ds.upsert(pid, &page).await.map_err(|e| e.to_string())?;
+            return Ok(page);
+        }
+        let mut state = p.store.load().await.map_err(|e| e.to_string())?;
+        let page = state.upsert_doc(id, folder, &category, title, body, author);
+        p.store.save(&state).await.map_err(|e| e.to_string())?;
+        Ok(page)
+    }
+
+    /// Delete a page by id; returns whether one existed.
+    async fn doc_delete(&self, pid: &str, p: &ProjectHandle, id: &str) -> Result<bool, String> {
+        if let Some(ds) = &self.doc_store {
+            return ds.delete(pid, id).await.map_err(|e| e.to_string());
+        }
+        let mut state = p.store.load().await.map_err(|e| e.to_string())?;
+        let removed = state.remove_doc(id);
+        p.store.save(&state).await.map_err(|e| e.to_string())?;
+        Ok(removed)
     }
 
     /// Get (or lazily create) the live chat channel for a project.
@@ -369,6 +440,8 @@ pub struct HubExtras {
     /// Blob storage backend for uploads. Defaults to local disk under `hub_dir`
     /// when unset; the composition root wires S3/MinIO when configured.
     pub storage: Option<Arc<dyn coxagent_application::ports::outbound::StoragePort>>,
+    /// Server-side documentation store (e.g. MongoDB). `None` = per-project state.
+    pub doc_store: Option<Arc<dyn coxagent_application::ports::outbound::DocStorePort>>,
 }
 
 /// Assemble the shared [`AppState`] from the registered projects and hub extras.
@@ -399,6 +472,7 @@ fn build_state(
                 root: hub_dir.join("blobs"),
             })
         }),
+        doc_store: extras.doc_store,
     }
 }
 
@@ -1650,7 +1724,7 @@ async fn docs_list_ep(
     let Some(p) = app.project(&pid).await else {
         return not_found();
     };
-    let docs = p.store.load().await.map(|s| s.docs).unwrap_or_default();
+    let docs = app.doc_list(&pid, &p).await;
     Json(docs).into_response()
 }
 
@@ -1661,6 +1735,14 @@ struct DocUpsertReq {
     title: String,
     #[serde(default)]
     body: String,
+}
+
+/// Mint an id for a brand-new page (used only when the client sends none).
+fn mint_doc_id() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    format!("doc-{nanos}")
 }
 
 /// Colour bucket from a folder path's top segment.
@@ -1695,21 +1777,26 @@ async fn doc_upsert_ep(
         return (StatusCode::BAD_REQUEST, "title required").into_response();
     }
     let author = resolve_username(&app, &headers).await;
-    let Ok(mut state) = p.store.load().await else {
-        return internal_error("load failed");
+    // A client-minted "new-<ts>" placeholder id means "create"; treat as empty.
+    let id = if id.starts_with("new-") {
+        ""
+    } else {
+        id.as_str()
     };
-    let folder = req.folder.trim();
-    let page = state.upsert_doc(
-        &id,
-        folder,
-        doc_category(folder),
-        req.title.trim(),
-        &req.body,
-        &author,
-    );
-    match p.store.save(&state).await {
-        Ok(()) => Json(page).into_response(),
-        Err(e) => internal_error(&e.to_string()),
+    match app
+        .doc_upsert(
+            &pid,
+            &p,
+            id,
+            req.folder.trim(),
+            req.title.trim(),
+            &req.body,
+            &author,
+        )
+        .await
+    {
+        Ok(page) => Json(page).into_response(),
+        Err(e) => internal_error(&e),
     }
 }
 
@@ -1728,7 +1815,7 @@ async fn doc_ai_edit_ep(
     let Some(p) = app.project(&pid).await else {
         return not_found();
     };
-    let Some(page) = p.store.load().await.ok().and_then(|s| s.doc(&id)) else {
+    let Some(page) = app.doc_get(&pid, &p, &id).await else {
         return not_found();
     };
     if req.instruction.trim().is_empty() {
@@ -1748,23 +1835,13 @@ async fn doc_ai_edit_ep(
         )
         .await
     {
-        Ok(body) => {
-            let Ok(mut state) = p.store.load().await else {
-                return internal_error("load failed");
-            };
-            let saved = state.upsert_doc(
-                &id,
-                &page.folder,
-                &page.category,
-                &page.title,
-                &body,
-                "DOCS",
-            );
-            match p.store.save(&state).await {
-                Ok(()) => Json(saved).into_response(),
-                Err(e) => internal_error(&e.to_string()),
-            }
-        }
+        Ok(body) => match app
+            .doc_upsert(&pid, &p, &id, &page.folder, &page.title, &body, "DOCS")
+            .await
+        {
+            Ok(saved) => Json(saved).into_response(),
+            Err(e) => internal_error(&e),
+        },
         Err(e) => internal_error(&format!("doc edit failed: {e}")),
     }
 }
@@ -1777,13 +1854,9 @@ async fn doc_delete_ep(
     let Some(p) = app.project(&pid).await else {
         return not_found();
     };
-    let Ok(mut state) = p.store.load().await else {
-        return internal_error("load failed");
-    };
-    let removed = state.remove_doc(&id);
-    match p.store.save(&state).await {
-        Ok(()) => Json(serde_json::json!({ "ok": removed })).into_response(),
-        Err(e) => internal_error(&e.to_string()),
+    match app.doc_delete(&pid, &p, &id).await {
+        Ok(removed) => Json(serde_json::json!({ "ok": removed })).into_response(),
+        Err(e) => internal_error(&e),
     }
 }
 
@@ -1804,10 +1877,29 @@ async fn docs_generate_ep(
         Arc::clone(&p.engine),
         p.work_dir.clone(),
     );
-    match uc.execute(&md).await {
-        Ok(n) => Json(serde_json::json!({ "ok": true, "pages": n })).into_response(),
-        Err(e) => internal_error(&format!("docs generation failed: {e}")),
+    let pages = match uc.execute(&md).await {
+        Ok(pages) => pages,
+        Err(e) => return internal_error(&format!("docs generation failed: {e}")),
+    };
+    let mut written = 0usize;
+    for page in &pages {
+        if app
+            .doc_upsert(
+                &pid,
+                &p,
+                &page.id,
+                &page.folder,
+                &page.title,
+                &page.body,
+                &page.updated_by,
+            )
+            .await
+            .is_ok()
+        {
+            written += 1;
+        }
     }
+    Json(serde_json::json!({ "ok": true, "pages": written })).into_response()
 }
 
 #[derive(serde::Deserialize)]
