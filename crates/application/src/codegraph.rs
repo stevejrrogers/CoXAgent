@@ -16,8 +16,11 @@ use std::path::Path;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Symbol {
     pub name: String,
-    /// `fn`/`struct`/`enum`/`trait`/`class`/`interface`/`type`/`const`.
+    /// `fn`/`struct`/`enum`/`trait`/`class`/`interface`/`type`/`const`/`macro`.
     pub kind: String,
+    /// Containing type/class when known (e.g. `AppState` for `AppState::build`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
     /// Repo-relative path.
     pub file: String,
     pub line: usize,
@@ -93,29 +96,48 @@ impl CodeGraph {
     }
 
     fn ingest_file(&mut self, rel: &str, lang: &'static str, text: &str) {
+        // Imports drive the file→file dep graph — the line heuristic is fine.
         let mut imports = Vec::new();
-        let mut sym_count = 0usize;
-        for (i, raw) in text.lines().enumerate() {
-            let line = raw.trim();
-            if let Some(imp) = extract_import(lang, line) {
+        for raw in text.lines() {
+            if let Some(imp) = extract_import(lang, raw.trim()) {
                 if !imp.is_empty() {
                     imports.push(imp.clone());
                     self.edges.push((rel.to_owned(), imp));
                 }
             }
-            if let Some((kind, name)) = extract_symbol(lang, line) {
-                sym_count += 1;
-                self.symbols.push(Symbol {
-                    name,
-                    kind: kind.to_owned(),
-                    file: rel.to_owned(),
-                    line: i + 1,
-                    lang: lang.to_owned(),
-                });
-            }
         }
         imports.sort();
         imports.dedup();
+
+        // Symbols: accurate tree-sitter parse when supported, else the heuristic.
+        let mut sym_count = 0usize;
+        if let Some(syms) = crate::ts::symbols(lang, text) {
+            for s in syms {
+                sym_count += 1;
+                self.symbols.push(Symbol {
+                    name: s.name,
+                    kind: s.kind.to_owned(),
+                    scope: s.scope,
+                    file: rel.to_owned(),
+                    line: s.line,
+                    lang: lang.to_owned(),
+                });
+            }
+        } else {
+            for (i, raw) in text.lines().enumerate() {
+                if let Some((kind, name)) = extract_symbol(lang, raw.trim()) {
+                    sym_count += 1;
+                    self.symbols.push(Symbol {
+                        name,
+                        kind: kind.to_owned(),
+                        scope: None,
+                        file: rel.to_owned(),
+                        line: i + 1,
+                        lang: lang.to_owned(),
+                    });
+                }
+            }
+        }
         *self.languages.entry(lang.to_owned()).or_insert(0) += 1;
         self.files.push(FileNode {
             path: rel.to_owned(),
@@ -215,7 +237,10 @@ impl CodeGraph {
                 .iter()
                 .filter(|sy| sy.file == f.path)
                 .take(12)
-                .map(|sy| format!("{} {}", sy.kind, sy.name))
+                .map(|sy| match &sy.scope {
+                    Some(sc) => format!("{} {sc}::{}", sy.kind, sy.name),
+                    None => format!("{} {}", sy.kind, sy.name),
+                })
                 .collect();
             let _ = writeln!(s, "## {} ({})", f.path, f.lang);
             if !syms.is_empty() {
@@ -313,19 +338,34 @@ pub fn references(root: &Path, name: &str, limit: usize) -> Vec<Reference> {
                     .unwrap_or(&path)
                     .to_string_lossy()
                     .replace('\\', "/");
-                for (i, raw) in text.lines().enumerate() {
-                    if word_matches(raw, name) {
-                        let is_def =
-                            extract_symbol(lang, raw.trim()).is_some_and(|(_, n)| n == name);
-                        let text: String = raw.trim().chars().take(200).collect();
-                        out.push(Reference {
-                            file: rel.clone(),
-                            line: i + 1,
-                            text,
-                            is_def,
-                        });
+                let lines: Vec<&str> = text.lines().collect();
+                let push_ref = |out: &mut Vec<Reference>, ln: usize, raw: &str| {
+                    let is_def = extract_symbol(lang, raw.trim()).is_some_and(|(_, n)| n == name);
+                    out.push(Reference {
+                        file: rel.clone(),
+                        line: ln,
+                        text: raw.trim().chars().take(200).collect(),
+                        is_def,
+                    });
+                };
+                // Tree-sitter counts only real identifier tokens — usages inside
+                // comments and string literals are correctly ignored. Heuristic
+                // word-scan for languages without a grammar.
+                if let Some(ref_lines) = crate::ts::reference_lines(lang, &text, name) {
+                    for ln in ref_lines {
+                        let raw = lines.get(ln.saturating_sub(1)).copied().unwrap_or("");
+                        push_ref(&mut out, ln, raw);
                         if out.len() >= limit {
                             return sort_refs(out);
+                        }
+                    }
+                } else {
+                    for (i, raw) in lines.iter().enumerate() {
+                        if word_matches(raw, name) {
+                            push_ref(&mut out, i + 1, raw);
+                            if out.len() >= limit {
+                                return sort_refs(out);
+                            }
                         }
                     }
                 }
@@ -519,6 +559,44 @@ mod tests {
         assert!(word_matches("build(a, b)", "build"));
         assert!(!word_matches("let x = rebuild();", "build"));
         assert!(!word_matches("building = 1", "build"));
+    }
+
+    #[test]
+    fn treesitter_excludes_comments_and_strings() {
+        let dir = std::env::temp_dir().join(format!("cgts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("mk");
+        // `widget` appears as: a real def, a real call, a comment, and a string.
+        std::fs::write(
+            dir.join("src/a.rs"),
+            "pub fn widget() {}\nfn caller() { widget(); }\n// call widget here\nlet s = \"widget\";\n",
+        )
+        .expect("w");
+        let refs = references(&dir, "widget", 50);
+        // Heuristic would return 4; tree-sitter returns only the 2 real ones.
+        assert_eq!(refs.len(), 2, "comment + string usages must be excluded");
+        assert!(refs.iter().any(|r| r.is_def && r.line == 1));
+        assert!(refs.iter().any(|r| !r.is_def && r.line == 2));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn treesitter_captures_scope_and_methods() {
+        let syms = crate::ts::symbols(
+            "rust",
+            "struct App;\nimpl App {\n  pub fn build(&self) {}\n}\n",
+        )
+        .expect("rust supported");
+        assert!(syms.iter().any(|s| s.name == "App" && s.kind == "struct"));
+        let m = syms
+            .iter()
+            .find(|s| s.name == "build")
+            .expect("method found");
+        assert_eq!(
+            m.scope.as_deref(),
+            Some("App"),
+            "method scope is its impl type"
+        );
     }
 
     #[test]

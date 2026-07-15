@@ -3705,7 +3705,7 @@ function cgSearch(q){clearTimeout(cgT);cgT=setTimeout(async()=>{
   if(!q.trim()){box.innerHTML="";return;}
   let d={};try{d=await(await fetch(api("/codegraph?q="+encodeURIComponent(q)))).json();}catch(e){}
   const r=(d&&d.results)||[];
-  box.innerHTML=r.length?`<div class="cg-syms">`+r.map(s=>`<div class="cg-sym" onclick="cgImpact('${esc(s.name)}')" title="See where ${esc(s.name)} is used"><span class="cg-k cg-k-${esc(s.kind)}">${esc(s.kind)}</span><b>${esc(s.name)}</b><span class="cg-loc">${esc(s.file)}:${s.line}</span><i class="ti ti-arrow-right" style="margin-left:6px;color:var(--dim);font-size:13px"></i></div>`).join("")+`</div>`:'<div class="empty" style="padding:10px;font-size:12px">no symbols match</div>';
+  box.innerHTML=r.length?`<div class="cg-syms">`+r.map(s=>`<div class="cg-sym" onclick="cgImpact('${esc(s.name)}')" title="See where ${esc(s.name)} is used"><span class="cg-k cg-k-${esc(s.kind)}">${esc(s.kind)}</span><b>${s.scope?`<span style="color:var(--dim);font-weight:500">${esc(s.scope)}::</span>`:''}${esc(s.name)}</b><span class="cg-loc">${esc(s.file)}:${s.line}</span><i class="ti ti-arrow-right" style="margin-left:6px;color:var(--dim);font-size:13px"></i></div>`).join("")+`</div>`:'<div class="empty" style="padding:10px;font-size:12px">no symbols match</div>';
 },250);}
 // Impact analysis: where is this symbol used across the tree?
 async function cgImpact(name){
