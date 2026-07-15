@@ -2166,7 +2166,7 @@ async fn codegraph_ep(
         return Json(serde_json::json!({ "built": false })).into_response();
     };
     if let Some(q) = query.q.filter(|q| !q.trim().is_empty()) {
-        let results: Vec<_> = g.search(&q, 60);
+        let results: Vec<_> = g.relevance_search(&q, 60);
         return Json(serde_json::json!({ "built": true, "results": results })).into_response();
     }
     if query.map.unwrap_or(0) == 1 {

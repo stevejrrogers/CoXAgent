@@ -189,7 +189,7 @@ fn codegraph_query(
         }
         Q::Search { query: q } => {
             let g = graph();
-            for s in g.search(q, 50) {
+            for s in g.relevance_search(q, 50) {
                 let scope = s
                     .scope
                     .as_deref()

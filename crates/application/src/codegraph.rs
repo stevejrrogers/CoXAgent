@@ -194,6 +194,45 @@ impl CodeGraph {
             .collect()
     }
 
+    /// Relevance search: rank symbols by how many query terms match their name,
+    /// scope, and file path (splitting camelCase/snake_case). Finds things a
+    /// plain substring misses — e.g. "auth user" ranks `authenticate_user`,
+    /// `User::login` in `auth.rs` — without needing an embedding model.
+    #[must_use]
+    pub fn relevance_search(&self, query: &str, limit: usize) -> Vec<&Symbol> {
+        let terms: Vec<String> = tokenize(query);
+        if terms.is_empty() {
+            return Vec::new();
+        }
+        let mut scored: Vec<(u32, &Symbol)> = self
+            .symbols
+            .iter()
+            .filter_map(|s| {
+                let name_toks = tokenize(&s.name);
+                let scope_toks = s.scope.as_deref().map(tokenize).unwrap_or_default();
+                let path_toks = tokenize(&s.file);
+                let mut score = 0u32;
+                for t in &terms {
+                    // Name matches weigh most, then scope, then path.
+                    if name_toks.iter().any(|w| w == t) {
+                        score += 6;
+                    } else if s.name.to_lowercase().contains(t.as_str()) {
+                        score += 3;
+                    }
+                    if scope_toks.iter().any(|w| w == t) {
+                        score += 2;
+                    }
+                    if path_toks.iter().any(|w| w == t) {
+                        score += 1;
+                    }
+                }
+                (score > 0).then_some((score, s))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.name.len().cmp(&b.1.name.len())));
+        scored.into_iter().take(limit).map(|(_, s)| s).collect()
+    }
+
     /// Files that import `file`'s module (crude reverse-dependency by basename).
     #[must_use]
     pub fn dependents(&self, file: &str) -> Vec<String> {
@@ -443,6 +482,35 @@ pub fn references(root: &Path, name: &str, limit: usize) -> Vec<Reference> {
     sort_refs(out)
 }
 
+/// Lowercase word tokens from an identifier or path, splitting on non-alnum,
+/// camelCase, and snake_case boundaries (`authenticateUser` → `authenticate`,
+/// `user`). Drops 1-char tokens.
+fn tokenize(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut prev_lower = false;
+    for ch in s.chars() {
+        if ch.is_alphanumeric() {
+            // camelCase boundary: lower→Upper starts a new token.
+            if ch.is_uppercase() && prev_lower && !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+            cur.push(ch.to_ascii_lowercase());
+            prev_lower = ch.is_lowercase();
+        } else {
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+            prev_lower = false;
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out.retain(|t| t.len() > 1);
+    out
+}
+
 /// `scope::name` when a scope is known, else `name`.
 fn label(name: &str, scope: Option<&str>) -> String {
     match scope {
@@ -659,6 +727,36 @@ mod tests {
         assert_eq!(refs.len(), 2, "comment + string usages must be excluded");
         assert!(refs.iter().any(|r| r.is_def && r.line == 1));
         assert!(refs.iter().any(|r| !r.is_def && r.line == 2));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tokenize_splits_camel_and_snake() {
+        assert_eq!(tokenize("authenticateUser"), vec!["authenticate", "user"]);
+        assert_eq!(tokenize("get_current_user"), vec!["get", "current", "user"]);
+        assert_eq!(
+            tokenize("src/auth/login.rs"),
+            vec!["src", "auth", "login", "rs"]
+        );
+    }
+
+    #[test]
+    fn relevance_ranks_multi_term_matches_higher() {
+        let dir = std::env::temp_dir().join(format!("cgrel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("auth")).expect("mk");
+        std::fs::write(
+            dir.join("auth/login.rs"),
+            "pub fn authenticate_user() {}\npub fn parse_json() {}\n",
+        )
+        .expect("w");
+        let g = CodeGraph::index(&dir);
+        let hits = g.relevance_search("auth user", 10);
+        assert_eq!(
+            hits.first().map(|s| s.name.as_str()),
+            Some("authenticate_user"),
+            "the fn matching both terms (name + auth/ path) ranks first"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
