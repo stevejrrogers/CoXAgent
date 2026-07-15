@@ -3576,7 +3576,13 @@ async fn control_ep(
         "resume" => {
             // Attribute the run to whoever started it, on this machine, so the
             // agent cards can show "account@host" and claims are owned correctly.
-            let account = resolve_username(&app, &headers).await;
+            // A headless worker (no login session) takes its identity from
+            // COXAGENT_OPERATOR — the way a `coxagent run` box on another machine
+            // gets a distinct name in the shared registry.
+            let account = match std::env::var("COXAGENT_OPERATOR") {
+                Ok(o) if !o.is_empty() => o,
+                _ => resolve_username(&app, &headers).await,
+            };
             p.runner.set_operator(&account, &machine_host());
             p.runner.resume();
         }
