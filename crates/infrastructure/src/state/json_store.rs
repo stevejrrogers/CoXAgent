@@ -19,6 +19,49 @@ const STATE_FILE: &str = "state.json";
 const LOCK_FILE: &str = ".state.lock";
 const BACKUP_DIR: &str = ".backups";
 const MAX_BACKUPS: usize = 20;
+const COORD_FILE: &str = ".coord.json";
+/// Leader lease lifetime — a runner must renew within this or another takes over.
+const LEADER_TTL_SECS: i64 = 90;
+/// Per-ticket stage lease lifetime — long enough for a slow agent, short enough
+/// that a crashed runner's claim frees up for a retry.
+const STAGE_TTL_SECS: i64 = 1800;
+
+/// The cross-runner coordination file: who leads, and which per-ticket stages are
+/// currently claimed. Kept beside `state.json` and mutated only under the lock.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct Coord {
+    #[serde(default)]
+    leader: Option<Lease>,
+    #[serde(default)]
+    leases: Vec<StageLease>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct Lease {
+    worker: String,
+    at: String,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct StageLease {
+    ticket: String,
+    stage: String,
+    worker: String,
+    at: String,
+}
+
+/// Age in seconds of an RFC3339 timestamp relative to `now` (also RFC3339);
+/// a huge age on parse failure so unparseable leases are treated as expired.
+fn age_secs(at: &str, now: &str) -> i64 {
+    use time::format_description::well_known::Rfc3339;
+    match (
+        time::OffsetDateTime::parse(at, &Rfc3339),
+        time::OffsetDateTime::parse(now, &Rfc3339),
+    ) {
+        (Ok(a), Ok(n)) => (n - a).whole_seconds(),
+        _ => i64::MAX,
+    }
+}
 
 /// A [`StateStorePort`] that stores the project aggregate as one JSON file.
 pub struct JsonStateStore {
@@ -132,6 +175,86 @@ impl JsonStateStore {
         outcome
     }
 
+    fn coord_path(&self) -> PathBuf {
+        self.root.join(COORD_FILE)
+    }
+
+    fn read_coord(&self) -> Coord {
+        std::fs::read(self.coord_path())
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
+    }
+
+    fn write_coord(&self, coord: &Coord) -> Result<(), PortError> {
+        let json =
+            serde_json::to_vec_pretty(coord).map_err(|e| PortError::Backend(e.to_string()))?;
+        atomic_write(&self.root, &self.coord_path(), &json)
+    }
+
+    /// Acquire or renew leadership under the lock. Wins if there is no leader, the
+    /// current leader's lease is stale, or the caller already leads.
+    fn acquire_leader_blocking(&self, worker: &str, now: &str) -> Result<bool, PortError> {
+        let lock = acquire_lock(&self.lock_path())?;
+        let outcome = (|| {
+            let mut coord = self.read_coord();
+            let can_lead = match &coord.leader {
+                None => true,
+                Some(l) => l.worker == worker || age_secs(&l.at, now) > LEADER_TTL_SECS,
+            };
+            if can_lead {
+                coord.leader = Some(Lease {
+                    worker: worker.to_owned(),
+                    at: now.to_owned(),
+                });
+                self.write_coord(&coord)?;
+            }
+            Ok(can_lead)
+        })();
+        drop(lock);
+        outcome
+    }
+
+    /// Claim a per-ticket stage under the lock, pruning expired leases. Wins if no
+    /// live lease exists for `(ticket, stage)` or the caller already holds it.
+    fn claim_stage_blocking(
+        &self,
+        ticket: &str,
+        stage: &str,
+        worker: &str,
+        now: &str,
+    ) -> Result<bool, PortError> {
+        let lock = acquire_lock(&self.lock_path())?;
+        let outcome = (|| {
+            let mut coord = self.read_coord();
+            coord
+                .leases
+                .retain(|l| age_secs(&l.at, now) <= STAGE_TTL_SECS);
+            let held = coord
+                .leases
+                .iter()
+                .find(|l| l.ticket == ticket && l.stage == stage);
+            if let Some(l) = held {
+                if l.worker != worker {
+                    return Ok(false);
+                }
+            }
+            coord
+                .leases
+                .retain(|l| !(l.ticket == ticket && l.stage == stage));
+            coord.leases.push(StageLease {
+                ticket: ticket.to_owned(),
+                stage: stage.to_owned(),
+                worker: worker.to_owned(),
+                at: now.to_owned(),
+            });
+            self.write_coord(&coord)?;
+            Ok(true)
+        })();
+        drop(lock);
+        outcome
+    }
+
     /// Copy the current state file into a timestamped, pruned backup set.
     fn snapshot_backup(&self, current: &Path) -> Result<(), PortError> {
         let dir = self.root.join(BACKUP_DIR);
@@ -173,6 +296,38 @@ impl StateStorePort for JsonStateStore {
         let now = now.to_owned();
         tokio::task::spawn_blocking(move || {
             JsonStateStore { root }.claim_blocking(&id, &worker, &now)
+        })
+        .await
+        .map_err(|e| PortError::Backend(e.to_string()))?
+    }
+
+    async fn acquire_leader(&self, worker: &str, now: &str) -> Result<bool, PortError> {
+        let root = self.root.clone();
+        let worker = worker.to_owned();
+        let now = now.to_owned();
+        tokio::task::spawn_blocking(move || {
+            JsonStateStore { root }.acquire_leader_blocking(&worker, &now)
+        })
+        .await
+        .map_err(|e| PortError::Backend(e.to_string()))?
+    }
+
+    async fn claim_stage(
+        &self,
+        id: &TicketId,
+        stage: &str,
+        worker: &str,
+        now: &str,
+    ) -> Result<bool, PortError> {
+        let root = self.root.clone();
+        let (ticket, stage, worker, now) = (
+            id.to_string(),
+            stage.to_owned(),
+            worker.to_owned(),
+            now.to_owned(),
+        );
+        tokio::task::spawn_blocking(move || {
+            JsonStateStore { root }.claim_stage_blocking(&ticket, &stage, &worker, &now)
         })
         .await
         .map_err(|e| PortError::Backend(e.to_string()))?
@@ -239,5 +394,45 @@ fn prune_backups(dir: &Path, keep: usize) {
         for old in &files[..files.len() - keep] {
             let _ = std::fs::remove_file(old);
         }
+    }
+}
+
+#[cfg(test)]
+mod coord_tests {
+    use super::*;
+
+    fn store() -> JsonStateStore {
+        // `keep` prevents the tempdir from auto-deleting on drop for the test.
+        let dir = tempfile::tempdir().expect("tempdir").keep();
+        JsonStateStore::new(dir).expect("store")
+    }
+
+    #[tokio::test]
+    async fn only_one_worker_leads_at_a_time() {
+        let s = store();
+        let now = "2026-07-15T00:00:00Z";
+        assert!(s.acquire_leader("chopper@mac", now).await.unwrap());
+        // A different worker cannot lead while the lease is fresh.
+        assert!(!s.acquire_leader("luffy@mac", now).await.unwrap());
+        // The holder renews freely.
+        assert!(s.acquire_leader("chopper@mac", now).await.unwrap());
+        // After the lease goes stale, another worker takes over.
+        let later = "2026-07-15T00:05:00Z"; // 300s > LEADER_TTL_SECS
+        assert!(s.acquire_leader("luffy@mac", later).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn stage_claim_is_exclusive_per_ticket() {
+        let s = store();
+        let id = TicketId::new("CXC-F001").expect("id");
+        let now = "2026-07-15T00:00:00Z";
+        assert!(s.claim_stage(&id, "sa", "chopper@mac", now).await.unwrap());
+        // Another worker cannot take the same stage on the same ticket.
+        assert!(!s.claim_stage(&id, "sa", "luffy@mac", now).await.unwrap());
+        // A different stage on the same ticket is independent.
+        assert!(s.claim_stage(&id, "pd", "luffy@mac", now).await.unwrap());
+        // A different ticket's same stage is independent.
+        let id2 = TicketId::new("CXC-F002").expect("id");
+        assert!(s.claim_stage(&id2, "sa", "luffy@mac", now).await.unwrap());
     }
 }

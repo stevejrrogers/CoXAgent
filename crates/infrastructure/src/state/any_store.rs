@@ -44,4 +44,24 @@ impl StateStorePort for AnyStateStore {
             Self::Sql(s) => s.claim_ticket(id, worker, now).await,
         }
     }
+
+    async fn acquire_leader(&self, worker: &str, now: &str) -> Result<bool, PortError> {
+        match self {
+            Self::Json(s) => s.acquire_leader(worker, now).await,
+            Self::Sql(s) => s.acquire_leader(worker, now).await,
+        }
+    }
+
+    async fn claim_stage(
+        &self,
+        id: &TicketId,
+        stage: &str,
+        worker: &str,
+        now: &str,
+    ) -> Result<bool, PortError> {
+        match self {
+            Self::Json(s) => s.claim_stage(id, stage, worker, now).await,
+            Self::Sql(s) => s.claim_stage(id, stage, worker, now).await,
+        }
+    }
 }

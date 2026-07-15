@@ -18,6 +18,7 @@ pub struct RunDocsUseCase<S: StateStorePort, E: AgentEnginePort> {
     engine: Arc<E>,
     config: Config,
     work_dir: PathBuf,
+    worker: String,
 }
 
 impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
@@ -27,7 +28,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
             engine,
             config,
             work_dir,
+            worker: String::new(),
         }
+    }
+
+    /// Set this runner's identity (`account@host`) so the DOCS stage is claimed
+    /// per-ticket for parallel-safe documentation across concurrent runners.
+    #[must_use]
+    pub fn with_worker(mut self, worker: impl Into<String>) -> Self {
+        self.worker = worker.into();
+        self
     }
 
     /// Document the next `Done` feature. Returns its id, or `None` when there's
@@ -40,6 +50,18 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
         let Some(id) = next_documentable(&state) else {
             return Ok(None);
         };
+        let worker = if self.worker.is_empty() {
+            "local".to_owned()
+        } else {
+            self.worker.clone()
+        };
+        if !self
+            .store
+            .claim_stage(&id, "docs", &worker, &crate::state::now_rfc3339())
+            .await?
+        {
+            return Ok(None);
+        }
         let title = state
             .ticket(&id)
             .map_or("", coxagent_domain::Ticket::title)

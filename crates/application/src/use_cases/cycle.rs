@@ -697,45 +697,60 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             return report;
         }
 
+        // Coordinate concurrent runners: at most one leads the singleton phases
+        // (BA/PO/design-system/deploy/TEST/review) that must run once per project,
+        // not once per runner. Non-leaders still do per-ticket stages (SA/PD/DEV/
+        // DOCS) on tickets they claim, so real work runs in parallel without
+        // duplication. Falls back to leader when the backend can't coordinate.
+        let me = if self.worker.is_empty() {
+            "local".to_owned()
+        } else {
+            self.worker.clone()
+        };
+        let now = crate::state::now_rfc3339();
+        let leader = self.store.acquire_leader(&me, &now).await.unwrap_or(true);
+
         // Keep the code map fresh so `.coxagent/REPO_MAP.md` reflects the tree
         // the agents are about to work on (best-effort, token-saver-gated).
-        self.refresh_codegraph(cycle).await;
+        // Leader-only: it writes shared files under the repo.
+        if leader {
+            self.refresh_codegraph(cycle).await;
+            // Scrum: open/roll over the sprint at the start of the cycle.
+            self.advance_sprint_if_scrum(cycle).await;
 
-        // Scrum: open/roll over the sprint at the start of the cycle.
-        self.advance_sprint_if_scrum(cycle).await;
+            // BA runs on the first cycle of each period. `(cycle-1) % n == 0` is
+            // correct for every n including 1 (unlike `cycle % n == 1`).
+            let ba_every = self.config.workflow.ba_every_n_cycles;
+            if ba_every > 0 && (cycle - 1) % ba_every == 0 {
+                self.report("BA", "proposing features");
+                match self.ba().execute().await {
+                    Ok(ids) => report.ba_created = ids,
+                    Err(e) => report.errors.push(format!("BA: {e}")),
+                }
+            }
 
-        // BA runs on the first cycle of each period. `(cycle-1) % n == 0` is
-        // correct for every n including 1 (unlike `cycle % n == 1`).
-        let ba_every = self.config.workflow.ba_every_n_cycles;
-        if ba_every > 0 && (cycle - 1) % ba_every == 0 {
-            self.report("BA", "proposing features");
-            match self.ba().execute().await {
-                Ok(ids) => report.ba_created = ids,
-                Err(e) => report.errors.push(format!("BA: {e}")),
+            // Team hygiene: reject any duplicate tickets before design/dev.
+            self.dedup_backlog().await;
+
+            // PO lays out the milestone roadmap once the backlog exists.
+            self.report("PO", "planning milestones");
+            if let Err(e) = self.milestones().execute().await {
+                report.errors.push(format!("PO milestones: {e}"));
+            }
+
+            // PD establishes the project design system once UI work appears.
+            self.report("PD", "designing UX");
+            match self.design_system().execute().await {
+                Ok(created) => report.design_system_created = created,
+                Err(e) => report.errors.push(format!("PD design-system: {e}")),
             }
         }
 
-        // Team hygiene: reject any duplicate tickets (same title) before design
-        // or dev touches them, and call it out so it's visible.
-        self.dedup_backlog().await;
-
-        // PO lays out the milestone roadmap once the backlog exists.
-        self.report("PO", "planning milestones");
-        if let Err(e) = self.milestones().execute().await {
-            report.errors.push(format!("PO milestones: {e}"));
-        }
-
+        // SA designs the next unclaimed feature (per-ticket stage claim inside).
         self.report("SA", "designing");
         match self.sa().execute().await {
             Ok(id) => report.sa_readied = id,
             Err(e) => report.errors.push(format!("SA: {e}")),
-        }
-
-        // PD establishes the project design system once UI work appears.
-        self.report("PD", "designing UX");
-        match self.design_system().execute().await {
-            Ok(created) => report.design_system_created = created,
-            Err(e) => report.errors.push(format!("PD design-system: {e}")),
         }
 
         // PD authors UX for a UI ticket SA left pending, taking it to ready.
@@ -771,53 +786,60 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             }
         }
 
-        // Deploy after code changes so TEST verifies a running build.
-        if (report.feature_done.is_some() || report.bug_fixed.is_some()) && self.deploy.is_some() {
-            if let Some(deploy) = &self.deploy {
-                match deploy.deploy(&self.work_dir).await {
-                    Ok(r) if r.deployed => {
-                        self.record_deploy(r.success, &r.summary).await;
-                        let kind = if r.success {
-                            "deploy_ok"
-                        } else {
-                            "deploy_failed"
-                        };
-                        self.notify(kind, r.summary.clone()).await;
-                        // A failed deploy must become work, or nothing fixes it:
-                        // file it as a high-priority bug for DEV-BUG (deduped).
-                        if !r.success {
-                            if let Some(id) = self.file_deploy_bug(&r.summary).await {
-                                report.bugs_filed.push(id);
-                            }
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(e) => report.errors.push(format!("DEPLOY: {e}")),
-                }
-            }
-        }
-
-        self.report("TEST", "verifying build");
-        match self.test().execute().await {
-            Ok(ids) => report.bugs_filed = ids,
-            Err(e) => report.errors.push(format!("TEST: {e}")),
-        }
-
+        // DOCS documents the next completed feature (per-ticket stage claim).
         self.report("DOCS", "writing docs");
         match self.docs().execute().await {
             Ok(id) => report.documented = id,
             Err(e) => report.errors.push(format!("DOCS: {e}")),
         }
 
-        // Governance: architecture-conformance drift becomes tracked bugs.
-        match self.conformance().execute().await {
-            Ok(mut ids) => report.bugs_filed.append(&mut ids),
-            Err(e) => report.errors.push(format!("CONFORMANCE: {e}")),
-        }
+        // Leader-only tail: deploy, whole-build verification, governance, and PR
+        // review/merge each act on the shared build/repo and must run once.
+        if leader {
+            // Deploy after code changes so TEST verifies a running build.
+            if (report.feature_done.is_some() || report.bug_fixed.is_some())
+                && self.deploy.is_some()
+            {
+                if let Some(deploy) = &self.deploy {
+                    match deploy.deploy(&self.work_dir).await {
+                        Ok(r) if r.deployed => {
+                            self.record_deploy(r.success, &r.summary).await;
+                            let kind = if r.success {
+                                "deploy_ok"
+                            } else {
+                                "deploy_failed"
+                            };
+                            self.notify(kind, r.summary.clone()).await;
+                            // A failed deploy must become work, or nothing fixes
+                            // it: file it as a high-priority bug (deduped).
+                            if !r.success {
+                                if let Some(id) = self.file_deploy_bug(&r.summary).await {
+                                    report.bugs_filed.push(id);
+                                }
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) => report.errors.push(format!("DEPLOY: {e}")),
+                    }
+                }
+            }
 
-        // Auto-merge: the SA deep-dives open PRs and merges or requests changes.
-        self.report("SA", "reviewing PRs");
-        self.review_open_prs().await;
+            self.report("TEST", "verifying build");
+            match self.test().execute().await {
+                Ok(ids) => report.bugs_filed = ids,
+                Err(e) => report.errors.push(format!("TEST: {e}")),
+            }
+
+            // Governance: architecture-conformance drift becomes tracked bugs.
+            match self.conformance().execute().await {
+                Ok(mut ids) => report.bugs_filed.append(&mut ids),
+                Err(e) => report.errors.push(format!("CONFORMANCE: {e}")),
+            }
+
+            // Auto-merge: SA deep-dives open PRs and merges or requests changes.
+            self.report("SA", "reviewing PRs");
+            self.review_open_prs().await;
+        }
         self.report_idle();
 
         report.over_budget = self.record_activity(&report).await;
@@ -1132,6 +1154,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             self.config.clone(),
             self.work_dir.clone(),
         )
+        .with_worker(self.worker.clone())
     }
 
     fn milestones(&self) -> crate::use_cases::RunMilestonesUseCase<S, E> {
@@ -1160,6 +1183,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             self.config.clone(),
             self.work_dir.clone(),
         )
+        .with_worker(self.worker.clone())
     }
 
     fn dev(&self, mode: DevMode) -> RunDevUseCase<S, E> {
@@ -1189,6 +1213,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             self.config.clone(),
             self.work_dir.clone(),
         )
+        .with_worker(self.worker.clone())
     }
 
     fn conformance(&self) -> RunConformanceUseCase<S> {

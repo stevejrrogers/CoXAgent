@@ -49,4 +49,37 @@ pub trait StateStorePort: Send + Sync {
         self.save(&state).await?;
         Ok(true)
     }
+
+    /// Try to become (or renew) the project's work leader for singleton phases
+    /// (BA proposals, milestones, review/merge) that must run once, not once per
+    /// runner. `true` means the caller holds leadership this cycle.
+    ///
+    /// The default always grants it — a single runner is always the leader.
+    /// Shared backends override this with a lease so exactly one of several
+    /// concurrent runners leads at a time (with takeover if the leader dies).
+    ///
+    /// # Errors
+    /// [`PortError`] on a coordination-store failure.
+    async fn acquire_leader(&self, _worker: &str, _now: &str) -> Result<bool, PortError> {
+        Ok(true)
+    }
+
+    /// Atomically claim a per-ticket work `stage` (e.g. `"sa"`, `"pd"`, `"docs"`)
+    /// for `worker`, so two concurrent runners never do the same stage on the
+    /// same ticket. `true` means the caller won the stage.
+    ///
+    /// The default always grants it (single runner). Shared backends override
+    /// with a lease keyed by `(ticket, stage)`.
+    ///
+    /// # Errors
+    /// [`PortError`] on a coordination-store failure.
+    async fn claim_stage(
+        &self,
+        _id: &TicketId,
+        _stage: &str,
+        _worker: &str,
+        _now: &str,
+    ) -> Result<bool, PortError> {
+        Ok(true)
+    }
 }

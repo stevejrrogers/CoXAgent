@@ -34,6 +34,7 @@ pub struct RunPdUseCase<S: StateStorePort, E: AgentEnginePort> {
     engine: Arc<E>,
     config: Config,
     work_dir: PathBuf,
+    worker: String,
 }
 
 impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
@@ -43,7 +44,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
             engine,
             config,
             work_dir,
+            worker: String::new(),
         }
+    }
+
+    /// Set this runner's identity (`account@host`) so the PD stage is claimed
+    /// per-ticket for parallel-safe UX design across concurrent runners.
+    #[must_use]
+    pub fn with_worker(mut self, worker: impl Into<String>) -> Self {
+        self.worker = worker.into();
+        self
     }
 
     /// Author UX for the next pending UI feature awaiting it. Returns the
@@ -56,6 +66,18 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
         let Some(id) = next_feature_needing_ux(&state) else {
             return Ok(None);
         };
+        let worker = if self.worker.is_empty() {
+            "local".to_owned()
+        } else {
+            self.worker.clone()
+        };
+        if !self
+            .store
+            .claim_stage(&id, "pd", &worker, &crate::state::now_rfc3339())
+            .await?
+        {
+            return Ok(None);
+        }
         let title = state
             .ticket(&id)
             .map_or("", coxagent_domain::Ticket::title)

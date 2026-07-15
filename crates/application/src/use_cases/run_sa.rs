@@ -34,6 +34,7 @@ pub struct RunSaUseCase<S: StateStorePort, E: AgentEnginePort> {
     engine: Arc<E>,
     config: Config,
     work_dir: PathBuf,
+    worker: String,
 }
 
 impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
@@ -43,7 +44,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             engine,
             config,
             work_dir,
+            worker: String::new(),
         }
+    }
+
+    /// Set this runner's identity (`account@host`) so the SA stage is claimed
+    /// per-ticket, letting concurrent runners design different tickets in
+    /// parallel without both designing the same one.
+    #[must_use]
+    pub fn with_worker(mut self, worker: impl Into<String>) -> Self {
+        self.worker = worker.into();
+        self
     }
 
     /// Design the next pending feature. Returns the readied ticket id, or `None`
@@ -56,6 +67,20 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
         let Some(id) = next_feature_needing_design(&state) else {
             return Ok(None);
         };
+        // Claim the SA stage for this ticket; if another runner already has it,
+        // skip and let this cycle pick up something else next time.
+        let worker = if self.worker.is_empty() {
+            "local".to_owned()
+        } else {
+            self.worker.clone()
+        };
+        if !self
+            .store
+            .claim_stage(&id, "sa", &worker, &crate::state::now_rfc3339())
+            .await?
+        {
+            return Ok(None);
+        }
         let has_ui = state
             .ticket(&id)
             .is_some_and(coxagent_domain::Ticket::has_ui);
