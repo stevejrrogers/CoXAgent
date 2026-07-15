@@ -571,13 +571,28 @@
   .panel{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:17px}
   .panel h4{margin:0 0 13px;font-size:13px;font-weight:600;display:flex;align-items:center;gap:8px}
   .panel h4 .mo{margin-left:auto;font-size:11px;color:var(--dim);cursor:pointer;font-weight:500}
-  .agents{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:13px}
-  .agent{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:15px;display:flex;gap:13px;align-items:flex-start}
-  .av{width:40px;height:40px;border-radius:11px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:600;position:relative}
+  .agents{display:grid;grid-template-columns:repeat(auto-fill,minmax(262px,1fr));gap:15px}
+  .agent{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px 17px;display:flex;flex-direction:column;gap:13px;transition:border-color .14s,box-shadow .14s}
+  .agent:hover{border-color:var(--border2)}
+  .ag-head{display:flex;gap:12px;align-items:center}
+  .ag-id{flex:1;min-width:0}
+  .ag-term{font-size:13px;color:var(--dim);flex-shrink:0}
+  .av{width:42px;height:42px;border-radius:12px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;position:relative}
   .av .sr{position:absolute;right:-2px;bottom:-2px;width:12px;height:12px;border-radius:50%;border:2px solid var(--card);background:var(--dim)}
   .agent.run .av .sr{background:var(--green);animation:pulse 1.6s infinite}
-  .agent .rl{font-size:14px;font-weight:600} .agent .ds{font-size:12px;color:var(--dim);margin-top:2px} .agent.run .ds{color:var(--green)}
-  .agent .st{font-size:11px;color:var(--muted);margin-top:8px;display:flex;gap:6px;align-items:center}
+  .agent .rl{font-size:14px;font-weight:600;letter-spacing:-.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .agent .ds{font-size:12px;color:var(--dim);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .agent.run{border-color:color-mix(in srgb,var(--green) 42%,var(--border));box-shadow:0 0 0 1px color-mix(in srgb,var(--green) 20%,transparent)}
+  /* status block: its own zone under a hairline divider */
+  .ag-status{border-top:1px solid var(--border);padding-top:12px;display:flex;flex-direction:column;gap:8px;min-width:0}
+  .ag-now{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:600;color:var(--green);text-transform:uppercase;letter-spacing:.05em}
+  .ag-last{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted)}
+  .ag-task{display:inline-flex;align-items:center;gap:6px;align-self:flex-start;max-width:100%;background:color-mix(in srgb,var(--green) 14%,transparent);color:var(--green);border-radius:8px;padding:5px 10px;font-size:12px;font-weight:500;line-height:1.25}
+  .ag-task .tid{font-family:ui-monospace,monospace;font-size:11px;opacity:.85}
+  .ag-task.idle{background:var(--card2);color:var(--muted)} .ag-task.idle:hover{color:var(--text)}
+  .agent .agstats{margin:0}
+  .ag-by{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--dim);font-family:ui-monospace,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+  .ag-by i{flex-shrink:0}
   .cols{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:14px}
   .col{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:13px;min-height:120px}
   .col h3{margin:0 0 12px;font-size:12px;display:flex;align-items:center;gap:7px;font-weight:600}
@@ -1687,13 +1702,23 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
       let cur=null,live=working;
       if(r==="DEV-FEATURE"||r==="DEV-BUG"){const w=inProg.find(t=>r==="DEV-BUG"?t.type==="bug":t.type!=="bug");if(w){cur=w.id;}}
       if(!cur&&st.last&&st.last.ticket)cur=st.last.ticket;
-      const curHtml=working
-        ?`<span class="agtk agwork"><i class="ti ti-loader-2 att-spin"></i> ${esc((RUNNER.active_note||'working')+(cur?' · '+cur:''))}</span>${opHost?`<span class="agby"><i class="ti ti-user-cog" style="font-size:11px"></i> ${esc(opHost)}</span>`:''}`
-        :(cur?`<span class="agtk" onclick="event.stopPropagation();showTicket('${cur}')"><i class="ti ti-history"></i> ${esc(cur)}</span>`:'<span class="agidle">idle</span>');
-      return `<div class="agent ${live?'run':''}" onclick="openAgent('${r}')" style="cursor:pointer"><div class="av" style="background:${col}22;color:${col}">${initials(r)}<span class="sr"></span></div>
-        <div style="flex:1;min-width:0"><div class="rl">${r} <i class="ti ti-terminal-2" style="font-size:12px;color:var(--dim);float:right"></i></div><div class="ds">${d}</div>
+      // Status zone: when working, a task chip + who/where; otherwise last touch.
+      const taskChip=(note,tid,cls)=>`<span class="ag-task ${cls}"${tid&&!working?` onclick="event.stopPropagation();showTicket('${tid}')" style="cursor:pointer"`:''}>${note?esc(note):''}${tid?`<span class="tid">${esc(tid)}</span>`:''}</span>`;
+      let statusHtml;
+      if(working){
+        statusHtml=`<div class="ag-now"><i class="ti ti-loader-2 att-spin"></i> working now</div>
+          ${taskChip(RUNNER.active_note||'working',cur,'')}
+          ${opHost?`<div class="ag-by"><i class="ti ti-user-cog"></i> ${esc(opHost)}</div>`:''}`;
+      }else{
+        statusHtml=`<div class="ag-last"><i class="ti ti-point"></i> ${cur?'last touched':'idle'}</div>
+          ${cur?taskChip('',cur,'idle'):''}`;
+      }
+      return `<div class="agent ${live?'run':''}" onclick="openAgent('${r}')" style="cursor:pointer">
+        <div class="ag-head"><div class="av" style="background:${col}22;color:${col}">${initials(r)}<span class="sr"></span></div>
+          <div class="ag-id"><div class="rl">${r}</div><div class="ds">${d}</div></div>
+          <i class="ti ti-terminal-2 ag-term"></i></div>
         <div class="agstats"><span title="actions"><i class="ti ti-bolt"></i> ${st.n}</span><span title="tickets touched"><i class="ti ti-ticket"></i> ${st.tk.size}</span>${cost>0?`<span title="cost"><i class="ti ti-coin"></i> ${money(cost)}</span>`:''}</div>
-        <div class="st">${live?'<i class="ti ti-loader-2" style="font-size:13px"></i> working on ':'<i class="ti ti-point" style="font-size:13px"></i> last: '}${curHtml}</div></div></div>`;}).join("");
+        <div class="ag-status">${statusHtml}</div></div>`;}).join("");
     renderDupWarn(s);
     renderSessions();
     if(ME&&ME.role==="admin")renderTeamPeople();
