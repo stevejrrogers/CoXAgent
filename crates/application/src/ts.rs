@@ -1,7 +1,7 @@
 //! Tree-sitter parsing for the code graph — accurate, scope-aware symbol and
 //! reference extraction that the line/regex heuristic can't match. Supports
-//! Rust, Python, JavaScript, TypeScript and Go; other languages fall back to the
-//! heuristic. Never executes code — it only parses.
+//! Rust, Python, JavaScript, TypeScript, Go, Java, C# and Swift; other languages
+//! fall back to the heuristic. Never executes code — it only parses.
 
 use tree_sitter::{Language, Node, Parser};
 
@@ -21,6 +21,9 @@ fn language_for(lang: &str) -> Option<Language> {
         "javascript" => tree_sitter_javascript::language(),
         "typescript" => tree_sitter_typescript::language_typescript(),
         "go" => tree_sitter_go::language(),
+        "java" => tree_sitter_java::language(),
+        "csharp" => tree_sitter_c_sharp::language(),
+        "swift" => tree_sitter_swift::language(),
         _ => return None,
     })
 }
@@ -28,7 +31,10 @@ fn language_for(lang: &str) -> Option<Language> {
 /// Whether this language is parsed by tree-sitter (vs the heuristic fallback).
 #[must_use]
 pub fn supported(lang: &str) -> bool {
-    matches!(lang, "rust" | "python" | "javascript" | "typescript" | "go")
+    matches!(
+        lang,
+        "rust" | "python" | "javascript" | "typescript" | "go" | "java" | "csharp" | "swift"
+    )
 }
 
 fn parse(lang: &str, source: &str) -> Option<tree_sitter::Tree> {
@@ -198,6 +204,55 @@ fn collect_symbols(
                 }
                 _ => {}
             },
+            "java" | "csharp" => match kind {
+                "method_declaration" | "constructor_declaration" => {
+                    def = name_field(child, src).map(|n| ("fn", n, scope.map(str::to_owned)));
+                }
+                "class_declaration" | "record_declaration" => {
+                    if let Some(n) = name_field(child, src) {
+                        new_scope = Some(n.clone());
+                        def = Some(("class", n, None));
+                    }
+                }
+                "struct_declaration" => {
+                    if let Some(n) = name_field(child, src) {
+                        new_scope = Some(n.clone());
+                        def = Some(("struct", n, None));
+                    }
+                }
+                "interface_declaration" => {
+                    def = name_field(child, src).map(|n| ("interface", n, None));
+                }
+                "enum_declaration" => def = name_field(child, src).map(|n| ("enum", n, None)),
+                _ => {}
+            },
+            "swift" => match kind {
+                "function_declaration" => {
+                    def = name_field(child, src).map(|n| ("fn", n, scope.map(str::to_owned)));
+                }
+                "protocol_declaration" => {
+                    def = name_field(child, src).map(|n| ("interface", n, None));
+                }
+                // Swift uses `class_declaration` for class/struct/enum/actor —
+                // read the leading keyword for an accurate label + set scope.
+                "class_declaration" => {
+                    if let Some(n) = name_field(child, src) {
+                        let kw = child
+                            .child(0)
+                            .map(|c| text(c, src))
+                            .and_then(|k| match k {
+                                "struct" => Some("struct"),
+                                "enum" => Some("enum"),
+                                "actor" => Some("class"),
+                                _ => None,
+                            })
+                            .unwrap_or("class");
+                        new_scope = Some(n.clone());
+                        def = Some((kw, n, None));
+                    }
+                }
+                _ => {}
+            },
             _ => {}
         }
         if let Some((k, n, sc)) = def {
@@ -247,7 +302,9 @@ fn type_scope_intro(lang: &str, node: Node, src: &str) -> Option<String> {
         ("rust", "impl_item") => node
             .child_by_field_name("type")
             .map(|t| text(t, src).to_owned()),
-        ("python", "class_definition") | ("javascript" | "typescript", "class_declaration") => {
+        ("python", "class_definition")
+        | ("javascript" | "typescript" | "swift", "class_declaration")
+        | ("java" | "csharp", "class_declaration" | "struct_declaration" | "record_declaration") => {
             name_field(node, src)
         }
         _ => None,
@@ -265,7 +322,9 @@ fn fn_identity(
     match (lang, node.kind()) {
         ("rust", "function_item")
         | ("python", "function_definition")
-        | ("javascript" | "typescript", "function_declaration" | "method_definition") => {
+        | ("swift", "function_declaration")
+        | ("javascript" | "typescript", "function_declaration" | "method_definition")
+        | ("java" | "csharp", "method_declaration" | "constructor_declaration") => {
             name_field(node, src).map(scoped)
         }
         ("go", "function_declaration") => name_field(node, src).map(|n| (n, None)),
@@ -295,6 +354,14 @@ fn call_target(lang: &str, node: Node, src: &str) -> Option<(String, usize)> {
         "macro_invocation" if lang == "rust" => {
             node.child_by_field_name("macro").map(|m| text(m, src))
         }
+        "method_invocation" if lang == "java" => {
+            node.child_by_field_name("name").map(|n| text(n, src))
+        }
+        "invocation_expression" if lang == "csharp" => {
+            node.child_by_field_name("function").map(|f| text(f, src))
+        }
+        // Swift: `(call_expression (simple_identifier) (call_suffix …))`.
+        "call_expression" if lang == "swift" => node.named_child(0).map(|f| text(f, src)),
         _ => None,
     }?;
     let name = last_ident(callee);
@@ -348,6 +415,7 @@ const IDENT_KINDS: &[&str] = &[
     "property_identifier",
     "shorthand_property_identifier",
     "package_identifier",
+    "simple_identifier", // Swift
 ];
 
 fn collect_refs(node: Node, src: &str, name: &str, out: &mut Vec<usize>) {

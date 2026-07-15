@@ -55,6 +55,9 @@ tree-sitter-python = "0.21"
 tree-sitter-javascript = "0.21"
 tree-sitter-typescript = "0.21"
 tree-sitter-go = "0.21"
+tree-sitter-java = "0.21"
+tree-sitter-c-sharp = "0.21"
+tree-sitter-swift = "0.5"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

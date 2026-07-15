@@ -128,8 +128,10 @@ impl CodeGraph {
         imports.dedup();
 
         // Symbols: accurate tree-sitter parse when supported, else the heuristic.
+        // An empty parse (e.g. a grammar edge case) also falls back, so we never
+        // lose symbols a simple scan would have found.
         let mut sym_count = 0usize;
-        if let Some(syms) = crate::ts::symbols(lang, text) {
+        if let Some(syms) = crate::ts::symbols(lang, text).filter(|v| !v.is_empty()) {
             for s in syms {
                 sym_count += 1;
                 self.symbols.push(Symbol {
@@ -487,6 +489,8 @@ fn lang_of(name: &str) -> Option<&'static str> {
         "js" | "jsx" | "mjs" | "cjs" => "javascript",
         "go" => "go",
         "java" => "java",
+        "swift" => "swift",
+        "cs" => "csharp",
         "rb" => "ruby",
         _ => return None,
     })
@@ -650,6 +654,50 @@ mod tests {
         assert_eq!(refs.len(), 2, "comment + string usages must be excluded");
         assert!(refs.iter().any(|r| r.is_def && r.line == 1));
         assert!(refs.iter().any(|r| !r.is_def && r.line == 2));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn java_csharp_swift_symbols_and_calls() {
+        let dir = std::env::temp_dir().join(format!("cgjcs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("mk");
+        std::fs::write(
+            dir.join("src/Foo.java"),
+            "class Foo { void bar() { helper(); } void helper() {} }",
+        )
+        .expect("j");
+        std::fs::write(
+            dir.join("src/Prog.cs"),
+            "class Prog { void Run() { Work(); } void Work() {} }",
+        )
+        .expect("c");
+        std::fs::write(
+            dir.join("src/App.swift"),
+            "class App { func build() { validate() }\nfunc validate() {} }",
+        )
+        .expect("s");
+        let g = CodeGraph::index(&dir);
+        // Scope-aware methods across all three languages.
+        assert!(g
+            .symbols
+            .iter()
+            .any(|s| s.name == "bar" && s.scope.as_deref() == Some("Foo")));
+        assert!(g
+            .symbols
+            .iter()
+            .any(|s| s.name == "Run" && s.scope.as_deref() == Some("Prog")));
+        assert!(g
+            .symbols
+            .iter()
+            .any(|s| s.name == "build" && s.scope.as_deref() == Some("App")));
+        // Call graph resolves in each.
+        assert!(g.callers("helper").iter().any(|(w, _, _)| w == "Foo::bar"));
+        assert!(g.callers("Work").iter().any(|(w, _, _)| w == "Prog::Run"));
+        assert!(g
+            .callers("validate")
+            .iter()
+            .any(|(w, _, _)| w == "App::build"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
