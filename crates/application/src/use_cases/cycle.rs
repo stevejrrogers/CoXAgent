@@ -746,8 +746,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             }
         }
 
-        // SA designs the next unclaimed feature (per-ticket stage claim inside).
-        self.report("SA", "designing");
+        // SA/PD/DEV/DOCS report "working now" from inside, only after they win
+        // the per-ticket claim — so a runner that loses the race (or has nothing
+        // to do) shows idle instead of falsely mirroring the busy one.
         match self.sa().execute().await {
             Ok(id) => report.sa_readied = id,
             Err(e) => report.errors.push(format!("SA: {e}")),
@@ -759,7 +760,6 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             Err(e) => report.errors.push(format!("PD: {e}")),
         }
 
-        self.report("DEV-BUG", "fixing bugs");
         match self.dev(DevMode::Bug).execute().await {
             Ok(id) => {
                 if let Some(tid) = &id {
@@ -774,7 +774,6 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // Before building, make sure the next feature has a clear definition
             // of done — DEV raises unclear tickets and the BA fills them in.
             self.clarify_next_feature().await;
-            self.report("DEV-FEATURE", "building feature");
             match self.dev(DevMode::Feature).execute().await {
                 Ok(id) => {
                     if let Some(tid) = &id {
@@ -787,7 +786,6 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
 
         // DOCS documents the next completed feature (per-ticket stage claim).
-        self.report("DOCS", "writing docs");
         match self.docs().execute().await {
             Ok(id) => report.documented = id,
             Err(e) => report.errors.push(format!("DOCS: {e}")),
@@ -1155,6 +1153,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             self.work_dir.clone(),
         )
         .with_worker(self.worker.clone())
+        .with_phase(self.phase.clone())
     }
 
     fn milestones(&self) -> crate::use_cases::RunMilestonesUseCase<S, E> {
@@ -1184,6 +1183,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             self.work_dir.clone(),
         )
         .with_worker(self.worker.clone())
+        .with_phase(self.phase.clone())
     }
 
     fn dev(&self, mode: DevMode) -> RunDevUseCase<S, E> {
@@ -1195,6 +1195,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             mode,
         )
         .with_worker(self.worker.clone())
+        .with_phase(self.phase.clone())
     }
 
     fn test(&self) -> RunTestUseCase<S, E> {
@@ -1214,6 +1215,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             self.work_dir.clone(),
         )
         .with_worker(self.worker.clone())
+        .with_phase(self.phase.clone())
     }
 
     fn conformance(&self) -> RunConformanceUseCase<S> {

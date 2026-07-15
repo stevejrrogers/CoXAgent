@@ -58,6 +58,7 @@ pub struct RunDevUseCase<S: StateStorePort, E: AgentEnginePort> {
     /// Identity of this runner (`account@host`) recorded as the ticket's claim
     /// owner, so concurrent runners never work the same ticket.
     worker: String,
+    phase: Option<crate::use_cases::runner::PhaseReporter>,
 }
 
 impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
@@ -75,6 +76,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             work_dir,
             mode,
             worker: String::new(),
+            phase: None,
         }
     }
 
@@ -82,6 +84,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
     #[must_use]
     pub fn with_worker(mut self, worker: impl Into<String>) -> Self {
         self.worker = worker.into();
+        self
+    }
+
+    /// Attach the live "working now" reporter; fired only after the ticket is
+    /// claimed, so a runner that loses the race never shows a false-busy card.
+    #[must_use]
+    pub fn with_phase(mut self, phase: Option<crate::use_cases::runner::PhaseReporter>) -> Self {
+        self.phase = phase;
         self
     }
 
@@ -109,6 +119,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             .await?
         {
             return Ok(None);
+        }
+        if let Some(p) = &self.phase {
+            let role = match self.mode {
+                DevMode::Bug => "DEV-BUG",
+                DevMode::Feature => "DEV-FEATURE",
+            };
+            p(Some((role.to_owned(), id.to_string())));
         }
 
         let state = self.store.load().await?;

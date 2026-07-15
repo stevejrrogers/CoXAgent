@@ -35,6 +35,7 @@ pub struct RunPdUseCase<S: StateStorePort, E: AgentEnginePort> {
     config: Config,
     work_dir: PathBuf,
     worker: String,
+    phase: Option<crate::use_cases::runner::PhaseReporter>,
 }
 
 impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
@@ -45,6 +46,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
             config,
             work_dir,
             worker: String::new(),
+            phase: None,
         }
     }
 
@@ -53,6 +55,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
     #[must_use]
     pub fn with_worker(mut self, worker: impl Into<String>) -> Self {
         self.worker = worker.into();
+        self
+    }
+
+    /// Attach the live "working now" reporter; fired only after the stage is won.
+    #[must_use]
+    pub fn with_phase(mut self, phase: Option<crate::use_cases::runner::PhaseReporter>) -> Self {
+        self.phase = phase;
         self
     }
 
@@ -77,6 +86,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
             .await?
         {
             return Ok(None);
+        }
+        if let Some(p) = &self.phase {
+            p(Some(("PD".to_owned(), id.to_string())));
         }
         let title = state
             .ticket(&id)
