@@ -1,0 +1,121 @@
+//! Live integration test for the distributed coordination path: Postgres for
+//! durable state + transactional ticket claims, Redis for leader/stage leases.
+//!
+//! Skipped unless both are provided:
+//!   COXAGENT_TEST_PG_DSN=postgres://cox:test@localhost:55432/coxagent \
+//!   COXAGENT_TEST_REDIS_URL=redis://localhost:56379 \
+//!   cargo test -p coxagent-infrastructure --test distributed_coord -- --nocapture
+
+use coxagent_application::ports::outbound::StateStorePort;
+use coxagent_application::state::ProjectState;
+use coxagent_domain::{
+    Complexity, Priority, Role, Status, TechnicalDesign, Ticket, TicketId, TicketType,
+};
+use coxagent_infrastructure::state::SqlStateStore;
+
+fn env(k: &str) -> Option<String> {
+    std::env::var(k).ok().filter(|v| !v.is_empty())
+}
+
+async fn store(project: &str) -> SqlStateStore {
+    let dsn = env("COXAGENT_TEST_PG_DSN").expect("dsn");
+    let redis = env("COXAGENT_TEST_REDIS_URL").expect("redis");
+    SqlStateStore::connect(&dsn, project)
+        .await
+        .expect("connect pg")
+        .with_redis(&redis)
+        .expect("attach redis")
+}
+
+fn ready_feature(id: &str) -> Ticket {
+    let mut t = Ticket::new(
+        TicketId::new(id).expect("id"),
+        TicketType::Feature,
+        "f",
+        "",
+        Priority::High,
+        Complexity::Small,
+        false,
+    )
+    .expect("t");
+    t.set_technical_design(Role::Sa, TechnicalDesign::default())
+        .expect("design");
+    t.transition_to(Role::Sa, Status::Ready).expect("ready");
+    t
+}
+
+#[tokio::test]
+async fn distributed_coordination_across_two_hubs() {
+    if env("COXAGENT_TEST_PG_DSN").is_none() || env("COXAGENT_TEST_REDIS_URL").is_none() {
+        eprintln!("skipping: set COXAGENT_TEST_PG_DSN + COXAGENT_TEST_REDIS_URL");
+        return;
+    }
+    // Unique project id per run so reruns start clean.
+    let project = format!(
+        "test-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+
+    // Two stores on the same PG + Redis = two machines/hubs.
+    let hub_a = store(&project).await;
+    let hub_b = store(&project).await;
+    let now = "2026-07-15T00:00:00Z";
+
+    // Seed two ready features into the shared state.
+    hub_a
+        .save(&ProjectState {
+            tickets: vec![ready_feature("CXC-F001"), ready_feature("CXC-F002")],
+            ..ProjectState::default()
+        })
+        .await
+        .expect("seed");
+
+    // Leader election (Redis): exactly one hub leads.
+    let a_leads = hub_a
+        .acquire_leader("chopper@a", now)
+        .await
+        .expect("a lead");
+    let b_leads = hub_b.acquire_leader("luffy@b", now).await.expect("b lead");
+    assert!(a_leads, "first caller becomes leader");
+    assert!(!b_leads, "second caller cannot lead while lease is fresh");
+
+    // Stage lease (Redis): exclusive per (ticket, stage).
+    assert!(hub_a
+        .claim_stage(&TicketId::new("CXC-F001").unwrap(), "sa", "chopper@a", now)
+        .await
+        .unwrap());
+    assert!(!hub_b
+        .claim_stage(&TicketId::new("CXC-F001").unwrap(), "sa", "luffy@b", now)
+        .await
+        .unwrap());
+
+    // Ticket claim (Postgres transaction): two hubs race the same ticket, one wins.
+    let id = TicketId::new("CXC-F001").unwrap();
+    let a_won = hub_a.claim_ticket(&id, "chopper@a", now).await.unwrap();
+    let b_won = hub_b.claim_ticket(&id, "luffy@b", now).await.unwrap();
+    assert!(a_won ^ b_won, "exactly one hub wins the same ticket");
+    let winner = if a_won { "chopper@a" } else { "luffy@b" };
+    let state = hub_a.load().await.unwrap();
+    let t = state.tickets.iter().find(|t| t.id() == &id).unwrap();
+    assert_eq!(t.status(), Status::InProgress);
+    assert_eq!(t.claimed_by(), Some(winner));
+
+    // The *other* ticket is still free — the losing hub can grab a different one.
+    let id2 = TicketId::new("CXC-F002").unwrap();
+    assert!(hub_b.claim_ticket(&id2, "luffy@b", now).await.unwrap());
+
+    // Worker registry (Redis): both hubs heartbeat, both appear online.
+    hub_a
+        .heartbeat_worker("chopper@a", "leader", "CXC-F001", now)
+        .await
+        .unwrap();
+    hub_b
+        .heartbeat_worker("luffy@b", "worker", "CXC-F002", now)
+        .await
+        .unwrap();
+    let workers = hub_a.workers().await.unwrap();
+    assert_eq!(workers.len(), 2, "both teams show online: {workers:?}");
+}
