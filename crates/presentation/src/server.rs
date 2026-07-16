@@ -657,6 +657,7 @@ pub async fn serve_full(
             post(architecture_review_ep),
         )
         .route("/api/projects/:pid/docs-review", post(docs_review_ep))
+        .route("/api/projects/:pid/chat-reply", post(chat_reply_ep))
         .route("/api/projects/:pid/tickets", post(create_ticket))
         .route("/api/projects/:pid/ticket/:id", get(ticket_detail_ep))
         .route("/api/projects/:pid/ticket/:id/priority", post(set_priority))
@@ -3520,6 +3521,42 @@ async fn current_sprint(p: &ProjectHandle) -> u32 {
         .ok()
         .and_then(|s| s.sprint.map(|sp| sp.number))
         .unwrap_or(0)
+}
+
+#[derive(serde::Deserialize)]
+struct ChatReplyReq {
+    message: String,
+}
+
+/// A human posted in the team channel — the most relevant agent replies
+/// intelligently and runs any action requested. Fired by the composer.
+async fn chat_reply_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    Json(req): Json<ChatReplyReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let msg = req.message.trim();
+    if msg.is_empty() {
+        return Json(serde_json::json!({ "ok": true })).into_response();
+    }
+    let cfg = std::fs::read_to_string(&p.config_path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Config>(&t).ok())
+        .unwrap_or_default();
+    let uc = coxagent_application::use_cases::RunChatReplyUseCase::new(
+        Arc::clone(&p.store),
+        Arc::clone(&p.engine),
+        p.work_dir.clone(),
+        cfg.workflow.token_saver,
+        cfg.workflow.language,
+    );
+    match uc.execute(msg).await {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
 }
 
 /// On-demand SA architecture review: files refactor chores + a PO nudge.

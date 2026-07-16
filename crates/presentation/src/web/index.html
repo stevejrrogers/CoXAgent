@@ -2122,6 +2122,17 @@ function sendComment(){const inp=document.getElementById("disc-input");const bod
   const ticket=document.getElementById("disc-filter").value||null;
   inp.value="";ATT.disc=[];renderAttStrip("disc");
   fetch(api("/comments"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({body,ticket,attachments})})
+    .then(()=>{
+      // Team-channel messages get an intelligent agent reply (routed to the
+      // right role; runs the review/standup/discussion if that's the ask).
+      if(!ticket && body){
+        const lbl=document.getElementById("disc-run-label");if(lbl)lbl.textContent="Agent replying…";
+        fetch(api("/chat-reply"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({message:body})})
+          .then(async()=>{try{const s=await(await fetch(api("/state"))).json();render(s);renderDiscuss();}catch(e){}})
+          .catch(()=>{})
+          .finally(()=>{if(lbl)lbl.textContent="Agent discussion";});
+      }
+    })
     .catch(()=>{});}
 // ── Team chat (human-to-human channel, live over WebSocket) ─────────────────
 let CHAT=[], CHATWS=null, CHATWS_PID=null, chatwsRetry=null;
