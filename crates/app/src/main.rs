@@ -183,8 +183,17 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
                     .and_then(Path::parent)
                     .unwrap_or(&args.state_dir),
             );
+            // The project id is the workspace dir name (e.g. `cxc`), NOT a fixed
+            // "default" — so a headless worker shares the SAME Postgres project as
+            // the hub and other operators (distributed coordination).
+            let pid = args
+                .state_dir
+                .parent()
+                .and_then(Path::file_name)
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "default".to_owned());
             run_loop(
-                store().await?,
+                make_store(&pid, &args.state_dir).await?,
                 &args.state_dir,
                 work_dir,
                 context,
