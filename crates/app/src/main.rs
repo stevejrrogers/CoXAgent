@@ -464,6 +464,7 @@ async fn build_project(
         budget: live_budget,
         context_path: state_dir.join("project_context.md"),
         forge: forge_for_handle,
+        deploy: Some(Arc::new(DockerComposeDeploy::new())),
     })
 }
 

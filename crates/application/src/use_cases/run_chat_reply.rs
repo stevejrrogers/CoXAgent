@@ -6,7 +6,7 @@
 
 use crate::config::Language;
 use crate::error::AppError;
-use crate::ports::outbound::{AgentEnginePort, AgentRequest, StateStorePort};
+use crate::ports::outbound::{AgentEnginePort, AgentRequest, DeployPort, StateStorePort};
 use coxagent_domain::Role;
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -20,6 +20,7 @@ pub struct RunChatReplyUseCase<S: StateStorePort + ?Sized, E: AgentEnginePort + 
     work_dir: PathBuf,
     token_saver: bool,
     lang: Language,
+    deploy: Option<Arc<dyn DeployPort>>,
 }
 
 impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCase<S, E> {
@@ -36,7 +37,15 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             work_dir,
             token_saver,
             lang,
+            deploy: None,
         }
+    }
+
+    /// Give the chat the ability to actually deploy/run the app on request.
+    #[must_use]
+    pub fn with_deploy(mut self, deploy: Arc<dyn DeployPort>) -> Self {
+        self.deploy = Some(deploy);
+        self
     }
 
     /// Reply to `user_msg`. Best-effort: engine hiccups just yield no reply.
@@ -63,6 +72,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
              ACTION: discuss: <topic>           — kick off a team discussion\n\
              ACTION: feature: <title> :: <desc> — add a new feature to the backlog\n\
              ACTION: bug: <title> :: <desc>     — file a bug for the devs to fix\n\
+             ACTION: deploy                     — build & run the app now (docker compose up)\n\
              ACTION: none                       — just talking / asking\n\n\
              IMPORTANT — confirm before acting: if the action changes the project (creating a \
              ticket, running a review/standup/discussion) and the user has NOT clearly confirmed it \
@@ -130,8 +140,61 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         } else if let Some(rest) = strip_kw(a, "bug") {
             self.file_ticket(coxagent_domain::TicketType::Bug, rest, "TEST")
                 .await;
+        } else if lower.starts_with("deploy") {
+            self.deploy_now().await;
         }
         Ok(())
+    }
+
+    /// Deploy/run the app on request (docker compose in the codebase), reporting
+    /// the result back into the channel.
+    async fn deploy_now(&self) {
+        let Some(deploy) = &self.deploy else {
+            let msg = if self.lang.is_vi() {
+                "Mình chưa được cấp quyền deploy ở đây — cần bật deploy adapter cho project."
+            } else {
+                "I don't have deploy access here — a deploy adapter needs enabling for this project."
+            };
+            self.post("DEV-BUG", msg).await;
+            return;
+        };
+        let starting = if self.lang.is_vi() {
+            "🚀 Đang deploy (docker compose up)…"
+        } else {
+            "🚀 Deploying (docker compose up)…"
+        };
+        self.post("DEV-BUG", starting).await;
+        let result = deploy.deploy(&self.work_dir).await;
+        let body = match result {
+            Ok(r) if r.success => {
+                if self.lang.is_vi() {
+                    format!("✅ Deploy xong — {}", r.summary)
+                } else {
+                    format!("✅ Deploy OK — {}", r.summary)
+                }
+            }
+            Ok(r) => {
+                if self.lang.is_vi() {
+                    format!(
+                        "❌ Deploy fail — {}. Mình sẽ tạo bug để xử lý nếu bạn muốn.",
+                        r.summary
+                    )
+                } else {
+                    format!(
+                        "❌ Deploy failed — {}. I can file a bug to fix it if you want.",
+                        r.summary
+                    )
+                }
+            }
+            Err(e) => {
+                if self.lang.is_vi() {
+                    format!("❌ Không chạy được deploy: {e}")
+                } else {
+                    format!("❌ Couldn't run the deploy: {e}")
+                }
+            }
+        };
+        self.post("DEV-BUG", &body).await;
     }
 
     /// Create a ticket from a `<title> :: <description>` payload and confirm it in
@@ -220,8 +283,8 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             let _ = writeln!(out, "- Last deploy: {} ({})", last.version, last.title);
         }
         out.push_str(
-            "(The app auto-deploys via docker compose each cycle after DEV; you don't run it \
-             manually.)\n",
+            "(The app auto-deploys via docker compose after DEV each cycle; you can also deploy \
+             on request with ACTION: deploy.)\n",
         );
         out.push_str("Recent team channel:\n");
         for c in s

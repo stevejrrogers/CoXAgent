@@ -54,6 +54,9 @@ pub struct ProjectHandle {
     /// The code host for review actions (list/merge/diff PRs); set when git
     /// integration is configured with a provider.
     pub forge: Option<Arc<dyn coxagent_application::ports::outbound::ForgePort>>,
+    /// Deploy adapter, so on-demand actions (e.g. a chat "deploy" request) can
+    /// build & run the app.
+    pub deploy: Option<Arc<dyn coxagent_application::ports::outbound::DeployPort>>,
 }
 
 /// Builds a fresh project on demand (scaffold + register), injected by the
@@ -3546,13 +3549,16 @@ async fn chat_reply_ep(
         .ok()
         .and_then(|t| serde_json::from_str::<Config>(&t).ok())
         .unwrap_or_default();
-    let uc = coxagent_application::use_cases::RunChatReplyUseCase::new(
+    let mut uc = coxagent_application::use_cases::RunChatReplyUseCase::new(
         Arc::clone(&p.store),
         Arc::clone(&p.engine),
         p.work_dir.clone(),
         cfg.workflow.token_saver,
         cfg.workflow.language,
     );
+    if let Some(d) = &p.deploy {
+        uc = uc.with_deploy(Arc::clone(d));
+    }
     match uc.execute(msg).await {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => internal_error(&e.to_string()),
