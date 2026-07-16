@@ -327,6 +327,10 @@ pub struct ProjectState {
     /// and nest even before it holds a page — Confluence-style spaces/pages.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub doc_folders: Vec<String>,
+    /// Lessons the team learned in past retros — fed back into agent prompts so
+    /// the team actually improves over time (kept bounded, newest last).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lessons: Vec<String>,
     /// Spend accumulated on the current calendar day (UTC), for the daily budget
     /// policy. Resets when the day rolls over.
     #[serde(default)]
@@ -358,6 +362,7 @@ impl Default for ProjectState {
             milestones: Vec::new(),
             docs: Vec::new(),
             doc_folders: Vec::new(),
+            lessons: Vec::new(),
             spend_today_usd: 0.0,
             spend_day: String::new(),
         }
@@ -528,6 +533,19 @@ impl ProjectState {
         };
         self.docs.push(page.clone());
         page
+    }
+
+    /// Record a retro lesson (deduped, newest last, capped at 12).
+    pub fn add_lesson(&mut self, lesson: &str) {
+        let lesson = lesson.trim();
+        if lesson.is_empty() || self.lessons.iter().any(|l| l == lesson) {
+            return;
+        }
+        self.lessons.push(lesson.to_owned());
+        let overflow = self.lessons.len().saturating_sub(12);
+        if overflow > 0 {
+            self.lessons.drain(0..overflow);
+        }
     }
 
     /// Look up a documentation page by id.

@@ -565,6 +565,57 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             Self::sprint_planning(&mut state, n);
             state.log_activity("SM", "opened sprint", Some(format!("sprint {n}")));
             let _ = self.store.save(&state).await;
+            // Learn: distill one concrete lesson from the closing sprint and keep
+            // it — it gets fed back into the agents' prompts so they improve.
+            if closing.is_some() {
+                self.capture_retro_lesson().await;
+            }
+        }
+    }
+
+    /// Ask the SM to distill ONE concrete, actionable lesson from how the last
+    /// sprint went, store it, and post it — closing the learn-and-improve loop.
+    async fn capture_retro_lesson(&self) {
+        use std::fmt::Write as _;
+        let Ok(state) = self.store.load().await else {
+            return;
+        };
+        let mut ctx = String::from("Recent activity + outcomes:\n");
+        for a in state.activity.iter().rev().take(20) {
+            let _ = writeln!(ctx, "- {}: {}", a.agent, a.action);
+        }
+        let prior = if state.lessons.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\nLessons already recorded:\n- {}\n",
+                state.lessons.join("\n- ")
+            )
+        };
+        let request = AgentRequest {
+            role: coxagent_domain::Role::Sm,
+            system_prompt: "You are the SM running a sprint retrospective. Output ONE concrete, \
+                 actionable lesson the team should apply next sprint — a single sentence, \
+                 imperative, specific to what actually happened. No preamble."
+                .to_owned(),
+            task_prompt: format!(
+                "{ctx}{prior}\nWhat is the single most valuable NEW lesson to carry forward? \
+                 One sentence."
+            ),
+            work_dir: self.work_dir.clone(),
+            timeout: std::time::Duration::from_secs(90),
+        };
+        let Ok(outcome) = self.engine.run(request).await else {
+            return;
+        };
+        let lesson = outcome.stdout.trim().trim_start_matches("- ").to_owned();
+        if lesson.is_empty() || !outcome.succeeded() {
+            return;
+        }
+        if let Ok(mut s) = self.store.load().await {
+            s.add_lesson(&lesson);
+            s.post_comment("SM", &format!("🎓 Retro lesson: {lesson}"), None);
+            let _ = self.store.save(&s).await;
         }
     }
 
@@ -736,6 +787,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             self.refresh_codegraph(cycle).await;
             // Scrum: open/roll over the sprint at the start of the cycle.
             self.advance_sprint_if_scrum(cycle).await;
+
+            // Daily standup: every few cycles the SM runs the room — each active
+            // agent gives a live update and raises blockers, SM highlights focus.
+            if cycle % 3 == 1 {
+                self.scrum_standup().await;
+            }
 
             // BA runs on the first cycle of each period. `(cycle-1) % n == 0` is
             // correct for every n including 1 (unlike `cycle % n == 1`).
@@ -1042,6 +1099,24 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             None,
         );
         let _ = self.store.save(&state).await;
+    }
+
+    /// Run the daily standup: the SM opens, each active agent posts a grounded
+    /// update (done/next/blockers), and the SM highlights blockers + focus.
+    async fn scrum_standup(&self) {
+        self.report("SM", "running standup");
+        let uc = crate::use_cases::RunStandupUseCase::new(
+            Arc::clone(&self.store),
+            Arc::clone(&self.engine),
+            self.work_dir.clone(),
+        );
+        match uc.execute().await {
+            Ok(blockers) if blockers > 0 => {
+                tracing::info!("standup surfaced {blockers} blocker(s)");
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("standup: {e}"),
+        }
     }
 
     /// Make Scrum lively: when a real tension exists, run a facilitated

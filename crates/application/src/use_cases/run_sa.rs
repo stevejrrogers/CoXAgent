@@ -103,7 +103,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             .map_or("", coxagent_domain::Ticket::title)
             .to_owned();
 
-        let outcome = self.engine.run(self.build_request(&id, &title)).await?;
+        let lessons = state.lessons.clone();
+        let outcome = self
+            .engine
+            .run(self.build_request(&id, &title, &lessons))
+            .await?;
         if !outcome.succeeded() {
             return Err(PortError::Backend(format!(
                 "SA engine failed on {id}: {}",
@@ -128,14 +132,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
         Ok(Some(id))
     }
 
-    fn build_request(&self, id: &TicketId, title: &str) -> AgentRequest {
+    fn build_request(&self, id: &TicketId, title: &str, lessons: &[String]) -> AgentRequest {
         let _choice = self.config.engine.resolve(Role::Sa);
         AgentRequest {
             role: Role::Sa,
             system_prompt: prompts::system_prompt(prompts::SA),
             task_prompt: format!(
-                "Design feature {id}: {title}{}",
-                prompts::repo_map_block(&self.work_dir, self.config.workflow.token_saver)
+                "Design feature {id}: {title}{}{}",
+                prompts::repo_map_block(&self.work_dir, self.config.workflow.token_saver),
+                prompts::lessons_block(lessons),
             ),
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(1200),

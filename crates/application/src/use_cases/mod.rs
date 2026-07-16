@@ -15,6 +15,7 @@ pub mod run_docs;
 pub mod run_milestones;
 pub mod run_pd;
 pub mod run_sa;
+pub mod run_standup;
 pub mod run_test;
 pub mod runner;
 
@@ -33,5 +34,6 @@ pub use run_docs::RunDocsUseCase;
 pub use run_milestones::RunMilestonesUseCase;
 pub use run_pd::RunPdUseCase;
 pub use run_sa::RunSaUseCase;
+pub use run_standup::RunStandupUseCase;
 pub use run_test::RunTestUseCase;
 pub use runner::{run_forever, RunnerHandle, RunnerSnapshot};

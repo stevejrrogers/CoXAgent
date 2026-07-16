@@ -1,0 +1,221 @@
+//! `RunStandupUseCase` — a real daily standup, run by the SM with live agent
+//! turns. The SM opens with the sprint goal and status, each participating role
+//! gives a grounded update (done / next / blockers), and the SM closes by
+//! highlighting blockers and the focus for the day. Every turn is posted to the
+//! Scrum feed so the ceremony reads like a human team, not a status dump.
+
+use crate::error::{AppError, PortError};
+use crate::ports::outbound::{AgentEnginePort, AgentRequest, StateStorePort};
+use coxagent_domain::Role;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+/// The role personas pulled into a standup, in order.
+const PARTICIPANTS: &[(&str, &str)] = &[
+    ("BA", "Business Analyst — backlog & requirements"),
+    ("SA", "Solution Architect — design & technical risk"),
+    ("PD", "Product Designer — UX"),
+    ("DEV-FEATURE", "Feature Developer"),
+    ("DEV-BUG", "Bug-fix Developer"),
+    ("TEST", "QA Engineer"),
+    ("DOCS", "Tech Writer"),
+];
+
+/// Runs a facilitated standup over the shared engine + store.
+pub struct RunStandupUseCase<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> {
+    store: Arc<S>,
+    engine: Arc<E>,
+    work_dir: PathBuf,
+}
+
+impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunStandupUseCase<S, E> {
+    pub fn new(store: Arc<S>, engine: Arc<E>, work_dir: PathBuf) -> Self {
+        Self {
+            store,
+            engine,
+            work_dir,
+        }
+    }
+
+    /// Run the standup. Returns the number of blockers agents raised.
+    ///
+    /// # Errors
+    /// [`AppError`] when the engine fails on a turn.
+    pub async fn execute(&self) -> Result<usize, AppError> {
+        let context = self.status_context().await;
+
+        // SM opens the standup.
+        self.post("SM", &format!("🗣️ Standup — {}", self.headline().await))
+            .await;
+
+        // Only pull in roles that actually did something (grounded, not noise).
+        let active = self.active_roles().await;
+        let mut updates: Vec<(String, String)> = Vec::new();
+        let mut blockers = 0usize;
+        for (role, persona) in PARTICIPANTS.iter().filter(|(r, _)| active.contains(r)) {
+            let text = self.update(role, persona, &context, &updates).await?;
+            let is_blocked = text.to_lowercase().contains("block");
+            if is_blocked {
+                blockers += 1;
+            }
+            self.post(role, &text).await;
+            updates.push(((*role).to_owned(), text));
+        }
+
+        // SM closes: highlight blockers + the focus for the day.
+        let close = self.highlight(&context, &updates).await?;
+        self.post("SM", &format!("📌 {}", close.trim())).await;
+        Ok(blockers)
+    }
+
+    /// One-line sprint headline for the SM's opener.
+    async fn headline(&self) -> String {
+        let Ok(s) = self.store.load().await else {
+            return "daily sync".to_owned();
+        };
+        let done = s
+            .tickets
+            .iter()
+            .filter(|t| {
+                matches!(
+                    t.status(),
+                    coxagent_domain::Status::Done
+                        | coxagent_domain::Status::Documented
+                        | coxagent_domain::Status::Verified
+                )
+            })
+            .count();
+        let inflight = s
+            .tickets
+            .iter()
+            .filter(|t| t.status() == coxagent_domain::Status::InProgress)
+            .count();
+        match &s.sprint {
+            Some(sp) => format!(
+                "Sprint #{} “{}” · {done} done · {inflight} in flight. Round the room:",
+                sp.number, sp.goal
+            ),
+            None => format!("{done} shipped · {inflight} in flight. Round the room:"),
+        }
+    }
+
+    /// A compact status the agents ground their updates in.
+    async fn status_context(&self) -> String {
+        use std::fmt::Write as _;
+        let Ok(s) = self.store.load().await else {
+            return String::new();
+        };
+        let mut out = String::from("Recent team activity:\n");
+        for a in s.activity.iter().rev().take(14) {
+            let _ = writeln!(
+                out,
+                "- {}: {}{}",
+                a.agent,
+                a.action,
+                a.ticket
+                    .as_deref()
+                    .map(|t| format!(" [{t}]"))
+                    .unwrap_or_default()
+            );
+        }
+        out
+    }
+
+    /// Which roles have recent activity (so empty roles stay quiet).
+    async fn active_roles(&self) -> Vec<&'static str> {
+        let Ok(s) = self.store.load().await else {
+            return vec!["SA", "DEV-FEATURE", "TEST"];
+        };
+        let recent: std::collections::HashSet<String> = s
+            .activity
+            .iter()
+            .rev()
+            .take(30)
+            .map(|a| a.agent.to_uppercase())
+            .collect();
+        let mut roles: Vec<&'static str> = PARTICIPANTS
+            .iter()
+            .map(|(r, _)| *r)
+            .filter(|r| recent.contains(*r))
+            .collect();
+        if roles.is_empty() {
+            roles = vec!["SA", "DEV-FEATURE", "TEST"];
+        }
+        roles
+    }
+
+    async fn update(
+        &self,
+        role: &str,
+        persona: &str,
+        context: &str,
+        thread: &[(String, String)],
+    ) -> Result<String, AppError> {
+        use std::fmt::Write as _;
+        let prior = if thread.is_empty() {
+            String::new()
+        } else {
+            let mut s = String::from("\nTeammates so far:\n");
+            for (r, t) in thread {
+                let _ = writeln!(s, "{r}: {t}");
+            }
+            s
+        };
+        let task = format!(
+            "{context}{prior}\nYou are {role} ({persona}). Give your standup update in \
+             1-2 sentences: what you finished, what you're picking up next, and — only if \
+             real — one blocker (say \"BLOCKER:\" then what and who can help). Speak like a \
+             teammate, first person, concrete, no filler."
+        );
+        self.run(role, &task).await
+    }
+
+    async fn highlight(
+        &self,
+        context: &str,
+        thread: &[(String, String)],
+    ) -> Result<String, AppError> {
+        use std::fmt::Write as _;
+        let mut updates = String::new();
+        for (r, t) in thread {
+            let _ = writeln!(updates, "{r}: {t}");
+        }
+        let task = format!(
+            "{context}\nStandup updates:\n{updates}\nYou are the SM. In 2-3 sentences: call out \
+             any blocker and who should resolve it, and name the single most important focus for \
+             today. Be decisive and concrete."
+        );
+        self.run("SM", &task).await
+    }
+
+    async fn run(&self, role: &str, task: &str) -> Result<String, AppError> {
+        let request = AgentRequest {
+            role: Role::Sm,
+            system_prompt: format!(
+                "You are {role} at your team's daily standup. Speak plainly in the first \
+                 person like a real teammate — concise, specific, honest about blockers. No \
+                 preamble, no sign-off, 1-3 sentences."
+            ),
+            task_prompt: task.to_owned(),
+            work_dir: self.work_dir.clone(),
+            timeout: Duration::from_secs(90),
+        };
+        let outcome = self.engine.run(request).await?;
+        if !outcome.succeeded() {
+            return Err(PortError::Backend(format!(
+                "standup engine failed for {role}: {}",
+                outcome.stderr.trim()
+            ))
+            .into());
+        }
+        Ok(outcome.stdout.trim().to_owned())
+    }
+
+    async fn post(&self, author: &str, body: &str) {
+        if let Ok(mut state) = self.store.load().await {
+            state.post_comment(author, body, None);
+            let _ = self.store.save(&state).await;
+        }
+    }
+}

@@ -158,6 +158,22 @@ pub fn repo_map_block(work_dir: &std::path::Path, enabled: bool) -> String {
     )
 }
 
+/// Fold the team's retro lessons into a prompt block, so agents actually apply
+/// what past sprints learned. Empty when there are none.
+#[must_use]
+pub fn lessons_block(lessons: &[String]) -> String {
+    if lessons.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\n\nLessons the team learned in past retros — apply them:\n");
+    for l in lessons.iter().rev().take(6).rev() {
+        out.push_str("- ");
+        out.push_str(l);
+        out.push('\n');
+    }
+    out
+}
+
 /// Render architecture stack rules as prompt constraints, so DEV/SA follow the
 /// stack proactively (governance also enforces it reactively).
 #[must_use]
