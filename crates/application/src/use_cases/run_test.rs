@@ -38,10 +38,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
     /// [`AppError`] on engine failure or unparseable output.
     pub async fn execute(&self) -> Result<Vec<TicketId>, AppError> {
         let _choice = self.config.engine.resolve(Role::Test);
+        let memory = self.store.load().await.map_or_else(
+            |_| String::new(),
+            |s| prompts::team_memory_block(&s.decisions, &s.lessons),
+        );
         let request = AgentRequest {
             role: Role::Test,
             system_prompt: prompts::system_prompt(prompts::TEST),
-            task_prompt: "Test the current build and report new bugs.".to_owned(),
+            task_prompt: format!("Test the current build and report new bugs.{memory}"),
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(1800),
         };

@@ -352,6 +352,12 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             "(The app auto-deploys via docker compose after DEV each cycle; you can also deploy \
              on request with ACTION: deploy.)\n",
         );
+        if !s.decisions.is_empty() {
+            out.push_str("Team decisions/conventions (honour these):\n");
+            for d in s.decisions.iter().rev().take(6).rev() {
+                let _ = writeln!(out, "- {d}");
+            }
+        }
         out.push_str("Recent team channel:\n");
         for c in s
             .comments

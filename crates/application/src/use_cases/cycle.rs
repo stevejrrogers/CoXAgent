@@ -1157,6 +1157,18 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                         Ok(_) => {}
                         Err(e) => report.errors.push(format!("DEPLOY: {e}")),
                     }
+                    // Hard DoD gate: run the real test suite. A red suite becomes a
+                    // high-priority bug (deduped) — deterministic quality, not just
+                    // the LLM TEST agent's judgement.
+                    match deploy.run_tests(&self.work_dir).await {
+                        Ok(r) if r.deployed && !r.success => {
+                            if let Some(id) = self.file_test_failure(&r.summary).await {
+                                report.bugs_filed.push(id);
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) => report.errors.push(format!("TESTS: {e}")),
+                    }
                 }
             }
 
@@ -1285,6 +1297,39 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             state.post_comment("SM", &action, None);
             let _ = self.store.save(&state).await;
         }
+    }
+
+    /// File a High bug when the test-suite DoD gate goes red (deduped on an open
+    /// one). Deterministic quality signal from the actual toolchain.
+    async fn file_test_failure(&self, summary: &str) -> Option<TicketId> {
+        use coxagent_domain::ticket::{Complexity, Priority, Status, TicketType};
+        const MARKER: &str = "Tests failing";
+        let Ok(state) = self.store.load().await else {
+            return None;
+        };
+        if state.tickets.iter().any(|t| {
+            t.ticket_type() == TicketType::Bug
+                && t.status() == Status::Open
+                && t.title().starts_with(MARKER)
+        }) {
+            return None;
+        }
+        let first = summary.lines().next().unwrap_or("test suite is red");
+        crate::use_cases::AddTicketUseCase::new(Arc::clone(&self.store))
+            .execute(crate::use_cases::AddTicketInput {
+                ticket_type: TicketType::Bug,
+                title: format!("{MARKER}: {first}"),
+                description: format!(
+                    "The test suite is failing — Definition of Done is not met. Make the tests \
+                     pass (fix the code or the test).\n\nOutput:\n{summary}"
+                ),
+                priority: Priority::High,
+                complexity: Complexity::Medium,
+                has_ui: false,
+                acceptance_criteria: vec!["The full test suite passes".to_owned()],
+            })
+            .await
+            .ok()
     }
 
     async fn file_deploy_bug(&self, summary: &str) -> Option<TicketId> {

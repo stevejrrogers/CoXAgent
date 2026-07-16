@@ -590,6 +590,11 @@
   .sec{font-size:12px;font-weight:600;color:var(--dim);text-transform:uppercase;letter-spacing:.07em;margin:26px 0 13px;display:flex;align-items:center;gap:8px}
   .sec:first-child{margin-top:0}
   .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(158px,1fr));gap:13px}
+  .hgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+  .hcard{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:13px 15px}
+  .hcard .hval{font-size:22px;font-weight:700;line-height:1.1}
+  .hcard .hlbl{font-size:12px;color:var(--muted);margin-top:3px}
+  .hcard .hsub{font-size:11px;color:var(--dim);margin-top:2px}
   .kpi{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:16px 17px}
   .kpi .ic{width:32px;height:32px;border-radius:9px;display:flex;align-items:center;justify-content:center;background:var(--accentbg);color:var(--accent2);margin-bottom:11px}
   .kpi .v{font-size:27px;font-weight:600;letter-spacing:-.02em;line-height:1} .kpi .k{font-size:12px;color:var(--muted);margin-top:5px}
@@ -1091,6 +1096,7 @@ body:not(.manage) .manage-only { display: none !important; }
         <div id="ov-alerts"></div>
         <div id="ov-goal"></div>
         <div class="kpis" id="kpis"></div>
+        <div id="ov-health"></div>
         <div id="ov-deploy"></div>
         <div class="row2" id="ov-charts"></div>
         <div id="ov-design"></div>
@@ -1801,6 +1807,7 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
     const spend=s.spend||{};
     document.getElementById("ov-alerts").innerHTML=alertsHtml(s,m,spend);
     document.getElementById("kpis").innerHTML=[kpi("Shipped",m.shipped),kpi("In flight",m.inflight),kpi("Open bugs",m.openBugs),kpi("Documented",m.docd),kpi("Releases",m.releases),kpi("Cost",money(spend.total_cost_usd))].join("");
+    renderHealth(s);
     const dp=s.deploy;
     document.getElementById("ov-deploy").innerHTML=dp?`<div class="panel" style="margin-top:16px;display:flex;align-items:center;gap:13px">
       <div class="av" style="width:36px;height:36px;background:${dp.ok?'var(--green)':'var(--red)'}22;color:${dp.ok?'var(--green)':'var(--red)'}"><i class="ti ti-${dp.ok?'cloud-check':'cloud-x'}"></i></div>
@@ -2834,6 +2841,35 @@ function attHtml(atts){if(!atts||!atts.length)return"";
     if(a.mime&&a.mime.startsWith("image/"))return `<a href="${esc(a.url)}" target="_blank" rel="noopener" class="msg-img"><img src="${esc(a.url)}" alt="${esc(a.name)}" loading="lazy"></a>`;
     return `<a href="${esc(a.url)}" target="_blank" rel="noopener" download class="msg-file"><i class="ti ti-file-download"></i> <span>${esc(a.name)}</span> <em>${fmtBytes(a.size||0)}</em></a>`;
   }).join("")+`</div>`;}
+// Team-health metrics computed from the live state — data-driven Scrum.
+function renderHealth(s){
+  const el=document.getElementById("ov-health"); if(!el)return;
+  const t=s.tickets||[];
+  const isDone=x=>["done","documented","verified"].includes((x.status||"").toLowerCase());
+  const reviews=s.reviews||[];
+  const appr=reviews.filter(r=>(r.decision||"")==="approve").length;
+  const chg=reviews.filter(r=>(r.decision||"")==="request_changes").length;
+  const reviewTotal=appr+chg;
+  const rejectRate=reviewTotal?Math.round(chg*100/reviewTotal):0;
+  // Sprint velocity: committed vs shipped this sprint.
+  const sp=s.sprint; let velo="—", veloSub="no sprint";
+  if(sp&&sp.committed){const done=sp.committed.filter(id=>t.some(x=>x.id===id&&isDone(x))).length;
+    velo=`${done}/${sp.committed.length}`; veloSub=`sprint #${sp.number}`;}
+  const openBugs=t.filter(x=>(x.type||x.ticket_type||"").toLowerCase()==="bug"&&(x.status||"").toLowerCase()==="open").length;
+  const wip=t.filter(x=>(x.status||"").toLowerCase()==="inprogress").length;
+  const refactors=t.filter(x=>(x.title||"").startsWith("Refactor:")&&!isDone(x)).length;
+  const mem=((s.decisions||[]).length)+((s.lessons||[]).length);
+  const card=(lbl,val,sub,col)=>`<div class="hcard"><div class="hval" style="color:${col||'var(--text)'}">${val}</div><div class="hlbl">${lbl}</div>${sub?`<div class="hsub">${sub}</div>`:''}</div>`;
+  el.innerHTML=`<div class="sec" style="margin-top:20px"><i class="ti ti-heart-rate-monitor" style="color:var(--accent2)"></i> Team health</div>
+    <div class="hgrid">
+      ${card("Sprint velocity",velo,veloSub,"var(--green)")}
+      ${card("WIP (in progress)",wip,wip>6?'high — cân nhắc giảm':'ok',wip>6?'var(--amber)':'var(--text)')}
+      ${card("Open bugs",openBugs,"chưa fix",openBugs>4?'var(--red)':'var(--text)')}
+      ${card("PR reject rate",reviewTotal?rejectRate+'%':'—',`${appr}✓ / ${chg}✗`,rejectRate>50?'var(--amber)':'var(--text)')}
+      ${card("Refactor debt",refactors,"ticket refactor mở",refactors>0?'var(--amber)':'var(--text)')}
+      ${card("Team memory",mem,"decisions + lessons","var(--accent2)")}
+    </div>`;
+}
 function render(s){STATE=s;renderSidebar(s);renderActive();ingestChatSnapshot(s.chat);}
 function depChips(ids){
   if(!ids||!ids.length)return '<span style="color:var(--dim)">—</span>';

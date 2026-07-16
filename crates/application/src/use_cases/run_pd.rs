@@ -96,7 +96,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
             .map_or("", coxagent_domain::Ticket::title)
             .to_owned();
 
-        let outcome = self.engine.run(self.build_request(&id, &title)).await?;
+        let memory = prompts::team_memory_block(&state.decisions, &state.lessons);
+        let outcome = self
+            .engine
+            .run(self.build_request(&id, &title, &memory))
+            .await?;
         if !outcome.succeeded() {
             return Err(PortError::Backend(format!(
                 "PD engine failed on {id}: {}",
@@ -118,12 +122,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
         Ok(Some(id))
     }
 
-    fn build_request(&self, id: &TicketId, title: &str) -> AgentRequest {
+    fn build_request(&self, id: &TicketId, title: &str, memory: &str) -> AgentRequest {
         let _choice = self.config.engine.resolve(Role::Pd);
         AgentRequest {
             role: Role::Pd,
             system_prompt: prompts::system_prompt(prompts::PD),
-            task_prompt: format!("Design the UX for feature {id}: {title}"),
+            task_prompt: format!("Design the UX for feature {id}: {title}{memory}"),
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(1200),
         }

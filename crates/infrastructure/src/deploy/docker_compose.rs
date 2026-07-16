@@ -58,8 +58,70 @@ async fn daemon_up() -> bool {
         .is_ok_and(|s| s.success())
 }
 
+/// Detect the project's toolchain and return its test command, or `None`.
+fn test_command(work_dir: &Path) -> Option<(&'static str, Vec<&'static str>)> {
+    let has = |f: &str| work_dir.join(f).exists();
+    if has("Cargo.toml") {
+        Some(("cargo", vec!["test", "--quiet"]))
+    } else if has("go.mod") {
+        Some(("go", vec!["test", "./..."]))
+    } else if has("package.json") {
+        Some(("npm", vec!["test", "--silent"]))
+    } else if has("pyproject.toml") || has("pytest.ini") || has("requirements.txt") {
+        Some(("pytest", vec!["-q"]))
+    } else {
+        None
+    }
+}
+
 #[async_trait]
 impl DeployPort for DockerComposeDeploy {
+    async fn run_tests(&self, work_dir: &Path) -> Result<DeployReport, PortError> {
+        let Some((cmd, args)) = test_command(work_dir) else {
+            return Ok(DeployReport {
+                success: true,
+                deployed: false,
+                summary: "no recognised test runner".to_owned(),
+            });
+        };
+        let output = tokio::time::timeout(
+            Duration::from_secs(900),
+            Command::new(cmd)
+                .args(&args)
+                .current_dir(work_dir)
+                .stdin(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .map_err(|_| PortError::Backend("test run timed out".to_owned()))?
+        .map_err(|e| PortError::Backend(format!("spawn {cmd}: {e}")))?;
+        let success = output.status.success();
+        let tail = |b: &[u8]| -> String {
+            String::from_utf8_lossy(b)
+                .lines()
+                .rev()
+                .take(12)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let summary = if success {
+            format!("{cmd} {} passed", args.join(" "))
+        } else {
+            let out = tail(&output.stdout);
+            let err = tail(&output.stderr);
+            format!("{cmd} tests failed:\n{err}\n{out}")
+        };
+        Ok(DeployReport {
+            success,
+            deployed: true,
+            summary,
+        })
+    }
+
     async fn ensure_daemon(&self) -> Result<bool, PortError> {
         if daemon_up().await {
             return Ok(true);

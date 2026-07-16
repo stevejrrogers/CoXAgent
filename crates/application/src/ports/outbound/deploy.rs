@@ -35,4 +35,19 @@ pub trait DeployPort: Send + Sync {
     async fn ensure_daemon(&self) -> Result<bool, PortError> {
         Ok(true)
     }
+
+    /// Run the project's test suite as a hard Definition-of-Done gate — detect
+    /// the toolchain and run its tests. `deployed=false` means no toolchain was
+    /// recognised (skipped). The default skips.
+    ///
+    /// # Errors
+    /// [`PortError::Backend`] if the test tool can't be launched.
+    async fn run_tests(&self, work_dir: &Path) -> Result<DeployReport, PortError> {
+        let _ = work_dir;
+        Ok(DeployReport {
+            success: true,
+            deployed: false,
+            summary: "no test runner".to_owned(),
+        })
+    }
 }
