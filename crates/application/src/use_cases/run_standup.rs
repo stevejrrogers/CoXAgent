@@ -85,7 +85,10 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunStandupUseCase<
         let mut raised: Vec<(String, String)> = Vec::new();
         for (role, persona) in PARTICIPANTS.iter().filter(|(r, _)| active.contains(r)) {
             let text = self.update(role, persona, &context, &updates).await?;
-            if text.to_lowercase().contains("block") {
+            let low = text.to_lowercase();
+            // A blocker OR a Staff-level concern raised in someone's domain both
+            // get picked up and turned into a concrete follow-up.
+            if low.contains("block") || low.contains("raise:") || low.contains("concern") {
                 raised.push(((*role).to_owned(), text.clone()));
             }
             self.post(role, &text).await;
@@ -129,10 +132,11 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunStandupUseCase<
         context: &str,
     ) -> Result<String, AppError> {
         let task = format!(
-            "{context}\n{owner} raised this blocker at standup:\n\"{blocker}\"\nYou are {responder}, \
-             the teammate best placed to help. In 1-2 sentences, respond directly to {owner} with \
-             a concrete action to resolve it (who does what, next step). If it needs tracked work, \
-             say so. Be specific and own it — no vague reassurance."
+            "{context}\n{owner} raised this at standup (a blocker or a domain concern):\n\
+             \"{blocker}\"\nYou are {responder}, the teammate best placed to help. In 1-2 \
+             sentences, respond directly to {owner} with a concrete action to resolve it (who does \
+             what, next step). If it needs tracked work, say so. Be specific and own it — no vague \
+             reassurance."
         );
         self.run(responder, &task).await
     }
@@ -240,10 +244,11 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunStandupUseCase<
             s
         };
         let task = format!(
-            "{context}{prior}\nYou are {role} ({persona}). Give your standup update in \
-             1-2 sentences: what you finished, what you're picking up next, and — only if \
-             real — one blocker (say \"BLOCKER:\" then what and who can help). Speak like a \
-             teammate, first person, concrete, no filler."
+            "{context}{prior}\nYou are {role} ({persona}), a Staff/Principal-level owner of your \
+             area. Give your standup update in 1-2 sentences: what you finished, what's next, and \
+             — only if real — a blocker (say \"BLOCKER:\") or a concern/risk you notice in your \
+             domain that the team should act on (say \"RAISE:\" then what and who should help). \
+             Speak like a teammate, first person, concrete, no filler."
         );
         self.run(role, &task).await
     }
