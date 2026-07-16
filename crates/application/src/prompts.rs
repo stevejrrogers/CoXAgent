@@ -182,16 +182,26 @@ pub fn repo_map_block(work_dir: &std::path::Path, enabled: bool) -> String {
     )
 }
 
-/// Fold the team's retro lessons into a prompt block, so agents actually apply
-/// what past sprints learned. Empty when there are none.
+/// Fold the team's durable memory — decisions/conventions plus retro lessons —
+/// into a prompt block so every agent stays consistent with what's been decided
+/// and learned, instead of re-deriving (and contradicting) each call. Empty when
+/// there's nothing yet.
 #[must_use]
-pub fn lessons_block(lessons: &[String]) -> String {
-    if lessons.is_empty() {
+pub fn team_memory_block(decisions: &[String], lessons: &[String]) -> String {
+    if decisions.is_empty() && lessons.is_empty() {
         return String::new();
     }
-    let mut out = String::from("\n\nLessons the team learned in past retros — apply them:\n");
+    let mut out = String::from(
+        "\n\n## Team memory — honour these (decisions the team already made + \
+         lessons learned):\n",
+    );
+    for d in decisions.iter().rev().take(12).rev() {
+        out.push_str("- [decision] ");
+        out.push_str(d);
+        out.push('\n');
+    }
     for l in lessons.iter().rev().take(6).rev() {
-        out.push_str("- ");
+        out.push_str("- [lesson] ");
         out.push_str(l);
         out.push('\n');
     }

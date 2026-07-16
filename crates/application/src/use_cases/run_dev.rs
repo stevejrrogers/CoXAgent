@@ -192,7 +192,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             task_prompt: format!(
                 "Ticket {id}: {title}\n\nImplement it now.{}{}",
                 prompts::repo_map_block(&self.work_dir, self.config.workflow.token_saver),
-                prompts::lessons_block(&state.lessons),
+                prompts::team_memory_block(&state.decisions, &state.lessons),
             ),
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(3600),

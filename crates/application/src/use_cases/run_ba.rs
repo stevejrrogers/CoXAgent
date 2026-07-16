@@ -73,8 +73,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
             task_prompt: format!(
                 "Product goal:\n{}\n\nEXISTING BACKLOG — do NOT re-propose anything already \
                  here (same or similar title/scope):\n{}\n\nPropose only genuinely NEW features \
-                 that are not already covered above.",
-                self.context, backlog_block
+                 that are not already covered above.{}",
+                self.context,
+                backlog_block,
+                prompts::team_memory_block(&existing.decisions, &existing.lessons)
             ),
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(600),

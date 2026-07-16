@@ -103,10 +103,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             .map_or("", coxagent_domain::Ticket::title)
             .to_owned();
 
-        let lessons = state.lessons.clone();
+        let memory = crate::prompts::team_memory_block(&state.decisions, &state.lessons);
         let outcome = self
             .engine
-            .run(self.build_request(&id, &title, &lessons))
+            .run(self.build_request(&id, &title, &memory))
             .await?;
         if !outcome.succeeded() {
             return Err(PortError::Backend(format!(
@@ -132,15 +132,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
         Ok(Some(id))
     }
 
-    fn build_request(&self, id: &TicketId, title: &str, lessons: &[String]) -> AgentRequest {
+    fn build_request(&self, id: &TicketId, title: &str, memory: &str) -> AgentRequest {
         let _choice = self.config.engine.resolve(Role::Sa);
         AgentRequest {
             role: Role::Sa,
             system_prompt: prompts::system_prompt(prompts::SA),
             task_prompt: format!(
-                "Design feature {id}: {title}{}{}",
+                "Design feature {id}: {title}{}{memory}",
                 prompts::repo_map_block(&self.work_dir, self.config.workflow.token_saver),
-                prompts::lessons_block(lessons),
             ),
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(1200),

@@ -381,6 +381,11 @@ pub struct ProjectState {
     /// the team actually improves over time (kept bounded, newest last).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lessons: Vec<String>,
+    /// The team's durable decisions & conventions (ADR-style one-liners): the
+    /// architecture calls, tech choices, and "how we do X" every agent should
+    /// honour — so parallel LLM calls stay consistent instead of contradicting.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decisions: Vec<String>,
     /// Set when the SA has called a halt on new features to run a hardening /
     /// refactor sprint (the codebase risk is too high to keep building on).
     /// While true, BA proposes no new features and planning dedicates the sprint
@@ -419,6 +424,7 @@ impl Default for ProjectState {
             docs: Vec::new(),
             doc_folders: Vec::new(),
             lessons: Vec::new(),
+            decisions: Vec::new(),
             refactor_mode: false,
             spend_today_usd: 0.0,
             spend_day: String::new(),
@@ -638,6 +644,21 @@ impl ProjectState {
         let overflow = self.lessons.len().saturating_sub(12);
         if overflow > 0 {
             self.lessons.drain(0..overflow);
+        }
+    }
+
+    /// Record a durable team decision / convention (deduped, newest last, capped
+    /// at 20). Trimmed to one line so it reads as an ADR entry.
+    pub fn add_decision(&mut self, decision: &str) {
+        let d = decision.trim().replace('\n', " ");
+        let d = d.trim();
+        if d.is_empty() || self.decisions.iter().any(|x| x == d) {
+            return;
+        }
+        self.decisions.push(d.to_owned());
+        let overflow = self.decisions.len().saturating_sub(20);
+        if overflow > 0 {
+            self.decisions.drain(0..overflow);
         }
     }
 

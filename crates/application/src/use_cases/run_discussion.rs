@@ -96,6 +96,13 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunDiscussionUseCa
         let (decision, action) = split_action(&raw);
         self.post("SM", &format!("✅ Decision: {}", decision.trim()))
             .await;
+        // Persist it to the team's durable memory so every agent honours it later.
+        if !decision.trim().is_empty() {
+            if let Ok(mut s) = self.store.load().await {
+                s.add_decision(decision.trim());
+                let _ = self.store.save(&s).await;
+            }
+        }
 
         // Enact a decided action through the guarded AddTicket path.
         let mut created_ticket = None;

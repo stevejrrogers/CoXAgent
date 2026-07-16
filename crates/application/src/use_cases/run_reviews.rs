@@ -123,6 +123,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunArchitectureAud
         // is a real report, not just tickets.
         self.post_assessment(render_assessment(obj.get("assessment"), &risk, sprint, vi))
             .await;
+        self.bank_verdict(&obj).await;
 
         if items.is_empty() {
             let msg = if vi {
@@ -138,6 +139,23 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunArchitectureAud
             self.call_refactor_sprint(vi).await;
         }
         Ok(filed)
+    }
+
+    /// Bank the architecture verdict as a durable team decision so every agent
+    /// honours it later.
+    async fn bank_verdict(&self, obj: &serde_json::Value) {
+        let Some(v) = obj
+            .get("assessment")
+            .and_then(|a| a.get("verdict"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|v| !v.trim().is_empty())
+        else {
+            return;
+        };
+        if let Ok(mut s) = self.store.load().await {
+            s.add_decision(&format!("Architecture: {}", v.trim()));
+            let _ = self.store.save(&s).await;
+        }
     }
 
     /// Post the assessment to the feed and save it as the Architecture Review
