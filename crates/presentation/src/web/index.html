@@ -531,7 +531,13 @@
   .tkc-addr{width:24px;height:22px;border-radius:6px;background:var(--card2);border:1px solid var(--border2);color:var(--muted);cursor:pointer;font-size:13px;display:inline-flex;align-items:center;justify-content:center;opacity:0;transition:opacity .1s}
   .tkc:hover .tkc-addr{opacity:1}
   .tkc-addr:hover{color:var(--accent2);border-color:var(--accent2)}
+  .cmtool{display:inline-flex;gap:1px;align-items:center;margin-right:6px}
+  .cmtool button{width:26px;height:26px;border:none;background:transparent;color:var(--dim);border-radius:5px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;font-size:13px}
+  .cmtool button:hover{background:var(--card2);color:var(--accent2)}
+  .tkc-wrap{margin-top:10px}
+  .tkc-wrap .cmtool{margin:0 0 6px 0}
   .tkc-compose{display:flex;gap:7px;margin-top:10px}
+  .tkc-wrap .tkc-compose{margin-top:0}
   .tkc-compose input{flex:1;background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:9px;padding:9px 12px;font-size:13px;font-family:inherit}
   .tkc-compose .pri{padding:0 14px}
   .tkc-menu{position:fixed;z-index:200;background:var(--panel);border:1px solid var(--border2);border-radius:10px;padding:5px;display:flex;gap:2px;box-shadow:0 8px 24px rgba(0,0,0,.35)}
@@ -1228,7 +1234,7 @@ body:not(.manage) .manage-only { display: none !important; }
             <div class="chatcompose">
               <input type="file" id="disc-file" multiple hidden onchange="pickFiles('disc',this)">
               <button class="att-btn" onclick="document.getElementById('disc-file').click()" title="Attach files"><i class="ti ti-paperclip"></i></button>
-              <input id="disc-input" placeholder="Message the team…  (Enter to send)" onkeydown="if(event.key==='Enter')sendComment()">
+              <span id="disc-toolbar"></span><input id="disc-input" placeholder="Message the team…  (**markdown** · Enter to send)" onkeydown="if(event.key==='Enter')sendComment()">
               <button class="pri" onclick="sendComment()"><i class="ti ti-send"></i></button>
             </div>
           </div>
@@ -1983,6 +1989,7 @@ function renderBacklogPanel(s){
 function loadComments(){if(CUR==="discuss")renderDiscuss();}
 function renderDiscuss(){
   const sel=document.getElementById("disc-filter");if(!sel)return;
+  const _tb=document.getElementById("disc-toolbar");if(_tb&&!_tb.dataset.i){_tb.innerHTML=mdToolbar("disc-input");_tb.dataset.i="1";}
   const want=sel.value;
   const ids=(STATE.tickets||[]).map(t=>t.id);
   const opts=['<option value="">Team channel</option>'].concat(ids.map(id=>`<option value="${esc(id)}">${esc(id)}</option>`)).join("");
@@ -2017,11 +2024,23 @@ function renderDiscuss(){
     return `${sep}<div class="cmsg${mine?' mine':''}">
       <div class="cav" style="background:${col}22;color:${col}">${esc(initials(c.author))}</div>
       <div class="ccol"><div class="chead"><b>${esc(c.author)}</b>${badge}${tick}<span class="ctime">${esc(time)}</span></div>
-        ${c.body?`<div class="cbub">${esc(c.body)}</div>`:''}${attHtml(c.attachments)}</div></div>`;}).join("");
+        ${c.body?`<div class="cbub md">${formatMsg(c.body)}</div>`:''}${attHtml(c.attachments)}</div></div>`;}).join("");
   if(atBottom)box.scrollTop=box.scrollHeight;
 }
 // Classify SM/DEPLOY scrum notifications so they render as a timeline event
 // (sprint open/close, ship, deploy) rather than a conversational bubble.
+// Wrap the selection (or insert) markdown in a text input/textarea.
+function mdIns(id,b,a){const el=document.getElementById(id);if(!el)return;
+  const s=el.selectionStart??el.value.length,e=el.selectionEnd??el.value.length,v=el.value,sel=v.slice(s,e)||"text";
+  el.value=v.slice(0,s)+b+sel+a+v.slice(e);el.focus();
+  try{el.selectionStart=s+b.length;el.selectionEnd=s+b.length+sel.length;}catch(_){}}
+function mdToolbar(id){return `<div class="cmtool">
+  <button type="button" title="Bold" onmousedown="event.preventDefault()" onclick="mdIns('${id}','**','**')"><i class="ti ti-bold"></i></button>
+  <button type="button" title="Italic" onmousedown="event.preventDefault()" onclick="mdIns('${id}','_','_')"><i class="ti ti-italic"></i></button>
+  <button type="button" title="Inline code" onmousedown="event.preventDefault()" onclick="mdIns('${id}','\`','\`')"><i class="ti ti-code"></i></button>
+  <button type="button" title="Bullet list" onmousedown="event.preventDefault()" onclick="mdIns('${id}','\\n- ','')"><i class="ti ti-list"></i></button>
+  <button type="button" title="Link" onmousedown="event.preventDefault()" onclick="mdIns('${id}','[','](https://)')"><i class="ti ti-link"></i></button>
+</div>`;}
 function scrumEvent(c){
   const b=(c.body||"").trim();const a=c.author||"";
   // Strip a leading emoji/symbol so "📋 Sprint review…" still classifies.
@@ -2789,7 +2808,7 @@ async function showTicket(id){
     ${(t.status==="pending"||t.status==="open")?`<button class="tk-btn danger" onclick="rejectTicket('${t.id}')"><i class="ti ti-ban"></i> Reject</button>`:''}
   </div>`;
   h+=`<div class="mrow" style="display:block;border:none;margin-top:6px"><span class="lbl">Comments</span><div id="tk-comments" style="margin-top:8px">${'<div class="empty" style="padding:8px">loading…</div>'}</div>
-    <div class="tkc-compose"><input id="tkc-input" placeholder="Add a comment…  (Enter to post · @ to mention)" onkeydown="if(event.key==='Enter')postTicketComment('${t.id}')"><button class="pri" onclick="postTicketComment('${t.id}')"><i class="ti ti-send"></i></button></div></div>`;
+    <div class="tkc-wrap">${mdToolbar('tkc-input')}<div class="tkc-compose"><input id="tkc-input" placeholder="Add a comment…  (**markdown** · Enter to post · @ to mention)" onkeydown="if(event.key==='Enter')postTicketComment('${t.id}')"><button class="pri" onclick="postTicketComment('${t.id}')"><i class="ti ti-send"></i></button></div></div></div>`;
   body.innerHTML=h;
   renderTicketComments(t.id);}
 async function rejectTicket(id){try{await fetch(api("/ticket/"+id+"/reject"),{method:"POST"});close_("ov-ticket");}catch(e){}}
