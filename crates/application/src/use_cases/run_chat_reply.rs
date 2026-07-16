@@ -21,7 +21,16 @@ pub struct RunChatReplyUseCase<S: StateStorePort + ?Sized, E: AgentEnginePort + 
     token_saver: bool,
     lang: Language,
     deploy: Option<Arc<dyn DeployPort>>,
+    host_port: Option<u16>,
 }
+
+/// Common docker-compose filenames we treat as "already has a deploy setup".
+const COMPOSE_NAMES: &[&str] = &[
+    "docker-compose.yml",
+    "docker-compose.yaml",
+    "compose.yml",
+    "compose.yaml",
+];
 
 impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCase<S, E> {
     pub fn new(
@@ -38,6 +47,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             token_saver,
             lang,
             deploy: None,
+            host_port: None,
         }
     }
 
@@ -45,6 +55,13 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
     #[must_use]
     pub fn with_deploy(mut self, deploy: Arc<dyn DeployPort>) -> Self {
         self.deploy = Some(deploy);
+        self
+    }
+
+    /// The host port to publish on when scaffolding a docker setup.
+    #[must_use]
+    pub fn with_host_port(mut self, port: Option<u16>) -> Self {
+        self.host_port = port;
         self
     }
 
@@ -158,6 +175,19 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             self.post("DEV-BUG", msg).await;
             return;
         };
+        // Greenfield / no infra? Scaffold a Dockerfile + compose so "deploy" just
+        // works locally, then run it.
+        let has_compose = COMPOSE_NAMES.iter().any(|f| self.work_dir.join(f).exists());
+        if !has_compose {
+            let scaffolding = if self.lang.is_vi() {
+                "🛠️ Chưa có docker setup — mình đang tạo Dockerfile + docker-compose để chạy local…"
+            } else {
+                "🛠️ No docker setup yet — scaffolding a Dockerfile + docker-compose to run locally…"
+            };
+            self.post("DEV-FEATURE", scaffolding).await;
+            self.scaffold_docker().await;
+        }
+
         let starting = if self.lang.is_vi() {
             "🚀 Đang deploy (docker compose up)…"
         } else {
@@ -241,6 +271,28 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             };
             self.post(author, &msg).await;
         }
+    }
+
+    /// Have a DEV agent inspect the codebase and write a minimal, working
+    /// Dockerfile + docker-compose so the app can run locally. Best-effort.
+    async fn scaffold_docker(&self) {
+        let port = self.host_port.unwrap_or(8080);
+        let task = format!(
+            "The project in the working directory has NO docker setup. Inspect the code — detect \
+             the language, how it builds, and its entrypoint/served port — then CREATE a minimal \
+             but WORKING `Dockerfile` and `docker-compose.yml` in the working directory that build \
+             and run the app locally. Publish it on host port {port} (map \"{port}:<container \
+             port>\" from an env var defaulting to {port}). Include any obvious dependency service \
+             only if the code clearly needs it. Write the files, then print a one-line summary."
+        );
+        let request = AgentRequest {
+            role: Role::DevFeature,
+            system_prompt: crate::prompts::system_prompt(crate::prompts::DEV),
+            task_prompt: task,
+            work_dir: self.work_dir.clone(),
+            timeout: Duration::from_secs(600),
+        };
+        let _ = self.engine.run(request).await;
     }
 
     /// A compact, grounded status the reply agent reasons over.

@@ -3557,7 +3557,9 @@ async fn chat_reply_ep(
         cfg.workflow.language,
     );
     if let Some(d) = &p.deploy {
-        uc = uc.with_deploy(Arc::clone(d));
+        uc = uc
+            .with_deploy(Arc::clone(d))
+            .with_host_port(cfg.deploy.host_port);
     }
     match uc.execute(msg).await {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
