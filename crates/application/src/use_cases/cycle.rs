@@ -1441,7 +1441,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             Arc::clone(&self.engine),
             self.work_dir.clone(),
         )
-        .with_language(self.config.workflow.language);
+        .with_language(self.config.workflow.language)
+        .with_operator(self.worker.clone());
         match uc.execute().await {
             Ok(blockers) if blockers > 0 => {
                 tracing::info!("standup surfaced {blockers} blocker(s)");

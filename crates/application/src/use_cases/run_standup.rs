@@ -47,6 +47,7 @@ pub struct RunStandupUseCase<S: StateStorePort + ?Sized, E: AgentEnginePort + ?S
     engine: Arc<E>,
     work_dir: PathBuf,
     lang: crate::config::Language,
+    operator: String,
 }
 
 impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunStandupUseCase<S, E> {
@@ -56,6 +57,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunStandupUseCase<
             engine,
             work_dir,
             lang: crate::config::Language::En,
+            operator: String::new(),
         }
     }
 
@@ -63,6 +65,13 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunStandupUseCase<
     #[must_use]
     pub fn with_language(mut self, lang: crate::config::Language) -> Self {
         self.lang = lang;
+        self
+    }
+
+    /// Attribute the ceremony's agent posts to this worker (`operator@host`).
+    #[must_use]
+    pub fn with_operator(mut self, operator: impl Into<String>) -> Self {
+        self.operator = operator.into();
         self
     }
 
@@ -297,7 +306,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunStandupUseCase<
 
     async fn post(&self, author: &str, body: &str) {
         if let Ok(mut state) = self.store.load().await {
-            state.post_comment(author, body, None);
+            state.post_comment_by(author, &self.operator, body, None);
             let _ = self.store.save(&state).await;
         }
     }

@@ -59,6 +59,10 @@ pub struct Comment {
     pub at: String,
     /// Author: an agent role (e.g. `SM`, `PO`) or `USER`.
     pub author: String,
+    /// For an agent message, the worker identity (`operator@host`) that produced
+    /// it — so you can tell whose DEV/SA/... posted, when several run in parallel.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub by: String,
     pub body: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ticket: Option<String>,
@@ -454,6 +458,25 @@ impl ProjectState {
         self.post_comment_att(author, body, ticket, Vec::new());
     }
 
+    /// Post an agent comment attributed to the worker identity (`operator@host`)
+    /// that produced it, so parallel runners are distinguishable.
+    pub fn post_comment_by(&mut self, author: &str, by: &str, body: &str, ticket: Option<String>) {
+        self.comments.push(Comment {
+            id: mint_id(),
+            at: now_rfc3339(),
+            author: author.to_owned(),
+            by: by.to_owned(),
+            body: body.to_owned(),
+            ticket,
+            attachments: Vec::new(),
+            reactions: Vec::new(),
+        });
+        let overflow = self.comments.len().saturating_sub(MAX_COMMENTS);
+        if overflow > 0 {
+            self.comments.drain(0..overflow);
+        }
+    }
+
     /// Post a comment with attachments.
     pub fn post_comment_att(
         &mut self,
@@ -466,6 +489,7 @@ impl ProjectState {
             id: mint_id(),
             at: now_rfc3339(),
             author: author.to_owned(),
+            by: String::new(),
             body: body.to_owned(),
             ticket,
             attachments,

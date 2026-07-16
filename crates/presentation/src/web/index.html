@@ -902,6 +902,8 @@
   .chead{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted)}
   .chead b{color:var(--text);font-size:12px}
   .cbadge{font-size:9px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:var(--accent2);background:var(--accentbg);padding:1px 6px;border-radius:5px}
+  .crole{font-size:9.5px;font-weight:700;letter-spacing:.3px;color:var(--muted);background:var(--card2);border:1px solid var(--border2);padding:1px 6px;border-radius:5px}
+  .cby{font-size:10px;color:var(--dim);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--card2);border:1px solid var(--border2);padding:1px 6px;border-radius:5px}
   .ctk{font-size:10px;font-family:ui-monospace,monospace;color:var(--muted);background:var(--card2);padding:1px 6px;border-radius:5px}
   .ctime{color:var(--dim)}
   .cbub{background:var(--card);border:1px solid var(--border);border-radius:12px;border-top-left-radius:3px;padding:9px 13px;font-size:13px;line-height:1.5;color:var(--text);white-space:pre-wrap;word-break:break-word}
@@ -1481,6 +1483,8 @@ const KPI_IC={Shipped:"ti-rocket","In flight":"ti-plane-tilt","Open bugs":"ti-bu
 const money=n=>"$"+(Number(n)||0).toFixed(2);
 const fmtK=n=>{n=Number(n)||0;return n>=1000?(n/1000).toFixed(1)+"k":String(n);};
 const AC={BA:"--blue","DEV-FEATURE":"--green","DEV-BUG":"--red",SA:"--purple",TEST:"--teal",DOCS:"--blue",PO:"--amber",SM:"--teal",PD:"--purple",USER:"--accent"};
+// Stable nicknames so each role reads as one consistent person, not a label.
+const AGENT_NICK={BA:"Bella",PO:"Pola",SM:"Sam",SA:"Aria","DEV-FEATURE":"Finn","DEV-BUG":"Bex",TEST:"Quinn",DOCS:"Dana",PD:"Piper"};
 const TITLES={overview:["Overview","project health at a glance"],team:["Agents","your autonomous workers"],board:["Work","board · sprint · backlog"],activity:["Activity","what the agents are doing"],roadmap:["Roadmap","now · next · later, auto-generated"],discuss:["Scrum","standups, sprint events & team threads"],docs:["Wiki","product & technical knowledge base"],codemap:["Code map","symbols & dependencies the agents navigate"],chat:["Chat","talk with your teammates"],review:["Review","open pull requests — approve & merge"],people:["People","per-user activity & productivity"],audit:["Audit","who did what, when"],access:["Users","accounts, project access & tokens"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
 const esc=s=>(s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 const cvar=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim()||"#888";
@@ -2045,11 +2049,17 @@ function renderDiscuss(){
     const isAgent=!!AC[c.author];
     const mine=!isAgent&&c.author===me;
     const col=cvar(AC[c.author]||"--muted");
+    const nick=AGENT_NICK[c.author];
+    const name=nick||c.author;
+    // Agent messages: show the nickname as the person, the role as a tag, and —
+    // when several workers run in parallel — who (operator@host) posted it.
+    const roleTag=(isAgent&&nick)?` <span class="crole">${esc(c.author)}</span>`:'';
+    const byChip=(isAgent&&c.by)?` <span class="cby" title="worker that posted this">${esc(c.by)}</span>`:'';
     const badge=isAgent?'<span class="cbadge">agent</span>':'';
     const tick=(c.ticket&&!want)?` <span class="ctk">${esc(c.ticket)}</span>`:'';
     return `${sep}<div class="cmsg${mine?' mine':''}">
-      <div class="cav" style="background:${col}22;color:${col}">${esc(initials(c.author))}</div>
-      <div class="ccol"><div class="chead"><b>${esc(c.author)}</b>${badge}${tick}<span class="ctime">${esc(time)}</span></div>
+      <div class="cav" style="background:${col}22;color:${col}">${esc(initials(name))}</div>
+      <div class="ccol"><div class="chead"><b>${esc(name)}</b>${roleTag}${badge}${byChip}${tick}<span class="ctime">${esc(time)}</span></div>
         ${c.body?`<div class="cbub md">${mdRender(c.body)}</div>`:''}${attHtml(c.attachments)}</div></div>`;}).join("");
   if(atBottom)box.scrollTop=box.scrollHeight;
 }
