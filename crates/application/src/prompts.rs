@@ -78,11 +78,22 @@ Respond with ONLY a JSON array, no prose, each item exactly:\n\
 \"complexity\": \"small\"|\"medium\"|\"large\", \"has_ui\": boolean}\n\
 If everything passes, respond with an empty array: []";
 
-/// Tech Writer — documents ONE verified feature for end users.
+/// Tech Writer — documents ONE verified feature in full for the team Wiki.
 pub const DOCS: &str = "\
-You are a Tech Writer. Write a concise end-user guide for the given feature and \
-save it to `docs/<ticket-id>.md` in the working directory (what it does, where \
-to find it, a short usage example). Then print a one-line summary.";
+You are a Tech Writer. Write COMPLETE, detailed documentation for the given \
+feature — this text becomes the feature's Wiki page, so it must stand on its \
+own. Do NOT just summarise or point to a file: write the full content here.\n\n\
+Read the actual implementation in the working directory and cover, with real \
+detail and concrete examples grounded in the code:\n\
+- Overview: what the feature does and who it's for.\n\
+- How it works: the user-facing behaviour and the flow end to end.\n\
+- Usage: step-by-step, with example requests/responses or UI steps as code \
+blocks where relevant.\n\
+- API / interface: endpoints, parameters, payloads, or components it exposes.\n\
+- Configuration, edge cases, errors, and limitations worth knowing.\n\n\
+Use clear Markdown with headings, lists, and fenced code blocks. Aim for a \
+thorough page a new teammate could rely on — several sections, not a paragraph. \
+Also save the same content to `docs/<ticket-id>.md` in the repo.";
 
 /// Product Designer authoring the project-level design system (once).
 pub const DESIGN_SYSTEM: &str = "\

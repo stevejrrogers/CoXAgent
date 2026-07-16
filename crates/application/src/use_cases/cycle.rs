@@ -17,6 +17,9 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+/// How often (in sprints) the SA runs a whole-system architecture review.
+const ARCH_REVIEW_EVERY_SPRINTS: u32 = 8;
+
 /// The SA reviewer's JSON verdict on a pull request.
 #[derive(serde::Deserialize)]
 struct ReviewVerdict {
@@ -583,6 +586,112 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // The team actually talks the plan through (PO/SA/DEV weigh in, SM
             // confirms the commitment) — planning as a ceremony, not an announce.
             self.scrum_planning().await;
+            // Every few sprints the SA steps back and reviews the whole
+            // architecture, filing refactor tickets and asking the PO to
+            // prioritise a hardening sprint before tech debt compounds.
+            if n % ARCH_REVIEW_EVERY_SPRINTS == 0 {
+                self.architecture_audit(n).await;
+            }
+        }
+    }
+
+    /// Whole-system architecture review: the SA examines the codebase against
+    /// clean architecture / DDD / SOLID, coupling and module boundaries,
+    /// monolith-vs-microservices fit, and horizontal scalability — then files
+    /// concrete refactor chores and asks the PO to prioritise them.
+    async fn architecture_audit(&self, sprint: u32) {
+        use coxagent_domain::ticket::TicketType;
+        let vi = self.config.workflow.language.is_vi();
+        self.report("SA", "architecture review");
+        let task = format!(
+            "You are a Staff Solution Architect doing a WHOLE-SYSTEM architecture review of the \
+             code in the working directory (use `.coxagent/REPO_MAP.md` to orient).{}\n\nAssess \
+             honestly: clean/hexagonal layering & the dependency rule; DDD boundaries; SOLID and \
+             coupling/cohesion; whether it should stay a modular monolith or split services (with \
+             justification); and horizontal scalability (statelessness, shared/session state, the \
+             data layer, caching). Identify concrete, high-value REFACTORS — not nitpicks.\n\n\
+             Respond with ONLY a JSON array (empty [] if the architecture is genuinely solid), each \
+             item exactly: {{\"title\": string, \"description\": string, \"priority\": \
+             \"low\"|\"medium\"|\"high\", \"complexity\": \"small\"|\"medium\"|\"large\"}}. \
+             `description` must name the files/modules and the target design.",
+            crate::prompts::repo_map_block(&self.work_dir, self.config.workflow.token_saver)
+        );
+        let request = AgentRequest {
+            role: coxagent_domain::Role::Sa,
+            system_prompt: crate::prompts::system_prompt(crate::prompts::SA),
+            task_prompt: task,
+            work_dir: self.work_dir.clone(),
+            timeout: std::time::Duration::from_secs(900),
+        };
+        let Ok(outcome) = self.engine.run(request).await else {
+            return;
+        };
+        if !outcome.succeeded() {
+            return;
+        }
+        let items = crate::parsing::parse_items(&outcome.stdout).unwrap_or_default();
+        if items.is_empty() {
+            let msg = if vi {
+                format!("🏛️ Rà soát kiến trúc (sau sprint {sprint}): kiến trúc đang ổn, chưa cần refactor lớn.")
+            } else {
+                format!("🏛️ Architecture review (after sprint {sprint}): the architecture is solid — no major refactor needed.")
+            };
+            if let Ok(mut s) = self.store.load().await {
+                s.post_comment("SA", &msg, None);
+                let _ = self.store.save(&s).await;
+            }
+            return;
+        }
+        let adder = crate::use_cases::AddTicketUseCase::new(Arc::clone(&self.store));
+        let mut filed: Vec<String> = Vec::new();
+        for it in items.iter().take(8) {
+            let marker = format!("Refactor: {}", it.title);
+            if let Ok(state) = self.store.load().await {
+                if state
+                    .tickets
+                    .iter()
+                    .any(|t| t.title() == marker && t.status() != coxagent_domain::Status::Done)
+                {
+                    continue;
+                }
+            }
+            if let Ok(id) = adder
+                .execute(crate::use_cases::AddTicketInput {
+                    ticket_type: TicketType::Chore,
+                    title: marker,
+                    description: format!(
+                        "Architecture refactor (SA review, sprint {sprint}).\n\n{}",
+                        it.description
+                    ),
+                    priority: it.priority,
+                    complexity: it.complexity,
+                    has_ui: false,
+                    acceptance_criteria: Vec::new(),
+                })
+                .await
+            {
+                filed.push(id.to_string());
+            }
+        }
+        if let Ok(mut s) = self.store.load().await {
+            let msg = if vi {
+                format!(
+                    "🏛️ Rà soát kiến trúc (sau sprint {sprint}): SA đã tạo {} ticket refactor ({}). \
+                     PO ơi, cân nhắc ưu tiên một sprint hardening để xử lý trước khi nợ kỹ thuật phình to.",
+                    filed.len(),
+                    filed.join(", ")
+                )
+            } else {
+                format!(
+                    "🏛️ Architecture review (after sprint {sprint}): SA filed {} refactor ticket(s) ({}). \
+                     PO, please consider prioritising a hardening sprint before the tech debt compounds.",
+                    filed.len(),
+                    filed.join(", ")
+                )
+            };
+            s.post_comment("SA", &msg, None);
+            s.log_activity("SA", "architecture review", None);
+            let _ = self.store.save(&s).await;
         }
     }
 

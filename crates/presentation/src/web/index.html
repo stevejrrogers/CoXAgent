@@ -577,6 +577,12 @@
   .chip{display:flex;align-items:center;gap:7px;background:var(--card);border:1px solid var(--border);border-radius:20px;padding:6px 12px;font-size:12px;color:var(--muted)}
   .content{padding:24px 28px;max-width:1340px}
   .view{display:none} .view.on{display:block}
+  /* Scrum is a conversation surface — let it break out of the centered reading
+     column and use the full width + height like a chat app. */
+  .content:has(#view-discuss.on){max-width:none;padding:0;height:calc(100vh - 58px)}
+  #view-discuss.on{display:flex;flex-direction:column;height:100%;min-height:0}
+  #view-discuss .chatwrap{border:none;border-radius:0}
+  #view-discuss .chatbody .cmsg{max-width:min(920px,72%)}
   .sec{font-size:12px;font-weight:600;color:var(--dim);text-transform:uppercase;letter-spacing:.07em;margin:26px 0 13px;display:flex;align-items:center;gap:8px}
   .sec:first-child{margin-top:0}
   .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(158px,1fr));gap:13px}

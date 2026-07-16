@@ -11,6 +11,25 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Pick the teammate best placed to resolve a blocker from its wording — so the
+/// right role owns the follow-up instead of a generic reply.
+fn responder_for(blocker_lower: &str) -> &'static str {
+    let has = |kw: &[&str]| kw.iter().any(|k| blocker_lower.contains(k));
+    if has(&["pr", "merge", "conflict", "rebase", "review"]) {
+        "DEV-FEATURE"
+    } else if has(&["deploy", "port", "docker", "build", "ci"]) {
+        "DEV-BUG"
+    } else if has(&["design", "ux", "layout", "screen"]) {
+        "PD"
+    } else if has(&["spec", "requirement", "acceptance", "scope", "unclear"]) {
+        "BA"
+    } else if has(&["test", "qa", "flaky", "coverage"]) {
+        "TEST"
+    } else {
+        "SA"
+    }
+}
+
 /// The role personas pulled into a standup, in order.
 const PARTICIPANTS: &[(&str, &str)] = &[
     ("BA", "Business Analyst — backlog & requirements"),
@@ -54,28 +73,68 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunStandupUseCase<
     pub async fn execute(&self) -> Result<usize, AppError> {
         let context = self.status_context().await;
 
-        // SM opens the standup.
-        self.post("SM", &format!("🗣️ Standup — {}", self.headline().await))
+        // SM opens the standup for real: a short spoken intro on where the sprint
+        // stands and a prompt for the team to report in — not just a status line.
+        let opener = self.opener(&context).await?;
+        self.post("SM", &format!("🗣️ Standup — {}", opener.trim()))
             .await;
 
         // Only pull in roles that actually did something (grounded, not noise).
         let active = self.active_roles().await;
         let mut updates: Vec<(String, String)> = Vec::new();
-        let mut blockers = 0usize;
+        let mut raised: Vec<(String, String)> = Vec::new();
         for (role, persona) in PARTICIPANTS.iter().filter(|(r, _)| active.contains(r)) {
             let text = self.update(role, persona, &context, &updates).await?;
-            let is_blocked = text.to_lowercase().contains("block");
-            if is_blocked {
-                blockers += 1;
+            if text.to_lowercase().contains("block") {
+                raised.push(((*role).to_owned(), text.clone()));
             }
             self.post(role, &text).await;
             updates.push(((*role).to_owned(), text));
+        }
+
+        // Each raised blocker gets handled: the most relevant teammate replies
+        // with a concrete action to resolve it — so a blocker never just hangs.
+        let blockers = raised.len();
+        for (owner, blocker) in &raised {
+            let responder = responder_for(&blocker.to_lowercase());
+            let reply = self.resolve(responder, owner, blocker, &context).await?;
+            self.post(responder, &reply).await;
+            updates.push((responder.to_owned(), reply));
         }
 
         // SM closes: highlight blockers + the focus for the day.
         let close = self.highlight(&context, &updates).await?;
         self.post("SM", &format!("📌 {}", close.trim())).await;
         Ok(blockers)
+    }
+
+    /// The SM's spoken opener: a two-sentence read on the sprint plus an explicit
+    /// ask for the team to give their updates.
+    async fn opener(&self, context: &str) -> Result<String, AppError> {
+        let headline = self.headline().await;
+        let task = format!(
+            "{context}\nStatus line: {headline}\nYou are the SM opening the daily standup. In 2 \
+             sentences, greet the team, give a quick read on where the sprint stands, and ask \
+             everyone to share what they finished, what's next, and any blocker. Warm but brief."
+        );
+        self.run("SM", &task).await
+    }
+
+    /// A teammate resolves a raised blocker with a concrete action.
+    async fn resolve(
+        &self,
+        responder: &str,
+        owner: &str,
+        blocker: &str,
+        context: &str,
+    ) -> Result<String, AppError> {
+        let task = format!(
+            "{context}\n{owner} raised this blocker at standup:\n\"{blocker}\"\nYou are {responder}, \
+             the teammate best placed to help. In 1-2 sentences, respond directly to {owner} with \
+             a concrete action to resolve it (who does what, next step). If it needs tracked work, \
+             say so. Be specific and own it — no vague reassurance."
+        );
+        self.run(responder, &task).await
     }
 
     /// One-line sprint headline for the SM's opener.
