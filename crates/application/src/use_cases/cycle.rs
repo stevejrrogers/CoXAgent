@@ -327,6 +327,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     pr.number
                 ))
                 .await;
+                // A conflict comment on a PR is a dead-end — no agent works PRs.
+                // Turn it into a chore so a DEV actually rebases/resolves it,
+                // draining the pile-up instead of leaving it stuck.
+                if !pr.mergeable {
+                    self.file_conflict_chore(pr.number, &pr.head).await;
+                }
                 continue;
             }
             let Ok(diff) = forge.pr_diff(pr.number).await else {
@@ -896,6 +902,42 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// Turn a failed deploy into a high-priority bug so DEV-BUG will fix it.
     /// Deduped: only one open "Deploy failing" bug exists at a time, refreshed
     /// with the latest error. Returns the new ticket id when one is filed.
+    /// Turn a stuck (conflicted) PR into a chore so a DEV rebases and resolves
+    /// it — otherwise conflicted PRs pile up forever. Deduped per PR number.
+    async fn file_conflict_chore(&self, pr: u64, head: &str) {
+        use coxagent_domain::ticket::{Complexity, Priority, TicketType};
+        let marker = format!("Resolve merge conflict on PR #{pr}");
+        let Ok(state) = self.store.load().await else {
+            return;
+        };
+        if state
+            .tickets
+            .iter()
+            .any(|t| t.title().starts_with(&marker) && t.status() != coxagent_domain::Status::Done)
+        {
+            return;
+        }
+        let adder = crate::use_cases::AddTicketUseCase::new(Arc::clone(&self.store));
+        let _ = adder
+            .execute(crate::use_cases::AddTicketInput {
+                ticket_type: TicketType::Chore,
+                title: marker,
+                description: format!(
+                    "PR #{pr} (branch `{head}`) has merge conflicts with the base branch. \
+                     Rebase the branch onto the latest base, resolve conflicts, keeping both \
+                     sides' intended behaviour, and push so the PR becomes mergeable."
+                ),
+                priority: Priority::High,
+                complexity: Complexity::Small,
+                has_ui: false,
+                acceptance_criteria: vec![
+                    format!("PR #{pr} is mergeable (no conflicts)"),
+                    "No behaviour from either side is lost".to_owned(),
+                ],
+            })
+            .await;
+    }
+
     async fn file_deploy_bug(&self, summary: &str) -> Option<TicketId> {
         use coxagent_domain::ticket::{Priority, Status, TicketType};
         const MARKER: &str = "Deploy failing";
