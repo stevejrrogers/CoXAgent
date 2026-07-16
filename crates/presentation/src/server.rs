@@ -3865,7 +3865,7 @@ async fn agent_log_ep(
     let role: String = q
         .role
         .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .collect();
     if role.is_empty() {
         return (StatusCode::BAD_REQUEST, "role required").into_response();

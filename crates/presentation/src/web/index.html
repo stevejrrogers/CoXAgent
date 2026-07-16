@@ -4247,7 +4247,7 @@ async function openAgent(role){
     :'<div class="empty">no recorded actions yet</div>';
   const body=document.getElementById("agent-transcript");body.textContent="loading…";
   document.getElementById("ov-agent").classList.add("open");
-  AGENT_LOG_ROLE=role;
+  AGENT_LOG_ROLE=role.toLowerCase().replace(/-/g,"_");  // serde key: DEV-FEATURE→dev_feature
   await pollAgentLog();               // first fetch now
   clearInterval(AGENT_LOG_TIMER);
   AGENT_LOG_TIMER=setInterval(pollAgentLog,1500);  // then live every 1.5s
