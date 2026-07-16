@@ -91,6 +91,7 @@ async fn make_store(
     }
 }
 
+#[allow(clippy::too_many_lines)] // a flat CLI-command dispatch; splitting hurts readability
 async fn run() -> Result<String, Box<dyn std::error::Error>> {
     let args = cli::parse();
     // The single-project store is built lazily: `serve`/`hub`/`discover` don't
@@ -348,10 +349,7 @@ fn codegraph_query(
 /// `<base>/coordination.json` into the environment, unless already set. Lets the
 /// Finder-launched app join the distributed backend without env plumbing.
 fn load_coordination(base: &Path) {
-    if std::env::var("COXAGENT_DB_DSN")
-        .map(|v| !v.is_empty())
-        .unwrap_or(false)
-    {
+    if std::env::var("COXAGENT_DB_DSN").is_ok_and(|v| !v.is_empty()) {
         return; // an explicit env always wins
     }
     let path = base.join("coordination.json");
