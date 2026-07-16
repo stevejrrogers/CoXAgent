@@ -192,6 +192,52 @@ impl DesignSystem {
     }
 }
 
+/// The standard, role-owned Wiki spaces — a Confluence-like structure so each
+/// role's knowledge has an obvious home instead of everything landing in one
+/// folder. Ordered as they should appear in the tree.
+pub const STANDARD_DOC_FOLDERS: &[&str] = &[
+    "Product",       // BA / PO — feature docs & specs
+    "Architecture",  // SA — technical designs & decisions
+    "Design",        // PD — UX flows & the design system
+    "Engineering",   // DEV — chores, maintenance, how-tos
+    "QA",            // TEST — test plans & reports
+    "Release Notes", // shipped versions, merges, deploys (the log)
+    "Operations",    // ops — runbooks, deploy & infra
+    "Team",          // SM — retros, decisions, ways of working
+];
+
+/// The standard Wiki space a ticket's documentation belongs in, by type: a
+/// feature is product knowledge; a chore (merge/rebase/maintenance) or a bug fix
+/// is engineering, not a feature.
+#[must_use]
+pub fn standard_doc_folder(ticket_type: coxagent_domain::TicketType) -> &'static str {
+    use coxagent_domain::TicketType;
+    match ticket_type {
+        TicketType::Feature => "Product",
+        TicketType::Chore | TicketType::Bug => "Engineering",
+    }
+}
+
+/// The colour/category bucket for a Wiki folder, keyed off its top-level space.
+/// Keeps DOCS-written pages consistent with the UI's folder colouring.
+#[must_use]
+pub fn doc_category_of(folder: &str) -> &'static str {
+    match folder
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "architecture" | "technical" | "engineering" => "technical",
+        "design" | "flows" => "flows",
+        "qa" | "testing" | "test" | "tests" => "qa",
+        "operations" | "ops" | "release notes" | "releases" => "ops",
+        _ => "product",
+    }
+}
+
 /// One living documentation page. `category` is `"product"` or `"technical"`;
 /// `body` is Markdown. Pages are written by the DOCS agent and editable by
 /// humans, and are structured so both people and agents can read them.
@@ -559,6 +605,44 @@ impl ProjectState {
         let before = self.docs.len();
         self.docs.retain(|d| d.id != id);
         self.docs.len() != before
+    }
+
+    /// Ensure the standard, role-owned Wiki spaces exist (idempotent), so the
+    /// knowledge base has a sensible Confluence-like structure from the start
+    /// rather than everything dumped into one folder. See [`STANDARD_DOC_FOLDERS`].
+    pub fn ensure_standard_folders(&mut self) {
+        for f in STANDARD_DOC_FOLDERS {
+            self.add_doc_folder(f);
+        }
+    }
+
+    /// Re-file docs backed by a ticket into the folder that matches the ticket's
+    /// type, correcting legacy pages that were all dumped under "Features" (a
+    /// merge chore is not a feature — it belongs in Engineering). Pages ids are
+    /// `feat-<TICKET>`; unknown tickets are left where they are.
+    pub fn normalize_doc_folders(&mut self) {
+        // Snapshot the ticket type for each documented ticket first (avoids a
+        // borrow conflict with the mutable docs iteration below).
+        let routes: Vec<(String, String)> = self
+            .docs
+            .iter()
+            .filter_map(|d| {
+                let raw = d.id.strip_prefix("feat-")?;
+                let tid = TicketId::new(raw).ok()?;
+                let t = self.tickets.iter().find(|t| t.id() == &tid)?;
+                Some((
+                    d.id.clone(),
+                    standard_doc_folder(t.ticket_type()).to_owned(),
+                ))
+            })
+            .collect();
+        for (id, folder) in routes {
+            if let Some(p) = self.docs.iter_mut().find(|d| d.id == id) {
+                if p.folder != folder {
+                    p.folder = folder;
+                }
+            }
+        }
     }
 
     /// Create a Wiki folder path (idempotent). Nested paths are `/`-separated.

@@ -825,6 +825,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // Leader-only: it writes shared files under the repo.
         if leader {
             self.refresh_codegraph(cycle).await;
+            // Seed the standard Wiki spaces and re-file any legacy pages that
+            // were dumped under the wrong space (once, on the first cycle).
+            if cycle == 1 {
+                if let Ok(mut s) = self.store.load().await {
+                    s.ensure_standard_folders();
+                    s.normalize_doc_folders();
+                    let _ = self.store.save(&s).await;
+                }
+            }
             // Scrum: open/roll over the sprint at the start of the cycle.
             self.advance_sprint_if_scrum(cycle).await;
 

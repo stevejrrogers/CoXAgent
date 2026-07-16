@@ -100,10 +100,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
         }
 
         let mut state = self.store.load().await?;
+        state.ensure_standard_folders();
         let ticket = state
             .ticket_mut(&id)
             .ok_or_else(|| PortError::Corrupt(format!("ticket {id} vanished")))?;
+        let ticket_type = ticket.ticket_type();
         ticket.transition_to(Role::Docs, Status::Documented)?;
+        // File the page in the standard space for the ticket's type, so a merge
+        // chore lands in Engineering — not under Features next to real features.
+        let folder = crate::state::standard_doc_folder(ticket_type);
+        let category = crate::state::doc_category_of(folder);
         // Surface the documentation in the Wiki: one page per documented feature,
         // so the knowledge base actually fills up as the team ships (not just
         // markdown buried in the codebase).
@@ -117,8 +123,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
         };
         state.upsert_doc(
             &format!("feat-{id}"),
-            "Features",
-            "product",
+            folder,
+            category,
             &title,
             &body,
             "DOCS",

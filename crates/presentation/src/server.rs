@@ -2000,10 +2000,10 @@ fn doc_category(folder: &str) -> &'static str {
         .to_ascii_lowercase()
         .as_str()
     {
-        "technical" => "technical",
-        "flows" => "flows",
+        "technical" | "architecture" | "engineering" => "technical",
+        "flows" | "design" => "flows",
         "testing" | "qa" | "test" | "tests" => "qa",
-        "operations" | "ops" => "ops",
+        "operations" | "ops" | "release notes" | "releases" => "ops",
         _ => "product",
     }
 }
