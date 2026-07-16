@@ -318,14 +318,57 @@ fn load_config(state_dir: &Path) -> Config {
     let root = state_dir.parent().unwrap_or(state_dir);
     let path = root.join("coxagent.json");
     match std::fs::read_to_string(&path) {
-        Ok(text) => match serde_json::from_str(&text) {
-            Ok(cfg) => cfg,
+        Ok(text) => match serde_json::from_str::<Config>(&text) {
+            Ok(mut cfg) => {
+                heal_host_port(root, &path, &mut cfg);
+                cfg
+            }
             Err(e) => {
                 tracing::warn!("invalid {}: {e}; using defaults", path.display());
                 Config::default()
             }
         },
         Err(_) => Config::default(),
+    }
+}
+
+/// Self-heal a project left without a deploy port: assign a free `host_port` and
+/// persist it, so a project onboarded before per-project ports (or with the field
+/// cleared) stops colliding on the shared default port. Picks the lowest port in
+/// range that no sibling project claims and that is currently bindable, so two
+/// null-port projects on one host land on different ports. Best-effort.
+fn heal_host_port(root: &Path, cfg_path: &Path, cfg: &mut Config) {
+    if cfg.deploy.host_port.is_some() {
+        return;
+    }
+    // Ports already claimed by sibling projects under the same base dir.
+    let mut used: std::collections::HashSet<u16> = std::collections::HashSet::new();
+    if let Some(base) = root.parent() {
+        if let Ok(entries) = std::fs::read_dir(base) {
+            for e in entries.flatten() {
+                let sib = e.path().join("coxagent.json");
+                if sib == *cfg_path {
+                    continue;
+                }
+                if let Ok(text) = std::fs::read_to_string(&sib) {
+                    if let Ok(c) = serde_json::from_str::<Config>(&text) {
+                        if let Some(p) = c.deploy.host_port {
+                            used.insert(p);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let bindable = |p: u16| std::net::TcpListener::bind(("127.0.0.1", p)).is_ok();
+    let Some(port) = (PORT_BASE..PORT_BASE + 500).find(|p| !used.contains(p) && bindable(*p))
+    else {
+        return;
+    };
+    cfg.deploy.host_port = Some(port);
+    if let Ok(text) = serde_json::to_string_pretty(cfg) {
+        let _ = std::fs::write(cfg_path, text);
+        tracing::info!("self-healed host port {port} for {}", cfg_path.display());
     }
 }
 
