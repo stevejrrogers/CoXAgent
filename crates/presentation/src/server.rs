@@ -652,6 +652,11 @@ pub async fn serve_full(
             post(codegraph_build_ep),
         )
         .route("/api/projects/:pid/standup", post(standup_ep))
+        .route(
+            "/api/projects/:pid/architecture-review",
+            post(architecture_review_ep),
+        )
+        .route("/api/projects/:pid/docs-review", post(docs_review_ep))
         .route("/api/projects/:pid/tickets", post(create_ticket))
         .route("/api/projects/:pid/ticket/:id", get(ticket_detail_ep))
         .route("/api/projects/:pid/ticket/:id/priority", post(set_priority))
@@ -3507,6 +3512,65 @@ async fn user_may_see_broadcast(p: &ProjectHandle, user: &str, json: &str) -> bo
 /// SM-run standup: posts a deterministic status roundup to the team channel and
 /// pulls in each agent's latest contribution. Zero engine cost — derived from
 /// state — so it can be triggered freely to see the team "gather".
+/// Current sprint number (0 when not in a sprint), for review labels.
+async fn current_sprint(p: &ProjectHandle) -> u32 {
+    p.store
+        .load()
+        .await
+        .ok()
+        .and_then(|s| s.sprint.map(|sp| sp.number))
+        .unwrap_or(0)
+}
+
+/// On-demand SA architecture review: files refactor chores + a PO nudge.
+async fn architecture_review_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let cfg = std::fs::read_to_string(&p.config_path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Config>(&t).ok())
+        .unwrap_or_default();
+    let uc = coxagent_application::use_cases::RunArchitectureAuditUseCase::new(
+        Arc::clone(&p.store),
+        Arc::clone(&p.engine),
+        p.work_dir.clone(),
+        cfg.workflow.token_saver,
+        cfg.workflow.language,
+    );
+    match uc.execute(current_sprint(&p).await).await {
+        Ok(filed) => Json(serde_json::json!({ "ok": true, "filed": filed })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// On-demand DOCS Wiki-gap review: writes missing pages in full.
+async fn docs_review_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let cfg = std::fs::read_to_string(&p.config_path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Config>(&t).ok())
+        .unwrap_or_default();
+    let uc = coxagent_application::use_cases::RunDocsAuditUseCase::new(
+        Arc::clone(&p.store),
+        Arc::clone(&p.engine),
+        p.work_dir.clone(),
+        cfg.workflow.language,
+    );
+    match uc.execute(current_sprint(&p).await).await {
+        Ok(written) => Json(serde_json::json!({ "ok": true, "written": written })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
 /// The Scrum language configured for a project (English by default).
 fn project_language(p: &ProjectHandle) -> coxagent_application::config::Language {
     std::fs::read_to_string(&p.config_path)

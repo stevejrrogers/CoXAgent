@@ -1244,6 +1244,8 @@ body:not(.manage) .manage-only { display: none !important; }
             <select class="sel" id="disc-filter" onchange="renderDiscuss()"><option value="">Team channel</option></select>
             <button class="ticket-actions chatstart" onclick="runStandup(this)" title="SM posts a status roundup pulling every agent in — free, no engine cost"><i class="ti ti-clipboard-check"></i> Standup</button>
             <button class="ticket-actions chatstart" onclick="startDiscussion()"><i class="ti ti-users-group"></i> <span id="disc-run-label">Agent discussion</span></button>
+            <button class="ticket-actions chatstart manage-only" onclick="reviewRun(this,'architecture-review','SA')" title="SA reviews the whole architecture and files refactor tickets"><i class="ti ti-building-bank"></i> Arch review</button>
+            <button class="ticket-actions chatstart manage-only" onclick="reviewRun(this,'docs-review','DOCS')" title="DOCS reviews the Wiki and writes any missing pages"><i class="ti ti-book"></i> Docs review</button>
           </div>
           <div id="disc-thread" class="chatbody" ondragover="event.preventDefault();this.classList.add('dropping')" ondragleave="this.classList.remove('dropping')" ondrop="dropFiles('disc',event)"></div>
           <div class="composewrap">
@@ -2087,6 +2089,18 @@ async function runStandup(btn){
     const r=await fetch(api("/standup"),{method:"POST"});
     if(r.ok){const s=await(await fetch(api("/state"))).json();render(s);renderDiscuss();}
   }catch(e){}
+  btn.innerHTML=old;btn.disabled=false;
+}
+async function reviewRun(btn,path,who){
+  const old=btn.innerHTML;btn.innerHTML='<i class="ti ti-loader-2"></i> …';btn.disabled=true;
+  document.getElementById("disc-filter").value="";
+  try{
+    const r=await fetch(api("/"+path),{method:"POST"});
+    if(r.ok){const d=await r.json();const n=d.filed??d.written??0;
+      toasty(who+" review done"+(n?" — "+n+" item(s)":" — nothing needed"),"ok");
+      const s=await(await fetch(api("/state"))).json();render(s);renderDiscuss();
+    } else {alert("Review failed: "+(await r.text()||r.status)+" (needs a configured engine).");}
+  }catch(e){alert("Network error.");}
   btn.innerHTML=old;btn.disabled=false;
 }
 async function startDiscussion(){

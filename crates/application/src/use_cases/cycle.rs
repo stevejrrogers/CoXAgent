@@ -128,6 +128,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         self.worker = worker.into();
     }
 
+    /// Trigger the whole-system architecture review on demand (same work the
+    /// periodic 8-sprint review does), for acceptance/manual runs.
+    pub async fn review_architecture_now(&self, sprint: u32) {
+        self.architecture_audit(sprint).await;
+    }
+
+    /// Trigger the Wiki documentation review on demand.
+    pub async fn review_docs_now(&self, sprint: u32) {
+        self.docs_audit(sprint).await;
+    }
+
     /// Set the live phase reporter (called by `run_forever`).
     pub fn set_phase_reporter(&mut self, reporter: crate::use_cases::runner::PhaseReporter) {
         self.phase = Some(reporter);
@@ -601,98 +612,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// monolith-vs-microservices fit, and horizontal scalability — then files
     /// concrete refactor chores and asks the PO to prioritise them.
     async fn architecture_audit(&self, sprint: u32) {
-        use coxagent_domain::ticket::TicketType;
-        let vi = self.config.workflow.language.is_vi();
         self.report("SA", "architecture review");
-        let task = format!(
-            "You are a Staff Solution Architect doing a WHOLE-SYSTEM architecture review of the \
-             code in the working directory (use `.coxagent/REPO_MAP.md` to orient).{}\n\nAssess \
-             honestly: clean/hexagonal layering & the dependency rule; DDD boundaries; SOLID and \
-             coupling/cohesion; whether it should stay a modular monolith or split services (with \
-             justification); and horizontal scalability (statelessness, shared/session state, the \
-             data layer, caching). Identify concrete, high-value REFACTORS — not nitpicks.\n\n\
-             Respond with ONLY a JSON array (empty [] if the architecture is genuinely solid), each \
-             item exactly: {{\"title\": string, \"description\": string, \"priority\": \
-             \"low\"|\"medium\"|\"high\", \"complexity\": \"small\"|\"medium\"|\"large\"}}. \
-             `description` must name the files/modules and the target design.",
-            crate::prompts::repo_map_block(&self.work_dir, self.config.workflow.token_saver)
+        let uc = crate::use_cases::RunArchitectureAuditUseCase::new(
+            Arc::clone(&self.store),
+            Arc::clone(&self.engine),
+            self.work_dir.clone(),
+            self.config.workflow.token_saver,
+            self.config.workflow.language,
         );
-        let request = AgentRequest {
-            role: coxagent_domain::Role::Sa,
-            system_prompt: crate::prompts::system_prompt(crate::prompts::SA),
-            task_prompt: task,
-            work_dir: self.work_dir.clone(),
-            timeout: std::time::Duration::from_secs(900),
-        };
-        let Ok(outcome) = self.engine.run(request).await else {
-            return;
-        };
-        if !outcome.succeeded() {
-            return;
-        }
-        let items = crate::parsing::parse_items(&outcome.stdout).unwrap_or_default();
-        if items.is_empty() {
-            let msg = if vi {
-                format!("🏛️ Rà soát kiến trúc (sau sprint {sprint}): kiến trúc đang ổn, chưa cần refactor lớn.")
-            } else {
-                format!("🏛️ Architecture review (after sprint {sprint}): the architecture is solid — no major refactor needed.")
-            };
-            if let Ok(mut s) = self.store.load().await {
-                s.post_comment("SA", &msg, None);
-                let _ = self.store.save(&s).await;
-            }
-            return;
-        }
-        let adder = crate::use_cases::AddTicketUseCase::new(Arc::clone(&self.store));
-        let mut filed: Vec<String> = Vec::new();
-        for it in items.iter().take(8) {
-            let marker = format!("Refactor: {}", it.title);
-            if let Ok(state) = self.store.load().await {
-                if state
-                    .tickets
-                    .iter()
-                    .any(|t| t.title() == marker && t.status() != coxagent_domain::Status::Done)
-                {
-                    continue;
-                }
-            }
-            if let Ok(id) = adder
-                .execute(crate::use_cases::AddTicketInput {
-                    ticket_type: TicketType::Chore,
-                    title: marker,
-                    description: format!(
-                        "Architecture refactor (SA review, sprint {sprint}).\n\n{}",
-                        it.description
-                    ),
-                    priority: it.priority,
-                    complexity: it.complexity,
-                    has_ui: false,
-                    acceptance_criteria: Vec::new(),
-                })
-                .await
-            {
-                filed.push(id.to_string());
-            }
-        }
-        if let Ok(mut s) = self.store.load().await {
-            let msg = if vi {
-                format!(
-                    "🏛️ Rà soát kiến trúc (sau sprint {sprint}): SA đã tạo {} ticket refactor ({}). \
-                     PO ơi, cân nhắc ưu tiên một sprint hardening để xử lý trước khi nợ kỹ thuật phình to.",
-                    filed.len(),
-                    filed.join(", ")
-                )
-            } else {
-                format!(
-                    "🏛️ Architecture review (after sprint {sprint}): SA filed {} refactor ticket(s) ({}). \
-                     PO, please consider prioritising a hardening sprint before the tech debt compounds.",
-                    filed.len(),
-                    filed.join(", ")
-                )
-            };
-            s.post_comment("SA", &msg, None);
-            s.log_activity("SA", "architecture review", None);
-            let _ = self.store.save(&s).await;
+        if let Err(e) = uc.execute(sprint).await {
+            tracing::warn!("architecture review: {e}");
         }
     }
 
@@ -701,88 +630,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// the missing documentation in full — so the knowledge base doesn't drift
     /// behind the code.
     async fn docs_audit(&self, sprint: u32) {
-        use coxagent_domain::ticket::Status;
-        let vi = self.config.workflow.language.is_vi();
-        let Ok(state) = self.store.load().await else {
-            return;
-        };
-        // Shipped tickets whose Wiki page is missing or a thin stub.
-        let mut targets: Vec<(TicketId, String, coxagent_domain::TicketType)> = Vec::new();
-        for t in &state.tickets {
-            if !matches!(
-                t.status(),
-                Status::Done | Status::Documented | Status::Verified
-            ) {
-                continue;
-            }
-            let doc_id = format!("feat-{}", t.id());
-            let thin = state
-                .docs
-                .iter()
-                .find(|d| d.id == doc_id)
-                .map_or(true, |d| d.body.trim().len() < 200);
-            if thin {
-                targets.push((t.id().clone(), t.title().to_owned(), t.ticket_type()));
-            }
-        }
-        if targets.is_empty() {
-            let msg = if vi {
-                format!("📚 Rà soát tài liệu (sau sprint {sprint}): Wiki đã đầy đủ, không thiếu trang nào.")
-            } else {
-                format!("📚 Docs review (after sprint {sprint}): the Wiki is complete — nothing missing.")
-            };
-            if let Ok(mut s) = self.store.load().await {
-                s.post_comment("DOCS", &msg, None);
-                let _ = self.store.save(&s).await;
-            }
-            return;
-        }
         self.report("DOCS", "documentation review");
-        let mut written: Vec<String> = Vec::new();
-        for (id, title, ttype) in targets.iter().take(5) {
-            let request = AgentRequest {
-                role: coxagent_domain::Role::Docs,
-                system_prompt: crate::prompts::system_prompt(crate::prompts::DOCS),
-                task_prompt: format!("Document ticket {id}: {title}"),
-                work_dir: self.work_dir.clone(),
-                timeout: std::time::Duration::from_secs(900),
-            };
-            let Ok(outcome) = self.engine.run(request).await else {
-                continue;
-            };
-            if !outcome.succeeded() {
-                continue;
-            }
-            let body = outcome.stdout.trim();
-            if body.len() < 200 {
-                continue;
-            }
-            let folder = crate::state::standard_doc_folder(*ttype);
-            let category = crate::state::doc_category_of(folder);
-            if let Ok(mut s) = self.store.load().await {
-                s.ensure_standard_folders();
-                s.upsert_doc(&format!("feat-{id}"), folder, category, title, body, "DOCS");
-                let _ = self.store.save(&s).await;
-                written.push(id.to_string());
-            }
-        }
-        if let Ok(mut s) = self.store.load().await {
-            let msg = if vi {
-                format!(
-                    "📚 Rà soát tài liệu (sau sprint {sprint}): DOCS đã viết {} trang còn thiếu ({}).",
-                    written.len(),
-                    written.join(", ")
-                )
-            } else {
-                format!(
-                    "📚 Docs review (after sprint {sprint}): DOCS wrote {} missing page(s) ({}).",
-                    written.len(),
-                    written.join(", ")
-                )
-            };
-            s.post_comment("DOCS", &msg, None);
-            s.log_activity("DOCS", "documentation review", None);
-            let _ = self.store.save(&s).await;
+        let uc = crate::use_cases::RunDocsAuditUseCase::new(
+            Arc::clone(&self.store),
+            Arc::clone(&self.engine),
+            self.work_dir.clone(),
+            self.config.workflow.language,
+        );
+        if let Err(e) = uc.execute(sprint).await {
+            tracing::warn!("documentation review: {e}");
         }
     }
 
