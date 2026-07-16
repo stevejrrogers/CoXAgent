@@ -52,13 +52,23 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         let context = self.context().await;
         let task = format!(
             "{context}\nA human teammate just wrote in the team channel:\n\"{msg}\"\n\nYou are \
-             {persona}. Reply like a sharp, helpful teammate: answer directly and specifically, \
-             grounded in the project state above — not generically. Keep it 1-4 sentences.\n\n\
-             If (and only if) they are asking the team to DO one of these, append a final line \
-             exactly one of:\nACTION: arch_review   (review the architecture, file refactor \
-             tickets)\nACTION: docs_review   (fill missing Wiki docs)\nACTION: standup\n\
-             ACTION: discuss: <one-line topic>   (kick off a team discussion)\nOtherwise append \
-             `ACTION: none`.{}",
+             {persona}, replying like a sharp senior teammate — the way a good coding agent in a \
+             terminal would. Answer directly and specifically, grounded in the project state above. \
+             If the request is ambiguous or you need a detail to do it right, ASK a crisp \
+             clarifying question instead of guessing. Keep it concise.\n\n\
+             You can also DO things by appending EXACTLY ONE final line:\n\
+             ACTION: arch_review                — review the architecture, file refactor tickets\n\
+             ACTION: docs_review                — fill missing Wiki docs\n\
+             ACTION: standup                    — run a standup\n\
+             ACTION: discuss: <topic>           — kick off a team discussion\n\
+             ACTION: feature: <title> :: <desc> — add a new feature to the backlog\n\
+             ACTION: bug: <title> :: <desc>     — file a bug for the devs to fix\n\
+             ACTION: none                       — just talking / asking\n\n\
+             IMPORTANT — confirm before acting: if the action changes the project (creating a \
+             ticket, running a review/standup/discussion) and the user has NOT clearly confirmed it \
+             in this thread, DO NOT act yet — reply with your proposal and a yes/no question, and \
+             use `ACTION: none`. Only emit the real action once the thread shows they confirmed \
+             (e.g. \"ok\", \"làm đi\", \"yes\").{}",
             self.lang.reply_directive()
         );
         let Some(raw) = self.run(persona, &task).await else {
@@ -104,22 +114,70 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             )
             .with_language(self.lang);
             let _ = uc.execute().await;
-        } else if let Some(topic) = a
-            .strip_prefix("discuss:")
-            .or_else(|| a.strip_prefix("discuss"))
-        {
-            let topic = topic.trim_start_matches([':', ' ']).trim();
-            if !topic.is_empty() {
+        } else if let Some(rest) = strip_kw(a, "discuss") {
+            if !rest.is_empty() {
                 let uc = super::RunDiscussionUseCase::new(
                     Arc::clone(&self.store),
                     Arc::clone(&self.engine),
                     self.work_dir.clone(),
                 )
                 .with_language(self.lang);
-                let _ = uc.execute(topic).await;
+                let _ = uc.execute(rest).await;
             }
+        } else if let Some(rest) = strip_kw(a, "feature") {
+            self.file_ticket(coxagent_domain::TicketType::Feature, rest, "PO")
+                .await;
+        } else if let Some(rest) = strip_kw(a, "bug") {
+            self.file_ticket(coxagent_domain::TicketType::Bug, rest, "TEST")
+                .await;
         }
         Ok(())
+    }
+
+    /// Create a ticket from a `<title> :: <description>` payload and confirm it in
+    /// the channel, so a chat request turns into tracked, actionable work.
+    async fn file_ticket(&self, kind: coxagent_domain::TicketType, payload: &str, author: &str) {
+        use coxagent_domain::ticket::{Complexity, Priority};
+        let (title, desc) = payload
+            .split_once("::")
+            .map_or((payload.trim(), ""), |(t, d)| (t.trim(), d.trim()));
+        if title.is_empty() {
+            return;
+        }
+        let priority = if kind == coxagent_domain::TicketType::Bug {
+            Priority::High
+        } else {
+            Priority::Medium
+        };
+        let adder = super::AddTicketUseCase::new(Arc::clone(&self.store));
+        if let Ok(id) = adder
+            .execute(super::AddTicketInput {
+                ticket_type: kind,
+                title: title.to_owned(),
+                description: if desc.is_empty() {
+                    format!("Requested in the team chat: {title}")
+                } else {
+                    desc.to_owned()
+                },
+                priority,
+                complexity: Complexity::Medium,
+                has_ui: false,
+                acceptance_criteria: Vec::new(),
+            })
+            .await
+        {
+            let kind_str = if kind == coxagent_domain::TicketType::Bug {
+                "bug"
+            } else {
+                "tính năng"
+            };
+            let msg = if self.lang.is_vi() {
+                format!("🎫 Đã tạo {id} ({kind_str}): {title}. Team sẽ đưa vào quy trình.")
+            } else {
+                format!("🎫 Filed {id}: {title}. The team will pick it up.")
+            };
+            self.post(author, &msg).await;
+        }
     }
 
     /// A compact, grounded status the reply agent reasons over.
@@ -156,6 +214,14 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         let _ = writeln!(
             out,
             "- {done} shipped · {inflight} in progress · {open_bugs} open bug(s)"
+        );
+        let _ = writeln!(out, "- Current version: {}", s.current_version);
+        if let Some(last) = s.history.last() {
+            let _ = writeln!(out, "- Last deploy: {} ({})", last.version, last.title);
+        }
+        out.push_str(
+            "(The app auto-deploys via docker compose each cycle after DEV; you don't run it \
+             manually.)\n",
         );
         out.push_str("Recent team channel:\n");
         for c in s
@@ -240,6 +306,13 @@ fn route_persona(lower: &str) -> &'static str {
     } else {
         "SM"
     }
+}
+
+/// Strip a `<keyword>` / `<keyword>:` prefix and return the trimmed remainder,
+/// or `None` when `a` isn't that directive.
+fn strip_kw<'a>(a: &'a str, kw: &str) -> Option<&'a str> {
+    let rest = a.strip_prefix(kw)?;
+    Some(rest.trim_start_matches([':', ' ']).trim())
 }
 
 /// Split a trailing `ACTION: <directive>` line off the reply body.
