@@ -47,6 +47,20 @@ pub struct CycleReport {
 }
 
 impl CycleReport {
+    /// Whether the cycle produced any real work (used to auto-stop an idle
+    /// worker). Errors don't count as work.
+    #[must_use]
+    pub fn did_work(&self) -> bool {
+        !self.ba_created.is_empty()
+            || self.sa_readied.is_some()
+            || self.design_system_created
+            || self.pd_designed.is_some()
+            || self.bug_fixed.is_some()
+            || self.feature_done.is_some()
+            || self.documented.is_some()
+            || !self.bugs_filed.is_empty()
+    }
+
     #[must_use]
     pub fn summary(&self) -> String {
         let mut s = format!("cycle {} —", self.cycle);
@@ -1210,6 +1224,29 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 "spend cap reached — loop paused".to_owned(),
             )
             .await;
+        }
+        // Every configured engine hit a quota / rate-limit wall — pause the loop
+        // instead of spinning uselessly, and tell the team why.
+        if report
+            .errors
+            .iter()
+            .any(|e| e.contains("ALL_ENGINES_QUOTA_EXHAUSTED"))
+        {
+            report.over_budget = true;
+            let vi = self.config.workflow.language.is_vi();
+            let msg = if vi {
+                "🛑 Tất cả engine đều hết quota/token — tạm dừng vòng chạy. Nạp lại quota hoặc \
+                 thêm engine fallback (Settings → engine.fallbacks) rồi resume."
+            } else {
+                "🛑 Every engine hit a quota/token wall — pausing the loop. Top up quota or add a \
+                 fallback engine (Settings → engine.fallbacks), then resume."
+            };
+            if let Ok(mut s) = self.store.load().await {
+                s.post_comment("SM", msg, None);
+                s.log_activity("SM", "paused — engines out of quota", None);
+                let _ = self.store.save(&s).await;
+            }
+            self.notify("quota_exhausted", msg.to_owned()).await;
         }
         report
     }

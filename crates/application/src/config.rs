@@ -62,6 +62,11 @@ pub struct EngineMapping {
     pub default: EngineChoice,
     #[serde(default)]
     pub per_role: HashMap<Role, EngineChoice>,
+    /// Engines to fall back to, in order, when the primary hits a quota / auth /
+    /// rate-limit wall — so a run keeps going on another CLI that still has
+    /// budget instead of failing until the quota resets.
+    #[serde(default)]
+    pub fallbacks: Vec<EngineChoice>,
 }
 
 impl EngineMapping {
@@ -315,6 +320,7 @@ impl Default for Config {
                     model: "sonnet".to_owned(),
                 },
                 per_role: HashMap::new(),
+                fallbacks: Vec::new(),
             },
             git: GitConfig::default(),
             workflow: WorkflowConfig::default(),

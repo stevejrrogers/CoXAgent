@@ -2,6 +2,7 @@
 
 pub mod any;
 pub mod claude;
+pub mod failover;
 pub mod metering;
 pub mod mock;
 pub mod opencode;
@@ -11,6 +12,7 @@ pub mod transcript;
 
 pub use any::AnyEngine;
 pub use claude::ClaudeEngine;
+pub use failover::{is_quota_wall, FailoverEngine, ALL_EXHAUSTED};
 pub use metering::{Meter, MeteringEngine};
 pub use mock::MockEngine;
 pub use opencode::OpencodeEngine;

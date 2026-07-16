@@ -3023,6 +3023,9 @@ async function loadSettings(){let cfg={};try{cfg=await(await fetch(api("/config"
       ${detBanner}
       <div style="margin:-2px 0 12px"><button onclick="checkAgentSetup(true)" class="btn-ghost"><i class="ti ti-robot"></i> Agent setup guide</button></div>
       <div class="panel frm">${defRow}
+        <div class="fr" style="align-items:flex-start"><span class="lbl">Fallback engines</span>
+          <textarea id="eng-fallbacks" rows="2" style="flex:1;min-width:0;background:var(--card);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:8px 11px;font-size:12.5px;font-family:ui-monospace,Menlo,monospace" placeholder="one per line: &lt;engine&gt; &lt;model&gt;\ne.g.  opencode gpt-4o\n      gemini gemini-2.0-flash">${(cfg.engine&&cfg.engine.fallbacks||[]).map(f=>`${f.engine} ${f.model}`).join("\n")}</textarea>
+          <span class="hint">tried in order when the primary hits a quota/rate-limit wall</span></div>
         <button type="button" class="set-expand ${anyOverride?'open':''}" onclick="toggleRoleOverrides(this)"><i class="ti ti-chevron-right"></i> Per-agent model overrides <span style="color:var(--dim);font-weight:400">· optional — give any agent a different model</span></button>
         <div class="role-overrides" ${anyOverride?'':'hidden'}>${roleRows}</div>
       </div>
@@ -3097,6 +3100,7 @@ function toggleRoleOverrides(btn){const box=btn.nextElementSibling;const open=bo
 async function saveSettings(){const cfg=window._cfg||{engine:{},workflow:{}};cfg.engine=cfg.engine||{};cfg.workflow=cfg.workflow||{};
   cfg.engine.default={engine:val("eng-default"),model:val("mdl-default")};
   const per={};ROLES.forEach(r=>{const e=val("eng-"+r),m=val("mdl-"+r);if(e)per[r]={engine:e,model:m||"sonnet"};});cfg.engine.per_role=per;
+  cfg.engine.fallbacks=(val("eng-fallbacks")||"").split("\n").map(l=>l.trim()).filter(Boolean).map(l=>{const p=l.split(/\s+/);return{engine:p[0],model:p.slice(1).join(" ")||"sonnet"};}).filter(f=>f.engine);
   cfg.workflow.mode=val("wf-mode");
   cfg.workflow.sprint_length_cycles=parseInt(val("wf-sp")||"10",10);
   cfg.workflow.ba_every_n_cycles=parseInt(val("wf-ba")||"4",10);

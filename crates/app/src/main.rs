@@ -8,10 +8,12 @@ mod onboard;
 mod shutdown;
 
 use coxagent_application::config::Config;
-use coxagent_application::ports::outbound::{AgentEnginePort, StateStorePort};
+use coxagent_application::ports::outbound::StateStorePort;
 use coxagent_application::use_cases::{RecoverUseCase, RunBaUseCase, RunCycleUseCase};
 use coxagent_application::Spend;
-use coxagent_infrastructure::engine::{AnyEngine, Meter, MeteringEngine, TranscriptEngine};
+use coxagent_infrastructure::engine::{
+    AnyEngine, FailoverEngine, Meter, MeteringEngine, TranscriptEngine,
+};
 use coxagent_infrastructure::{
     discover, AnyStateStore, DockerComposeDeploy, JsonStateStore, SqlStateStore, WebhookNotifier,
 };
@@ -825,18 +827,34 @@ fn append_registry(registry_path: &Path, id: &str, path: &Path) -> std::io::Resu
 }
 
 /// The metered + transcript-logging engine plus the spend meter it feeds.
-type BuiltEngine = (Arc<MeteringEngine<TranscriptEngine<AnyEngine>>>, Meter);
+type BuiltEngine = (
+    Arc<MeteringEngine<TranscriptEngine<FailoverEngine<AnyEngine>>>>,
+    Meter,
+);
 
-/// Build the engine stack (transcript logging + metering) named by config,
-/// plus the shared spend meter the cycle drains into state.
+/// Build the engine stack (failover across engines + transcript logging +
+/// metering) named by config, plus the shared spend meter the cycle drains into
+/// state. The primary plus any configured fallbacks form the failover chain, so
+/// a quota wall on one CLI rolls over to the next instead of stalling the run.
 fn build_engine(
     config: &Config,
     logs_dir: PathBuf,
 ) -> Result<BuiltEngine, Box<dyn std::error::Error>> {
     let choice = &config.engine.default;
-    let inner = AnyEngine::from_choice(choice)?;
-    tracing::info!("engine: {} ({})", inner.id(), choice.model);
-    let logged = TranscriptEngine::new(inner, logs_dir);
+    let mut engines = vec![AnyEngine::from_choice(choice)?];
+    for fb in &config.engine.fallbacks {
+        match AnyEngine::from_choice(fb) {
+            Ok(e) => engines.push(e),
+            Err(e) => tracing::warn!("skipping fallback engine {:?}: {e}", fb.engine),
+        }
+    }
+    let names: Vec<String> = std::iter::once(choice)
+        .chain(config.engine.fallbacks.iter())
+        .map(|c| format!("{:?}({})", c.engine, c.model))
+        .collect();
+    tracing::info!("engines (failover order): {}", names.join(" → "));
+    let failover = FailoverEngine::new(engines);
+    let logged = TranscriptEngine::new(failover, logs_dir);
     let meter: Meter = Arc::new(Mutex::new(Spend::default()));
     Ok((
         Arc::new(MeteringEngine::new(logged, Arc::clone(&meter))),
@@ -937,6 +955,14 @@ async fn run_loop(
     let shutdown = shutdown::Shutdown::listen();
     tracing::info!("cycle loop started");
 
+    // A headless worker can auto-exit after N consecutive idle cycles (no work),
+    // so it doesn't linger forever. 0/unset = run until stopped.
+    let max_idle: u64 = std::env::var("COXAGENT_MAX_IDLE_CYCLES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let mut idle = 0u64;
+
     let mut cycle = 0u64;
     while !shutdown.is_triggered() {
         cycle += 1;
@@ -946,8 +972,17 @@ async fn run_loop(
             tracing::warn!("{e}");
         }
         if report.over_budget {
-            tracing::warn!("budget cap reached — stopping loop");
+            tracing::warn!("budget/quota cap reached — stopping loop");
             break;
+        }
+        if report.did_work() {
+            idle = 0;
+        } else {
+            idle += 1;
+            if max_idle > 0 && idle >= max_idle {
+                tracing::info!("idle for {idle} cycle(s) — auto-stopping worker");
+                break;
+            }
         }
         if max_cycles.is_some_and(|m| cycle >= m) {
             break;
