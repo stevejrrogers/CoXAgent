@@ -1011,14 +1011,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             return;
         }
         let adder = crate::use_cases::AddTicketUseCase::new(Arc::clone(&self.store));
-        let _ = adder
+        let Ok(id) = adder
             .execute(crate::use_cases::AddTicketInput {
                 ticket_type: TicketType::Chore,
                 title: marker,
                 description: format!(
                     "PR #{pr} (branch `{head}`) has merge conflicts with the base branch. \
-                     Rebase the branch onto the latest base, resolve conflicts, keeping both \
-                     sides' intended behaviour, and push so the PR becomes mergeable."
+                     Check out `{head}`, rebase it onto the latest base, resolve every conflict \
+                     keeping both sides' intended behaviour, run the build/tests, and push so the \
+                     PR becomes mergeable."
                 ),
                 priority: Priority::High,
                 complexity: Complexity::Small,
@@ -1028,7 +1029,35 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     "No behaviour from either side is lost".to_owned(),
                 ],
             })
-            .await;
+            .await
+        else {
+            return;
+        };
+
+        // A rebase is mechanical — it needs no architecture. Attach a minimal
+        // technical design and ready it directly so a DEV picks it up next cycle
+        // instead of waiting a full SA pass. Then post it as a visible ACTION so
+        // the raised blocker is tied to concrete, tracked work in the feed.
+        if let Ok(mut state) = self.store.load().await {
+            if let Some(t) = state.ticket_mut(&id) {
+                let design = coxagent_domain::TechnicalDesign {
+                    approach: format!(
+                        "Rebase `{head}` onto base and resolve conflicts; no design change."
+                    ),
+                    ..Default::default()
+                };
+                let _ = t.set_technical_design(coxagent_domain::Role::Sa, design);
+                let _ = t.transition_to(coxagent_domain::Role::Sa, coxagent_domain::Status::Ready);
+            }
+            state.post_comment(
+                "SM",
+                &format!(
+                    "🎫 Action: {id} filed — DEV to rebase & resolve merge conflict on PR #{pr}."
+                ),
+                None,
+            );
+            let _ = self.store.save(&state).await;
+        }
     }
 
     async fn file_deploy_bug(&self, summary: &str) -> Option<TicketId> {
