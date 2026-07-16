@@ -175,6 +175,20 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             self.post("DEV-BUG", msg).await;
             return;
         };
+        // Make sure the Docker daemon is up — start it if it's off, and only ask
+        // the human to help when we genuinely can't bring it up.
+        if !matches!(deploy.ensure_daemon().await, Ok(true)) {
+            let msg = if self.lang.is_vi() {
+                "🐳 Docker daemon đang tắt và mình bật lên không được. Bạn mở Docker Desktop \
+                 giúp rồi nhắn \"deploy lại\" nhé."
+            } else {
+                "🐳 The Docker daemon is off and I couldn't start it. Please open Docker \
+                 Desktop, then say \"deploy again\"."
+            };
+            self.post("DEV-BUG", msg).await;
+            return;
+        }
+
         // Greenfield / no infra? Scaffold a Dockerfile + compose so "deploy" just
         // works locally, then run it.
         let has_compose = COMPOSE_NAMES.iter().any(|f| self.work_dir.join(f).exists());

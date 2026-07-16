@@ -46,8 +46,47 @@ impl DockerComposeDeploy {
     }
 }
 
+/// Whether the Docker daemon answers `docker info`.
+async fn daemon_up() -> bool {
+    Command::new("docker")
+        .args(["info"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+        .is_ok_and(|s| s.success())
+}
+
 #[async_trait]
 impl DeployPort for DockerComposeDeploy {
+    async fn ensure_daemon(&self) -> Result<bool, PortError> {
+        if daemon_up().await {
+            return Ok(true);
+        }
+        // Try to start it: Docker Desktop on macOS, systemd on Linux.
+        #[cfg(target_os = "macos")]
+        let _ = Command::new("open")
+            .args(["-a", "Docker"])
+            .stdin(std::process::Stdio::null())
+            .status()
+            .await;
+        #[cfg(target_os = "linux")]
+        let _ = Command::new("systemctl")
+            .args(["start", "docker"])
+            .stdin(std::process::Stdio::null())
+            .status()
+            .await;
+        // Poll for it to come up (Docker Desktop can take a while to boot).
+        for _ in 0..30 {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            if daemon_up().await {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     async fn deploy(&self, work_dir: &Path) -> Result<DeployReport, PortError> {
         if !COMPOSE_FILES.iter().any(|f| work_dir.join(f).exists()) {
             return Ok(DeployReport {
