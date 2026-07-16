@@ -27,6 +27,7 @@ pub struct RunStandupUseCase<S: StateStorePort + ?Sized, E: AgentEnginePort + ?S
     store: Arc<S>,
     engine: Arc<E>,
     work_dir: PathBuf,
+    lang: crate::config::Language,
 }
 
 impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunStandupUseCase<S, E> {
@@ -35,7 +36,15 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunStandupUseCase<
             store,
             engine,
             work_dir,
+            lang: crate::config::Language::En,
         }
+    }
+
+    /// Set the language the ceremony speaks (English or Vietnamese).
+    #[must_use]
+    pub fn with_language(mut self, lang: crate::config::Language) -> Self {
+        self.lang = lang;
+        self
     }
 
     /// Run the standup. Returns the number of blockers agents raised.
@@ -72,7 +81,11 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunStandupUseCase<
     /// One-line sprint headline for the SM's opener.
     async fn headline(&self) -> String {
         let Ok(s) = self.store.load().await else {
-            return "họp nhanh hằng ngày".to_owned();
+            return if self.lang.is_vi() {
+                "họp nhanh hằng ngày".to_owned()
+            } else {
+                "daily sync".to_owned()
+            };
         };
         let done = s
             .tickets
@@ -91,12 +104,17 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunStandupUseCase<
             .iter()
             .filter(|t| t.status() == coxagent_domain::Status::InProgress)
             .count();
-        match &s.sprint {
-            Some(sp) => format!(
+        match (&s.sprint, self.lang.is_vi()) {
+            (Some(sp), true) => format!(
                 "Sprint #{} “{}” · {done} xong · {inflight} đang làm. Điểm danh cả nhóm:",
                 sp.number, sp.goal
             ),
-            None => format!("{done} đã ship · {inflight} đang làm. Điểm danh cả nhóm:"),
+            (Some(sp), false) => format!(
+                "Sprint #{} “{}” · {done} done · {inflight} in flight. Round the room:",
+                sp.number, sp.goal
+            ),
+            (None, true) => format!("{done} đã ship · {inflight} đang làm. Điểm danh cả nhóm:"),
+            (None, false) => format!("{done} shipped · {inflight} in flight. Round the room:"),
         }
     }
 
@@ -196,7 +214,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunStandupUseCase<
                 "You are {role} at your team's daily standup. Speak plainly in the first \
                  person like a real teammate — concise, specific, honest about blockers. No \
                  preamble, no sign-off, 1-3 sentences.{}",
-                crate::prompts::VI_REPLY
+                self.lang.reply_directive()
             ),
             task_prompt: task.to_owned(),
             work_dir: self.work_dir.clone(),

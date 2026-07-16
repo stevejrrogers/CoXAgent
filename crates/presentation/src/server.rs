@@ -1396,7 +1396,8 @@ async fn run_discussion_ep(
         Arc::clone(&p.store),
         Arc::clone(&p.engine),
         p.work_dir.clone(),
-    );
+    )
+    .with_language(project_language(&p));
     match uc.execute(topic).await {
         Ok(o) => Json(serde_json::json!({
             "ok": true, "turns": o.turns, "decision": o.decision,
@@ -3506,6 +3507,16 @@ async fn user_may_see_broadcast(p: &ProjectHandle, user: &str, json: &str) -> bo
 /// SM-run standup: posts a deterministic status roundup to the team channel and
 /// pulls in each agent's latest contribution. Zero engine cost — derived from
 /// state — so it can be triggered freely to see the team "gather".
+/// The Scrum language configured for a project (English by default).
+fn project_language(p: &ProjectHandle) -> coxagent_application::config::Language {
+    std::fs::read_to_string(&p.config_path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Config>(&t).ok())
+        .map_or(coxagent_application::config::Language::En, |c| {
+            c.workflow.language
+        })
+}
+
 async fn standup_ep(
     State(app): State<AppState>,
     Path(pid): Path<String>,
@@ -3517,6 +3528,7 @@ async fn standup_ep(
     let Ok(mut s) = p.store.load().await else {
         return internal_error("load failed");
     };
+    let vi = project_language(&p).is_vi();
 
     let inflight = s
         .tickets
@@ -3545,17 +3557,25 @@ async fn standup_ep(
                 })
             })
             .count();
+        if vi {
+            format!(
+                "Standup — Sprint #{} \u{201c}{}\u{201d}: {}/{} cam kết đã ship, {inflight} đang làm, {} blocker.",
+                sp.number, sp.goal, done, sp.committed.len(), blockers.len()
+            )
+        } else {
+            format!(
+                "Standup — Sprint #{} \u{201c}{}\u{201d}: {}/{} committed shipped, {inflight} in flight, {} blocker(s).",
+                sp.number, sp.goal, done, sp.committed.len(), blockers.len()
+            )
+        }
+    } else if vi {
         format!(
-            "Standup — Sprint #{} \u{201c}{}\u{201d}: {}/{} cam kết đã ship, {inflight} đang làm, {} blocker.",
-            sp.number,
-            sp.goal,
-            done,
-            sp.committed.len(),
+            "Standup — {shipped} đã ship, {inflight} đang làm, {} blocker.",
             blockers.len()
         )
     } else {
         format!(
-            "Standup — {shipped} đã ship, {inflight} đang làm, {} blocker.",
+            "Standup — {shipped} shipped, {inflight} in flight, {} blocker(s).",
             blockers.len()
         )
     };
@@ -3574,17 +3594,29 @@ async fn standup_ep(
     }
 
     let closing = if blockers.is_empty() {
-        "Focus: dồn sức cho backlog sprint — ship xong rồi hãy đề xuất thêm.".to_owned()
+        if vi {
+            "Focus: dồn sức cho backlog sprint — ship xong rồi hãy đề xuất thêm.".to_owned()
+        } else {
+            "Focus: keep burning the sprint backlog — ship before proposing more.".to_owned()
+        }
     } else {
-        let show: Vec<&String> = blockers.iter().take(3).collect();
-        format!(
-            "Focus: dọn {} bug đang mở trước ({}). DEV-BUG ưu tiên mấy cái này hơn tính năng.",
-            blockers.len(),
-            show.iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
+        let ids = blockers
+            .iter()
+            .take(3)
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        if vi {
+            format!(
+                "Focus: dọn {} bug đang mở trước ({ids}). DEV-BUG ưu tiên mấy cái này hơn tính năng.",
+                blockers.len()
+            )
+        } else {
+            format!(
+                "Focus: clear {} open bug(s) first ({ids}). DEV-BUG, these take priority over features.",
+                blockers.len()
+            )
+        }
     };
     s.post_comment("SM", &closing, None);
 

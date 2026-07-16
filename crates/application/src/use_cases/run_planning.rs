@@ -33,6 +33,7 @@ pub struct RunPlanningUseCase<S: StateStorePort + ?Sized, E: AgentEnginePort + ?
     store: Arc<S>,
     engine: Arc<E>,
     work_dir: PathBuf,
+    lang: crate::config::Language,
 }
 
 impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunPlanningUseCase<S, E> {
@@ -41,7 +42,15 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunPlanningUseCase
             store,
             engine,
             work_dir,
+            lang: crate::config::Language::En,
         }
+    }
+
+    /// Set the language the ceremony speaks (English or Vietnamese).
+    #[must_use]
+    pub fn with_language(mut self, lang: crate::config::Language) -> Self {
+        self.lang = lang;
+        self
     }
 
     /// Run the planning ceremony. No-op (returns `Ok`) when there is no sprint.
@@ -134,7 +143,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunPlanningUseCase
                 "You are {role} at your team's sprint planning. Speak plainly in the first person \
                  like a real teammate — concise, specific, honest about risk and scope. No \
                  preamble, no sign-off, 1-3 sentences.{}",
-                crate::prompts::VI_REPLY
+                self.lang.reply_directive()
             ),
             task_prompt: task.to_owned(),
             work_dir: self.work_dir.clone(),

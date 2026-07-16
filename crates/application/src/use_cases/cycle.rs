@@ -568,10 +568,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let closing = state.sprint.clone();
         if let Some(n) = crate::sprint::advance(&mut state, cycle, len) {
             let _ = prev; // superseded by the richer review below
+            let lang = self.config.workflow.language;
             if let Some(cl) = &closing {
-                Self::sprint_review_and_retro(&mut state, cl);
+                Self::sprint_review_and_retro(&mut state, cl, lang);
             }
-            Self::sprint_planning(&mut state, n);
+            Self::sprint_planning(&mut state, n, lang);
             state.log_activity("SM", "opened sprint", Some(format!("sprint {n}")));
             let _ = self.store.save(&state).await;
             // Learn: distill one concrete lesson from the closing sprint and keep
@@ -593,7 +594,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             Arc::clone(&self.store),
             Arc::clone(&self.engine),
             self.work_dir.clone(),
-        );
+        )
+        .with_language(self.config.workflow.language);
         if let Err(e) = uc.execute().await {
             tracing::warn!("sprint planning: {e}");
         }
@@ -607,7 +609,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             Arc::clone(&self.store),
             Arc::clone(&self.engine),
             self.work_dir.clone(),
-        );
+        )
+        .with_language(self.config.workflow.language);
         if let Err(e) = uc.execute().await {
             tracing::warn!("backlog grooming: {e}");
         }
@@ -638,7 +641,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 "You are the SM running a sprint retrospective. Output ONE concrete, \
                  actionable lesson the team should apply next sprint — a single sentence, \
                  imperative, specific to what actually happened. No preamble.{}",
-                crate::prompts::VI_REPLY
+                self.config.workflow.language.reply_directive()
             ),
             task_prompt: format!(
                 "{ctx}{prior}\nWhat is the single most valuable NEW lesson to carry forward? \
@@ -666,6 +669,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     fn sprint_review_and_retro(
         state: &mut crate::state::ProjectState,
         closing: &crate::state::Sprint,
+        lang: crate::config::Language,
     ) {
         use coxagent_domain::ticket::Status;
         let is_done = |id: &coxagent_domain::TicketId| {
@@ -688,30 +692,50 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .collect();
         let total = closing.committed.len();
         let pct = (shipped.len() * 100).checked_div(total).unwrap_or(100);
-        state.post_comment(
-            "SM",
-            &format!(
-                "📋 Sprint {} review — đã ship {}/{}: {}.",
+        let shipped_list = if shipped.is_empty() {
+            if lang.is_vi() {
+                "chưa có gì lần này".to_owned()
+            } else {
+                "nothing this time".to_owned()
+            }
+        } else {
+            shipped.join(", ")
+        };
+        let review = if lang.is_vi() {
+            format!(
+                "📋 Sprint {} review — đã ship {}/{}: {shipped_list}.",
                 closing.number,
                 shipped.len(),
-                total,
-                if shipped.is_empty() {
-                    "chưa có gì lần này".to_owned()
-                } else {
-                    shipped.join(", ")
-                }
-            ),
-            None,
-        );
-        let takeaway = if carry.is_empty() {
-            "Sprint gọn — mọi thứ cam kết đều ship. Giữ phạm vi thực tế thì sẽ duy trì được."
-                .to_owned()
+                total
+            )
         } else {
             format!(
+                "📋 Sprint {} review — shipped {}/{}: {shipped_list}.",
+                closing.number,
+                shipped.len(),
+                total
+            )
+        };
+        state.post_comment("SM", &review, None);
+        let takeaway = match (carry.is_empty(), lang.is_vi()) {
+            (true, true) => {
+                "Sprint gọn — mọi thứ cam kết đều ship. Giữ phạm vi thực tế thì sẽ duy trì được."
+                    .to_owned()
+            }
+            (true, false) => {
+                "Clean sprint — everything committed shipped. Keep the scope realistic and this holds."
+                    .to_owned()
+            }
+            (false, true) => format!(
                 "{} ticket bị mang sang ({}). Có thể đã cam kết quá tay — sprint sau lấy phần nhỏ hơn, rõ hơn.",
                 carry.len(),
                 carry.join(", ")
-            )
+            ),
+            (false, false) => format!(
+                "{} ticket(s) carried over ({}). Likely over-committed — pull a smaller, clearer slice next sprint.",
+                carry.len(),
+                carry.join(", ")
+            ),
         };
         state.post_comment(
             "SM",
@@ -730,25 +754,38 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
 
     /// Sprint Planning: announce the goal and the committed tickets, so the plan
     /// is visible rather than implicit.
-    fn sprint_planning(state: &mut crate::state::ProjectState, number: u32) {
+    fn sprint_planning(
+        state: &mut crate::state::ProjectState,
+        number: u32,
+        lang: crate::config::Language,
+    ) {
         let Some(sp) = state.sprint.clone() else {
             return;
         };
         let committed: Vec<String> = sp.committed.iter().map(ToString::to_string).collect();
-        state.post_comment(
-            "SM",
-            &format!(
-                "🏃 Sprint {number} planning — mục tiêu: {}. Cam kết {} ticket theo ưu tiên: {}.",
+        let list = if committed.is_empty() {
+            if lang.is_vi() {
+                "backlog trống".to_owned()
+            } else {
+                "backlog empty".to_owned()
+            }
+        } else {
+            committed.join(", ")
+        };
+        let post = if lang.is_vi() {
+            format!(
+                "🏃 Sprint {number} planning — mục tiêu: {}. Cam kết {} ticket theo ưu tiên: {list}.",
                 sp.goal,
-                committed.len(),
-                if committed.is_empty() {
-                    "backlog trống".to_owned()
-                } else {
-                    committed.join(", ")
-                }
-            ),
-            None,
-        );
+                committed.len()
+            )
+        } else {
+            format!(
+                "🏃 Sprint {number} planning — goal: {}. Committed {} ticket(s) by priority: {list}.",
+                sp.goal,
+                committed.len()
+            )
+        };
+        state.post_comment("SM", &post, None);
     }
 
     /// Emit an event to the notifier, if one is attached. Best-effort.
@@ -1069,13 +1106,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 let _ = t.set_technical_design(coxagent_domain::Role::Sa, design);
                 let _ = t.transition_to(coxagent_domain::Role::Sa, coxagent_domain::Status::Ready);
             }
-            state.post_comment(
-                "SM",
-                &format!(
-                    "🎫 Action: đã tạo {id} — DEV rebase & xử lý merge conflict cho PR #{pr}."
-                ),
-                None,
-            );
+            let action = if self.config.workflow.language.is_vi() {
+                format!("🎫 Action: đã tạo {id} — DEV rebase & xử lý merge conflict cho PR #{pr}.")
+            } else {
+                format!(
+                    "🎫 Action: {id} filed — DEV to rebase & resolve merge conflict on PR #{pr}."
+                )
+            };
+            state.post_comment("SM", &action, None);
             let _ = self.store.save(&state).await;
         }
     }
@@ -1202,15 +1240,20 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         if rejected.is_empty() {
             return;
         }
+        let vi = self.config.workflow.language.is_vi();
         for (dup, orig, title) in &rejected {
-            state.post_comment(
-                "SM",
-                &format!(
+            let msg = if vi {
+                format!(
                     "Heads up — {dup} trùng với {orig} (\"{title}\"). Từ chối {dup} để khỏi làm \
                      trùng. BA nhớ kiểm tra backlog trước khi đề xuất."
-                ),
-                Some(dup.to_string()),
-            );
+                )
+            } else {
+                format!(
+                    "Heads up — {dup} duplicates {orig} (\"{title}\"). Rejecting {dup} so we don't \
+                     build the same thing twice. BA, please check the backlog before proposing."
+                )
+            };
+            state.post_comment("SM", &msg, Some(dup.to_string()));
         }
         state.log_activity(
             "SM",
@@ -1228,7 +1271,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             Arc::clone(&self.store),
             Arc::clone(&self.engine),
             self.work_dir.clone(),
-        );
+        )
+        .with_language(self.config.workflow.language);
         match uc.execute().await {
             Ok(blockers) if blockers > 0 => {
                 tracing::info!("standup surfaced {blockers} blocker(s)");
@@ -1245,7 +1289,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let Ok(state) = self.store.load().await else {
             return;
         };
-        let Some(topic) = Self::scrum_topic(&state, report, cycle) else {
+        let Some(topic) = Self::scrum_topic(&state, report, cycle, self.config.workflow.language)
+        else {
             return;
         };
         self.report("SM", "scrum discussion");
@@ -1253,7 +1298,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             Arc::clone(&self.store),
             Arc::clone(&self.engine),
             self.work_dir.clone(),
-        );
+        )
+        .with_language(self.config.workflow.language);
         if let Err(e) = uc.execute(&topic).await {
             tracing::warn!("scrum discussion: {e}");
         }
@@ -1265,14 +1311,21 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         state: &crate::state::ProjectState,
         report: &CycleReport,
         cycle: u64,
+        lang: crate::config::Language,
     ) -> Option<String> {
         use coxagent_domain::{Status, TicketType};
+        let vi = lang.is_vi();
         // A failed deploy is the loudest signal — discuss root cause + prevention.
         if report.errors.iter().any(|e| e.contains("DEPLOY")) || !report.bugs_filed.is_empty() {
             return Some(
-                "Lần deploy hoặc chạy test gần nhất phát sinh lỗi. Nguyên nhân gốc có thể là gì, \
-                 và ta nên thay đổi gì để nó không tái diễn?"
-                    .to_owned(),
+                if vi {
+                    "Lần deploy hoặc chạy test gần nhất phát sinh lỗi. Nguyên nhân gốc có thể là gì, \
+                     và ta nên thay đổi gì để nó không tái diễn?"
+                } else {
+                    "The last deploy or test run surfaced failures. What's the likely root cause, \
+                     and what should we change to stop it recurring?"
+                }
+                .to_owned(),
             );
         }
         let open_bugs = state
@@ -1281,10 +1334,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .filter(|t| t.ticket_type() == TicketType::Bug && t.status() == Status::Open)
             .count();
         if open_bugs >= 3 {
-            return Some(format!(
-                "Đang có {open_bugs} bug mở. Nên tạm dừng tính năng mới để dọn hết bug trước, hay \
-                 tiếp tục ship? Quyết định đi, và nếu cần thì tạo ticket theo dõi."
-            ));
+            return Some(if vi {
+                format!(
+                    "Đang có {open_bugs} bug mở. Nên tạm dừng tính năng mới để dọn hết bug trước, \
+                     hay tiếp tục ship? Quyết định đi, và nếu cần thì tạo ticket theo dõi."
+                )
+            } else {
+                format!(
+                    "We have {open_bugs} open bugs. Should we pause new features and burn down the \
+                     bug backlog first, or keep shipping? Decide and, if useful, create a tracking ticket."
+                )
+            });
         }
         // A stalled in-progress ticket is worth flagging as a possible blocker.
         if let Some(t) = state
@@ -1293,19 +1353,32 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .find(|t| t.status() == Status::InProgress)
         {
             if cycle % 4 == 0 {
-                return Some(format!(
-                    "{} đã ở trạng thái đang làm khá lâu. Có bị block hay quá lớn không? \
-                     Nên tách nhỏ hay gỡ block cho nó?",
-                    t.id()
-                ));
+                return Some(if vi {
+                    format!(
+                        "{} đã ở trạng thái đang làm khá lâu. Có bị block hay quá lớn không? \
+                         Nên tách nhỏ hay gỡ block cho nó?",
+                        t.id()
+                    )
+                } else {
+                    format!(
+                        "{} has been in progress for a while. Is it blocked or too big? \
+                         Should we split it or unblock it?",
+                        t.id()
+                    )
+                });
             }
         }
         // Otherwise a light periodic check-in keeps the sprint honest.
         if cycle % 6 == 0 {
             return Some(
-                "Điểm tin sprint: có đang đúng hướng với mục tiêu sprint không? Có rủi ro, phình \
-                 phạm vi, hay blocker nào cần nêu? Chốt một bước tiếp theo cụ thể."
-                    .to_owned(),
+                if vi {
+                    "Điểm tin sprint: có đang đúng hướng với mục tiêu sprint không? Có rủi ro, phình \
+                     phạm vi, hay blocker nào cần nêu? Chốt một bước tiếp theo cụ thể."
+                } else {
+                    "Sprint check-in: are we on track for the sprint goal? Any risks, scope creep, \
+                     or blockers to raise? Decide on one concrete next step."
+                }
+                .to_owned(),
             );
         }
         None

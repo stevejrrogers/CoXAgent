@@ -81,6 +81,38 @@ pub enum Mode {
     Scrum,
 }
 
+/// The language the team's Scrum ceremonies and feed posts speak. Code, tickets
+/// and technical review stay in English regardless — this only sets the tone of
+/// the human-facing standup / planning / grooming / retro conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Language {
+    #[default]
+    En,
+    Vi,
+}
+
+impl Language {
+    /// The directive appended to ceremony prompts so agents answer in this
+    /// language. Empty for English (the base prompts are already English).
+    #[must_use]
+    pub fn reply_directive(self) -> &'static str {
+        match self {
+            Language::En => "",
+            Language::Vi => {
+                " Viết toàn bộ phản hồi bằng tiếng Việt tự nhiên (giữ nguyên các nhãn kỹ thuật \
+                 như \"BLOCKER:\" và mã ticket)."
+            }
+        }
+    }
+
+    /// Whether this is Vietnamese — for picking the localized deterministic posts.
+    #[must_use]
+    pub fn is_vi(self) -> bool {
+        matches!(self, Language::Vi)
+    }
+}
+
 /// Loop tuning.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkflowConfig {
@@ -107,6 +139,9 @@ pub struct WorkflowConfig {
     /// output to cut token spend. On by default; disable for maximum verbosity.
     #[serde(default = "default_true")]
     pub token_saver: bool,
+    /// Language the Scrum ceremonies and team feed speak (English or Vietnamese).
+    #[serde(default)]
+    pub language: Language,
 }
 
 fn default_sprint_len() -> u64 {
@@ -138,6 +173,7 @@ impl Default for WorkflowConfig {
             sprint_length_cycles: default_sprint_len(),
             webhook_url: None,
             token_saver: true,
+            language: Language::En,
         }
     }
 }

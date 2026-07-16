@@ -139,13 +139,6 @@ pub fn system_prompt(role_section: &str) -> String {
     format!("{BASE}\n\n{role_section}")
 }
 
-/// Language directive appended to Scrum-ceremony prompts so the whole standup /
-/// planning / grooming / retro conversation reads in Vietnamese. Structural
-/// keywords the UI keys off (e.g. `BLOCKER:`) are kept verbatim on purpose.
-pub const VI_REPLY: &str =
-    " Viết toàn bộ phản hồi bằng tiếng Việt tự nhiên (giữ nguyên các nhãn kỹ thuật \
-     như \"BLOCKER:\" và mã ticket).";
-
 /// A compact repo-map context block for code-touching agents: the file/symbol
 /// layout so they locate code without exploring blind (fewer tool calls / tokens).
 /// Empty when the token-saver is off or no map has been built yet.

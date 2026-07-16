@@ -36,6 +36,7 @@ pub struct RunGroomingUseCase<S: StateStorePort + ?Sized, E: AgentEnginePort + ?
     store: Arc<S>,
     engine: Arc<E>,
     work_dir: PathBuf,
+    lang: crate::config::Language,
 }
 
 impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunGroomingUseCase<S, E> {
@@ -44,7 +45,15 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunGroomingUseCase
             store,
             engine,
             work_dir,
+            lang: crate::config::Language::En,
         }
+    }
+
+    /// Set the language the ceremony speaks (English or Vietnamese).
+    #[must_use]
+    pub fn with_language(mut self, lang: crate::config::Language) -> Self {
+        self.lang = lang;
+        self
     }
 
     /// Run the grooming ceremony. No-op (returns `Ok`) when the backlog has
@@ -57,11 +66,12 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunGroomingUseCase
             return Ok(());
         };
 
-        self.post(
-            "SM",
-            "🧹 Backlog grooming — cùng đưa các mục ưu tiên vào trạng thái sẵn sàng.",
-        )
-        .await;
+        let opener = if self.lang.is_vi() {
+            "🧹 Backlog grooming — cùng đưa các mục ưu tiên vào trạng thái sẵn sàng."
+        } else {
+            "🧹 Backlog grooming — let's get the top items ready."
+        };
+        self.post("SM", opener).await;
 
         let mut thread: Vec<(String, String)> = Vec::new();
         for (role, persona) in VOICES {
@@ -140,7 +150,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunGroomingUseCase
                 "You are {role} at your team's backlog grooming. Speak plainly in the first \
                  person like a real teammate — concise, specific, reference ticket ids. No \
                  preamble, no sign-off, 1-3 sentences.{}",
-                crate::prompts::VI_REPLY
+                self.lang.reply_directive()
             ),
             task_prompt: task.to_owned(),
             work_dir: self.work_dir.clone(),

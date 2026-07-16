@@ -2950,6 +2950,7 @@ async function loadSettings(){let cfg={};try{cfg=await(await fetch(api("/config"
         <div class="fr"><span class="lbl">BA every N cycles</span><input id="wf-ba" type="number" min="0" value="${wf.ba_every_n_cycles??4}" style="width:90px"/><span class="hint">0 disables BA</span></div>
         <div class="fr"><span class="lbl">Feature dev</span><select id="wf-fd"><option value="true" ${wf.feature_dev_enabled!==false?'selected':''}>enabled</option><option value="false" ${wf.feature_dev_enabled===false?'selected':''}>disabled</option></select></div>
         <div class="fr"><span class="lbl">Token saver</span><select id="wf-ts"><option value="true" ${wf.token_saver!==false?'selected':''}>on — compress diffs/logs &amp; terse agent output</option><option value="false" ${wf.token_saver===false?'selected':''}>off — full verbosity</option></select><span class="hint">cuts engine spend on big reviews with no loss of the actual change</span></div>
+        <div class="fr"><span class="lbl">Scrum language</span><select id="wf-lang"><option value="en" ${wf.language!=='vi'?'selected':''}>English</option><option value="vi" ${wf.language==='vi'?'selected':''}>Tiếng Việt</option></select><span class="hint">standup, planning, grooming &amp; retro speak this language</span></div>
         <div class="fr"><span class="lbl">Sleep seconds</span><input id="wf-sl" type="number" min="0" value="${wf.sleep_seconds??30}" style="width:90px"/><span class="hint">between cycles</span></div>
         <div class="fr"><span class="lbl">Budget — total (USD)</span><input id="wf-bg" type="number" min="0" step="0.5" value="${wf.budget_usd??''}" placeholder="unlimited" style="width:100px" ${wf.budget_usd==null?'disabled':''}/>
           <label class="hint" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" id="wf-bg-unl" ${wf.budget_usd==null?'checked':''} onchange="document.getElementById('wf-bg').disabled=this.checked;if(this.checked)document.getElementById('wf-bg').value='';"> unlimited</label>
@@ -3017,6 +3018,7 @@ async function saveSettings(){const cfg=window._cfg||{engine:{},workflow:{}};cfg
   cfg.workflow.ba_every_n_cycles=parseInt(val("wf-ba")||"4",10);
   cfg.workflow.feature_dev_enabled=val("wf-fd")==="true";
   cfg.workflow.token_saver=val("wf-ts")==="true";
+  cfg.workflow.language=val("wf-lang")||"en";
   cfg.workflow.sleep_seconds=parseInt(val("wf-sl")||"30",10);
   const bg=val("wf-bg");cfg.workflow.budget_usd=bg?parseFloat(bg):null;
   cfg.policy=cfg.policy||{};

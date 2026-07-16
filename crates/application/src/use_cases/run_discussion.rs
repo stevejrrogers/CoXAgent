@@ -43,6 +43,7 @@ pub struct RunDiscussionUseCase<S: StateStorePort + ?Sized, E: AgentEnginePort +
     store: Arc<S>,
     engine: Arc<E>,
     work_dir: PathBuf,
+    lang: crate::config::Language,
 }
 
 impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunDiscussionUseCase<S, E> {
@@ -51,7 +52,15 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunDiscussionUseCa
             store,
             engine,
             work_dir,
+            lang: crate::config::Language::En,
         }
+    }
+
+    /// Set the language the discussion speaks (English or Vietnamese).
+    #[must_use]
+    pub fn with_language(mut self, lang: crate::config::Language) -> Self {
+        self.lang = lang;
+        self
     }
 
     /// Facilitate a discussion on `topic`: PO and SA weigh in, SM decides. Each
@@ -153,7 +162,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunDiscussionUseCa
                  in the first person, like a real teammate — have a point of view, agree or \
                  push back, ask a pointed question when something is unclear, and don't be \
                  afraid to raise a concern. Be concise (2-4 sentences), no bullet lists.{}",
-                crate::prompts::VI_REPLY
+                self.lang.reply_directive()
             ),
             task_prompt: task.to_owned(),
             work_dir: self.work_dir.clone(),
