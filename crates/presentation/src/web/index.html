@@ -2998,8 +2998,11 @@ async function loadSettings(){let cfg={};try{cfg=await(await fetch(api("/config"
   if(!Array.isArray(detected))detected=[];
   const detNames=new Set(detected.map(d=>d.name));window._detected=detNames;
   const def=cfg.engine&&cfg.engine.default||{engine:"claude",model:"sonnet"},per=cfg.engine&&cfg.engine.per_role||{},wf=cfg.workflow||{},pol=cfg.policy||{},git=cfg.git||{};
-  const eng=["opencode","claude","scripted","mock"];
-  const label=e=>e+(detNames.has(e)?" ✓":(e==="scripted"||e==="mock")?"":" (not installed)");
+  // Real agent CLIs only. `scripted`/`mock` are offline test engines (no real
+  // LLM) — only shown if a project is already pinned to one, never offered new.
+  const realEng=["claude","opencode","hermes","gemini","codex"];
+  const eng=[...realEng]; ["scripted","mock"].forEach(t=>{if([def.engine,...Object.values(per).map(p=>p.engine)].includes(t))eng.push(t);});
+  const label=e=>e+(detNames.has(e)?" ✓":(e==="scripted"||e==="mock")?" (test)":" (not installed)");
   const opt=(s)=>eng.map(e=>`<option value="${e}" ${e===s?'selected':''}>${label(e)}</option>`).join("");
   const detBanner=(detected&&detected.length)
     ? `<div class="panel" style="margin-bottom:12px"><div style="font-size:12px;color:var(--muted);margin-bottom:6px"><i class="ti ti-cpu" style="color:var(--accent2)"></i> Detected agent CLIs on this machine — agents run locally via these:</div>`
