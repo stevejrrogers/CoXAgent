@@ -152,7 +152,8 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunDiscussionUseCa
                 "You are {role} in an autonomous software team's discussion. Speak plainly \
                  in the first person, like a real teammate — have a point of view, agree or \
                  push back, ask a pointed question when something is unclear, and don't be \
-                 afraid to raise a concern. Be concise (2-4 sentences), no bullet lists."
+                 afraid to raise a concern. Be concise (2-4 sentences), no bullet lists.{}",
+                crate::prompts::VI_REPLY
             ),
             task_prompt: task.to_owned(),
             work_dir: self.work_dir.clone(),

@@ -3546,7 +3546,7 @@ async fn standup_ep(
             })
             .count();
         format!(
-            "Standup — Sprint #{} \u{201c}{}\u{201d}: {}/{} committed shipped, {inflight} in flight, {} blocker(s).",
+            "Standup — Sprint #{} \u{201c}{}\u{201d}: {}/{} cam kết đã ship, {inflight} đang làm, {} blocker.",
             sp.number,
             sp.goal,
             done,
@@ -3555,7 +3555,7 @@ async fn standup_ep(
         )
     } else {
         format!(
-            "Standup — {shipped} shipped, {inflight} in flight, {} blocker(s).",
+            "Standup — {shipped} đã ship, {inflight} đang làm, {} blocker.",
             blockers.len()
         )
     };
@@ -3573,17 +3573,19 @@ async fn standup_ep(
         }
     }
 
-    let closing =
-        if blockers.is_empty() {
-            "Focus: keep burning the sprint backlog — ship before proposing more.".to_owned()
-        } else {
-            let show: Vec<&String> = blockers.iter().take(3).collect();
-            format!(
-            "Focus: clear {} open bug(s) first ({}). DEV-BUG, these take priority over features.",
+    let closing = if blockers.is_empty() {
+        "Focus: dồn sức cho backlog sprint — ship xong rồi hãy đề xuất thêm.".to_owned()
+    } else {
+        let show: Vec<&String> = blockers.iter().take(3).collect();
+        format!(
+            "Focus: dọn {} bug đang mở trước ({}). DEV-BUG ưu tiên mấy cái này hơn tính năng.",
             blockers.len(),
-            show.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+            show.iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         )
-        };
+    };
     s.post_comment("SM", &closing, None);
 
     match p.store.save(&s).await {

@@ -57,8 +57,11 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunGroomingUseCase
             return Ok(());
         };
 
-        self.post("SM", "🧹 Backlog grooming — let's get the top items ready.")
-            .await;
+        self.post(
+            "SM",
+            "🧹 Backlog grooming — cùng đưa các mục ưu tiên vào trạng thái sẵn sàng.",
+        )
+        .await;
 
         let mut thread: Vec<(String, String)> = Vec::new();
         for (role, persona) in VOICES {
@@ -136,7 +139,8 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunGroomingUseCase
             system_prompt: format!(
                 "You are {role} at your team's backlog grooming. Speak plainly in the first \
                  person like a real teammate — concise, specific, reference ticket ids. No \
-                 preamble, no sign-off, 1-3 sentences."
+                 preamble, no sign-off, 1-3 sentences.{}",
+                crate::prompts::VI_REPLY
             ),
             task_prompt: task.to_owned(),
             work_dir: self.work_dir.clone(),

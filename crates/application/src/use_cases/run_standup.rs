@@ -72,7 +72,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunStandupUseCase<
     /// One-line sprint headline for the SM's opener.
     async fn headline(&self) -> String {
         let Ok(s) = self.store.load().await else {
-            return "daily sync".to_owned();
+            return "họp nhanh hằng ngày".to_owned();
         };
         let done = s
             .tickets
@@ -93,10 +93,10 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunStandupUseCase<
             .count();
         match &s.sprint {
             Some(sp) => format!(
-                "Sprint #{} “{}” · {done} done · {inflight} in flight. Round the room:",
+                "Sprint #{} “{}” · {done} xong · {inflight} đang làm. Điểm danh cả nhóm:",
                 sp.number, sp.goal
             ),
-            None => format!("{done} shipped · {inflight} in flight. Round the room:"),
+            None => format!("{done} đã ship · {inflight} đang làm. Điểm danh cả nhóm:"),
         }
     }
 
@@ -195,7 +195,8 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunStandupUseCase<
             system_prompt: format!(
                 "You are {role} at your team's daily standup. Speak plainly in the first \
                  person like a real teammate — concise, specific, honest about blockers. No \
-                 preamble, no sign-off, 1-3 sentences."
+                 preamble, no sign-off, 1-3 sentences.{}",
+                crate::prompts::VI_REPLY
             ),
             task_prompt: task.to_owned(),
             work_dir: self.work_dir.clone(),

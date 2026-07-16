@@ -634,10 +634,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         };
         let request = AgentRequest {
             role: coxagent_domain::Role::Sm,
-            system_prompt: "You are the SM running a sprint retrospective. Output ONE concrete, \
+            system_prompt: format!(
+                "You are the SM running a sprint retrospective. Output ONE concrete, \
                  actionable lesson the team should apply next sprint — a single sentence, \
-                 imperative, specific to what actually happened. No preamble."
-                .to_owned(),
+                 imperative, specific to what actually happened. No preamble.{}",
+                crate::prompts::VI_REPLY
+            ),
             task_prompt: format!(
                 "{ctx}{prior}\nWhat is the single most valuable NEW lesson to carry forward? \
                  One sentence."
@@ -689,12 +691,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         state.post_comment(
             "SM",
             &format!(
-                "📋 Sprint {} review — shipped {}/{}: {}.",
+                "📋 Sprint {} review — đã ship {}/{}: {}.",
                 closing.number,
                 shipped.len(),
                 total,
                 if shipped.is_empty() {
-                    "nothing this time".to_owned()
+                    "chưa có gì lần này".to_owned()
                 } else {
                     shipped.join(", ")
                 }
@@ -702,11 +704,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             None,
         );
         let takeaway = if carry.is_empty() {
-            "Clean sprint — everything committed shipped. Keep the scope realistic and this holds."
+            "Sprint gọn — mọi thứ cam kết đều ship. Giữ phạm vi thực tế thì sẽ duy trì được."
                 .to_owned()
         } else {
             format!(
-                "{} ticket(s) carried over ({}). Likely over-committed — pull a smaller, clearer slice next sprint.",
+                "{} ticket bị mang sang ({}). Có thể đã cam kết quá tay — sprint sau lấy phần nhỏ hơn, rõ hơn.",
                 carry.len(),
                 carry.join(", ")
             )
@@ -715,7 +717,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             "SM",
             &format!(
                 "🔄 Sprint {} retro — velocity {pct}%. {takeaway}",
-                closing.number
+                closing.number // "Sprint N retro" giữ nguyên nhãn cho bộ lọc timeline
             ),
             None,
         );
@@ -736,11 +738,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         state.post_comment(
             "SM",
             &format!(
-                "🏃 Sprint {number} planning — goal: {}. Committed {} ticket(s) by priority: {}.",
+                "🏃 Sprint {number} planning — mục tiêu: {}. Cam kết {} ticket theo ưu tiên: {}.",
                 sp.goal,
                 committed.len(),
                 if committed.is_empty() {
-                    "backlog empty".to_owned()
+                    "backlog trống".to_owned()
                 } else {
                     committed.join(", ")
                 }
@@ -1070,7 +1072,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             state.post_comment(
                 "SM",
                 &format!(
-                    "🎫 Action: {id} filed — DEV to rebase & resolve merge conflict on PR #{pr}."
+                    "🎫 Action: đã tạo {id} — DEV rebase & xử lý merge conflict cho PR #{pr}."
                 ),
                 None,
             );
@@ -1204,8 +1206,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             state.post_comment(
                 "SM",
                 &format!(
-                    "Heads up — {dup} duplicates {orig} (\"{title}\"). Rejecting {dup} so we don't \
-                     build the same thing twice. BA, please check the backlog before proposing."
+                    "Heads up — {dup} trùng với {orig} (\"{title}\"). Từ chối {dup} để khỏi làm \
+                     trùng. BA nhớ kiểm tra backlog trước khi đề xuất."
                 ),
                 Some(dup.to_string()),
             );
@@ -1268,8 +1270,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // A failed deploy is the loudest signal — discuss root cause + prevention.
         if report.errors.iter().any(|e| e.contains("DEPLOY")) || !report.bugs_filed.is_empty() {
             return Some(
-                "The last deploy or test run surfaced failures. What's the likely root cause, \
-                 and what should we change to stop it recurring?"
+                "Lần deploy hoặc chạy test gần nhất phát sinh lỗi. Nguyên nhân gốc có thể là gì, \
+                 và ta nên thay đổi gì để nó không tái diễn?"
                     .to_owned(),
             );
         }
@@ -1280,8 +1282,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .count();
         if open_bugs >= 3 {
             return Some(format!(
-                "We have {open_bugs} open bugs. Should we pause new features and burn down the \
-                 bug backlog first, or keep shipping? Decide and, if useful, create a tracking ticket."
+                "Đang có {open_bugs} bug mở. Nên tạm dừng tính năng mới để dọn hết bug trước, hay \
+                 tiếp tục ship? Quyết định đi, và nếu cần thì tạo ticket theo dõi."
             ));
         }
         // A stalled in-progress ticket is worth flagging as a possible blocker.
@@ -1292,8 +1294,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         {
             if cycle % 4 == 0 {
                 return Some(format!(
-                    "{} has been in progress for a while. Is it blocked or too big? \
-                     Should we split it or unblock it?",
+                    "{} đã ở trạng thái đang làm khá lâu. Có bị block hay quá lớn không? \
+                     Nên tách nhỏ hay gỡ block cho nó?",
                     t.id()
                 ));
             }
@@ -1301,8 +1303,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // Otherwise a light periodic check-in keeps the sprint honest.
         if cycle % 6 == 0 {
             return Some(
-                "Sprint check-in: are we on track for the sprint goal? Any risks, scope creep, \
-                 or blockers to raise? Decide on one concrete next step."
+                "Điểm tin sprint: có đang đúng hướng với mục tiêu sprint không? Có rủi ro, phình \
+                 phạm vi, hay blocker nào cần nêu? Chốt một bước tiếp theo cụ thể."
                     .to_owned(),
             );
         }

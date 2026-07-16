@@ -133,7 +133,8 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunPlanningUseCase
             system_prompt: format!(
                 "You are {role} at your team's sprint planning. Speak plainly in the first person \
                  like a real teammate — concise, specific, honest about risk and scope. No \
-                 preamble, no sign-off, 1-3 sentences."
+                 preamble, no sign-off, 1-3 sentences.{}",
+                crate::prompts::VI_REPLY
             ),
             task_prompt: task.to_owned(),
             work_dir: self.work_dir.clone(),
