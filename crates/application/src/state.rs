@@ -323,6 +323,10 @@ pub struct ProjectState {
     /// Living documentation pages (product + technical) written by agents/humans.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub docs: Vec<DocPage>,
+    /// Explicit Wiki folder paths (`/`-separated, nested), so a folder can exist
+    /// and nest even before it holds a page — Confluence-style spaces/pages.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub doc_folders: Vec<String>,
     /// Spend accumulated on the current calendar day (UTC), for the daily budget
     /// policy. Resets when the day rolls over.
     #[serde(default)]
@@ -353,6 +357,7 @@ impl Default for ProjectState {
             design_system: None,
             milestones: Vec::new(),
             docs: Vec::new(),
+            doc_folders: Vec::new(),
             spend_today_usd: 0.0,
             spend_day: String::new(),
         }
@@ -536,6 +541,47 @@ impl ProjectState {
         let before = self.docs.len();
         self.docs.retain(|d| d.id != id);
         self.docs.len() != before
+    }
+
+    /// Create a Wiki folder path (idempotent). Nested paths are `/`-separated.
+    pub fn add_doc_folder(&mut self, path: &str) {
+        let path = path.trim().trim_matches('/');
+        if !path.is_empty() && !self.doc_folders.iter().any(|f| f == path) {
+            self.doc_folders.push(path.to_owned());
+        }
+    }
+
+    /// Delete a Wiki folder and everything under it — its subfolders and every
+    /// page whose folder is at or below the path (Confluence: deleting a space
+    /// takes its pages). Returns the ids of deleted pages.
+    pub fn remove_doc_folder(&mut self, path: &str) -> Vec<String> {
+        let path = path.trim().trim_matches('/').to_owned();
+        if path.is_empty() {
+            return Vec::new();
+        }
+        let prefix = format!("{path}/");
+        let under = |f: &str| f == path || f.starts_with(&prefix);
+        self.doc_folders.retain(|f| !under(f));
+        let removed: Vec<String> = self
+            .docs
+            .iter()
+            .filter(|d| under(&d.folder))
+            .map(|d| d.id.clone())
+            .collect();
+        self.docs.retain(|d| !under(&d.folder));
+        removed
+    }
+
+    /// Move a page to another folder path. Returns whether the page exists.
+    pub fn move_doc(&mut self, id: &str, folder: &str) -> bool {
+        let folder = folder.trim().trim_matches('/').to_owned();
+        if let Some(p) = self.docs.iter_mut().find(|d| d.id == id) {
+            p.folder = folder;
+            p.updated_at = now_rfc3339();
+            true
+        } else {
+            false
+        }
     }
 
     /// Look up a channel by id (`#general` is synthesised on demand).

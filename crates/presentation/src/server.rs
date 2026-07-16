@@ -630,6 +630,15 @@ pub async fn serve_full(
         .route("/api/projects/:pid/docs", get(docs_list_ep))
         .route("/api/projects/:pid/docs/generate", post(docs_generate_ep))
         .route(
+            "/api/projects/:pid/doc-folders",
+            get(doc_folders_ep).post(doc_folder_add_ep),
+        )
+        .route(
+            "/api/projects/:pid/doc-folders/delete",
+            post(doc_folder_del_ep),
+        )
+        .route("/api/projects/:pid/docs/:id/move", post(doc_move_ep))
+        .route(
             "/api/projects/:pid/docs/:id",
             axum::routing::put(doc_upsert_ep).delete(doc_delete_ep),
         )
@@ -2092,6 +2101,95 @@ async fn doc_delete_ep(
     };
     match app.doc_delete(&pid, &p, &id).await {
         Ok(removed) => Json(serde_json::json!({ "ok": removed })).into_response(),
+        Err(e) => internal_error(&e),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct FolderReq {
+    path: String,
+}
+
+/// The explicit Wiki folder paths (empty folders included).
+async fn doc_folders_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let folders = p
+        .store
+        .load()
+        .await
+        .map(|s| s.doc_folders)
+        .unwrap_or_default();
+    Json(folders).into_response()
+}
+
+/// Create a (possibly nested) Wiki folder.
+async fn doc_folder_add_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    Json(req): Json<FolderReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Ok(mut s) = p.store.load().await else {
+        return internal_error("load failed");
+    };
+    s.add_doc_folder(&req.path);
+    match p.store.save(&s).await {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Delete a Wiki folder and everything under it (subfolders + pages).
+async fn doc_folder_del_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    Json(req): Json<FolderReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let path = req.path.trim().trim_matches('/').to_owned();
+    let prefix = format!("{path}/");
+    // Delete pages under the folder from whichever store holds them.
+    for page in app.doc_list(&pid, &p).await {
+        if page.folder == path || page.folder.starts_with(&prefix) {
+            let _ = app.doc_delete(&pid, &p, &page.id).await;
+        }
+    }
+    let Ok(mut s) = p.store.load().await else {
+        return internal_error("load failed");
+    };
+    s.remove_doc_folder(&path);
+    match p.store.save(&s).await {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Move a page into another folder (works across the state/Mongo stores).
+async fn doc_move_ep(
+    State(app): State<AppState>,
+    Path((pid, id)): Path<(String, String)>,
+    Json(req): Json<FolderReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Some(page) = app.doc_get(&pid, &p, &id).await else {
+        return (StatusCode::NOT_FOUND, "no such page").into_response();
+    };
+    match app
+        .doc_upsert(&pid, &p, &id, &req.path, &page.title, &page.body, "USER")
+        .await
+    {
+        Ok(_) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => internal_error(&e),
     }
 }

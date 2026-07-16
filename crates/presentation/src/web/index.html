@@ -365,6 +365,16 @@
   .docsrail{width:250px;flex:none;display:flex;flex-direction:column;background:var(--card);border:1px solid var(--border);border-radius:var(--r);overflow:hidden}
   .docsrail-hd{display:flex;align-items:center;justify-content:space-between;padding:13px 14px 10px;font-size:11px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--dim)}
   .docslist{flex:1;overflow-y:auto;padding:2px 8px 10px}
+  .docfolder{display:flex;align-items:center;gap:5px;padding:5px 6px;border-radius:6px;cursor:pointer;font-size:12.5px;font-weight:600;color:var(--muted);user-select:none}
+  .docfolder:hover{background:var(--card2);color:var(--text)}
+  .docfolder .dfc{font-size:14px;flex-shrink:0;opacity:.7}
+  .docfolder .dfi{font-size:14px;flex-shrink:0;color:var(--accent2)}
+  .docfolder .dfn{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .dfacts{display:none;gap:2px;flex-shrink:0}
+  .docfolder:hover .dfacts{display:flex}
+  .dfacts i{font-size:13px;width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;border-radius:5px;color:var(--dim)}
+  .dfacts i:hover{background:var(--card);color:var(--accent2)}
+  .docitem .dfi{font-size:13px;margin-right:2px}
   .docs-cat{font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin:12px 8px 4px;display:flex;align-items:center;gap:6px}
   .docs-cat i{font-size:13px;opacity:.7}
   .docitem{padding:7px 11px;border-radius:8px;cursor:pointer;color:var(--muted);font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -1236,6 +1246,7 @@ body:not(.manage) .manage-only { display: none !important; }
             <div class="docsrail-hd"><span>Wiki</span>
               <div style="display:flex;gap:6px">
                 <button class="chanadd" onclick="generateDocs()" id="docs-gen" title="Generate/refresh with the DOCS agent"><i class="ti ti-sparkles"></i></button>
+                <button class="chanadd" onclick="newFolder('')" title="New folder"><i class="ti ti-folder-plus"></i></button>
                 <button class="chanadd" onclick="newDoc()" title="New page"><i class="ti ti-plus"></i></button>
               </div>
             </div>
@@ -3031,32 +3042,62 @@ function docCatLabel(c){return {product:"Product",technical:"Technical",flows:"F
 // Legacy pages with no folder fall back to their category label.
 function docFolder(d){return (d.folder&&d.folder.trim())||docCatLabel(d.category);}
 const FOLDER_ICON={Product:"ti-package",Technical:"ti-code",Flows:"ti-route",Testing:"ti-checklist",Operations:"ti-server-cog"};
+let DOC_FOLDERS=[],DOC_EXP=null;
+function docExp(){if(!DOC_EXP){try{DOC_EXP=new Set(JSON.parse(localStorage.getItem("cox_docexp")||"[]"));}catch(e){DOC_EXP=new Set();}}return DOC_EXP;}
+function saveExp(){localStorage.setItem("cox_docexp",JSON.stringify([...docExp()]));}
+function toggleFolder(path){const s=docExp();if(s.has(path))s.delete(path);else s.add(path);saveExp();renderDocsList();}
 async function loadDocs(){
   try{DOCS=await(await fetch(api("/docs"))).json();}catch(e){DOCS=[];}
+  try{DOC_FOLDERS=await(await fetch(api("/doc-folders"))).json();}catch(e){DOC_FOLDERS=[];}
   if(DOC_CUR&&!DOCS.some(d=>d.id===DOC_CUR))DOC_CUR=null;
   if(!DOC_CUR&&DOCS.length)DOC_CUR=DOCS[0].id;
   renderDocsList();renderDocMain();
 }
+// Build a nested folder tree from explicit folders + each page's folder path.
+function buildDocTree(){
+  const root={name:"",path:"",folders:{},pages:[]};
+  const ensure=path=>{if(!path)return root;let cur=root,acc="";for(const part of path.split("/")){if(!part)continue;acc=acc?acc+"/"+part:part;cur.folders[part]=cur.folders[part]||{name:part,path:acc,folders:{},pages:[]};cur=cur.folders[part];}return cur;};
+  for(const f of (DOC_FOLDERS||[]))ensure(f);
+  for(const d of DOCS)ensure((d.folder&&d.folder.trim())||"").pages.push(d);
+  return root;
+}
+// Every folder path (for the "move page" picker).
+function allFolderPaths(){const s=new Set(DOC_FOLDERS||[]);for(const d of DOCS){const f=(d.folder||"").trim();if(f){let acc="";for(const p of f.split("/")){acc=acc?acc+"/"+p:p;s.add(acc);}}}return [...s].sort();}
 function renderDocsList(){
   const box=document.getElementById("docs-list");if(!box)return;
-  if(!DOCS.length){box.innerHTML='<div class="empty" style="padding:14px 8px;font-size:12px">No pages yet.</div>';return;}
-  // Group pages by their full folder path, then render folders in sorted order.
-  const groups={};
-  for(const d of DOCS){const f=docFolder(d);(groups[f]=groups[f]||[]).push(d);}
-  const paths=Object.keys(groups).sort((a,b)=>a.localeCompare(b));
-  const html=paths.map(path=>{
-    const depth=path.split("/").length-1;
-    const top=path.split("/")[0];
-    const leaf=path.split("/").slice(-1)[0];
-    const icon=FOLDER_ICON[top]||"ti-folder";
-    const pad=8+depth*12;
-    const head=`<div class="docs-cat" style="padding-left:${pad}px"><i class="ti ${depth?"ti-folder":icon}"></i> ${esc(leaf)}</div>`;
-    const items=groups[path].slice().sort((a,b)=>a.title.localeCompare(b.title)).map(d=>
-      `<div class="docitem${d.id===DOC_CUR?' on':''}" style="padding-left:${pad+18}px" onclick="openDoc('${esc(d.id)}')">${esc(d.title)}</div>`).join("");
-    return head+items;
-  }).join("");
-  box.innerHTML=html;
+  const root=buildDocTree(),exp=docExp();
+  const node=(n,depth)=>{let h="";
+    for(const fn of Object.keys(n.folders).sort((a,b)=>a.localeCompare(b))){const f=n.folders[fn];const open=exp.has(f.path);const pad=8+depth*13;
+      h+=`<div class="docfolder" style="padding-left:${pad}px" onclick="toggleFolder('${esc(f.path)}')">
+        <i class="ti ti-chevron-${open?'down':'right'} dfc"></i><i class="ti ${FOLDER_ICON[f.name]||'ti-folder'} dfi"></i>
+        <span class="dfn">${esc(f.name)}</span>
+        <span class="dfacts">
+          <i class="ti ti-file-plus" title="New page here" onclick="event.stopPropagation();newDoc('${esc(f.path)}')"></i>
+          <i class="ti ti-folder-plus" title="New subfolder" onclick="event.stopPropagation();newFolder('${esc(f.path)}')"></i>
+          <i class="ti ti-trash" title="Delete folder" onclick="event.stopPropagation();deleteFolder('${esc(f.path)}')"></i>
+        </span></div>`;
+      if(open)h+=node(f,depth+1);
+    }
+    for(const d of n.pages.slice().sort((a,b)=>a.title.localeCompare(b.title))){const pad=8+depth*13+18;
+      h+=`<div class="docitem${d.id===DOC_CUR?' on':''}" style="padding-left:${pad}px" onclick="openDoc('${esc(d.id)}')"><i class="ti ti-file-text dfi" style="opacity:.55"></i> ${esc(d.title)}</div>`;
+    }
+    return h;};
+  box.innerHTML=node(root,0)||'<div class="empty" style="padding:14px 8px;font-size:12px">Empty. Create a folder (＋) or page.</div>';
 }
+async function newFolder(parent){
+  const name=prompt("Folder name"+(parent?(" under "+parent):"")+":");if(!name||!name.trim())return;
+  const path=(parent?parent+"/":"")+name.trim().replace(/\//g,"-");
+  try{await fetch(api("/doc-folders"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path})});}catch(e){}
+  if(parent)docExp().add(parent);docExp().add(path);saveExp();await loadDocs();
+}
+async function deleteFolder(path){if(!confirm('Delete folder "'+path+'" and everything inside it?'))return;
+  try{await fetch(api("/doc-folders/delete"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path})});}catch(e){}
+  await loadDocs();
+}
+async function moveDoc(id){const cur=DOCS.find(d=>d.id===id);if(!cur)return;
+  const folder=prompt("Move to folder path (blank = root):",cur.folder||"");if(folder===null)return;
+  try{await fetch(api("/docs/"+id+"/move"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:folder.trim()})});}catch(e){}
+  if(folder.trim())docExp().add(folder.trim());saveExp();await loadDocs();}
 function openDoc(id){if(typeof docsWsClose==="function")docsWsClose();DOC_CUR=id;DOC_EDIT=false;renderDocsList();renderDocMain();}
 function currentDoc(){return DOCS.find(d=>d.id===DOC_CUR);}
 // Distinct folder paths already in use, for the editor's datalist.
@@ -3098,12 +3139,14 @@ function renderDocMain(){
   }
   const meta=d.updated_by?`<span class="doc-meta">Updated by ${esc(d.updated_by)}${d.updated_at?" · "+esc(d.updated_at.slice(0,10)):""}</span>`:"";
   const crumb=docFolder(d).split("/").map(esc).join(' <i class="ti ti-chevron-right" style="font-size:11px;opacity:.5"></i> ');
-  const actions=canEdit?`<div style="display:flex;gap:6px"><button class="gc-btn" onclick="askAiEdit()" title="Ask the DOCS agent to revise this page"><i class="ti ti-sparkles"></i> Ask AI</button><button class="gc-btn" onclick="DOC_EDIT=true;renderDocMain()"><i class="ti ti-pencil"></i> Edit</button></div>`:"";
+  const actions=canEdit?`<div style="display:flex;gap:6px"><button class="gc-btn" onclick="askAiEdit()" title="Ask the DOCS agent to revise this page"><i class="ti ti-sparkles"></i> Ask AI</button><button class="gc-btn" onclick="moveDoc('${esc(d.id)}')" title="Move to another folder"><i class="ti ti-folder-symlink"></i> Move</button><button class="gc-btn" onclick="DOC_EDIT=true;renderDocMain()"><i class="ti ti-pencil"></i> Edit</button></div>`:"";
   el.innerHTML=`<div class="doc-head"><div><span class="doc-cat-tag ${esc(d.category)}">${crumb}</span><h2>${esc(d.title)}</h2>${meta}</div>${actions}</div><div class="doc-body md">${mdRender(d.body)}</div>`;
 }
-async function newDoc(){
+async function newDoc(folder){
   const title=prompt("New page title:");if(!title||!title.trim())return;
-  const folder=(prompt("Folder path (e.g. Product, Technical/Architecture):","Product")||"Product").trim()||"Product";
+  // Folder given (from a tree node) → use it; else ask.
+  if(folder===undefined||folder===null){folder=(prompt("Folder path (e.g. Product, Technical/Architecture) — blank for root:","")||"").trim();}
+  if(folder)docExp().add(folder),saveExp();
   await putDoc("", folder, title.trim(), "# "+title.trim()+"\n\nWrite here…");DOC_EDIT=true;renderDocMain();
 }
 // ---- Rich-text (Confluence-like) editor + live collaboration --------------
