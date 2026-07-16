@@ -698,6 +698,7 @@ pub async fn serve_full(
         .route("/api/projects/:pid/prs", get(list_prs_ep))
         .route("/api/projects/:pid/prs/:num/diff", get(pr_diff_ep))
         .route("/api/projects/:pid/prs/:num/:action", post(pr_action_ep))
+        .route("/api/projects/:pid/agent-log", get(agent_log_ep))
         .route("/api/projects/:pid/transcripts", get(list_transcripts))
         .route("/api/projects/:pid/transcripts/:name", get(get_transcript))
         .route("/api/projects/:pid/events", get(events_ep))
@@ -3842,6 +3843,58 @@ fn transcripts_dir(p: &ProjectHandle) -> PathBuf {
         .unwrap_or(&p.config_path)
         .join("logs")
         .join("transcripts")
+}
+
+#[derive(serde::Deserialize)]
+struct AgentLogQuery {
+    role: String,
+}
+
+/// Live agent log for a role: the streamed `<workspace>/logs/live/<role>.log`
+/// (updated during the run), falling back to the newest completed transcript
+/// for that role. Powers the full-screen live agent view.
+async fn agent_log_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<AgentLogQuery>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    // Sanitize the role to a filename token (no path traversal).
+    let role: String = q
+        .role
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    if role.is_empty() {
+        return (StatusCode::BAD_REQUEST, "role required").into_response();
+    }
+    let base = p.config_path.parent().unwrap_or(&p.config_path);
+    let live = base.join("logs").join("live").join(format!("{role}.log"));
+    let (body, live_flag) = match std::fs::read_to_string(&live) {
+        Ok(s) if s.trim().len() > 20 => (s, true),
+        _ => {
+            // Fall back to the latest transcript for this role.
+            let dir = transcripts_dir(&p);
+            let latest = std::fs::read_dir(&dir).ok().and_then(|entries| {
+                entries
+                    .flatten()
+                    .filter(|e| e.file_name().to_string_lossy().contains(&role))
+                    .max_by_key(|e| {
+                        e.metadata()
+                            .and_then(|m| m.modified())
+                            .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+                    })
+                    .map(|e| e.path())
+            });
+            let text = latest
+                .and_then(|pth| std::fs::read_to_string(pth).ok())
+                .unwrap_or_default();
+            (text, false)
+        }
+    };
+    Json(serde_json::json!({ "role": role, "live": live_flag, "log": body })).into_response()
 }
 
 /// List transcript files (name + size + modified), newest first.

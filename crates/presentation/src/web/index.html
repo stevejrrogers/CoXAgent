@@ -1139,14 +1139,14 @@ body:not(.manage) .manage-only { display: none !important; }
         <div class="sec" style="margin-top:20px">Agent transcripts <span style="font-size:11px;color:var(--dim);font-weight:400">· full prompt + output per run</span></div>
         <div class="panel"><div id="transcript-list"></div></div>
       </div>
-      <div class="ov" id="ov-agent" onclick="if(event.target===this)close_('ov-agent')"><div class="modal" style="max-width:840px">
-        <span class="x" onclick="close_('ov-agent')"><i class="ti ti-x"></i></span>
+      <div class="ov" id="ov-agent" onclick="if(event.target===this)closeAgent()"><div class="modal" style="max-width:1160px;width:94vw;height:90vh;display:flex;flex-direction:column">
+        <span class="x" onclick="closeAgent()"><i class="ti ti-x"></i></span>
         <h3 id="agent-title" style="display:flex;align-items:center;gap:9px"></h3>
-        <div class="msub" id="agent-sub">recent actions &amp; latest run</div>
-        <div class="sec" style="margin-top:12px">Recent actions</div>
-        <div id="agent-acts" class="panel" style="max-height:22vh;overflow:auto"></div>
-        <div class="sec" style="margin-top:14px">Latest run <span style="font-size:11px;color:var(--dim);font-weight:400">· full prompt + output, like a CLI session</span></div>
-        <pre id="agent-transcript" style="max-height:46vh;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:12px;background:var(--card2);padding:12px;border-radius:8px">—</pre>
+        <div class="msub" id="agent-sub">live work log</div>
+        <div class="sec" style="margin-top:10px">Recent actions</div>
+        <div id="agent-acts" class="panel" style="max-height:16vh;overflow:auto"></div>
+        <div class="sec" style="margin-top:12px;display:flex;align-items:center;gap:8px">Work log <span id="agent-live-badge" style="font-size:10px;font-weight:700;padding:1px 7px;border-radius:5px;background:var(--green)22;color:var(--green);display:none">● LIVE</span> <span style="font-size:11px;color:var(--dim);font-weight:400">· what the agent is doing, step by step</span></div>
+        <pre id="agent-transcript" style="flex:1;min-height:0;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.5;background:var(--card2);padding:12px;border-radius:8px">—</pre>
       </div></div>
       <div class="ov" id="ov-transcript" onclick="if(event.target===this)close_('ov-transcript')"><div class="modal" style="max-width:760px">
         <span class="x" onclick="close_('ov-transcript')"><i class="ti ti-x"></i></span>
@@ -4245,17 +4245,27 @@ async function openAgent(role){
   document.getElementById("agent-acts").innerHTML=acts.length?acts.map(a=>
     `<div class="act"><div class="atx"><span>${esc(a.action)}</span> ${a.ticket?`<span class="tk">${esc(a.ticket)}</span>`:''}</div><span class="tm">${esc((a.at||'').slice(11,16))}</span></div>`).join("")
     :'<div class="empty">no recorded actions yet</div>';
-  const body=document.getElementById("agent-transcript");body.textContent="loading latest run…";
+  const body=document.getElementById("agent-transcript");body.textContent="loading…";
   document.getElementById("ov-agent").classList.add("open");
-  try{
-    const rows=await(await fetch(api("/transcripts"))).json();
-    const token=role.toLowerCase().replace(/-/g,"_");
-    const match=(rows||[]).find(t=>{const m=t.name.match(/-(\w[\w-]*)\.md$/);return m&&m[1]===token;});
-    if(!match){body.textContent="(this agent hasn't run yet — no transcript)";return;}
-    const r=await fetch(api("/transcripts/"+encodeURIComponent(match.name)));
-    body.textContent=r.ok?await r.text():"(unavailable)";
-  }catch(e){body.textContent="(error loading transcript)";}
+  AGENT_LOG_ROLE=role;
+  await pollAgentLog();               // first fetch now
+  clearInterval(AGENT_LOG_TIMER);
+  AGENT_LOG_TIMER=setInterval(pollAgentLog,1500);  // then live every 1.5s
 }
+let AGENT_LOG_TIMER=null, AGENT_LOG_ROLE=null;
+async function pollAgentLog(){
+  if(!AGENT_LOG_ROLE)return;
+  const body=document.getElementById("agent-transcript");
+  const badge=document.getElementById("agent-live-badge");
+  try{
+    const d=await(await fetch(api("/agent-log?role="+encodeURIComponent(AGENT_LOG_ROLE)))).json();
+    const atBottom=body.scrollHeight-body.scrollTop-body.clientHeight<40;
+    body.textContent=d.log&&d.log.trim()?d.log:"(this agent hasn't run yet)";
+    if(badge)badge.style.display=d.live?"inline-block":"none";
+    if(atBottom)body.scrollTop=body.scrollHeight;   // follow the tail
+  }catch(e){}
+}
+function closeAgent(){clearInterval(AGENT_LOG_TIMER);AGENT_LOG_TIMER=null;AGENT_LOG_ROLE=null;close_('ov-agent');}
 async function openTranscript(enc,name){
   document.getElementById("tr-title").textContent=name;
   document.getElementById("tr-body").textContent="loading…";

@@ -26,6 +26,14 @@ pub use transcript::TranscriptEngine;
 /// subprocess's PATH, so heavy tool output the agent triggers is compressed
 /// (rtk-style). No-op when unset. Applied to the agent process only — never the
 /// hub itself, so CoXAgent's own git/tooling is unaffected.
+/// The serde key for a role (e.g. `DEV-FEATURE`), used for per-role log files.
+pub(crate) fn role_key(role: coxagent_domain::Role) -> String {
+    serde_json::to_value(role)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
 pub(crate) fn apply_shim_path(cmd: &mut tokio::process::Command) {
     if let Ok(shim) = std::env::var("COXAGENT_SHIM_DIR") {
         if !shim.is_empty() {
