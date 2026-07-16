@@ -301,8 +301,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             }
         };
         let target = self.flow_base();
-        // Bound cost: review a few PRs per cycle, oldest first.
-        for pr in prs.into_iter().rev().take(3) {
+        // With full merge authority (auto_merge on) the SA owns the queue and
+        // works it hard — draining the pile-up — rather than nibbling a few PRs.
+        // As a suggestion-only reviewer it stays light. Bounded either way for cost.
+        let batch = if auto_merge { 12 } else { 3 };
+        for pr in prs.into_iter().rev().take(batch) {
             // Only review PRs into the configured target branch; leave PRs aimed
             // elsewhere (e.g. an integration → main promotion) to humans.
             if pr.base != target {
@@ -474,11 +477,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // so the reviewer checks the change doesn't break existing callers.
         let impact = self.diff_impact(diff);
         let task = format!(
-            "You are the reviewer on a pull request before merge. Do a deep code review for \
-             correctness, completeness, safety, and architecture fit.\n\nPR: {title}\nBranch: \
-             {head}\n\nUnified diff:\n```\n{clipped}\n```\n{impact}\nRespond with ONLY JSON: \
-             {{\"decision\": \"approve\" | \"request_changes\", \"summary\": \"one short \
-             paragraph; if request_changes, list the concrete fixes\"}}.{terse}"
+            "You are the SA with full merge authority on this pull request. Do a deep code review \
+             for correctness, completeness, safety, and architecture fit. You may APPROVE (which \
+             merges it) only when ALL hold: the change is functionally correct and will keep the \
+             build/tests green after merge; it carries adequate tests for what it changes; and the \
+             code is clean (clear naming, no dead code, follows the repo's conventions and the \
+             established architecture). If it merely works but is untested, sloppy, or drifts from \
+             the architecture, REQUEST_CHANGES with the concrete fixes — a green diff is not enough, \
+             the merged code must be good.\n\nPR: {title}\nBranch: {head}\n\nUnified diff:\n```\n\
+             {clipped}\n```\n{impact}\nRespond with ONLY JSON: {{\"decision\": \"approve\" | \
+             \"request_changes\", \"summary\": \"one short paragraph; if request_changes, list the \
+             concrete fixes\"}}.{terse}"
         );
         let request = AgentRequest {
             role: Role::Sa,
