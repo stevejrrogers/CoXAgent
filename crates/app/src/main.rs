@@ -65,6 +65,24 @@ async fn make_store(
                 }
                 _ => tracing::info!("[{id}] state store: Postgres"),
             }
+            // First move to Postgres for a project that already has local JSON
+            // state: seed it so the existing backlog/history migrates without loss.
+            if let Ok(existing) = store.load().await {
+                if existing.tickets.is_empty() && existing.comments.is_empty() {
+                    if let Ok(js) = JsonStateStore::new(state_dir) {
+                        if let Ok(local) = js.load().await {
+                            if !local.tickets.is_empty() || !local.comments.is_empty() {
+                                store.save(&local).await?;
+                                tracing::info!(
+                                    "[{id}] seeded Postgres from local JSON ({} tickets, {} comments)",
+                                    local.tickets.len(),
+                                    local.comments.len()
+                                );
+                            }
+                        }
+                    }
+                }
+            }
             Ok(Arc::new(AnyStateStore::Sql(store)))
         }
         _ => Ok(Arc::new(AnyStateStore::Json(JsonStateStore::new(
@@ -146,6 +164,10 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
             Ok(String::new())
         }
         Command::Hub { registry, port } => {
+            // Pick up the shared coordination backend (Postgres/Redis) from a
+            // persistent file next to the registry, so the desktop app is
+            // distributed even when launched from Finder (no env).
+            load_coordination(registry.parent().unwrap_or_else(|| Path::new(".")));
             run_hub(&registry, port).await?;
             Ok(String::new())
         }
@@ -154,6 +176,12 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
             context,
             max_cycles,
         } => {
+            load_coordination(
+                args.state_dir
+                    .parent()
+                    .and_then(Path::parent)
+                    .unwrap_or(&args.state_dir),
+            );
             run_loop(
                 store().await?,
                 &args.state_dir,
@@ -316,6 +344,47 @@ fn codegraph_query(
 
 /// Load `coxagent.json` from the workspace root (parent of the state dir), or
 /// fall back to defaults. Config lives beside the state, written by `onboard`.
+/// Load the shared coordination backend (Postgres state DSN + Redis URL) from
+/// `<base>/coordination.json` into the environment, unless already set. Lets the
+/// Finder-launched app join the distributed backend without env plumbing.
+fn load_coordination(base: &Path) {
+    if std::env::var("COXAGENT_DB_DSN")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+    {
+        return; // an explicit env always wins
+    }
+    let path = base.join("coordination.json");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return;
+    };
+    if let Some(dsn) = v
+        .get("db_dsn")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        std::env::set_var("COXAGENT_DB_DSN", dsn);
+    }
+    if let Some(url) = v
+        .get("redis_url")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        std::env::set_var("COXAGENT_REDIS_URL", url);
+    }
+    if let Some(adsn) = v
+        .get("auth_dsn")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        std::env::set_var("COXAGENT_AUTH_DSN", adsn);
+    }
+    tracing::info!("coordination config loaded from {}", path.display());
+}
+
 fn load_config(state_dir: &Path) -> Config {
     let root = state_dir.parent().unwrap_or(state_dir);
     let path = root.join("coxagent.json");
@@ -672,9 +741,11 @@ async fn build_auth(
         _ => None,
     };
 
-    // Server mode: when a database is configured, accounts / membership / tokens
-    // live in Postgres (shared across instances), not a local file.
-    if let Ok(dsn) = std::env::var("COXAGENT_DB_DSN") {
+    // Server mode: accounts / membership / tokens live in Postgres (shared) only
+    // when an explicit auth DSN is set — kept SEPARATE from the state DSN so a
+    // project can move its state to Postgres while keeping the local account file
+    // (no forced re-login when going distributed on one host).
+    if let Ok(dsn) = std::env::var("COXAGENT_AUTH_DSN") {
         let svc = SqlAuthService::connect(&dsn).await?;
         if let Some((user, pass)) = &admin {
             svc.bootstrap_admin(user, pass).await?;
