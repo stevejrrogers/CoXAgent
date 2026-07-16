@@ -78,6 +78,7 @@ mod tests {
                     output_tokens: 50,
                     cost_usd: self.0,
                 }),
+                trace: String::new(),
             })
         }
     }

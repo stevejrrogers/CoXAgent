@@ -44,8 +44,16 @@ impl<E: AgentEnginePort> TranscriptEngine<E> {
         }
         let ts = time::OffsetDateTime::now_utc().unix_timestamp();
         let path = self.dir.join(format!("{ts}-{role}.md"));
+        let steps = if outcome.trace.trim().is_empty() {
+            String::new()
+        } else {
+            format!(
+                "## Work log (what the agent did)\n{}\n\n",
+                outcome.trace.trim()
+            )
+        };
         let body = format!(
-            "# {role} @ {ts}\n\n## System\n{system}\n\n## Task\n{task}\n\n## Output (exit {:?})\n{}\n\n{}",
+            "# {role} @ {ts}\n\n{steps}## System\n{system}\n\n## Task\n{task}\n\n## Output (exit {:?})\n{}\n\n{}",
             outcome.exit_code,
             outcome.stdout.trim(),
             if outcome.stderr.trim().is_empty() {

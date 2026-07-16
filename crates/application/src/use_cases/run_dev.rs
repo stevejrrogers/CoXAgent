@@ -259,6 +259,7 @@ mod tests {
                 stderr: String::new(),
                 exit_code: Some(0),
                 usage: None,
+                trace: String::new(),
             })
         }
     }

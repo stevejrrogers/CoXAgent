@@ -28,12 +28,18 @@ pub struct Usage {
 
 /// The raw result of an engine run. Parsing into domain effects is the caller's
 /// job — the engine layer stays dumb.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct AgentOutcome {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: Option<i32>,
     pub usage: Option<Usage>,
+    /// A human-readable step-by-step work log of the run (tool calls, edits,
+    /// reasoning) when the engine can capture it — surfaced in the transcript so
+    /// you can see exactly what the agent did, like a coding-agent terminal.
+    /// Empty when the engine only returns a final result.
+    #[doc(hidden)]
+    pub trace: String,
 }
 
 impl AgentOutcome {

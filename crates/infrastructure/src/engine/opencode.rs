@@ -70,6 +70,7 @@ impl AgentEnginePort for OpencodeEngine {
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
             exit_code: output.status.code(),
             usage: None,
+            trace: String::new(),
         })
     }
 }

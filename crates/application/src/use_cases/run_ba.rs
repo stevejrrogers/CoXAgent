@@ -164,6 +164,7 @@ mod tests {
                 stderr: String::new(),
                 exit_code: Some(self.code),
                 usage: None,
+                trace: String::new(),
             })
         }
     }
