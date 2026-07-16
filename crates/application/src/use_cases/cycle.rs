@@ -570,6 +570,37 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             if closing.is_some() {
                 self.capture_retro_lesson().await;
             }
+            // The team actually talks the plan through (PO/SA/DEV weigh in, SM
+            // confirms the commitment) — planning as a ceremony, not an announce.
+            self.scrum_planning().await;
+        }
+    }
+
+    /// Run the Sprint Planning ceremony: after the deterministic announce, the
+    /// team discusses scope, risk, and capacity, and the SM confirms commitment.
+    async fn scrum_planning(&self) {
+        self.report("SM", "sprint planning");
+        let uc = crate::use_cases::RunPlanningUseCase::new(
+            Arc::clone(&self.store),
+            Arc::clone(&self.engine),
+            self.work_dir.clone(),
+        );
+        if let Err(e) = uc.execute().await {
+            tracing::warn!("sprint planning: {e}");
+        }
+    }
+
+    /// Run the Backlog Grooming ceremony: BA/SA/PO refine the top un-ready items
+    /// so the backlog is healthy for the next planning.
+    async fn scrum_grooming(&self) {
+        self.report("SM", "backlog grooming");
+        let uc = crate::use_cases::RunGroomingUseCase::new(
+            Arc::clone(&self.store),
+            Arc::clone(&self.engine),
+            self.work_dir.clone(),
+        );
+        if let Err(e) = uc.execute().await {
+            tracing::warn!("backlog grooming: {e}");
         }
     }
 
@@ -792,6 +823,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // agent gives a live update and raises blockers, SM highlights focus.
             if cycle % 3 == 1 {
                 self.scrum_standup().await;
+            }
+            // Mid-sprint backlog grooming, offset from the standup so the two
+            // ceremonies don't land in the same cycle.
+            if self.config.workflow.mode == crate::config::Mode::Scrum && cycle % 3 == 2 {
+                self.scrum_grooming().await;
             }
 
             // BA runs on the first cycle of each period. `(cycle-1) % n == 0` is

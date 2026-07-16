@@ -2067,6 +2067,8 @@ function scrumEvent(c){
   if(/^sprint \d+ retro/i.test(s)) return {icon:"refresh",col:"var(--amber)",text:b};
   if(/^sprint \d+ planning/i.test(s)) return {icon:"run",col:"var(--accent2)",text:b};
   if(/^retro lesson/i.test(s)) return {icon:"bulb",col:"var(--green)",text:b,kind:"decision"};
+  if(/^commitment:/i.test(s)) return {icon:"target",col:"var(--green)",text:b,kind:"decision"};
+  if(/^backlog grooming/i.test(s)) return {icon:"broom",col:"var(--accent2)",text:b,kind:"disc"};
   if(/^standup\b/i.test(s)) return {icon:"microphone",col:"var(--accent2)",text:b,kind:"disc"};
   if(/^(retro|review)\b/i.test(s)) return {icon:"users-group",col:"var(--accent2)",text:b};
   if(/^sprint\b/i.test(s)) return {icon:"flag",col:"var(--accent2)",text:b};
