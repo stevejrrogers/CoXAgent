@@ -377,6 +377,12 @@ pub struct ProjectState {
     /// the team actually improves over time (kept bounded, newest last).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lessons: Vec<String>,
+    /// Set when the SA has called a halt on new features to run a hardening /
+    /// refactor sprint (the codebase risk is too high to keep building on).
+    /// While true, BA proposes no new features and planning dedicates the sprint
+    /// to the refactor chores; cleared once they're all done.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub refactor_mode: bool,
     /// Spend accumulated on the current calendar day (UTC), for the daily budget
     /// policy. Resets when the day rolls over.
     #[serde(default)]
@@ -409,6 +415,7 @@ impl Default for ProjectState {
             docs: Vec::new(),
             doc_folders: Vec::new(),
             lessons: Vec::new(),
+            refactor_mode: false,
             spend_today_usd: 0.0,
             spend_day: String::new(),
         }
@@ -579,6 +586,22 @@ impl ProjectState {
         };
         self.docs.push(page.clone());
         page
+    }
+
+    /// Number of open (not-done) architecture refactor chores (title starts with
+    /// `Refactor:`). Drives entering/leaving the refactor sprint.
+    #[must_use]
+    pub fn open_refactor_count(&self) -> usize {
+        self.tickets
+            .iter()
+            .filter(|t| {
+                t.title().starts_with("Refactor:")
+                    && !matches!(
+                        t.status(),
+                        coxagent_domain::Status::Done | coxagent_domain::Status::Documented
+                    )
+            })
+            .count()
     }
 
     /// Record a retro lesson (deduped, newest last, capped at 12).

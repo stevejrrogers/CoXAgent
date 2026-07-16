@@ -51,25 +51,38 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunArchitectureAud
             "You are a Staff Solution Architect doing a WHOLE-SYSTEM architecture review. You have \
              FULL read access to the working directory — actually OPEN and READ the code, don't \
              guess. Investigate and ground EVERY statement in specific files you found:\n\
-             - Architecture & clean/hexagonal layering: are there domain / application / adapter \
-             layers, and does the dependency rule hold (edges → core, never the reverse)? Name the \
-             modules; say if it's actually layered or a big ball of mud.\n\
-             - Persistence: which datastore(s) are ACTUALLY used (Postgres/Mongo/SQLite/plain \
-             files/none), the driver/ORM, and where the repository/adapter lives. If there's no \
-             real DB, say so.\n\
-             - Caching: is there any (in-memory / Redis / HTTP)? where — and what's missing.\n\
-             - Concurrency & consistency: async model, locks, transactions, atomic writes, race \
-             handling.\n\
-             - Horizontal scalability: stateless or not, shared/session/in-proc state, whether it \
-             can run behind N instances.\n\nEvidence to start from (read further as needed):\n\
-             {evidence}\n\nRespond with ONLY a JSON object, no prose:\n\
-             {{\"assessment\": {{\"architecture\": string, \"persistence\": string, \"caching\": \
-             string, \"concurrency\": string, \"scalability\": string, \"verdict\": string}}, \
-             \"refactors\": [{{\"title\": string, \"description\": string, \"priority\": \
-             \"low\"|\"medium\"|\"high\", \"complexity\": \"small\"|\"medium\"|\"large\"}}]}}\n\
-             Each assessment field: 1-3 concrete sentences citing real files/modules. `refactors` \
-             lists concrete high-value work (name the files + target design); [] only if genuinely \
-             solid.{}{}",
+             - Architecture & clean/hexagonal layering: domain/application/adapter layers, and the \
+             dependency rule (edges → core). Layered, or a big ball of mud?\n\
+             - Persistence: which datastore(s) are ACTUALLY used, the driver/ORM, schema/migrations, \
+             indexing, and where the repository/adapter lives. If there's no real DB, say so.\n\
+             - Caching: any (in-memory / Redis / HTTP)? where — and what's missing.\n\
+             - Concurrency & consistency: async model, locks, transactions, atomic writes, races.\n\
+             - Scalability & performance: stateless or not, shared/in-proc state, N-instance \
+             readiness, obvious bottlenecks (N+1, unbounded work).\n\
+             - Reliability & resilience: failure modes, retries/timeouts/idempotency, health checks, \
+             backups/DR, graceful degradation.\n\
+             - Security: authN/authZ, secrets handling, encryption in transit/at rest, input \
+             validation, OWASP issues, vulnerable deps, audit logging.\n\
+             - Observability: logging, metrics, tracing, alerting — enough to operate it?\n\
+             - API & integration: contract clarity, versioning/backward-compat, error handling, \
+             coupling to third parties / lock-in.\n\
+             - Testability & quality: test strategy & coverage of critical paths, CI/CD gates.\n\
+             - Cost & tech choices: stack fit, build-vs-buy, licensing/cloud cost risks.\n\n\
+             Then judge the LONG-TERM risk: if the foundation is weak, building more features on it \
+             just compounds the mess — in that case recommend HALTING new features for a hardening \
+             sprint.\n\nEvidence to start from (read further as needed):\n{evidence}\n\n\
+             Respond with ONLY a JSON object, no prose:\n{{\"assessment\": {{\"architecture\": \
+             string, \"persistence\": string, \"caching\": string, \"concurrency\": string, \
+             \"scalability\": string, \"reliability\": string, \"security\": string, \
+             \"observability\": string, \"api\": string, \"testability\": string, \"cost\": string, \
+             \"verdict\": string}}, \"risk\": \"low\"|\"medium\"|\"high\"|\"critical\", \
+             \"halt_for_refactor\": boolean, \"refactors\": [{{\"title\": string, \"description\": \
+             string, \"priority\": \"low\"|\"medium\"|\"high\", \"complexity\": \
+             \"small\"|\"medium\"|\"large\"}}]}}\n\
+             Each assessment field: 1-3 concrete sentences citing real files/modules (write \
+             \"n/a\" if truly not applicable). Set halt_for_refactor=true only when the risk is \
+             high/critical and continuing to add features would make it worse. `refactors` names \
+             concrete work (files + target design); [] only if genuinely solid.{}{}",
             self.lang.reply_directive(),
             crate::prompts::repo_map_block(&self.work_dir, self.token_saver)
         );
@@ -94,25 +107,22 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunArchitectureAud
                     .collect()
             })
             .unwrap_or_default();
+        let risk = obj
+            .get("risk")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_lowercase();
+        let halt = obj
+            .get("halt_for_refactor")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+            || risk == "high"
+            || risk == "critical";
 
         // Post the written assessment (and save it as a Wiki page) so the review
         // is a real report, not just tickets.
-        let report = render_assessment(obj.get("assessment"), sprint, vi);
-        if !report.is_empty() {
-            if let Ok(mut s) = self.store.load().await {
-                s.ensure_standard_folders();
-                s.post_comment("SA", &report, None);
-                s.upsert_doc(
-                    "arch-review",
-                    "Architecture",
-                    crate::state::doc_category_of("Architecture"),
-                    "Architecture Review",
-                    &report,
-                    "SA",
-                );
-                let _ = self.store.save(&s).await;
-            }
-        }
+        self.post_assessment(render_assessment(obj.get("assessment"), &risk, sprint, vi))
+            .await;
 
         if items.is_empty() {
             let msg = if vi {
@@ -123,7 +133,56 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunArchitectureAud
             self.post("SA", &msg).await;
             return Ok(0);
         }
-        self.file_refactors(&items, sprint, vi).await
+        let filed = self.file_refactors(&items, sprint, vi).await?;
+        if halt && filed > 0 {
+            self.call_refactor_sprint(vi).await;
+        }
+        Ok(filed)
+    }
+
+    /// Post the assessment to the feed and save it as the Architecture Review
+    /// Wiki page (no-op when empty).
+    async fn post_assessment(&self, report: String) {
+        if report.is_empty() {
+            return;
+        }
+        if let Ok(mut s) = self.store.load().await {
+            s.ensure_standard_folders();
+            s.post_comment("SA", &report, None);
+            s.upsert_doc(
+                "arch-review",
+                "Architecture",
+                crate::state::doc_category_of("Architecture"),
+                "Architecture Review",
+                &report,
+                "SA",
+            );
+            let _ = self.store.save(&s).await;
+        }
+    }
+
+    /// The SA calls a halt: flag a refactor sprint so BA stops proposing features
+    /// and planning dedicates the next sprint to the refactor chores.
+    async fn call_refactor_sprint(&self, vi: bool) {
+        if let Ok(mut s) = self.store.load().await {
+            if s.refactor_mode {
+                return;
+            }
+            s.refactor_mode = true;
+            let msg = if vi {
+                "🛑 SA yêu cầu DỪNG thêm feature: nền tảng đang rủi ro cao, càng xây thêm càng tệ. \
+                 Sprint tới là REFACTOR SPRINT — ưu tiên dọn các ticket refactor, SA sẽ giám sát \
+                 chất lượng và cập nhật lại technical spec cho các feature dính kiến trúc cũ."
+            } else {
+                "🛑 SA is calling a HALT on new features: the foundation is high-risk and building \
+                 more only makes it worse. Next sprint is a REFACTOR SPRINT — the refactor chores \
+                 come first, and the SA will supervise quality and realign feature specs affected \
+                 by the old architecture."
+            };
+            s.post_comment("SA", msg, None);
+            s.log_activity("SA", "called a refactor sprint", None);
+            let _ = self.store.save(&s).await;
+        }
     }
 
     /// File the SA's refactor recommendations as deduped chores and nudge the PO.
@@ -322,7 +381,12 @@ fn parse_object(raw: &str) -> serde_json::Value {
 }
 
 /// Render the assessment object into a readable Markdown report.
-fn render_assessment(assessment: Option<&serde_json::Value>, sprint: u32, vi: bool) -> String {
+fn render_assessment(
+    assessment: Option<&serde_json::Value>,
+    risk: &str,
+    sprint: u32,
+    vi: bool,
+) -> String {
     use std::fmt::Write as _;
     let Some(a) = assessment.filter(|v| v.is_object()) else {
         return String::new();
@@ -333,7 +397,7 @@ fn render_assessment(assessment: Option<&serde_json::Value>, sprint: u32, vi: bo
             .unwrap_or("")
             .trim()
     };
-    let fields: [(&str, &str, &str); 6] = [
+    let fields: [(&str, &str, &str); 12] = [
         (
             "architecture",
             "Kiến trúc & phân tầng",
@@ -348,20 +412,39 @@ fn render_assessment(assessment: Option<&serde_json::Value>, sprint: u32, vi: bo
         ),
         (
             "scalability",
-            "Khả năng scale ngang",
-            "Horizontal scalability",
+            "Scale & hiệu năng",
+            "Scalability & performance",
         ),
+        (
+            "reliability",
+            "Độ tin cậy & resilience",
+            "Reliability & resilience",
+        ),
+        ("security", "Bảo mật", "Security"),
+        ("observability", "Observability", "Observability"),
+        ("api", "API & tích hợp", "API & integration"),
+        (
+            "testability",
+            "Kiểm thử & chất lượng",
+            "Testability & quality",
+        ),
+        ("cost", "Chi phí & công nghệ", "Cost & tech choices"),
         ("verdict", "Kết luận", "Verdict"),
     ];
     let mut out = if vi {
-        format!("🏛️ **Rà soát kiến trúc — sau sprint {sprint}**\n")
+        format!("🏛️ **Rà soát kiến trúc — sau sprint {sprint}**")
     } else {
-        format!("🏛️ **Architecture review — after sprint {sprint}**\n")
+        format!("🏛️ **Architecture review — after sprint {sprint}**")
     };
+    if !risk.is_empty() {
+        let label = if vi { "Rủi ro" } else { "Risk" };
+        let _ = write!(out, " · **{label}: {}**", risk.to_uppercase());
+    }
+    out.push('\n');
     let mut any = false;
     for (key, vi_label, en_label) in fields {
         let v = get(key);
-        if v.is_empty() {
+        if v.is_empty() || v.eq_ignore_ascii_case("n/a") {
             continue;
         }
         any = true;

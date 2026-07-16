@@ -642,6 +642,108 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
     }
 
+    /// Drive the refactor sprint the SA called for. Returns whether one is active
+    /// (so BA stays quiet). When the refactor chores are all done it clears the
+    /// mode and announces; while they're open the SA realigns one pending
+    /// feature's technical spec to the target architecture.
+    async fn maintain_refactor_sprint(&self) -> bool {
+        let Ok(state) = self.store.load().await else {
+            return false;
+        };
+        if !state.refactor_mode {
+            return false;
+        }
+        let vi = self.config.workflow.language.is_vi();
+        if state.open_refactor_count() == 0 {
+            if let Ok(mut s) = self.store.load().await {
+                s.refactor_mode = false;
+                let msg = if vi {
+                    "✅ Refactor sprint hoàn tất — nền tảng đã dọn xong, quay lại làm feature."
+                } else {
+                    "✅ Refactor sprint complete — the foundation is cleaned up; back to features."
+                };
+                s.post_comment("SA", msg, None);
+                s.log_activity("SA", "refactor sprint complete", None);
+                let _ = self.store.save(&s).await;
+            }
+            return false;
+        }
+        self.realign_one_spec(vi).await;
+        true
+    }
+
+    /// While refactoring, the SA rewrites one pending feature's technical design
+    /// so it targets the new architecture instead of the old bad one (bounded to
+    /// one per cycle; marked so it isn't redone).
+    async fn realign_one_spec(&self, vi: bool) {
+        use coxagent_domain::{Status, TicketType};
+        let Ok(state) = self.store.load().await else {
+            return;
+        };
+        let target = state
+            .tickets
+            .iter()
+            .filter(|t| {
+                t.ticket_type() == TicketType::Feature
+                    && matches!(t.status(), Status::Pending | Status::Ready)
+            })
+            .find_map(|t| {
+                let d = t.design().technical.as_ref()?;
+                (!d.approach.contains("[realigned]"))
+                    .then(|| (t.id().clone(), t.title().to_owned(), d.approach.clone()))
+            });
+        let Some((id, title, approach)) = target else {
+            return;
+        };
+        self.report("SA", "realigning spec");
+        let task = format!(
+            "The team is in a REFACTOR SPRINT fixing the architecture. Update the technical design \
+             for feature {id} ({title}) so it targets the NEW clean architecture, not the old one \
+             it was written against. Current approach:\n{approach}\n\nRespond with ONLY JSON: \
+             {{\"approach\": string, \"files\": [string], \"api_contract\": string, \
+             \"data_changes\": string, \"test_plan\": string}}. Begin `approach` with \
+             \"[realigned] \"."
+        );
+        let request = AgentRequest {
+            role: coxagent_domain::Role::Sa,
+            system_prompt: crate::prompts::system_prompt(crate::prompts::SA),
+            task_prompt: task,
+            work_dir: self.work_dir.clone(),
+            timeout: std::time::Duration::from_secs(600),
+        };
+        let Ok(outcome) = self.engine.run(request).await else {
+            return;
+        };
+        if !outcome.succeeded() {
+            return;
+        }
+        let (Some(start), Some(end)) = (outcome.stdout.find('{'), outcome.stdout.rfind('}')) else {
+            return;
+        };
+        let Ok(design) =
+            serde_json::from_str::<coxagent_domain::TechnicalDesign>(&outcome.stdout[start..=end])
+        else {
+            return;
+        };
+        if let Ok(mut s) = self.store.load().await {
+            if let Some(t) = s.ticket_mut(&id) {
+                if t.set_technical_design(coxagent_domain::Role::Sa, design)
+                    .is_ok()
+                {
+                    let msg = if vi {
+                        format!("🧭 SA đã cập nhật lại technical spec cho {id} theo kiến trúc mới.")
+                    } else {
+                        format!(
+                            "🧭 SA realigned the technical spec for {id} to the new architecture."
+                        )
+                    };
+                    s.post_comment("SA", &msg, Some(id.to_string()));
+                    let _ = self.store.save(&s).await;
+                }
+            }
+        }
+    }
+
     /// Run the Sprint Planning ceremony: after the deterministic announce, the
     /// team discusses scope, risk, and capacity, and the SM confirms commitment.
     async fn scrum_planning(&self) {
@@ -828,15 +930,20 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         } else {
             committed.join(", ")
         };
+        let tag = if state.refactor_mode {
+            " · 🛠️ REFACTOR SPRINT"
+        } else {
+            ""
+        };
         let post = if lang.is_vi() {
             format!(
-                "🏃 Sprint {number} planning — mục tiêu: {}. Cam kết {} ticket theo ưu tiên: {list}.",
+                "🏃 Sprint {number} planning{tag} — mục tiêu: {}. Cam kết {} ticket theo ưu tiên: {list}.",
                 sp.goal,
                 committed.len()
             )
         } else {
             format!(
-                "🏃 Sprint {number} planning — goal: {}. Committed {} ticket(s) by priority: {list}.",
+                "🏃 Sprint {number} planning{tag} — goal: {}. Committed {} ticket(s) by priority: {list}.",
                 sp.goal,
                 committed.len()
             )
@@ -943,10 +1050,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 self.scrum_grooming().await;
             }
 
+            // During a refactor sprint BA proposes nothing new — the whole point
+            // is to stop piling features on a shaky base. SA also realigns the
+            // specs of pending features to the target architecture, and the mode
+            // clears itself once the refactor chores are done.
+            let refactoring = self.maintain_refactor_sprint().await;
+
             // BA runs on the first cycle of each period. `(cycle-1) % n == 0` is
             // correct for every n including 1 (unlike `cycle % n == 1`).
             let ba_every = self.config.workflow.ba_every_n_cycles;
-            if ba_every > 0 && (cycle - 1) % ba_every == 0 {
+            if !refactoring && ba_every > 0 && (cycle - 1) % ba_every == 0 {
                 self.report("BA", "proposing features");
                 match self.ba().execute().await {
                     Ok(ids) => report.ba_created = ids,
