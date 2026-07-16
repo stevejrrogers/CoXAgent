@@ -57,6 +57,19 @@ impl DeployPort for DockerComposeDeploy {
             });
         }
 
+        // Bring the previous stack down first (best-effort). Without this, a
+        // still-running container from a prior cycle keeps holding its host
+        // ports, so `up` fails with "port is already allocated" — a recurring,
+        // self-inflicted deploy blocker. `down --remove-orphans` releases the
+        // project's own ports (and orphaned services) so `up` starts clean.
+        let _ = Command::new("docker")
+            .args(["compose", "down", "--remove-orphans"])
+            .current_dir(work_dir)
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output()
+            .await;
+
         let mut cmd = Command::new("docker");
         cmd.arg("compose")
             .arg("up")

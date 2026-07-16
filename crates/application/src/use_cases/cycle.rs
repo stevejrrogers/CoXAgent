@@ -1083,20 +1083,54 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }) {
             return None;
         }
+        // Port clashes are an infra fault, not a code bug: the compose file must
+        // map the host port from an env var (the project's assigned port) instead
+        // of hardcoding one, so two stacks on one host never fight. Give the agent
+        // that specific fix rather than a generic "make it build".
+        let low = summary.to_lowercase();
+        let is_port = low.contains("already allocated")
+            || low.contains("address already in use")
+            || low.contains("bind for");
+        let host_port = self.config.deploy.host_port;
+        let (description, acceptance) = if is_port {
+            let port_hint = host_port.map_or_else(
+                || "the project's assigned host port".to_owned(),
+                |p| format!("host port {p} (this project's assigned port)"),
+            );
+            (
+                format!(
+                    "The docker deploy failed because a host port is already in use — an infra \
+                     clash, not a code defect. Fix the compose file so every published port maps \
+                     from an environment variable defaulting to {port_hint} (e.g. \
+                     `\"${{APP_PORT:-<port>}}:<container>\"`), never a hardcoded shared port, so \
+                     redeploys and other stacks don't collide. Verify `docker compose up -d \
+                     --build` then succeeds.\n\nDeploy output: {summary}"
+                ),
+                vec![
+                    "Published ports come from an env var, not a hardcoded value".to_owned(),
+                    "`docker compose up -d --build` succeeds with the container running".to_owned(),
+                ],
+            )
+        } else {
+            (
+                format!(
+                    "The docker deploy failed and the container is not running. \
+                     Root-cause and fix so `docker compose up -d --build` succeeds.\n\n\
+                     Deploy output: {summary}"
+                ),
+                Vec::new(),
+            )
+        };
         let adder = crate::use_cases::AddTicketUseCase::new(Arc::clone(&self.store));
         adder
             .execute(crate::use_cases::AddTicketInput {
                 ticket_type: TicketType::Bug,
                 title: format!("{MARKER}: {summary}"),
-                description: format!(
-                    "The docker deploy failed and the container is not running. \
-                     Root-cause and fix so `docker compose up -d --build` succeeds.\n\n\
-                     Deploy output: {summary}"
-                ),
+                description,
                 priority: Priority::High,
                 complexity: coxagent_domain::ticket::Complexity::Medium,
                 has_ui: false,
-                acceptance_criteria: Vec::new(),
+                acceptance_criteria: acceptance,
             })
             .await
             .ok()
