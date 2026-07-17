@@ -594,8 +594,12 @@ async fn build_syschat_store(
             if matches!(store.load("system_chat").await, Ok(None)) {
                 if let Ok(text) = std::fs::read_to_string(hub_dir.join("system_chat.json")) {
                     if !text.trim().is_empty() {
-                        let _ = store.save("system_chat", &text).await;
-                        tracing::info!("system chat: migrated local file into Postgres");
+                        match store.save("system_chat", &text).await {
+                            Ok(()) => {
+                                tracing::info!("system chat: migrated local file into Postgres");
+                            }
+                            Err(e) => tracing::warn!("system chat migration failed: {e}"),
+                        }
                     }
                 }
             }
