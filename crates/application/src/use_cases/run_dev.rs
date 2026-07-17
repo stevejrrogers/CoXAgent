@@ -130,14 +130,25 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         }
 
         let state = self.store.load().await?;
-        let outcome = self.engine.run(self.build_request(&state, &id)).await?;
-        if !outcome.succeeded() {
-            return Err(PortError::Backend(format!(
-                "{:?} engine failed on {id}: {}",
-                self.mode,
-                outcome.stderr.trim()
-            ))
-            .into());
+        // On ANY engine failure (error or non-zero exit — e.g. a quota wall),
+        // release the claim so the ticket returns to the queue instead of being
+        // stranded In-Progress forever (which piled up 100+ orphaned tickets and
+        // kept burning tokens re-claiming fresh ones).
+        match self.engine.run(self.build_request(&state, &id)).await {
+            Ok(o) if o.succeeded() => {}
+            Ok(o) => {
+                self.release_claim(&id).await;
+                return Err(PortError::Backend(format!(
+                    "{:?} engine failed on {id}: {}",
+                    self.mode,
+                    o.stderr.trim()
+                ))
+                .into());
+            }
+            Err(e) => {
+                self.release_claim(&id).await;
+                return Err(e.into());
+            }
         }
 
         // Complete: reload (the run may have changed nothing we track), move to
@@ -162,6 +173,18 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         });
         self.store.save(&state).await?;
         Ok(Some(id))
+    }
+
+    /// Return a stranded ticket to the queue when the run failed, so it isn't
+    /// stuck In-Progress. `System` is the only actor allowed to un-claim.
+    async fn release_claim(&self, id: &TicketId) {
+        if let Ok(mut state) = self.store.load().await {
+            if let Some(t) = state.ticket_mut(id) {
+                if t.release_claim(Role::System).is_ok() {
+                    let _ = self.store.save(&state).await;
+                }
+            }
+        }
     }
 
     fn candidates(&self, state: &ProjectState) -> Vec<TicketId> {
