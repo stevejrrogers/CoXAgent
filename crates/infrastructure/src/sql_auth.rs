@@ -1,7 +1,10 @@
 //! `SqlAuthService` — a Postgres-backed [`AuthPort`]. Accounts, project
-//! membership, API tokens, and 2FA secrets live in the shared database so a
-//! team's collaborative auth data is server-side (not a local `auth.json`).
-//! Sessions and brute-force counters stay in memory (per-instance, ephemeral).
+//! membership, API tokens, 2FA secrets, and login sessions live in the shared
+//! database so a team's collaborative auth data is server-side (not a local
+//! `auth.json`). Sessions are persisted (with a wall-clock expiry) and restored
+//! on connect, so a hub restart never signs anyone out. Brute-force counters
+//! stay in memory (per-instance, ephemeral — a lockout resetting on restart is
+//! harmless).
 
 use argon2::password_hash::{PasswordHash, PasswordVerifier};
 use argon2::Argon2;
@@ -17,7 +20,7 @@ use tokio_postgres::NoTls;
 
 use crate::auth::{hash_password, mint_token, now_rfc3339, sha256_hex, unix_now};
 
-const SESSION_TTL: Duration = Duration::from_secs(12 * 60 * 60);
+const SESSION_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const MAX_FAILS: u32 = 5;
 const LOCKOUT: Duration = Duration::from_secs(15 * 60);
 
@@ -38,6 +41,14 @@ CREATE TABLE IF NOT EXISTS auth_tokens (
     role    TEXT NOT NULL,
     hash    TEXT NOT NULL,
     created TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS auth_sessions (
+    token    TEXT PRIMARY KEY,
+    username TEXT NOT NULL,
+    role     TEXT NOT NULL,
+    expires  BIGINT NOT NULL,
+    label    TEXT NOT NULL DEFAULT '',
+    at       TEXT NOT NULL DEFAULT ''
 );";
 
 struct Session {
@@ -92,7 +103,84 @@ impl SqlAuthService {
             .batch_execute(INIT_SQL)
             .await
             .map_err(|e| format!("auth migrate: {e}"))?;
+        svc.load_sessions().await;
         Ok(svc)
+    }
+
+    /// Restore non-expired sessions from the database into the in-memory cache,
+    /// so a hub restart keeps everyone logged in. Expired rows are pruned.
+    async fn load_sessions(&self) {
+        let Ok(client) = self.client().await else {
+            return;
+        };
+        let now = unix_now();
+        let now_i = i64::try_from(now).unwrap_or(i64::MAX);
+        let _ = client
+            .execute("DELETE FROM auth_sessions WHERE expires <= $1", &[&now_i])
+            .await;
+        let Ok(rows) = client
+            .query(
+                "SELECT token, username, role, expires, label, at FROM auth_sessions WHERE expires > $1",
+                &[&now_i],
+            )
+            .await
+        else {
+            return;
+        };
+        let Ok(mut sessions) = self.sessions.lock() else {
+            return;
+        };
+        for row in rows {
+            let token: String = row.get(0);
+            let username: String = row.get(1);
+            let role = role_from(&row.get::<_, String>(2));
+            let expires_unix: i64 = row.get(3);
+            let label: String = row.get(4);
+            let at: String = row.get(5);
+            // Rebuild the monotonic deadline from the wall-clock expiry.
+            let remaining = u64::try_from((expires_unix - now_i).max(0)).unwrap_or(0);
+            sessions.insert(
+                token,
+                Session {
+                    user: AuthUser {
+                        username,
+                        name: String::new(),
+                        email: String::new(),
+                        role,
+                        projects: Vec::new(),
+                    },
+                    expires: Instant::now() + Duration::from_secs(remaining),
+                    label,
+                    at,
+                },
+            );
+        }
+        tracing::info!("auth: restored {} session(s) from Postgres", sessions.len());
+    }
+
+    /// Best-effort write-through of one session to the database.
+    async fn persist_session(&self, token: &str, username: &str, role: AuthRole, at: &str) {
+        let Ok(client) = self.client().await else {
+            return;
+        };
+        let expires = i64::try_from(unix_now() + SESSION_TTL.as_secs()).unwrap_or(i64::MAX);
+        let _ = client
+            .execute(
+                "INSERT INTO auth_sessions (token, username, role, expires, label, at)
+                 VALUES ($1, $2, $3, $4, '', $5)
+                 ON CONFLICT (token) DO UPDATE SET expires = EXCLUDED.expires",
+                &[&token, &username, &role_str(role), &expires, &at],
+            )
+            .await;
+    }
+
+    /// Best-effort delete of one session from the database.
+    async fn forget_session(&self, token: &str) {
+        if let Ok(client) = self.client().await {
+            let _ = client
+                .execute("DELETE FROM auth_sessions WHERE token = $1", &[&token])
+                .await;
+        }
     }
 
     /// UPSERT an admin from the environment (env is authoritative each launch).
@@ -194,6 +282,10 @@ impl AuthPort for SqlAuthService {
         }
         self.clear_failures(username);
         let token = mint_token();
+        let at = now_rfc3339();
+        // Persist first so a crash right after login still leaves a valid,
+        // restorable session — then cache it in memory for fast validation.
+        self.persist_session(&token, username, role, &at).await;
         let session = Session {
             user: AuthUser {
                 username: username.to_owned(),
@@ -204,7 +296,7 @@ impl AuthPort for SqlAuthService {
             },
             expires: Instant::now() + SESSION_TTL,
             label: String::new(),
-            at: now_rfc3339(),
+            at,
         };
         match self.sessions.lock() {
             Ok(mut s) => {
@@ -220,6 +312,14 @@ impl AuthPort for SqlAuthService {
             if let Some(sess) = s.get_mut(token) {
                 device.clone_into(&mut sess.label);
             }
+        }
+        if let Ok(client) = self.client().await {
+            let _ = client
+                .execute(
+                    "UPDATE auth_sessions SET label = $1 WHERE token = $2",
+                    &[&device, &token],
+                )
+                .await;
         }
     }
 
@@ -259,6 +359,7 @@ impl AuthPort for SqlAuthService {
         if let Ok(mut s) = self.sessions.lock() {
             s.remove(token);
         }
+        self.forget_session(token).await;
     }
 
     async fn principal_for_bearer(&self, token: &str) -> Option<AuthUser> {
