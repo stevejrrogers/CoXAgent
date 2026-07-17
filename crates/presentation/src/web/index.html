@@ -930,6 +930,7 @@
   .slash-item b{color:var(--accent2);font-family:ui-monospace,monospace}
   .slash-arg{color:var(--muted);font-family:ui-monospace,monospace;font-size:11px}
   .slash-desc{color:var(--dim);margin-left:auto;font-size:11px}
+  .cbub.working{color:var(--muted);font-style:italic;font-size:12.5px;display:inline-flex;align-items:center;gap:7px}
   .ctime{color:var(--dim)}
   .cbub{background:var(--card);border:1px solid var(--border);border-radius:12px;border-top-left-radius:3px;padding:9px 13px;font-size:13px;line-height:1.5;color:var(--text);white-space:pre-wrap;word-break:break-word}
   /* rendered-markdown message body: flow like HTML, chat-sized elements */
@@ -2091,12 +2092,12 @@ async function handleSlash(body){
       refreshDisc();return true;
     case "discuss": case "discussion":
       if(!arg){toasty("Usage: /discuss <topic>","warn");return true;}
-      toasty("Agents discussing…","ok");
+      setDiscBusy("Team is discussing "+arg+"…");
       try{await fetch(api("/discuss"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({topic:arg})});}catch(e){}
       refreshDisc();return true;
-    case "standup": runStandup(dummy); return true;
-    case "arch": case "architecture": reviewRun(dummy,"architecture-review","SA"); return true;
-    case "docs": reviewRun(dummy,"docs-review","DOCS"); return true;
+    case "standup": setDiscBusy("SM is running the standup…"); runStandup(dummy); return true;
+    case "arch": case "architecture": setDiscBusy("SA is reviewing the architecture…"); reviewRun(dummy,"architecture-review","SA"); return true;
+    case "docs": setDiscBusy("DOCS is reviewing the Wiki…"); reviewRun(dummy,"docs-review","DOCS"); return true;
     case "start": case "resume": ctl("resume"); toasty("Starting…","ok"); return true;
     case "stop": ctl("stop"); toasty("Stopping…","ok"); return true;
     case "pause": ctl("pause"); toasty("Paused","ok"); return true;
@@ -2121,6 +2122,9 @@ function pickSlash(cmd,hasArg){
   if(hasArg){inp.value=cmd+" ";inp.focus();document.getElementById("slash-menu").style.display="none";}
   else{inp.value=cmd;document.getElementById("slash-menu").style.display="none";sendComment();}
 }
+// A live "working…" bubble shown in the feed while a long agent action runs.
+let DISC_BUSY=null;
+function setDiscBusy(label){DISC_BUSY={label,count:window.DISC_MSGN||0,since:Date.now()};if(CUR==="discuss")renderDiscuss();}
 // Turn ticket ids (e.g. OT-F001, CXC-B123) in rendered message HTML into
 // clickable links that open the ticket detail. Skips ids already inside a tag.
 function linkifyTickets(html){
@@ -2172,6 +2176,13 @@ function renderDiscuss(){
       <div class="cav" style="background:${col}22;color:${col}">${esc(initials(name))}</div>
       <div class="ccol"><div class="chead"><b>${esc(name)}</b>${roleTag}${badge}${byChip}${tick}<span class="ctime">${esc(time)}</span></div>
         ${c.body?`<div class="cbub md">${linkifyTickets(mdRender(c.body))}</div>`:''}${attHtml(c.attachments)}</div></div>`;}).join("");
+  // Working indicator: a "thinking…" bubble while a chat-triggered action runs.
+  // Clears once new messages arrive (the agent replied/acted) or after a while.
+  if(DISC_BUSY){
+    if(msgs.length>DISC_BUSY.count||Date.now()-DISC_BUSY.since>150000){DISC_BUSY=null;}
+    else{box.innerHTML+=`<div class="cmsg"><div class="cav" style="background:color-mix(in srgb,var(--accent2) 20%,transparent);color:var(--accent2)"><i class="ti ti-loader-2 att-spin"></i></div><div class="ccol"><div class="cbub working"><i class="ti ti-loader-2 att-spin"></i> ${esc(DISC_BUSY.label)}</div></div></div>`;}
+  }
+  window.DISC_MSGN=msgs.length;
   if(atBottom)box.scrollTop=box.scrollHeight;
 }
 // Classify SM/DEPLOY scrum notifications so they render as a timeline event
@@ -2257,6 +2268,7 @@ function sendComment(){const inp=document.getElementById("disc-input");const bod
       // right role; runs the review/standup/discussion if that's the ask).
       if(!ticket && body){
         const lbl=document.getElementById("disc-run-label");if(lbl)lbl.textContent="Agent replying…";
+        setDiscBusy("The team is thinking…");
         fetch(api("/chat-reply"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({message:body})})
           .then(async()=>{try{const s=await(await fetch(api("/state"))).json();render(s);renderDiscuss();}catch(e){}})
           .catch(()=>{})
