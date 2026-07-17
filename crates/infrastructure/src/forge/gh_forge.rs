@@ -230,4 +230,55 @@ impl ForgePort for GhForge {
             .await
             .map(|_| ())
     }
+
+    async fn pr_feedback(
+        &self,
+        number: u64,
+    ) -> Result<Vec<coxagent_application::ports::outbound::PrFeedback>, PortError> {
+        let n = number.to_string();
+        let raw = self
+            .gh(&[
+                "pr",
+                "view",
+                &n,
+                "--repo",
+                &self.repo,
+                "--json",
+                "reviews,commits",
+            ])
+            .await?;
+        let v: serde_json::Value = serde_json::from_str(&raw)
+            .map_err(|e| PortError::Backend(format!("pr view parse: {e}")))?;
+        // The branch's newest commit time: any change-request review submitted
+        // AFTER it has not been addressed by a push yet.
+        let last_commit = v["commits"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|c| c["committedDate"].as_str())
+            .max()
+            .unwrap_or("")
+            .to_owned();
+        let out = v["reviews"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|r| r["state"].as_str() == Some("CHANGES_REQUESTED"))
+            .filter(|r| r["submittedAt"].as_str().unwrap_or("") > last_commit.as_str())
+            .map(|r| coxagent_application::ports::outbound::PrFeedback {
+                author: r["author"]["login"].as_str().unwrap_or("").to_owned(),
+                body: r["body"].as_str().unwrap_or("").to_owned(),
+                at: r["submittedAt"].as_str().unwrap_or("").to_owned(),
+            })
+            .filter(|f| !f.body.trim().is_empty())
+            .collect();
+        Ok(out)
+    }
+
+    async fn comment_pr(&self, number: u64, body: &str) -> Result<(), PortError> {
+        let n = number.to_string();
+        self.gh(&["pr", "comment", &n, "--repo", &self.repo, "--body", body])
+            .await
+            .map(|_| ())
+    }
 }

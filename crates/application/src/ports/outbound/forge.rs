@@ -72,4 +72,33 @@ pub trait ForgePort: Send + Sync {
     /// # Errors
     /// [`PortError::Backend`] on an API/CLI failure.
     async fn close_pr(&self, number: u64) -> Result<(), PortError>;
+
+    /// Unaddressed review feedback on a PR: change-request reviews submitted
+    /// AFTER the branch's latest commit (older ones were already addressed by a
+    /// push). Empty = nothing to fix. Default: unsupported → empty.
+    ///
+    /// # Errors
+    /// [`PortError::Backend`] on an API/CLI failure.
+    async fn pr_feedback(&self, _number: u64) -> Result<Vec<PrFeedback>, PortError> {
+        Ok(Vec::new())
+    }
+
+    /// Leave a plain comment on a PR (e.g. "addressed the feedback").
+    ///
+    /// # Errors
+    /// [`PortError::Backend`] on an API/CLI failure.
+    async fn comment_pr(&self, _number: u64, _body: &str) -> Result<(), PortError> {
+        Ok(())
+    }
+}
+
+/// One piece of review feedback awaiting a fix.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PrFeedback {
+    /// Reviewer login.
+    pub author: String,
+    /// The review body (what to change).
+    pub body: String,
+    /// RFC3339 submission time.
+    pub at: String,
 }

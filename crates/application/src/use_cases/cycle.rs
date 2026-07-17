@@ -1246,6 +1246,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // Auto-merge: SA deep-dives open PRs and merges or requests changes.
             self.report("SA", "reviewing PRs");
             self.review_open_prs().await;
+            // Close the loop: when a human (or the SA) requested changes on a
+            // PR, a DEV agent addresses the feedback and pushes to the branch.
+            self.address_pr_feedback().await;
 
             // Scrum comes alive: when there's a real tension (deploy failure, a
             // bug pile-up, or a periodic check-in), the team actually discusses
@@ -1584,6 +1587,78 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         .await;
         if posted.is_ok() && !first_ever {
             tracing::info!("posted daily digest for {today}");
+        }
+    }
+
+    /// The PR feedback loop: for the newest open PR with unaddressed
+    /// change-requests (a review submitted after the branch's last commit), run
+    /// a DEV agent that checks out the branch, fixes exactly what the review
+    /// asked, and pushes — then replies on the PR and tells the chat. One PR per
+    /// cycle, so a review queue drains steadily without a token spike.
+    async fn address_pr_feedback(&self) {
+        if !self.config.git.enabled {
+            return;
+        }
+        let Some(forge) = &self.forge else { return };
+        let Ok(prs) = forge.list_open_prs().await else {
+            return;
+        };
+        let target = self.flow_base();
+        for pr in prs.into_iter().filter(|p| p.base == target).take(5) {
+            let feedback = match forge.pr_feedback(pr.number).await {
+                Ok(f) if !f.is_empty() => f,
+                _ => continue,
+            };
+            self.report("DEV-BUG", &format!("fixing PR #{}", pr.number));
+            let asks = feedback
+                .iter()
+                .map(|f| format!("- ({}) {}", f.author, f.body.trim()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let request = crate::ports::outbound::AgentRequest {
+                role: coxagent_domain::Role::DevBug,
+                system_prompt: crate::prompts::system_prompt(crate::prompts::DEV),
+                task_prompt: format!(
+                    "A reviewer requested changes on pull request #{} (branch `{}`).\n\n\
+                     REVIEW FEEDBACK TO ADDRESS:\n{asks}\n\n\
+                     Do exactly this:\n\
+                     1. `git fetch origin && git checkout {} && git pull origin {}`\n\
+                     2. Make the changes the review asks for — nothing more.\n\
+                     3. Run the tests/build to make sure nothing broke.\n\
+                     4. `git add -A && git commit -m \"fix: address review feedback on #{}\"` \
+                        and `git push origin {}`.\n",
+                    pr.number, pr.head, pr.head, pr.head, pr.number, pr.head
+                ),
+                work_dir: self.work_dir.clone(),
+                timeout: std::time::Duration::from_secs(1800),
+            };
+            match self.engine.run(request).await {
+                Ok(o) if o.succeeded() => {
+                    let _ = forge
+                        .comment_pr(
+                            pr.number,
+                            "🔧 Addressed the review feedback — changes pushed to this branch. \
+                             Please take another look.",
+                        )
+                        .await;
+                    self.log_git(&format!("DEV addressed feedback on PR #{}", pr.number))
+                        .await;
+                    self.notify(
+                        "pr_fixed",
+                        format!(
+                            "PR #{} — review feedback addressed and pushed; ready for another look: {}",
+                            pr.number, pr.url
+                        ),
+                    )
+                    .await;
+                }
+                _ => {
+                    self.log_git(&format!("feedback fix on PR #{} failed", pr.number))
+                        .await;
+                }
+            }
+            self.report_idle();
+            break; // one PR per cycle
         }
     }
 
