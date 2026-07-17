@@ -32,3 +32,55 @@ pub struct NullNotifier;
 impl NotifierPort for NullNotifier {
     async fn notify(&self, _event: NotifyEvent) {}
 }
+
+/// Delivers events into the project's own team chat (`#general`) as a bot post,
+/// so notifications live where the user already is — and the app's existing
+/// chat push-notification path raises a native banner for them. Writes through
+/// the state store, so it works from the hub AND from headless operators.
+pub struct ChatNotifier<S: super::StateStorePort + ?Sized> {
+    store: std::sync::Arc<S>,
+}
+
+impl<S: super::StateStorePort + ?Sized> ChatNotifier<S> {
+    pub fn new(store: std::sync::Arc<S>) -> Self {
+        Self { store }
+    }
+}
+
+/// A leading emoji per event kind so alerts scan at a glance in the chat.
+fn kind_icon(kind: &str) -> &'static str {
+    match kind {
+        k if k.contains("deploy_failed") || k.contains("fail") => "❌",
+        k if k.contains("deploy") => "🚀",
+        k if k.contains("budget") => "💰",
+        k if k.contains("quota") => "⛔",
+        k if k.contains("pr") => "🔀",
+        k if k.contains("sprint") => "🏁",
+        k if k.contains("digest") => "📰",
+        _ => "🔔",
+    }
+}
+
+#[async_trait]
+impl<S: super::StateStorePort + ?Sized> NotifierPort for ChatNotifier<S> {
+    async fn notify(&self, event: NotifyEvent) {
+        let body = format!("{} {}", kind_icon(&event.kind), event.message);
+        let _ = super::mutate_state(self.store.as_ref(), |s| {
+            s.post_chat_in("COX", &body, crate::state::GENERAL_CHANNEL, Vec::new());
+            Ok(())
+        })
+        .await;
+    }
+}
+
+/// Fans one event out to several sinks (e.g. team chat + an external webhook).
+pub struct FanoutNotifier(pub Vec<std::sync::Arc<dyn NotifierPort>>);
+
+#[async_trait]
+impl NotifierPort for FanoutNotifier {
+    async fn notify(&self, event: NotifyEvent) {
+        for n in &self.0 {
+            n.notify(event.clone()).await;
+        }
+    }
+}

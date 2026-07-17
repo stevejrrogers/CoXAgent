@@ -115,6 +115,64 @@ fn status_key(s: Status) -> &'static str {
     }
 }
 
+/// A one-message daily digest for the team chat: what shipped in the last 24h,
+/// what it cost, where the sprint stands, and anything stuck. Pure over state.
+#[must_use]
+pub fn digest_markdown(state: &ProjectState, now_rfc3339: &str) -> String {
+    use std::fmt::Write as _;
+    // "Last 24h" by RFC3339 lexicographic compare on a prefix cut 24h back —
+    // both are UTC RFC3339, so string order is time order.
+    let cutoff = time::OffsetDateTime::now_utc()
+        .saturating_sub(time::Duration::hours(24))
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default();
+    let shipped: Vec<&crate::state::DeployRecord> = state
+        .history
+        .iter()
+        .filter(|d| d.at.as_str() > cutoff.as_str())
+        .collect();
+    let in_progress = state
+        .tickets
+        .iter()
+        .filter(|t| t.status() == Status::InProgress)
+        .count();
+    let open_bugs = state
+        .tickets
+        .iter()
+        .filter(|t| t.ticket_type() == TicketType::Bug && t.status() == Status::Open)
+        .count();
+    let mut out = format!(
+        "**Daily digest** · {}\n",
+        &now_rfc3339[..10.min(now_rfc3339.len())]
+    );
+    if shipped.is_empty() {
+        out.push_str("- Shipped (24h): nothing new\n");
+    } else {
+        let _ = writeln!(out, "- Shipped (24h): {}", shipped.len());
+        for d in shipped.iter().take(6) {
+            let _ = writeln!(out, "  - {} {} — {}", d.version, d.ticket, d.title);
+        }
+    }
+    if let Some(sp) = &state.sprint {
+        let done = crate::sprint::done_count(state);
+        let _ = writeln!(
+            out,
+            "- Sprint {}: {}/{} committed done — goal: {}",
+            sp.number,
+            done,
+            sp.committed.len(),
+            sp.goal
+        );
+    }
+    let _ = writeln!(out, "- In flight: {in_progress} · open bugs: {open_bugs}");
+    let _ = writeln!(
+        out,
+        "- Spend to date: ${:.2} ({} runs)",
+        state.spend.total_cost_usd, state.spend.runs
+    );
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

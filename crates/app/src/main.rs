@@ -515,9 +515,7 @@ async fn build_project(
     if let Some(f) = forge {
         cycle_uc = cycle_uc.with_forge(f);
     }
-    if let Some(url) = webhook.filter(|u| !u.is_empty()) {
-        cycle_uc = cycle_uc.with_notifier(Arc::new(WebhookNotifier::new(url)));
-    }
+    cycle_uc = cycle_uc.with_notifier(build_notifier(Arc::clone(&store), webhook));
     let handle = Arc::new(RunnerHandle::new());
     let loop_handle = Arc::clone(&handle);
     tokio::spawn(async move { run_forever(loop_handle, cycle_uc, sleep).await });
@@ -1157,9 +1155,7 @@ async fn run_loop(
     if let Some(f) = forge {
         uc = uc.with_forge(f);
     }
-    if let Some(url) = webhook.filter(|u| !u.is_empty()) {
-        uc = uc.with_notifier(std::sync::Arc::new(WebhookNotifier::new(url)));
-    }
+    uc = uc.with_notifier(build_notifier(Arc::clone(&store), webhook));
     // Heartbeat the shared worker registry with the live role + ticket each phase,
     // so every dashboard shows this headless team's current agent.
     let hb_store = Arc::clone(&store);
@@ -1325,6 +1321,21 @@ fn spawn_log_uploader(state_dir: &Path, work_dir: &Path) {
             }
         }
     });
+}
+
+/// The event notifier for a runner: always the project's own team chat (with a
+/// native push via the app's chat-notification path), plus an external webhook
+/// when one is configured.
+fn build_notifier(
+    store: Arc<AnyStateStore>,
+    webhook: Option<String>,
+) -> Arc<dyn coxagent_application::ports::outbound::NotifierPort> {
+    use coxagent_application::ports::outbound::{ChatNotifier, FanoutNotifier, NotifierPort};
+    let mut sinks: Vec<Arc<dyn NotifierPort>> = vec![Arc::new(ChatNotifier::new(store))];
+    if let Some(url) = webhook.filter(|u| !u.is_empty()) {
+        sinks.push(Arc::new(WebhookNotifier::new(url)));
+    }
+    Arc::new(FanoutNotifier(sinks))
 }
 
 /// This machine's hostname (the "machine" a headless worker runs on), or

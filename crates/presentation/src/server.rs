@@ -652,6 +652,7 @@ pub async fn serve_full(
         .route("/api/projects/:pid/config", get(get_config).put(put_config))
         .route("/api/projects/:pid/control/:action", post(control_ep))
         .route("/api/projects/:pid/sprint/goal", post(set_sprint_goal_ep))
+        .route("/api/projects/:pid/digest", post(digest_ep))
         .route(
             "/api/projects/:pid/operators/:operator/:action",
             post(operator_control_ep),
@@ -4124,6 +4125,37 @@ async fn operator_control_ep(
             Json(serde_json::json!({ "error": e.to_string() })),
         )
             .into_response(),
+    }
+}
+
+/// Post an on-demand daily digest (shipped/spend/sprint at a glance) into the
+/// project's team chat and return it — the `/digest` slash command.
+async fn digest_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Ok(state) = p.store.load().await else {
+        return internal_error("load failed");
+    };
+    let now = coxagent_application::state::now_rfc3339();
+    let digest = coxagent_application::metrics::digest_markdown(&state, &now);
+    drop(state);
+    let res = coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        s.post_chat_in(
+            "COX",
+            &format!("📰 {digest}"),
+            coxagent_application::state::GENERAL_CHANNEL,
+            Vec::new(),
+        );
+        Ok(())
+    })
+    .await;
+    match res {
+        Ok(()) => Json(serde_json::json!({ "ok": true, "digest": digest })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
     }
 }
 

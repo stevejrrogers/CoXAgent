@@ -2074,6 +2074,7 @@ const SLASH_CMDS=[
   ["/standup","","SM runs a standup roundup"],
   ["/arch","","SA reviews architecture & files refactors"],
   ["/docs","","DOCS reviews the Wiki & fills gaps"],
+  ["/digest","","Post a daily digest (shipped · spend · sprint) to chat"],
   ["/start","","Start your operator"],
   ["/stop","","Stop your operator"],
   ["/pause","","Pause the runner"],
@@ -2094,6 +2095,9 @@ async function handleSlash(body){
       if(!arg){toasty("Usage: /discuss <topic>","warn");return true;}
       setDiscBusy("Team is discussing "+arg+"…");
       try{await fetch(api("/discuss"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({topic:arg})});}catch(e){}
+      refreshDisc();return true;
+    case "digest":
+      try{await fetch(api("/digest"),{method:"POST"});toasty("Digest posted to chat","ok");}catch(e){}
       refreshDisc();return true;
     case "standup": setDiscBusy("SM is running the standup…"); runStandup(dummy); return true;
     case "arch": case "architecture": setDiscBusy("SA is reviewing the architecture…"); reviewRun(dummy,"architecture-review","SA"); return true;

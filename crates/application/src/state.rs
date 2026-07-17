@@ -417,6 +417,10 @@ pub struct ProjectState {
     /// whatever happens to be in the backlog.
     #[serde(default)]
     pub sprint_goal: String,
+    /// UTC date (YYYY-MM-DD) the daily digest was last posted to the team chat,
+    /// so exactly one digest lands per day regardless of restarts or operators.
+    #[serde(default)]
+    pub last_digest_day: String,
     /// Spend accumulated on the current calendar day (UTC), for the daily budget
     /// policy. Resets when the day rolls over.
     #[serde(default)]
@@ -453,6 +457,7 @@ impl Default for ProjectState {
             refactor_mode: false,
             sprint_cycle: 0,
             sprint_goal: String::new(),
+            last_digest_day: String::new(),
             spend_today_usd: 0.0,
             spend_day: String::new(),
         }

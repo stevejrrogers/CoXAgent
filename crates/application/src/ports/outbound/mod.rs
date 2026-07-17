@@ -18,6 +18,6 @@ pub use engine::{AgentEnginePort, AgentOutcome, AgentRequest, Usage};
 pub use forge::{ForgePort, PullRequest};
 pub use git::{GitAuthor, GitPort};
 pub use kv_doc::KvDocPort;
-pub use notify::{NotifierPort, NotifyEvent, NullNotifier};
+pub use notify::{ChatNotifier, FanoutNotifier, NotifierPort, NotifyEvent, NullNotifier};
 pub use state_store::{mutate_state, StateStorePort, WorkerEntry};
 pub use storage::StoragePort;

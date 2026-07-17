@@ -281,6 +281,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                             );
                             let _ = self.store.save(&s).await;
                         }
+                        // Surface it where the human lives: the team chat.
+                        self.notify(
+                            "pr_opened",
+                            format!(
+                                "PR #{} ({id}) is awaiting your review — {}",
+                                pr.number, pr.url
+                            ),
+                        )
+                        .await;
                     }
                     Err(e) => self.log_git(&format!("open PR for {id} failed: {e}")).await,
                 }
@@ -616,7 +625,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
         Self::sprint_planning(&mut state, n, lang);
         state.log_activity("SM", "opened sprint", Some(format!("sprint {n}")));
+        let goal = state
+            .sprint
+            .as_ref()
+            .map(|s| s.goal.clone())
+            .unwrap_or_default();
         let _ = self.store.save(&state).await;
+        self.notify("sprint_rolled", format!("Sprint {n} opened — goal: {goal}"))
+            .await;
         // Learn: distill one concrete lesson from the closing sprint and keep
         // it — it gets fed back into the agents' prompts so they improve.
         if closing.is_some() {
@@ -1065,6 +1081,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             }
             // Scrum: open/roll over the sprint at the start of the cycle.
             self.advance_sprint_if_scrum(cycle).await;
+
+            // One digest per UTC day into the team chat: shipped/spend/sprint at
+            // a glance, so the user doesn't need the dashboard open to keep up.
+            self.post_daily_digest().await;
 
             // Daily standup: every few cycles the SM runs the room — but only when
             // the team actually did something since last time. A standup with no
@@ -1527,6 +1547,41 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             None,
         );
         let _ = self.store.save(&state).await;
+    }
+
+    /// Post the daily digest into the team chat, at most once per UTC day (the
+    /// marker lives in state, so restarts and multiple operators can't repeat
+    /// it). The very first run only stamps the day — no digest of nothing.
+    async fn post_daily_digest(&self) {
+        let today = crate::state::now_rfc3339()[..10].to_owned();
+        let Ok(state) = self.store.load().await else {
+            return;
+        };
+        if state.last_digest_day == today {
+            return;
+        }
+        let first_ever = state.last_digest_day.is_empty();
+        let digest = crate::metrics::digest_markdown(&state, &crate::state::now_rfc3339());
+        drop(state);
+        let posted = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+            if s.last_digest_day == today {
+                return Ok(()); // another operator beat us to it
+            }
+            s.last_digest_day.clone_from(&today);
+            if !first_ever {
+                s.post_chat_in(
+                    "COX",
+                    &format!("📰 {digest}"),
+                    crate::state::GENERAL_CHANNEL,
+                    Vec::new(),
+                );
+            }
+            Ok(())
+        })
+        .await;
+        if posted.is_ok() && !first_ever {
+            tracing::info!("posted daily digest for {today}");
+        }
     }
 
     /// Whether the board has any recent team activity to hold a standup over —
