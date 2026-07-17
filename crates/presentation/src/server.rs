@@ -3924,27 +3924,47 @@ async fn agent_log_ep(
     } else {
         live_dir.join(format!("{role}.log"))
     };
-    let (body, live_flag) = match std::fs::read_to_string(&live) {
-        Ok(s) if s.trim().len() > 20 => (s, true),
-        _ => {
-            // Fall back to the latest transcript for this role.
-            let dir = transcripts_dir(&p);
-            let latest = std::fs::read_dir(&dir).ok().and_then(|entries| {
-                entries
-                    .flatten()
-                    .filter(|e| e.file_name().to_string_lossy().contains(&role))
-                    .max_by_key(|e| {
-                        e.metadata()
-                            .and_then(|m| m.modified())
-                            .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
-                    })
-                    .map(|e| e.path())
-            });
-            let text = latest
-                .and_then(|pth| std::fs::read_to_string(pth).ok())
-                .unwrap_or_default();
-            (text, false)
-        }
+    // Local live file first (this machine's operators). If empty/absent, try
+    // shared storage (MinIO) where remote operators mirror their live logs, so
+    // the central hub can show an operator running on another machine.
+    let local = std::fs::read_to_string(&live)
+        .ok()
+        .filter(|s| s.trim().len() > 20);
+    let remote = if local.is_some() {
+        None
+    } else {
+        let name = if account.is_empty() {
+            format!("{role}.log")
+        } else {
+            format!("{role}__{account}.log")
+        };
+        app.storage
+            .get(&format!("agentlogs/{pid}/{name}"))
+            .await
+            .ok()
+            .and_then(|b| String::from_utf8(b).ok())
+            .filter(|s| s.trim().len() > 20)
+    };
+    let (body, live_flag) = if let Some(s) = local.or(remote) {
+        (s, true)
+    } else {
+        // Fall back to the latest transcript for this role.
+        let dir = transcripts_dir(&p);
+        let latest = std::fs::read_dir(&dir).ok().and_then(|entries| {
+            entries
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().contains(&role))
+                .max_by_key(|e| {
+                    e.metadata()
+                        .and_then(|m| m.modified())
+                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+                })
+                .map(|e| e.path())
+        });
+        let text = latest
+            .and_then(|pth| std::fs::read_to_string(pth).ok())
+            .unwrap_or_default();
+        (text, false)
     };
     Json(serde_json::json!({ "role": role, "live": live_flag, "log": body })).into_response()
 }

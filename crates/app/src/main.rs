@@ -1133,6 +1133,9 @@ async fn run_loop(
         } else {
             None
         };
+    // Ship this operator's live logs to shared storage (MinIO) so the central
+    // hub can show a remote operator's live agent log, not just local ones.
+    spawn_log_uploader(state_dir, &work_dir);
     let mut uc = RunCycleUseCase::new(Arc::clone(&store), engine, config, work_dir, context)
         .with_meter(meter)
         .with_deploy(std::sync::Arc::new(DockerComposeDeploy::new()))
@@ -1272,6 +1275,44 @@ async fn run_loop(
 
     tracing::info!("cycle loop stopped after {cycle} cycle(s)");
     Ok(format!("stopped after {cycle} cycle(s)\n"))
+}
+
+/// Periodically mirror a headless operator's `logs/live/*.log` to shared storage
+/// (MinIO) under `agentlogs/<project>/<file>`, so the central hub can serve a
+/// remote operator's live log. No-op when S3 is not configured (single machine —
+/// the hub reads the local files directly).
+fn spawn_log_uploader(state_dir: &Path, work_dir: &Path) {
+    use coxagent_application::ports::outbound::StoragePort;
+    let Some(s3) = coxagent_infrastructure::S3Storage::from_env() else {
+        return;
+    };
+    let project = state_dir.parent().and_then(Path::file_name).map_or_else(
+        || "default".to_owned(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    let live_dir = work_dir
+        .parent()
+        .unwrap_or(work_dir)
+        .join("logs")
+        .join("live");
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+            let Ok(entries) = std::fs::read_dir(&live_dir) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                let path = e.path();
+                if path.extension().is_some_and(|x| x == "log") {
+                    if let Ok(data) = std::fs::read(&path) {
+                        let name = e.file_name().to_string_lossy().into_owned();
+                        let key = format!("agentlogs/{project}/{name}");
+                        let _ = s3.put(&key, &data, "text/plain").await;
+                    }
+                }
+            }
+        }
+    });
 }
 
 /// This machine's hostname (the "machine" a headless worker runs on), or
