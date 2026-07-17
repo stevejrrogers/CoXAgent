@@ -27,6 +27,10 @@ domain -> application -> infrastructure/presentation, dependencies point INWARD 
 only. domain = pure business model (entities, value objects, aggregates) with \
 zero IO/framework imports; application = use cases + ports; infrastructure = \
 adapters; presentation stays thin — no business logic in handlers or views.\n\
+- Client apps (web/ios/macos/android) follow the SAME layering: domain and \
+application are pure (no React/SwiftUI/Compose/Android-SDK imports there); \
+views + view-models are the presentation layer and only call use cases; API \
+clients, local storage, and crypto bindings are infrastructure adapters.\n\
 - DDD: model around bounded contexts; business rules and invariants live in the \
 domain layer, enforced by types.\n\
 - Backend: split into microservices by bounded context when it has independent \
