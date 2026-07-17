@@ -1106,12 +1106,35 @@ async fn run_loop(
     // so every dashboard shows this headless team's current agent.
     let hb_store = Arc::clone(&store);
     let hb_worker = worker.clone();
+    // Shared live phase + keepalive: a single engine call can run for tens of
+    // minutes while the registry TTL is a few minutes, so without a mid-phase
+    // refresh a busy operator would drop off the dashboard and look dead.
+    let phase: Arc<Mutex<(String, String)>> =
+        Arc::new(Mutex::new(("idle".to_owned(), String::new())));
+    {
+        let (s, w, phase) = (Arc::clone(&store), hb_worker.clone(), Arc::clone(&phase));
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(45)).await;
+                let (role, note) = phase
+                    .lock()
+                    .map_or_else(|_| ("idle".to_owned(), String::new()), |p| p.clone());
+                if role != "idle" {
+                    let now = coxagent_application::state::now_rfc3339();
+                    let _ = s.heartbeat_worker(&w, &role, &note, &now).await;
+                }
+            }
+        });
+    }
     uc.set_phase_reporter(std::sync::Arc::new(move |info| {
         // Beat the live role+ticket on a phase, "idle" between — never stale.
         let (role, note) = match info {
             Some((role, note)) => (role, note),
             None => ("idle".to_owned(), String::new()),
         };
+        if let Ok(mut p) = phase.lock() {
+            *p = (role.clone(), note.clone());
+        }
         let (s, w) = (Arc::clone(&hb_store), hb_worker.clone());
         tokio::spawn(async move {
             let now = coxagent_application::state::now_rfc3339();

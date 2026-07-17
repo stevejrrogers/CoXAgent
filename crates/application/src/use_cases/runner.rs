@@ -173,6 +173,33 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
     // agent on which ticket.
     let h = std::sync::Arc::clone(&handle);
     let store = cycle_uc.store();
+    // The live phase, shared with a keepalive task. A single engine call can run
+    // for tens of minutes; the registry TTL is a few minutes, so without a
+    // mid-phase refresh a busy operator would drop off every dashboard and look
+    // dead. The keepalive re-beats the current phase periodically to fix that.
+    let phase: std::sync::Arc<std::sync::Mutex<(String, String)>> =
+        std::sync::Arc::new(std::sync::Mutex::new(("idle".to_owned(), String::new())));
+    {
+        let (store, h, phase) = (
+            std::sync::Arc::clone(&store),
+            std::sync::Arc::clone(&h),
+            std::sync::Arc::clone(&phase),
+        );
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(45)).await;
+                let (role, note) = phase
+                    .lock()
+                    .map_or_else(|_| ("idle".to_owned(), String::new()), |p| p.clone());
+                if role != "idle" {
+                    let now = crate::state::now_rfc3339();
+                    let _ = store
+                        .heartbeat_worker(&h.worker_id(), &role, &note, &now)
+                        .await;
+                }
+            }
+        });
+    }
     cycle_uc.set_phase_reporter(std::sync::Arc::new(move |info| {
         // `Some` = entering a phase (role + ticket); `None` = idle between phases.
         // Beat both so the registry reflects reality and never shows stale work.
@@ -180,6 +207,9 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
             Some((role, note)) => (role.clone(), note.clone()),
             None => ("idle".to_owned(), String::new()),
         };
+        if let Ok(mut p) = phase.lock() {
+            *p = (role.clone(), note.clone());
+        }
         match info {
             Some((role, note)) => h.set_active(&role, &note),
             None => h.clear_active(),
