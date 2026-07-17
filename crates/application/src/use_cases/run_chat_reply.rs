@@ -86,11 +86,15 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
              ACTION: arch_review                — review the architecture, file refactor tickets\n\
              ACTION: docs_review                — fill missing Wiki docs\n\
              ACTION: standup                    — run a standup\n\
-             ACTION: discuss: <topic>           — kick off a team discussion\n\
-             ACTION: feature: <title> :: <desc> — add a new feature to the backlog\n\
-             ACTION: bug: <title> :: <desc>     — file a bug for the devs to fix\n\
+             ACTION: discuss: <topic>           — kick off a team discussion (PO+SA weigh in, SM decides)\n\
+             ACTION: feature: <title> :: <desc> :: <low|medium|high> — add a feature to the backlog at that priority\n\
+             ACTION: bug: <title> :: <desc> :: <low|medium|high>     — file a bug at that priority\n\
+             ACTION: priority: <ticket-id> :: <low|medium|high>      — reprioritise an existing ticket\n\
              ACTION: deploy                     — build & run the app now (docker compose up)\n\
              ACTION: none                       — just talking / asking\n\n\
+             For a real decision that needs the team (should we build X? which approach?), prefer \
+             `discuss:` so PO and SA debate and the SM decides. Set a sensible priority when you \
+             file work.\n\
              IMPORTANT — confirm before acting: if the action changes the project (creating a \
              ticket, running a review/standup/discussion) and the user has NOT clearly confirmed it \
              in this thread, DO NOT act yet — reply with your proposal and a yes/no question, and \
@@ -157,10 +161,40 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         } else if let Some(rest) = strip_kw(a, "bug") {
             self.file_ticket(coxagent_domain::TicketType::Bug, rest, "TEST")
                 .await;
+        } else if let Some(rest) = strip_kw(a, "priority") {
+            self.reprioritize(rest).await;
         } else if lower.starts_with("deploy") {
             self.deploy_now().await;
         }
         Ok(())
+    }
+
+    /// Reprioritise an existing ticket from chat: `<id> :: <level>` (or space).
+    async fn reprioritize(&self, rest: &str) {
+        use coxagent_domain::{Role, TicketId};
+        let (id_s, lvl_s) = rest
+            .split_once("::")
+            .or_else(|| rest.split_once(char::is_whitespace))
+            .unwrap_or((rest, ""));
+        let (Some(prio), Ok(tid)) = (parse_priority(lvl_s), TicketId::new(id_s.trim())) else {
+            return;
+        };
+        let mut done = false;
+        let res = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+            if let Some(t) = s.ticket_mut(&tid) {
+                done = t.set_priority(Role::Po, prio).is_ok();
+            }
+            Ok(())
+        })
+        .await;
+        if res.is_ok() && done {
+            let msg = if self.lang.is_vi() {
+                format!("⬆️ Đã đổi ưu tiên {tid} → {prio:?}.")
+            } else {
+                format!("⬆️ Set {tid} priority to {prio:?}.")
+            };
+            self.post("PO", &msg).await;
+        }
     }
 
     /// Deploy/run the app on request (docker compose in the codebase), reporting
@@ -245,17 +279,19 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
     /// the channel, so a chat request turns into tracked, actionable work.
     async fn file_ticket(&self, kind: coxagent_domain::TicketType, payload: &str, author: &str) {
         use coxagent_domain::ticket::{Complexity, Priority};
-        let (title, desc) = payload
-            .split_once("::")
-            .map_or((payload.trim(), ""), |(t, d)| (t.trim(), d.trim()));
+        // `title :: desc :: priority` — desc and priority optional.
+        let mut parts = payload.splitn(3, "::").map(str::trim);
+        let title = parts.next().unwrap_or("").trim();
+        let desc = parts.next().unwrap_or("");
+        let prio = parts.next().and_then(parse_priority);
         if title.is_empty() {
             return;
         }
-        let priority = if kind == coxagent_domain::TicketType::Bug {
+        let priority = prio.unwrap_or(if kind == coxagent_domain::TicketType::Bug {
             Priority::High
         } else {
             Priority::Medium
-        };
+        });
         let adder = super::AddTicketUseCase::new(Arc::clone(&self.store));
         if let Ok(id) = adder
             .execute(super::AddTicketInput {
@@ -445,6 +481,17 @@ fn route_persona(lower: &str) -> &'static str {
 
 /// Strip a `<keyword>` / `<keyword>:` prefix and return the trimmed remainder,
 /// or `None` when `a` isn't that directive.
+/// Parse a priority word (English or Vietnamese) into a domain [`Priority`].
+fn parse_priority(s: &str) -> Option<coxagent_domain::ticket::Priority> {
+    use coxagent_domain::ticket::Priority;
+    match s.trim().to_lowercase().as_str() {
+        "high" | "cao" | "urgent" | "khẩn" | "p0" | "p1" => Some(Priority::High),
+        "medium" | "med" | "normal" | "trung bình" | "p2" => Some(Priority::Medium),
+        "low" | "thấp" | "p3" => Some(Priority::Low),
+        _ => None,
+    }
+}
+
 fn strip_kw<'a>(a: &'a str, kw: &str) -> Option<&'a str> {
     let rest = a.strip_prefix(kw)?;
     Some(rest.trim_start_matches([':', ' ']).trim())
