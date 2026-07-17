@@ -122,6 +122,17 @@ impl DeployPort for DockerComposeDeploy {
         })
     }
 
+    async fn down(&self, work_dir: &Path) -> Result<(), PortError> {
+        let _ = Command::new("docker")
+            .args(["compose", "down", "--remove-orphans"])
+            .current_dir(work_dir)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .await
+            .map_err(|e| PortError::Backend(format!("compose down: {e}")))?;
+        Ok(())
+    }
+
     async fn health(&self, port: u16) -> Result<bool, PortError> {
         // Something accepting TCP on the published port = the app is up.
         let addr = format!("127.0.0.1:{port}");

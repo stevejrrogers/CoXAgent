@@ -2809,6 +2809,10 @@ async fn pr_action_ep(
         return (StatusCode::NOT_IMPLEMENTED, "forge not configured").into_response();
     };
     let comment = body.map(|b| b.0.comment).unwrap_or_default();
+    // Preview actions deploy code; they answer with their own payload.
+    if action == "preview" || action == "preview-stop" {
+        return pr_preview(&p, forge, num, action == "preview").await;
+    }
     let result = match action.as_str() {
         "merge" => forge.merge_pr(num).await,
         "request-changes" => {
@@ -2825,6 +2829,124 @@ async fn pr_action_ep(
     match result {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Run one git command in `dir`, surfacing stderr on failure.
+async fn git_pv(dir: &std::path::Path, args: &[&str]) -> Result<(), String> {
+    let out = tokio::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_owned())
+    }
+}
+
+/// Deploy a PR's branch so the human can SEE the change running before
+/// approving (start=true), or tear the preview down and restore main
+/// (start=false). The preview runs on the project's app port — one app at a
+/// time, honestly labeled — via a git worktree under `<workspace>/.preview/`.
+async fn pr_preview(
+    p: &ProjectHandle,
+    forge: &Arc<dyn coxagent_application::ports::outbound::ForgePort>,
+    num: u64,
+    start: bool,
+) -> axum::response::Response {
+    let Some(deploy) = &p.deploy else {
+        return (StatusCode::NOT_IMPLEMENTED, "deploy not configured").into_response();
+    };
+    let root = p
+        .config_path
+        .parent()
+        .unwrap_or(&p.config_path)
+        .to_path_buf();
+    let prev_dir = root.join(".preview").join(num.to_string());
+    // The project's published app port, for the "open it" link.
+    let port = std::fs::read_to_string(&p.config_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v["deploy"]["host_port"].as_u64());
+    let chat = |msg: String| {
+        let store = Arc::clone(&p.store);
+        async move {
+            let _ = coxagent_application::ports::outbound::mutate_state(store.as_ref(), |s| {
+                s.post_chat_in(
+                    "COX",
+                    &msg,
+                    coxagent_application::state::GENERAL_CHANNEL,
+                    Vec::new(),
+                );
+                Ok(())
+            })
+            .await;
+        }
+    };
+    if start {
+        // Resolve the PR's head branch and materialise it in a preview worktree.
+        let head = match forge.list_open_prs().await {
+            Ok(prs) => match prs.into_iter().find(|x| x.number == num) {
+                Some(x) => x.head,
+                None => return (StatusCode::NOT_FOUND, "PR not open").into_response(),
+            },
+            Err(e) => return internal_error(&e.to_string()),
+        };
+        let refspec = format!("origin/{head}");
+        let step = if prev_dir.exists() {
+            git_pv(&p.work_dir, &["fetch", "origin", &head])
+                .await
+                .and(git_pv(&prev_dir, &["reset", "--hard", &refspec]).await)
+        } else {
+            let _ = std::fs::create_dir_all(prev_dir.parent().unwrap_or(&root));
+            git_pv(&p.work_dir, &["fetch", "origin", &head]).await.and(
+                git_pv(
+                    &p.work_dir,
+                    &[
+                        "worktree",
+                        "add",
+                        "--force",
+                        &prev_dir.to_string_lossy(),
+                        &refspec,
+                    ],
+                )
+                .await,
+            )
+        };
+        if let Err(e) = step {
+            return internal_error(&format!("preview checkout: {e}"));
+        }
+        // Swap: stop the current app, run the PR branch on the app port.
+        let _ = deploy.down(&p.work_dir).await;
+        match deploy.deploy(&prev_dir).await {
+            Ok(r) if r.success => {
+                let url = port.map(|pt| format!("http://localhost:{pt}"));
+                chat(format!(
+                    "👁 Preview of PR #{num} is LIVE{} — the main build is paused; restore it from the Review tab when done.",
+                    url.as_deref().map(|u| format!(" at {u}")).unwrap_or_default()
+                ))
+                .await;
+                Json(serde_json::json!({ "ok": true, "url": url, "summary": r.summary }))
+                    .into_response()
+            }
+            Ok(r) => internal_error(&format!("preview deploy failed: {}", r.summary)),
+            Err(e) => internal_error(&e.to_string()),
+        }
+    } else {
+        let _ = deploy.down(&prev_dir).await;
+        match deploy.deploy(&p.work_dir).await {
+            Ok(_) => {
+                chat(format!(
+                    "↩️ Preview of PR #{num} stopped — main build restored."
+                ))
+                .await;
+                Json(serde_json::json!({ "ok": true })).into_response()
+            }
+            Err(e) => internal_error(&e.to_string()),
+        }
     }
 }
 

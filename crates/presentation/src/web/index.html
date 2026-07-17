@@ -4262,6 +4262,8 @@ async function renderReview(){
       </div>
       <div class="revacts">
         <button class="gc-btn" onclick="viewDiff(${p.number},'${esc(p.head)}')"><i class="ti ti-file-diff"></i> Diff</button>
+        <button class="gc-btn" title="Run THIS branch on the app port so you can see it before approving" onclick="prAction(${p.number},'preview')"><i class="ti ti-eye"></i> Preview</button>
+        <button class="gc-btn" title="Stop the preview and restore the main build" onclick="prAction(${p.number},'preview-stop')"><i class="ti ti-eye-off"></i></button>
         ${rev?`<button class="gc-btn" onclick="prAction(${p.number},'request-changes')"><i class="ti ti-arrow-back-up"></i> Changes</button>
         <button class="gc-btn pri" ${p.mergeable?'':'disabled'} onclick="prAction(${p.number},'merge')"><i class="ti ti-git-merge"></i> Merge</button>`:''}
       </div>
@@ -4296,8 +4298,13 @@ async function prAction(num,action){
   let comment="";
   if(action==="request-changes"){comment=prompt("What changes should the agent make?");if(comment===null)return;}
   if(action==="merge"&&!confirm("Merge PR #"+num+"? This ships the code."))return;
+  if(action==="preview")toasty("Building preview of PR #"+num+"… (docker build, may take a minute)","ok");
   try{const r=await fetch(api("/prs/"+num+"/"+action),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({comment})});
-    if(r.ok){toasty(action==="merge"?"Merged ✓":action==="request-changes"?"Changes requested":"Done","ok");renderReview();}
+    if(r.ok){
+      if(action==="preview"){const d=await r.json().catch(()=>({}));
+        toasty("Preview live"+(d.url?" — "+d.url:""),"ok");if(d.url)window.open(d.url,"_blank");}
+      else toasty(action==="merge"?"Merged ✓":action==="request-changes"?"Changes requested — a DEV agent will address it next cycle":action==="preview-stop"?"Preview stopped — main restored":"Done","ok");
+      renderReview();}
     else{toasty("Failed: "+(await r.text()||r.status),"err");}
   }catch(e){toasty("Network error","err");}
 }

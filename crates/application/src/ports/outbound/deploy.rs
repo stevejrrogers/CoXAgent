@@ -36,6 +36,16 @@ pub trait DeployPort: Send + Sync {
         Ok(true)
     }
 
+    /// Tear down whatever this directory's deploy started (e.g. `docker compose
+    /// down`), freeing its ports — used when swapping the app for a PR preview.
+    /// Default: nothing to stop.
+    ///
+    /// # Errors
+    /// [`PortError::Backend`] on an unexpected failure to run the deploy tool.
+    async fn down(&self, _work_dir: &Path) -> Result<(), PortError> {
+        Ok(())
+    }
+
     /// Liveness check for the deployed app: is something accepting connections
     /// on `127.0.0.1:<port>`? Used by the Ops/SRE monitor to detect an app that
     /// crashed after deploy. The default reports healthy (no monitor).
