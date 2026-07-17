@@ -5,20 +5,13 @@
 //! action goes through the same guarded `AddTicket` path — the agents deliberate,
 //! code commits the outcome.
 
-use crate::error::{AppError, PortError};
-use crate::ports::outbound::{AgentEnginePort, AgentRequest, StateStorePort};
-use crate::use_cases::{AddTicketInput, AddTicketUseCase};
-use coxagent_domain::{Complexity, Priority, Role, TicketType};
+use crate::error::AppError;
+use crate::ports::outbound::{AgentEnginePort, StateStorePort};
+use crate::use_cases::{ceremony, AddTicketInput, AddTicketUseCase};
+use coxagent_domain::{Complexity, Priority, TicketType};
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
-
-/// One participant's contribution, kept for the transcript and the next prompt.
-struct Turn {
-    role: &'static str,
-    text: String,
-}
 
 /// The outcome of a discussion: the posted turns and any created ticket.
 pub struct DiscussionOutcome {
@@ -69,37 +62,62 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunDiscussionUseCa
     /// # Errors
     /// [`AppError`] when the engine fails on a turn.
     pub async fn execute(&self, topic: &str) -> Result<DiscussionOutcome, AppError> {
-        let mut turns: Vec<Turn> = Vec::new();
-
         // Open the discussion with a marked topic so the Scrum feed frames the
         // whole exchange as one ceremony.
         self.post("SM", &format!("💬 Discussion — {topic}")).await;
 
-        // Opinion turns — each role reacts to the topic and the thread so far.
-        for (role, persona) in [
-            (
-                "PO",
-                "the Product Owner, who cares about user value, business priority, and scope",
-            ),
-            (
-                "SA",
-                "the Solution Architect, who cares about technical feasibility, risk, and effort",
-            ),
-        ] {
-            let text = self.opinion(role, persona, topic, &turns).await?;
-            self.post(role, &text).await;
-            turns.push(Turn { role, text });
+        // One engine call role-plays the whole discussion: PO and SA give their
+        // takes, then SM decides and (optionally) appends an ACTION marker.
+        let task = format!(
+            "Team discussion topic: {topic}\n\nRun the discussion now. PO gives their take (user \
+             value, business priority, scope) and SA gives theirs (technical feasibility, risk, \
+             effort) — 2-3 sentences each, with a real point of view. Then SM summarises and \
+             states ONE clear decision. If the team should build something, AFTER the transcript \
+             append on a NEW LINE exactly:\nACTION: {{\"title\": string, \"description\": string, \
+             \"priority\": \"low\"|\"medium\"|\"high\"}}\nOtherwise append:\nACTION: none"
+        );
+        let (turns, raw) = ceremony::run_transcript_raw(
+            self.engine.as_ref(),
+            &self.work_dir,
+            self.lang,
+            "You are facilitating an autonomous software team's discussion.",
+            &[
+                (
+                    "PO",
+                    "Product Owner — user value, business priority, and scope",
+                ),
+                (
+                    "SA",
+                    "Solution Architect — technical feasibility, risk, and effort",
+                ),
+            ],
+            &task,
+        )
+        .await?;
+
+        // Post each turn; the ACTION marker (if any) is stripped from display.
+        let mut posted = 1usize; // the topic header
+        let mut decision = String::new();
+        for turn in &turns {
+            let text = strip_action(&turn.text);
+            if text.trim().is_empty() {
+                continue;
+            }
+            if turn.speaker == "SM" {
+                self.post("SM", &format!("✅ Decision: {}", text.trim()))
+                    .await;
+                decision = text.trim().to_owned();
+            } else {
+                self.post(&turn.speaker, &text).await;
+            }
+            posted += 1;
         }
 
-        // Decision turn — the SM concludes and may propose an action.
-        let raw = self.decision(topic, &turns).await?;
-        let (decision, action) = split_action(&raw);
-        self.post("SM", &format!("✅ Decision: {}", decision.trim()))
-            .await;
-        // Persist it to the team's durable memory so every agent honours it later.
-        if !decision.trim().is_empty() {
+        let (_prose, action) = split_action(&raw);
+        // Persist the decision to durable memory so every agent honours it later.
+        if !decision.is_empty() {
             if let Ok(mut s) = self.store.load().await {
-                s.add_decision(decision.trim());
+                s.add_decision(&decision);
                 let _ = self.store.save(&s).await;
             }
         }
@@ -129,61 +147,10 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunDiscussionUseCa
         }
 
         Ok(DiscussionOutcome {
-            turns: turns.len() + 1,
+            turns: posted,
             decision,
             created_ticket,
         })
-    }
-
-    async fn opinion(
-        &self,
-        role: &str,
-        persona: &str,
-        topic: &str,
-        thread: &[Turn],
-    ) -> Result<String, AppError> {
-        let task = format!(
-            "Team discussion topic: {topic}\n\n{}\n\nYou are {role}, {persona}. Give your \
-             take in 2-3 sentences. Be concrete and concise. No preamble, no sign-off.",
-            render_thread(thread),
-        );
-        self.run(role, &task).await
-    }
-
-    async fn decision(&self, topic: &str, thread: &[Turn]) -> Result<String, AppError> {
-        let task = format!(
-            "Team discussion topic: {topic}\n\n{}\n\nYou are SM (Scrum Master). Summarise and \
-             state ONE clear decision in 2-3 sentences. If the team should build something, \
-             append on a NEW LINE exactly:\nACTION: {{\"title\": string, \"description\": string, \
-             \"priority\": \"low\"|\"medium\"|\"high\"}}\nOtherwise append:\nACTION: none",
-            render_thread(thread),
-        );
-        self.run("SM", &task).await
-    }
-
-    async fn run(&self, role: &str, task: &str) -> Result<String, AppError> {
-        let request = AgentRequest {
-            role: Role::Sm,
-            system_prompt: format!(
-                "You are {role} in an autonomous software team's discussion. Speak plainly \
-                 in the first person, like a real teammate — have a point of view, agree or \
-                 push back, ask a pointed question when something is unclear, and don't be \
-                 afraid to raise a concern. Be concise (2-4 sentences), no bullet lists.{}",
-                self.lang.reply_directive()
-            ),
-            task_prompt: task.to_owned(),
-            work_dir: self.work_dir.clone(),
-            timeout: Duration::from_secs(120),
-        };
-        let outcome = self.engine.run(request).await?;
-        if !outcome.succeeded() {
-            return Err(PortError::Backend(format!(
-                "discussion engine failed for {role}: {}",
-                outcome.stderr.trim()
-            ))
-            .into());
-        }
-        Ok(outcome.stdout.trim().to_owned())
     }
 
     async fn post(&self, author: &str, body: &str) {
@@ -194,17 +161,13 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunDiscussionUseCa
     }
 }
 
-/// Render the thread so far for inclusion in the next prompt.
-fn render_thread(thread: &[Turn]) -> String {
-    use std::fmt::Write as _;
-    if thread.is_empty() {
-        return "(no comments yet)".to_owned();
+/// Cut an `ACTION:` marker (and anything after it) off a transcript turn so it
+/// never shows in the feed — the marker is parsed separately from the raw text.
+fn strip_action(text: &str) -> String {
+    match text.find("ACTION:") {
+        Some(idx) => text[..idx].trim().to_owned(),
+        None => text.trim().to_owned(),
     }
-    let mut s = String::from("Discussion so far:\n");
-    for t in thread {
-        let _ = writeln!(s, "{}: {}", t.role, t.text);
-    }
-    s
 }
 
 /// Split an SM decision into (prose, optional action) on the `ACTION:` marker.

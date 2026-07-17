@@ -1066,9 +1066,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // Scrum: open/roll over the sprint at the start of the cycle.
             self.advance_sprint_if_scrum(cycle).await;
 
-            // Daily standup: every few cycles the SM runs the room — each active
-            // agent gives a live update and raises blockers, SM highlights focus.
-            if cycle % 3 == 1 {
+            // Daily standup: every few cycles the SM runs the room — but only when
+            // the team actually did something since last time. A standup with no
+            // real activity is pure token burn (and reads like noise), so we skip
+            // it when the board has been quiet.
+            if cycle % 3 == 1 && self.has_recent_activity().await {
                 self.scrum_standup().await;
             }
             // Mid-sprint backlog grooming, offset from the standup so the two
@@ -1525,6 +1527,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             None,
         );
         let _ = self.store.save(&state).await;
+    }
+
+    /// Whether the board has any recent team activity to hold a standup over —
+    /// the gate that stops empty, token-wasting standups on a quiet board.
+    async fn has_recent_activity(&self) -> bool {
+        self.store
+            .load()
+            .await
+            .is_ok_and(|s| !s.activity.is_empty())
     }
 
     /// Run the daily standup: the SM opens, each active agent posts a grounded

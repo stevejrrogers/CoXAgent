@@ -1,34 +1,17 @@
 //! `RunStandupUseCase` — a real daily standup, run by the SM with live agent
 //! turns. The SM opens with the sprint goal and status, each participating role
 //! gives a grounded update (done / next / blockers), and the SM closes by
-//! highlighting blockers and the focus for the day. Every turn is posted to the
-//! Scrum feed so the ceremony reads like a human team, not a status dump.
+//! highlighting blockers and the focus for the day.
+//!
+//! The whole ceremony is produced in a **single** engine call (see
+//! [`crate::use_cases::ceremony`]) rather than one call per role turn — the feed
+//! reads identically to a human team, at roughly 1/N the token cost.
 
-use crate::error::{AppError, PortError};
-use crate::ports::outbound::{AgentEnginePort, AgentRequest, StateStorePort};
-use coxagent_domain::Role;
+use crate::error::AppError;
+use crate::ports::outbound::{AgentEnginePort, StateStorePort};
+use crate::use_cases::ceremony;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
-
-/// Pick the teammate best placed to resolve a blocker from its wording — so the
-/// right role owns the follow-up instead of a generic reply.
-fn responder_for(blocker_lower: &str) -> &'static str {
-    let has = |kw: &[&str]| kw.iter().any(|k| blocker_lower.contains(k));
-    if has(&["pr", "merge", "conflict", "rebase", "review"]) {
-        "DEV-FEATURE"
-    } else if has(&["deploy", "port", "docker", "build", "ci"]) {
-        "DEV-BUG"
-    } else if has(&["design", "ux", "layout", "screen"]) {
-        "PD"
-    } else if has(&["spec", "requirement", "acceptance", "scope", "unclear"]) {
-        "BA"
-    } else if has(&["test", "qa", "flaky", "coverage"]) {
-        "TEST"
-    } else {
-        "SA"
-    }
-}
 
 /// The role personas pulled into a standup, in order.
 const PARTICIPANTS: &[(&str, &str)] = &[
@@ -78,76 +61,57 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunStandupUseCase<
     /// Run the standup. Returns the number of blockers agents raised.
     ///
     /// # Errors
-    /// [`AppError`] when the engine fails on a turn.
+    /// [`AppError`] when the engine fails.
     pub async fn execute(&self) -> Result<usize, AppError> {
-        let context = self.status_context().await;
-
-        // SM opens the standup for real: a short spoken intro on where the sprint
-        // stands and a prompt for the team to report in — not just a status line.
-        let opener = self.opener(&context).await?;
-        self.post("SM", &format!("🗣️ Standup — {}", opener.trim()))
-            .await;
-
         // Only pull in roles that actually did something (grounded, not noise).
         let active = self.active_roles().await;
-        let mut updates: Vec<(String, String)> = Vec::new();
-        let mut raised: Vec<(String, String)> = Vec::new();
-        for (role, persona) in PARTICIPANTS.iter().filter(|(r, _)| active.contains(r)) {
-            let text = self.update(role, persona, &context, &updates).await?;
-            let low = text.to_lowercase();
-            // A blocker OR a Staff-level concern raised in someone's domain both
-            // get picked up and turned into a concrete follow-up.
-            if low.contains("block") || low.contains("raise:") || low.contains("concern") {
-                raised.push(((*role).to_owned(), text.clone()));
-            }
-            self.post(role, &text).await;
-            updates.push(((*role).to_owned(), text));
+        let roster: Vec<(&str, &str)> = PARTICIPANTS
+            .iter()
+            .filter(|(r, _)| active.contains(r))
+            .copied()
+            .collect();
+        if roster.is_empty() {
+            return Ok(0);
         }
 
-        // Each raised blocker gets handled: the most relevant teammate replies
-        // with a concrete action to resolve it — so a blocker never just hangs.
-        let blockers = raised.len();
-        for (owner, blocker) in &raised {
-            let responder = responder_for(&blocker.to_lowercase());
-            let reply = self.resolve(responder, owner, blocker, &context).await?;
-            self.post(responder, &reply).await;
-            updates.push((responder.to_owned(), reply));
-        }
-
-        // SM closes: highlight blockers + the focus for the day.
-        let close = self.highlight(&context, &updates).await?;
-        self.post("SM", &format!("📌 {}", close.trim())).await;
-        Ok(blockers)
-    }
-
-    /// The SM's spoken opener: a two-sentence read on the sprint plus an explicit
-    /// ask for the team to give their updates.
-    async fn opener(&self, context: &str) -> Result<String, AppError> {
+        let context = self.status_context().await;
         let headline = self.headline().await;
         let task = format!(
-            "{context}\nStatus line: {headline}\nYou are the SM opening the daily standup. In 2 \
-             sentences, greet the team, give a quick read on where the sprint stands, and ask \
-             everyone to share what they finished, what's next, and any blocker. Warm but brief."
+            "{context}\nSprint status: {headline}\n\nRun the full daily standup now. Order:\n\
+             1. SM opens warmly in 1-2 sentences and asks the team to report in.\n\
+             2. Each teammate gives their update: what they finished, what's next, and — only if \
+             real — a blocker or a cross-cutting risk. When there is one, put `BLOCKER:` or \
+             `RAISE:` followed by the issue on that same line.\n\
+             3. For every blocker/RAISE, the single most relevant teammate replies on its own line \
+             with a concrete action to resolve it (who does what next).\n\
+             4. SM closes in 1-2 sentences: which blockers to clear and the single most important \
+             focus for today.\n\
+             Ground every line in the activity above — do not invent work that isn't there."
         );
-        self.run("SM", &task).await
-    }
 
-    /// A teammate resolves a raised blocker with a concrete action.
-    async fn resolve(
-        &self,
-        responder: &str,
-        owner: &str,
-        blocker: &str,
-        context: &str,
-    ) -> Result<String, AppError> {
-        let task = format!(
-            "{context}\n{owner} raised this at standup (a blocker or a domain concern):\n\
-             \"{blocker}\"\nYou are {responder}, the teammate best placed to help. In 1-2 \
-             sentences, respond directly to {owner} with a concrete action to resolve it (who does \
-             what, next step). If it needs tracked work, say so. Be specific and own it — no vague \
-             reassurance."
-        );
-        self.run(responder, &task).await
+        let turns = ceremony::run_transcript(
+            self.engine.as_ref(),
+            &self.work_dir,
+            self.lang,
+            "You are facilitating an autonomous software team's daily standup.",
+            &roster,
+            &task,
+        )
+        .await?;
+
+        // Header frames the whole exchange as one ceremony in the feed.
+        self.post("SM", "🗣️ Standup").await;
+        let mut blockers = 0usize;
+        for turn in &turns {
+            if turn.speaker != "SM" {
+                let low = turn.text.to_lowercase();
+                if low.contains("block") || low.contains("raise:") || low.contains("concern") {
+                    blockers += 1;
+                }
+            }
+            self.post(&turn.speaker, &turn.text).await;
+        }
+        Ok(blockers)
     }
 
     /// One-line sprint headline for the SM's opener.
@@ -233,75 +197,6 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunStandupUseCase<
             roles = vec!["SA", "DEV-FEATURE", "TEST"];
         }
         roles
-    }
-
-    async fn update(
-        &self,
-        role: &str,
-        persona: &str,
-        context: &str,
-        thread: &[(String, String)],
-    ) -> Result<String, AppError> {
-        use std::fmt::Write as _;
-        let prior = if thread.is_empty() {
-            String::new()
-        } else {
-            let mut s = String::from("\nTeammates so far:\n");
-            for (r, t) in thread {
-                let _ = writeln!(s, "{r}: {t}");
-            }
-            s
-        };
-        let task = format!(
-            "{context}{prior}\nYou are {role} ({persona}), a Staff/Principal-level owner of your \
-             area. Give your standup update in 1-2 sentences: what you finished, what's next, and \
-             — only if real — a blocker (say \"BLOCKER:\") or a concern/risk you notice in your \
-             domain that the team should act on (say \"RAISE:\" then what and who should help). \
-             Speak like a teammate, first person, concrete, no filler."
-        );
-        self.run(role, &task).await
-    }
-
-    async fn highlight(
-        &self,
-        context: &str,
-        thread: &[(String, String)],
-    ) -> Result<String, AppError> {
-        use std::fmt::Write as _;
-        let mut updates = String::new();
-        for (r, t) in thread {
-            let _ = writeln!(updates, "{r}: {t}");
-        }
-        let task = format!(
-            "{context}\nStandup updates:\n{updates}\nYou are the SM. In 2-3 sentences: call out \
-             any blocker and who should resolve it, and name the single most important focus for \
-             today. Be decisive and concrete."
-        );
-        self.run("SM", &task).await
-    }
-
-    async fn run(&self, role: &str, task: &str) -> Result<String, AppError> {
-        let request = AgentRequest {
-            role: Role::Sm,
-            system_prompt: format!(
-                "You are {role} at your team's daily standup. Speak plainly in the first \
-                 person like a real teammate — concise, specific, honest about blockers. No \
-                 preamble, no sign-off, 1-3 sentences.{}",
-                self.lang.reply_directive()
-            ),
-            task_prompt: task.to_owned(),
-            work_dir: self.work_dir.clone(),
-            timeout: Duration::from_secs(90),
-        };
-        let outcome = self.engine.run(request).await?;
-        if !outcome.succeeded() {
-            return Err(PortError::Backend(format!(
-                "standup engine failed for {role}: {}",
-                outcome.stderr.trim()
-            ))
-            .into());
-        }
-        Ok(outcome.stdout.trim().to_owned())
     }
 
     async fn post(&self, author: &str, body: &str) {

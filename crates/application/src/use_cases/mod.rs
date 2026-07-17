@@ -2,6 +2,7 @@
 
 pub mod add_ticket;
 pub mod analyze_attachment;
+pub mod ceremony;
 pub mod conformance_check;
 pub mod cycle;
 pub mod generate_docs;
