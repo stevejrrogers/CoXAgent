@@ -1704,6 +1704,7 @@ struct CommentReactReq {
 async fn post_comment(
     State(app): State<AppState>,
     Path(pid): Path<String>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<PostCommentReq>,
 ) -> axum::response::Response {
     let Some(p) = app.project(&pid).await else {
@@ -1713,17 +1714,20 @@ async fn post_comment(
     if body.is_empty() && req.attachments.is_empty() {
         return (axum::http::StatusCode::BAD_REQUEST, "empty comment").into_response();
     }
+    // Attribute the comment to the signed-in account (so Scrum/discussion shows
+    // real names, not a generic "USER"); falls back to "USER" in open mode.
+    let author = resolve_username(&app, &headers).await;
     let Ok(mut state) = p.store.load().await else {
         return internal_error("load failed");
     };
-    state.post_comment_att("USER", body, req.ticket.clone(), req.attachments.clone());
+    state.post_comment_att(&author, body, req.ticket.clone(), req.attachments.clone());
     if let Err(e) = p.store.save(&state).await {
         return internal_error(&e.to_string());
     }
     // If the user attached something an agent can read, let the SA agent read it
     // and respond — answering if a question was asked, otherwise reading it
     // proactively and asking back. Runs in the background so the post is instant.
-    maybe_analyze_attachments(&app, &p, "USER", body, req.ticket, &req.attachments);
+    maybe_analyze_attachments(&app, &p, &author, body, req.ticket, &req.attachments);
     Json(serde_json::json!({ "ok": true })).into_response()
 }
 

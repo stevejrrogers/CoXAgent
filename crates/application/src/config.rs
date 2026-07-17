@@ -67,6 +67,12 @@ pub struct EngineMapping {
     /// budget instead of failing until the quota resets.
     #[serde(default)]
     pub fallbacks: Vec<EngineChoice>,
+    /// Auto-failover (default on): append every agent CLI detected on the host —
+    /// plus a cheaper same-CLI tier — to the fallback chain automatically, so the
+    /// user only toggles it on/off instead of listing models by hand. Explicit
+    /// `fallbacks` still take priority (tried first).
+    #[serde(default = "default_true")]
+    pub auto_fallback: bool,
 }
 
 impl EngineMapping {
@@ -321,6 +327,7 @@ impl Default for Config {
                 },
                 per_role: HashMap::new(),
                 fallbacks: Vec::new(),
+                auto_fallback: true,
             },
             git: GitConfig::default(),
             workflow: WorkflowConfig::default(),

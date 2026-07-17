@@ -994,14 +994,52 @@ fn build_failover(
 /// logging + metering) named by config, plus the shared spend meter the cycle
 /// drains into state. Roles with a `per_role` override (e.g. ceremonies on a
 /// cheap model) get their own failover chain; everything else uses the default.
+/// The fallback chain actually used: the explicit `fallbacks` first, then — when
+/// `auto_fallback` is on (the default) — a cheaper same-CLI tier and every other
+/// agent CLI detected on this host, so failover works out of the box and the user
+/// only flips one switch instead of listing models by hand.
+fn effective_fallbacks(config: &Config) -> Vec<coxagent_application::config::EngineChoice> {
+    use coxagent_application::config::{EngineChoice, EngineKind};
+    let mut out = config.engine.fallbacks.clone();
+    if !config.engine.auto_fallback {
+        return out;
+    }
+    let default_kind = config.engine.default.engine;
+    let mut push = |kind: EngineKind, model: String| {
+        if !out.iter().any(|c| c.engine == kind && c.model == model) {
+            out.push(EngineChoice {
+                engine: kind,
+                model,
+            });
+        }
+    };
+    // Cheap same-CLI tier for Claude (sonnet → haiku) — the highest-value step.
+    if default_kind == EngineKind::Claude && config.engine.default.model != "haiku" {
+        push(EngineKind::Claude, "haiku".to_owned());
+    }
+    // Every other installed CLI, best-effort model (scripted/mock never auto-added).
+    for d in discover() {
+        let model = match d.kind {
+            EngineKind::Claude => "haiku".to_owned(),
+            EngineKind::Opencode => config.engine.default.model.clone(),
+            _ => continue,
+        };
+        if d.kind != default_kind {
+            push(d.kind, model);
+        }
+    }
+    out
+}
+
 fn build_engine(
     config: &Config,
     logs_dir: PathBuf,
 ) -> Result<BuiltEngine, Box<dyn std::error::Error>> {
-    let default = build_failover(&config.engine.default, &config.engine.fallbacks)?;
+    let fallbacks = effective_fallbacks(config);
+    let default = build_failover(&config.engine.default, &fallbacks)?;
     let mut per_role = std::collections::HashMap::new();
     for (role, choice) in &config.engine.per_role {
-        match build_failover(choice, &config.engine.fallbacks) {
+        match build_failover(choice, &fallbacks) {
             Ok(e) => {
                 tracing::info!(
                     "role {role:?} routed to {:?}({})",
@@ -1014,10 +1052,15 @@ fn build_engine(
         }
     }
     tracing::info!(
-        "default engine {:?}({}) + {} fallback(s)",
+        "default engine {:?}({}) + {} fallback(s){}",
         config.engine.default.engine,
         config.engine.default.model,
-        config.engine.fallbacks.len()
+        fallbacks.len(),
+        if config.engine.auto_fallback {
+            " [auto]"
+        } else {
+            ""
+        }
     );
     let router = RoutingEngine::new(default, per_role);
     let logged = TranscriptEngine::new(router, logs_dir);
