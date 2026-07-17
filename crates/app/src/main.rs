@@ -1038,6 +1038,7 @@ fn logs_dir(state_dir: &Path) -> PathBuf {
 }
 
 /// The continuous cycle loop with graceful shutdown.
+#[allow(clippy::too_many_lines)] // linear setup + loop; splitting hurts readability
 async fn run_loop(
     store: Arc<AnyStateStore>,
     state_dir: &Path,
@@ -1117,6 +1118,7 @@ async fn run_loop(
             let _ = s.heartbeat_worker(&w, &role, &note, &now).await;
         });
     }));
+    let operator = worker.clone();
     uc.set_worker(worker);
     let shutdown = shutdown::Shutdown::listen();
     tracing::info!("cycle loop started");
@@ -1131,6 +1133,13 @@ async fn run_loop(
 
     let mut cycle = 0u64;
     while !shutdown.is_triggered() {
+        // Honour this operator's per-user Start/Stop from the web: when the user
+        // has stopped their operator, idle instead of working (their credentials
+        // aren't spent) — without exiting, so a later Start resumes it live.
+        if matches!(store.get_desired(&operator).await, Ok(Some(false))) {
+            shutdown.sleep_or_shutdown(sleep).await;
+            continue;
+        }
         cycle += 1;
         let report = uc.run_cycle(cycle).await;
         tracing::info!("{}", report.summary());

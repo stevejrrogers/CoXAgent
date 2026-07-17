@@ -12,9 +12,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     var window: NSWindow!
     var web: WKWebView!
     var hub: Process?
+    // The dashboard origin the WebView loads. Defaults to the embedded hub on
+    // localhost, but points at a central hub when remote mode is configured.
+    var base = "http://127.0.0.1:\(PORT)"
+
+    // Remote-hub mode: when a hub URL is configured (env `COXAGENT_HUB_URL` or a
+    // `~/CoXAgent/hub.url` file), this machine does NOT spawn its own hub — it is
+    // a thin viewer onto a central, hosted hub that everyone shares. Returns the
+    // trimmed URL (no trailing slash) or nil for the default embedded mode.
+    func remoteHub() -> String? {
+        var raw: String?
+        if let u = ProcessInfo.processInfo.environment["COXAGENT_HUB_URL"], !u.isEmpty {
+            raw = u
+        } else if let s = try? String(contentsOfFile: workspace() + "/hub.url", encoding: .utf8) {
+            raw = s
+        }
+        guard var u = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !u.isEmpty else {
+            return nil
+        }
+        while u.hasSuffix("/") { u.removeLast() }
+        return u
+    }
 
     func applicationDidFinishLaunching(_ note: Notification) {
-        startHub()
+        // Only boot a local hub in embedded mode; in remote mode we just view.
+        if let remote = remoteHub() {
+            base = remote
+        } else {
+            startHub()
+        }
 
         // Bridge web → native for notifications: the WKWebView has no web
         // Notification API, so the page posts to `coxnotify` and we raise a real
@@ -40,7 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             contentRect: NSMakeRect(0, 0, 1360, 860),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered, defer: false)
-        window.title = "CoXAgent"
+        window.title = (remoteHub() != nil) ? "CoXAgent — \(base)" : "CoXAgent"
         window.center()
         window.contentView = web
         window.makeKeyAndOrderFront(nil)
@@ -189,13 +215,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         hub = p
     }
 
-    // Poll /api/health, then load the dashboard once the hub is listening.
+    // Poll /api/health, then load the dashboard once the hub (local or remote)
+    // is reachable.
     func loadWhenReady(_ attempt: Int = 0) {
-        let health = URL(string: "http://127.0.0.1:\(PORT)/api/health")!
+        let health = URL(string: "\(base)/api/health")!
         URLSession.shared.dataTask(with: health) { _, resp, _ in
             DispatchQueue.main.async {
                 if let http = resp as? HTTPURLResponse, http.statusCode == 200 {
-                    self.web.load(URLRequest(url: URL(string: "http://127.0.0.1:\(PORT)/")!))
+                    self.web.load(URLRequest(url: URL(string: "\(self.base)/")!))
                 } else if attempt < 80 {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
                         self.loadWhenReady(attempt + 1)
