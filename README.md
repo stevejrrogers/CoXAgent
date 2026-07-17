@@ -58,13 +58,15 @@ each with its own runner; every API and SSE stream is scoped per project. New
 projects are onboarded from the UI (scaffold + seed + register live) and
 persisted to the hub registry.
 
-**RBAC.** Argon2id-hashed credentials (a JSON user file storing only hashes),
-HttpOnly session cookies, brute-force lockout (5 failures → 15-min lock),
-middleware that gates every route: writes require an admin, viewers are
-read-only. Bootstrap an admin from env (authoritative — it always wins over a
-stale file); runs open when no account is configured. **API tokens** for
-automation: admins mint scoped service-account tokens (stored as SHA-256
-hashes, shown once) used via `Authorization: Bearer`.
+**RBAC.** Argon2id-hashed credentials, HttpOnly session cookies, brute-force
+lockout (5 failures → 15-min lock), middleware that gates every route: writes
+require an admin, viewers are read-only. Bootstrap an admin from env
+(authoritative — it always wins over a stale file); runs open when no account is
+configured. Accounts, tokens, and 2FA secrets live in a local `auth.json` (only
+hashes) or, when `COXAGENT_AUTH_DSN` is set, in **Postgres**; **sessions persist
+in Redis** (native-TTL keys) so a hub relaunch never signs anyone out.
+**API tokens** for automation: admins mint scoped service-account tokens (stored
+as SHA-256 hashes, shown once) used via `Authorization: Bearer`.
 
 **Audit.** An append-only security trail records every authenticated mutation
 and sign-in (success and failure) with actor, action, and outcome. Admin-only,
@@ -88,11 +90,35 @@ follow-up work.
 
 **Persistence.** `JsonStateStore` (atomic writes, file lock, rolling backups,
 auto-repair) locally; `SqlStateStore` (Postgres, JSONB per project, optimistic
-concurrency) for the shared hub. Both pass the same contract test.
+concurrency) for the shared hub. Both pass the same contract test. Where each
+kind of data lives when the infra is configured: **Postgres** — project state,
+accounts/tokens, audit log, system chat; **Redis** — sessions + all ephemeral
+coordination (leases, worker registry, operator locks, desired-run flags);
+**MongoDB** — the living documentation store; **MinIO/S3** — chat & ticket media.
+Only two bootstrap files stay machine-local by design: `coordination.json` (the
+DSNs themselves) and `registry.json` (project id → local codebase path).
+
+**Distributed & multi-operator (SaaS).** Many operators (`account@host`) work one
+project in parallel, coordinating through Postgres + Redis: an atomic
+`claim_ticket`, per-stage leases, and leader election mean no two ever duplicate
+work; shared-state writes use optimistic concurrency **with retry** so neither
+loses an update; each operator builds in its own git worktree; a **single-instance
+lock** refuses a second process for the same `account@host`. **Start/stop is
+per-user** — each controls only their own operator (a persisted desired-run flag
+the operator honours, so Stop reaches a worker on another machine without killing
+processes; admins can control any). The desktop app runs an embedded hub by
+default, or, with `COXAGENT_HUB_URL` set, becomes a **thin client** onto a central
+hub and spawns its own operator (idle until started). Token spend is metered
+**per operator** for per-user FinOps, and each operator's **live log** is viewable
+separately in the dashboard.
 
 **Scrum & FinOps.** Optional sprint mode (commit backlog, roll over, report
-velocity). Real token/cost usage metered per role into state; a `budget_usd` cap
-auto-pauses the loop.
+velocity). Real token/cost usage metered per role **and per operator** into state;
+a `budget_usd` cap auto-pauses the loop. **Token-optimized ceremonies**: standup /
+planning / grooming / discussion each run in a *single* engine call (not one per
+role turn), fire only when there's real activity, and route to a cheap model
+(`per_role`, e.g. haiku for `sm`/`docs`) — an order-of-magnitude cut with no loss
+of the human-team feel.
 
 **Teamwork.** Per-ticket and team-channel **discussion threads**; agents post
 standups and ship notes, humans reply — live over SSE.
@@ -108,7 +134,7 @@ Roadmap, Discussion, Cost, Audit (admin), Settings (engine + model-per-role,
 workflow) — over a live SSE feed, controllable runner (Resume/Step/Pause),
 interactive tickets, login + role-aware UI.
 
-86 tests; clippy pedantic + `-D warnings`; CI + tagged release binaries
+150 tests; clippy pedantic + `-D warnings`; CI + tagged release binaries
 (macOS arm64/x64, linux).
 
 ## Quickstart
@@ -147,18 +173,23 @@ Real LLM agents need a CLI (`claude`/`opencode`) on PATH inside the container;
 the base image ships the offline `scripted`/`mock` engines — install a CLI in a
 derived image to run real agents in the container.
 
-### Enterprise: RBAC + Postgres
+### Enterprise: distributed hub (Postgres + Redis + Mongo + MinIO)
 
 ```sh
-# Bootstrap the admin once (seeds a hashed auth.json beside the registry).
-export COXAGENT_ADMIN_USER=root
-export COXAGENT_ADMIN_PASSWORD='••••••••'
-# Shared multi-tenant persistence (else the local JSON store is used).
-export COXAGENT_DB_DSN='postgres://user:pass@host:5432/coxagent'
+export COXAGENT_ADMIN_USER=root COXAGENT_ADMIN_PASSWORD='••••••••'
+export COXAGENT_DB_DSN='postgres://user:pass@host:5432/coxagent'    # state, chat, audit
+export COXAGENT_AUTH_DSN="$COXAGENT_DB_DSN"                         # accounts in Postgres
+export COXAGENT_REDIS_URL='redis://host:6379'                      # sessions + coordination
+export COXAGENT_MONGO_URL='mongodb://host:27017'                   # docs (optional)
+export COXAGENT_S3_ENDPOINT='http://host:9000'                     # media (optional)
 coxagent hub --registry registry.json --port 4000
 ```
 
-`auth.json` holds only Argon2 hashes and is git-ignored — never commit it.
+The desktop app reads these from a `coordination.json` next to the registry, so a
+Finder launch is distributed without env. Extra operators join the same project
+by running `coxagent … run` (or a thin-client app, `COXAGENT_HUB_URL=…`) with a
+distinct `COXAGENT_OPERATOR`. `auth.json` (file mode) holds only Argon2 hashes and
+is git-ignored — never commit it.
 
 ## Engines
 
