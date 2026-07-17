@@ -156,7 +156,9 @@ impl SysChat {
     async fn save(&self) {
         let json = { serde_json::to_string(&*self.inner.lock().await).unwrap_or_default() };
         if let Some(s) = &self.store {
-            let _ = s.save(SYSCHAT_KEY, &json).await;
+            if let Err(e) = s.save(SYSCHAT_KEY, &json).await {
+                tracing::warn!("system chat save failed: {e}");
+            }
             return;
         }
         if let Some(parent) = self.path.parent() {
@@ -230,7 +232,9 @@ impl Ws {
     async fn save(&self) {
         let json = { serde_json::to_string(&*self.inner.lock().await).unwrap_or_default() };
         if let Some(s) = &self.store {
-            let _ = s.save("workspace", &json).await;
+            if let Err(e) = s.save("workspace", &json).await {
+                tracing::warn!("workspace save failed: {e}");
+            }
             return;
         }
         let _ = std::fs::write(&self.path, json);

@@ -59,8 +59,11 @@ impl KvDocPort for PgKvDoc {
     async fn save(&self, key: &str, json: &str) -> Result<(), PortError> {
         let client = self.client().await.map_err(PortError::Backend)?;
         client
+            // `$2::text::jsonb`: bind as TEXT (a &str param), cast in SQL — a bare
+            // `$2::jsonb` makes the driver infer a JSONB param and fail to
+            // serialize a &str ("error serializing parameter").
             .execute(
-                "INSERT INTO app_kv (key, doc, updated) VALUES ($1, $2::jsonb, now())
+                "INSERT INTO app_kv (key, doc, updated) VALUES ($1, $2::text::jsonb, now())
                  ON CONFLICT (key) DO UPDATE SET doc = EXCLUDED.doc, updated = now()",
                 &[&key, &json],
             )
