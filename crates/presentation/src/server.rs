@@ -4038,10 +4038,28 @@ async fn control_ep(
 async fn operator_control_ep(
     State(app): State<AppState>,
     Path((pid, operator, action)): Path<(String, String, String)>,
+    headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
     let Some(p) = app.project(&pid).await else {
         return not_found();
     };
+    // Each user controls only their OWN team: the operator's account (the part
+    // before `@`) must match the logged-in user — unless they're an admin, who
+    // may manage everyone. Open mode (no auth) allows it (single-user local).
+    if let Some(auth) = app.auth.clone() {
+        let caller = resolve_principal(&auth, &headers).await;
+        let account = operator.split('@').next().unwrap_or("");
+        let allowed = caller
+            .as_ref()
+            .is_some_and(|u| u.role.can_manage() || u.username.eq_ignore_ascii_case(account));
+        if !allowed {
+            return (
+                axum::http::StatusCode::FORBIDDEN,
+                Json(serde_json::json!({ "error": "you can only control your own operator" })),
+            )
+                .into_response();
+        }
+    }
     let running = match action.as_str() {
         "start" => true,
         "stop" => false,
