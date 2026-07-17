@@ -140,4 +140,16 @@ pub trait StateStorePort: Send + Sync {
     async fn get_desired(&self, _operator: &str) -> Result<Option<bool>, PortError> {
         Ok(None)
     }
+
+    /// Acquire or renew a single-instance lock for `operator`, held by `instance`
+    /// (a per-process token such as the PID). Returns `true` if this instance
+    /// holds the lock; `false` means another live process already runs this
+    /// operator, so the caller should not start a duplicate. Default `true`
+    /// (single-machine file store needs no cross-process lock).
+    ///
+    /// # Errors
+    /// [`PortError`] on a coordination-store failure.
+    async fn acquire_operator(&self, _operator: &str, _instance: &str) -> Result<bool, PortError> {
+        Ok(true)
+    }
 }

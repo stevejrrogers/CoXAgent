@@ -99,4 +99,11 @@ impl StateStorePort for AnyStateStore {
             Self::Sql(s) => s.get_desired(operator).await,
         }
     }
+
+    async fn acquire_operator(&self, operator: &str, instance: &str) -> Result<bool, PortError> {
+        match self {
+            Self::Json(s) => s.acquire_operator(operator, instance).await,
+            Self::Sql(s) => s.acquire_operator(operator, instance).await,
+        }
+    }
 }

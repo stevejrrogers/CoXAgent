@@ -16,6 +16,9 @@ const LEADER_TTL_MS: u64 = 90_000;
 const STAGE_TTL_MS: u64 = 1_800_000;
 /// Worker presence (ms) — how long a team shows online after its last beat.
 const WORKER_TTL_MS: u64 = 600_000;
+/// Operator single-instance lock (ms) — one live process per `operator@host`.
+/// Renewed by the holder; a duplicate process can only take it once this lapses.
+const OPLOCK_TTL_MS: u64 = 90_000;
 
 /// Redis coordinator scoped to one project id. Cloneable-cheap (holds a client).
 pub struct RedisCoord {
@@ -127,6 +130,26 @@ impl RedisCoord {
             .await
             .map_err(|e| PortError::Backend(format!("redis heartbeat: {e}")))?;
         Ok(())
+    }
+
+    /// Acquire or renew the single-instance lock for `operator`, held by this
+    /// `instance` (its PID). Wins only if the lock is free or already ours — so a
+    /// second process with the same `operator@host` is refused while the first
+    /// keeps renewing. Returns `true` when this instance holds the lock.
+    ///
+    /// # Errors
+    /// [`PortError`] on a Redis failure.
+    pub async fn acquire_operator_lock(
+        &self,
+        operator: &str,
+        instance: &str,
+    ) -> Result<bool, PortError> {
+        self.take(
+            &format!("cox:{}:oplock:{operator}", self.project_id),
+            instance,
+            OPLOCK_TTL_MS,
+        )
+        .await
     }
 
     /// Record an operator's desired run state as a persistent (no-TTL) key, so a

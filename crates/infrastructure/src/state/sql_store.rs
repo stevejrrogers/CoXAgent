@@ -318,6 +318,13 @@ impl StateStorePort for SqlStateStore {
         }
         Ok(None)
     }
+
+    async fn acquire_operator(&self, operator: &str, instance: &str) -> Result<bool, PortError> {
+        if let Some(r) = &self.redis {
+            return r.acquire_operator_lock(operator, instance).await;
+        }
+        Ok(true)
+    }
 }
 
 impl SqlStateStore {

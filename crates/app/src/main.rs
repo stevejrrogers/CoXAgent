@@ -1143,6 +1143,35 @@ async fn run_loop(
     }));
     let operator = worker.clone();
     uc.set_worker(worker);
+
+    // Single-instance lock: refuse to start a second process for the same
+    // `operator@host`. Two runners under one identity share a claim owner,
+    // clobber each other's registry heartbeat, and double the token spend —
+    // exactly the "two luffy" duplication. The lock is held (and renewed) by
+    // this process's PID; a duplicate only wins once the holder dies.
+    let instance = std::process::id().to_string();
+    if !store
+        .acquire_operator(&operator, &instance)
+        .await
+        .unwrap_or(true)
+    {
+        tracing::warn!(
+            "operator {operator} is already running on this host — not starting a duplicate"
+        );
+        return Ok(format!(
+            "operator {operator} already active elsewhere; refusing to start a duplicate\n"
+        ));
+    }
+    {
+        let (s, op, inst) = (Arc::clone(&store), operator.clone(), instance.clone());
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                let _ = s.acquire_operator(&op, &inst).await; // renew our hold
+            }
+        });
+    }
+
     let shutdown = shutdown::Shutdown::listen();
     tracing::info!("cycle loop started");
 
