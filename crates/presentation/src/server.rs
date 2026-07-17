@@ -113,31 +113,52 @@ struct ChatChannel {
 /// [`SystemChat`] aggregate (private channels + all messages) behind a mutex,
 /// the JSON file it persists to, a broadcast bus for live WebSockets, and the
 /// directory uploaded chat media lives in.
+/// Hub-wide chat key in the shared KV store.
+const SYSCHAT_KEY: &str = "system_chat";
+
 #[derive(Clone)]
 struct SysChat {
     inner: Arc<tokio::sync::Mutex<coxagent_application::SystemChat>>,
+    /// Local-file fallback path, used only when no shared store is configured.
     path: PathBuf,
+    /// Shared DB store (Postgres). When set, it is the system of record and the
+    /// file is not touched.
+    store: Option<Arc<dyn coxagent_application::ports::outbound::KvDocPort>>,
     tx: tokio::sync::broadcast::Sender<String>,
 }
 
 impl SysChat {
-    /// Load the store from `dir/system_chat.json` (empty if absent).
-    fn load(dir: &std::path::Path) -> Self {
+    /// Load the store from the shared DB when `store` is set, else from
+    /// `dir/system_chat.json` (empty if absent).
+    async fn load(
+        dir: &std::path::Path,
+        store: Option<Arc<dyn coxagent_application::ports::outbound::KvDocPort>>,
+    ) -> Self {
         let path = dir.join("system_chat.json");
-        let inner = std::fs::read_to_string(&path)
-            .ok()
+        let text = if let Some(s) = &store {
+            s.load(SYSCHAT_KEY).await.ok().flatten()
+        } else {
+            std::fs::read_to_string(&path).ok()
+        };
+        let inner = text
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
         Self {
             inner: Arc::new(tokio::sync::Mutex::new(inner)),
             path,
+            store,
             tx: tokio::sync::broadcast::channel(256).0,
         }
     }
 
-    /// Persist the current state to disk (best-effort).
+    /// Persist the current state (best-effort) to the shared DB, or the local
+    /// file when no store is configured.
     async fn save(&self) {
         let json = { serde_json::to_string(&*self.inner.lock().await).unwrap_or_default() };
+        if let Some(s) = &self.store {
+            let _ = s.save(SYSCHAT_KEY, &json).await;
+            return;
+        }
         if let Some(parent) = self.path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -497,10 +518,12 @@ pub struct HubExtras {
     pub storage: Option<Arc<dyn coxagent_application::ports::outbound::StoragePort>>,
     /// Server-side documentation store (e.g. MongoDB). `None` = per-project state.
     pub doc_store: Option<Arc<dyn coxagent_application::ports::outbound::DocStorePort>>,
+    /// Shared KV store for hub-wide singletons (system chat). `None` = local file.
+    pub syschat_store: Option<Arc<dyn coxagent_application::ports::outbound::KvDocPort>>,
 }
 
 /// Assemble the shared [`AppState`] from the registered projects and hub extras.
-fn build_state(
+async fn build_state(
     projects: Vec<ProjectHandle>,
     audit: Arc<dyn AuditPort>,
     extras: HubExtras,
@@ -509,6 +532,7 @@ fn build_state(
     let map: HashMap<String, ProjectHandle> =
         projects.into_iter().map(|p| (p.id.clone(), p)).collect();
     let hub_dir = extras.hub_dir.unwrap_or_else(|| PathBuf::from("."));
+    let syschat = SysChat::load(&hub_dir, extras.syschat_store).await;
     AppState {
         projects: Arc::new(RwLock::new(map)),
         chat_bus: Arc::new(RwLock::new(HashMap::new())),
@@ -523,7 +547,7 @@ fn build_state(
         viewers: Arc::new(std::sync::Mutex::new(HashMap::new())),
         remover: extras.remover,
         analyzer: extras.analyzer,
-        syschat: SysChat::load(&hub_dir),
+        syschat,
         storage: extras.storage.unwrap_or_else(|| {
             Arc::new(DiskStorage {
                 root: hub_dir.join("blobs"),
@@ -546,7 +570,7 @@ pub async fn serve_full(
     audit: Arc<dyn AuditPort>,
     extras: HubExtras,
 ) -> std::io::Result<()> {
-    let state = build_state(projects, audit, extras);
+    let state = build_state(projects, audit, extras).await;
 
     let app = Router::new()
         .route("/", get(index))

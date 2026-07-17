@@ -11,6 +11,7 @@ pub mod docs_store;
 pub mod engine;
 pub mod forge;
 pub mod git;
+pub mod kv_doc;
 pub mod notifier;
 pub mod sql_auth;
 pub mod state;
@@ -27,6 +28,7 @@ pub use engine::{
 };
 pub use forge::{GhForge, GlForge};
 pub use git::SystemGit;
+pub use kv_doc::PgKvDoc;
 pub use notifier::WebhookNotifier;
 pub use sql_auth::SqlAuthService;
 pub use state::{AnyStateStore, JsonStateStore, SqlStateStore};

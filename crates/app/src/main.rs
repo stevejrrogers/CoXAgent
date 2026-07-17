@@ -567,6 +567,7 @@ async fn serve_with_runner(
         hub_dir: Some(state_dir.parent().unwrap_or(state_dir).to_path_buf()),
         storage: build_storage().await,
         doc_store: build_doc_store().await,
+        syschat_store: build_syschat_store(state_dir.parent().unwrap_or(state_dir)).await,
         ..Default::default()
     };
     coxagent_presentation::serve_full(vec![project], port, audit, extras).await?;
@@ -575,6 +576,39 @@ async fn serve_with_runner(
 
 /// Documentation store: MongoDB when `COXAGENT_MONGO_URL` is set, else `None`
 /// (docs fall back to per-project `state.json`).
+/// Shared KV store for hub-wide singletons (system chat), backed by Postgres
+/// when a state DSN is configured. Falls back to `None` (local file) otherwise.
+/// On first use it migrates an existing `system_chat.json` under `hub_dir` into
+/// the database so nothing is lost when moving off the local file.
+async fn build_syschat_store(
+    hub_dir: &Path,
+) -> Option<std::sync::Arc<dyn coxagent_application::ports::outbound::KvDocPort>> {
+    use coxagent_application::ports::outbound::KvDocPort;
+    let dsn = std::env::var("COXAGENT_DB_DSN")
+        .ok()
+        .filter(|s| !s.is_empty())?;
+    match coxagent_infrastructure::PgKvDoc::connect(&dsn).await {
+        Ok(store) => {
+            // One-time migration: seed the DB from the local file if the DB has
+            // no system-chat doc yet but a file exists.
+            if matches!(store.load("system_chat").await, Ok(None)) {
+                if let Ok(text) = std::fs::read_to_string(hub_dir.join("system_chat.json")) {
+                    if !text.trim().is_empty() {
+                        let _ = store.save("system_chat", &text).await;
+                        tracing::info!("system chat: migrated local file into Postgres");
+                    }
+                }
+            }
+            tracing::info!("system chat store: Postgres");
+            Some(std::sync::Arc::new(store))
+        }
+        Err(e) => {
+            tracing::warn!("Postgres KV configured but unavailable ({e}); using local file");
+            None
+        }
+    }
+}
+
 async fn build_doc_store(
 ) -> Option<std::sync::Arc<dyn coxagent_application::ports::outbound::DocStorePort>> {
     match coxagent_infrastructure::MongoDocStore::from_env().await {
@@ -716,6 +750,7 @@ async fn run_hub(registry: &Path, port: u16) -> Result<(), Box<dyn std::error::E
         hub_dir: Some(base.clone()),
         storage: build_storage().await,
         doc_store: build_doc_store().await,
+        syschat_store: build_syschat_store(&base).await,
     };
     coxagent_presentation::serve_full(projects, port, audit, extras).await?;
     Ok(())
