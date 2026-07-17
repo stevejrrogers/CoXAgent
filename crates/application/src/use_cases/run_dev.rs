@@ -151,27 +151,33 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             }
         }
 
-        // Complete: reload (the run may have changed nothing we track), move to
-        // the terminal status, bump the version, record the deploy, persist.
-        let mut state = self.store.load().await?;
-        transition(
-            &mut state,
-            &id,
+        // Complete under an atomic read-modify-write with retry: move to the
+        // terminal status, bump the version, record the deploy. A concurrent
+        // operator saving the shared state can't make us lose this completion
+        // (which would strand the ticket and waste tokens redoing it).
+        let (role, status, bump, id_c) = (
             self.mode.role(),
             self.mode.complete_status(),
-        )?;
-        let version = state.current_version.bumped(self.mode.bump());
-        state.current_version = version.clone();
-        let title = state
-            .ticket(&id)
-            .map_or_else(String::new, |t| t.title().to_owned());
-        state.history.push(crate::state::DeployRecord {
-            version,
-            ticket: id.clone(),
-            title,
-            at: now_rfc3339(),
-        });
-        self.store.save(&state).await?;
+            self.mode.bump(),
+            id.clone(),
+        );
+        crate::ports::outbound::mutate_state(self.store.as_ref(), |state| {
+            transition(state, &id_c, role, status)
+                .map_err(|e| PortError::Corrupt(e.to_string()))?;
+            let version = state.current_version.bumped(bump);
+            state.current_version = version.clone();
+            let title = state
+                .ticket(&id_c)
+                .map_or_else(String::new, |t| t.title().to_owned());
+            state.history.push(crate::state::DeployRecord {
+                version,
+                ticket: id_c.clone(),
+                title,
+                at: now_rfc3339(),
+            });
+            Ok(())
+        })
+        .await?;
         if let Some(p) = &self.phase {
             p(None);
         }

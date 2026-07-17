@@ -111,14 +111,22 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
         let ux =
             parse_ux(&outcome.stdout).map_err(|e| PortError::Corrupt(format!("PD output: {e}")))?;
 
-        let mut state = self.store.load().await?;
-        let ticket = state
-            .ticket_mut(&id)
-            .ok_or_else(|| PortError::Corrupt(format!("ticket {id} vanished")))?;
-        ticket.set_ux_design(Role::Pd, ux_of(&ux))?;
-        // DoR re-checked here; passes now that both technical and UX exist.
-        ticket.transition_to(Role::Pd, Status::Ready)?;
-        self.store.save(&state).await?;
+        // Atomic read-modify-write with retry (parallel-safe).
+        let ux_design = ux_of(&ux);
+        crate::ports::outbound::mutate_state(self.store.as_ref(), |state| {
+            let ticket = state
+                .ticket_mut(&id)
+                .ok_or_else(|| PortError::Corrupt(format!("ticket {id} vanished")))?;
+            ticket
+                .set_ux_design(Role::Pd, ux_design.clone())
+                .map_err(|e| PortError::Corrupt(e.to_string()))?;
+            // DoR re-checked here; passes now that both technical and UX exist.
+            ticket
+                .transition_to(Role::Pd, Status::Ready)
+                .map_err(|e| PortError::Corrupt(e.to_string()))?;
+            Ok(())
+        })
+        .await?;
         if let Some(p) = &self.phase {
             p(None);
         }

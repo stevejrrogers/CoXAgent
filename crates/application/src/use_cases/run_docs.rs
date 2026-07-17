@@ -127,15 +127,6 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
         };
         let category = crate::state::doc_category_of(space);
 
-        let mut state = self.store.load().await?;
-        state.ensure_standard_folders();
-        let ticket = state
-            .ticket_mut(&id)
-            .ok_or_else(|| PortError::Corrupt(format!("ticket {id} vanished")))?;
-        ticket.transition_to(Role::Docs, Status::Documented)?;
-        if sub.is_some() {
-            state.add_doc_folder(&folder);
-        }
         // Surface the documentation in the Wiki: one page per documented feature,
         // so the knowledge base actually fills up as the team ships (not just
         // markdown buried in the codebase).
@@ -144,15 +135,30 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
         } else {
             format!("Documentation for **{title}** ({id}). See the codebase docs for details.")
         };
-        state.upsert_doc(
-            &format!("feat-{id}"),
-            &folder,
-            category,
-            &title,
-            &body,
-            "DOCS",
-        );
-        self.store.save(&state).await?;
+        let has_sub = sub.is_some();
+        // Atomic read-modify-write with retry (parallel-safe).
+        crate::ports::outbound::mutate_state(self.store.as_ref(), |state| {
+            state.ensure_standard_folders();
+            let ticket = state
+                .ticket_mut(&id)
+                .ok_or_else(|| PortError::Corrupt(format!("ticket {id} vanished")))?;
+            ticket
+                .transition_to(Role::Docs, Status::Documented)
+                .map_err(|e| PortError::Corrupt(e.to_string()))?;
+            if has_sub {
+                state.add_doc_folder(&folder);
+            }
+            state.upsert_doc(
+                &format!("feat-{id}"),
+                &folder,
+                category,
+                &title,
+                &body,
+                "DOCS",
+            );
+            Ok(())
+        })
+        .await?;
         if let Some(p) = &self.phase {
             p(None);
         }

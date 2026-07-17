@@ -19,5 +19,5 @@ pub use forge::{ForgePort, PullRequest};
 pub use git::{GitAuthor, GitPort};
 pub use kv_doc::KvDocPort;
 pub use notify::{NotifierPort, NotifyEvent, NullNotifier};
-pub use state_store::{StateStorePort, WorkerEntry};
+pub use state_store::{mutate_state, StateStorePort, WorkerEntry};
 pub use storage::StoragePort;

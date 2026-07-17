@@ -20,6 +20,34 @@ pub struct WorkerEntry {
     pub at: String,
 }
 
+/// Atomic read-modify-write with retry: load the state, apply `f`, and save. If
+/// a concurrent writer advanced the revision (a [`PortError::Conflict`]), reload
+/// and re-apply `f` up to a bounded number of times. This is how two operators
+/// working the same project in parallel both persist their changes without one
+/// silently clobbering the other or losing work — `f` re-runs on a fresh state
+/// each retry, so it must recompute from the reloaded state (not capture stale
+/// values).
+///
+/// # Errors
+/// The mutator's error, or [`PortError::Conflict`] if it never converged.
+pub async fn mutate_state<S, F>(store: &S, mut f: F) -> Result<(), PortError>
+where
+    S: StateStorePort + ?Sized,
+    F: FnMut(&mut ProjectState) -> Result<(), PortError>,
+{
+    let mut last = PortError::Conflict("mutate: no attempts".to_owned());
+    for _ in 0..12 {
+        let mut state = store.load().await?;
+        f(&mut state)?;
+        match store.save(&state).await {
+            Ok(()) => return Ok(()),
+            Err(PortError::Conflict(e)) => last = PortError::Conflict(e),
+            Err(other) => return Err(other),
+        }
+    }
+    Err(last)
+}
+
 /// Persistence port for the project aggregate.
 ///
 /// Implementations must make `save` atomic (no torn writes) and guard against

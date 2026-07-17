@@ -118,17 +118,26 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
         let design = parse_design(&outcome.stdout)
             .map_err(|e| PortError::Corrupt(format!("SA output: {e}")))?;
 
-        let mut state = self.store.load().await?;
-        let ticket = state
-            .ticket_mut(&id)
-            .ok_or_else(|| PortError::Corrupt(format!("ticket {id} vanished")))?;
-        ticket.set_technical_design(Role::Sa, technical_of(&design))?;
-        // SA owns the technical design only. A non-UI ticket is ready now; a UI
-        // ticket stays pending for PD to author UX (DoR then passes on both).
-        if !has_ui {
-            ticket.transition_to(Role::Sa, Status::Ready)?;
-        }
-        self.store.save(&state).await?;
+        // Atomic read-modify-write with retry, so a concurrent operator can't
+        // clobber this SA design or lose the transition (parallel-safe).
+        let td = technical_of(&design);
+        crate::ports::outbound::mutate_state(self.store.as_ref(), |state| {
+            let ticket = state
+                .ticket_mut(&id)
+                .ok_or_else(|| PortError::Corrupt(format!("ticket {id} vanished")))?;
+            ticket
+                .set_technical_design(Role::Sa, td.clone())
+                .map_err(|e| PortError::Corrupt(e.to_string()))?;
+            // SA owns the technical design only. A non-UI ticket is ready now;
+            // a UI ticket stays pending for PD to author UX.
+            if !has_ui {
+                ticket
+                    .transition_to(Role::Sa, Status::Ready)
+                    .map_err(|e| PortError::Corrupt(e.to_string()))?;
+            }
+            Ok(())
+        })
+        .await?;
         // Work done: clear the live phase so the dashboard/keepalive stops
         // showing this role once we move on (no stale "still on SA" label).
         if let Some(p) = &self.phase {
