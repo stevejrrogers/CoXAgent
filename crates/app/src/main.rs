@@ -474,7 +474,16 @@ async fn build_project(
     let loaded = store.load().await.ok();
     let alias = loaded.as_ref().map(|s| s.alias.clone()).unwrap_or_default();
     let custom_name = loaded.as_ref().and_then(|s| s.display_name.clone());
-    let context = std::fs::read_to_string(state_dir.join("project_context.md")).unwrap_or_default();
+    let mut context =
+        std::fs::read_to_string(state_dir.join("project_context.md")).unwrap_or_default();
+    // Prepend the company-wide conventions (set once in the Workspace screen) so
+    // every agent on every project follows the same house rules.
+    let hub_dir = state_dir.parent().and_then(Path::parent);
+    if let Some(conv) = hub_dir.and_then(workspace_conventions) {
+        if !conv.trim().is_empty() {
+            context = format!("## Company conventions (apply to all work)\n{conv}\n\n{context}");
+        }
+    }
     let webhook = config.workflow.webhook_url.clone();
     // Shared, live-adjustable budget caps — seeded from config, updated by the
     // config API, read by the loop each cycle (so edits apply without a restart).
@@ -1336,6 +1345,40 @@ fn build_notifier(
         sinks.push(Arc::new(WebhookNotifier::new(url)));
     }
     Arc::new(FanoutNotifier(sinks))
+}
+
+/// The company-wide conventions from the workspace doc (`app_kv` key `workspace`
+/// on Postgres, else `<hub>/workspace.json`). Best-effort; `None` when unset.
+fn workspace_conventions(hub_dir: &Path) -> Option<String> {
+    use coxagent_application::ports::outbound::KvDocPort;
+    let raw = match std::env::var("COXAGENT_DB_DSN").ok().filter(|s| !s.is_empty()) {
+        Some(dsn) => {
+            // A short blocking read on its own runtime — build_project runs at
+            // startup, so this one-off is fine and keeps the signature sync.
+            std::thread::spawn(move || {
+                tokio::runtime::Runtime::new().ok().and_then(|rt| {
+                    rt.block_on(async {
+                        coxagent_infrastructure::PgKvDoc::connect(&dsn)
+                            .await
+                            .ok()?
+                            .load("workspace")
+                            .await
+                            .ok()
+                            .flatten()
+                    })
+                })
+            })
+            .join()
+            .ok()
+            .flatten()?
+        }
+        None => std::fs::read_to_string(hub_dir.join("workspace.json")).ok()?,
+    };
+    serde_json::from_str::<serde_json::Value>(&raw)
+        .ok()?
+        .get("conventions")?
+        .as_str()
+        .map(str::to_owned)
 }
 
 /// This machine's hostname (the "machine" a headless worker runs on), or

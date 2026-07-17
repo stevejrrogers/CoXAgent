@@ -932,34 +932,54 @@
   .slash-desc{color:var(--dim);margin-left:auto;font-size:11px}
   .cbub.working{color:var(--muted);font-style:italic;font-size:12.5px;display:inline-flex;align-items:center;gap:7px}
   /* Workspace home */
-  .wshero{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;flex-wrap:wrap;padding:22px 24px;border:1px solid var(--border);border-radius:16px;background:linear-gradient(135deg,color-mix(in srgb,var(--accent2) 10%,var(--card)),var(--card));margin-bottom:6px}
-  .wsname{font-size:24px;font-weight:750;letter-spacing:-.02em}
-  .wstag{color:var(--muted);font-size:13px;margin-top:4px}
-  .wsstats{display:flex;gap:10px;flex-wrap:wrap}
-  .wsgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
-  .wscard{border:1px solid var(--border);border-radius:14px;background:var(--card);padding:16px;cursor:pointer;transition:border-color .15s,transform .15s}
-  .wscard:hover{border-color:var(--accent2);transform:translateY(-2px)}
+  #view-home{max-width:1180px}
+  .wshero{display:flex;align-items:center;gap:22px;flex-wrap:wrap;padding:26px 28px;border:1px solid var(--border);border-radius:18px;
+    background:radial-gradient(120% 160% at 0% 0%,color-mix(in srgb,var(--accent2) 16%,var(--card)),var(--card) 55%);margin-bottom:20px}
+  .wsmark{width:52px;height:52px;border-radius:14px;background:linear-gradient(135deg,var(--accent2),var(--accent));display:grid;place-items:center;color:#06202a;font-size:24px;font-weight:800;flex:none;box-shadow:0 8px 22px color-mix(in srgb,var(--accent2) 40%,transparent)}
+  .wsname{font-size:25px;font-weight:780;letter-spacing:-.02em;line-height:1.1}
+  .wstag{color:var(--muted);font-size:13px;margin-top:5px}
+  .wsstats{display:flex;gap:22px;margin-left:auto;flex-wrap:wrap}
+  .wsstat{text-align:right} .wsstat b{font-size:22px;font-weight:750;letter-spacing:-.02em;display:block;line-height:1}
+  .wsstat span{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+  .wslayout{display:grid;grid-template-columns:1fr 300px;gap:22px;align-items:start}
+  @media(max-width:900px){.wslayout{grid-template-columns:1fr}}
+  .wssec{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--dim);margin-bottom:12px}
+  .wshead{display:flex;align-items:center;justify-content:space-between}
+  .wsgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:14px}
+  .wscard{border:1px solid var(--border);border-radius:15px;background:var(--card);padding:17px;cursor:pointer;transition:border-color .15s,transform .15s,box-shadow .15s}
+  .wscard:hover{border-color:var(--accent2);transform:translateY(-3px);box-shadow:0 12px 30px rgba(0,0,0,.22)}
   .wsc-h{display:flex;align-items:center;gap:8px}
+  .wsc-h b{font-size:15px}
   .wsc-v{margin-left:auto;color:var(--dim);font-size:11px;font-family:ui-monospace,monospace}
-  .wsc-goal{color:var(--accent2);font-size:12px;margin-top:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .wsc-stats{display:flex;gap:14px;color:var(--muted);font-size:12.5px;margin-top:10px}
-  .wsc-online{display:flex;gap:4px;margin-top:12px;align-items:center}
+  .wsc-goal{color:var(--accent2);font-size:12px;margin-top:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .wsc-stats{display:flex;gap:15px;color:var(--muted);font-size:13px;margin-top:12px}
+  .wsc-online{display:flex;gap:4px;margin-top:14px;align-items:center;min-height:22px}
   .wsc-off{color:var(--dim);font-size:11px}
   .wsava{width:22px;height:22px;border-radius:50%;background:color-mix(in srgb,var(--accent2) 22%,transparent);color:var(--accent2);display:inline-flex;align-items:center;justify-content:center;font-size:9.5px;font-weight:700}
-  .wsrow{display:flex;align-items:center;gap:12px;padding:9px 6px;border-bottom:1px solid var(--border);font-size:13px}
-  .wsrow:last-child{border-bottom:none}
-  .wsproj{min-width:130px;font-weight:600}
-  .wsstate{flex:1;color:var(--muted)}
-  .wsspend{color:var(--dim);font-size:12px;font-family:ui-monospace,monospace}
+  /* Sidebar: your agents + team */
+  .wscol{display:flex;flex-direction:column;gap:8px}
+  .wscard-a .wsproj{font-size:13px}
+  .wscard-a .wsstate{display:block;margin:3px 0}
+  .wscard-a .wsdot{margin-right:4px}
+  .agbtn{flex:none;width:34px;height:34px;border-radius:9px;border:1px solid var(--border2);background:var(--card2);color:var(--green);cursor:pointer;display:grid;place-items:center;font-size:15px}
+  .agbtn.stop{color:var(--red)} .agbtn:hover{border-color:currentColor}
+  .wsrow{display:flex;align-items:center;gap:10px;padding:11px 13px;border:1px solid var(--border);border-radius:12px;background:var(--card);font-size:13px}
+  .wsproj{font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .wsstate{flex:1;color:var(--muted);font-size:12px;min-width:0}
+  .wsspend{color:var(--dim);font-size:11px;font-family:ui-monospace,monospace}
   .wsdot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:2px}
   .wsdot.on{background:var(--green);box-shadow:0 0 6px var(--green)}
   .wsdot.off{background:var(--red)} .wsdot.idle{background:var(--amber)}
-  .wsmem{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--border);border-radius:20px;padding:5px 12px 5px 6px;margin:3px;font-size:12.5px}
-  .wsrole{color:var(--dim);font-size:10.5px;text-transform:uppercase}
+  .wsmem{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--border);border-radius:20px;padding:4px 11px 4px 5px;margin:0 4px 6px 0;font-size:12px}
+  .wsrole{color:var(--dim);font-size:10px;text-transform:uppercase}
+  .wsmanage-wrap{margin-top:24px}
+  .wsmanage-btn{background:none;border:1px solid var(--border);color:var(--muted);border-radius:10px;padding:9px 14px;font-size:12.5px;cursor:pointer}
+  .wsmanage-btn:hover{border-color:var(--accent2);color:var(--text)}
+  #ws-admin{margin-top:14px}
   .wsroles{display:flex;flex-direction:column;gap:4px;margin-bottom:12px;padding:10px 12px;border:1px dashed var(--border2);border-radius:10px}
   .wsrole-x{color:var(--muted);font-size:12px}
   .wsrole-x b{color:var(--accent2);font-family:ui-monospace,monospace;margin-right:4px}
-  .wssetup{border-color:color-mix(in srgb,var(--accent2) 45%,var(--border))}
+  .wshero.wssetup{border-color:color-mix(in srgb,var(--accent2) 45%,var(--border))}
   .ctime{color:var(--dim)}
   .cbub{background:var(--card);border:1px solid var(--border);border-radius:12px;border-top-left-radius:3px;padding:9px 13px;font-size:13px;line-height:1.5;color:var(--text);white-space:pre-wrap;word-break:break-word}
   /* rendered-markdown message body: flow like HTML, chat-sized elements */
@@ -1145,13 +1165,22 @@ body:not(.manage) .manage-only { display: none !important; }
     <div class="content">
       <div class="view" id="view-home">
         <div id="ws-hero"></div>
-        <div class="sec">My agents <span style="font-size:11px;color:var(--dim);font-weight:400">· your operator in each project — start/stop is yours alone</span></div>
-        <div class="panel" id="ws-myagents"></div>
-        <div class="sec">Projects</div>
-        <div id="ws-projects" class="wsgrid"></div>
-        <div class="sec">Members</div>
-        <div class="panel" id="ws-members"></div>
-        <div class="manage-only" id="ws-admin"></div>
+        <div class="wslayout">
+          <section class="wsmain">
+            <div class="wshead"><span class="wssec">Projects</span></div>
+            <div id="ws-projects" class="wsgrid"></div>
+          </section>
+          <aside class="wsside">
+            <div class="wssec">Your agents</div>
+            <div id="ws-myagents" class="wscol"></div>
+            <div class="wssec" style="margin-top:20px">Team</div>
+            <div id="ws-members"></div>
+          </aside>
+        </div>
+        <div class="manage-only wsmanage-wrap">
+          <button class="wsmanage-btn" onclick="document.getElementById('ws-admin').hidden=!document.getElementById('ws-admin').hidden"><i class="ti ti-settings"></i> Manage workspace</button>
+        </div>
+        <div class="manage-only" id="ws-admin" hidden></div>
       </div>
       <div class="view on" id="view-overview">
         <div id="ov-alerts"></div>
@@ -2007,19 +2036,24 @@ async function renderHome(){
           <button class="pri" onclick="createWs()"><i class="ti ti-rocket"></i> Tạo workspace</button>
         </div></div></div>`;
   }else{
+    const nm=w.name||"Your workspace";
+    const stat=(v,l)=>`<div class="wsstat"><b>${v}</b><span>${l}</span></div>`;
     document.getElementById("ws-hero").innerHTML=`<div class="wshero">
-      <div><div class="wsname">${esc(w.name||"Your workspace")}</div><div class="wstag">${esc(w.tagline||"one company · many projects · autonomous teams")}</div></div>
-      <div class="wsstats">${kpi("Projects",(ov.projects||[]).length)}${kpi("Members",(ov.members||[]).length)}${kpi("Online now",online.size)}${kpi("Total spend",money(totalSpend))}</div></div>`;
+      <div class="wsmark">${esc(initials(nm))}</div>
+      <div><div class="wsname">${esc(nm)}</div><div class="wstag">${esc(w.tagline||"one company · many projects · autonomous teams")}</div></div>
+      <div class="wsstats">${stat((ov.projects||[]).length,"Projects")}${stat((ov.members||[]).length,"Members")}${stat(online.size,"Online")}${stat(money(totalSpend),"Spend")}</div></div>`;
   }
   document.getElementById("ws-myagents").innerHTML=(me.agents||[]).length?(me.agents||[]).map(a=>{
-    const st=a.online?`<span class="wsdot on"></span> <b>${esc((a.role||"").toUpperCase())}</b> ${a.ticket?`<span class="tid">${esc(a.ticket)}</span>`:""}`
-      :(a.desired===false?'<span class="wsdot off"></span> stopped':'<span class="wsdot idle"></span> idle');
+    const st=a.online?`<span class="wsdot on"></span><b>${esc((a.role||"").toUpperCase())}</b> ${a.ticket?`<span class="tid">${esc(a.ticket)}</span>`:""}`
+      :(a.desired===false?'<span class="wsdot off"></span>stopped':'<span class="wsdot idle"></span>idle');
     const op=a.operator?`'${esc(a.operator)}'`:null;
-    const btn=a.online?`<button class="ticket-actions" onclick="myAgentCtl('${esc(a.project)}',${op},'stop')"><i class="ti ti-player-stop"></i> Stop</button>`
-      :`<button class="ticket-actions" onclick="myAgentCtl('${esc(a.project)}',${op},'start')"><i class="ti ti-player-play"></i> Start</button>`;
-    return `<div class="wsrow"><span class="wsproj">${esc(a.name||a.project)}</span><span class="wsstate">${st}</span>
-      <span class="wsspend">${fmtK(a.tokens||0)} tok · ${money(a.cost||0)}</span>${btn}</div>`;}).join("")
-    :'<div class="empty">no agents yet — Start one in a project you belong to</div>';
+    const btn=a.online?`<button class="agbtn stop" onclick="myAgentCtl('${esc(a.project)}',${op},'stop')" title="Stop"><i class="ti ti-player-stop-filled"></i></button>`
+      :`<button class="agbtn" onclick="myAgentCtl('${esc(a.project)}',${op},'start')" title="Start"><i class="ti ti-player-play-filled"></i></button>`;
+    return `<div class="wsrow wscard-a"><div style="flex:1;min-width:0">
+      <div class="wsproj">${esc(a.name||a.project)}</div>
+      <div class="wsstate">${st}</div>
+      <div class="wsspend">${fmtK(a.tokens||0)} tok · ${money(a.cost||0)}</div></div>${btn}</div>`;}).join("")
+    :'<div class="empty" style="padding:14px">No agents yet — open a project and Start yours.</div>';
   document.getElementById("ws-projects").innerHTML=(ov.projects||[]).map(p=>`
     <div class="wscard" onclick="switchProject('${esc(p.id)}');nav('overview')">
       <div class="wsc-h"><b>${esc(p.name||p.id)}</b><span class="tk">${esc(p.alias||"")}</span><span class="wsc-v">v${esc(p.version||"0")}</span></div>
@@ -2041,6 +2075,8 @@ async function myAgentCtl(pid,op,action){
   setTimeout(renderHome,900);
 }
 async function renderWsAdmin(w){
+  // Pull the full workspace doc (includes conventions, not in the overview).
+  try{const full=await(await fetch("/api/workspace")).json();w=Object.assign({},w,full);}catch(e){}
   let invites=[];try{invites=await(await fetch("/api/workspace/invites")).json();}catch(e){}
   const projOpts=(STATE&&window.PROJECTS||[]).map(p=>p.id||p).join(", ");
   document.getElementById("ws-admin").innerHTML=`
@@ -2048,6 +2084,8 @@ async function renderWsAdmin(w){
     <div class="panel frm">
       <div class="fr"><span class="lbl">Company name</span><input id="wsn" value="${esc(w.name||"")}" placeholder="e.g. Straw Hat Labs"></div>
       <div class="fr"><span class="lbl">Tagline</span><input id="wst" value="${esc(w.tagline||"")}" placeholder="what your company does"></div>
+      <div class="fr" style="align-items:flex-start"><span class="lbl">Conventions</span>
+        <textarea id="wsc" rows="4" placeholder="Company rules injected into EVERY agent on every project, e.g.\n- Comments & docs in Vietnamese\n- Follow hexagonal architecture; no logic in handlers\n- Prefer the existing UI components, never add a CSS framework" style="flex:1;background:var(--card);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 11px;font-size:12.5px;font-family:inherit">${esc(w.conventions||"")}</textarea></div>
       <div class="fr"><span class="lbl"></span><button class="pri" onclick="saveWs()"><i class="ti ti-check"></i> Save</button></div>
     </div>
     <div class="sec">Invite people</div>
@@ -2068,7 +2106,7 @@ async function renderWsAdmin(w){
         <button class="ticket-actions" onclick="revokeInvite('${esc(i.token)}')"><i class="ti ti-trash"></i></button></div>`).join(""):'<div class="empty" style="padding:6px">no active invites</div>'}
     </div>`;
 }
-async function saveWs(){try{await fetch("/api/workspace",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:val("wsn"),tagline:val("wst"),accent:""})});toasty("Workspace saved","ok");renderHome();}catch(e){}}
+async function saveWs(){try{await fetch("/api/workspace",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:val("wsn"),tagline:val("wst"),accent:"",conventions:val("wsc")})});toasty("Saved — conventions apply to new agent runs","ok");renderHome();}catch(e){}}
 // First-run: the admin creates the workspace (name + tagline), then invites.
 async function createWs(){
   const name=val("wsn0").trim();if(!name){toasty("Đặt tên công ty trước nhé","warn");return;}

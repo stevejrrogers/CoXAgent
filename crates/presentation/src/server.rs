@@ -177,6 +177,10 @@ struct WorkspaceDoc {
     tagline: String,
     #[serde(default)]
     accent: String,
+    /// Company-wide engineering conventions (coding standards, style, do/don't).
+    /// Injected into every agent's prompt across every project.
+    #[serde(default)]
+    conventions: String,
     #[serde(default)]
     invites: Vec<Invite>,
 }
@@ -4249,7 +4253,7 @@ async fn digest_ep(
 async fn workspace_get_ep(State(app): State<AppState>) -> axum::response::Response {
     let w = app.workspace.inner.lock().await.clone();
     Json(serde_json::json!({
-        "name": w.name, "tagline": w.tagline, "accent": w.accent,
+        "name": w.name, "tagline": w.tagline, "accent": w.accent, "conventions": w.conventions,
         "configured": !w.name.trim().is_empty(),
     }))
     .into_response()
@@ -4263,6 +4267,8 @@ struct WorkspacePutReq {
     tagline: String,
     #[serde(default)]
     accent: String,
+    #[serde(default)]
+    conventions: Option<String>,
 }
 
 /// Set the workspace identity (admin — writes are admin-gated by middleware).
@@ -4275,6 +4281,10 @@ async fn workspace_put_ep(
         req.name.trim().clone_into(&mut w.name);
         req.tagline.trim().clone_into(&mut w.tagline);
         req.accent.trim().clone_into(&mut w.accent);
+        // Conventions edited on their own screen; only overwrite when provided.
+        if let Some(c) = &req.conventions {
+            c.trim().clone_into(&mut w.conventions);
+        }
     }
     app.workspace.save().await;
     Json(serde_json::json!({ "ok": true })).into_response()
