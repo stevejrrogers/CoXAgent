@@ -40,6 +40,28 @@ pub fn is_quota_wall(msg: &str) -> bool {
     .any(|k| m.contains(k))
 }
 
+/// Whether a message looks like a transient failure (a hang/timeout, a dropped
+/// connection, a stalled stream) worth retrying on another engine — the model is
+/// stuck or slow, not the task being wrong. Unlike a quota wall this does NOT
+/// exhaust the loop: if every engine is merely slow, the next cycle retries.
+#[must_use]
+pub fn is_transient(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    [
+        "timed out",
+        "timeout",
+        "deadline",
+        "connection",
+        "stream closed",
+        "broken pipe",
+        "reset by peer",
+        "temporarily",
+        "try again",
+    ]
+    .iter()
+    .any(|k| m.contains(k))
+}
+
 /// Runs the first engine that isn't quota-blocked.
 pub struct FailoverEngine<E: AgentEnginePort> {
     engines: Vec<E>,
@@ -71,8 +93,10 @@ impl<E: AgentEnginePort> AgentEnginePort for FailoverEngine<E> {
                 // Failed: only fall through on a quota wall, and only if another
                 // engine is left. A normal task failure is returned as-is.
                 Ok(o) => {
-                    if !is_last && is_quota_wall(&o.stderr) {
-                        tracing::warn!("engine {} quota-blocked, failing over", engine.id());
+                    // Fall over on a quota wall or a transient stall (slow/hung
+                    // engine), as long as another engine is left to try.
+                    if !is_last && (is_quota_wall(&o.stderr) || is_transient(&o.stderr)) {
+                        tracing::warn!("engine {} unavailable, failing over", engine.id());
                         last_err.clone_from(&o.stderr);
                         continue;
                     }
@@ -80,12 +104,13 @@ impl<E: AgentEnginePort> AgentEnginePort for FailoverEngine<E> {
                 }
                 Err(e) => {
                     let msg = e.to_string();
-                    if !is_last && is_quota_wall(&msg) {
-                        tracing::warn!("engine {} error (quota), failing over", engine.id());
+                    if !is_last && (is_quota_wall(&msg) || is_transient(&msg)) {
+                        tracing::warn!("engine {} error, failing over: {msg}", engine.id());
                         last_err = msg;
                         continue;
                     }
-                    // Last engine also quota-blocked → tag it so the loop pauses.
+                    // Every engine was quota-blocked → tag it so the loop pauses
+                    // (a transient stall is NOT tagged: the next cycle retries).
                     if is_quota_wall(&msg) {
                         return Err(PortError::Backend(format!("{ALL_EXHAUSTED}: {msg}")));
                     }
@@ -94,5 +119,26 @@ impl<E: AgentEnginePort> AgentEnginePort for FailoverEngine<E> {
             }
         }
         Err(PortError::Backend(format!("{ALL_EXHAUSTED}: {last_err}")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_quota_wall, is_transient};
+
+    #[test]
+    fn detects_quota_walls() {
+        assert!(is_quota_wall("Error 429: rate limit exceeded"));
+        assert!(is_quota_wall("usage limit reached for your plan"));
+        assert!(is_quota_wall("401 Unauthorized: invalid api key"));
+        assert!(!is_quota_wall("compile error: missing semicolon"));
+    }
+
+    #[test]
+    fn detects_transient_stalls() {
+        assert!(is_transient("claude timed out"));
+        assert!(is_transient("connection reset by peer"));
+        assert!(is_transient("stream closed unexpectedly"));
+        assert!(!is_transient("the tests failed"));
     }
 }
