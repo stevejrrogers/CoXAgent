@@ -1351,7 +1351,10 @@ fn build_notifier(
 /// on Postgres, else `<hub>/workspace.json`). Best-effort; `None` when unset.
 fn workspace_conventions(hub_dir: &Path) -> Option<String> {
     use coxagent_application::ports::outbound::KvDocPort;
-    let raw = match std::env::var("COXAGENT_DB_DSN").ok().filter(|s| !s.is_empty()) {
+    let raw = match std::env::var("COXAGENT_DB_DSN")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
         Some(dsn) => {
             // A short blocking read on its own runtime — build_project runs at
             // startup, so this one-off is fine and keeps the signature sync.
