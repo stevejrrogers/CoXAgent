@@ -915,6 +915,13 @@
   .crole{font-size:9.5px;font-weight:700;letter-spacing:.3px;color:var(--muted);background:var(--card2);border:1px solid var(--border2);padding:1px 6px;border-radius:5px}
   .cby{font-size:10px;color:var(--dim);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--card2);border:1px solid var(--border2);padding:1px 6px;border-radius:5px}
   .ctk{font-size:10px;font-family:ui-monospace,monospace;color:var(--muted);background:var(--card2);padding:1px 6px;border-radius:5px}
+  .tref{color:var(--accent2);cursor:pointer;font-family:ui-monospace,monospace;text-decoration:none;border-bottom:1px dashed color-mix(in srgb,var(--accent2) 50%,transparent)}
+  .tref:hover{color:var(--accent);border-bottom-color:var(--accent)}
+  .sprintgoal{display:flex;align-items:center;gap:9px;padding:9px 16px;border-bottom:1px solid var(--border);background:color-mix(in srgb,var(--accent2) 6%,var(--card));font-size:12.5px}
+  .sprintgoal i{color:var(--accent2)}
+  .sprintgoal .sg-lbl{color:var(--muted);font-weight:600;white-space:nowrap}
+  .sprintgoal input{flex:1;min-width:0;background:var(--card);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:6px 11px;font-size:12.5px}
+  .sprintgoal input.saved{border-color:var(--green)}
   .ctime{color:var(--dim)}
   .cbub{background:var(--card);border:1px solid var(--border);border-radius:12px;border-top-left-radius:3px;padding:9px 13px;font-size:13px;line-height:1.5;color:var(--text);white-space:pre-wrap;word-break:break-word}
   /* rendered-markdown message body: flow like HTML, chat-sized elements */
@@ -1267,6 +1274,11 @@ body:not(.manage) .manage-only { display: none !important; }
             <button class="ticket-actions chatstart" onclick="startDiscussion()"><i class="ti ti-users-group"></i> <span id="disc-run-label">Agent discussion</span></button>
             <button class="ticket-actions chatstart manage-only" onclick="reviewRun(this,'architecture-review','SA')" title="SA reviews the whole architecture and files refactor tickets"><i class="ti ti-building-bank"></i> Arch review</button>
             <button class="ticket-actions chatstart manage-only" onclick="reviewRun(this,'docs-review','DOCS')" title="DOCS reviews the Wiki and writes any missing pages"><i class="ti ti-book"></i> Docs review</button>
+          </div>
+          <div class="sprintgoal manage-only" title="The PO's goal for the next sprint — the BA proposes tickets that advance it (they still pass refinement before any DEV work)">
+            <i class="ti ti-target-arrow"></i><span class="sg-lbl">Sprint goal</span>
+            <input id="sprint-goal-in" placeholder="e.g. Ship PDF export + email digests for reports" onkeydown="if(event.key==='Enter')setSprintGoal()">
+            <button class="ticket-actions" onclick="setSprintGoal()"><i class="ti ti-check"></i> Set</button>
           </div>
           <div id="disc-thread" class="chatbody" ondragover="event.preventDefault();this.classList.add('dropping')" ondragleave="this.classList.remove('dropping')" ondrop="dropFiles('disc',event)"></div>
           <div class="composewrap">
@@ -2039,8 +2051,27 @@ function renderBacklogPanel(s){
     <div class="panel">${rows||'<div class="empty">backlog is clear — every ticket is in flight or shipped</div>'}</div>`;
 }
 function loadComments(){if(CUR==="discuss")renderDiscuss();}
+async function setSprintGoal(){
+  const el=document.getElementById("sprint-goal-in");if(!el)return;
+  const goal=el.value.trim();
+  try{const r=await fetch(api("/sprint/goal"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({goal})});
+    if(r.ok){el.classList.add("saved");setTimeout(()=>el.classList.remove("saved"),1200);}
+  }catch(e){}
+}
+// Fill the sprint-goal input from state (unless the PO is editing it).
+function syncSprintGoal(s){
+  const el=document.getElementById("sprint-goal-in");
+  if(el&&document.activeElement!==el)el.value=(s&&s.sprint_goal)||"";
+}
+// Turn ticket ids (e.g. OT-F001, CXC-B123) in rendered message HTML into
+// clickable links that open the ticket detail. Skips ids already inside a tag.
+function linkifyTickets(html){
+  return html.replace(/(^|[^\w>])([A-Z]{2,6}-[FBC]\d{1,4})\b/g,
+    (_,pre,id)=>`${pre}<a class="tref" onclick="event.stopPropagation();showTicket('${id}')">${id}</a>`);
+}
 function renderDiscuss(){
   const sel=document.getElementById("disc-filter");if(!sel)return;
+  syncSprintGoal(STATE);
   const _tb=document.getElementById("disc-toolbar");if(_tb&&!_tb.dataset.i){_tb.innerHTML=mdToolbar("disc-input");_tb.dataset.i="1";}
   const want=sel.value;
   const ids=(STATE.tickets||[]).map(t=>t.id);
@@ -2078,11 +2109,11 @@ function renderDiscuss(){
     const roleTag=(isAgent&&nick)?` <span class="crole">${esc(c.author)}</span>`:'';
     const byChip=(isAgent&&c.by)?` <span class="cby" title="worker that posted this">${esc(c.by)}</span>`:'';
     const badge=isAgent?'<span class="cbadge">agent</span>':'';
-    const tick=(c.ticket&&!want)?` <span class="ctk">${esc(c.ticket)}</span>`:'';
+    const tick=(c.ticket&&!want)?` <span class="ctk tref" onclick="event.stopPropagation();showTicket('${esc(c.ticket)}')" style="cursor:pointer">${esc(c.ticket)}</span>`:'';
     return `${sep}<div class="cmsg${mine?' mine':''}">
       <div class="cav" style="background:${col}22;color:${col}">${esc(initials(name))}</div>
       <div class="ccol"><div class="chead"><b>${esc(name)}</b>${roleTag}${badge}${byChip}${tick}<span class="ctime">${esc(time)}</span></div>
-        ${c.body?`<div class="cbub md">${mdRender(c.body)}</div>`:''}${attHtml(c.attachments)}</div></div>`;}).join("");
+        ${c.body?`<div class="cbub md">${linkifyTickets(mdRender(c.body))}</div>`:''}${attHtml(c.attachments)}</div></div>`;}).join("");
   if(atBottom)box.scrollTop=box.scrollHeight;
 }
 // Classify SM/DEPLOY scrum notifications so they render as a timeline event

@@ -71,12 +71,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
             role: Role::Ba,
             system_prompt: prompts::system_prompt(prompts::BA),
             task_prompt: format!(
-                "Product goal:\n{}\n\nEXISTING BACKLOG — do NOT re-propose anything already \
+                "Product goal:\n{}\n{}\nEXISTING BACKLOG — do NOT re-propose anything already \
                  here (same or similar title/scope):\n{}\n\nPropose only genuinely NEW features \
                  that are not already covered above. When the project already has code (see the \
                  repo map below), propose features that fit the existing stack and structure — \
                  concrete, grounded in what's there, not generic.{}{}",
                 self.context,
+                sprint_goal_block(&existing.sprint_goal),
                 backlog_block,
                 prompts::repo_map_block(&self.work_dir, true),
                 prompts::team_memory_block(&existing.decisions, &existing.lessons)
@@ -122,6 +123,20 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
             created.push(id);
         }
         Ok(created)
+    }
+}
+
+/// When the PO has set a sprint goal, steer the BA to break it into concrete
+/// tickets that directly advance it — the top priority for the sprint.
+fn sprint_goal_block(goal: &str) -> String {
+    let g = goal.trim();
+    if g.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nTHIS SPRINT'S GOAL (set by the Product Owner) — prioritise proposals that directly \
+             advance it, broken into concrete, buildable tickets:\n{g}\n"
+        )
     }
 }
 

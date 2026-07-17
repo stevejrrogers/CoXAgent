@@ -651,6 +651,7 @@ pub async fn serve_full(
         .route("/api/projects/:pid/audit", get(audit_ep))
         .route("/api/projects/:pid/config", get(get_config).put(put_config))
         .route("/api/projects/:pid/control/:action", post(control_ep))
+        .route("/api/projects/:pid/sprint/goal", post(set_sprint_goal_ep))
         .route(
             "/api/projects/:pid/operators/:operator/:action",
             post(operator_control_ep),
@@ -4123,6 +4124,35 @@ async fn operator_control_ep(
             Json(serde_json::json!({ "error": e.to_string() })),
         )
             .into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct SprintGoalReq {
+    goal: String,
+}
+
+/// Set the PO's goal for the upcoming sprint. It becomes the sprint goal on the
+/// next roll-over and steers the BA to propose tickets that advance it — the
+/// proposals still pass the normal Pending→Ready refinement gate before any DEV
+/// work, so nothing is built without vetting.
+async fn set_sprint_goal_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    Json(req): Json<SprintGoalReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let goal = req.goal.trim().to_owned();
+    match coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        s.sprint_goal.clone_from(&goal);
+        Ok(())
+    })
+    .await
+    {
+        Ok(()) => Json(serde_json::json!({ "ok": true, "goal": goal })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
     }
 }
 

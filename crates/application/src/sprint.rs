@@ -30,9 +30,15 @@ pub fn advance(state: &mut ProjectState, cycle: u64, length: u64) -> Option<u32>
     }
     let number = state.sprint.as_ref().map_or(0, |s| s.number) + 1;
     let committed = open_backlog(state);
+    // The PO's set goal wins; otherwise derive one from the committed titles.
+    let goal = if state.sprint_goal.trim().is_empty() {
+        goal_from(state, &committed)
+    } else {
+        state.sprint_goal.trim().to_owned()
+    };
     state.sprint = Some(Sprint {
         number,
-        goal: goal_from(state, &committed),
+        goal,
         started_cycle: cycle,
         length_cycles: length,
         committed,

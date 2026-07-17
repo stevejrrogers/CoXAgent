@@ -411,6 +411,12 @@ pub struct ProjectState {
     /// forward, so sprints keep rolling regardless of restarts.
     #[serde(default)]
     pub sprint_cycle: u64,
+    /// The PO's goal for the upcoming sprint (human-set from the Scrum view). When
+    /// set it becomes the sprint goal on the next roll-over and steers the BA's
+    /// proposals, so the team works toward what the PO asked for — not just
+    /// whatever happens to be in the backlog.
+    #[serde(default)]
+    pub sprint_goal: String,
     /// Spend accumulated on the current calendar day (UTC), for the daily budget
     /// policy. Resets when the day rolls over.
     #[serde(default)]
@@ -446,6 +452,7 @@ impl Default for ProjectState {
             decisions: Vec::new(),
             refactor_mode: false,
             sprint_cycle: 0,
+            sprint_goal: String::new(),
             spend_today_usd: 0.0,
             spend_day: String::new(),
         }
