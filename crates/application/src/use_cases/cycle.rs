@@ -583,7 +583,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let Ok(mut state) = self.store.load().await else {
             return;
         };
+        let _ = cycle; // the per-process cycle resets on restart — use the
+                       // persistent counter below so sprints keep advancing.
         let len = self.config.workflow.sprint_length_cycles;
+        // Migrate: seed the persistent counter from the current sprint's stored
+        // (old per-process) cycle the first time, so an in-flight sprint doesn't
+        // roll instantly, then advance it once per leader cycle.
+        if state.sprint_cycle == 0 {
+            state.sprint_cycle = state.sprint.as_ref().map_or(0, |s| s.started_cycle);
+        }
+        state.sprint_cycle += 1;
+        let sc = state.sprint_cycle;
         let prev = state.sprint.as_ref().map(|s| {
             (
                 s.number,
@@ -594,30 +604,33 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // Capture the closing sprint before `advance` replaces it, so we can run
         // a real review + retro on it.
         let closing = state.sprint.clone();
-        if let Some(n) = crate::sprint::advance(&mut state, cycle, len) {
-            let _ = prev; // superseded by the richer review below
-            let lang = self.config.workflow.language;
-            if let Some(cl) = &closing {
-                Self::sprint_review_and_retro(&mut state, cl, lang);
-            }
-            Self::sprint_planning(&mut state, n, lang);
-            state.log_activity("SM", "opened sprint", Some(format!("sprint {n}")));
+        let Some(n) = crate::sprint::advance(&mut state, sc, len) else {
+            // No roll this cycle — still persist the bumped counter.
             let _ = self.store.save(&state).await;
-            // Learn: distill one concrete lesson from the closing sprint and keep
-            // it — it gets fed back into the agents' prompts so they improve.
-            if closing.is_some() {
-                self.capture_retro_lesson().await;
-            }
-            // The team actually talks the plan through (PO/SA/DEV weigh in, SM
-            // confirms the commitment) — planning as a ceremony, not an announce.
-            self.scrum_planning().await;
-            // Every few sprints the SA steps back and reviews the whole
-            // architecture, filing refactor tickets and asking the PO to
-            // prioritise a hardening sprint before tech debt compounds.
-            if n % ARCH_REVIEW_EVERY_SPRINTS == 0 {
-                self.architecture_audit(n).await;
-                self.docs_audit(n).await;
-            }
+            return;
+        };
+        let _ = prev; // superseded by the richer review below
+        let lang = self.config.workflow.language;
+        if let Some(cl) = &closing {
+            Self::sprint_review_and_retro(&mut state, cl, lang);
+        }
+        Self::sprint_planning(&mut state, n, lang);
+        state.log_activity("SM", "opened sprint", Some(format!("sprint {n}")));
+        let _ = self.store.save(&state).await;
+        // Learn: distill one concrete lesson from the closing sprint and keep
+        // it — it gets fed back into the agents' prompts so they improve.
+        if closing.is_some() {
+            self.capture_retro_lesson().await;
+        }
+        // The team actually talks the plan through (PO/SA/DEV weigh in, SM
+        // confirms the commitment) — planning as a ceremony, not an announce.
+        self.scrum_planning().await;
+        // Every few sprints the SA steps back and reviews the whole architecture,
+        // filing refactor tickets and asking the PO to prioritise a hardening
+        // sprint before tech debt compounds.
+        if n % ARCH_REVIEW_EVERY_SPRINTS == 0 {
+            self.architecture_audit(n).await;
+            self.docs_audit(n).await;
         }
     }
 

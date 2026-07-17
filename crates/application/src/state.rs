@@ -392,6 +392,12 @@ pub struct ProjectState {
     /// to the refactor chores; cleared once they're all done.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub refactor_mode: bool,
+    /// Persistent, restart-safe leader-cycle counter that drives sprint timing.
+    /// The per-process cycle number resets to 1 every worker launch, so sprints
+    /// stalled after a restart; this counter lives in state and only moves
+    /// forward, so sprints keep rolling regardless of restarts.
+    #[serde(default)]
+    pub sprint_cycle: u64,
     /// Spend accumulated on the current calendar day (UTC), for the daily budget
     /// policy. Resets when the day rolls over.
     #[serde(default)]
@@ -426,6 +432,7 @@ impl Default for ProjectState {
             lessons: Vec::new(),
             decisions: Vec::new(),
             refactor_mode: false,
+            sprint_cycle: 0,
             spend_today_usd: 0.0,
             spend_day: String::new(),
         }
