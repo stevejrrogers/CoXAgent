@@ -633,6 +633,8 @@
   .tso-role{font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--dim);border:1px solid var(--border);border-radius:5px;padding:1px 6px}
   .tso-role.lead{color:var(--green);border-color:color-mix(in srgb,var(--green) 45%,var(--border))}
   .tso-tk{font-family:ui-monospace,monospace;font-size:11px;color:var(--accent2)}
+  .tso-stop{margin-left:4px;background:none;border:none;color:var(--dim);cursor:pointer;padding:2px 4px;border-radius:5px;font-size:13px;line-height:1}
+  .tso-stop:hover{color:var(--red);background:color-mix(in srgb,var(--red) 14%,transparent)}
   .ag-by{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--dim);font-family:ui-monospace,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
   .ag-by i{flex-shrink:0}
   .ag-nteams{margin-left:auto;background:color-mix(in srgb,var(--green) 18%,transparent);color:var(--green);border-radius:20px;padding:1px 8px;font-size:10px;font-weight:600;letter-spacing:0}
@@ -4243,8 +4245,15 @@ async function renderTeamsOnline(){
       const busy=!/^(leader|worker|idle)$/i.test(role);
       return `<div class="tso"><span class="tso-dot"></span><span class="tso-id">${esc(w.worker)}</span>`
         +`<span class="tso-role ${busy?'lead':''}">${esc(role.replace(/_/g,'-').toUpperCase())}</span>`
-        +(w.ticket?`<span class="tso-tk">${esc(w.ticket)}</span>`:'')+`</div>`;
+        +(w.ticket?`<span class="tso-tk">${esc(w.ticket)}</span>`:'')
+        +`<button class="tso-stop" title="Stop this operator (idles it — saves its tokens)" onclick="stopOperator('${esc(w.worker)}')"><i class="ti ti-player-stop"></i></button>`
+        +`</div>`;
     }).join("")+`</div></div>`;
+}
+async function stopOperator(op){
+  if(!confirm("Stop operator "+op+"? It will idle (stop spending tokens) until it's started again."))return;
+  try{await fetch(api("/operators/"+encodeURIComponent(op)+"/stop"),{method:"POST"});}catch(e){}
+  setTimeout(renderTeamsOnline,600);
 }
 async function openAgent(role){
   const meta=AGENTS.find(a=>a[0]===role);const col=cvar((meta&&meta[2])||"--muted");

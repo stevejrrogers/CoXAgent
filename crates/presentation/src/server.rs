@@ -651,6 +651,10 @@ pub async fn serve_full(
         .route("/api/projects/:pid/audit", get(audit_ep))
         .route("/api/projects/:pid/config", get(get_config).put(put_config))
         .route("/api/projects/:pid/control/:action", post(control_ep))
+        .route(
+            "/api/projects/:pid/operators/:operator/:action",
+            post(operator_control_ep),
+        )
         .route("/api/projects/:pid/ba-analyze", post(ba_analyze))
         .route("/api/projects/:pid/ticket-refine", post(ticket_refine))
         .route("/api/projects/:pid/discuss", post(run_discussion_ep))
@@ -4024,6 +4028,40 @@ async fn control_ep(
         }
     }
     Json(p.runner.snapshot()).into_response()
+}
+
+/// Control any operator (by `account@host`) from the dashboard: set its desired
+/// run state, which that operator honours on its next cycle — so Stop reaches a
+/// worker on another machine (or a headless one) without touching processes.
+/// Stopping only idles it (saves its credentials); Start requires the operator's
+/// process to be alive and waiting.
+async fn operator_control_ep(
+    State(app): State<AppState>,
+    Path((pid, operator, action)): Path<(String, String, String)>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let running = match action.as_str() {
+        "start" => true,
+        "stop" => false,
+        _ => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "action must be start or stop" })),
+            )
+                .into_response()
+        }
+    };
+    match p.store.set_desired(&operator, running).await {
+        Ok(()) => Json(serde_json::json!({ "ok": true, "operator": operator, "running": running }))
+            .into_response(),
+        Err(e) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
 }
 
 async fn events_ep(
