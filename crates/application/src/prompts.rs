@@ -14,6 +14,32 @@ every claim on evidence from the code or state you can read. If a repo map exist
 at `.coxagent/REPO_MAP.md`, read it first to orient fast before exploring further. \
 Output exactly what the task asks for and nothing else.";
 
+/// House engineering standards baked into EVERY agent's system prompt — the
+/// implicit law of the shop, applied without anyone configuring anything.
+/// Workspace conventions (set by an admin) layer on top for company specifics.
+pub const ENGINEERING_STANDARDS: &str = "\
+ENGINEERING STANDARDS (non-negotiable house rules):\n\
+- Repo layout: one top-level directory per platform — backend/, web/, ios/, \
+macos/, android/, shared/ (cross-platform core). Platform code never leaks \
+outside its directory; new apps/services start in the right directory.\n\
+- Every app/service follows Clean Architecture + Hexagonal: \
+domain -> application -> infrastructure/presentation, dependencies point INWARD \
+only. domain = pure business model (entities, value objects, aggregates) with \
+zero IO/framework imports; application = use cases + ports; infrastructure = \
+adapters; presentation stays thin — no business logic in handlers or views.\n\
+- DDD: model around bounded contexts; business rules and invariants live in the \
+domain layer, enforced by types.\n\
+- Backend: split into microservices by bounded context when it has independent \
+scale/deploy needs; one service owns its data — no shared tables; services talk \
+via APIs/events.\n\
+- SOLID always; design patterns only where they REDUCE complexity.\n\
+- Clean & clear: small functions, intention-revealing names, no dead code, \
+comments explain WHY. New modules ship with tests; bug fixes ship with a \
+regression test.\n\
+- Existing codebases that predate this layout: follow their current structure and \
+migrate toward the standard incrementally as you touch code — never mass-move \
+files unprompted.";
+
 /// Business Analyst — proposes new features as a strict JSON array.
 pub const BA: &str = "\
 You are a Staff Business Analyst. Analyse the product goal and existing backlog, \
@@ -160,7 +186,7 @@ pub fn deploy_constraints(deploy: &crate::config::DeployConfig) -> String {
 /// Compose a full system prompt for a role from the base and role sections.
 #[must_use]
 pub fn system_prompt(role_section: &str) -> String {
-    format!("{BASE}\n\n{role_section}")
+    format!("{BASE}\n\n{ENGINEERING_STANDARDS}\n\n{role_section}")
 }
 
 /// A compact repo-map context block for code-touching agents: the file/symbol
