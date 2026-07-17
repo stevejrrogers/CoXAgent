@@ -12,7 +12,7 @@ use coxagent_application::ports::outbound::StateStorePort;
 use coxagent_application::use_cases::{RecoverUseCase, RunBaUseCase, RunCycleUseCase};
 use coxagent_application::Spend;
 use coxagent_infrastructure::engine::{
-    AnyEngine, FailoverEngine, Meter, MeteringEngine, TranscriptEngine,
+    AnyEngine, FailoverEngine, Meter, MeteringEngine, RoutingEngine, TranscriptEngine,
 };
 use coxagent_infrastructure::{
     discover, AnyStateStore, DockerComposeDeploy, JsonStateStore, SqlStateStore, WebhookNotifier,
@@ -190,8 +190,10 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
                 .state_dir
                 .parent()
                 .and_then(Path::file_name)
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "default".to_owned());
+                .map_or_else(
+                    || "default".to_owned(),
+                    |n| n.to_string_lossy().into_owned(),
+                );
             run_loop(
                 make_store(&pid, &args.state_dir).await?,
                 &args.state_dir,
@@ -904,35 +906,60 @@ fn append_registry(registry_path: &Path, id: &str, path: &Path) -> std::io::Resu
     std::fs::write(registry_path, serde_json::to_string_pretty(&arr)?)
 }
 
-/// The metered + transcript-logging engine plus the spend meter it feeds.
+/// The metered + transcript-logging + per-role-routing engine plus the spend
+/// meter it feeds.
 type BuiltEngine = (
-    Arc<MeteringEngine<TranscriptEngine<FailoverEngine<AnyEngine>>>>,
+    Arc<MeteringEngine<TranscriptEngine<RoutingEngine<FailoverEngine<AnyEngine>>>>>,
     Meter,
 );
 
-/// Build the engine stack (failover across engines + transcript logging +
-/// metering) named by config, plus the shared spend meter the cycle drains into
-/// state. The primary plus any configured fallbacks form the failover chain, so
-/// a quota wall on one CLI rolls over to the next instead of stalling the run.
-fn build_engine(
-    config: &Config,
-    logs_dir: PathBuf,
-) -> Result<BuiltEngine, Box<dyn std::error::Error>> {
-    let choice = &config.engine.default;
+/// Build one failover chain: the primary choice first, then any configured
+/// fallbacks, so a quota wall on one CLI rolls over to the next.
+fn build_failover(
+    choice: &coxagent_application::config::EngineChoice,
+    fallbacks: &[coxagent_application::config::EngineChoice],
+) -> Result<FailoverEngine<AnyEngine>, Box<dyn std::error::Error>> {
     let mut engines = vec![AnyEngine::from_choice(choice)?];
-    for fb in &config.engine.fallbacks {
+    for fb in fallbacks {
         match AnyEngine::from_choice(fb) {
             Ok(e) => engines.push(e),
             Err(e) => tracing::warn!("skipping fallback engine {:?}: {e}", fb.engine),
         }
     }
-    let names: Vec<String> = std::iter::once(choice)
-        .chain(config.engine.fallbacks.iter())
-        .map(|c| format!("{:?}({})", c.engine, c.model))
-        .collect();
-    tracing::info!("engines (failover order): {}", names.join(" → "));
-    let failover = FailoverEngine::new(engines);
-    let logged = TranscriptEngine::new(failover, logs_dir);
+    Ok(FailoverEngine::new(engines))
+}
+
+/// Build the engine stack (per-role routing over failover chains + transcript
+/// logging + metering) named by config, plus the shared spend meter the cycle
+/// drains into state. Roles with a `per_role` override (e.g. ceremonies on a
+/// cheap model) get their own failover chain; everything else uses the default.
+fn build_engine(
+    config: &Config,
+    logs_dir: PathBuf,
+) -> Result<BuiltEngine, Box<dyn std::error::Error>> {
+    let default = build_failover(&config.engine.default, &config.engine.fallbacks)?;
+    let mut per_role = std::collections::HashMap::new();
+    for (role, choice) in &config.engine.per_role {
+        match build_failover(choice, &config.engine.fallbacks) {
+            Ok(e) => {
+                tracing::info!(
+                    "role {role:?} routed to {:?}({})",
+                    choice.engine,
+                    choice.model
+                );
+                per_role.insert(*role, e);
+            }
+            Err(e) => tracing::warn!("per-role engine for {role:?} unavailable: {e}"),
+        }
+    }
+    tracing::info!(
+        "default engine {:?}({}) + {} fallback(s)",
+        config.engine.default.engine,
+        config.engine.default.model,
+        config.engine.fallbacks.len()
+    );
+    let router = RoutingEngine::new(default, per_role);
+    let logged = TranscriptEngine::new(router, logs_dir);
     let meter: Meter = Arc::new(Mutex::new(Spend::default()));
     Ok((
         Arc::new(MeteringEngine::new(logged, Arc::clone(&meter))),

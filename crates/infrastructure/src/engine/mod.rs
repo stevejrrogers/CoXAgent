@@ -7,6 +7,7 @@ pub mod metering;
 pub mod mock;
 pub mod opencode;
 pub mod registry;
+pub mod routing;
 pub mod scripted;
 pub mod transcript;
 
@@ -19,6 +20,7 @@ pub use opencode::OpencodeEngine;
 pub use registry::{
     discover, discover_in, discover_tooling, DetectedEngine, DetectedTool, Tooling,
 };
+pub use routing::RoutingEngine;
 pub use scripted::ScriptedEngine;
 pub use transcript::TranscriptEngine;
 
