@@ -18,7 +18,19 @@ use tokio::process::Command;
 fn live_path(work_dir: &Path, role: &str) -> Option<PathBuf> {
     let dir = work_dir.parent()?.join("logs").join("live");
     std::fs::create_dir_all(&dir).ok()?;
-    Some(dir.join(format!("{role}.log")))
+    // Key the file by operator when this process runs as a named headless worker
+    // (COXAGENT_OPERATOR), so two operators working the same role don't clobber
+    // each other's live log and each can be tailed separately in the dashboard.
+    let suffix = std::env::var("COXAGENT_OPERATOR")
+        .ok()
+        .map(|o| {
+            o.chars()
+                .filter(char::is_ascii_alphanumeric)
+                .collect::<String>()
+        })
+        .filter(|s| !s.is_empty())
+        .map_or_else(String::new, |s| format!("__{s}"));
+    Some(dir.join(format!("{role}{suffix}.log")))
 }
 
 fn append_live(path: &Path, line: &str) {

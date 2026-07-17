@@ -643,6 +643,9 @@
   .ag-run{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:7px 9px;border-radius:9px;background:color-mix(in srgb,var(--green) 8%,transparent);border:1px solid color-mix(in srgb,var(--green) 16%,transparent)}
   .ag-run .ag-task{background:transparent;border:0;padding:0;font-weight:600}
   .ag-run .ag-by{margin-left:auto}
+  .agpick{display:inline-flex;align-items:center;gap:5px;font-size:11px;padding:3px 9px;border-radius:7px;background:var(--card2);border:1px solid var(--border);color:var(--muted);cursor:pointer}
+  .agpick.on{border-color:color-mix(in srgb,var(--green) 45%,var(--border));color:var(--green);background:color-mix(in srgb,var(--green) 10%,transparent)}
+  .agpick:hover{color:var(--text)}
   /* ticket modal actions + inline edit */
   .tk-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px}
   .tk-btn{display:inline-flex;align-items:center;gap:6px;background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:9px;padding:8px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit}
@@ -1145,6 +1148,7 @@ body:not(.manage) .manage-only { display: none !important; }
         <span class="x" onclick="closeAgent()"><i class="ti ti-x"></i></span>
         <h3 id="agent-title" style="display:flex;align-items:center;gap:9px"></h3>
         <div class="msub" id="agent-sub">live work log</div>
+        <div id="agent-picker" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px"></div>
         <div class="sec" style="margin-top:10px">Recent actions</div>
         <div id="agent-acts" class="panel" style="max-height:16vh;overflow:auto"></div>
         <div class="sec" style="margin-top:12px;display:flex;align-items:center;gap:8px">Work log <span id="agent-live-badge" style="font-size:10px;font-weight:700;padding:1px 7px;border-radius:5px;background:var(--green)22;color:var(--green);display:none">● LIVE</span> <span style="font-size:11px;color:var(--dim);font-weight:400">· what the agent is doing, step by step</span></div>
@@ -1855,7 +1859,7 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
       const taskChip=(note,tid,cls)=>`<span class="ag-task ${cls}"${tid?` onclick="event.stopPropagation();showTicket('${tid}')" style="cursor:pointer"`:''}>${note?esc(note):''}${tid?`<span class="tid">${esc(tid)}</span>`:''}</span>`;
       let statusHtml;
       if(working){
-        const rows=runners.map(rn=>`<div class="ag-run">`
+        const rows=runners.map(rn=>`<div class="ag-run" onclick="event.stopPropagation();openAgent('${r}','${esc(rn.who)}')" style="cursor:pointer" title="View ${esc(short(rn.who))}'s live log">`
           +`<span class="ag-task">${rn.ticket?`<span class="tid">${esc(rn.ticket)}</span>`:'working'}</span>`
           +`<span class="ag-by" title="${esc(rn.who)}"><i class="ti ti-user-cog"></i> ${esc(short(rn.who))}</span></div>`).join("");
         statusHtml=`<div class="ag-now"><i class="ti ti-loader-2 att-spin"></i> working now${runners.length>1?`<span class="ag-nteams">${runners.length} teams</span>`:''}</div>
@@ -4260,10 +4264,24 @@ async function stopOperator(op){
   try{await fetch(api("/operators/"+encodeURIComponent(op)+"/stop"),{method:"POST"});}catch(e){}
   setTimeout(renderTeamsOnline,600);
 }
-async function openAgent(role){
+async function openAgent(role,worker){
   const meta=AGENTS.find(a=>a[0]===role);const col=cvar((meta&&meta[2])||"--muted");
-  document.getElementById("agent-title").innerHTML=`<span class="av" style="width:30px;height:30px;background:${col}22;color:${col}">${esc(initials(role))}</span> ${esc(role)}`;
-  document.getElementById("agent-sub").textContent=(meta&&meta[1])||"agent";
+  AGENT_LOG_WORKER=worker||"";
+  // If several operators run this role, offer a picker to view each one's log.
+  const runners=(window.WORKERS||[]).filter(w=>(w.role||"").replace(/_/g,"-").toUpperCase()===role);
+  const who=AGENT_LOG_WORKER?AGENT_LOG_WORKER.split('@')[0]:(runners[0]&&runners[0].worker?runners[0].worker.split('@')[0]:"");
+  if(AGENT_LOG_WORKER==="" && runners[0])AGENT_LOG_WORKER=runners[0].worker;
+  const tk=(runners.find(r=>r.worker===AGENT_LOG_WORKER)||runners[0]||{}).ticket||"";
+  document.getElementById("agent-title").innerHTML=`<span class="av" style="width:30px;height:30px;background:${col}22;color:${col}">${esc(initials(role))}</span> ${esc(role)}${who?` <span style="font-size:12px;color:var(--muted)">· <i class="ti ti-user-cog"></i> ${esc(who)}</span>`:''}${tk?` <span class="tid">${esc(tk)}</span>`:''}`;
+  document.getElementById("agent-sub").innerHTML=(meta&&meta[1])||"agent";
+  // Operator picker chips when >1 operator is on this role.
+  const pick=document.getElementById("agent-picker");
+  if(pick){
+    pick.innerHTML=runners.length>1?runners.map(r=>{
+      const acct=r.worker.split('@')[0];const on=r.worker===AGENT_LOG_WORKER;
+      return `<button class="agpick ${on?'on':''}" onclick="openAgent('${role}','${esc(r.worker)}')"><i class="ti ti-user-cog"></i> ${esc(acct)}${r.ticket?` · ${esc(r.ticket)}`:''}</button>`;
+    }).join(""):"";
+  }
   const acts=(STATE.activity||[]).filter(a=>a.agent===role).slice(-15).reverse();
   document.getElementById("agent-acts").innerHTML=acts.length?acts.map(a=>
     `<div class="act"><div class="atx"><span>${esc(a.action)}</span> ${a.ticket?`<span class="tk">${esc(a.ticket)}</span>`:''}</div><span class="tm">${esc((a.at||'').slice(11,16))}</span></div>`).join("")
@@ -4275,20 +4293,21 @@ async function openAgent(role){
   clearInterval(AGENT_LOG_TIMER);
   AGENT_LOG_TIMER=setInterval(pollAgentLog,1500);  // then live every 1.5s
 }
-let AGENT_LOG_TIMER=null, AGENT_LOG_ROLE=null;
+let AGENT_LOG_TIMER=null, AGENT_LOG_ROLE=null, AGENT_LOG_WORKER="";
 async function pollAgentLog(){
   if(!AGENT_LOG_ROLE)return;
   const body=document.getElementById("agent-transcript");
   const badge=document.getElementById("agent-live-badge");
   try{
-    const d=await(await fetch(api("/agent-log?role="+encodeURIComponent(AGENT_LOG_ROLE)))).json();
+    const url="/agent-log?role="+encodeURIComponent(AGENT_LOG_ROLE)+(AGENT_LOG_WORKER?"&worker="+encodeURIComponent(AGENT_LOG_WORKER):"");
+    const d=await(await fetch(api(url))).json();
     const atBottom=body.scrollHeight-body.scrollTop-body.clientHeight<40;
     body.textContent=d.log&&d.log.trim()?d.log:"(this agent hasn't run yet)";
     if(badge)badge.style.display=d.live?"inline-block":"none";
     if(atBottom)body.scrollTop=body.scrollHeight;   // follow the tail
   }catch(e){}
 }
-function closeAgent(){clearInterval(AGENT_LOG_TIMER);AGENT_LOG_TIMER=null;AGENT_LOG_ROLE=null;close_('ov-agent');}
+function closeAgent(){clearInterval(AGENT_LOG_TIMER);AGENT_LOG_TIMER=null;AGENT_LOG_ROLE=null;AGENT_LOG_WORKER="";close_('ov-agent');}
 async function openTranscript(enc,name){
   document.getElementById("tr-title").textContent=name;
   document.getElementById("tr-body").textContent="loading…";

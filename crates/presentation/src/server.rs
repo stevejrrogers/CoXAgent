@@ -3876,6 +3876,10 @@ fn transcripts_dir(p: &ProjectHandle) -> PathBuf {
 #[derive(serde::Deserialize)]
 struct AgentLogQuery {
     role: String,
+    /// Optional operator (`account@host` or just the account) to view that
+    /// specific worker's live log when several run the same role.
+    #[serde(default)]
+    worker: String,
 }
 
 /// Live agent log for a role: the streamed `<workspace>/logs/live/<role>.log`
@@ -3898,8 +3902,24 @@ async fn agent_log_ep(
     if role.is_empty() {
         return (StatusCode::BAD_REQUEST, "role required").into_response();
     }
+    // A specific operator's log is `<role>__<account>.log`; without a worker (or
+    // when that file is absent) fall back to the shared `<role>.log`.
+    let account: String = q
+        .worker
+        .split('@')
+        .next()
+        .unwrap_or("")
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect();
     let base = p.config_path.parent().unwrap_or(&p.config_path);
-    let live = base.join("logs").join("live").join(format!("{role}.log"));
+    let live_dir = base.join("logs").join("live");
+    let per_op = live_dir.join(format!("{role}__{account}.log"));
+    let live = if !account.is_empty() && per_op.exists() {
+        per_op
+    } else {
+        live_dir.join(format!("{role}.log"))
+    };
     let (body, live_flag) = match std::fs::read_to_string(&live) {
         Ok(s) if s.trim().len() > 20 => (s, true),
         _ => {
