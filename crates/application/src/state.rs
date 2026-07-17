@@ -987,7 +987,7 @@ mod channel_tests {
 }
 
 /// A short, collision-free message id (nanos + a process-local counter).
-pub(crate) fn mint_id() -> String {
+pub fn mint_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
     static SEQ: AtomicU64 = AtomicU64::new(0);

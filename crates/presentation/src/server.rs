@@ -9,7 +9,7 @@ use axum::http::{header, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Json};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::Router;
 use coxagent_application::auth::AuthPort;
 use coxagent_application::metrics;
@@ -166,6 +166,73 @@ impl SysChat {
     }
 }
 
+/// Workspace identity + invites: the company-level document (name, branding,
+/// pending invite links) persisted in the shared KV store (Postgres) when
+/// configured, else a local `workspace.json` under the hub dir.
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
+struct WorkspaceDoc {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    tagline: String,
+    #[serde(default)]
+    accent: String,
+    #[serde(default)]
+    invites: Vec<Invite>,
+}
+
+/// One shareable invite link: whoever opens it can create their own account
+/// with the preset role + project membership, `uses_left` times.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct Invite {
+    token: String,
+    role: String,
+    #[serde(default)]
+    projects: Vec<String>,
+    created_by: String,
+    created_at: String,
+    uses_left: u32,
+}
+
+/// The hub-wide workspace store (see [`WorkspaceDoc`]).
+#[derive(Clone)]
+struct Ws {
+    inner: Arc<tokio::sync::Mutex<WorkspaceDoc>>,
+    path: PathBuf,
+    store: Option<Arc<dyn coxagent_application::ports::outbound::KvDocPort>>,
+}
+
+impl Ws {
+    async fn load(
+        dir: &std::path::Path,
+        store: Option<Arc<dyn coxagent_application::ports::outbound::KvDocPort>>,
+    ) -> Self {
+        let path = dir.join("workspace.json");
+        let text = if let Some(s) = &store {
+            s.load("workspace").await.ok().flatten()
+        } else {
+            std::fs::read_to_string(&path).ok()
+        };
+        let inner = text
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        Self {
+            inner: Arc::new(tokio::sync::Mutex::new(inner)),
+            path,
+            store,
+        }
+    }
+
+    async fn save(&self) {
+        let json = { serde_json::to_string(&*self.inner.lock().await).unwrap_or_default() };
+        if let Some(s) = &self.store {
+            let _ = s.save("workspace", &json).await;
+            return;
+        }
+        let _ = std::fs::write(&self.path, json);
+    }
+}
+
 /// Default blob storage: local disk under a root, used when no S3/MinIO backend
 /// is injected. Keys are relative paths (e.g. `chat/<file>`).
 struct DiskStorage {
@@ -229,6 +296,8 @@ struct AppState {
     remover: Option<ProjectRemover>,
     /// System-wide chat store shared across all projects.
     syschat: SysChat,
+    /// Workspace identity + invite links (company-level, hub-wide).
+    workspace: Ws,
     /// Blob storage for uploaded files (local disk by default, or S3/MinIO).
     storage: Arc<dyn coxagent_application::ports::outbound::StoragePort>,
     /// Server-side documentation store (MongoDB) when configured; `None` falls
@@ -532,7 +601,9 @@ async fn build_state(
     let map: HashMap<String, ProjectHandle> =
         projects.into_iter().map(|p| (p.id.clone(), p)).collect();
     let hub_dir = extras.hub_dir.unwrap_or_else(|| PathBuf::from("."));
+    let kv = extras.syschat_store.clone();
     let syschat = SysChat::load(&hub_dir, extras.syschat_store).await;
+    let workspace = Ws::load(&hub_dir, kv).await;
     AppState {
         projects: Arc::new(RwLock::new(map)),
         chat_bus: Arc::new(RwLock::new(HashMap::new())),
@@ -548,6 +619,7 @@ async fn build_state(
         remover: extras.remover,
         analyzer: extras.analyzer,
         syschat,
+        workspace,
         storage: extras.storage.unwrap_or_else(|| {
             Arc::new(DiskStorage {
                 root: hub_dir.join("blobs"),
@@ -653,6 +725,19 @@ pub async fn serve_full(
         .route("/api/projects/:pid/control/:action", post(control_ep))
         .route("/api/projects/:pid/sprint/goal", post(set_sprint_goal_ep))
         .route("/api/projects/:pid/digest", post(digest_ep))
+        .route(
+            "/api/workspace",
+            get(workspace_get_ep).put(workspace_put_ep),
+        )
+        .route(
+            "/api/workspace/invites",
+            get(invites_list_ep).post(invite_create_ep),
+        )
+        .route("/api/workspace/invites/:token", delete(invite_delete_ep))
+        .route("/api/workspace/overview", get(workspace_overview_ep))
+        .route("/api/me/agents", get(my_agents_ep))
+        .route("/join/:token", get(join_page_ep))
+        .route("/api/workspace/join", post(join_ep))
         .route(
             "/api/projects/:pid/operators/:operator/:action",
             post(operator_control_ep),
@@ -4159,6 +4244,348 @@ async fn digest_ep(
     }
 }
 
+// ---------------- Workspace: identity, invites, overview, my-agents ----------
+
+async fn workspace_get_ep(State(app): State<AppState>) -> axum::response::Response {
+    let w = app.workspace.inner.lock().await.clone();
+    Json(serde_json::json!({
+        "name": w.name, "tagline": w.tagline, "accent": w.accent,
+        "configured": !w.name.trim().is_empty(),
+    }))
+    .into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct WorkspacePutReq {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    tagline: String,
+    #[serde(default)]
+    accent: String,
+}
+
+/// Set the workspace identity (admin — writes are admin-gated by middleware).
+async fn workspace_put_ep(
+    State(app): State<AppState>,
+    Json(req): Json<WorkspacePutReq>,
+) -> axum::response::Response {
+    {
+        let mut w = app.workspace.inner.lock().await;
+        req.name.trim().clone_into(&mut w.name);
+        req.tagline.trim().clone_into(&mut w.tagline);
+        req.accent.trim().clone_into(&mut w.accent);
+    }
+    app.workspace.save().await;
+    Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct InviteCreateReq {
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    projects: Vec<String>,
+    #[serde(default)]
+    uses: Option<u32>,
+}
+
+/// Mint a shareable invite link (admin). Whoever opens it self-registers with
+/// the preset role + project membership.
+async fn invite_create_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<InviteCreateReq>,
+) -> axum::response::Response {
+    let by = resolve_username(&app, &headers).await;
+    let token = format!(
+        "{}{}",
+        coxagent_application::state::mint_id(),
+        coxagent_application::state::mint_id()
+    );
+    let invite = Invite {
+        token: token.clone(),
+        role: req.role.unwrap_or_else(|| "viewer".to_owned()),
+        projects: req.projects,
+        created_by: by,
+        created_at: coxagent_application::state::now_rfc3339(),
+        uses_left: req.uses.unwrap_or(5).clamp(1, 100),
+    };
+    {
+        let mut w = app.workspace.inner.lock().await;
+        w.invites.push(invite);
+    }
+    app.workspace.save().await;
+    Json(serde_json::json!({ "ok": true, "token": token, "url": format!("/join/{token}") }))
+        .into_response()
+}
+
+async fn invites_list_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    if let Some(auth) = app.auth.clone() {
+        let admin = resolve_principal(&auth, &headers)
+            .await
+            .is_some_and(|u| u.role.can_manage());
+        if !admin {
+            return (StatusCode::FORBIDDEN, "admin role required").into_response();
+        }
+    }
+    let w = app.workspace.inner.lock().await.clone();
+    Json(w.invites).into_response()
+}
+
+async fn invite_delete_ep(
+    State(app): State<AppState>,
+    Path(token): Path<String>,
+) -> axum::response::Response {
+    {
+        let mut w = app.workspace.inner.lock().await;
+        w.invites.retain(|i| i.token != token);
+    }
+    app.workspace.save().await;
+    Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+/// The public join page an invitee lands on: a minimal branded form that
+/// registers their account against the invite token.
+async fn join_page_ep(
+    State(app): State<AppState>,
+    Path(token): Path<String>,
+) -> axum::response::Response {
+    let w = app.workspace.inner.lock().await.clone();
+    let valid = w
+        .invites
+        .iter()
+        .any(|i| i.token == token && i.uses_left > 0);
+    let name = if w.name.trim().is_empty() {
+        "CoXAgent".to_owned()
+    } else {
+        w.name
+    };
+    let body = if valid {
+        format!(
+            r#"<h1>Join {n}</h1><p class="sub">Create your account to join the workspace.</p>
+<input id="u" placeholder="username" autocomplete="username">
+<input id="n" placeholder="display name (optional)">
+<input id="p" type="password" placeholder="password" autocomplete="new-password">
+<button onclick="go()">Join workspace</button><div id="err"></div>
+<script>async function go(){{const r=await fetch('/api/workspace/join',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{token:'{t}',username:u.value.trim(),password:p.value,name:n.value.trim()}})}});if(r.ok)location.href='/';else document.getElementById('err').textContent=(await r.json().catch(()=>({{}}))).error||'could not join';}}
+document.addEventListener('keydown',e=>{{if(e.key==='Enter')go()}});</script>"#,
+            n = html_escape(&name),
+            t = html_escape(&token),
+        )
+    } else {
+        format!(
+            "<h1>{}</h1><p class=\"sub\">This invite link is invalid or has been used up. Ask an admin for a new one.</p>",
+            html_escape(&name)
+        )
+    };
+    axum::response::Html(format!(
+        r#"<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Join</title>
+<style>body{{font-family:-apple-system,system-ui,sans-serif;background:#0b1020;color:#e6ecff;display:grid;place-items:center;min-height:100vh;margin:0}}
+.card{{background:#121a30;border:1px solid #24304f;border-radius:16px;padding:34px;width:340px;box-shadow:0 20px 60px rgba(0,0,0,.4)}}
+h1{{font-size:20px;margin:0 0 6px}} .sub{{color:#8b98b8;font-size:13px;margin:0 0 18px}}
+input{{width:100%;box-sizing:border-box;background:#0b1020;color:#e6ecff;border:1px solid #24304f;border-radius:10px;padding:11px 13px;font-size:14px;margin-bottom:10px}}
+button{{width:100%;background:#22d3ee;color:#06202a;border:none;border-radius:10px;padding:12px;font-size:14px;font-weight:700;cursor:pointer}}
+#err{{color:#f87171;font-size:12.5px;margin-top:10px;min-height:16px}}</style>
+<div class="card">{body}</div>"#
+    ))
+    .into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct JoinReq {
+    token: String,
+    username: String,
+    password: String,
+    #[serde(default)]
+    name: String,
+}
+
+/// Redeem an invite: create the account with the invite's role + projects,
+/// consume one use, and sign the new member straight in.
+async fn join_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<JoinReq>,
+) -> axum::response::Response {
+    let Some(auth) = app.auth.clone() else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(serde_json::json!({"error":"auth not configured"})),
+        )
+            .into_response();
+    };
+    let username = req.username.trim().to_owned();
+    if username.is_empty() || req.password.len() < 4 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error":"username and a password (4+ chars) required"})),
+        )
+            .into_response();
+    }
+    // Validate + consume one use atomically under the workspace lock.
+    let invite = {
+        let mut w = app.workspace.inner.lock().await;
+        let Some(i) = w
+            .invites
+            .iter_mut()
+            .find(|i| i.token == req.token && i.uses_left > 0)
+        else {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error":"invite invalid or used up"})),
+            )
+                .into_response();
+        };
+        i.uses_left -= 1;
+        let inv = i.clone();
+        w.invites.retain(|i| i.uses_left > 0);
+        inv
+    };
+    app.workspace.save().await;
+    let role = role_from(Some(invite.role.as_str()));
+    if !auth.create_user(&username, &req.password, role).await {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error":"username already taken"})),
+        )
+            .into_response();
+    }
+    if !req.name.trim().is_empty() {
+        auth.update_user(&username, req.name.trim(), "", None).await;
+    }
+    for pid in &invite.projects {
+        auth.assign_project(&username, pid).await;
+    }
+    audit_push(&app.audit, &username, "joined via invite".to_owned(), 200).await;
+    // Sign them straight in (no 2FA on a brand-new account).
+    match auth.login(&username, &req.password, None).await {
+        coxagent_application::LoginResult::Ok(token) => {
+            let cookie = format!(
+                "{SESSION_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200{}",
+                cookie_secure(&headers)
+            );
+            (
+                [(header::SET_COOKIE, cookie)],
+                Json(serde_json::json!({"ok":true})),
+            )
+                .into_response()
+        }
+        _ => Json(serde_json::json!({ "ok": true, "login": "manual" })).into_response(),
+    }
+}
+
+/// Company-level overview: every project's health + spend + who's online, plus
+/// the member directory — the workspace home screen's data.
+async fn workspace_overview_ep(State(app): State<AppState>) -> axum::response::Response {
+    let order = app.order.read().await.clone();
+    let projects_map = app.projects.read().await.clone();
+    let mut projects = Vec::new();
+    for pid in &order {
+        let Some(p) = projects_map.get(pid) else {
+            continue;
+        };
+        let Ok(state) = p.store.load().await else {
+            continue;
+        };
+        let m = coxagent_application::metrics::compute(&state);
+        let workers = p.store.workers().await.unwrap_or_default();
+        projects.push(serde_json::json!({
+            "id": p.id, "name": p.name, "alias": state.alias,
+            "version": m.version,
+            "shipped": m.features_shipped, "in_flight": m.features_in_flight,
+            "bugs_open": m.bugs_open, "total_tickets": m.total_tickets,
+            "spend": state.spend.total_cost_usd,
+            "sprint": state.sprint.as_ref().map(|s| serde_json::json!({"number": s.number, "goal": s.goal})),
+            "online": workers.iter().map(|w| w.worker.split('@').next().unwrap_or("").to_owned()).collect::<Vec<_>>(),
+        }));
+    }
+    let members = match app.auth.clone() {
+        Some(auth) => auth
+            .list_users()
+            .await
+            .into_iter()
+            .map(|u| serde_json::json!({"username": u.username, "name": u.name, "role": u.role.as_str(), "projects": u.projects}))
+            .collect::<Vec<_>>(),
+        None => Vec::new(),
+    };
+    let w = app.workspace.inner.lock().await.clone();
+    Json(serde_json::json!({
+        "workspace": {"name": w.name, "tagline": w.tagline, "accent": w.accent},
+        "projects": projects, "members": members,
+    }))
+    .into_response()
+}
+
+/// The signed-in user's agents across every project they belong to: online
+/// state, current work, desired flag, and their token spend — the "my agents"
+/// management panel.
+async fn my_agents_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let me = resolve_username(&app, &headers).await;
+    let (is_admin, my_projects) = match app.auth.clone() {
+        Some(auth) => resolve_principal(&auth, &headers)
+            .await
+            .map_or((false, Vec::new()), |u| (u.role.can_manage(), u.projects)),
+        None => (true, Vec::new()),
+    };
+    let order = app.order.read().await.clone();
+    let projects_map = app.projects.read().await.clone();
+    let prefix = format!("{me}@");
+    let mut out = Vec::new();
+    for pid in &order {
+        let Some(p) = projects_map.get(pid) else {
+            continue;
+        };
+        if !is_admin && !my_projects.contains(pid) {
+            continue;
+        }
+        let workers = p.store.workers().await.unwrap_or_default();
+        let mine: Vec<_> = workers
+            .iter()
+            .filter(|w| w.worker.starts_with(&prefix))
+            .collect();
+        let spend = p.store.load().await.ok().map(|s| {
+            s.spend
+                .by_operator
+                .iter()
+                .filter(|(k, _)| k.starts_with(&prefix))
+                .map(|(_, v)| (v.cost_usd, v.input_tokens + v.output_tokens))
+                .fold((0.0, 0u64), |a, b| (a.0 + b.0, a.1 + b.1))
+        });
+        let (cost, tokens) = spend.unwrap_or((0.0, 0));
+        let operator = mine.first().map(|w| w.worker.clone());
+        let desired = match &operator {
+            Some(op) => p.store.get_desired(op).await.ok().flatten(),
+            None => None,
+        };
+        out.push(serde_json::json!({
+            "project": pid, "name": p.name,
+            "online": !mine.is_empty(),
+            "operator": operator,
+            "role": mine.first().map(|w| w.role.clone()),
+            "ticket": mine.first().map(|w| w.ticket.clone()),
+            "desired": desired,
+            "cost": cost, "tokens": tokens,
+        }));
+    }
+    Json(serde_json::json!({ "username": me, "agents": out })).into_response()
+}
+
+/// Minimal HTML escaping for the join page.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
 #[derive(serde::Deserialize)]
 struct SprintGoalReq {
     goal: String,
@@ -4276,6 +4703,9 @@ async fn auth_mw(
         || path == "/api/health"
         || path == "/api/auth/login"
         || path.starts_with("/api/chat/hook/")
+        // Invite flow: the invite token IS the credential for joining.
+        || path.starts_with("/join/")
+        || path == "/api/workspace/join"
     {
         return next.run(req).await;
     }

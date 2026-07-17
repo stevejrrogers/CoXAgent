@@ -931,6 +931,31 @@
   .slash-arg{color:var(--muted);font-family:ui-monospace,monospace;font-size:11px}
   .slash-desc{color:var(--dim);margin-left:auto;font-size:11px}
   .cbub.working{color:var(--muted);font-style:italic;font-size:12.5px;display:inline-flex;align-items:center;gap:7px}
+  /* Workspace home */
+  .wshero{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;flex-wrap:wrap;padding:22px 24px;border:1px solid var(--border);border-radius:16px;background:linear-gradient(135deg,color-mix(in srgb,var(--accent2) 10%,var(--card)),var(--card));margin-bottom:6px}
+  .wsname{font-size:24px;font-weight:750;letter-spacing:-.02em}
+  .wstag{color:var(--muted);font-size:13px;margin-top:4px}
+  .wsstats{display:flex;gap:10px;flex-wrap:wrap}
+  .wsgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
+  .wscard{border:1px solid var(--border);border-radius:14px;background:var(--card);padding:16px;cursor:pointer;transition:border-color .15s,transform .15s}
+  .wscard:hover{border-color:var(--accent2);transform:translateY(-2px)}
+  .wsc-h{display:flex;align-items:center;gap:8px}
+  .wsc-v{margin-left:auto;color:var(--dim);font-size:11px;font-family:ui-monospace,monospace}
+  .wsc-goal{color:var(--accent2);font-size:12px;margin-top:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .wsc-stats{display:flex;gap:14px;color:var(--muted);font-size:12.5px;margin-top:10px}
+  .wsc-online{display:flex;gap:4px;margin-top:12px;align-items:center}
+  .wsc-off{color:var(--dim);font-size:11px}
+  .wsava{width:22px;height:22px;border-radius:50%;background:color-mix(in srgb,var(--accent2) 22%,transparent);color:var(--accent2);display:inline-flex;align-items:center;justify-content:center;font-size:9.5px;font-weight:700}
+  .wsrow{display:flex;align-items:center;gap:12px;padding:9px 6px;border-bottom:1px solid var(--border);font-size:13px}
+  .wsrow:last-child{border-bottom:none}
+  .wsproj{min-width:130px;font-weight:600}
+  .wsstate{flex:1;color:var(--muted)}
+  .wsspend{color:var(--dim);font-size:12px;font-family:ui-monospace,monospace}
+  .wsdot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:2px}
+  .wsdot.on{background:var(--green);box-shadow:0 0 6px var(--green)}
+  .wsdot.off{background:var(--red)} .wsdot.idle{background:var(--amber)}
+  .wsmem{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--border);border-radius:20px;padding:5px 12px 5px 6px;margin:3px;font-size:12.5px}
+  .wsrole{color:var(--dim);font-size:10.5px;text-transform:uppercase}
   .ctime{color:var(--dim)}
   .cbub{background:var(--card);border:1px solid var(--border);border-radius:12px;border-top-left-radius:3px;padding:9px 13px;font-size:13px;line-height:1.5;color:var(--text);white-space:pre-wrap;word-break:break-word}
   /* rendered-markdown message body: flow like HTML, chat-sized elements */
@@ -1063,6 +1088,7 @@ body:not(.manage) .manage-only { display: none !important; }
       <div class="chanlist" id="dm-list"></div>
     </div>
     <nav class="nav" id="ws-nav">
+      <a data-v="home" onclick="nav('home')"><i class="ti ti-building-skyscraper"></i> Workspace</a>
       <a data-v="overview" class="on" onclick="nav('overview')"><i class="ti ti-layout-dashboard"></i> Overview</a>
       <a data-v="team" onclick="nav('team')"><i class="ti ti-robot"></i> Agents</a>
       <a data-v="board" onclick="nav('board')"><i class="ti ti-columns"></i> Work</a>
@@ -1113,6 +1139,16 @@ body:not(.manage) .manage-only { display: none !important; }
         <div id="proj-menu" class="projmenu"></div>
       </div></div>
     <div class="content">
+      <div class="view" id="view-home">
+        <div id="ws-hero"></div>
+        <div class="sec">My agents <span style="font-size:11px;color:var(--dim);font-weight:400">· your operator in each project — start/stop is yours alone</span></div>
+        <div class="panel" id="ws-myagents"></div>
+        <div class="sec">Projects</div>
+        <div id="ws-projects" class="wsgrid"></div>
+        <div class="sec">Members</div>
+        <div class="panel" id="ws-members"></div>
+        <div class="manage-only" id="ws-admin"></div>
+      </div>
       <div class="view on" id="view-overview">
         <div id="ov-alerts"></div>
         <div id="ov-goal"></div>
@@ -1519,7 +1555,7 @@ const fmtK=n=>{n=Number(n)||0;return n>=1000?(n/1000).toFixed(1)+"k":String(n);}
 const AC={BA:"--blue","DEV-FEATURE":"--green","DEV-BUG":"--red",SA:"--purple",TEST:"--teal",DOCS:"--blue",PO:"--amber",SM:"--teal",PD:"--purple",USER:"--accent"};
 // Stable nicknames so each role reads as one consistent person, not a label.
 const AGENT_NICK={BA:"Bella",PO:"Pola",SM:"Sam",SA:"Aria","DEV-FEATURE":"Finn","DEV-BUG":"Bex",TEST:"Quinn",DOCS:"Dana",PD:"Piper"};
-const TITLES={overview:["Overview","project health at a glance"],team:["Agents","your autonomous workers"],board:["Work","board · sprint · backlog"],activity:["Activity","what the agents are doing"],roadmap:["Roadmap","now · next · later, auto-generated"],discuss:["Scrum","standups, sprint events & team threads"],docs:["Wiki","product & technical knowledge base"],codemap:["Code map","symbols & dependencies the agents navigate"],chat:["Chat","talk with your teammates"],review:["Review","open pull requests — approve & merge"],people:["People","per-user activity & productivity"],audit:["Audit","who did what, when"],access:["Users","accounts, project access & tokens"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
+const TITLES={home:["Workspace","company overview · projects · your agents"],overview:["Overview","project health at a glance"],team:["Agents","your autonomous workers"],board:["Work","board · sprint · backlog"],activity:["Activity","what the agents are doing"],roadmap:["Roadmap","now · next · later, auto-generated"],discuss:["Scrum","standups, sprint events & team threads"],docs:["Wiki","product & technical knowledge base"],codemap:["Code map","symbols & dependencies the agents navigate"],chat:["Chat","talk with your teammates"],review:["Review","open pull requests — approve & merge"],people:["People","per-user activity & productivity"],audit:["Audit","who did what, when"],access:["Users","accounts, project access & tokens"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
 const esc=s=>(s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 const cvar=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim()||"#888";
 let STATE={}, CUR="overview", BF="all", INIT_ACT=false, WORKTAB="board";
@@ -1945,7 +1981,76 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
         <div style="color:var(--dim);font-size:11px;margin-top:8px">Loop auto-pauses when the cap is reached.</div>`;
     }else{document.getElementById("cost-budget").innerHTML='<div class="empty">no budget cap set — add "budget_usd" in coxagent.json</div>';}
     renderTokenSaver();
-  }else if(CUR==="discuss"){renderDiscuss();}else if(CUR==="roadmap"){renderRoadmap();}}
+  }else if(CUR==="discuss"){renderDiscuss();}else if(CUR==="roadmap"){renderRoadmap();}else if(CUR==="home"){renderHome();}}
+// ---- Workspace home: company hero, my agents, project grid, members, invites ----
+async function renderHome(){
+  let ov={projects:[],members:[],workspace:{}},me={agents:[]};
+  try{[ov,me]=await Promise.all([fetch("/api/workspace/overview").then(r=>r.json()),fetch("/api/me/agents").then(r=>r.json())]);}catch(e){return;}
+  const w=ov.workspace||{};const totalSpend=(ov.projects||[]).reduce((a,p)=>a+(p.spend||0),0);
+  const online=new Set();(ov.projects||[]).forEach(p=>(p.online||[]).forEach(o=>online.add(o)));
+  document.getElementById("ws-hero").innerHTML=`<div class="wshero">
+    <div><div class="wsname">${esc(w.name||"Your workspace")}</div><div class="wstag">${esc(w.tagline||"one company · many projects · autonomous teams")}</div></div>
+    <div class="wsstats">${kpi("Projects",(ov.projects||[]).length)}${kpi("Members",(ov.members||[]).length)}${kpi("Online now",online.size)}${kpi("Total spend",money(totalSpend))}</div></div>`;
+  document.getElementById("ws-myagents").innerHTML=(me.agents||[]).length?(me.agents||[]).map(a=>{
+    const st=a.online?`<span class="wsdot on"></span> <b>${esc((a.role||"").toUpperCase())}</b> ${a.ticket?`<span class="tid">${esc(a.ticket)}</span>`:""}`
+      :(a.desired===false?'<span class="wsdot off"></span> stopped':'<span class="wsdot idle"></span> idle');
+    const op=a.operator?`'${esc(a.operator)}'`:null;
+    const btn=a.online?`<button class="ticket-actions" onclick="myAgentCtl('${esc(a.project)}',${op},'stop')"><i class="ti ti-player-stop"></i> Stop</button>`
+      :`<button class="ticket-actions" onclick="myAgentCtl('${esc(a.project)}',${op},'start')"><i class="ti ti-player-play"></i> Start</button>`;
+    return `<div class="wsrow"><span class="wsproj">${esc(a.name||a.project)}</span><span class="wsstate">${st}</span>
+      <span class="wsspend">${fmtK(a.tokens||0)} tok · ${money(a.cost||0)}</span>${btn}</div>`;}).join("")
+    :'<div class="empty">no agents yet — Start one in a project you belong to</div>';
+  document.getElementById("ws-projects").innerHTML=(ov.projects||[]).map(p=>`
+    <div class="wscard" onclick="switchProject('${esc(p.id)}');nav('overview')">
+      <div class="wsc-h"><b>${esc(p.name||p.id)}</b><span class="tk">${esc(p.alias||"")}</span><span class="wsc-v">v${esc(p.version||"0")}</span></div>
+      ${p.sprint?`<div class="wsc-goal"><i class="ti ti-target-arrow"></i> S${p.sprint.number}: ${esc(p.sprint.goal||"")}</div>`:''}
+      <div class="wsc-stats"><span>🚀 ${p.shipped||0}</span><span>⚙️ ${p.in_flight||0}</span><span>🐛 ${p.bugs_open||0}</span><span>${money(p.spend||0)}</span></div>
+      <div class="wsc-online">${(p.online||[]).map(o=>`<span class="wsava" title="${esc(o)}">${esc(initials(o))}</span>`).join("")||'<span class="wsc-off">no one online</span>'}</div>
+    </div>`).join("")||'<div class="empty">no projects yet</div>';
+  document.getElementById("ws-members").innerHTML=(ov.members||[]).map(m=>
+    `<span class="wsmem" title="${esc((m.projects||[]).join(", ")||"all projects")}"><span class="wsava">${esc(initials(m.name||m.username))}</span> ${esc(m.name||m.username)} <span class="wsrole">${esc(m.role)}</span></span>`).join("")||'<div class="empty">running open — no accounts</div>';
+  if(ME&&ME.role==="admin")renderWsAdmin(w);
+}
+async function myAgentCtl(pid,op,action){
+  try{
+    if(op){await fetch(`/api/projects/${pid}/operators/${encodeURIComponent(op)}/${action}`,{method:"POST"});}
+    if(action==="start"){await fetch(`/api/projects/${pid}/control/resume`,{method:"POST"});}
+    else if(!op){await fetch(`/api/projects/${pid}/control/stop`,{method:"POST"});}
+    toasty(action==="start"?"Starting your agent…":"Stopping your agent…","ok");
+  }catch(e){}
+  setTimeout(renderHome,900);
+}
+async function renderWsAdmin(w){
+  let invites=[];try{invites=await(await fetch("/api/workspace/invites")).json();}catch(e){}
+  const projOpts=(STATE&&window.PROJECTS||[]).map(p=>p.id||p).join(", ");
+  document.getElementById("ws-admin").innerHTML=`
+    <div class="sec">Workspace settings <span style="font-size:11px;color:var(--dim);font-weight:400">· admin</span></div>
+    <div class="panel frm">
+      <div class="fr"><span class="lbl">Company name</span><input id="wsn" value="${esc(w.name||"")}" placeholder="e.g. Straw Hat Labs"></div>
+      <div class="fr"><span class="lbl">Tagline</span><input id="wst" value="${esc(w.tagline||"")}" placeholder="what your company does"></div>
+      <div class="fr"><span class="lbl"></span><button class="pri" onclick="saveWs()"><i class="ti ti-check"></i> Save</button></div>
+    </div>
+    <div class="sec">Invite people</div>
+    <div class="panel frm">
+      <div class="fr"><span class="lbl">Role</span><select id="inv-role"><option value="viewer">viewer</option><option value="be">be</option><option value="fe">fe</option><option value="admin">admin</option></select>
+        <span class="lbl" style="min-width:auto">Projects</span><input id="inv-projects" placeholder="comma-separated ids (blank = none)" style="flex:1">
+        <span class="lbl" style="min-width:auto">Uses</span><input id="inv-uses" type="number" value="5" min="1" style="width:70px">
+        <button class="pri" onclick="createInvite()"><i class="ti ti-link"></i> Create link</button></div>
+      <div id="inv-new"></div>
+      ${invites.length?invites.map(i=>`<div class="wsrow"><span class="wsproj" style="font-family:ui-monospace,monospace;font-size:11px">/join/${esc(i.token.slice(0,14))}…</span>
+        <span class="wsstate">${esc(i.role)} · ${esc((i.projects||[]).join(", ")||"no projects")} · ${i.uses_left} use(s) left</span>
+        <button class="ticket-actions" onclick="copyInvite('${esc(i.token)}')"><i class="ti ti-copy"></i> Copy</button>
+        <button class="ticket-actions" onclick="revokeInvite('${esc(i.token)}')"><i class="ti ti-trash"></i></button></div>`).join(""):'<div class="empty" style="padding:6px">no active invites</div>'}
+    </div>`;
+}
+async function saveWs(){try{await fetch("/api/workspace",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:val("wsn"),tagline:val("wst"),accent:""})});toasty("Workspace saved","ok");renderHome();}catch(e){}}
+async function createInvite(){
+  const projects=(val("inv-projects")||"").split(",").map(s=>s.trim()).filter(Boolean);
+  try{const r=await(await fetch("/api/workspace/invites",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({role:val("inv-role"),projects,uses:parseInt(val("inv-uses")||"5",10)})})).json();
+    if(r.ok){const url=location.origin+r.url;document.getElementById("inv-new").innerHTML=`<div class="wsrow" style="background:color-mix(in srgb,var(--green) 8%,transparent)"><span class="wsproj" style="font-family:ui-monospace,monospace;font-size:12px;user-select:all">${esc(url)}</span><button class="ticket-actions" onclick="navigator.clipboard.writeText('${esc(url)}');toasty('Copied','ok')"><i class="ti ti-copy"></i> Copy</button></div>`;renderWsAdmin({name:val("wsn"),tagline:val("wst")});}
+  }catch(e){}}
+function copyInvite(t){navigator.clipboard.writeText(location.origin+"/join/"+t);toasty("Invite link copied","ok");}
+async function revokeInvite(t){try{await fetch("/api/workspace/invites/"+t,{method:"DELETE"});renderHome();}catch(e){}}
 async function renderTokenSaver(){
   const el=document.getElementById("cost-tokensaver");if(!el)return;
   let d={};try{d=await(await fetch("/api/token-saver")).json();}catch(e){return;}
