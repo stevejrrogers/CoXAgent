@@ -922,6 +922,14 @@
   .sprintgoal .sg-lbl{color:var(--muted);font-weight:600;white-space:nowrap}
   .sprintgoal input{flex:1;min-width:0;background:var(--card);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:6px 11px;font-size:12.5px}
   .sprintgoal input.saved{border-color:var(--green)}
+  .sprintgoal #sprint-goal-txt{color:var(--text)}
+  .slash-menu{display:none;margin:0 12px;border:1px solid var(--border2);border-radius:10px;background:var(--card);box-shadow:0 -6px 24px rgba(0,0,0,.25);overflow:hidden;max-height:240px;overflow-y:auto}
+  .slash-item{display:flex;align-items:baseline;gap:8px;padding:8px 12px;cursor:pointer;font-size:12.5px;border-bottom:1px solid var(--border)}
+  .slash-item:last-child{border-bottom:none}
+  .slash-item:hover{background:var(--card2)}
+  .slash-item b{color:var(--accent2);font-family:ui-monospace,monospace}
+  .slash-arg{color:var(--muted);font-family:ui-monospace,monospace;font-size:11px}
+  .slash-desc{color:var(--dim);margin-left:auto;font-size:11px}
   .ctime{color:var(--dim)}
   .cbub{background:var(--card);border:1px solid var(--border);border-radius:12px;border-top-left-radius:3px;padding:9px 13px;font-size:13px;line-height:1.5;color:var(--text);white-space:pre-wrap;word-break:break-word}
   /* rendered-markdown message body: flow like HTML, chat-sized elements */
@@ -1275,18 +1283,18 @@ body:not(.manage) .manage-only { display: none !important; }
             <button class="ticket-actions chatstart manage-only" onclick="reviewRun(this,'architecture-review','SA')" title="SA reviews the whole architecture and files refactor tickets"><i class="ti ti-building-bank"></i> Arch review</button>
             <button class="ticket-actions chatstart manage-only" onclick="reviewRun(this,'docs-review','DOCS')" title="DOCS reviews the Wiki and writes any missing pages"><i class="ti ti-book"></i> Docs review</button>
           </div>
-          <div class="sprintgoal manage-only" title="The PO's goal for the next sprint — the BA proposes tickets that advance it (they still pass refinement before any DEV work)">
-            <i class="ti ti-target-arrow"></i><span class="sg-lbl">Sprint goal</span>
-            <input id="sprint-goal-in" placeholder="e.g. Ship PDF export + email digests for reports" onkeydown="if(event.key==='Enter')setSprintGoal()">
-            <button class="ticket-actions" onclick="setSprintGoal()"><i class="ti ti-check"></i> Set</button>
+          <div class="sprintgoal" id="sprint-goal-bar" style="display:none" title="Set with /sprint <goal> in the message box">
+            <i class="ti ti-target-arrow"></i><span class="sg-lbl">Sprint goal:</span>
+            <span id="sprint-goal-txt"></span>
           </div>
           <div id="disc-thread" class="chatbody" ondragover="event.preventDefault();this.classList.add('dropping')" ondragleave="this.classList.remove('dropping')" ondrop="dropFiles('disc',event)"></div>
           <div class="composewrap">
+            <div id="slash-menu" class="slash-menu"></div>
             <div class="att-strip" id="disc-att"></div>
             <div class="chatcompose">
               <input type="file" id="disc-file" multiple hidden onchange="pickFiles('disc',this)">
               <button class="att-btn" onclick="document.getElementById('disc-file').click()" title="Attach files"><i class="ti ti-paperclip"></i></button>
-              <span id="disc-toolbar"></span><input id="disc-input" placeholder="Message the team…  (**markdown** · Enter to send)" onkeydown="if(event.key==='Enter')sendComment()">
+              <span id="disc-toolbar"></span><input id="disc-input" placeholder="Message the team…  (type / for commands · Enter to send)" oninput="slashMenu()" onkeydown="if(event.key==='Enter')sendComment()">
               <button class="pri" onclick="sendComment()"><i class="ti ti-send"></i></button>
             </div>
           </div>
@@ -2051,17 +2059,67 @@ function renderBacklogPanel(s){
     <div class="panel">${rows||'<div class="empty">backlog is clear — every ticket is in flight or shipped</div>'}</div>`;
 }
 function loadComments(){if(CUR==="discuss")renderDiscuss();}
-async function setSprintGoal(){
-  const el=document.getElementById("sprint-goal-in");if(!el)return;
-  const goal=el.value.trim();
-  try{const r=await fetch(api("/sprint/goal"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({goal})});
-    if(r.ok){el.classList.add("saved");setTimeout(()=>el.classList.remove("saved"),1200);}
-  }catch(e){}
-}
-// Fill the sprint-goal input from state (unless the PO is editing it).
+// Show the current sprint goal as a read-only chip; set it with /sprint <goal>.
 function syncSprintGoal(s){
-  const el=document.getElementById("sprint-goal-in");
-  if(el&&document.activeElement!==el)el.value=(s&&s.sprint_goal)||"";
+  const bar=document.getElementById("sprint-goal-bar"),txt=document.getElementById("sprint-goal-txt");
+  if(!bar||!txt)return;
+  const g=(s&&s.sprint_goal||"").trim();
+  txt.textContent=g; bar.style.display=g?"flex":"none";
+}
+// --- Slash commands in the team chat ---
+const SLASH_CMDS=[
+  ["/sprint","<goal>","Set the sprint goal — BA proposes tickets toward it"],
+  ["/discuss","<topic>","Team discusses a topic; SM decides"],
+  ["/standup","","SM runs a standup roundup"],
+  ["/arch","","SA reviews architecture & files refactors"],
+  ["/docs","","DOCS reviews the Wiki & fills gaps"],
+  ["/start","","Start your operator"],
+  ["/stop","","Stop your operator"],
+  ["/pause","","Pause the runner"],
+  ["/help","","Show this list"],
+];
+async function refreshDisc(){try{const s=await(await fetch(api("/state"))).json();render(s);renderDiscuss();}catch(e){}}
+// Returns true if `body` was a slash command (and was handled — don't post it).
+async function handleSlash(body){
+  if(body[0]!=="/")return false;
+  const m=body.match(/^\/(\S+)\s*([\s\S]*)$/); if(!m)return false;
+  const cmd=m[1].toLowerCase(), arg=(m[2]||"").trim(), dummy={};
+  switch(cmd){
+    case "sprint": case "goal":
+      if(!arg){toasty("Usage: /sprint <goal text>","warn");return true;}
+      try{await fetch(api("/sprint/goal"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({goal:arg})});toasty("Sprint goal set","ok");}catch(e){}
+      refreshDisc();return true;
+    case "discuss": case "discussion":
+      if(!arg){toasty("Usage: /discuss <topic>","warn");return true;}
+      toasty("Agents discussing…","ok");
+      try{await fetch(api("/discuss"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({topic:arg})});}catch(e){}
+      refreshDisc();return true;
+    case "standup": runStandup(dummy); return true;
+    case "arch": case "architecture": reviewRun(dummy,"architecture-review","SA"); return true;
+    case "docs": reviewRun(dummy,"docs-review","DOCS"); return true;
+    case "start": case "resume": ctl("resume"); toasty("Starting…","ok"); return true;
+    case "stop": ctl("stop"); toasty("Stopping…","ok"); return true;
+    case "pause": ctl("pause"); toasty("Paused","ok"); return true;
+    case "help": toasty(SLASH_CMDS.map(c=>c[0]+(c[1]?" "+c[1]:"")).join("  ·  "),"ok"); return true;
+    default: toasty("Unknown command "+"/"+cmd+" — try /help","warn"); return true;
+  }
+}
+// Slash autocomplete menu under the message box.
+function slashMenu(){
+  const inp=document.getElementById("disc-input"),menu=document.getElementById("slash-menu");
+  if(!inp||!menu)return;
+  const v=inp.value;
+  if(v[0]!=="/"||v.includes(" ")){menu.style.display="none";return;}
+  const q=v.slice(1).toLowerCase();
+  const hits=SLASH_CMDS.filter(c=>c[0].slice(1).startsWith(q));
+  if(!hits.length){menu.style.display="none";return;}
+  menu.innerHTML=hits.map(c=>`<div class="slash-item" onclick="pickSlash('${c[0]}',${c[1]?1:0})"><b>${c[0]}</b> <span class="slash-arg">${esc(c[1])}</span><span class="slash-desc">${esc(c[2])}</span></div>`).join("");
+  menu.style.display="block";
+}
+function pickSlash(cmd,hasArg){
+  const inp=document.getElementById("disc-input");
+  if(hasArg){inp.value=cmd+" ";inp.focus();document.getElementById("slash-menu").style.display="none";}
+  else{inp.value=cmd;document.getElementById("slash-menu").style.display="none";sendComment();}
 }
 // Turn ticket ids (e.g. OT-F001, CXC-B123) in rendered message HTML into
 // clickable links that open the ticket detail. Skips ids already inside a tag.
@@ -2188,6 +2246,9 @@ async function startDiscussion(){
 function sendComment(){const inp=document.getElementById("disc-input");const body=inp.value.trim();
   const attachments=(ATT.disc||[]).slice();
   if(!body&&!attachments.length)return;
+  // Slash command? Handle it instead of posting a message.
+  const sm=document.getElementById("slash-menu");if(sm)sm.style.display="none";
+  if(body[0]==="/"){inp.value="";handleSlash(body);return;}
   const ticket=document.getElementById("disc-filter").value||null;
   inp.value="";ATT.disc=[];renderAttStrip("disc");
   fetch(api("/comments"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({body,ticket,attachments})})
