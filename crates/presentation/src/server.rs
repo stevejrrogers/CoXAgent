@@ -3987,23 +3987,34 @@ async fn control_ep(
     let Some(p) = app.project(&pid).await else {
         return not_found();
     };
+    // Attribute the run to whoever started it, on this machine, so the agent
+    // cards can show "account@host" and claims are owned correctly. A headless
+    // worker (no login session) takes its identity from COXAGENT_OPERATOR — the
+    // way a `coxagent run` box on another machine gets a distinct name.
+    let account = match std::env::var("COXAGENT_OPERATOR") {
+        Ok(o) if !o.is_empty() => o,
+        _ => resolve_username(&app, &headers).await,
+    };
+    let operator = format!("{account}@{}", machine_host());
     match action.as_str() {
         "resume" => {
-            // Attribute the run to whoever started it, on this machine, so the
-            // agent cards can show "account@host" and claims are owned correctly.
-            // A headless worker (no login session) takes its identity from
-            // COXAGENT_OPERATOR — the way a `coxagent run` box on another machine
-            // gets a distinct name in the shared registry.
-            let account = match std::env::var("COXAGENT_OPERATOR") {
-                Ok(o) if !o.is_empty() => o,
-                _ => resolve_username(&app, &headers).await,
-            };
             p.runner.set_operator(&account, &machine_host());
             p.runner.resume();
+            // Persist this operator's intent so reopening the app auto-resumes
+            // for THIS user only — never starts anyone else's operator.
+            let _ = p.store.set_desired(&operator, true).await;
         }
-        "pause" => p.runner.pause(),
+        // Pause/stop are local to this operator and persist the stopped intent,
+        // so a reopen stays idle instead of auto-resuming.
+        "pause" => {
+            p.runner.pause();
+            let _ = p.store.set_desired(&operator, false).await;
+        }
         "step" => p.runner.step(),
-        "stop" => p.runner.stop(),
+        "stop" => {
+            p.runner.stop();
+            let _ = p.store.set_desired(&operator, false).await;
+        }
         other => {
             return (
                 axum::http::StatusCode::BAD_REQUEST,

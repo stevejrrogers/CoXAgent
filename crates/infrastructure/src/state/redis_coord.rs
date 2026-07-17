@@ -129,6 +129,38 @@ impl RedisCoord {
         Ok(())
     }
 
+    /// Record an operator's desired run state as a persistent (no-TTL) key, so a
+    /// user's start/stop intent survives and drives auto-resume for that operator.
+    ///
+    /// # Errors
+    /// [`PortError`] on a Redis failure.
+    pub async fn set_desired(&self, operator: &str, running: bool) -> Result<(), PortError> {
+        let mut c = self.conn().await?;
+        let key = format!("cox:{}:desired:{operator}", self.project_id);
+        redis::cmd("SET")
+            .arg(&key)
+            .arg(if running { "running" } else { "stopped" })
+            .query_async::<()>(&mut c)
+            .await
+            .map_err(|e| PortError::Backend(format!("redis set_desired: {e}")))?;
+        Ok(())
+    }
+
+    /// This operator's desired run state, or `None` if never set.
+    ///
+    /// # Errors
+    /// [`PortError`] on a Redis failure.
+    pub async fn get_desired(&self, operator: &str) -> Result<Option<bool>, PortError> {
+        let mut c = self.conn().await?;
+        let key = format!("cox:{}:desired:{operator}", self.project_id);
+        let v: Option<String> = redis::cmd("GET")
+            .arg(&key)
+            .query_async(&mut c)
+            .await
+            .map_err(|e| PortError::Backend(format!("redis get_desired: {e}")))?;
+        Ok(v.map(|s| s == "running"))
+    }
+
     /// List every worker currently online (keys still within TTL).
     ///
     /// # Errors

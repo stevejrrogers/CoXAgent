@@ -522,6 +522,20 @@ async fn build_project(
     let loop_handle = Arc::clone(&handle);
     tokio::spawn(async move { run_forever(loop_handle, cycle_uc, sleep).await });
 
+    // Auto-resume this machine's operator if the user left it running last time
+    // (per-operator desired state). This restores only THIS user's operator —
+    // it never starts anyone else's, so no one's credentials get spent for them.
+    if let Ok(op) = std::env::var("COXAGENT_OPERATOR") {
+        if !op.is_empty() {
+            let operator = format!("{op}@{}", worker_host());
+            if matches!(store.get_desired(&operator).await, Ok(Some(true))) {
+                handle.set_operator(&op, &worker_host());
+                handle.resume();
+                tracing::info!("auto-resumed operator {operator} (left running)");
+            }
+        }
+    }
+
     let config_path = state_dir
         .parent()
         .unwrap_or(state_dir)

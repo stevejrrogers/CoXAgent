@@ -304,6 +304,20 @@ impl StateStorePort for SqlStateStore {
             })
             .collect())
     }
+
+    async fn set_desired(&self, operator: &str, running: bool) -> Result<(), PortError> {
+        if let Some(r) = &self.redis {
+            return r.set_desired(operator, running).await;
+        }
+        Ok(())
+    }
+
+    async fn get_desired(&self, operator: &str) -> Result<Option<bool>, PortError> {
+        if let Some(r) = &self.redis {
+            return r.get_desired(operator).await;
+        }
+        Ok(None)
+    }
 }
 
 impl SqlStateStore {

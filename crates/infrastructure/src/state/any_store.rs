@@ -85,4 +85,18 @@ impl StateStorePort for AnyStateStore {
             Self::Sql(s) => s.workers().await,
         }
     }
+
+    async fn set_desired(&self, operator: &str, running: bool) -> Result<(), PortError> {
+        match self {
+            Self::Json(s) => s.set_desired(operator, running).await,
+            Self::Sql(s) => s.set_desired(operator, running).await,
+        }
+    }
+
+    async fn get_desired(&self, operator: &str) -> Result<Option<bool>, PortError> {
+        match self {
+            Self::Json(s) => s.get_desired(operator).await,
+            Self::Sql(s) => s.get_desired(operator).await,
+        }
+    }
 }

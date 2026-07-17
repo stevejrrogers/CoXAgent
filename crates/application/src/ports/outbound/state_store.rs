@@ -120,4 +120,24 @@ pub trait StateStorePort: Send + Sync {
     async fn workers(&self) -> Result<Vec<WorkerEntry>, PortError> {
         Ok(Vec::new())
     }
+
+    /// Persist an operator's desired run state (`true` = should be running) so a
+    /// user's start/stop intent survives restarts and drives auto-resume when
+    /// that same operator reopens the app. Per-operator, so one user's choice
+    /// never starts or stops another's. Default no-op (single-runner file store).
+    ///
+    /// # Errors
+    /// [`PortError`] on a coordination-store failure.
+    async fn set_desired(&self, _operator: &str, _running: bool) -> Result<(), PortError> {
+        Ok(())
+    }
+
+    /// This operator's persisted desired run state, or `None` if never set (in
+    /// which case the runner stays idle until an explicit start).
+    ///
+    /// # Errors
+    /// [`PortError`] on a coordination-store failure.
+    async fn get_desired(&self, _operator: &str) -> Result<Option<bool>, PortError> {
+        Ok(None)
+    }
 }
