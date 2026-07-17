@@ -98,23 +98,32 @@ pub async fn brownfield<S: StateStorePort + 'static>(
     state.alias = alias.clone();
     store.save(&state).await?;
 
+    // Git is mandatory (branch-per-ticket, audit trail). Initialise + baseline
+    // commit when the codebase is not yet a repository.
+    let git_note = ensure_git_repo(codebase)?;
+
+    // Comprehension pass: so the team adopts the project understanding it, not
+    // blind. Index the code into a REPO_MAP the agents read first, and detect the
+    // stack to (a) seed governance rules that match reality and (b) draft a real
+    // project_context.md instead of an empty template.
+    let repo_stats = build_repo_map(codebase);
+    let (rules, stack_lines) = detect_stack(codebase);
+
     let root = state_dir.parent().unwrap_or(state_dir);
     let config_path = root.join("coxagent.json");
     if !config_path.exists() {
-        std::fs::write(
-            &config_path,
-            serde_json::to_string_pretty(&Config::default())?,
-        )?;
+        let mut cfg = Config::default();
+        cfg.architecture.clone_from(&rules);
+        std::fs::write(&config_path, serde_json::to_string_pretty(&cfg)?)?;
     }
     let context_path = state_dir.join("project_context.md");
     if !context_path.exists() {
         std::fs::create_dir_all(state_dir)?;
-        std::fs::write(&context_path, context_template(name))?;
+        std::fs::write(
+            &context_path,
+            comprehension_context(name, &repo_stats, &stack_lines),
+        )?;
     }
-
-    // Git is mandatory (branch-per-ticket, audit trail). Initialise + baseline
-    // commit when the codebase is not yet a repository.
-    let git_note = ensure_git_repo(codebase)?;
 
     // Deploy needs a compose file; seed a chore if the app is not dockerized.
     let adder = AddTicketUseCase::new(Arc::clone(store));
@@ -141,19 +150,130 @@ pub async fn brownfield<S: StateStorePort + 'static>(
     } else {
         format!("Seeded: {}", seeded.join(", "))
     };
+    let arch_line = if rules.is_empty() {
+        "Stack: none auto-detected (set architecture rules in Settings if needed)".to_owned()
+    } else {
+        format!(
+            "Detected stack ({} area(s)) → seeded governance rules",
+            rules.len()
+        )
+    };
     Ok(format!(
         "Adopted existing project '{name}' (alias {alias}) at {}.\n\
          {git_note}\n\
+         Comprehension: {repo_stats}\n\
+         {arch_line}\n\
          Wrote: {}\n       {}\n\
          {seeded_line}\n\n\
-         HUMAN GATE: complete {} (describe the existing stack & scope) before \
-         running `coxagent run --work-dir {}`.\n",
+         REVIEW: skim {} (auto-drafted from the code) and the seeded backlog, then \
+         run the team on `{}`.\n",
         codebase.display(),
         config_path.display(),
         context_path.display(),
         context_path.display(),
         codebase.display(),
     ))
+}
+
+/// Index the codebase into a graph + write `.coxagent/REPO_MAP.md` (the map the
+/// agents read first to orient). Returns a one-line stat summary; best-effort.
+fn build_repo_map(codebase: &Path) -> String {
+    use coxagent_application::codegraph::CodeGraph;
+    let g = CodeGraph::index(codebase);
+    let _ = g.save(codebase);
+    let _ = std::fs::create_dir_all(codebase.join(".coxagent"));
+    let _ = std::fs::write(
+        codebase.join(".coxagent").join("REPO_MAP.md"),
+        g.repo_map(40_000),
+    );
+    format!(
+        "indexed {} files, {} symbols, {} calls",
+        g.files.len(),
+        g.symbols.len(),
+        g.calls.len()
+    )
+}
+
+/// Detect the tech stack from manifest files at the root and one level down.
+/// Returns governance [`StackRule`]s (area → required language) plus a
+/// human-readable summary line per area — enough for the team to respect the
+/// existing stack instead of guessing.
+fn detect_stack(
+    codebase: &Path,
+) -> (
+    Vec<coxagent_application::conformance::StackRule>,
+    Vec<String>,
+) {
+    use coxagent_application::conformance::StackRule;
+    const MANIFESTS: &[(&str, &str)] = &[
+        ("Cargo.toml", "Rust"),
+        ("package.json", "JavaScript/TypeScript"),
+        ("go.mod", "Go"),
+        ("pyproject.toml", "Python"),
+        ("requirements.txt", "Python"),
+        ("pom.xml", "Java"),
+        ("build.gradle", "Java/Kotlin"),
+        ("Gemfile", "Ruby"),
+        ("composer.json", "PHP"),
+    ];
+    let mut areas: Vec<std::path::PathBuf> = vec![codebase.to_path_buf()];
+    if let Ok(rd) = std::fs::read_dir(codebase) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if e.path().is_dir()
+                && !name.starts_with('.')
+                && !matches!(name.as_str(), "node_modules" | "target" | "vendor" | "dist")
+            {
+                areas.push(e.path());
+            }
+        }
+    }
+    let (mut rules, mut summary, mut seen) =
+        (Vec::new(), Vec::new(), std::collections::HashSet::new());
+    for area in areas {
+        let rel = area
+            .strip_prefix(codebase)
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        for (file, lang) in MANIFESTS {
+            if area.join(file).exists() && seen.insert((rel.clone(), (*lang).to_owned())) {
+                rules.push(StackRule {
+                    area: rel.clone(),
+                    language: (*lang).to_owned(),
+                    require_any: vec![(*file).to_owned()],
+                    forbid_ext: Vec::new(),
+                });
+                let loc = if rel.is_empty() { "root" } else { &rel };
+                summary.push(format!("- **{loc}** — {lang} (`{file}`)"));
+            }
+        }
+    }
+    (rules, summary)
+}
+
+/// Draft `project_context.md` from what the comprehension pass learned, so the
+/// human reviews & refines a real starting point rather than a blank template.
+fn comprehension_context(name: &str, repo_stats: &str, stack_lines: &[String]) -> String {
+    let stack = if stack_lines.is_empty() {
+        "_No stack auto-detected — describe it here._".to_owned()
+    } else {
+        stack_lines.join("\n")
+    };
+    format!(
+        "# {name} — project context\n\n\
+         _Auto-drafted on adoption from the codebase ({repo_stats}). Review and refine._\n\n\
+         ## Stack (detected)\n{stack}\n\n\
+         ## What this project is\n\
+         _One paragraph: the product, who it's for, the core value. (Fill in — the \
+         team uses this to propose relevant work.)_\n\n\
+         ## Scope for the team\n\
+         _What should the autonomous team work on first? Goals, priorities, pain \
+         points, areas to avoid._\n\n\
+         ## Conventions to respect\n\
+         _Testing, CI, code style, branching — anything the agents must not break. \
+         The agents also read `.coxagent/REPO_MAP.md` for structure._\n",
+    )
 }
 
 /// Ensure `dir` is a git repo: `git init` + a baseline commit when it is not.
