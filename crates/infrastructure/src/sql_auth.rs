@@ -58,6 +58,25 @@ struct Session {
     at: String,
 }
 
+/// The durable session record when sessions live in Redis (native-TTL keys).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SessionRec {
+    username: String,
+    role: String,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    at: String,
+    /// Wall-clock expiry (unix secs) — lets a restart rebuild the deadline even
+    /// though Redis also auto-expires the key.
+    expires: u64,
+}
+
+/// Redis key for one session token.
+fn session_key(token: &str) -> String {
+    format!("cox:auth:session:{token}")
+}
+
 #[derive(Default)]
 struct Attempts {
     fails: u32,
@@ -67,7 +86,11 @@ struct Attempts {
 /// Postgres-backed auth service with in-memory sessions.
 pub struct SqlAuthService {
     pool: Pool,
+    /// Fast in-memory cache of live sessions; the durable copy is Redis (native
+    /// TTL) when configured, else the `auth_sessions` Postgres table.
     sessions: Mutex<HashMap<String, Session>>,
+    /// When set, sessions live in Redis as `cox:auth:session:*` TTL keys.
+    redis: Option<redis::Client>,
     attempts: Mutex<HashMap<String, Attempts>>,
     /// Pending (unconfirmed) 2FA secrets, keyed by username, until `enable_2fa`.
     pending_2fa: Mutex<HashMap<String, String>>,
@@ -95,6 +118,7 @@ impl SqlAuthService {
         let svc = Self {
             pool,
             sessions: Mutex::new(HashMap::new()),
+            redis: None,
             attempts: Mutex::new(HashMap::new()),
             pending_2fa: Mutex::new(HashMap::new()),
         };
@@ -103,13 +127,70 @@ impl SqlAuthService {
             .batch_execute(INIT_SQL)
             .await
             .map_err(|e| format!("auth migrate: {e}"))?;
-        svc.load_sessions().await;
         Ok(svc)
     }
 
-    /// Restore non-expired sessions from the database into the in-memory cache,
-    /// so a hub restart keeps everyone logged in. Expired rows are pruned.
+    /// Route session storage through Redis (native-TTL keys) instead of the
+    /// Postgres `auth_sessions` table. Call before serving so restored sessions
+    /// come from Redis. The first command establishes the connection (lazy).
+    ///
+    /// # Errors
+    /// Returns a message if the Redis URL is invalid.
+    pub fn with_redis(mut self, url: &str) -> Result<Self, String> {
+        self.redis = Some(redis::Client::open(url).map_err(|e| format!("auth redis open: {e}"))?);
+        Ok(self)
+    }
+
+    /// Restore live sessions into the in-memory cache. Must be called after any
+    /// `with_redis`, so the correct backend is queried.
+    pub async fn restore_sessions(&self) {
+        self.load_sessions().await;
+    }
+
+    async fn redis_conn(&self) -> Option<redis::aio::MultiplexedConnection> {
+        self.redis
+            .as_ref()?
+            .get_multiplexed_async_connection()
+            .await
+            .ok()
+    }
+
+    /// Rebuild one cache entry from a durable record's fields.
+    fn cache_session(
+        &self,
+        token: String,
+        username: String,
+        role: AuthRole,
+        label: String,
+        at: String,
+        remaining: u64,
+    ) {
+        if let Ok(mut sessions) = self.sessions.lock() {
+            sessions.insert(
+                token,
+                Session {
+                    user: AuthUser {
+                        username,
+                        name: String::new(),
+                        email: String::new(),
+                        role,
+                        projects: Vec::new(),
+                    },
+                    expires: Instant::now() + Duration::from_secs(remaining),
+                    label,
+                    at,
+                },
+            );
+        }
+    }
+
+    /// Restore non-expired sessions into the in-memory cache so a hub restart
+    /// keeps everyone logged in. Reads from Redis when configured, else Postgres.
     async fn load_sessions(&self) {
+        if self.redis.is_some() {
+            self.load_sessions_redis().await;
+            return;
+        }
         let Ok(client) = self.client().await else {
             return;
         };
@@ -158,12 +239,89 @@ impl SqlAuthService {
         tracing::info!("auth: restored {} session(s) from Postgres", sessions.len());
     }
 
-    /// Best-effort write-through of one session to the database.
+    /// Restore live sessions from Redis (`cox:auth:session:*`). Redis's native
+    /// TTL means only non-expired keys still exist — no manual pruning.
+    async fn load_sessions_redis(&self) {
+        let Some(mut c) = self.redis_conn().await else {
+            return;
+        };
+        let mut keys: Vec<String> = Vec::new();
+        let mut cursor = 0u64;
+        loop {
+            let Ok((next, batch)) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg("cox:auth:session:*")
+                .arg("COUNT")
+                .arg(200)
+                .query_async::<(u64, Vec<String>)>(&mut c)
+                .await
+            else {
+                return;
+            };
+            keys.extend(batch);
+            cursor = next;
+            if cursor == 0 {
+                break;
+            }
+        }
+        if keys.is_empty() {
+            tracing::info!("auth: restored 0 session(s) from Redis");
+            return;
+        }
+        let Ok(vals) = redis::cmd("MGET")
+            .arg(&keys)
+            .query_async::<Vec<Option<String>>>(&mut c)
+            .await
+        else {
+            return;
+        };
+        let now = unix_now();
+        let mut restored = 0usize;
+        for (key, val) in keys.iter().zip(vals) {
+            let Some(rec) = val.and_then(|s| serde_json::from_str::<SessionRec>(&s).ok()) else {
+                continue;
+            };
+            let token = key.rsplit(':').next().unwrap_or(key).to_owned();
+            let remaining = rec.expires.saturating_sub(now);
+            self.cache_session(
+                token,
+                rec.username,
+                role_from(&rec.role),
+                rec.label,
+                rec.at,
+                remaining,
+            );
+            restored += 1;
+        }
+        tracing::info!("auth: restored {restored} session(s) from Redis");
+    }
+
+    /// Best-effort write-through of one session to the durable store.
     async fn persist_session(&self, token: &str, username: &str, role: AuthRole, at: &str) {
+        let expires = unix_now() + SESSION_TTL.as_secs();
+        if let Some(mut c) = self.redis_conn().await {
+            let rec = SessionRec {
+                username: username.to_owned(),
+                role: role_str(role).to_owned(),
+                label: String::new(),
+                at: at.to_owned(),
+                expires,
+            };
+            let ttl_ms = u64::try_from(SESSION_TTL.as_millis()).unwrap_or(u64::MAX);
+            let _ = redis::cmd("SET")
+                .arg(session_key(token))
+                .arg(serde_json::to_string(&rec).unwrap_or_default())
+                .arg("PX")
+                .arg(ttl_ms)
+                .query_async::<()>(&mut c)
+                .await;
+            return;
+        }
         let Ok(client) = self.client().await else {
             return;
         };
-        let expires = i64::try_from(unix_now() + SESSION_TTL.as_secs()).unwrap_or(i64::MAX);
+        let expires = i64::try_from(expires).unwrap_or(i64::MAX);
         let _ = client
             .execute(
                 "INSERT INTO auth_sessions (token, username, role, expires, label, at)
@@ -174,8 +332,15 @@ impl SqlAuthService {
             .await;
     }
 
-    /// Best-effort delete of one session from the database.
+    /// Best-effort delete of one session from the durable store.
     async fn forget_session(&self, token: &str) {
+        if let Some(mut c) = self.redis_conn().await {
+            let _ = redis::cmd("DEL")
+                .arg(session_key(token))
+                .query_async::<()>(&mut c)
+                .await;
+            return;
+        }
         if let Ok(client) = self.client().await {
             let _ = client
                 .execute("DELETE FROM auth_sessions WHERE token = $1", &[&token])
@@ -312,6 +477,27 @@ impl AuthPort for SqlAuthService {
             if let Some(sess) = s.get_mut(token) {
                 device.clone_into(&mut sess.label);
             }
+        }
+        if let Some(mut c) = self.redis_conn().await {
+            // Read-modify-write the label, keeping the remaining TTL.
+            if let Ok(Some(js)) = redis::cmd("GET")
+                .arg(session_key(token))
+                .query_async::<Option<String>>(&mut c)
+                .await
+            {
+                if let Ok(mut rec) = serde_json::from_str::<SessionRec>(&js) {
+                    device.clone_into(&mut rec.label);
+                    if let Ok(v) = serde_json::to_string(&rec) {
+                        let _ = redis::cmd("SET")
+                            .arg(session_key(token))
+                            .arg(v)
+                            .arg("KEEPTTL")
+                            .query_async::<()>(&mut c)
+                            .await;
+                    }
+                }
+            }
+            return;
         }
         if let Ok(client) = self.client().await {
             let _ = client

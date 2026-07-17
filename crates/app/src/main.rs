@@ -755,7 +755,15 @@ async fn build_auth(
     // project can move its state to Postgres while keeping the local account file
     // (no forced re-login when going distributed on one host).
     if let Ok(dsn) = std::env::var("COXAGENT_AUTH_DSN") {
-        let svc = SqlAuthService::connect(&dsn).await?;
+        let mut svc = SqlAuthService::connect(&dsn).await?;
+        // Sessions are ephemeral TTL data — store them in Redis (native expiry)
+        // when available, else they fall back to the Postgres auth_sessions table.
+        if let Ok(url) = std::env::var("COXAGENT_REDIS_URL") {
+            if !url.is_empty() {
+                svc = svc.with_redis(&url)?;
+            }
+        }
+        svc.restore_sessions().await;
         if let Some((user, pass)) = &admin {
             svc.bootstrap_admin(user, pass).await?;
             tracing::info!("admin '{user}' provisioned in Postgres");
