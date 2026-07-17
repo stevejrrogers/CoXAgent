@@ -172,6 +172,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             at: now_rfc3339(),
         });
         self.store.save(&state).await?;
+        if let Some(p) = &self.phase {
+            p(None);
+        }
         Ok(Some(id))
     }
 

@@ -119,6 +119,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
         // DoR re-checked here; passes now that both technical and UX exist.
         ticket.transition_to(Role::Pd, Status::Ready)?;
         self.store.save(&state).await?;
+        if let Some(p) = &self.phase {
+            p(None);
+        }
         Ok(Some(id))
     }
 

@@ -153,6 +153,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
             "DOCS",
         );
         self.store.save(&state).await?;
+        if let Some(p) = &self.phase {
+            p(None);
+        }
         Ok(Some(id))
     }
 }

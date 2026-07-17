@@ -129,6 +129,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             ticket.transition_to(Role::Sa, Status::Ready)?;
         }
         self.store.save(&state).await?;
+        // Work done: clear the live phase so the dashboard/keepalive stops
+        // showing this role once we move on (no stale "still on SA" label).
+        if let Some(p) = &self.phase {
+            p(None);
+        }
         Ok(Some(id))
     }
 
