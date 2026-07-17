@@ -1160,7 +1160,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             Err(e) => report.errors.push(format!("DEV-BUG: {e}")),
         }
 
-        if self.config.workflow.feature_dev_enabled {
+        // PR-queue backpressure: when too many PRs are already open, STOP
+        // starting new features — every extra parallel branch multiplies merge
+        // conflicts (cascade). The team drains the queue (review/fix/merge)
+        // before taking on more; bug fixes still run.
+        let queue_full = self.pr_queue_full().await;
+        if queue_full {
+            report
+                .errors
+                .push("DEV-FEATURE: paused — PR queue full, draining reviews first".to_owned());
+        }
+        if self.config.workflow.feature_dev_enabled && !queue_full {
             // Before building, make sure the next feature has a clear definition
             // of done — DEV raises unclear tickets and the BA fills them in.
             self.clarify_next_feature().await;
@@ -1604,28 +1614,44 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             return;
         };
         let target = self.flow_base();
-        for pr in prs.into_iter().filter(|p| p.base == target).take(5) {
-            let feedback = match forge.pr_feedback(pr.number).await {
-                Ok(f) if !f.is_empty() => f,
-                _ => continue,
-            };
+        // OLDEST first: merging the oldest PR first minimises how many times the
+        // rest have to re-resolve — the opposite order feeds the conflict cascade.
+        let mut queue: Vec<_> = prs.into_iter().filter(|p| p.base == target).collect();
+        queue.sort_by(|a, b| a.created.cmp(&b.created));
+        for pr in queue.into_iter().take(6) {
+            // What needs fixing? Explicit review feedback, and/or merge conflicts
+            // — conflicts are handled IMMEDIATELY, not parked for a review round.
+            let feedback = forge.pr_feedback(pr.number).await.unwrap_or_default();
+            let conflicted = !pr.mergeable;
+            if feedback.is_empty() && !conflicted {
+                continue;
+            }
             self.report("DEV-BUG", &format!("fixing PR #{}", pr.number));
-            let asks = feedback
+            let mut asks: Vec<String> = feedback
                 .iter()
                 .map(|f| format!("- ({}) {}", f.author, f.body.trim()))
-                .collect::<Vec<_>>()
-                .join("\n");
+                .collect();
+            if conflicted {
+                asks.push(format!(
+                    "- (merge-queue) The branch conflicts with `{target}`. Merge the latest \
+                     `{target}` INTO this branch (`git fetch origin && git merge origin/{target}`), \
+                     resolve every conflict preserving BOTH the branch's fix and what landed on \
+                     {target}, and make the build/tests green."
+                ));
+            }
+            let asks = asks.join("\n");
             let request = crate::ports::outbound::AgentRequest {
                 role: coxagent_domain::Role::DevBug,
                 system_prompt: crate::prompts::system_prompt(crate::prompts::DEV),
                 task_prompt: format!(
-                    "A reviewer requested changes on pull request #{} (branch `{}`).\n\n\
-                     REVIEW FEEDBACK TO ADDRESS:\n{asks}\n\n\
+                    "Pull request #{} (branch `{}`) is blocked and YOU are unblocking the merge \
+                     queue.\n\n\
+                     WHAT TO FIX:\n{asks}\n\n\
                      Do exactly this:\n\
                      1. `git fetch origin && git checkout {} && git pull origin {}`\n\
-                     2. Make the changes the review asks for — nothing more.\n\
+                     2. Address the items above — nothing more.\n\
                      3. Run the tests/build to make sure nothing broke.\n\
-                     4. `git add -A && git commit -m \"fix: address review feedback on #{}\"` \
+                     4. `git add -A && git commit -m \"fix: unblock PR #{}\"` \
                         and `git push origin {}`.\n",
                     pr.number, pr.head, pr.head, pr.head, pr.number, pr.head
                 ),
@@ -1660,6 +1686,24 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             self.report_idle();
             break; // one PR per cycle
         }
+    }
+
+    /// Whether the open-PR queue has hit the WIP limit (`git.max_open_prs`) —
+    /// the signal to stop opening new branches and drain reviews instead.
+    async fn pr_queue_full(&self) -> bool {
+        let limit = self.config.git.max_open_prs;
+        if !self.config.git.enabled || limit == 0 {
+            return false;
+        }
+        let Some(forge) = &self.forge else {
+            return false;
+        };
+        let Ok(prs) = forge.list_open_prs().await else {
+            return false;
+        };
+        let target = self.flow_base();
+        let open = prs.iter().filter(|p| p.base == target).count();
+        open >= limit as usize
     }
 
     /// Ops/SRE monitor: once the app has been deployed, ping its published port

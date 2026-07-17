@@ -160,6 +160,10 @@ pub struct WorkflowConfig {
     pub language: Language,
 }
 
+fn default_max_open_prs() -> u32 {
+    4
+}
+
 fn default_sprint_len() -> u64 {
     10
 }
@@ -269,6 +273,11 @@ pub struct GitConfig {
     /// user merges). Implies `auto_review`.
     #[serde(default)]
     pub auto_merge: bool,
+    /// WIP limit on open PRs into the target branch: at/above this, DEV stops
+    /// starting NEW features and the team drains the review queue instead —
+    /// the brake that prevents cascade merge conflicts. 0 = unlimited.
+    #[serde(default = "default_max_open_prs")]
+    pub max_open_prs: u32,
 }
 
 fn default_true() -> bool {
@@ -299,6 +308,7 @@ impl Default for GitConfig {
             auto_pr: false,
             auto_review: true,
             auto_merge: false,
+            max_open_prs: default_max_open_prs(),
         }
     }
 }
