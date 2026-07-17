@@ -17,8 +17,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// Sessions live this long before a token must be re-issued.
-const SESSION_TTL: Duration = Duration::from_secs(12 * 60 * 60);
+/// Sessions live this long before a token must be re-issued. Long-lived so a
+/// hub relaunch (new binary, config change) never signs the operator out — the
+/// token is persisted to `sessions.json` and restored on startup.
+const SESSION_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// Consecutive failed logins for one account before it is locked.
 const MAX_FAILS: u32 = 5;
