@@ -885,9 +885,21 @@ async fn onboard_project(
         wd
     };
 
-    // Seed the confirmed project brief (from AI-assisted drafting), if any.
+    // Seed the confirmed project brief (from AI-assisted drafting), if any —
+    // MERGED into the auto-drafted comprehension context, not overwriting it, so
+    // the BA sees both the detected stack/structure and the user's goal.
     if let Some(goal) = req.goal.as_ref().filter(|g| !g.trim().is_empty()) {
-        let _ = std::fs::write(state_dir.join("project_context.md"), goal);
+        let ctx_path = state_dir.join("project_context.md");
+        let base_ctx = std::fs::read_to_string(&ctx_path).unwrap_or_default();
+        let merged = if base_ctx.trim().is_empty() {
+            goal.clone()
+        } else {
+            format!(
+                "{}\n\n## Goal (from onboarding)\n{goal}\n",
+                base_ctx.trim_end()
+            )
+        };
+        let _ = std::fs::write(&ctx_path, merged);
     }
 
     // Assign a unique host port so this project's `docker compose` deploy does

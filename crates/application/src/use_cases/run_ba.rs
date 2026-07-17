@@ -73,9 +73,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
             task_prompt: format!(
                 "Product goal:\n{}\n\nEXISTING BACKLOG — do NOT re-propose anything already \
                  here (same or similar title/scope):\n{}\n\nPropose only genuinely NEW features \
-                 that are not already covered above.{}",
+                 that are not already covered above. When the project already has code (see the \
+                 repo map below), propose features that fit the existing stack and structure — \
+                 concrete, grounded in what's there, not generic.{}{}",
                 self.context,
                 backlog_block,
+                prompts::repo_map_block(&self.work_dir, true),
                 prompts::team_memory_block(&existing.decisions, &existing.lessons)
             ),
             work_dir: self.work_dir.clone(),
