@@ -956,6 +956,10 @@
   .wsdot.off{background:var(--red)} .wsdot.idle{background:var(--amber)}
   .wsmem{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--border);border-radius:20px;padding:5px 12px 5px 6px;margin:3px;font-size:12.5px}
   .wsrole{color:var(--dim);font-size:10.5px;text-transform:uppercase}
+  .wsroles{display:flex;flex-direction:column;gap:4px;margin-bottom:12px;padding:10px 12px;border:1px dashed var(--border2);border-radius:10px}
+  .wsrole-x{color:var(--muted);font-size:12px}
+  .wsrole-x b{color:var(--accent2);font-family:ui-monospace,monospace;margin-right:4px}
+  .wssetup{border-color:color-mix(in srgb,var(--accent2) 45%,var(--border))}
   .ctime{color:var(--dim)}
   .cbub{background:var(--card);border:1px solid var(--border);border-radius:12px;border-top-left-radius:3px;padding:9px 13px;font-size:13px;line-height:1.5;color:var(--text);white-space:pre-wrap;word-break:break-word}
   /* rendered-markdown message body: flow like HTML, chat-sized elements */
@@ -1088,7 +1092,7 @@ body:not(.manage) .manage-only { display: none !important; }
       <div class="chanlist" id="dm-list"></div>
     </div>
     <nav class="nav" id="ws-nav">
-      <a data-v="home" onclick="nav('home')"><i class="ti ti-building-skyscraper"></i> Workspace</a>
+      <a data-v="home" id="nav-home" onclick="nav('home')"><i class="ti ti-home"></i> Home</a>
       <a data-v="overview" class="on" onclick="nav('overview')"><i class="ti ti-layout-dashboard"></i> Overview</a>
       <a data-v="team" onclick="nav('team')"><i class="ti ti-robot"></i> Agents</a>
       <a data-v="board" onclick="nav('board')"><i class="ti ti-columns"></i> Work</a>
@@ -1555,7 +1559,7 @@ const fmtK=n=>{n=Number(n)||0;return n>=1000?(n/1000).toFixed(1)+"k":String(n);}
 const AC={BA:"--blue","DEV-FEATURE":"--green","DEV-BUG":"--red",SA:"--purple",TEST:"--teal",DOCS:"--blue",PO:"--amber",SM:"--teal",PD:"--purple",USER:"--accent"};
 // Stable nicknames so each role reads as one consistent person, not a label.
 const AGENT_NICK={BA:"Bella",PO:"Pola",SM:"Sam",SA:"Aria","DEV-FEATURE":"Finn","DEV-BUG":"Bex",TEST:"Quinn",DOCS:"Dana",PD:"Piper"};
-const TITLES={home:["Workspace","company overview · projects · your agents"],overview:["Overview","project health at a glance"],team:["Agents","your autonomous workers"],board:["Work","board · sprint · backlog"],activity:["Activity","what the agents are doing"],roadmap:["Roadmap","now · next · later, auto-generated"],discuss:["Scrum","standups, sprint events & team threads"],docs:["Wiki","product & technical knowledge base"],codemap:["Code map","symbols & dependencies the agents navigate"],chat:["Chat","talk with your teammates"],review:["Review","open pull requests — approve & merge"],people:["People","per-user activity & productivity"],audit:["Audit","who did what, when"],access:["Users","accounts, project access & tokens"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
+const TITLES={home:["Home","your company · projects · your agents"],overview:["Overview","project health at a glance"],team:["Agents","your autonomous workers"],board:["Work","board · sprint · backlog"],activity:["Activity","what the agents are doing"],roadmap:["Roadmap","now · next · later, auto-generated"],discuss:["Scrum","standups, sprint events & team threads"],docs:["Wiki","product & technical knowledge base"],codemap:["Code map","symbols & dependencies the agents navigate"],chat:["Chat","talk with your teammates"],review:["Review","open pull requests — approve & merge"],people:["People","per-user activity & productivity"],audit:["Audit","who did what, when"],access:["Users","accounts, project access & tokens"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
 const esc=s=>(s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 const cvar=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim()||"#888";
 let STATE={}, CUR="overview", BF="all", INIT_ACT=false, WORKTAB="board";
@@ -1988,9 +1992,25 @@ async function renderHome(){
   try{[ov,me]=await Promise.all([fetch("/api/workspace/overview").then(r=>r.json()),fetch("/api/me/agents").then(r=>r.json())]);}catch(e){return;}
   const w=ov.workspace||{};const totalSpend=(ov.projects||[]).reduce((a,p)=>a+(p.spend||0),0);
   const online=new Set();(ov.projects||[]).forEach(p=>(p.online||[]).forEach(o=>online.add(o)));
-  document.getElementById("ws-hero").innerHTML=`<div class="wshero">
-    <div><div class="wsname">${esc(w.name||"Your workspace")}</div><div class="wstag">${esc(w.tagline||"one company · many projects · autonomous teams")}</div></div>
-    <div class="wsstats">${kpi("Projects",(ov.projects||[]).length)}${kpi("Members",(ov.members||[]).length)}${kpi("Online now",online.size)}${kpi("Total spend",money(totalSpend))}</div></div>`;
+  // Sidebar "Home" shows the company name once the workspace exists.
+  const navH=document.getElementById("nav-home");
+  if(navH)navH.innerHTML=w.name?`<i class="ti ti-building-skyscraper"></i> ${esc(w.name)}`:'<i class="ti ti-home"></i> Home';
+  const isAdmin=ME&&ME.role==="admin";
+  if(!w.name&&isAdmin){
+    // First run: the admin CREATES the workspace here — one clear step.
+    document.getElementById("ws-hero").innerHTML=`<div class="wshero wssetup">
+      <div style="flex:1;min-width:260px"><div class="wsname"><i class="ti ti-building-skyscraper"></i> Tạo workspace của công ty</div>
+        <div class="wstag">Đặt tên công ty — rồi mời đồng nghiệp bằng invite link bên dưới. Bạn (admin) là chủ workspace.</div>
+        <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap">
+          <input id="wsn0" placeholder="Tên công ty, vd. Straw Hat Labs" style="flex:1;min-width:200px;background:var(--card);color:var(--text);border:1px solid var(--border2);border-radius:10px;padding:11px 13px">
+          <input id="wst0" placeholder="tagline (tuỳ chọn)" style="flex:1;min-width:160px;background:var(--card);color:var(--text);border:1px solid var(--border2);border-radius:10px;padding:11px 13px">
+          <button class="pri" onclick="createWs()"><i class="ti ti-rocket"></i> Tạo workspace</button>
+        </div></div></div>`;
+  }else{
+    document.getElementById("ws-hero").innerHTML=`<div class="wshero">
+      <div><div class="wsname">${esc(w.name||"Your workspace")}</div><div class="wstag">${esc(w.tagline||"one company · many projects · autonomous teams")}</div></div>
+      <div class="wsstats">${kpi("Projects",(ov.projects||[]).length)}${kpi("Members",(ov.members||[]).length)}${kpi("Online now",online.size)}${kpi("Total spend",money(totalSpend))}</div></div>`;
+  }
   document.getElementById("ws-myagents").innerHTML=(me.agents||[]).length?(me.agents||[]).map(a=>{
     const st=a.online?`<span class="wsdot on"></span> <b>${esc((a.role||"").toUpperCase())}</b> ${a.ticket?`<span class="tid">${esc(a.ticket)}</span>`:""}`
       :(a.desired===false?'<span class="wsdot off"></span> stopped':'<span class="wsdot idle"></span> idle');
@@ -2008,7 +2028,7 @@ async function renderHome(){
       <div class="wsc-online">${(p.online||[]).map(o=>`<span class="wsava" title="${esc(o)}">${esc(initials(o))}</span>`).join("")||'<span class="wsc-off">no one online</span>'}</div>
     </div>`).join("")||'<div class="empty">no projects yet</div>';
   document.getElementById("ws-members").innerHTML=(ov.members||[]).map(m=>
-    `<span class="wsmem" title="${esc((m.projects||[]).join(", ")||"all projects")}"><span class="wsava">${esc(initials(m.name||m.username))}</span> ${esc(m.name||m.username)} <span class="wsrole">${esc(m.role)}</span></span>`).join("")||'<div class="empty">running open — no accounts</div>';
+    `<span class="wsmem" title="${esc((m.projects||[]).join(", ")||"all projects")}"><span class="wsava">${esc(initials(m.name||m.username))}</span> ${esc(m.name||m.username)} ${m.role==="admin"?'<i class="ti ti-crown" style="color:var(--amber)" title="workspace admin"></i>':""}<span class="wsrole">${esc(m.role)}</span></span>`).join("")||'<div class="empty">running open — no accounts</div>';
   if(ME&&ME.role==="admin")renderWsAdmin(w);
 }
 async function myAgentCtl(pid,op,action){
@@ -2032,7 +2052,12 @@ async function renderWsAdmin(w){
     </div>
     <div class="sec">Invite people</div>
     <div class="panel frm">
-      <div class="fr"><span class="lbl">Role</span><select id="inv-role"><option value="viewer">viewer</option><option value="be">be</option><option value="fe">fe</option><option value="admin">admin</option></select>
+      <div class="wsroles">
+        <span class="wsrole-x"><b>admin</b> quản trị workspace: dự án, thành viên, invite — như bạn</span>
+        <span class="wsrole-x"><b>be / fe</b> thành viên: làm việc + chạy agent trong dự án được gán</span>
+        <span class="wsrole-x"><b>viewer</b> chỉ xem, không sửa gì</span>
+      </div>
+      <div class="fr"><span class="lbl">Role</span><select id="inv-role"><option value="viewer">viewer — chỉ xem</option><option value="be">be — member (backend)</option><option value="fe">fe — member (frontend)</option><option value="admin">admin — đồng quản trị workspace</option></select>
         <span class="lbl" style="min-width:auto">Projects</span><input id="inv-projects" placeholder="comma-separated ids (blank = none)" style="flex:1">
         <span class="lbl" style="min-width:auto">Uses</span><input id="inv-uses" type="number" value="5" min="1" style="width:70px">
         <button class="pri" onclick="createInvite()"><i class="ti ti-link"></i> Create link</button></div>
@@ -2044,6 +2069,12 @@ async function renderWsAdmin(w){
     </div>`;
 }
 async function saveWs(){try{await fetch("/api/workspace",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:val("wsn"),tagline:val("wst"),accent:""})});toasty("Workspace saved","ok");renderHome();}catch(e){}}
+// First-run: the admin creates the workspace (name + tagline), then invites.
+async function createWs(){
+  const name=val("wsn0").trim();if(!name){toasty("Đặt tên công ty trước nhé","warn");return;}
+  try{await fetch("/api/workspace",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name,tagline:val("wst0"),accent:""})});
+    toasty("Workspace \""+name+"\" đã tạo — giờ mời đồng nghiệp bằng invite link","ok");renderHome();
+  }catch(e){}}
 async function createInvite(){
   const projects=(val("inv-projects")||"").split(",").map(s=>s.trim()).filter(Boolean);
   try{const r=await(await fetch("/api/workspace/invites",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({role:val("inv-role"),projects,uses:parseInt(val("inv-uses")||"5",10)})})).json();
