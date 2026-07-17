@@ -122,6 +122,18 @@ impl DeployPort for DockerComposeDeploy {
         })
     }
 
+    async fn health(&self, port: u16) -> Result<bool, PortError> {
+        // Something accepting TCP on the published port = the app is up.
+        let addr = format!("127.0.0.1:{port}");
+        let ok = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            tokio::net::TcpStream::connect(&addr),
+        )
+        .await
+        .is_ok_and(|r| r.is_ok());
+        Ok(ok)
+    }
+
     async fn ensure_daemon(&self) -> Result<bool, PortError> {
         if daemon_up().await {
             return Ok(true);

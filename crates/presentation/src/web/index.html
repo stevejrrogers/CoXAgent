@@ -3339,6 +3339,7 @@ async function loadSettings(){let cfg={};try{cfg=await(await fetch(api("/config"
         <div class="fr"><span class="lbl">Sprint length</span><input id="wf-sp" type="number" min="1" value="${wf.sprint_length_cycles??10}" style="width:90px"/><span class="hint">cycles per sprint</span></div>
         <div class="fr"><span class="lbl">BA every N cycles</span><input id="wf-ba" type="number" min="0" value="${wf.ba_every_n_cycles??4}" style="width:90px"/><span class="hint">0 disables BA</span></div>
         <div class="fr"><span class="lbl">Feature dev</span><select id="wf-fd"><option value="true" ${wf.feature_dev_enabled!==false?'selected':''}>enabled</option><option value="false" ${wf.feature_dev_enabled===false?'selected':''}>disabled</option></select></div>
+        <div class="fr"><span class="lbl">Ops monitor</span><select id="wf-ops"><option value="true" ${wf.ops_monitor!==false?'selected':''}>on</option><option value="false" ${wf.ops_monitor===false?'selected':''}>off</option></select><span class="hint">pings the deployed app; files a bug + alerts on an outage</span></div>
         <div class="fr"><span class="lbl">Token saver</span><select id="wf-ts"><option value="true" ${wf.token_saver!==false?'selected':''}>on — compress diffs/logs &amp; terse agent output</option><option value="false" ${wf.token_saver===false?'selected':''}>off — full verbosity</option></select><span class="hint">cuts engine spend on big reviews with no loss of the actual change</span></div>
         <div class="fr"><span class="lbl">Scrum language</span><select id="wf-lang"><option value="en" ${wf.language!=='vi'?'selected':''}>English</option><option value="vi" ${wf.language==='vi'?'selected':''}>Tiếng Việt</option></select><span class="hint">standup, planning, grooming &amp; retro speak this language</span></div>
         <div class="fr"><span class="lbl">Sleep seconds</span><input id="wf-sl" type="number" min="0" value="${wf.sleep_seconds??30}" style="width:90px"/><span class="hint">between cycles</span></div>
@@ -3409,6 +3410,7 @@ async function saveSettings(){const cfg=window._cfg||{engine:{},workflow:{}};cfg
   cfg.workflow.sprint_length_cycles=parseInt(val("wf-sp")||"10",10);
   cfg.workflow.ba_every_n_cycles=parseInt(val("wf-ba")||"4",10);
   cfg.workflow.feature_dev_enabled=val("wf-fd")==="true";
+  cfg.workflow.ops_monitor=val("wf-ops")!=="false";
   cfg.workflow.token_saver=val("wf-ts")==="true";
   cfg.workflow.language=val("wf-lang")||"en";
   cfg.workflow.sleep_seconds=parseInt(val("wf-sl")||"30",10);

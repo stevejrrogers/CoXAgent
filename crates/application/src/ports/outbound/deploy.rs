@@ -36,6 +36,16 @@ pub trait DeployPort: Send + Sync {
         Ok(true)
     }
 
+    /// Liveness check for the deployed app: is something accepting connections
+    /// on `127.0.0.1:<port>`? Used by the Ops/SRE monitor to detect an app that
+    /// crashed after deploy. The default reports healthy (no monitor).
+    ///
+    /// # Errors
+    /// [`PortError::Backend`] if the check can't run.
+    async fn health(&self, _port: u16) -> Result<bool, PortError> {
+        Ok(true)
+    }
+
     /// Run the project's test suite as a hard Definition-of-Done gate — detect
     /// the toolchain and run its tests. `deployed=false` means no toolchain was
     /// recognised (skipped). The default skips.

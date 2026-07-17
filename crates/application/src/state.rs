@@ -421,6 +421,10 @@ pub struct ProjectState {
     /// so exactly one digest lands per day regardless of restarts or operators.
     #[serde(default)]
     pub last_digest_day: String,
+    /// Whether the Ops/SRE monitor currently sees the deployed app as down —
+    /// tracked so it files exactly one bug per outage and can announce recovery.
+    #[serde(default)]
+    pub ops_down: bool,
     /// Spend accumulated on the current calendar day (UTC), for the daily budget
     /// policy. Resets when the day rolls over.
     #[serde(default)]
@@ -458,6 +462,7 @@ impl Default for ProjectState {
             sprint_cycle: 0,
             sprint_goal: String::new(),
             last_digest_day: String::new(),
+            ops_down: false,
             spend_today_usd: 0.0,
             spend_day: String::new(),
         }

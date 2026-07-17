@@ -142,6 +142,11 @@ pub struct WorkflowConfig {
     /// Cycles per sprint in scrum mode.
     #[serde(default = "default_sprint_len")]
     pub sprint_length_cycles: u64,
+    /// Ops/SRE monitor (default on): after a deploy, the leader pings the app on
+    /// its published port each cycle and files a high-priority bug + alerts the
+    /// chat if it went down — so the team also runs what it ships.
+    #[serde(default = "default_true")]
+    pub ops_monitor: bool,
     /// Webhook URL notified on significant events (deploy, budget, policy).
     /// Empty = no notifications. Slack/Teams incoming webhooks work directly.
     #[serde(default)]
@@ -178,6 +183,7 @@ impl Default for WorkflowConfig {
         Self {
             ba_every_n_cycles: 4,
             feature_dev_enabled: true,
+            ops_monitor: true,
             sleep_seconds: 30,
             budget_usd: None,
             mode: Mode::Kanban,

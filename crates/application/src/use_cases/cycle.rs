@@ -1086,6 +1086,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // a glance, so the user doesn't need the dashboard open to keep up.
             self.post_daily_digest().await;
 
+            // Ops/SRE: ping the deployed app; file a bug + alert on an outage.
+            self.ops_monitor().await;
+
             // Daily standup: every few cycles the SM runs the room — but only when
             // the team actually did something since last time. A standup with no
             // real activity is pure token burn (and reads like noise), so we skip
@@ -1581,6 +1584,71 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         .await;
         if posted.is_ok() && !first_ever {
             tracing::info!("posted daily digest for {today}");
+        }
+    }
+
+    /// Ops/SRE monitor: once the app has been deployed, ping its published port
+    /// each leader cycle. On an outage, file exactly one high-priority bug and
+    /// alert the chat; on recovery, announce it. State-tracked so it never spams.
+    async fn ops_monitor(&self) {
+        use coxagent_domain::ticket::{Complexity, Priority, TicketType};
+        if !self.config.workflow.ops_monitor {
+            return;
+        }
+        let Some(port) = self.config.deploy.host_port else {
+            return;
+        };
+        let Some(deploy) = &self.deploy else {
+            return;
+        };
+        let Ok(state) = self.store.load().await else {
+            return;
+        };
+        // Only meaningful once something has actually been deployed.
+        if state.history.is_empty() {
+            return;
+        }
+        let was_down = state.ops_down;
+        let healthy = deploy.health(port).await.unwrap_or(true);
+        if !healthy && !was_down {
+            let adder = crate::use_cases::AddTicketUseCase::new(Arc::clone(&self.store));
+            let _ = adder
+                .execute(crate::use_cases::AddTicketInput {
+                    ticket_type: TicketType::Bug,
+                    title: format!("App is DOWN — no response on port {port}"),
+                    description: "The Ops monitor found the deployed app not accepting \
+                                  connections. Check the container/logs for a crash and restore \
+                                  service."
+                        .to_owned(),
+                    priority: Priority::High,
+                    complexity: Complexity::Medium,
+                    has_ui: false,
+                    acceptance_criteria: vec![format!("App answers on 127.0.0.1:{port} again")],
+                })
+                .await;
+            let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                s.ops_down = true;
+                Ok(())
+            })
+            .await;
+            self.notify(
+                "ops_down",
+                format!(
+                    "App is DOWN — nothing responding on port {port}. Filed a high-priority bug."
+                ),
+            )
+            .await;
+        } else if healthy && was_down {
+            let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                s.ops_down = false;
+                Ok(())
+            })
+            .await;
+            self.notify(
+                "ops_up",
+                format!("App recovered — responding on port {port} again."),
+            )
+            .await;
         }
     }
 
