@@ -12,6 +12,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     var window: NSWindow!
     var web: WKWebView!
     var hub: Process?
+    // In remote mode, the local operator processes this machine contributes to
+    // the shared team (one per locally-provisioned project). They idle until the
+    // user Starts them from the web, and are torn down when the app quits.
+    var operators: [Process] = []
     // The dashboard origin the WebView loads. Defaults to the embedded hub on
     // localhost, but points at a central hub when remote mode is configured.
     var base = "http://127.0.0.1:\(PORT)"
@@ -35,9 +39,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     func applicationDidFinishLaunching(_ note: Notification) {
-        // Only boot a local hub in embedded mode; in remote mode we just view.
+        // Only boot a local hub in embedded mode; in remote mode we just view the
+        // central hub and contribute this machine's operators to the shared team.
         if let remote = remoteHub() {
             base = remote
+            startOperators()
         } else {
             startHub()
         }
@@ -215,6 +221,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         hub = p
     }
 
+    // Remote mode: spawn one local operator per locally-provisioned project so
+    // this machine contributes compute to the shared team using THIS user's own
+    // credentials. Each operator idles (COXAGENT_WAIT_FOR_START) until the user
+    // Starts it from the web, so opening the app never spends tokens unbidden.
+    // Coordination (Postgres/Redis) DSNs come from ~/CoXAgent/coordination.json,
+    // which the runner loads itself.
+    func startOperators() {
+        let ws = workspace()
+        guard let data = FileManager.default.contents(atPath: ws + "/registry.json"),
+              let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        else { return }
+        let operatorName = ProcessInfo.processInfo.environment["COXAGENT_OPERATOR"] ?? NSUserName()
+        for proj in arr {
+            guard let path = proj["path"] as? String,
+                  FileManager.default.fileExists(atPath: path + "/codebase")
+            else { continue }
+            var env = richEnv()
+            env["COXAGENT_OPERATOR"] = operatorName
+            env["COXAGENT_WAIT_FOR_START"] = "1"
+            let p = Process()
+            p.executableURL = coxagentURL()
+            p.environment = env
+            p.currentDirectoryURL = URL(fileURLWithPath: ws)
+            p.arguments = ["--state-dir", path + "/state", "run", "--work-dir", path + "/codebase"]
+            let logPath = ws + "/operator-\(proj["id"] as? String ?? "proj").log"
+            FileManager.default.createFile(atPath: logPath, contents: nil)
+            if let fh = FileHandle(forWritingAtPath: logPath) {
+                p.standardOutput = fh
+                p.standardError = fh
+            }
+            try? p.run()
+            operators.append(p)
+        }
+    }
+
     // Poll /api/health, then load the dashboard once the hub (local or remote)
     // is reachable.
     func loadWhenReady(_ attempt: Int = 0) {
@@ -232,7 +273,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         }.resume()
     }
 
-    func applicationWillTerminate(_ note: Notification) { hub?.terminate() }
+    func applicationWillTerminate(_ note: Notification) {
+        hub?.terminate()
+        for op in operators { op.terminate() }
+    }
     func applicationShouldTerminateAfterLastWindowClosed(_ s: NSApplication) -> Bool { true }
 
     // MARK: - WKUIDelegate: native panels for JS alert()/confirm()/prompt().

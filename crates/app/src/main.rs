@@ -1131,12 +1131,22 @@ async fn run_loop(
         .unwrap_or(0);
     let mut idle = 0u64;
 
+    // An app-spawned operator waits for an explicit web Start before doing any
+    // work (so opening the app never silently burns tokens); a manually launched
+    // `cox-server run` keeps its run-immediately default.
+    let wait_for_start = std::env::var("COXAGENT_WAIT_FOR_START").is_ok_and(|v| v == "1");
+
     let mut cycle = 0u64;
     while !shutdown.is_triggered() {
-        // Honour this operator's per-user Start/Stop from the web: when the user
-        // has stopped their operator, idle instead of working (their credentials
-        // aren't spent) — without exiting, so a later Start resumes it live.
-        if matches!(store.get_desired(&operator).await, Ok(Some(false))) {
+        // Honour this operator's per-user Start/Stop from the web: idle (without
+        // exiting) when the user has stopped it — or, for an app-spawned operator,
+        // until they first Start it — so no one's credentials are spent unbidden.
+        let idle_now = match store.get_desired(&operator).await {
+            Ok(Some(true)) => false,
+            Ok(Some(false)) => true,
+            _ => wait_for_start,
+        };
+        if idle_now {
             shutdown.sleep_or_shutdown(sleep).await;
             continue;
         }
