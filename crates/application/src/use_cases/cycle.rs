@@ -1783,6 +1783,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 for (role, cost) in std::mem::take(&mut m.by_role) {
                     *state.spend.by_role.entry(role).or_default() += cost;
                 }
+                // Attribute this cycle's spend to the operator that ran it, so
+                // each user's token usage is measurable in a shared project.
+                if !self.worker.is_empty() {
+                    let op = state
+                        .spend
+                        .by_operator
+                        .entry(self.worker.clone())
+                        .or_default();
+                    op.cost_usd += m.total_cost_usd;
+                    op.input_tokens += m.input_tokens;
+                    op.output_tokens += m.output_tokens;
+                    op.runs += m.runs;
+                }
                 *m = Spend::default();
             }
         }

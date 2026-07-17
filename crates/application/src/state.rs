@@ -273,6 +273,19 @@ pub struct Spend {
     /// Cost attributed per agent role (e.g. `dev_feature`).
     #[serde(default)]
     pub by_role: std::collections::BTreeMap<String, f64>,
+    /// Usage attributed per operator (`account@host`) — the SaaS per-user view,
+    /// so each user's token spend is measurable even though they share a project.
+    #[serde(default)]
+    pub by_operator: std::collections::BTreeMap<String, OperatorSpend>,
+}
+
+/// One operator's slice of the spend, for per-user token accounting.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct OperatorSpend {
+    pub cost_usd: f64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub runs: u64,
 }
 
 /// The last deployment outcome, surfaced on the dashboard.
