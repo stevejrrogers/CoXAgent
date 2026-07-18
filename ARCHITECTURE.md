@@ -86,7 +86,9 @@ Key decisions:
   (merge-only cycles, resolver-PRs auto-closed, BA/TEST paused).
 - Conflicts: resolved on the original branch, then **verified** (no committed
   markers + forge reports mergeable) before anything may merge.
-- Deploys: self-heal port squatters (compose project → raw container), and a
-  red deploy retries next cycle without waiting for new code.
+- Deploys: compose-only with deterministic project names (`cox-<parent>-<dir>`),
+  self-healing port squatters (compose project → raw container), red deploys
+  retry next cycle without new code, and an hourly janitor removes dead
+  `cox-*` projects + dangling images (never the `cox-infra` backing group).
 - Engine memory: daily hygiene judges `~/.claude` project memory against
   `PROCESS_INVARIANTS`; durable lessons are promoted into `CLAUDE.md`.

@@ -3,7 +3,9 @@
 An autonomous multi-agent software team. A continuous loop of role-agents —
 BA → SA → PD → DEV → TEST → DOCS, with code-enforced governance — carries a
 ticket from proposal to a running, tested, documented build over a managed
-codebase. See [PLAN.md](PLAN.md) for the full design.
+codebase. See [ARCHITECTURE.md](ARCHITECTURE.md) for the current architecture,
+[DEPLOYMENT.md](DEPLOYMENT.md) for the three deploy shapes (macOS app,
+docker-compose, Kubernetes/Helm), and [PLAN.md](PLAN.md) for the original design.
 
 The core idea: the LLM proposes and implements, but **state invariants live in
 code, not in prompts**. Who may change a ticket's status, when a ticket is
@@ -20,9 +22,11 @@ layer only depends on layers below it; a violation fails to compile.
 crates/
 ├── domain/          # DDD core: Ticket aggregate, transitions, events — no IO
 ├── application/     # use cases + ports (inbound/outbound traits), auth boundary
+├── contracts/       # versioned wire types between services (event bus, jobs)
 ├── infrastructure/  # adapters: state stores, engines, deploy, auth
-├── presentation/    # inbound adapters: axum server + embedded SPA, clap CLI
-└── app/             # composition root — the one place DI happens; binary `coxagent`
+├── presentation/    # inbound adapters: axum REST + WS + MCP, embedded SPA
+└── app/             # composition root; binaries: coxagent, cox-all,
+                     #   cox-gateway, cox-realtime, cox-knowledge
 ```
 
 Ports mean swaps, not rewrites: the state store is `JsonStateStore` locally and

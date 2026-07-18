@@ -130,13 +130,30 @@ gateway pods. Start with `cox-all`; split only when load asks for it.
 
 1. Tag a release: `git tag v0.94.0 && git push origin v0.94.0` — the `desktop`
    workflow builds the full app bundles (macOS `.dmg`, Windows zip, Linux
-   tar.gz) and attaches them to the GitHub Release.
+   tar.gz) and attaches them to the GitHub Release. **Bump the workspace
+   `version` in Cargo.toml in the same commit** (the update check compares it)
+   and refresh `Cargo.lock` (CI builds `--locked`).
 2. Point the hub at the repo once: Settings → Workspace → App downloads →
-   `releases_repo` (e.g. `stevejrrogers/CoXAgent`). The hub polls the latest
-   release every 30 minutes and republishes version + per-platform URLs at
-   `GET /api/app/latest`. Manual URL fields override auto-detected assets;
-   iOS is always a manual App Store / TestFlight link.
-3. Every signed-in client compares the hub's version with the latest release:
-   newer → a top banner ("CoXAgent X đã có — Update") opens the Get-CoXAgent
-   modal, which highlights the platform the user is on. The download icon next
-   to the user badge opens the same modal any time.
+   `releases_repo`. The hub polls the latest release (2-minute cadence until
+   the first release is seen, then every 30 minutes) and republishes version +
+   per-platform URLs at `GET /api/app/latest`. iOS is always a manual App
+   Store / TestFlight link.
+3. **Private repos work**: clients never hit GitHub directly — the hub streams
+   assets through `GET /api/app/download/{macos.dmg,windows.exe,linux.tar.gz}`
+   using its own `gh` auth. Tokens never reach clients.
+4. Update UX: when a newer version exists, every signed-in client shows a
+   bottom-right toast (dismiss remembers the version) and the get-app button
+   beside the user badge turns into a pulsing rocket. Inside the macOS shell,
+   clicking macOS **self-updates in place**: download → mount → swap the .app
+   → relaunch, with toast progress and a browser-download fallback on any
+   failure. Other platforms download via the browser. The sidebar brand shows
+   the running version (`autonomous dev team · vX.Y.Z`).
+
+## Local backing services & docker hygiene
+
+- `deploy/local-infra/docker-compose.yml` (project `cox-infra`) groups the
+  local Postgres/Redis/Mongo/MinIO with their existing named volumes.
+- Agent deploys are forced onto deterministic compose project names
+  (`cox-<parent>-<dir>`); an hourly hub janitor `down`s fully-stopped `cox-*`
+  projects (never `cox-infra`) and prunes dangling images. Manual sweep:
+  `./scripts/docker-clean.sh` (`--deep` adds builder cache).
