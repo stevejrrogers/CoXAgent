@@ -2093,6 +2093,13 @@ let MG=null;
 const ROLE_COLORS={super:"#f59e0b",admin:"#22d3ee",director:"#a78bfa",manager:"#a78bfa",techlead:"#a78bfa",fe:"#34d399",be:"#60a5fa",ba:"#f472b6",viewer:"#6b7280"};
 function roleChip(r,n){const c=ROLE_COLORS[r]||"#6b7280";return `<span class="mg-rolechip" style="--rc:${c}">${esc(r)}${n!==undefined?` <b>${n}</b>`:""}</span>`;}
 async function renderManage(){
+  // Live refresh (SSE/poll) must never clobber an in-progress form: if the
+  // create panel is open or the user is typing in a Manage input, skip this
+  // repaint — the next event after they finish will catch the view up.
+  const cr=document.getElementById("mg-create");
+  if(cr&&!cr.hidden)return;
+  const a=document.activeElement;
+  if(a&&(a.tagName==="INPUT"||a.tagName==="TEXTAREA")&&a.closest('[id^="view-mg-"]'))return;
   try{MG=await(await fetch("/api/manage/overview")).json();}catch(e){return;}
   if(CUR==="mg-spaces")renderMgSpaces();
   else if(CUR==="mg-users")renderMgPeople();
@@ -2138,7 +2145,7 @@ function picked(id){return Array.from(document.querySelectorAll('#'+id+' input:c
 async function mgCreateSpace(){
   const name=val("mg-sp-name").trim();if(!name){toasty("Đặt tên space","warn");return;}
   try{const r=await fetch("/api/spaces",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name,tagline:val("mg-sp-tag"),admins:picked("mg-sp-admins"),projects:picked("mg-sp-projects")})});
-    if(r.ok){toasty("Space đã tạo","ok");renderManage();}else toasty("Failed: "+await r.text(),"err");}catch(e){}}
+    if(r.ok){toasty("Space đã tạo","ok");const cr=document.getElementById("mg-create");if(cr)cr.hidden=true;if(document.activeElement)document.activeElement.blur();renderManage();}else toasty("Failed: "+await r.text(),"err");}catch(e){}}
 async function openMgSpace(id){
   nav("mg-space");
   const el=document.getElementById("mg-space-body");if(el)el.innerHTML='<div class="empty">loading…</div>';
