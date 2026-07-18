@@ -44,6 +44,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
     /// # Errors
     /// - [`AppError::Port`] when the engine fails or returns unparseable output.
     /// - [`AppError::Domain`] when a proposed feature is invalid.
+    #[allow(clippy::too_many_lines)] // one linear pass; splitting hurts readability
     pub async fn execute(&self) -> Result<Vec<TicketId>, AppError> {
         let _choice = self.config.engine.resolve(Role::Ba);
 
@@ -114,8 +115,28 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
             .into());
         }
 
-        let proposals = parse_items(&outcome.stdout)
-            .map_err(|e| crate::error::PortError::Corrupt(format!("BA output: {e}")))?;
+        // One cheap repair pass instead of discarding the whole call on a
+        // malformed bracket.
+        let proposals = match parse_items(&outcome.stdout) {
+            Ok(p) => p,
+            Err(first) => {
+                let fixed = crate::use_cases::repair_json(
+                    self.engine.as_ref(),
+                    &outcome.stdout,
+                    "a JSON array of feature proposals",
+                    &self.work_dir,
+                )
+                .await;
+                match fixed.as_deref().map(parse_items) {
+                    Some(Ok(p)) => p,
+                    _ => {
+                        return Err(
+                            crate::error::PortError::Corrupt(format!("BA output: {first}")).into(),
+                        )
+                    }
+                }
+            }
+        };
 
         let adder = AddTicketUseCase::new(Arc::clone(&self.store));
         let mut created = Vec::with_capacity(proposals.len());

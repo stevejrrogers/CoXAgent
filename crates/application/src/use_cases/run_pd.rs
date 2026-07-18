@@ -108,8 +108,22 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
             ))
             .into());
         }
-        let ux =
-            parse_ux(&outcome.stdout).map_err(|e| PortError::Corrupt(format!("PD output: {e}")))?;
+        let ux = match parse_ux(&outcome.stdout) {
+            Ok(u) => u,
+            Err(first) => {
+                let fixed = crate::use_cases::repair_json(
+                    self.engine.as_ref(),
+                    &outcome.stdout,
+                    "a JSON object with the UX design fields",
+                    &self.work_dir,
+                )
+                .await;
+                match fixed.as_deref().map(parse_ux) {
+                    Some(Ok(u)) => u,
+                    _ => return Err(PortError::Corrupt(format!("PD output: {first}")).into()),
+                }
+            }
+        };
 
         // Atomic read-modify-write with retry (parallel-safe).
         let ux_design = ux_of(&ux);

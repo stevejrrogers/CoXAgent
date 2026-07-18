@@ -115,8 +115,22 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             ))
             .into());
         }
-        let design = parse_design(&outcome.stdout)
-            .map_err(|e| PortError::Corrupt(format!("SA output: {e}")))?;
+        let design = match parse_design(&outcome.stdout) {
+            Ok(d) => d,
+            Err(first) => {
+                let fixed = crate::use_cases::repair_json(
+                    self.engine.as_ref(),
+                    &outcome.stdout,
+                    "a JSON object with the technical design fields",
+                    &self.work_dir,
+                )
+                .await;
+                match fixed.as_deref().map(parse_design) {
+                    Some(Ok(d)) => d,
+                    _ => return Err(PortError::Corrupt(format!("SA output: {first}")).into()),
+                }
+            }
+        };
 
         // Atomic read-modify-write with retry, so a concurrent operator can't
         // clobber this SA design or lose the transition (parallel-safe).

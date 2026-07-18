@@ -441,6 +441,11 @@ pub struct ProjectState {
     /// every cycle.
     #[serde(default)]
     pub drain_notice_sprint: u32,
+    /// Failed DEV attempts per ticket id. At 3 the ticket is parked (skipped by
+    /// agents, flagged for a human) so a poisoned ticket can't burn tokens
+    /// forever. Cleared when a human edits the ticket.
+    #[serde(default)]
+    pub ticket_fail_attempts: std::collections::BTreeMap<String, u32>,
     /// Whether the Ops/SRE monitor currently sees the deployed app as down —
     /// tracked so it files exactly one bug per outage and can announce recovery.
     #[serde(default)]
@@ -484,6 +489,7 @@ impl Default for ProjectState {
             last_digest_day: String::new(),
             pr_fix_attempts: std::collections::BTreeMap::new(),
             drain_notice_sprint: 0,
+            ticket_fail_attempts: std::collections::BTreeMap::new(),
             ops_down: false,
             spend_today_usd: 0.0,
             spend_day: String::new(),

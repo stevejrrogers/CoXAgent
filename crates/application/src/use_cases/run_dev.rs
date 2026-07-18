@@ -59,6 +59,9 @@ pub struct RunDevUseCase<S: StateStorePort, E: AgentEnginePort> {
     /// owner, so concurrent runners never work the same ticket.
     worker: String,
     phase: Option<crate::use_cases::runner::PhaseReporter>,
+    /// Test runner for the mechanical Definition-of-Done check: after the
+    /// engine finishes, the suite must be green or the ticket is NOT done.
+    verify: Option<Arc<dyn crate::ports::outbound::DeployPort>>,
 }
 
 impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
@@ -77,7 +80,18 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             mode,
             worker: String::new(),
             phase: None,
+            verify: None,
         }
+    }
+
+    /// Attach the test runner enforcing the mechanical DoD (green tests).
+    #[must_use]
+    pub fn with_verify(
+        mut self,
+        verify: Option<Arc<dyn crate::ports::outbound::DeployPort>>,
+    ) -> Self {
+        self.verify = verify;
+        self
     }
 
     /// Set the runner identity (`account@host`) recorded as the claim owner.
@@ -99,6 +113,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
     ///
     /// # Errors
     /// [`AppError`] on engine failure or an unexpected state transition error.
+    #[allow(clippy::too_many_lines)] // one linear pass; splitting hurts readability
     pub async fn execute(&self) -> Result<Option<TicketId>, AppError> {
         let state = self.store.load().await?;
         // Walk the work queue best-first and atomically claim the first ticket no
@@ -113,6 +128,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         let now = now_rfc3339();
         let mut chosen = None;
         for cand in self.candidates(&state) {
+            // Parked: a ticket that failed 3 times needs a human, not more tokens.
+            if state
+                .ticket_fail_attempts
+                .get(cand.as_str())
+                .copied()
+                .unwrap_or(0)
+                >= 3
+            {
+                continue;
+            }
             if self.store.claim_ticket(&cand, &worker, &now).await? {
                 chosen = Some(cand);
                 break;
@@ -137,6 +162,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         match self.engine.run(self.build_request(&state, &id)).await {
             Ok(o) if o.succeeded() => {}
             Ok(o) => {
+                self.record_failure(&id, o.stderr.trim()).await;
                 self.release_claim(&id).await;
                 return Err(PortError::Backend(format!(
                     "{:?} engine failed on {id}: {}",
@@ -146,8 +172,55 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 .into());
             }
             Err(e) => {
+                self.record_failure(&id, &e.to_string()).await;
                 self.release_claim(&id).await;
                 return Err(e.into());
+            }
+        }
+
+        // Mechanical Definition of Done: the suite must be GREEN after the
+        // change. Red → one bounded repair pass fed the failure output; still
+        // red → the ticket is NOT done (claim released, failure recorded)
+        // instead of shipping a broken build for TEST to rediscover later.
+        if let Some(deploy) = &self.verify {
+            let failed = |r: &crate::ports::outbound::DeployReport| !r.success;
+            let mut red = match deploy.run_tests(&self.work_dir).await {
+                Ok(r) if failed(&r) => Some(r.summary),
+                _ => None,
+            };
+            if let Some(fail) = red.take() {
+                let tail: String = fail
+                    .chars()
+                    .rev()
+                    .take(3000)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect();
+                let repair = AgentRequest {
+                    role: self.mode.role(),
+                    system_prompt: prompts::system_prompt(prompts::DEV),
+                    task_prompt: format!(
+                        "Your change for ticket {id} left the test suite FAILING. Fix ONLY \
+                         these failures now (do not start new work):\n{tail}"
+                    ),
+                    work_dir: self.work_dir.clone(),
+                    timeout: Duration::from_secs(1800),
+                };
+                let _ = self.engine.run(repair).await;
+                red = match deploy.run_tests(&self.work_dir).await {
+                    Ok(r) if failed(&r) => Some(r.summary),
+                    _ => None,
+                };
+            }
+            if let Some(fail) = red {
+                self.record_failure(&id, &fail).await;
+                self.release_claim(&id).await;
+                return Err(PortError::Backend(format!(
+                    "{:?} left tests red on {id} — ticket returned to the queue",
+                    self.mode
+                ))
+                .into());
             }
         }
 
@@ -182,6 +255,29 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             p(None);
         }
         Ok(Some(id))
+    }
+
+    /// Count a failed attempt on `id`; at the 3rd, park it with a visible note
+    /// so a human decides instead of the team burning tokens forever.
+    async fn record_failure(&self, id: &TicketId, why: &str) {
+        let key = id.to_string();
+        let short: String = why.chars().take(300).collect();
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+            let n = s.ticket_fail_attempts.entry(key.clone()).or_insert(0);
+            *n += 1;
+            if *n == 3 {
+                s.post_comment(
+                    "DEV-BUG",
+                    &format!(
+                        "⛔ {id} PARKED after 3 failed attempts (last: {short}) — needs a \
+                         human decision; agents will skip it."
+                    ),
+                    Some(key.clone()),
+                );
+            }
+            Ok(())
+        })
+        .await;
     }
 
     /// Return a stranded ticket to the queue when the run failed, so it isn't
