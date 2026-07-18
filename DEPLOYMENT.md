@@ -128,9 +128,9 @@ gateway pods. Start with `cox-all`; split only when load asks for it.
 
 ## App distribution & in-app updates
 
-1. Tag a release: `git tag v0.94.0 && git push origin v0.94.0` — the `release`
-   workflow builds the macOS `.dmg`, Windows `.exe`, and Linux `.tar.gz` and
-   attaches them to the GitHub Release.
+1. Tag a release: `git tag v0.94.0 && git push origin v0.94.0` — the `desktop`
+   workflow builds the full app bundles (macOS `.dmg`, Windows zip, Linux
+   tar.gz) and attaches them to the GitHub Release.
 2. Point the hub at the repo once: Settings → Workspace → App downloads →
    `releases_repo` (e.g. `stevejrrogers/CoXAgent`). The hub polls the latest
    release every 30 minutes and republishes version + per-platform URLs at

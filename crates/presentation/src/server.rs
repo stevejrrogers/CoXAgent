@@ -1683,8 +1683,8 @@ async fn releases_watchdog(app: AppState) {
                         };
                         let (dmg, exe, lin) = (
                             pick(&[".dmg"]),
-                            pick(&[".exe", ".msi"]),
-                            pick(&[".appimage", ".deb", "-linux.tar.gz"]),
+                            pick(&[".exe", ".msi", "windows-x64.zip"]),
+                            pick(&[".appimage", ".deb", "linux-x64.tar.gz", "linux.tar.gz"]),
                         );
                         let mut doc = app.workspace.inner.lock().await;
                         let d = &mut doc.downloads;
