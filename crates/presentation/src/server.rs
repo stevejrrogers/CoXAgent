@@ -2964,8 +2964,25 @@ async fn pr_action_ep(
         return pr_preview(&p, forge, num, action == "preview").await;
     }
     // Force-merge runs in the background (conflict fix can take minutes).
+    // Per-PR in-flight guard: two users clicking Force at once would run two
+    // engines in the SAME work_dir, corrupting each other's resolution.
     if action == "force-merge" {
-        tokio::spawn(force_merge(p.clone(), num));
+        let key = (pid.clone(), num);
+        {
+            let mut inflight = force_inflight().lock().await;
+            if !inflight.insert(key.clone()) {
+                return (
+                    StatusCode::CONFLICT,
+                    "force-merge for this PR is already running",
+                )
+                    .into_response();
+            }
+        }
+        let handle = p.clone();
+        tokio::spawn(async move {
+            force_merge(handle, num).await;
+            force_inflight().lock().await.remove(&key);
+        });
         return Json(serde_json::json!({ "ok": true, "started": true })).into_response();
     }
     let result = match action.as_str() {
@@ -2990,6 +3007,14 @@ async fn pr_action_ep(
 /// Force-merge one PR on the human's order: if it's already green, merge now;
 /// if it's blocked (conflicts), a DEV agent resolves them IMMEDIATELY (not next
 /// cycle), pushes, and then the merge lands. Progress is narrated in `#agents`.
+/// (project id, PR number) pairs with a force-merge currently running — the
+/// hub-wide guard against concurrent resolutions in one work_dir.
+fn force_inflight() -> &'static tokio::sync::Mutex<std::collections::HashSet<(String, u64)>> {
+    static SET: std::sync::OnceLock<tokio::sync::Mutex<std::collections::HashSet<(String, u64)>>> =
+        std::sync::OnceLock::new();
+    SET.get_or_init(|| tokio::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
 async fn force_merge(p: ProjectHandle, num: u64) {
     let Some(forge) = p.forge.clone() else { return };
     let say = |msg: String| {
