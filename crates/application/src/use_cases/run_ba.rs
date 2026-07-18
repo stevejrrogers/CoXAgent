@@ -47,18 +47,36 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
     pub async fn execute(&self) -> Result<Vec<TicketId>, AppError> {
         let _choice = self.config.engine.resolve(Role::Ba);
 
-        // Show the BA what already exists so it doesn't re-propose duplicates.
+        // Show the BA what already exists so it doesn't re-propose duplicates —
+        // but BOUNDED: on a mature project the full list is thousands of tokens
+        // re-sent every run. Active (unshipped) tickets matter most, newest
+        // first, capped; the rest is a one-line count. Exact duplicates are
+        // caught by the code-side title/semantic dedup regardless.
         let existing = self.store.load().await?;
-        let backlog: Vec<String> = existing
+        let active: Vec<String> = existing
             .tickets
             .iter()
-            .filter(|t| t.status() != coxagent_domain::Status::Rejected)
+            .rev()
+            .filter(|t| {
+                use coxagent_domain::Status;
+                matches!(
+                    t.status(),
+                    Status::Pending | Status::Ready | Status::InProgress | Status::Open
+                )
+            })
             .map(|t| format!("- {} {}", t.id(), t.title()))
             .collect();
-        let backlog_block = if backlog.is_empty() {
+        let total = existing.tickets.len();
+        let shown = active.len().min(80);
+        let backlog_block = if total == 0 {
             "(empty — this is a fresh project)".to_owned()
         } else {
-            backlog.join("\n")
+            format!(
+                "{}\n(… {total} tickets exist in total, {} active — assume anything obvious \
+                 has been proposed already)",
+                active[..shown].join("\n"),
+                active.len()
+            )
         };
         let taken: std::collections::HashSet<String> = existing
             .tickets
