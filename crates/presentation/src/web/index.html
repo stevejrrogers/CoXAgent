@@ -1129,8 +1129,23 @@ body:not(.manage) .manage-only { display: none !important; }
 .urole.viewer{background:var(--accent2)22;color:var(--accent2)}
 .ulogout{background:none;border:1px solid var(--border2);color:var(--muted);cursor:pointer;font-size:15px;padding:6px 8px;border-radius:8px;line-height:0}
 .ulogout:hover{color:var(--red);border-color:var(--red)}
-.npmode{flex:1;background:transparent;border:none;color:var(--muted);cursor:pointer;font-size:12px;font-weight:600;padding:7px;border-radius:7px;font-family:inherit}
+.npmode{flex:1;display:flex;align-items:center;justify-content:center;gap:7px;background:transparent;border:none;color:var(--muted);cursor:pointer;font-size:12.5px;font-weight:600;padding:9px;border-radius:8px;font-family:inherit;transition:background .15s,color .15s}
 .npmode.on{background:var(--accent);color:#fff}
+.npmode i{font-size:15px}
+.np-head{display:flex;align-items:center;gap:12px;margin-bottom:16px}
+.np-mark{width:40px;height:40px;border-radius:12px;background:linear-gradient(135deg,var(--accent),color-mix(in srgb,var(--accent) 55%,#000));display:flex;align-items:center;justify-content:center;font-size:19px;color:#fff;flex:none}
+.np-head h3{margin:0 0 2px;font-size:16.5px}
+.np-head .np-sub{font-size:12px;color:var(--muted)}
+.np-field{display:flex;flex-direction:column;gap:6px;margin-bottom:13px}
+.np-field .lbl{font-size:11.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted)}
+.np-field .hint{font-size:11px;color:var(--dim)}
+.np-in{width:100%;box-sizing:border-box;background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:10px;padding:10px 12px;font-size:13px;font-family:inherit;transition:border-color .15s}
+.np-in:focus{outline:none;border-color:var(--accent)}
+textarea.np-in{resize:vertical;line-height:1.5}
+.np-grid{display:grid;grid-template-columns:1fr 130px;gap:12px}
+.np-sel{position:relative}
+.np-sel select{appearance:none;-webkit-appearance:none;padding-right:32px;cursor:pointer}
+.np-sel::after{content:"";position:absolute;right:13px;top:50%;width:7px;height:7px;border-right:1.5px solid var(--muted);border-bottom:1.5px solid var(--muted);transform:translateY(-70%) rotate(45deg);pointer-events:none}
 </style>
 </head>
 <body>
@@ -1625,37 +1640,42 @@ body:not(.manage) .manage-only { display: none !important; }
       <button class="pri" onclick="saveTicket(true)" title="Save and kick off the autonomous build cycle"><i class="ti ti-rocket"></i> Save &amp; Start Flow</button>
     </div>
   </div></div>
-  <div class="ov" id="ov-newproj" onclick="if(event.target===this)close_('ov-newproj')"><div class="modal">
+  <div class="ov" id="ov-newproj" onclick="if(event.target===this)close_('ov-newproj')"><div class="modal" style="max-width:520px">
     <span class="x" onclick="close_('ov-newproj')"><i class="ti ti-x"></i></span>
-    <h3>New project</h3>
-    <div style="display:flex;gap:6px;background:var(--card2);border:1px solid var(--border2);border-radius:9px;padding:3px;margin-bottom:12px">
-      <button id="npm-new" class="npmode on" onclick="setProjMode('new')">Start fresh</button>
-      <button id="npm-import" class="npmode" onclick="setProjMode('import')">Import codebase</button>
+    <div class="np-head">
+      <div class="np-mark"><i class="ti ti-folder-plus"></i></div>
+      <div><h3>New project</h3><div class="np-sub">Team agents nhận việc ngay khi project sẵn sàng.</div></div>
     </div>
-    <div class="mrow" style="flex-direction:column;align-items:stretch;gap:6px">
-      <span class="lbl">Project name</span>
-      <input id="np-name" placeholder="e.g. CoXChat" style="background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 11px;font-size:13px;font-family:inherit">
+    <div style="display:flex;gap:4px;background:var(--card2);border:1px solid var(--border2);border-radius:11px;padding:3px;margin-bottom:16px">
+      <button id="npm-new" class="npmode on" onclick="setProjMode('new')"><i class="ti ti-sparkles"></i> Start fresh</button>
+      <button id="npm-import" class="npmode" onclick="setProjMode('import')"><i class="ti ti-folder-down"></i> Import codebase</button>
     </div>
-    <div class="mrow" style="flex-direction:column;align-items:stretch;gap:6px">
-      <span class="lbl">Ticket alias <span style="color:var(--dim)">(optional)</span></span>
-      <input id="np-alias" placeholder="e.g. CXC" maxlength="5" style="background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 11px;font-size:13px;font-family:inherit;text-transform:uppercase">
+    <div class="np-grid">
+      <div class="np-field">
+        <span class="lbl">Project name</span>
+        <input id="np-name" class="np-in" placeholder="e.g. CoXChat">
+      </div>
+      <div class="np-field">
+        <span class="lbl">Alias <span style="text-transform:none;font-weight:500;color:var(--dim)">optional</span></span>
+        <input id="np-alias" class="np-in" placeholder="CXC" maxlength="5" style="text-transform:uppercase;font-family:ui-monospace,monospace;text-align:center">
+      </div>
     </div>
-    <div class="mrow" id="np-path-row" style="flex-direction:column;align-items:stretch;gap:6px;display:none">
+    <div class="np-field" id="np-path-row" style="display:none">
       <span class="lbl">Existing codebase path</span>
-      <input id="np-path" placeholder="/Users/you/Projects/my-app" style="background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 11px;font-size:13px;font-family:ui-monospace,monospace">
-      <span style="font-size:11px;color:var(--dim)">git-inits it if needed; seeds a dockerize chore if no compose file</span>
+      <input id="np-path" class="np-in" placeholder="/Users/you/Projects/my-app" style="font-family:ui-monospace,monospace">
+      <span class="hint">git-inits it if needed; seeds a dockerize chore if no compose file</span>
     </div>
-    <div class="mrow" id="np-goal-row" style="flex-direction:column;align-items:stretch;gap:6px">
-      <div style="display:flex;align-items:center;gap:8px"><span class="lbl">Project goal <span style="color:var(--dim)">(optional)</span></span><div style="flex:1"></div>
+    <div class="np-field" id="np-goal-row">
+      <div style="display:flex;align-items:center;gap:8px"><span class="lbl">Project goal <span style="text-transform:none;font-weight:500;color:var(--dim)">optional</span></span><div style="flex:1"></div>
         <button onclick="refineGoal()" style="background:var(--card2);color:var(--accent2);border:1px solid var(--border2);border-radius:8px;padding:5px 10px;font-size:11px;font-weight:600;cursor:pointer;font-family:inherit"><i class="ti ti-sparkles"></i> <span id="np-goal-label">Draft with BA/PO</span></button></div>
-      <textarea id="np-goal" rows="3" placeholder="Rough idea — e.g. 'a secure team chat, more private than WhatsApp'. Click Draft to have BA/PO turn it into a project brief you review." style="background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 11px;font-size:13px;font-family:inherit;resize:vertical"></textarea>
+      <textarea id="np-goal" class="np-in" rows="3" placeholder="Rough idea — e.g. 'a secure team chat, more private than WhatsApp'. Click Draft to have BA/PO turn it into a project brief you review."></textarea>
     </div>
-    <div class="mrow" id="np-space-row" style="flex-direction:column;align-items:stretch;gap:6px;display:none">
+    <div class="np-field" id="np-space-row" style="display:none">
       <span class="lbl">Space</span>
-      <select id="np-space" style="background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 11px;font-size:13px;font-family:inherit"></select>
+      <div class="np-sel"><select id="np-space" class="np-in"></select></div>
     </div>
-    <div id="np-err" style="color:var(--red);font-size:12px;min-height:16px;margin:4px 0"></div>
-    <button class="pri" onclick="createProject()" style="width:100%;justify-content:center"><i class="ti ti-plus"></i> <span id="np-submit-label">Create project</span></button>
+    <div id="np-err" style="color:var(--red);font-size:12px;min-height:16px;margin:2px 0 6px"></div>
+    <button class="pri" onclick="createProject()" style="width:100%;justify-content:center;padding:11px"><i class="ti ti-plus"></i> <span id="np-submit-label">Create project</span></button>
   </div></div>
 
 <script>
