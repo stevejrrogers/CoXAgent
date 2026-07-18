@@ -62,6 +62,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         let cfg = WKWebViewConfiguration()
         let ucc = WKUserContentController()
         ucc.add(self, name: "coxnotify")
+        ucc.add(self, name: "coxupdate")
         cfg.userContentController = ucc
 
         web = WKWebView(frame: NSMakeRect(0, 0, 1360, 860), configuration: cfg)
@@ -350,6 +351,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     // The page posts {title, body, channel} to `coxnotify`; we raise a macOS
     // notification via UNUserNotificationCenter.
     func userContentController(_ ucc: WKUserContentController, didReceive message: WKScriptMessage) {
+        // In-place self-update: the page sends the release .dmg URL; we
+        // download, swap the bundle on disk, and relaunch — no manual steps.
+        if message.name == "coxupdate", let url = message.body as? String {
+            selfUpdate(urlString: url)
+            return
+        }
         guard message.name == "coxnotify", let d = message.body as? [String: Any] else { return }
         // Diagnostic pings from the page: log, don't raise a banner.
         if let dbg = d["debug"] as? String { notifLog("JS: \(dbg)"); return }
@@ -366,6 +373,88 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         let req = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(req) { err in
             if let err = err { self.notifLog("add() error: \(err)") }
+        }
+    }
+
+    // ── In-place self-update ─────────────────────────────────────────────────
+    // Download the release .dmg, stage the new bundle, then hand off to a tiny
+    // detached script that swaps the .app after this process exits and
+    // relaunches it. HTTPS-only; any failure falls back to the browser.
+    func updateSay(_ text: String) {
+        DispatchQueue.main.async {
+            let js = "typeof toasty==='function'&&toasty(" +
+                String(data: try! JSONSerialization.data(withJSONObject: [text]), encoding: .utf8)!.dropFirst().dropLast() + ",'ok')"
+            self.web.evaluateJavaScript(String(js), completionHandler: nil)
+        }
+    }
+
+    func selfUpdate(urlString: String) {
+        guard let url = URL(string: urlString), url.scheme == "https",
+              url.pathExtension.lowercased() == "dmg" else {
+            if let u = URL(string: urlString) { NSWorkspace.shared.open(u) }
+            return
+        }
+        updateSay("Đang tải bản cập nhật…")
+        let task = URLSession.shared.downloadTask(with: url) { temp, _, err in
+            guard let temp = temp, err == nil else {
+                self.updateSay("Tải thất bại — mở trình duyệt để tải tay.")
+                NSWorkspace.shared.open(url)
+                return
+            }
+            do { try self.applyUpdate(dmg: temp) }
+            catch {
+                self.notifLog("selfUpdate failed: \(error)")
+                self.updateSay("Không tự cài được — mở trình duyệt để tải tay.")
+                NSWorkspace.shared.open(url)
+            }
+        }
+        task.resume()
+    }
+
+    func applyUpdate(dmg: URL) throws {
+        let fm = FileManager.default
+        let work = fm.temporaryDirectory.appendingPathComponent("coxupdate-\(UUID().uuidString)")
+        try fm.createDirectory(at: work, withIntermediateDirectories: true)
+        let dmgPath = work.appendingPathComponent("update.dmg")
+        try fm.moveItem(at: dmg, to: dmgPath)
+        let mount = work.appendingPathComponent("mnt")
+
+        func run(_ launchPath: String, _ args: [String]) throws {
+            let p = Process()
+            p.launchPath = launchPath
+            p.arguments = args
+            try p.run()
+            p.waitUntilExit()
+            if p.terminationStatus != 0 { throw NSError(domain: "coxupdate", code: Int(p.terminationStatus)) }
+        }
+        try run("/usr/bin/hdiutil", ["attach", dmgPath.path, "-nobrowse", "-readonly", "-mountpoint", mount.path])
+        defer { try? run("/usr/bin/hdiutil", ["detach", mount.path, "-force"]) }
+        guard let appName = try fm.contentsOfDirectory(atPath: mount.path).first(where: { $0.hasSuffix(".app") }) else {
+            throw NSError(domain: "coxupdate", code: 2)
+        }
+        let staged = work.appendingPathComponent("staged.app")
+        try run("/usr/bin/ditto", [mount.appendingPathComponent(appName).path, staged.path])
+
+        let target = Bundle.main.bundleURL.path
+        let script = work.appendingPathComponent("swap.sh")
+        let sh = """
+        #!/bin/bash
+        while kill -0 \(ProcessInfo.processInfo.processIdentifier) 2>/dev/null; do sleep 0.3; done
+        rm -rf "\(target)"
+        /usr/bin/ditto "\(staged.path)" "\(target)"
+        /usr/bin/xattr -dr com.apple.quarantine "\(target)" 2>/dev/null
+        open "\(target)"
+        rm -rf "\(work.path)"
+        """
+        try sh.write(to: script, atomically: true, encoding: .utf8)
+        try run("/bin/chmod", ["+x", script.path])
+        let p = Process()
+        p.launchPath = "/bin/bash"
+        p.arguments = [script.path]
+        try p.run() // detached: outlives us
+        DispatchQueue.main.async {
+            self.updateSay("Đã tải xong — app sẽ tự khởi động lại…")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { NSApp.terminate(nil) }
         }
     }
 
