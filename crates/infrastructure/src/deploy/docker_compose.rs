@@ -224,6 +224,8 @@ impl DeployPort for DockerComposeDeploy {
         Ok(false)
     }
 
+    // Linear up → evict-retry → summarize pass; splitting it would obscure it.
+    #[allow(clippy::too_many_lines)]
     async fn deploy(&self, work_dir: &Path) -> Result<DeployReport, PortError> {
         if !COMPOSE_FILES.iter().any(|f| work_dir.join(f).exists()) {
             return Ok(DeployReport {
