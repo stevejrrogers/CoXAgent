@@ -1283,10 +1283,14 @@ textarea.np-in{resize:vertical;line-height:1.5}
       <button onclick="doLogout()" title="Sign out" class="ulogout"><i class="ti ti-logout"></i></button>
     </div>
   </aside>
-  <div id="update-banner" hidden style="position:fixed;top:0;left:0;right:0;z-index:400;display:flex;align-items:center;justify-content:center;gap:12px;background:var(--accent);color:#fff;padding:8px 14px;font-size:13px;font-weight:600">
-    <i class="ti ti-rocket"></i><span id="upd-text"></span>
-    <button onclick="openGetApp()" style="background:rgba(255,255,255,.18);border:none;color:#fff;border-radius:8px;padding:5px 13px;font-weight:700;cursor:pointer;font-family:inherit">Update</button>
-    <button onclick="document.getElementById('update-banner').hidden=true" style="background:transparent;border:none;color:#fff;opacity:.7;cursor:pointer"><i class="ti ti-x"></i></button>
+  <div id="update-banner" hidden style="position:fixed;right:18px;bottom:18px;z-index:400;display:flex;align-items:center;gap:12px;background:var(--card);border:1px solid var(--accent);border-radius:14px;padding:13px 16px;box-shadow:0 14px 44px rgba(0,0,0,.45);animation:cmpop .18s ease;max-width:360px">
+    <div style="width:38px;height:38px;border-radius:11px;background:color-mix(in srgb,var(--accent) 16%,transparent);display:flex;align-items:center;justify-content:center;flex:none"><i class="ti ti-rocket" style="font-size:19px;color:var(--accent)"></i></div>
+    <div style="flex:1;min-width:0">
+      <div id="upd-title" style="font-size:13px;font-weight:700;color:var(--text)"></div>
+      <div id="upd-sub" style="font-size:11.5px;color:var(--muted);margin-top:1px"></div>
+    </div>
+    <button onclick="openGetApp()" class="pri" style="padding:7px 14px;font-size:12.5px">Tải về</button>
+    <button onclick="dismissUpdate()" title="Để sau" style="background:transparent;border:none;color:var(--dim);cursor:pointer;font-size:14px;padding:4px"><i class="ti ti-x"></i></button>
   </div>
   <div class="ov" id="ov-getapp" onclick="if(event.target===this)close_('ov-getapp')"><div class="modal" style="max-width:460px">
     <span class="x" onclick="close_('ov-getapp')"><i class="ti ti-x"></i></span>
@@ -2552,9 +2556,15 @@ async function checkAppUpdate(){
   window._appLatest=d;
   const nb=document.getElementById("update-banner");
   if(d.latest_version&&d.hub_version&&verGt(d.latest_version,d.hub_version)&&localStorage.getItem("coxskipver")!==d.latest_version){
-    document.getElementById("upd-text").textContent="CoXAgent "+d.latest_version+" đã có (bạn đang chạy "+d.hub_version+")";
+    document.getElementById("upd-title").textContent="CoXAgent "+d.latest_version+" đã có";
+    document.getElementById("upd-sub").textContent="bạn đang chạy "+d.hub_version+" — tải bản mới rồi cài đè là xong";
     nb.hidden=false;
   }else nb.hidden=true;
+}
+function dismissUpdate(){
+  const d=window._appLatest||{};
+  if(d.latest_version)localStorage.setItem("coxskipver",d.latest_version);
+  document.getElementById("update-banner").hidden=true;
 }
 async function openGetApp(){
   // Always fetch fresh — the hub may have just discovered a new release.

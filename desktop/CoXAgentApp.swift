@@ -282,6 +282,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     // MARK: - WKUIDelegate: native panels for JS alert()/confirm()/prompt().
     // Without these, WKWebView silently returns default values — so in-app
     // confirms (e.g. "Remove project?") would resolve to false and never fire.
+    // External links (downloads, docs, GitHub releases) open in the system
+    // browser — the embedded webview neither downloads files nor should it
+    // navigate away from the app. Anything not on the hub origin goes out.
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        if let url = navigationAction.request.url,
+           let scheme = url.scheme, scheme == "http" || scheme == "https",
+           let host = url.host, host != "127.0.0.1", host != "localhost" {
+            NSWorkspace.shared.open(url)
+            decisionHandler(.cancel)
+            return
+        }
+        decisionHandler(.allow)
+    }
+
+    // target=_blank / window.open: same rule — external to the browser.
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                 for navigationAction: WKNavigationAction,
+                 windowFeatures: WKWindowFeatures) -> WKWebView? {
+        if let url = navigationAction.request.url {
+            NSWorkspace.shared.open(url)
+        }
+        return nil
+    }
+
     func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
                  initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
         let a = NSAlert(); a.messageText = "CoXAgent"; a.informativeText = message
