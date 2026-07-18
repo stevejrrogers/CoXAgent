@@ -243,6 +243,10 @@ struct Space {
     /// Project ids belonging to this space.
     #[serde(default)]
     projects: Vec<String>,
+    /// Explicit member usernames. Saving the space additionally ASSIGNS each
+    /// member to every project of the space (additive — never auto-revokes).
+    #[serde(default)]
+    members: Vec<String>,
     /// Monthly USD spend cap for this space; 0 = no cap. Set by Super only.
     #[serde(default)]
     budget_usd: f64,
@@ -5158,6 +5162,7 @@ async fn spaces_for(app: &AppState, headers: &axum::http::HeaderMap) -> Vec<Spac
     all.into_iter()
         .filter(|s| {
             s.admins.iter().any(|a| a.eq_ignore_ascii_case(&me))
+                || s.members.iter().any(|m| m.eq_ignore_ascii_case(&me))
                 || s.projects.iter().any(|p| my_projects.contains(p))
         })
         .collect()
@@ -5181,6 +5186,8 @@ struct SpaceReq {
     admins: Vec<String>,
     #[serde(default)]
     projects: Vec<String>,
+    #[serde(default)]
+    members: Vec<String>,
     /// Monthly USD cap (0 = none). Applied by Super only.
     #[serde(default)]
     budget_usd: f64,
@@ -5193,15 +5200,15 @@ async fn validate_space_req(
     app: &AppState,
     req: &SpaceReq,
     exclude_sid: Option<&str>,
-) -> Result<(Vec<String>, Vec<String>), String> {
+) -> Result<(Vec<String>, Vec<String>, Vec<String>), String> {
     if req.name.trim().chars().count() > 60 {
         return Err("name too long (max 60)".into());
     }
     if req.tagline.chars().count() > 160 {
         return Err("tagline too long (max 160)".into());
     }
-    if req.admins.len() > 20 || req.projects.len() > 100 {
-        return Err("too many admins/projects".into());
+    if req.admins.len() > 20 || req.projects.len() > 100 || req.members.len() > 200 {
+        return Err("too many admins/projects/members".into());
     }
     let known_users: std::collections::HashSet<String> = match app.auth.clone() {
         Some(auth) => auth
@@ -5212,17 +5219,22 @@ async fn validate_space_req(
             .collect(),
         None => std::collections::HashSet::new(),
     };
-    let mut admins = Vec::new();
-    for a in &req.admins {
-        let a = a.trim().to_owned();
-        if a.is_empty() || admins.contains(&a) {
-            continue;
+    let valid_users = |list: &[String]| -> Result<Vec<String>, String> {
+        let mut out: Vec<String> = Vec::new();
+        for a in list {
+            let a = a.trim().to_owned();
+            if a.is_empty() || out.contains(&a) {
+                continue;
+            }
+            if !known_users.is_empty() && !known_users.contains(&a.to_lowercase()) {
+                return Err(format!("unknown user: {a}"));
+            }
+            out.push(a);
         }
-        if !known_users.is_empty() && !known_users.contains(&a.to_lowercase()) {
-            return Err(format!("unknown user: {a}"));
-        }
-        admins.push(a);
-    }
+        Ok(out)
+    };
+    let admins = valid_users(&req.admins)?;
+    let members = valid_users(&req.members)?;
     let known_projects: std::collections::HashSet<String> =
         app.order.read().await.iter().cloned().collect();
     let mut projects = Vec::new();
@@ -5250,7 +5262,20 @@ async fn validate_space_req(
             }
         }
     }
-    Ok((admins, projects))
+    Ok((admins, projects, members))
+}
+
+/// Adding someone to a space means they can actually WORK there: each member
+/// is assigned to every project of the space (additive only — removing a
+/// member from the space never auto-revokes project access; that stays an
+/// explicit per-project action in Users).
+async fn assign_space_members(app: &AppState, members: &[String], projects: &[String]) {
+    let Some(auth) = app.auth.clone() else { return };
+    for m in members {
+        for p in projects {
+            let _ = auth.assign_project(m, p).await;
+        }
+    }
 }
 
 /// Create a space (super admin only).
@@ -5266,7 +5291,7 @@ async fn space_create_ep(
     if name.is_empty() {
         return (StatusCode::BAD_REQUEST, "name required").into_response();
     }
-    let (admins, projects) = match validate_space_req(&app, &req, None).await {
+    let (admins, projects, members) = match validate_space_req(&app, &req, None).await {
         Ok(v) => v,
         Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
     };
@@ -5282,13 +5307,15 @@ async fn space_create_ep(
             name,
             tagline: req.tagline.trim().to_owned(),
             admins,
-            projects,
+            projects: projects.clone(),
+            members: members.clone(),
             budget_usd: req.budget_usd.clamp(0.0, 1_000_000.0),
             created_by: by,
             created_at: coxagent_application::state::now_rfc3339(),
         });
     }
     app.spaces.save().await;
+    assign_space_members(&app, &members, &projects).await;
     Json(serde_json::json!({ "ok": true, "id": id })).into_response()
 }
 
@@ -5301,7 +5328,8 @@ async fn space_update_ep(
 ) -> axum::response::Response {
     let sup = is_super(&app, &headers).await;
     let me = resolve_username(&app, &headers).await;
-    let (admins, projects) = match validate_space_req(&app, &req, Some(sid.as_str())).await {
+    let (admins, projects, members) = match validate_space_req(&app, &req, Some(sid.as_str())).await
+    {
         Ok(v) => v,
         Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
     };
@@ -5321,11 +5349,15 @@ async fn space_update_ep(
         // Only the super admin reshapes membership/projects/budget of a space.
         if sup {
             space.admins = admins;
-            space.projects = projects;
+            space.projects = projects.clone();
+            space.members = members.clone();
             space.budget_usd = req.budget_usd.clamp(0.0, 1_000_000.0);
         }
     }
     app.spaces.save().await;
+    if sup {
+        assign_space_members(&app, &members, &projects).await;
+    }
     Json(serde_json::json!({ "ok": true })).into_response()
 }
 
@@ -5400,6 +5432,9 @@ async fn manage_overview_ep(
                 .iter()
                 .filter(|u| {
                     s.admins.iter().any(|a| a.eq_ignore_ascii_case(&u.username))
+                        || s.members
+                            .iter()
+                            .any(|m| m.eq_ignore_ascii_case(&u.username))
                         || u.projects.iter().any(|p| s.projects.contains(p))
                 })
                 .collect();

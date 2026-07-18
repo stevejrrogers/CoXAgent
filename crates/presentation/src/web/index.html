@@ -1214,6 +1214,7 @@ textarea.np-in{resize:vertical;line-height:1.5}
         <div class="fr"><span class="lbl">Tagline</span><input id="spm-tag" placeholder="what this space builds" maxlength="160"></div>
         <div class="fr" id="spm-budget-row"><span class="lbl">Budget/mo</span><input id="spm-budget" type="number" min="0" step="10" placeholder="USD — 0 = không giới hạn" style="width:180px"><span class="hint" style="font-size:11px;color:var(--dim)">cảnh báo khi space đốt vượt mức</span></div>
         <div class="fr" style="align-items:flex-start"><span class="lbl">Admins</span><div id="spm-admins-box" style="flex:1"></div></div>
+        <div class="fr" style="align-items:flex-start" id="spm-members-row"><span class="lbl">Members</span><div style="flex:1"><div id="spm-members-box"></div><div class="hint" style="font-size:11px;color:var(--dim);margin-top:5px">member được tự gán vào mọi project của space</div></div></div>
         <div class="fr" style="align-items:flex-start"><span class="lbl">Projects</span><div id="spm-projects-box" style="flex:1"></div></div>
       </div>
       <div class="coxmodal-acts" style="margin-top:14px">
@@ -2270,6 +2271,7 @@ function openSpaceModalLite(sp){
   document.getElementById("spm-tag").value=sp.tagline||"";
   document.getElementById("spm-admins-box").closest(".fr").style.display="none";
   document.getElementById("spm-projects-box").closest(".fr").style.display="none";
+  document.getElementById("spm-members-row").style.display="none";
   document.getElementById("spm-budget-row").style.display="none";
   document.getElementById("spm-del").hidden=true;
   document.getElementById("spm-ok").innerHTML='<i class="ti ti-check"></i> Save';
@@ -2291,6 +2293,8 @@ function openSpaceModal(id){
   document.getElementById("spm-budget").value=sp&&sp.budget_usd?sp.budget_usd:"";
   document.getElementById("spm-budget-row").style.display="";
   document.getElementById("spm-admins-box").innerHTML=mgPicker("spm-admins",((MG||{}).users||[]).map(u=>u.username),sp?(sp.admins||[]):[]);
+  document.getElementById("spm-members-box").innerHTML=mgPicker("spm-members",((MG||{}).users||[]).map(u=>u.username),sp?(sp.members||[]):[]);
+  document.getElementById("spm-members-row").style.display="";
   document.getElementById("spm-projects-box").innerHTML=mgPicker("spm-projects",allP,sp?(sp.projects||[]):[]);
   document.getElementById("spm-del").hidden=!sp;
   document.getElementById("spm-ok").innerHTML='<i class="ti ti-check"></i> '+(sp?"Save":"Create");
@@ -2300,13 +2304,14 @@ function openSpaceModal(id){
 }
 function closeSpaceModal(){document.getElementById("sp-modal").hidden=true;SPM_ID=null;SPM_LITE=null;
   document.getElementById("spm-admins-box").closest(".fr").style.display="";
-  document.getElementById("spm-projects-box").closest(".fr").style.display="";}
+  document.getElementById("spm-projects-box").closest(".fr").style.display="";
+  document.getElementById("spm-members-row").style.display="";}
 async function submitSpaceModal(){
   const name=val("spm-name").trim();if(!name){toasty("Đặt tên space","warn");return;}
   const lite=SPM_LITE;
   const body=JSON.stringify(lite
-    ?{name,tagline:val("spm-tag"),admins:lite.admins||[],projects:lite.projects||[],budget_usd:lite.budget_usd||0}
-    :{name,tagline:val("spm-tag"),admins:picked("spm-admins"),projects:picked("spm-projects"),budget_usd:parseFloat(val("spm-budget"))||0});
+    ?{name,tagline:val("spm-tag"),admins:lite.admins||[],projects:lite.projects||[],members:lite.members||[],budget_usd:lite.budget_usd||0}
+    :{name,tagline:val("spm-tag"),admins:picked("spm-admins"),projects:picked("spm-projects"),members:picked("spm-members"),budget_usd:parseFloat(val("spm-budget"))||0});
   const ok=document.getElementById("spm-ok");ok.disabled=true;
   try{
     const r=await(SPM_ID
@@ -2424,6 +2429,7 @@ async function renderHome(){
   const agents=selSp?(me.agents||[]).filter(a=>pidSet.has(a.project)):(me.agents||[]);
   const members=selSp?(ov.members||[]).filter(m=>
       (selSp.admins||[]).some(a=>a.toLowerCase()===(m.username||"").toLowerCase())
+      ||(selSp.members||[]).some(a=>a.toLowerCase()===(m.username||"").toLowerCase())
       ||(m.projects||[]).some(p=>pidSet.has(p)))
     :(ov.members||[]);
   // Sidebar "Home" shows the company name once the workspace exists.
