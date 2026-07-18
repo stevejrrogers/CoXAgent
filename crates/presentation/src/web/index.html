@@ -1288,15 +1288,6 @@ textarea.np-in{resize:vertical;line-height:1.5}
       <button onclick="doLogout()" title="Sign out" class="ulogout"><i class="ti ti-logout"></i></button>
     </div>
   </aside>
-  <div id="update-banner" hidden style="position:fixed;right:18px;bottom:18px;z-index:400;display:flex;align-items:center;gap:12px;background:var(--card);border:1px solid var(--accent);border-radius:14px;padding:13px 16px;box-shadow:0 14px 44px rgba(0,0,0,.45);animation:cmpop .18s ease;max-width:360px">
-    <div style="width:38px;height:38px;border-radius:11px;background:color-mix(in srgb,var(--accent) 16%,transparent);display:flex;align-items:center;justify-content:center;flex:none"><i class="ti ti-rocket" style="font-size:19px;color:var(--accent)"></i></div>
-    <div style="flex:1;min-width:0">
-      <div id="upd-title" style="font-size:13px;font-weight:700;color:var(--text)"></div>
-      <div id="upd-sub" style="font-size:11.5px;color:var(--muted);margin-top:1px"></div>
-    </div>
-    <button onclick="openGetApp()" class="pri" style="padding:7px 14px;font-size:12.5px">Tải về</button>
-    <button type="button" onclick="dismissUpdate()" title="Để sau" style="background:transparent;border:none;color:var(--dim);cursor:pointer;font-size:16px;padding:10px;margin:-6px"><i class="ti ti-x"></i></button>
-  </div>
   <div class="ov" id="ov-getapp" onclick="if(event.target===this)close_('ov-getapp')"><div class="modal" style="max-width:460px">
     <span class="x" onclick="close_('ov-getapp')"><i class="ti ti-x"></i></span>
     <div class="np-head"><div class="np-mark"><i class="ti ti-download"></i></div>
@@ -2569,12 +2560,6 @@ async function checkAppUpdate(){
     const dot=btn.querySelector(".upd-dot");if(dot)dot.hidden=!newer;
     if(ic)ic.className=newer?"ti ti-rocket":"ti ti-download";
   }
-  const nb=document.getElementById("update-banner");
-  if(newer&&!window._updMuted&&localStorage.getItem("coxskipver")!==d.latest_version){
-    document.getElementById("upd-title").textContent="CoXAgent "+d.latest_version+" đã có";
-    document.getElementById("upd-sub").textContent="bạn đang chạy "+d.hub_version+" — bấm Tải về để tự cập nhật";
-    nb.hidden=false;
-  }else nb.hidden=true;
 }
 function coxSelfUpdate(url){
   try{
@@ -2582,15 +2567,6 @@ function coxSelfUpdate(url){
     toasty("Đang tải bản cập nhật — app sẽ tự khởi động lại khi xong","ok");
     close_("ov-getapp");
   }catch(e){window.open(url,"_blank");}
-}
-function dismissUpdate(){
-  const d=window._appLatest||{};
-  if(d.latest_version)localStorage.setItem("coxskipver",d.latest_version);
-  // Session-wide mute: once dismissed, the toast stays gone for THIS session
-  // even if a newer version lands mid-session (the rocket button keeps
-  // signalling) — versions churning rapidly must not resurrect the toast.
-  window._updMuted=true;
-  document.getElementById("update-banner").hidden=true;
 }
 async function openGetApp(){
   // Always fetch fresh — the hub may have just discovered a new release —
