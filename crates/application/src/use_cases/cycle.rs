@@ -1150,25 +1150,28 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             Err(e) => report.errors.push(format!("PD: {e}")),
         }
 
-        match self.dev(DevMode::Bug).execute().await {
-            Ok(id) => {
-                if let Some(tid) = &id {
-                    self.commit_for_ticket(tid, "fix").await;
-                }
-                report.bug_fixed = id;
-            }
-            Err(e) => report.errors.push(format!("DEV-BUG: {e}")),
-        }
-
         // PR-queue backpressure: when too many PRs are already open, STOP
-        // starting new features — every extra parallel branch multiplies merge
-        // conflicts (cascade). The team drains the queue (review/fix/merge)
-        // before taking on more; bug fixes still run.
+        // starting new branches (bugs AND features) — every extra parallel
+        // branch multiplies merge conflicts (cascade). Draining the queue
+        // (review / fix feedback / resolve conflicts / merge) IS the dev work
+        // until it's back under the limit.
         let queue_full = self.pr_queue_full().await;
         if queue_full {
             report
                 .errors
-                .push("DEV-FEATURE: paused — PR queue full, draining reviews first".to_owned());
+                .push("DEV: paused new work — PR queue full, draining reviews first".to_owned());
+        }
+
+        if !queue_full {
+            match self.dev(DevMode::Bug).execute().await {
+                Ok(id) => {
+                    if let Some(tid) = &id {
+                        self.commit_for_ticket(tid, "fix").await;
+                    }
+                    report.bug_fixed = id;
+                }
+                Err(e) => report.errors.push(format!("DEV-BUG: {e}")),
+            }
         }
         if self.config.workflow.feature_dev_enabled && !queue_full {
             // Before building, make sure the next feature has a clear definition
@@ -1588,7 +1591,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 s.post_chat_in(
                     "COX",
                     &format!("📰 {digest}"),
-                    crate::state::GENERAL_CHANNEL,
+                    crate::state::AGENTS_CHANNEL,
                     Vec::new(),
                 );
             }
@@ -1605,6 +1608,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// a DEV agent that checks out the branch, fixes exactly what the review
     /// asked, and pushes — then replies on the PR and tells the chat. One PR per
     /// cycle, so a review queue drains steadily without a token spike.
+    #[allow(clippy::too_many_lines)] // one linear queue-drain pass; splitting hurts readability
     async fn address_pr_feedback(&self) {
         if !self.config.git.enabled {
             return;
@@ -1624,6 +1628,30 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             let feedback = forge.pr_feedback(pr.number).await.unwrap_or_default();
             let conflicted = !pr.mergeable;
             if feedback.is_empty() && !conflicted {
+                continue;
+            }
+            // Ping-pong brake: after 2 fix rounds on one PR, escalate to a human
+            // instead of burning tokens on an endless review↔fix loop.
+            let attempts = self.store.load().await.map_or(0, |s| {
+                s.pr_fix_attempts.get(&pr.number).copied().unwrap_or(0)
+            });
+            if attempts >= 2 {
+                if attempts == 2 {
+                    self.notify(
+                        "pr_stuck",
+                        format!(
+                            "PR #{} has been fixed {attempts} times and is still blocked — needs a \
+                             human decision: {}",
+                            pr.number, pr.url
+                        ),
+                    )
+                    .await;
+                    let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                        s.pr_fix_attempts.insert(pr.number, attempts + 1);
+                        Ok(())
+                    })
+                    .await;
+                }
                 continue;
             }
             self.report("DEV-BUG", &format!("fixing PR #{}", pr.number));
@@ -1669,6 +1697,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                         .await;
                     self.log_git(&format!("DEV addressed feedback on PR #{}", pr.number))
                         .await;
+                    let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                        *s.pr_fix_attempts.entry(pr.number).or_insert(0) += 1;
+                        Ok(())
+                    })
+                    .await;
                     self.notify(
                         "pr_fixed",
                         format!(

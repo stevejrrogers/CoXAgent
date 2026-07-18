@@ -114,6 +114,10 @@ pub const MAX_CHAT: usize = 500;
 /// The id of the default channel every project has and everyone can see.
 pub const GENERAL_CHANNEL: &str = "general";
 
+/// The system feed channel: agent/bot notifications (PRs, deploys, digest,
+/// previews) land here instead of spamming `#general`. Open to everyone.
+pub const AGENTS_CHANNEL: &str = "agents";
+
 fn general_channel() -> String {
     GENERAL_CHANNEL.to_owned()
 }
@@ -157,16 +161,22 @@ impl Channel {
         self.id == GENERAL_CHANNEL
     }
 
+    /// An open system channel everyone can read (`#general`, `#agents`).
+    #[must_use]
+    pub fn is_open(&self) -> bool {
+        self.id == GENERAL_CHANNEL || self.id == AGENTS_CHANNEL
+    }
+
     /// Whether `user` may see and read this channel.
     #[must_use]
     pub fn can_view(&self, user: &str) -> bool {
-        self.is_general() || self.owner == user || self.members.iter().any(|m| m == user)
+        self.is_open() || self.owner == user || self.members.iter().any(|m| m == user)
     }
 
     /// Whether `user` may invite others (owner, or a delegated inviter).
     #[must_use]
     pub fn can_invite(&self, user: &str) -> bool {
-        self.is_general() || self.owner == user || self.inviters.iter().any(|m| m == user)
+        self.is_open() || self.owner == user || self.inviters.iter().any(|m| m == user)
     }
 }
 
@@ -421,6 +431,11 @@ pub struct ProjectState {
     /// so exactly one digest lands per day regardless of restarts or operators.
     #[serde(default)]
     pub last_digest_day: String,
+    /// How many times a DEV agent has pushed fixes to each open PR (by number).
+    /// Capped so a review↔fix ping-pong escalates to a human instead of
+    /// burning tokens forever; entries are dropped when the PR closes.
+    #[serde(default)]
+    pub pr_fix_attempts: std::collections::BTreeMap<u64, u32>,
     /// Whether the Ops/SRE monitor currently sees the deployed app as down —
     /// tracked so it files exactly one bug per outage and can announce recovery.
     #[serde(default)]
@@ -462,6 +477,7 @@ impl Default for ProjectState {
             sprint_cycle: 0,
             sprint_goal: String::new(),
             last_digest_day: String::new(),
+            pr_fix_attempts: std::collections::BTreeMap::new(),
             ops_down: false,
             spend_today_usd: 0.0,
             spend_day: String::new(),
@@ -797,13 +813,17 @@ impl ProjectState {
         if id == GENERAL_CHANNEL {
             return Some(general_channel_record());
         }
+        if id == AGENTS_CHANNEL {
+            return Some(agents_channel_record());
+        }
         self.channels.iter().find(|c| c.id == id).cloned()
     }
 
-    /// All channels `user` can see: `#general` first, then their private ones.
+    /// All channels `user` can see: `#general` and `#agents` first, then their
+    /// private ones.
     #[must_use]
     pub fn channels_for(&self, user: &str) -> Vec<Channel> {
-        let mut out = vec![general_channel_record()];
+        let mut out = vec![general_channel_record(), agents_channel_record()];
         out.extend(self.channels.iter().filter(|c| c.can_view(user)).cloned());
         out
     }
@@ -899,6 +919,19 @@ impl ProjectState {
 }
 
 /// The synthetic record for the implicit `#general` channel.
+fn agents_channel_record() -> Channel {
+    Channel {
+        id: AGENTS_CHANNEL.to_owned(),
+        name: "agents".to_owned(),
+        owner: String::new(),
+        members: Vec::new(),
+        inviters: Vec::new(),
+        created_at: String::new(),
+        kind: "general".to_owned(),
+        project: String::new(),
+    }
+}
+
 fn general_channel_record() -> Channel {
     Channel {
         id: GENERAL_CHANNEL.to_owned(),
@@ -951,10 +984,11 @@ mod channel_tests {
         assert_eq!(ch.id, "design-review");
         assert!(ch.can_view("alice"));
         assert!(!ch.can_view("bob"));
-        // general is always visible; alice sees general + hers, bob only general.
-        assert_eq!(s.channels_for("alice").len(), 2);
-        assert_eq!(s.channels_for("bob").len(), 1);
+        // general + agents are always visible; alice additionally sees hers.
+        assert_eq!(s.channels_for("alice").len(), 3);
+        assert_eq!(s.channels_for("bob").len(), 2);
         assert_eq!(s.channels_for("bob")[0].id, GENERAL_CHANNEL);
+        assert_eq!(s.channels_for("bob")[1].id, AGENTS_CHANNEL);
     }
 
     #[test]

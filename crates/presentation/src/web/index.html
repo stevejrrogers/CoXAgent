@@ -2606,7 +2606,7 @@ function onChatIncoming(m){
 function ingestChatSnapshot(list){
   if(!Array.isArray(list))return;
   if(!chatPrimed){list.forEach(markSeen);chatPrimed=true;return;}
-  list.forEach(m=>{if((m.channel||"general")==="general")onChatIncoming(m);});
+  list.forEach(m=>{const c=m.channel||"general";if(c==="general"||c==="agents")onChatIncoming(m);});
 }
 // Start the live chat connection as soon as a project is active, so
 // notifications arrive on any page — not only while the Chat view is open.

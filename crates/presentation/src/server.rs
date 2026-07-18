@@ -2882,7 +2882,7 @@ async fn pr_preview(
                 s.post_chat_in(
                     "COX",
                     &msg,
-                    coxagent_application::state::GENERAL_CHANNEL,
+                    coxagent_application::state::AGENTS_CHANNEL,
                     Vec::new(),
                 );
                 Ok(())
@@ -4362,7 +4362,7 @@ async fn digest_ep(
         s.post_chat_in(
             "COX",
             &format!("📰 {digest}"),
-            coxagent_application::state::GENERAL_CHANNEL,
+            coxagent_application::state::AGENTS_CHANNEL,
             Vec::new(),
         );
         Ok(())
