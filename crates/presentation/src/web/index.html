@@ -780,7 +780,10 @@
   .wscrumb:hover{background:var(--accentbg)}
   .wssep{color:var(--dim)}
   .wslist{display:flex;flex-direction:column;border:1px solid var(--border);border-radius:9px;overflow:hidden}
-  .wsrow{display:flex;align-items:center;gap:10px;padding:8px 12px;cursor:pointer;border-bottom:1px solid var(--border);font-size:13px}
+  /* File-browser rows: must win over the Home-dashboard .wsrow/.wsname (cards, 25px hero name) */
+  .wslist .wsrow{display:flex;align-items:center;gap:10px;padding:8px 12px;cursor:pointer;border:none;border-bottom:1px solid var(--border);border-radius:0;background:transparent;font-size:13px}
+  .wslist .wsrow:last-child{border-bottom:none}
+  .wslist .wsname{flex:1;min-width:0;font-family:ui-monospace,monospace;font-size:13px;font-weight:500;letter-spacing:0;line-height:1.4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .wsrow:last-child{border-bottom:none}
   .wsrow:hover{background:var(--card2)}
   .wsrow i{font-size:16px;flex:none}
