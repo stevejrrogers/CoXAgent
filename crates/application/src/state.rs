@@ -467,6 +467,15 @@ pub struct ProjectState {
     /// UTC day the SM last posted the consolidated impediment report.
     #[serde(default)]
     pub last_impediment_day: String,
+    /// PRs the SM already sent to the SA for a stuck-PR rescue (root-cause →
+    /// close or concrete instructions). One rescue per PR, ever — the second
+    /// stall goes to a human.
+    #[serde(default)]
+    pub pr_rescues: std::collections::BTreeMap<u64, u32>,
+    /// Tickets the SA already re-designed after 3 red builds. One redesign per
+    /// ticket; failing again stays parked for a human.
+    #[serde(default)]
+    pub ticket_redesigns: std::collections::BTreeMap<String, u32>,
     /// The sprint number the clean-base drain notice was last announced for, so
     /// the SA explains the "merge everything first" hold once per sprint, not
     /// every cycle.
@@ -498,6 +507,8 @@ impl Default for ProjectState {
             last_memory_hygiene_day: String::new(),
             jobs: Vec::new(),
             last_impediment_day: String::new(),
+            pr_rescues: std::collections::BTreeMap::new(),
+            ticket_redesigns: std::collections::BTreeMap::new(),
             alias: String::new(),
             display_name: None,
             current_version: SemVer::default(),

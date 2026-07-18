@@ -1141,7 +1141,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // against the current process law once a day.
             self.memory_hygiene().await;
 
-            // SM: one consolidated blocker picture per day, until it's clean.
+            // SM dispatch FIRST (agents resolve), then report what remains.
+            self.sm_unpark_tickets().await;
             self.impediment_watch().await;
 
             // Merge-queue recovery gate: with a blown-up queue the ONLY useful
@@ -1761,6 +1762,188 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
     }
 
+    /// SM → SA rescue for a stuck PR: instead of a third blind fix round (or
+    /// dumping it on a human), the SA root-causes the PR and DECIDES —
+    /// `CLOSE` (superseded / wrong direction) or `INSTRUCT` (concrete steps,
+    /// left as review feedback so the normal fix loop picks them up with one
+    /// informed retry). One rescue per PR, tracked in state.
+    async fn sa_rescue_pr(&self, pr: &crate::ports::outbound::PullRequest) {
+        let Some(forge) = self.forge.clone() else {
+            return;
+        };
+        // Claim the rescue first so parallel operators don't double-spend.
+        let claimed = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+            if s.pr_rescues.contains_key(&pr.number) {
+                return Err(crate::PortError::Conflict("already rescued".into()));
+            }
+            s.pr_rescues.insert(pr.number, 1);
+            Ok(())
+        })
+        .await;
+        if claimed.is_err() {
+            return;
+        }
+        self.report("SA", &format!("root-causing stuck PR #{}", pr.number));
+        let diff: String = forge
+            .pr_diff(pr.number)
+            .await
+            .unwrap_or_default()
+            .chars()
+            .take(12_000)
+            .collect();
+        let request = crate::ports::outbound::AgentRequest {
+            role: coxagent_domain::Role::Sa,
+            system_prompt: crate::prompts::system_prompt(crate::prompts::SA),
+            task_prompt: format!(
+                "PR #{n} (`{h}`) has failed TWO fix rounds and is blocking the merge queue. \
+                 You are the architect deciding its fate — no more blind retries.\n\n\
+                 TITLE: {t}\n\nDIFF (truncated):\n{diff}\n\n\
+                 Investigate against the current base branch (you are in the repo). Reply with \
+                 EXACTLY one of:\n\
+                 CLOSE — the change is superseded by what already landed, or fundamentally \
+                 wrong; closing loses nothing.\n\
+                 INSTRUCT\n<numbered, concrete steps a DEV can follow to unblock this exact PR \
+                 — name files, name the conflict, name what to keep>",
+                n = pr.number,
+                h = pr.head,
+                t = pr.title,
+            ),
+            work_dir: self.work_dir.clone(),
+            timeout: std::time::Duration::from_secs(900),
+        };
+        let out = match self.engine.run(request).await {
+            Ok(o) if o.succeeded() => o.stdout.trim().to_owned(),
+            _ => String::new(),
+        };
+        let say = |msg: String| {
+            let store = Arc::clone(&self.store);
+            async move {
+                let _ = crate::ports::outbound::mutate_state(store.as_ref(), |s| {
+                    s.post_chat_in("SM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+                    Ok(())
+                })
+                .await;
+            }
+        };
+        if out.starts_with("CLOSE") {
+            let _ = forge
+                .comment_pr(
+                    pr.number,
+                    "Closed by SA rescue: superseded/wrong direction — see queue history.",
+                )
+                .await;
+            if forge.close_pr(pr.number).await.is_ok() {
+                say(format!(
+                    "🧯 SM→SA rescue PR #{}: SA kết luận ĐÓNG (đã bị thay thế/sai hướng).",
+                    pr.number
+                ))
+                .await;
+            }
+        } else if let Some(steps) = out.strip_prefix("INSTRUCT") {
+            let steps = steps.trim();
+            let _ = forge
+                .request_changes(
+                    pr.number,
+                    &format!("SA rescue instructions (follow EXACTLY):\n{steps}"),
+                )
+                .await;
+            let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                s.pr_fix_attempts.insert(pr.number, 0); // one informed retry
+                Ok(())
+            })
+            .await;
+            say(format!(
+                "🧯 SM→SA rescue PR #{}: SA để lại chỉ dẫn cụ thể — DEV được một vòng thử lại có định hướng.",
+                pr.number
+            ))
+            .await;
+        } else {
+            say(format!(
+                "🧯 SM→SA rescue PR #{}: SA không kết luận được — chuyển người quyết.",
+                pr.number
+            ))
+            .await;
+        }
+    }
+
+    /// SM → SA re-design for tickets PARKED after 3 red builds: the failure is
+    /// treated as a spec/design problem, not a typing problem — the SA revises
+    /// the technical approach (simplify, split, change direction) and the
+    /// ticket re-enters the flow with fresh attempts. One redesign per ticket;
+    /// parking again after that is a human decision.
+    async fn sm_unpark_tickets(&self) {
+        let candidates: Vec<(String, String)> = {
+            let Ok(state) = self.store.load().await else {
+                return;
+            };
+            state
+                .ticket_fail_attempts
+                .iter()
+                .filter(|(id, n)| **n >= 3 && !state.ticket_redesigns.contains_key(*id))
+                .filter_map(|(id, _)| {
+                    state
+                        .tickets
+                        .iter()
+                        .find(|t| t.id().to_string() == *id)
+                        .map(|t| (id.clone(), t.title().to_owned()))
+                })
+                .take(1) // one redesign per cycle bounds cost
+                .collect()
+        };
+        for (id, title) in candidates {
+            let claimed = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                if s.ticket_redesigns.contains_key(&id) {
+                    return Err(crate::PortError::Conflict("already redesigned".into()));
+                }
+                s.ticket_redesigns.insert(id.clone(), 1);
+                Ok(())
+            })
+            .await;
+            if claimed.is_err() {
+                continue;
+            }
+            self.report("SA", &format!("re-designing parked {id}"));
+            let request = crate::ports::outbound::AgentRequest {
+                role: coxagent_domain::Role::Sa,
+                system_prompt: crate::prompts::system_prompt(crate::prompts::SA),
+                task_prompt: format!(
+                    "Ticket {id} (\"{title}\") was PARKED after THREE failed build/verify \
+                     attempts — the current technical approach is not working. Study the repo \
+                     and the ticket's history, then reply with a REVISED approach in under 900 \
+                     characters: simplify the scope, change the technique, or split out what's \
+                     achievable. Plain text, imperative, concrete files/modules.",
+                ),
+                work_dir: self.work_dir.clone(),
+                timeout: std::time::Duration::from_secs(900),
+            };
+            let out = match self.engine.run(request).await {
+                Ok(o) if o.succeeded() => o.stdout.trim().chars().take(1200).collect::<String>(),
+                _ => String::new(),
+            };
+            if out.len() < 40 {
+                continue; // no usable revision — stays parked for a human
+            }
+            let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                if let Some(t) = s.tickets.iter_mut().find(|t| t.id().to_string() == id) {
+                    let design = coxagent_domain::TechnicalDesign {
+                        approach: out.clone(),
+                        ..Default::default()
+                    };
+                    let _ = t.set_technical_design(coxagent_domain::Role::Sa, design);
+                }
+                s.ticket_fail_attempts.remove(&id);
+                let msg = format!(
+                    "🧯 SM→SA: {id} được RE-DESIGN sau 3 build đỏ — DEV thử lại với hướng mới. \
+                     Đỏ tiếp là chuyển người quyết."
+                );
+                s.post_comment("SM", &msg, Some(id.clone()));
+                s.post_chat_in("SM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+                Ok(())
+            })
+            .await;
+        }
+    }
+
     /// SM impediment watch: the Scrum Master's real job — surface everything
     /// blocking flow as ONE daily picture instead of scattered noise, and keep
     /// surfacing it until it's gone. Sources are deterministic state, not LLM
@@ -1775,15 +1958,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             return;
         }
         let mut items: Vec<String> = Vec::new();
+        // Only post-ladder states reach the human report: a stuck PR the SA
+        // already rescued once, a parked ticket the SA already re-designed.
         let stuck: Vec<String> = state
             .pr_fix_attempts
             .iter()
-            .filter(|(_, n)| **n >= 3)
+            .filter(|(pr, n)| **n >= 3 && state.pr_rescues.contains_key(pr))
             .map(|(pr, _)| format!("#{pr}"))
             .collect();
         if !stuck.is_empty() {
             items.push(format!(
-                "PR kẹt sau nhiều vòng fix (cần người quyết): {}",
+                "PR kẹt SAU khi SA đã rescue (cần người quyết): {}",
                 stuck.join(", ")
             ));
         }
@@ -1908,18 +2093,26 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             if feedback.is_empty() && !conflicted {
                 continue;
             }
-            // Ping-pong brake: after 2 fix rounds on one PR, escalate to a human
-            // instead of burning tokens on an endless review↔fix loop.
-            let attempts = self.store.load().await.map_or(0, |s| {
-                s.pr_fix_attempts.get(&pr.number).copied().unwrap_or(0)
+            // Ping-pong brake with an SM escalation LADDER: after 2 fix rounds
+            // the SM first sends the SA in for a root-cause rescue (close the
+            // PR, or leave concrete instructions and grant one informed retry).
+            // Only a SECOND stall after that rescue goes to a human.
+            let (attempts, rescued) = self.store.load().await.map_or((0, 0), |s| {
+                (
+                    s.pr_fix_attempts.get(&pr.number).copied().unwrap_or(0),
+                    s.pr_rescues.get(&pr.number).copied().unwrap_or(0),
+                )
             });
             if attempts >= 2 {
+                if rescued == 0 {
+                    self.sa_rescue_pr(&pr).await;
+                    continue;
+                }
                 if attempts == 2 {
                     self.notify(
                         "pr_stuck",
                         format!(
-                            "PR #{} has been fixed {attempts} times and is still blocked — needs a \
-                             human decision: {}",
+                            "PR #{} vẫn kẹt SAU khi SA đã rescue — cần người quyết: {}",
                             pr.number, pr.url
                         ),
                     )
