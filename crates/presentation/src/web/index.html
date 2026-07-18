@@ -1620,7 +1620,7 @@ function setWorkTab(w){WORKTAB=w;
   document.getElementById("work-backlog").style.display=w==="backlog"?"":"none";
   renderActive();}
 
-function nav(v){setTimeout(()=>{try{updateSegments()}catch(e){}},0);
+function nav(v){
   // Navigating a workspace view leaves Chat mode and shows the menu again.
   if(isChatMode())setMode("workspace");
   // Management surfaces are Admin + lead only — bounce members to Overview.
@@ -1631,6 +1631,7 @@ function nav(v){setTimeout(()=>{try{updateSegments()}catch(e){}},0);
   document.querySelectorAll(".nav a").forEach(a=>a.classList.toggle("on",a.dataset.v===v));
   document.getElementById("pg-title").textContent=TITLES[v][0];
   document.getElementById("pg-sub").textContent=TITLES[v][1];
+  try{updateSegments();}catch(e){}
   if(v==="settings")loadSettings(); else if(v==="discuss"){loadComments();} else if(v==="docs"){loadDocs();} else if(v==="people"){renderPeople();} else if(v==="audit"){renderAudit();} else if(v==="access"){renderAccess();} else if(v==="roadmap"){renderRoadmap();} else if(v==="review"){renderReview();} else if(v==="codemap"){renderCodeMap();} else renderActive();}
 function initials(r){return r.replace("DEV-","").slice(0,2);}
 function metricsFrom(s){const t=s.tickets||[],h=s.history||[],isF=x=>x.type!=="bug";
@@ -2679,9 +2680,11 @@ function markSeen(m){SEEN.add(chatKey(m));}
 function updateSegments(){
   const mg=document.getElementById("mode-manage");
   if(mg)mg.style.display=(ME&&ME.role==="super")?"":"none";
-  if(mg)mg.classList.toggle("on",CUR==="manage");
+  if(mg)mg.classList.toggle("on",CUR==="manage"&&!isChatMode());
   const ws=document.getElementById("mode-ws");
   if(ws)ws.classList.toggle("on",!isChatMode()&&CUR!=="manage");
+  const ch=document.getElementById("mode-chat");
+  if(ch)ch.classList.toggle("on",isChatMode());
 }
 function setMode(m){
   MODE=(m==="chat")?"chat":"workspace";
@@ -2697,6 +2700,7 @@ function applyMode(){
   if(chat){renderChannels();selectChannel(CURCHAN);clearUnread(CURCHAN);
     setTimeout(()=>{const i=document.getElementById("chat-input");if(i)i.focus();},40);}
   updateModeBadge();
+  try{updateSegments();}catch(e){}
 }
 // Notification click / native bridge: jump into Chat mode on that channel.
 function focusChannel(id){setMode("chat");selectChannel(id);}
