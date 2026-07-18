@@ -2213,6 +2213,23 @@ function renderMgSpaces(){
 // Space create/edit lives in a modal OUTSIDE the re-rendered view, so the live
 // refresh (SSE/3s poll) can repaint the Spaces grid freely without touching it.
 let SPM_ID=null; // null = creating; otherwise the space id being edited
+let SPM_LITE=null; // set = space-admin lite edit (name/tagline only, from Home)
+// Lite edit for space admins from Home: name + tagline only. Membership stays
+// untouched — the PUT carries the space's current admins/projects verbatim.
+function openSpaceModalLite(sp){
+  SPM_ID=sp.id;SPM_LITE=sp;
+  document.getElementById("spm-title").textContent="Edit space — "+sp.name;
+  document.getElementById("spm-msg").textContent="Đổi tên / tagline. Thành viên & projects do Super Admin quản trong Manage.";
+  document.getElementById("spm-name").value=sp.name;
+  document.getElementById("spm-tag").value=sp.tagline||"";
+  document.getElementById("spm-admins-box").closest(".fr").style.display="none";
+  document.getElementById("spm-projects-box").closest(".fr").style.display="none";
+  document.getElementById("spm-del").hidden=true;
+  document.getElementById("spm-ok").innerHTML='<i class="ti ti-check"></i> Save';
+  const m=document.getElementById("sp-modal");m.hidden=false;
+  m.onkeydown=e=>{if(e.key==="Escape")closeSpaceModal();};m.tabIndex=-1;
+  setTimeout(()=>document.getElementById("spm-name").focus(),30);
+}
 function openSpaceModal(id){
   SPM_ID=id||null;
   const sp=id?(((MG||{}).spaces||[]).find(x=>x.id===id)||null):null;
@@ -2232,10 +2249,15 @@ function openSpaceModal(id){
   m.onkeydown=e=>{if(e.key==="Escape")closeSpaceModal();};m.tabIndex=-1;
   setTimeout(()=>document.getElementById("spm-name").focus(),30);
 }
-function closeSpaceModal(){document.getElementById("sp-modal").hidden=true;SPM_ID=null;}
+function closeSpaceModal(){document.getElementById("sp-modal").hidden=true;SPM_ID=null;SPM_LITE=null;
+  document.getElementById("spm-admins-box").closest(".fr").style.display="";
+  document.getElementById("spm-projects-box").closest(".fr").style.display="";}
 async function submitSpaceModal(){
   const name=val("spm-name").trim();if(!name){toasty("Đặt tên space","warn");return;}
-  const body=JSON.stringify({name,tagline:val("spm-tag"),admins:picked("spm-admins"),projects:picked("spm-projects")});
+  const lite=SPM_LITE;
+  const body=JSON.stringify(lite
+    ?{name,tagline:val("spm-tag"),admins:lite.admins||[],projects:lite.projects||[]}
+    :{name,tagline:val("spm-tag"),admins:picked("spm-admins"),projects:picked("spm-projects")});
   const ok=document.getElementById("spm-ok");ok.disabled=true;
   try{
     const r=await(SPM_ID
@@ -2243,8 +2265,9 @@ async function submitSpaceModal(){
       :fetch("/api/spaces",{method:"POST",headers:{"Content-Type":"application/json"},body}));
     if(r.ok){
       toasty(SPM_ID?"Đã lưu":"Space đã tạo","ok");
-      const id=SPM_ID;closeSpaceModal();MG=null;await renderManage();
-      if(id&&CUR==="mg-space")openMgSpace(id);
+      const id=SPM_ID;closeSpaceModal();
+      if(lite){renderHome();}
+      else{MG=null;await renderManage();if(id&&CUR==="mg-space")openMgSpace(id);}
     }else toasty("Failed: "+await r.text(),"err");
   }catch(e){toasty("Network error","err");}
   ok.disabled=false;
@@ -2365,9 +2388,16 @@ async function renderHome(){
       <button class="spchip${sel?"":" on"}" onclick="setHomeSpace('')"><i class="ti ti-layout-grid"></i> All</button>
       ${spaces.map(s=>`<button class="spchip${sel===s.id?" on":""}" onclick="setHomeSpace('${esc(s.id)}')"><span class="sdot" style="background:${projColor(s.id)}"></span>${esc(s.name)}<span class="spn">${(s.projects||[]).length}</span></button>`).join("")}
     </div>`:"";
+  // Space admins (and Super) manage THEIR space right here — name/tagline via
+  // the lite modal; membership/projects stay Super-only in Manage.
+  const meU=(ME&&ME.username||"").toLowerCase();
+  const canEditSp=selSp&&(ME&&ME.role==="super"||(selSp.admins||[]).some(a=>a.toLowerCase()===meU));
+  window._homeSpaces=spaces;
+  const editBtn=canEditSp?`<button class="gc-btn" style="margin-left:14px" onclick="openSpaceModalLite(window._homeSpaces.find(s=>s.id==='${esc(selSp.id)}'))"><i class="ti ti-pencil"></i> Edit space</button>`:"";
   document.getElementById("ws-hero").innerHTML=spaceBar+`<div class="wshero">
       <div class="wsmark">${esc(initials(nm))}</div>
       <div><div class="wsname">${esc(nm)}</div><div class="wstag">${esc(tag)}</div></div>
+      ${editBtn}
       <div class="wsstats">${stat(projects.length,"Projects")}${stat(members.length,"Members")}${stat(online.size,"Online")}${stat(money(totalSpend),"Spend")}</div></div>`;
   ov=Object.assign({},ov,{projects,members});
   document.getElementById("ws-myagents").innerHTML=agents.length?agents.map(a=>{
@@ -2405,7 +2435,6 @@ async function renderWsAdmin(w){
   // Pull the full workspace doc (includes conventions, not in the overview).
   try{const full=await(await fetch("/api/workspace")).json();w=Object.assign({},w,full);}catch(e){}
   let invites=[];try{invites=await(await fetch("/api/workspace/invites")).json();}catch(e){}
-  const projOpts=(STATE&&window.PROJECTS||[]).map(p=>p.id||p).join(", ");
   document.getElementById("ws-admin").innerHTML=`
     <div class="sec">Workspace settings <span style="font-size:11px;color:var(--dim);font-weight:400">· admin</span></div>
     <div class="panel frm">
@@ -2423,9 +2452,9 @@ async function renderWsAdmin(w){
         <span class="wsrole-x"><b>viewer</b> chỉ xem, không sửa gì</span>
       </div>
       <div class="fr"><span class="lbl">Role</span><select id="inv-role"><option value="viewer">viewer — chỉ xem</option><option value="be">be — member (backend)</option><option value="fe">fe — member (frontend)</option><option value="admin">admin — đồng quản trị workspace</option></select>
-        <span class="lbl" style="min-width:auto">Projects</span><input id="inv-projects" placeholder="comma-separated ids (blank = none)" style="flex:1">
         <span class="lbl" style="min-width:auto">Uses</span><input id="inv-uses" type="number" value="5" min="1" style="width:70px">
         <button class="pri" onclick="createInvite()"><i class="ti ti-link"></i> Create link</button></div>
+      <div class="fr" style="align-items:flex-start"><span class="lbl">Projects</span><div style="flex:1">${invProjectPicker()}</div></div>
       <div id="inv-new"></div>
       ${invites.length?invites.map(i=>`<div class="wsrow"><span class="wsproj" style="font-family:ui-monospace,monospace;font-size:11px">/join/${esc(i.token.slice(0,14))}…</span>
         <span class="wsstate">${esc(i.role)} · ${esc((i.projects||[]).join(", ")||"no projects")} · ${i.uses_left} use(s) left</span>
@@ -2434,8 +2463,17 @@ async function renderWsAdmin(w){
     </div>`;
 }
 async function saveWs(){try{await fetch("/api/workspace",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:val("wsn"),tagline:val("wst"),accent:"",conventions:val("wsc")})});toasty("Saved — conventions apply to new agent runs","ok");renderHome();}catch(e){}}
+// Projects the caller may invite into: super = every project; space admin =
+// projects of their spaces (mirrors the server-side invite scoping).
+function invProjectPicker(){
+  const sup=ME&&ME.role==="super";
+  const spaces=window._homeSpaces||[];
+  const items=sup?(window.PROJECTS||[]).map(p=>p.id)
+    :[...new Set(spaces.filter(s=>(s.admins||[]).some(a=>a.toLowerCase()===(ME&&ME.username||"").toLowerCase())).flatMap(s=>s.projects||[]))];
+  return mgPicker("inv-projpick",items,[]);
+}
 async function createInvite(){
-  const projects=(val("inv-projects")||"").split(",").map(s=>s.trim()).filter(Boolean);
+  const projects=picked("inv-projpick");
   try{const r=await(await fetch("/api/workspace/invites",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({role:val("inv-role"),projects,uses:parseInt(val("inv-uses")||"5",10)})})).json();
     if(r.ok){const url=location.origin+r.url;document.getElementById("inv-new").innerHTML=`<div class="wsrow" style="background:color-mix(in srgb,var(--green) 8%,transparent)"><span class="wsproj" style="font-family:ui-monospace,monospace;font-size:12px;user-select:all">${esc(url)}</span><button class="ticket-actions" onclick="navigator.clipboard.writeText('${esc(url)}');toasty('Copied','ok')"><i class="ti ti-copy"></i> Copy</button></div>`;renderWsAdmin({name:val("wsn"),tagline:val("wst")});}
   }catch(e){}}
