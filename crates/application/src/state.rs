@@ -464,6 +464,9 @@ pub struct ProjectState {
     /// force-merge). Runners claim + remove atomically via `mutate_state`.
     #[serde(default)]
     pub jobs: Vec<PendingJob>,
+    /// UTC day the SM last posted the consolidated impediment report.
+    #[serde(default)]
+    pub last_impediment_day: String,
     /// The sprint number the clean-base drain notice was last announced for, so
     /// the SA explains the "merge everything first" hold once per sprint, not
     /// every cycle.
@@ -494,6 +497,7 @@ impl Default for ProjectState {
             queue_recovery: false,
             last_memory_hygiene_day: String::new(),
             jobs: Vec::new(),
+            last_impediment_day: String::new(),
             alias: String::new(),
             display_name: None,
             current_version: SemVer::default(),

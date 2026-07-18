@@ -1141,6 +1141,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // against the current process law once a day.
             self.memory_hygiene().await;
 
+            // SM: one consolidated blocker picture per day, until it's clean.
+            self.impediment_watch().await;
+
             // Merge-queue recovery gate: with a blown-up queue the ONLY useful
             // work is merging — creative roles are paused below.
             recovery = self.run_queue_recovery(self.open_pr_count().await).await;
@@ -1758,6 +1761,82 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
     }
 
+    /// SM impediment watch: the Scrum Master's real job — surface everything
+    /// blocking flow as ONE daily picture instead of scattered noise, and keep
+    /// surfacing it until it's gone. Sources are deterministic state, not LLM
+    /// judgement: stuck PRs (fix-attempt brake tripped), parked tickets
+    /// (3 failed builds), a red deploy, and active queue recovery.
+    async fn impediment_watch(&self) {
+        let today = crate::state::now_rfc3339()[..10].to_owned();
+        let Ok(state) = self.store.load().await else {
+            return;
+        };
+        if state.last_impediment_day == today {
+            return;
+        }
+        let mut items: Vec<String> = Vec::new();
+        let stuck: Vec<String> = state
+            .pr_fix_attempts
+            .iter()
+            .filter(|(_, n)| **n >= 3)
+            .map(|(pr, _)| format!("#{pr}"))
+            .collect();
+        if !stuck.is_empty() {
+            items.push(format!(
+                "PR kẹt sau nhiều vòng fix (cần người quyết): {}",
+                stuck.join(", ")
+            ));
+        }
+        let parked: Vec<String> = state
+            .ticket_fail_attempts
+            .iter()
+            .filter(|(_, n)| **n >= 3)
+            .map(|(id, _)| id.clone())
+            .collect();
+        if !parked.is_empty() {
+            items.push(format!(
+                "Ticket bị PARK sau 3 lần build đỏ: {}",
+                parked.join(", ")
+            ));
+        }
+        if let Some(d) = &state.deploy {
+            if !d.ok {
+                items.push(format!(
+                    "Deploy đang ĐỎ: {}",
+                    d.summary.lines().next().unwrap_or("")
+                ));
+            }
+        }
+        if state.queue_recovery {
+            items.push("Merge queue đang trong RECOVERY — chỉ merge, không code mới".to_owned());
+        }
+        drop(state);
+        if items.is_empty() {
+            // Still stamp the day so we don't re-scan every cycle.
+            let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                s.last_impediment_day.clone_from(&today);
+                Ok(())
+            })
+            .await;
+            return;
+        }
+        let msg = format!(
+            "🚧 Impediment watch ({} mục) — SM theo sát tới khi sạch:\n- {}",
+            items.len(),
+            items.join("\n- ")
+        );
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+            if s.last_impediment_day == today {
+                return Ok(());
+            }
+            s.last_impediment_day.clone_from(&today);
+            s.post_comment("SM", &msg, None);
+            s.post_chat_in("SM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+            Ok(())
+        })
+        .await;
+    }
+
     async fn post_daily_digest(&self) {
         let today = crate::state::now_rfc3339()[..10].to_owned();
         let Ok(state) = self.store.load().await else {
@@ -2177,7 +2256,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
                     if s.queue_recovery {
                         s.queue_recovery = false;
-                        s.post_chat_in("SA", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+                        s.post_chat_in("SM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
                     }
                     Ok(())
                 })
@@ -2206,8 +2285,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 s.queue_recovery = true;
                 // Give every parked PR another shot under the new regime.
                 s.pr_fix_attempts.clear();
-                s.post_comment("SA", &msg, None);
-                s.post_chat_in("SA", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+                s.post_comment("SM", &msg, None);
+                s.post_chat_in("SM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
             }
             Ok(())
         })
@@ -2265,8 +2344,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 return Ok(()); // another operator announced first
             }
             s.drain_notice_sprint = sprint_no;
-            s.post_comment("SA", &msg, None);
-            s.post_chat_in("SA", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+            s.post_comment("SM", &msg, None);
+            s.post_chat_in("SM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
             Ok(())
         })
         .await;

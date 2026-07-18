@@ -89,7 +89,7 @@ pub async fn merge_sweep<S: StateStorePort + ?Sized>(
         });
     }
     let _ = crate::ports::outbound::mutate_state(store, |s| {
-        s.post_chat_in("SA", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+        s.post_chat_in("SM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
         Ok(())
     })
     .await;
