@@ -2198,7 +2198,9 @@ function openSpaceModal(id){
   SPM_ID=id||null;
   const sp=id?(((MG||{}).spaces||[]).find(x=>x.id===id)||null):null;
   if(id&&!sp)return;
-  const allP=[...new Set(((MG||{}).spaces||[]).flatMap(x=>x.projects||[]).concat((MG||{}).unassigned_projects||[]))];
+  // One project = one space: offer only unassigned projects, plus (when
+  // editing) the ones already in THIS space.
+  const allP=[...new Set(((MG||{}).unassigned_projects||[]).concat(sp?(sp.projects||[]):[]))];
   document.getElementById("spm-title").textContent=sp?("Edit space — "+sp.name):"New space";
   document.getElementById("spm-msg").textContent=sp?"":"Nhóm projects + chỉ định space admin.";
   document.getElementById("spm-name").value=sp?sp.name:"";

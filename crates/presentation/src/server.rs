@@ -4942,6 +4942,7 @@ struct SpaceReq {
 async fn validate_space_req(
     app: &AppState,
     req: &SpaceReq,
+    exclude_sid: Option<&str>,
 ) -> Result<(Vec<String>, Vec<String>), String> {
     if req.name.trim().chars().count() > 60 {
         return Err("name too long (max 60)".into());
@@ -4985,6 +4986,20 @@ async fn validate_space_req(
         }
         projects.push(p);
     }
+    // A project belongs to exactly ONE space — claiming one already filed in a
+    // different space must fail loudly, not silently double-book it.
+    {
+        let doc = app.spaces.inner.lock().await;
+        for p in &projects {
+            if let Some(owner) = doc
+                .spaces
+                .iter()
+                .find(|s| Some(s.id.as_str()) != exclude_sid && s.projects.contains(p))
+            {
+                return Err(format!("project {p} already belongs to space {}", owner.id));
+            }
+        }
+    }
     Ok((admins, projects))
 }
 
@@ -5001,7 +5016,7 @@ async fn space_create_ep(
     if name.is_empty() {
         return (StatusCode::BAD_REQUEST, "name required").into_response();
     }
-    let (admins, projects) = match validate_space_req(&app, &req).await {
+    let (admins, projects) = match validate_space_req(&app, &req, None).await {
         Ok(v) => v,
         Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
     };
@@ -5035,7 +5050,7 @@ async fn space_update_ep(
 ) -> axum::response::Response {
     let sup = is_super(&app, &headers).await;
     let me = resolve_username(&app, &headers).await;
-    let (admins, projects) = match validate_space_req(&app, &req).await {
+    let (admins, projects) = match validate_space_req(&app, &req, Some(sid.as_str())).await {
         Ok(v) => v,
         Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
     };
