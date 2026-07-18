@@ -1235,14 +1235,36 @@ struct CreateProjectReq {
     /// Confirmed project goal/context to seed (from AI-assisted drafting).
     #[serde(default)]
     goal: Option<String>,
+    /// Space to file the new project under (super admin or that space's admin).
+    #[serde(default)]
+    space: Option<String>,
 }
 
 /// Onboard a new project from the dashboard (greenfield, or brownfield import
 /// with `existing`, optionally seeded with a `goal`) via the injected factory.
 async fn create_project(
     State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<CreateProjectReq>,
 ) -> axum::response::Response {
+    // Resolve the target space up front — a bad/unauthorized space must fail
+    // BEFORE the project is scaffolded, never leave a half-registered orphan.
+    let space_id = req
+        .space
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(sid) = space_id {
+        let sup = is_super(&app, &headers).await;
+        let me = resolve_username(&app, &headers).await;
+        let doc = app.spaces.inner.lock().await;
+        let Some(space) = doc.spaces.iter().find(|s| s.id == sid) else {
+            return (StatusCode::BAD_REQUEST, format!("unknown space: {sid}")).into_response();
+        };
+        if !sup && !space.admins.iter().any(|a| a.eq_ignore_ascii_case(&me)) {
+            return (StatusCode::FORBIDDEN, "not an admin of this space").into_response();
+        }
+    }
     let Some(factory) = app.factory.clone() else {
         return (
             StatusCode::NOT_IMPLEMENTED,
@@ -1276,6 +1298,17 @@ async fn create_project(
         }
         map.insert(id.clone(), handle);
         app.order.write().await.push(id.clone());
+    }
+    if let Some(sid) = space_id {
+        {
+            let mut doc = app.spaces.inner.lock().await;
+            if let Some(space) = doc.spaces.iter_mut().find(|s| s.id == sid) {
+                if !space.projects.contains(&id) {
+                    space.projects.push(id.clone());
+                }
+            }
+        }
+        app.spaces.save().await;
     }
     Json(serde_json::json!({ "ok": true, "id": id })).into_response()
 }

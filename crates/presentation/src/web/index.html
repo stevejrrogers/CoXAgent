@@ -1650,6 +1650,10 @@ body:not(.manage) .manage-only { display: none !important; }
         <button onclick="refineGoal()" style="background:var(--card2);color:var(--accent2);border:1px solid var(--border2);border-radius:8px;padding:5px 10px;font-size:11px;font-weight:600;cursor:pointer;font-family:inherit"><i class="ti ti-sparkles"></i> <span id="np-goal-label">Draft with BA/PO</span></button></div>
       <textarea id="np-goal" rows="3" placeholder="Rough idea — e.g. 'a secure team chat, more private than WhatsApp'. Click Draft to have BA/PO turn it into a project brief you review." style="background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 11px;font-size:13px;font-family:inherit;resize:vertical"></textarea>
     </div>
+    <div class="mrow" id="np-space-row" style="flex-direction:column;align-items:stretch;gap:6px;display:none">
+      <span class="lbl">Space</span>
+      <select id="np-space" style="background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 11px;font-size:13px;font-family:inherit"></select>
+    </div>
     <div id="np-err" style="color:var(--red);font-size:12px;min-height:16px;margin:4px 0"></div>
     <button class="pri" onclick="createProject()" style="width:100%;justify-content:center"><i class="ti ti-plus"></i> <span id="np-submit-label">Create project</span></button>
   </div></div>
@@ -4369,7 +4373,19 @@ function setProjMode(m){PROJ_MODE=m;
   document.getElementById("np-path-row").style.display=m==="import"?"flex":"none";
   document.getElementById("np-goal-row").style.display=m==="import"?"none":"flex";
   document.getElementById("np-submit-label").textContent=m==="import"?"Import project":"Create project";}
-function openNewProject(){["np-name","np-alias","np-path","np-goal"].forEach(i=>document.getElementById(i).value="");document.getElementById("np-err").textContent="";setProjMode("new");document.getElementById("ov-newproj").classList.add("open");setTimeout(()=>document.getElementById("np-name").focus(),50);}
+function openNewProject(){["np-name","np-alias","np-path","np-goal"].forEach(i=>document.getElementById(i).value="");document.getElementById("np-err").textContent="";setProjMode("new");loadNpSpaces();document.getElementById("ov-newproj").classList.add("open");setTimeout(()=>document.getElementById("np-name").focus(),50);}
+// Space picker in the New-project form: only the spaces the caller may file
+// into (all for super, own for a space admin); hidden when none exist.
+async function loadNpSpaces(){
+  const row=document.getElementById("np-space-row"),sel=document.getElementById("np-space");
+  row.style.display="none";sel.innerHTML="";
+  let d=null;try{d=await(await fetch("/api/spaces")).json();}catch(e){return;}
+  const sps=(d&&d.spaces)||[];if(!sps.length)return;
+  sel.innerHTML='<option value="">— không gán space —</option>'
+    +sps.map(s=>`<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("");
+  if(sps.length===1)sel.value=sps[0].id;
+  row.style.display="";
+}
 async function refineGoal(){
   const goal=document.getElementById("np-goal").value.trim();
   const err=document.getElementById("np-err");const lbl=document.getElementById("np-goal-label");
@@ -4391,6 +4407,7 @@ async function createProject(){
   const err=document.getElementById("np-err");
   if(!name){err.textContent="Project name is required.";return;}
   const body={name,alias:alias||null};
+  const sp=document.getElementById("np-space");if(sp&&sp.value)body.space=sp.value;
   if(PROJ_MODE==="import"){const p=document.getElementById("np-path").value.trim();
     if(!p){err.textContent="Enter the codebase path to import.";return;}body.existing=p;}
   else{const g=document.getElementById("np-goal").value.trim();if(g)body.goal=g;}
