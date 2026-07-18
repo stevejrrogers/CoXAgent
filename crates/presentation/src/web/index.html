@@ -1787,7 +1787,7 @@ function onEngine(sid){const eng=document.getElementById("eng-"+sid).value;
   document.getElementById("mc-"+sid).innerHTML=modelControl(eng,def,sid);}
 const KPI_IC={Shipped:"ti-rocket","In flight":"ti-plane-tilt","Open bugs":"ti-bug",Documented:"ti-book",Releases:"ti-versions",Cost:"ti-coin","Total spend":"ti-coin",Tokens:"ti-cpu",Runs:"ti-repeat","Agent actions":"ti-bolt","Tickets shipped":"ti-rocket","Bugs open":"ti-bug","Team cost":"ti-coin"};
 const money=n=>"$"+(Number(n)||0).toFixed(2);
-const fmtK=n=>{n=Number(n)||0;return n>=1000?(n/1000).toFixed(1)+"k":String(n);};
+const fmtK=n=>{n=Number(n)||0;return n>=1e9?(n/1e9).toFixed(1)+"B":n>=1e6?(n/1e6).toFixed(1)+"M":n>=1000?(n/1000).toFixed(1)+"k":String(n);};
 const AC={BA:"--blue","DEV-FEATURE":"--green","DEV-BUG":"--red",SA:"--purple",TEST:"--teal",DOCS:"--blue",PO:"--amber",SM:"--teal",PD:"--purple",USER:"--accent"};
 // Stable nicknames so each role reads as one consistent person, not a label.
 const AGENT_NICK={BA:"Bella",PO:"Pola",SM:"Sam",SA:"Aria","DEV-FEATURE":"Finn","DEV-BUG":"Bex",TEST:"Quinn",DOCS:"Dana",PD:"Piper"};
