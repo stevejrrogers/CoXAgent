@@ -2556,7 +2556,9 @@ async function checkAppUpdate(){
     nb.hidden=false;
   }else nb.hidden=true;
 }
-function openGetApp(){
+async function openGetApp(){
+  // Always fetch fresh — the hub may have just discovered a new release.
+  try{window._appLatest=await(await fetch("/api/app/latest")).json();}catch(e){}
   const d=window._appLatest||{downloads:{}};
   const dl=d.downloads||{};
   document.getElementById("ga-ver").textContent=d.latest_version?("phiên bản mới nhất: "+d.latest_version):"chưa cấu hình release — Settings → Workspace";
