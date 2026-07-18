@@ -239,6 +239,9 @@ struct Space {
     /// Project ids belonging to this space.
     #[serde(default)]
     projects: Vec<String>,
+    /// Monthly USD spend cap for this space; 0 = no cap. Set by Super only.
+    #[serde(default)]
+    budget_usd: f64,
     #[serde(default)]
     created_by: String,
     #[serde(default)]
@@ -4934,6 +4937,9 @@ struct SpaceReq {
     admins: Vec<String>,
     #[serde(default)]
     projects: Vec<String>,
+    /// Monthly USD cap (0 = none). Applied by Super only.
+    #[serde(default)]
+    budget_usd: f64,
 }
 
 /// Validate a space payload against reality: length caps, admins must be real
@@ -5033,6 +5039,7 @@ async fn space_create_ep(
             tagline: req.tagline.trim().to_owned(),
             admins,
             projects,
+            budget_usd: req.budget_usd.clamp(0.0, 1_000_000.0),
             created_by: by,
             created_at: coxagent_application::state::now_rfc3339(),
         });
@@ -5067,10 +5074,11 @@ async fn space_update_ep(
             req.name.trim().clone_into(&mut space.name);
         }
         req.tagline.trim().clone_into(&mut space.tagline);
-        // Only the super admin reshapes membership/projects of a space.
+        // Only the super admin reshapes membership/projects/budget of a space.
         if sup {
             space.admins = admins;
             space.projects = projects;
+            space.budget_usd = req.budget_usd.clamp(0.0, 1_000_000.0);
         }
     }
     app.spaces.save().await;
@@ -5160,7 +5168,7 @@ async fn manage_overview_ep(
                 "id": s.id, "name": s.name, "tagline": s.tagline,
                 "admins": s.admins, "projects": s.projects,
                 "members": member_list.len(), "roles": roles, "spend": spend,
-                "online": online,
+                "budget_usd": s.budget_usd, "online": online,
             })
         })
         .collect();
@@ -5882,10 +5890,15 @@ async fn audit_log_ep(
     State(app): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
-    // When auth is on, require an admin; open mode exposes it freely.
+    // Hub-wide audit trail: Admin/Super only — it records everyone's actions,
+    // so ordinary members (can_write) must NOT read it.
     if let Some(auth) = app.auth.clone() {
         let ok = match resolve_principal(&auth, &headers).await {
-            Some(u) => u.role.can_write(),
+            Some(u) => matches!(
+                u.role,
+                coxagent_application::auth::AuthRole::Admin
+                    | coxagent_application::auth::AuthRole::Super
+            ),
             None => false,
         };
         if !ok {

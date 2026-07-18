@@ -1197,6 +1197,7 @@ textarea.np-in{resize:vertical;line-height:1.5}
       <div class="frm">
         <div class="fr"><span class="lbl">Name</span><input id="spm-name" placeholder="e.g. Product Team A" maxlength="60"></div>
         <div class="fr"><span class="lbl">Tagline</span><input id="spm-tag" placeholder="what this space builds" maxlength="160"></div>
+        <div class="fr" id="spm-budget-row"><span class="lbl">Budget/mo</span><input id="spm-budget" type="number" min="0" step="10" placeholder="USD — 0 = không giới hạn" style="width:180px"><span class="hint" style="font-size:11px;color:var(--dim)">cảnh báo khi space đốt vượt mức</span></div>
         <div class="fr" style="align-items:flex-start"><span class="lbl">Admins</span><div id="spm-admins-box" style="flex:1"></div></div>
         <div class="fr" style="align-items:flex-start"><span class="lbl">Projects</span><div id="spm-projects-box" style="flex:1"></div></div>
       </div>
@@ -1256,6 +1257,7 @@ textarea.np-in{resize:vertical;line-height:1.5}
       <a data-v="mg-spaces" onclick="nav('mg-spaces')"><i class="ti ti-building-community"></i> Spaces</a>
       <a data-v="mg-users" onclick="nav('mg-users')"><i class="ti ti-users"></i> Users</a>
       <a data-v="mg-usage" onclick="nav('mg-usage')"><i class="ti ti-chart-bar"></i> Usage</a>
+      <a data-v="mg-audit" onclick="nav('mg-audit')"><i class="ti ti-shield-search"></i> Audit</a>
     </nav>
     <div id="user-badge" class="userbox">
       <div class="uavatar"><span id="ub-initials">U</span></div>
@@ -1299,6 +1301,7 @@ textarea.np-in{resize:vertical;line-height:1.5}
       <div class="view" id="view-mg-space"><div id="mg-space-body"></div></div>
       <div class="view" id="view-mg-users"><div id="mg-people-body"></div></div>
       <div class="view" id="view-mg-usage"><div id="mg-usage-body"></div></div>
+      <div class="view" id="view-mg-audit"><div id="mg-audit-body"></div></div>
       <div class="view" id="view-home">
         <div id="ws-hero"></div>
         <div class="wslayout">
@@ -1741,7 +1744,7 @@ const fmtK=n=>{n=Number(n)||0;return n>=1000?(n/1000).toFixed(1)+"k":String(n);}
 const AC={BA:"--blue","DEV-FEATURE":"--green","DEV-BUG":"--red",SA:"--purple",TEST:"--teal",DOCS:"--blue",PO:"--amber",SM:"--teal",PD:"--purple",USER:"--accent"};
 // Stable nicknames so each role reads as one consistent person, not a label.
 const AGENT_NICK={BA:"Bella",PO:"Pola",SM:"Sam",SA:"Aria","DEV-FEATURE":"Finn","DEV-BUG":"Bex",TEST:"Quinn",DOCS:"Dana",PD:"Piper"};
-const TITLES={"mg-spaces":["Spaces","every team space in the hub"],"mg-space":["Space","deep dive"],"mg-users":["Users","everyone across the hub"],"mg-usage":["Usage","who burns what"],home:["Home","your company · projects · your agents"],overview:["Overview","project health at a glance"],team:["Agents","your autonomous workers"],board:["Work","board · sprint · backlog"],activity:["Activity","what the agents are doing"],roadmap:["Roadmap","now · next · later, auto-generated"],discuss:["Scrum","standups, sprint events & team threads"],docs:["Wiki","product & technical knowledge base"],codemap:["Code map","files · symbols · dependencies the agents navigate"],chat:["Chat","talk with your teammates"],review:["Review","open pull requests — approve & merge"],people:["People","per-user activity & productivity"],audit:["Audit","who did what, when"],access:["Users","accounts, project access & tokens"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
+const TITLES={"mg-spaces":["Spaces","every team space in the hub"],"mg-space":["Space","deep dive"],"mg-users":["Users","everyone across the hub"],"mg-usage":["Usage","who burns what"],"mg-audit":["Audit","every action across the hub"],home:["Home","your company · projects · your agents"],overview:["Overview","project health at a glance"],team:["Agents","your autonomous workers"],board:["Work","board · sprint · backlog"],activity:["Activity","what the agents are doing"],roadmap:["Roadmap","now · next · later, auto-generated"],discuss:["Scrum","standups, sprint events & team threads"],docs:["Wiki","product & technical knowledge base"],codemap:["Code map","files · symbols · dependencies the agents navigate"],chat:["Chat","talk with your teammates"],review:["Review","open pull requests — approve & merge"],people:["People","per-user activity & productivity"],audit:["Audit","who did what, when"],access:["Users","accounts, project access & tokens"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
 const esc=s=>(s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 const cvar=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim()||"#888";
 let STATE={}, CUR="overview", BF="all", INIT_ACT=false, WORKTAB="board";
@@ -2171,7 +2174,7 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
         <div style="color:var(--dim);font-size:11px;margin-top:8px">Loop auto-pauses when the cap is reached.</div>`;
     }else{document.getElementById("cost-budget").innerHTML='<div class="empty">no budget cap set — add "budget_usd" in coxagent.json</div>';}
     renderTokenSaver();
-  }else if(CUR==="discuss"){renderDiscuss();}else if(CUR==="roadmap"){renderRoadmap();}else if(CUR==="home"){renderHome();}else if(CUR==="mg-spaces"){renderManage();}else if(CUR==="mg-users"){renderManage();}else if(CUR==="mg-usage"){renderManage();}}
+  }else if(CUR==="discuss"){renderDiscuss();}else if(CUR==="roadmap"){renderRoadmap();}else if(CUR==="home"){renderHome();}else if(CUR==="mg-spaces"){renderManage();}else if(CUR==="mg-users"){renderManage();}else if(CUR==="mg-usage"){renderManage();}else if(CUR==="mg-audit"){renderManage();}}
 // ---- Manage (super admin): spaces · users · usage ---------------------------
 let MG=null;
 const ROLE_COLORS={super:"#f59e0b",admin:"#22d3ee",director:"#a78bfa",manager:"#a78bfa",techlead:"#a78bfa",fe:"#34d399",be:"#60a5fa",ba:"#f472b6",viewer:"#6b7280"};
@@ -2187,6 +2190,24 @@ async function renderManage(){
   if(CUR==="mg-spaces")renderMgSpaces();
   else if(CUR==="mg-users")renderMgPeople();
   else if(CUR==="mg-usage")renderMgUsage();
+  else if(CUR==="mg-audit")renderMgAudit();
+}
+// Hub-wide audit trail (Admin/Super): every authenticated mutation, newest first.
+async function renderMgAudit(){
+  const el=document.getElementById("mg-audit-body");if(!el)return;
+  let rows=[];try{const r=await fetch("/api/audit-log");if(r.ok)rows=await r.json();}catch(e){}
+  const q=(window._mgaq||"").toLowerCase();
+  const list=rows.filter(e=>!q||JSON.stringify(e).toLowerCase().includes(q)).slice(0,300);
+  el.innerHTML=`<div class="dmsearch" style="margin-bottom:12px;max-width:340px"><i class="ti ti-search"></i><input placeholder="Lọc theo user, path, status…" value="${esc(window._mgaq||"")}" oninput="window._mgaq=this.value;renderMgAudit()"></div>
+  <div class="panel" style="font-family:ui-monospace,monospace;font-size:12px">${list.map(e=>{
+    const bad=(e.status||200)>=400;
+    return `<div class="wsrow" style="border:none;border-bottom:1px solid var(--border);border-radius:0;background:transparent;padding:7px 4px;gap:12px">
+      <span style="color:var(--dim);min-width:126px">${esc((e.at||e.time||"").slice(0,19).replace("T"," "))}</span>
+      <span style="min-width:90px;color:var(--accent2)">${esc(e.user||"?")}</span>
+      <span style="min-width:52px;font-weight:700">${esc((e.action||"").split(" ")[0])}</span>
+      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc((e.action||"").split(" ").slice(1).join(" "))}</span>
+      <span style="color:${bad?"var(--red)":"var(--green)"}">${esc(String(e.status||""))}</span></div>`;
+  }).join("")||'<div class="empty">chưa có bản ghi audit nào khớp</div>'}</div>`;
 }
 function renderMgSpaces(){
   const el=document.getElementById("mg-spaces-body");if(!el||!MG)return;
@@ -2205,7 +2226,7 @@ function renderMgSpaces(){
         <div class="wstag" style="font-size:12px;min-height:16px">${esc(sp.tagline||"")}</div>
         <div class="mg-admins">${(sp.admins||[]).map(a=>`<span class="wsava" title="space admin: ${esc(a)}">${esc(initials(a))}</span>`).join("")}<span class="mg-adminlbl">${esc((sp.admins||[]).join(", ")||"no admin")}</span></div>
         <div class="mg-roles">${Object.entries(sp.roles||{}).map(([r,n])=>roleChip(r,n)).join("")||'<span class="wsc-off">no members</span>'}</div>
-        <div class="wsc-stats"><span>📁 ${(sp.projects||[]).length} projects</span><span>👥 ${sp.members||0}</span><span style="color:var(--amber)">🔥 ${money(sp.spend||0)}</span></div>
+        <div class="wsc-stats"><span>📁 ${(sp.projects||[]).length} projects</span><span>👥 ${sp.members||0}</span><span style="color:${sp.budget_usd&&sp.spend>=sp.budget_usd?"var(--red)":sp.budget_usd&&sp.spend>=sp.budget_usd*.8?"var(--amber)":"var(--amber)"}">🔥 ${money(sp.spend||0)}${sp.budget_usd?` / ${money(sp.budget_usd)}`:""}</span>${sp.budget_usd&&sp.spend>=sp.budget_usd?'<span style="color:var(--red);font-weight:700">⛔ over budget</span>':""}</div>
         <div class="wsc-online">${(sp.online||[]).slice(0,8).map(o=>`<span class="wsava on" title="${esc(o)}">${esc(initials(o))}</span>`).join("")||'<span class="wsc-off">no one online</span>'}</div>
       </div>`).join("")||'<div class="empty">chưa có space — bấm New space</div>'}</div>
     ${(MG.unassigned_projects||[]).length?`<div class="panel" style="margin-top:14px;font-size:12.5px;color:var(--muted)"><i class="ti ti-alert-triangle" style="color:var(--amber)"></i> Chưa thuộc space nào: <b>${esc((MG.unassigned_projects||[]).join(", "))}</b> — gán qua Edit space.</div>`:""}`;
@@ -2224,6 +2245,7 @@ function openSpaceModalLite(sp){
   document.getElementById("spm-tag").value=sp.tagline||"";
   document.getElementById("spm-admins-box").closest(".fr").style.display="none";
   document.getElementById("spm-projects-box").closest(".fr").style.display="none";
+  document.getElementById("spm-budget-row").style.display="none";
   document.getElementById("spm-del").hidden=true;
   document.getElementById("spm-ok").innerHTML='<i class="ti ti-check"></i> Save';
   const m=document.getElementById("sp-modal");m.hidden=false;
@@ -2241,6 +2263,8 @@ function openSpaceModal(id){
   document.getElementById("spm-msg").textContent=sp?"":"Nhóm projects + chỉ định space admin.";
   document.getElementById("spm-name").value=sp?sp.name:"";
   document.getElementById("spm-tag").value=sp?(sp.tagline||""):"";
+  document.getElementById("spm-budget").value=sp&&sp.budget_usd?sp.budget_usd:"";
+  document.getElementById("spm-budget-row").style.display="";
   document.getElementById("spm-admins-box").innerHTML=mgPicker("spm-admins",((MG||{}).users||[]).map(u=>u.username),sp?(sp.admins||[]):[]);
   document.getElementById("spm-projects-box").innerHTML=mgPicker("spm-projects",allP,sp?(sp.projects||[]):[]);
   document.getElementById("spm-del").hidden=!sp;
@@ -2256,8 +2280,8 @@ async function submitSpaceModal(){
   const name=val("spm-name").trim();if(!name){toasty("Đặt tên space","warn");return;}
   const lite=SPM_LITE;
   const body=JSON.stringify(lite
-    ?{name,tagline:val("spm-tag"),admins:lite.admins||[],projects:lite.projects||[]}
-    :{name,tagline:val("spm-tag"),admins:picked("spm-admins"),projects:picked("spm-projects")});
+    ?{name,tagline:val("spm-tag"),admins:lite.admins||[],projects:lite.projects||[],budget_usd:lite.budget_usd||0}
+    :{name,tagline:val("spm-tag"),admins:picked("spm-admins"),projects:picked("spm-projects"),budget_usd:parseFloat(val("spm-budget"))||0});
   const ok=document.getElementById("spm-ok");ok.disabled=true;
   try{
     const r=await(SPM_ID
