@@ -367,6 +367,38 @@ fn load_coordination(base: &Path) {
     let Ok(text) = std::fs::read_to_string(&path) else {
         return;
     };
+    // Secrets hygiene: this file may carry credentials (DSNs). Clamp it to
+    // owner-only and steer real deployments toward env/secret managers —
+    // values support `${VAR}` interpolation so the file can stay secret-free.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(&path) {
+            let mode = meta.permissions().mode() & 0o777;
+            if mode & 0o077 != 0 {
+                let _ = std::fs::set_permissions(
+                    &path,
+                    std::fs::Permissions::from_mode(0o600),
+                );
+                tracing::warn!(
+                    "coordination.json was group/world-readable ({mode:o}) — tightened to 600. \
+                     Prefer COXAGENT_DB_DSN/AUTH_DSN/REDIS_URL env vars (or ${{VAR}} \
+                     placeholders in the file) over inline credentials."
+                );
+            }
+        }
+    }
+    // `${VAR}` placeholders resolve from the environment at load time.
+    let text = {
+        let mut t = text;
+        while let Some(start) = t.find("${") {
+            let Some(end_rel) = t[start..].find('}') else { break };
+            let var = t[start + 2..start + end_rel].to_owned();
+            let val = std::env::var(&var).unwrap_or_default();
+            t.replace_range(start..=start + end_rel, &val);
+        }
+        t
+    };
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
         return;
     };
