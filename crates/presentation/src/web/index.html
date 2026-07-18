@@ -2589,8 +2589,10 @@ function dismissUpdate(){
   document.getElementById("update-banner").hidden=true;
 }
 async function openGetApp(){
-  // Always fetch fresh — the hub may have just discovered a new release.
-  try{window._appLatest=await(await fetch("/api/app/latest")).json();}catch(e){}
+  // Always fetch fresh — the hub may have just discovered a new release —
+  // and resync the banner/button so a stale "update available" never lingers
+  // after you're already on the newest build.
+  await checkAppUpdate();
   const d=window._appLatest||{downloads:{}};
   const dl=d.downloads||{};
   document.getElementById("ga-ver").textContent=d.latest_version?("phiên bản mới nhất: "+d.latest_version):"chưa cấu hình release — Settings → Workspace";
