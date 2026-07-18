@@ -1135,6 +1135,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // a glance, so the user doesn't need the dashboard open to keep up.
             self.post_daily_digest().await;
 
+            // Self-correcting memory: audit the engine's per-machine notes
+            // against the current process law once a day.
+            self.memory_hygiene().await;
+
             // Merge-queue recovery gate: with a blown-up queue the ONLY useful
             // work is merging — creative roles are paused below.
             recovery = self.run_queue_recovery(self.open_pr_count().await).await;
@@ -1569,6 +1573,133 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// Post the daily digest into the team chat, at most once per UTC day (the
     /// marker lives in state, so restarts and multiple operators can't repeat
     /// it). The very first run only stamps the day — no digest of nothing.
+    /// Where the claude CLI keeps its per-project auto-memory for this
+    /// codebase: `~/.claude/projects/<work_dir with '/'→'-'>/memory`.
+    fn engine_memory_dir(&self) -> Option<std::path::PathBuf> {
+        let home = std::env::var("HOME").ok()?;
+        let slug = self.work_dir.to_string_lossy().replace('/', "-");
+        let dir = std::path::Path::new(&home)
+            .join(".claude/projects")
+            .join(slug)
+            .join("memory");
+        dir.is_dir().then_some(dir)
+    }
+
+    /// Engine-memory hygiene (daily, leader-only): the per-machine auto-memory
+    /// the engine writes for itself goes stale — worst case it keeps teaching a
+    /// pattern the orchestrator has since BANNED. Nobody is around to notice,
+    /// so the system audits itself: each oversized/aged memory file is judged
+    /// by a cheap model against [`crate::prompts::PROCESS_INVARIANTS`] — kept,
+    /// rewritten (corrected + compressed), or deleted. Actions are reported to
+    /// #agents so humans can see what the team un-learned.
+    // One linear pass: day-claim → list → judge → apply → report.
+    #[allow(clippy::too_many_lines)]
+    async fn memory_hygiene(&self) {
+        let today = crate::state::now_rfc3339()[..10].to_owned();
+        {
+            let Ok(state) = self.store.load().await else {
+                return;
+            };
+            if state.last_memory_hygiene_day == today {
+                return;
+            }
+        }
+        let claimed = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+            if s.last_memory_hygiene_day == today {
+                return Err(crate::PortError::Conflict("already ran".into()));
+            }
+            s.last_memory_hygiene_day.clone_from(&today);
+            Ok(())
+        })
+        .await;
+        if claimed.is_err() {
+            return; // another operator ran it today
+        }
+        let Some(dir) = self.engine_memory_dir() else {
+            return;
+        };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return;
+        };
+        // Oldest-modified first; MEMORY.md (the index) is never judged directly.
+        let mut files: Vec<std::path::PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| {
+                p.extension().is_some_and(|e| e == "md")
+                    && p.file_name().is_some_and(|n| n != "MEMORY.md")
+            })
+            .collect();
+        files.sort_by_key(|p| {
+            std::fs::metadata(p)
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH)
+        });
+        let mut actions: Vec<String> = Vec::new();
+        // Bounded: at most 3 judged per day keeps the token cost trivial.
+        for path in files.into_iter().take(3) {
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            if content.chars().count() < 1200 {
+                continue; // small notes are cheap to keep
+            }
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let capped: String = content.chars().take(20_000).collect();
+            let request = crate::ports::outbound::AgentRequest {
+                role: coxagent_domain::Role::Sm,
+                system_prompt: String::new(),
+                task_prompt: format!(
+                    "You are auditing one AGENT MEMORY file against the team's current process \
+                     law. The law WINS over the memory — anything in the memory that \
+                     contradicts it is stale and must go.\n\n{invariants}\n\n\
+                     MEMORY FILE `{name}`:\n---\n{capped}\n---\n\n\
+                     Reply with EXACTLY one of:\n\
+                     KEEP — still accurate and worth its size.\n\
+                     DELETE — mostly stale/contradicting; better gone than misleading.\n\
+                     REWRITE\\n<new content> — keep the still-true parts, corrected to match \
+                     the law, compressed under 2500 characters, same frontmatter style.",
+                    invariants = crate::prompts::PROCESS_INVARIANTS,
+                ),
+                work_dir: self.work_dir.clone(),
+                timeout: std::time::Duration::from_secs(300),
+            };
+            let Ok(o) = self.engine.run(request).await else {
+                continue;
+            };
+            let out = o.stdout.trim();
+            if out.starts_with("DELETE") {
+                if std::fs::remove_file(&path).is_ok() {
+                    actions.push(format!("🗑️ {name} — stale, contradicted current process"));
+                }
+            } else if let Some(rest) = out.strip_prefix("REWRITE") {
+                let new = rest.trim_start_matches(['\n', '\r', ' ']);
+                if new.len() > 100 && std::fs::write(&path, new).is_ok() {
+                    actions.push(format!(
+                        "✏️ {name} — corrected & compressed ({} → {} chars)",
+                        content.chars().count(),
+                        new.chars().count()
+                    ));
+                }
+            }
+        }
+        if !actions.is_empty() {
+            let msg = format!(
+                "🧹 Memory hygiene: engine memory audited against current process law.\n{}",
+                actions.join("\n")
+            );
+            let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                s.post_chat_in("SM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+                s.log_activity("SM", "memory hygiene — engine memory corrected", None);
+                Ok(())
+            })
+            .await;
+        }
+    }
+
     async fn post_daily_digest(&self) {
         let today = crate::state::now_rfc3339()[..10].to_owned();
         let Ok(state) = self.store.load().await else {

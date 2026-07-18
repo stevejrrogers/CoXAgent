@@ -441,6 +441,10 @@ pub struct ProjectState {
     /// the queue is back under the limit.
     #[serde(default)]
     pub queue_recovery: bool,
+    /// UTC day (YYYY-MM-DD) the engine-memory hygiene pass last ran, so the
+    /// audit of `~/.claude` project memory happens once a day, not every cycle.
+    #[serde(default)]
+    pub last_memory_hygiene_day: String,
     /// The sprint number the clean-base drain notice was last announced for, so
     /// the SA explains the "merge everything first" hold once per sprint, not
     /// every cycle.
@@ -469,6 +473,7 @@ impl Default for ProjectState {
         Self {
             schema_version: SCHEMA_VERSION,
             queue_recovery: false,
+            last_memory_hygiene_day: String::new(),
             alias: String::new(),
             display_name: None,
             current_version: SemVer::default(),

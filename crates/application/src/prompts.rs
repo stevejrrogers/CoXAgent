@@ -17,6 +17,23 @@ Output exactly what the task asks for and nothing else.";
 /// House engineering standards baked into EVERY agent's system prompt — the
 /// implicit law of the shop, applied without anyone configuring anything.
 /// Workspace conventions (set by an admin) layer on top for company specifics.
+/// The orchestrator's CURRENT process law, used as ground truth when auditing
+/// stale agent memory. Update this whenever a process rule changes — memory
+/// hygiene validates learned notes against exactly this text.
+pub const PROCESS_INVARIANTS: &str = "\
+CURRENT PROCESS LAW (orchestrator-enforced — anything contradicting this is WRONG):
+- Merge conflicts are resolved IN PLACE on the ORIGINAL branch (fetch, merge base in, \
+resolve, push). NEVER file 'Resolve merge conflict' tickets and NEVER open a new branch/PR \
+for a conflict — that pattern is banned and such PRs get auto-closed.
+- A conflict resolution only counts after verification: no committed conflict markers in \
+the diff, and the forge reports the PR mergeable again. Diffs with committed <<<<<<< or \
+>>>>>>> markers are never merged.
+- When the open-PR queue exceeds twice the WIP limit the team enters RECOVERY: merge-only \
+cycles, no new features, no new bug filing, until the queue is back under the limit.
+- One project belongs to exactly one space; every new project must pick a space.
+- Durable team knowledge belongs in working_agreements.md / architecture.md / CLAUDE.md \
+(shared, versioned) — NOT in per-machine engine memory.";
+
 pub const ENGINEERING_STANDARDS: &str = "\
 ENGINEERING STANDARDS (non-negotiable house rules):\n\
 - Repo layout: one top-level directory per platform — backend/, web/, ios/, \
