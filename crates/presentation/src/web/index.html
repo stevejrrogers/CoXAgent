@@ -4876,12 +4876,13 @@ let TERMS=[],TERM_SEQ=0,TERM_ACTIVE=null,TERM_LOADING=false;
 function termLib(){
   if(window.Terminal&&window.FitAddon)return Promise.resolve();
   if(TERM_LOADING)return TERM_LOADING;
+  // Served from the hub binary itself — works offline/air-gapped, no CDN.
   const css=document.createElement("link");css.rel="stylesheet";
-  css.href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css";
+  css.href="/assets/xterm.min.css";
   document.head.appendChild(css);
   const load=src=>new Promise((res,rej)=>{const s=document.createElement("script");s.src=src;s.onload=res;s.onerror=rej;document.head.appendChild(s);});
-  TERM_LOADING=load("https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js")
-    .then(()=>load("https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"))
+  TERM_LOADING=load("/assets/xterm.min.js")
+    .then(()=>load("/assets/xterm-addon-fit.min.js"))
     .catch(e=>{TERM_LOADING=false;throw e;});
   return TERM_LOADING;
 }

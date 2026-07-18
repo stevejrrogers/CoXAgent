@@ -30,6 +30,10 @@ use tokio_stream::{Stream, StreamExt};
 
 /// The embedded single-page dashboard.
 const INDEX_HTML: &str = include_str!("web/index.html");
+// Vendored terminal assets — embedded so the terminal works offline/air-gapped.
+const XTERM_JS: &str = include_str!("web/xterm.min.js");
+const XTERM_CSS: &str = include_str!("web/xterm.min.css");
+const XTERM_FIT_JS: &str = include_str!("web/xterm-addon-fit.min.js");
 
 /// How often the SSE stream pushes a fresh snapshot.
 const STREAM_INTERVAL: Duration = Duration::from_secs(1);
@@ -956,6 +960,18 @@ pub async fn serve_full(
 
     let app = Router::new()
         .route("/", get(index))
+        .route(
+            "/assets/xterm.min.js",
+            get(|| async { ([("content-type", "application/javascript")], XTERM_JS) }),
+        )
+        .route(
+            "/assets/xterm.min.css",
+            get(|| async { ([("content-type", "text/css")], XTERM_CSS) }),
+        )
+        .route(
+            "/assets/xterm-addon-fit.min.js",
+            get(|| async { ([("content-type", "application/javascript")], XTERM_FIT_JS) }),
+        )
         .route("/api/health", get(health))
         .route("/api/auth/login", post(login_ep))
         .route("/api/auth/logout", post(logout_ep))
@@ -5755,6 +5771,8 @@ async fn auth_mw(
     if path == "/"
         || path == "/api/health"
         || path == "/api/auth/login"
+        // Embedded static assets (vendored JS/CSS) — same trust level as "/".
+        || path.starts_with("/assets/")
         || path.starts_with("/api/chat/hook/")
         // Invite flow: the invite token IS the credential for joining.
         || path.starts_with("/join/")
