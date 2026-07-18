@@ -20,6 +20,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AuthRole {
+    /// Hub owner: full power across every space — creates/edits spaces,
+    /// promotes admins, sees everything.
+    Super,
     Admin,
     // Lead tier
     Director,
@@ -77,13 +80,20 @@ impl AuthRole {
     /// Member-tier roles (BA/FE/BE/…) can work and chat but not administer.
     #[must_use]
     pub fn can_manage(self) -> bool {
-        matches!(self, Self::Admin) || self.is_lead()
+        matches!(self, Self::Super | Self::Admin) || self.is_lead()
+    }
+
+    /// Hub-wide super admin (cross-space power).
+    #[must_use]
+    pub fn is_super(self) -> bool {
+        matches!(self, Self::Super)
     }
 
     /// Lowercase wire label. Compound roles collapse dots (e.g. `"techlead"`).
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Super => "super",
             Self::Admin => "admin",
             Self::Director => "director",
             Self::Manager => "manager",
@@ -106,6 +116,7 @@ impl AuthRole {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
+            Self::Super => "Super Admin",
             Self::Admin => "Admin",
             Self::Director => "Director",
             Self::Manager => "Manager",
@@ -133,6 +144,7 @@ impl AuthRole {
             .to_ascii_lowercase()
             .replace(['.', ' ', '-', '_'], "");
         match norm.as_str() {
+            "super" | "superadmin" => Self::Super,
             "admin" => Self::Admin,
             "director" => Self::Director,
             "manager" => Self::Manager,

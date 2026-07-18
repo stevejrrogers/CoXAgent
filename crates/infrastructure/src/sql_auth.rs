@@ -357,8 +357,8 @@ impl SqlAuthService {
         self.client()
             .await?
             .execute(
-                "INSERT INTO auth_users (username, hash, role) VALUES ($1, $2, 'admin')
-                 ON CONFLICT (username) DO UPDATE SET hash = EXCLUDED.hash, role = 'admin'",
+                "INSERT INTO auth_users (username, hash, role) VALUES ($1, $2, 'super')
+                 ON CONFLICT (username) DO UPDATE SET hash = EXCLUDED.hash, role = 'super'",
                 &[&username, &hash],
             )
             .await
@@ -728,14 +728,14 @@ impl AuthPort for SqlAuthService {
         // Never remove the last admin.
         let admins_left: i64 = client
             .query_one(
-                "SELECT count(*) FROM auth_users WHERE role = 'admin' AND username <> $1",
+                "SELECT count(*) FROM auth_users WHERE role IN ('admin','super') AND username <> $1",
                 &[&username],
             )
             .await
             .map_or(0, |r| r.get(0));
         let removing_admin = client
             .query_opt(
-                "SELECT 1 FROM auth_users WHERE username = $1 AND role = 'admin'",
+                "SELECT 1 FROM auth_users WHERE username = $1 AND role IN ('admin','super')",
                 &[&username],
             )
             .await

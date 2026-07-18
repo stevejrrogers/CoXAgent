@@ -1109,6 +1109,7 @@ body:not(.manage) .manage-only { display: none !important; }
   <aside class="side">
     <div class="brand"><div class="mk"><i class="ti ti-hexagon-letter-c"></i></div><div><div class="nm">CoXAgent</div><div class="tg">autonomous dev team</div></div></div>
     <div class="modeseg">
+      <button id="mode-manage" style="display:none" onclick="nav('manage')"><i class="ti ti-shield-cog"></i> Manage</button>
       <button id="mode-ws" class="on" onclick="setMode('workspace')"><i class="ti ti-layout-grid"></i> Workspace</button>
       <button id="mode-chat" onclick="setMode('chat')"><i class="ti ti-message-circle"></i> Chat<span class="modeseg-badge" id="mode-chat-badge" style="display:none"></span></button>
     </div>
@@ -1172,6 +1173,16 @@ body:not(.manage) .manage-only { display: none !important; }
         <div id="proj-menu" class="projmenu"></div>
       </div></div>
     <div class="content">
+      <div class="view" id="view-manage">
+        <div class="settabs">
+          <button class="settab-btn" data-t="mg-spaces" onclick="setMgTab('mg-spaces')"><i class="ti ti-building-community"></i> Spaces</button>
+          <button class="settab-btn" data-t="mg-people" onclick="setMgTab('mg-people')"><i class="ti ti-users"></i> People</button>
+          <button class="settab-btn" data-t="mg-usage" onclick="setMgTab('mg-usage')"><i class="ti ti-chart-bar"></i> Usage</button>
+        </div>
+        <div class="settab" data-p="mg-spaces"><div id="mg-spaces-body"></div></div>
+        <div class="settab" data-p="mg-people" hidden><div id="mg-people-body"></div></div>
+        <div class="settab" data-p="mg-usage" hidden><div id="mg-usage-body"></div></div>
+      </div>
       <div class="view" id="view-home">
         <div id="ws-hero"></div>
         <div class="wslayout">
@@ -1598,7 +1609,7 @@ const fmtK=n=>{n=Number(n)||0;return n>=1000?(n/1000).toFixed(1)+"k":String(n);}
 const AC={BA:"--blue","DEV-FEATURE":"--green","DEV-BUG":"--red",SA:"--purple",TEST:"--teal",DOCS:"--blue",PO:"--amber",SM:"--teal",PD:"--purple",USER:"--accent"};
 // Stable nicknames so each role reads as one consistent person, not a label.
 const AGENT_NICK={BA:"Bella",PO:"Pola",SM:"Sam",SA:"Aria","DEV-FEATURE":"Finn","DEV-BUG":"Bex",TEST:"Quinn",DOCS:"Dana",PD:"Piper"};
-const TITLES={home:["Home","your company · projects · your agents"],overview:["Overview","project health at a glance"],team:["Agents","your autonomous workers"],board:["Work","board · sprint · backlog"],activity:["Activity","what the agents are doing"],roadmap:["Roadmap","now · next · later, auto-generated"],discuss:["Scrum","standups, sprint events & team threads"],docs:["Wiki","product & technical knowledge base"],codemap:["Code map","symbols & dependencies the agents navigate"],chat:["Chat","talk with your teammates"],review:["Review","open pull requests — approve & merge"],people:["People","per-user activity & productivity"],audit:["Audit","who did what, when"],access:["Users","accounts, project access & tokens"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
+const TITLES={manage:["Manage","spaces · people · usage — super admin"],home:["Home","your company · projects · your agents"],overview:["Overview","project health at a glance"],team:["Agents","your autonomous workers"],board:["Work","board · sprint · backlog"],activity:["Activity","what the agents are doing"],roadmap:["Roadmap","now · next · later, auto-generated"],discuss:["Scrum","standups, sprint events & team threads"],docs:["Wiki","product & technical knowledge base"],codemap:["Code map","symbols & dependencies the agents navigate"],chat:["Chat","talk with your teammates"],review:["Review","open pull requests — approve & merge"],people:["People","per-user activity & productivity"],audit:["Audit","who did what, when"],access:["Users","accounts, project access & tokens"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
 const esc=s=>(s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 const cvar=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim()||"#888";
 let STATE={}, CUR="overview", BF="all", INIT_ACT=false, WORKTAB="board";
@@ -1609,7 +1620,7 @@ function setWorkTab(w){WORKTAB=w;
   document.getElementById("work-backlog").style.display=w==="backlog"?"":"none";
   renderActive();}
 
-function nav(v){
+function nav(v){setTimeout(()=>{try{updateSegments()}catch(e){}},0);
   // Navigating a workspace view leaves Chat mode and shows the menu again.
   if(isChatMode())setMode("workspace");
   // Management surfaces are Admin + lead only — bounce members to Overview.
@@ -2025,7 +2036,104 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
         <div style="color:var(--dim);font-size:11px;margin-top:8px">Loop auto-pauses when the cap is reached.</div>`;
     }else{document.getElementById("cost-budget").innerHTML='<div class="empty">no budget cap set — add "budget_usd" in coxagent.json</div>';}
     renderTokenSaver();
-  }else if(CUR==="discuss"){renderDiscuss();}else if(CUR==="roadmap"){renderRoadmap();}else if(CUR==="home"){renderHome();}}
+  }else if(CUR==="discuss"){renderDiscuss();}else if(CUR==="roadmap"){renderRoadmap();}else if(CUR==="home"){renderHome();}else if(CUR==="manage"){renderManage();}}
+// ---- Manage (super admin): spaces · people · usage --------------------------
+let MG=null;
+function setMgTab(name){
+  document.querySelectorAll('#view-manage .settab-btn').forEach(b=>b.classList.toggle("on",b.dataset.t===name));
+  document.querySelectorAll('#view-manage .settab').forEach(pn=>{pn.hidden=pn.dataset.p!==name;});
+}
+async function renderManage(){
+  try{MG=await(await fetch("/api/manage/overview")).json();}catch(e){return;}
+  if(!document.querySelector('#view-manage .settab-btn.on'))setMgTab('mg-spaces');
+  renderMgSpaces();renderMgPeople();renderMgUsage();
+}
+function spaceChips(sp){
+  return `<div class="wsc-stats"><span>📁 ${(sp.projects||[]).length}</span><span>👥 ${sp.members||0}</span><span>${money(sp.spend||0)}</span></div>
+    <div class="wsc-online">${(sp.online||[]).slice(0,8).map(o=>`<span class="wsava" title="${esc(o)}">${esc(initials(o))}</span>`).join("")||'<span class="wsc-off">no one online</span>'}</div>`;
+}
+function renderMgSpaces(){
+  const el=document.getElementById("mg-spaces-body");if(!el||!MG)return;
+  const t=MG.totals||{};
+  const stat=(v,l)=>`<div class="wsstat"><b>${v}</b><span>${l}</span></div>`;
+  const allP=(MG.spaces||[]).flatMap(s=>s.projects||[]).concat(MG.unassigned_projects||[]);
+  el.innerHTML=`
+    <div class="wshero" style="margin-bottom:16px"><div class="wsmark"><i class="ti ti-shield-cog"></i></div>
+      <div><div class="wsname">Hub control</div><div class="wstag">every space, every project, one view</div></div>
+      <div class="wsstats">${stat(t.projects||0,"Projects")}${stat((MG.spaces||[]).length,"Spaces")}${stat(t.users||0,"Users")}${stat(t.online||0,"Online")}${stat(money(t.spend||0),"Spend")}</div></div>
+    <div class="wssec">Spaces</div>
+    <div class="wsgrid" style="margin-bottom:18px">${(MG.spaces||[]).map(sp=>`
+      <div class="wscard" style="cursor:default">
+        <div class="wsc-h"><b>${esc(sp.name)}</b><span class="wsc-v">${esc(sp.id)}</span></div>
+        <div class="wstag" style="font-size:12px">${esc(sp.tagline||"")}</div>
+        ${spaceChips(sp)}
+        <div style="margin-top:10px;font-size:11.5px;color:var(--dim)">admins: ${esc((sp.admins||[]).join(", ")||"—")}<br>projects: ${esc((sp.projects||[]).join(", ")||"—")}</div>
+        <div style="display:flex;gap:6px;margin-top:12px">
+          <button class="gc-btn" onclick="mgEditSpace('${esc(sp.id)}')"><i class="ti ti-pencil"></i> Edit</button>
+          <button class="gc-btn" onclick="mgDeleteSpace('${esc(sp.id)}')"><i class="ti ti-trash"></i></button>
+        </div>
+        <div id="mg-edit-${esc(sp.id)}" hidden></div>
+      </div>`).join("")||'<div class="empty">chưa có space nào — tạo bên dưới</div>'}</div>
+    ${(MG.unassigned_projects||[]).length?`<div class="panel" style="margin-bottom:16px;font-size:12.5px;color:var(--muted)"><i class="ti ti-alert-triangle" style="color:var(--amber)"></i> Projects chưa thuộc space nào: <b>${esc((MG.unassigned_projects||[]).join(", "))}</b></div>`:""}
+    <div class="wssec">Create space</div>
+    <div class="panel frm">
+      <div class="fr"><span class="lbl">Name</span><input id="mg-sp-name" placeholder="e.g. Product Team A"></div>
+      <div class="fr"><span class="lbl">Tagline</span><input id="mg-sp-tag" placeholder="what this space builds"></div>
+      <div class="fr"><span class="lbl">Admins</span><input id="mg-sp-admins" placeholder="usernames, comma-separated"></div>
+      <div class="fr"><span class="lbl">Projects</span><input id="mg-sp-projects" placeholder="ids, comma-separated (available: ${esc(allP.join(', '))})"></div>
+      <div class="fr"><span class="lbl"></span><button class="pri" onclick="mgCreateSpace()"><i class="ti ti-plus"></i> Create space</button></div>
+    </div>`;
+}
+function csv(id){return (val(id)||"").split(",").map(x=>x.trim()).filter(Boolean);}
+async function mgCreateSpace(){
+  const name=val("mg-sp-name").trim();if(!name){toasty("Đặt tên space","warn");return;}
+  try{const r=await fetch("/api/spaces",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name,tagline:val("mg-sp-tag"),admins:csv("mg-sp-admins"),projects:csv("mg-sp-projects")})});
+    if(r.ok){toasty("Space đã tạo","ok");renderManage();}else toasty("Failed: "+await r.text(),"err");}catch(e){}}
+function mgEditSpace(id){
+  const sp=(MG.spaces||[]).find(x=>x.id===id);if(!sp)return;
+  const box=document.getElementById("mg-edit-"+id);if(!box)return;
+  if(!box.hidden){box.hidden=true;return;}
+  box.hidden=false;
+  box.innerHTML=`<div style="margin-top:10px;display:flex;flex-direction:column;gap:6px">
+    <input id="mge-name-${id}" value="${esc(sp.name)}" placeholder="name">
+    <input id="mge-tag-${id}" value="${esc(sp.tagline||"")}" placeholder="tagline">
+    <input id="mge-admins-${id}" value="${esc((sp.admins||[]).join(", "))}" placeholder="admins (comma)">
+    <input id="mge-projects-${id}" value="${esc((sp.projects||[]).join(", "))}" placeholder="projects (comma)">
+    <button class="pri" onclick="mgSaveSpace('${id}')"><i class="ti ti-check"></i> Save</button></div>`;
+}
+async function mgSaveSpace(id){
+  try{const r=await fetch("/api/spaces/"+id,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:val("mge-name-"+id),tagline:val("mge-tag-"+id),admins:csv("mge-admins-"+id),projects:csv("mge-projects-"+id)})});
+    if(r.ok){toasty("Đã lưu","ok");renderManage();}else toasty("Failed: "+await r.text(),"err");}catch(e){}}
+async function mgDeleteSpace(id){
+  if(!confirm("Xoá space "+id+"? (Không xoá project/user — chỉ bỏ nhóm.)"))return;
+  try{await fetch("/api/spaces/"+id,{method:"DELETE"});renderManage();}catch(e){}}
+function renderMgPeople(){
+  const el=document.getElementById("mg-people-body");if(!el||!MG)return;
+  const spaceOf=u=>(MG.spaces||[]).filter(s=>(s.admins||[]).includes(u.username)||(u.projects||[]).some(p=>(s.projects||[]).includes(p))).map(s=>s.name).join(", ");
+  const roles=["super","admin","director","manager","techlead","ba","fe","be","viewer"];
+  el.innerHTML=`<div class="panel">${(MG.users||[]).map(u=>`
+    <div class="wsrow"><span class="wsava">${esc(initials(u.name||u.username))}</span>
+      <span class="wsproj">${esc(u.name||u.username)} <span style="color:var(--dim);font-weight:400">@${esc(u.username)}</span></span>
+      <span class="wsstate">${esc(spaceOf(u)||"chưa thuộc space")}</span>
+      <select onchange="mgSetRole('${esc(u.username)}',this.value,'${esc(u.name||"")}')" style="background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:7px;padding:4px 8px;font-size:12px">
+        ${roles.map(r=>`<option value="${r}" ${u.role===r?"selected":""}>${r}</option>`).join("")}
+      </select></div>`).join("")||'<div class="empty">no users</div>'}</div>`;
+}
+async function mgSetRole(username,role,name){
+  try{const r=await fetch("/api/auth/users/"+encodeURIComponent(username),{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name,email:"",role})});
+    if(r.ok)toasty(username+" → "+role,"ok");else toasty("Failed: "+await r.text(),"err");}catch(e){}
+  renderManage();
+}
+function renderMgUsage(){
+  const el=document.getElementById("mg-usage-body");if(!el||!MG)return;
+  const rows=(MG.spaces||[]).map(s=>[s.name,s.spend||0]).sort((a,b)=>b[1]-a[1]);
+  const max=rows.length?Math.max(rows[0][1],0.01):1;
+  el.innerHTML=`<div class="panel">${rows.map(([n,c])=>`
+    <div style="display:flex;align-items:center;gap:12px;padding:8px 0"><span style="min-width:140px;font-size:12.5px">${esc(n)}</span>
+      <div style="flex:1;background:var(--card2);border-radius:6px;height:8px;overflow:hidden"><div style="width:${Math.max(3,Math.round(c/max*100))}%;height:100%;background:var(--accent2)"></div></div>
+      <span style="font-size:12px;font-family:ui-monospace,monospace;min-width:64px;text-align:right">${money(c)}</span></div>`).join("")||'<div class="empty">no spend yet</div>'}
+    </div>`;
+}
 // ---- Workspace home: company hero, my agents, project grid, members, invites ----
 async function renderHome(){
   let ov={projects:[],members:[],workspace:{}},me={agents:[]};
@@ -2568,6 +2676,13 @@ let SEEN=new Set(), chatPrimed=false;
 let MODE=(localStorage.getItem("cox_mode")==="chat")?"chat":"workspace";
 function isChatMode(){return MODE==="chat";}
 function markSeen(m){SEEN.add(chatKey(m));}
+function updateSegments(){
+  const mg=document.getElementById("mode-manage");
+  if(mg)mg.style.display=(ME&&ME.role==="super")?"":"none";
+  if(mg)mg.classList.toggle("on",CUR==="manage");
+  const ws=document.getElementById("mode-ws");
+  if(ws)ws.classList.toggle("on",!isChatMode()&&CUR!=="manage");
+}
 function setMode(m){
   MODE=(m==="chat")?"chat":"workspace";
   localStorage.setItem("cox_mode",MODE);
@@ -4079,6 +4194,7 @@ async function boot(){
   let r;try{r=await fetch("/api/auth/me");}catch(e){showLogin();return;}
   if(r.status===401){showLogin();return;}
   try{ME=await r.json();}catch(e){ME={auth:false};}
+  try{updateSegments();}catch(e){}
   startApp();
 }
 function startApp(){

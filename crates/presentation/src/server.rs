@@ -200,6 +200,75 @@ struct Invite {
     uses_left: u32,
 }
 
+/// One space: an organizational unit grouping projects + members under its own
+/// admins. Spaces live in the shared KV (`app_kv` key `spaces`); a normal admin
+/// manages only spaces that list them, a super admin manages all.
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+struct Space {
+    /// URL-safe slug id.
+    id: String,
+    name: String,
+    #[serde(default)]
+    tagline: String,
+    /// Usernames who administer THIS space (invite, edit, assign projects).
+    #[serde(default)]
+    admins: Vec<String>,
+    /// Project ids belonging to this space.
+    #[serde(default)]
+    projects: Vec<String>,
+    #[serde(default)]
+    created_by: String,
+    #[serde(default)]
+    created_at: String,
+}
+
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+struct SpacesDoc {
+    #[serde(default)]
+    spaces: Vec<Space>,
+}
+
+/// The hub-wide spaces store (see [`SpacesDoc`]).
+#[derive(Clone)]
+struct Sp {
+    inner: Arc<tokio::sync::Mutex<SpacesDoc>>,
+    path: PathBuf,
+    store: Option<Arc<dyn coxagent_application::ports::outbound::KvDocPort>>,
+}
+
+impl Sp {
+    async fn load(
+        dir: &std::path::Path,
+        store: Option<Arc<dyn coxagent_application::ports::outbound::KvDocPort>>,
+    ) -> Self {
+        let path = dir.join("spaces.json");
+        let text = if let Some(s) = &store {
+            s.load("spaces").await.ok().flatten()
+        } else {
+            std::fs::read_to_string(&path).ok()
+        };
+        let inner = text
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        Self {
+            inner: Arc::new(tokio::sync::Mutex::new(inner)),
+            path,
+            store,
+        }
+    }
+
+    async fn save(&self) {
+        let json = { serde_json::to_string(&*self.inner.lock().await).unwrap_or_default() };
+        if let Some(s) = &self.store {
+            if let Err(e) = s.save("spaces", &json).await {
+                tracing::warn!("spaces save failed: {e}");
+            }
+            return;
+        }
+        let _ = std::fs::write(&self.path, json);
+    }
+}
+
 /// The hub-wide workspace store (see [`WorkspaceDoc`]).
 #[derive(Clone)]
 struct Ws {
@@ -306,6 +375,8 @@ struct AppState {
     syschat: SysChat,
     /// Workspace identity + invite links (company-level, hub-wide).
     workspace: Ws,
+    /// Multi-space registry (super-admin managed groups of projects+admins).
+    spaces: Sp,
     /// Blob storage for uploaded files (local disk by default, or S3/MinIO).
     storage: Arc<dyn coxagent_application::ports::outbound::StoragePort>,
     /// Server-side documentation store (MongoDB) when configured; `None` falls
@@ -610,8 +681,10 @@ async fn build_state(
         projects.into_iter().map(|p| (p.id.clone(), p)).collect();
     let hub_dir = extras.hub_dir.unwrap_or_else(|| PathBuf::from("."));
     let kv = extras.syschat_store.clone();
+    let kv2 = extras.syschat_store.clone();
     let syschat = SysChat::load(&hub_dir, extras.syschat_store).await;
     let workspace = Ws::load(&hub_dir, kv).await;
+    let spaces = Sp::load(&hub_dir, kv2).await;
     AppState {
         projects: Arc::new(RwLock::new(map)),
         chat_bus: Arc::new(RwLock::new(HashMap::new())),
@@ -628,6 +701,7 @@ async fn build_state(
         analyzer: extras.analyzer,
         syschat,
         workspace,
+        spaces,
         storage: extras.storage.unwrap_or_else(|| {
             Arc::new(DiskStorage {
                 root: hub_dir.join("blobs"),
@@ -744,6 +818,12 @@ pub async fn serve_full(
         )
         .route("/api/workspace/invites/:token", delete(invite_delete_ep))
         .route("/api/workspace/overview", get(workspace_overview_ep))
+        .route("/api/spaces", get(spaces_list_ep).post(space_create_ep))
+        .route(
+            "/api/spaces/:sid",
+            axum::routing::put(space_update_ep).delete(space_delete_ep),
+        )
+        .route("/api/manage/overview", get(manage_overview_ep))
         .route("/api/me/agents", get(my_agents_ep))
         .route("/join/:token", get(join_page_ep))
         .route("/api/workspace/join", post(join_ep))
@@ -4542,6 +4622,24 @@ async fn invite_create_ep(
     Json(req): Json<InviteCreateReq>,
 ) -> axum::response::Response {
     let by = resolve_username(&app, &headers).await;
+    // A normal admin may only invite into projects of THEIR spaces; the super
+    // admin is unrestricted. (No spaces defined yet = legacy single-space mode,
+    // unrestricted for any admin.)
+    if !is_super(&app, &headers).await {
+        let mine = spaces_for(&app, &headers).await;
+        let has_spaces = !app.spaces.inner.lock().await.spaces.is_empty();
+        if has_spaces {
+            let allowed: std::collections::HashSet<&String> =
+                mine.iter().flat_map(|s| s.projects.iter()).collect();
+            if req.projects.iter().any(|p| !allowed.contains(p)) {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({"error":"you can only invite into your own space's projects"})),
+                )
+                    .into_response();
+            }
+        }
+    }
     let token = format!(
         "{}{}",
         coxagent_application::state::mint_id(),
@@ -4720,6 +4818,222 @@ async fn join_ep(
         }
         _ => Json(serde_json::json!({ "ok": true, "login": "manual" })).into_response(),
     }
+}
+
+// ---------------- Spaces (multi-workspace) + Manage --------------------------
+
+/// Whether the caller is the hub super admin.
+async fn is_super(app: &AppState, headers: &axum::http::HeaderMap) -> bool {
+    match app.auth.clone() {
+        Some(auth) => resolve_principal(&auth, headers)
+            .await
+            .is_some_and(|u| u.role.is_super()),
+        // Open mode (no auth): single-user local — allow.
+        None => true,
+    }
+}
+
+/// The spaces the caller may see: all for a super admin; otherwise the ones
+/// they administer or hold a member project in.
+async fn spaces_for(app: &AppState, headers: &axum::http::HeaderMap) -> Vec<Space> {
+    let all = app.spaces.inner.lock().await.spaces.clone();
+    if is_super(app, headers).await {
+        return all;
+    }
+    let (me, my_projects) = match app.auth.clone() {
+        Some(auth) => resolve_principal(&auth, headers)
+            .await
+            .map_or((String::new(), Vec::new()), |u| (u.username, u.projects)),
+        None => return all,
+    };
+    all.into_iter()
+        .filter(|s| {
+            s.admins.iter().any(|a| a.eq_ignore_ascii_case(&me))
+                || s.projects.iter().any(|p| my_projects.contains(p))
+        })
+        .collect()
+}
+
+async fn spaces_list_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let visible = spaces_for(&app, &headers).await;
+    let sup = is_super(&app, &headers).await;
+    Json(serde_json::json!({ "spaces": visible, "super": sup })).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct SpaceReq {
+    name: String,
+    #[serde(default)]
+    tagline: String,
+    #[serde(default)]
+    admins: Vec<String>,
+    #[serde(default)]
+    projects: Vec<String>,
+}
+
+/// Create a space (super admin only).
+async fn space_create_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<SpaceReq>,
+) -> axum::response::Response {
+    if !is_super(&app, &headers).await {
+        return (StatusCode::FORBIDDEN, "super admin required").into_response();
+    }
+    let name = req.name.trim().to_owned();
+    if name.is_empty() {
+        return (StatusCode::BAD_REQUEST, "name required").into_response();
+    }
+    let id = coxagent_application::state::slugify(&name);
+    let by = resolve_username(&app, &headers).await;
+    {
+        let mut doc = app.spaces.inner.lock().await;
+        if doc.spaces.iter().any(|s| s.id == id) {
+            return (StatusCode::CONFLICT, "space id already exists").into_response();
+        }
+        doc.spaces.push(Space {
+            id: id.clone(),
+            name,
+            tagline: req.tagline.trim().to_owned(),
+            admins: req.admins,
+            projects: req.projects,
+            created_by: by,
+            created_at: coxagent_application::state::now_rfc3339(),
+        });
+    }
+    app.spaces.save().await;
+    Json(serde_json::json!({ "ok": true, "id": id })).into_response()
+}
+
+/// Update a space: super admin, or an admin OF that space.
+async fn space_update_ep(
+    State(app): State<AppState>,
+    Path(sid): Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<SpaceReq>,
+) -> axum::response::Response {
+    let sup = is_super(&app, &headers).await;
+    let me = resolve_username(&app, &headers).await;
+    {
+        let mut doc = app.spaces.inner.lock().await;
+        let Some(space) = doc.spaces.iter_mut().find(|s| s.id == sid) else {
+            return not_found();
+        };
+        let allowed = sup || space.admins.iter().any(|a| a.eq_ignore_ascii_case(&me));
+        if !allowed {
+            return (StatusCode::FORBIDDEN, "not an admin of this space").into_response();
+        }
+        if !req.name.trim().is_empty() {
+            req.name.trim().clone_into(&mut space.name);
+        }
+        req.tagline.trim().clone_into(&mut space.tagline);
+        // Only the super admin reshapes membership/projects of a space.
+        if sup {
+            space.admins = req.admins;
+            space.projects = req.projects;
+        }
+    }
+    app.spaces.save().await;
+    Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+async fn space_delete_ep(
+    State(app): State<AppState>,
+    Path(sid): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    if !is_super(&app, &headers).await {
+        return (StatusCode::FORBIDDEN, "super admin required").into_response();
+    }
+    {
+        let mut doc = app.spaces.inner.lock().await;
+        doc.spaces.retain(|s| s.id != sid);
+    }
+    app.spaces.save().await;
+    Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+/// The super admin's cross-space overview: every space with its live stats
+/// (projects, members, spend, online), plus hub totals and the user directory.
+async fn manage_overview_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    if !is_super(&app, &headers).await {
+        return (StatusCode::FORBIDDEN, "super admin required").into_response();
+    }
+    let order = app.order.read().await.clone();
+    let projects_map = app.projects.read().await.clone();
+    // Per-project stats once.
+    let mut pstats: HashMap<String, (f64, usize, Vec<String>)> = HashMap::new();
+    for pid in &order {
+        let Some(p) = projects_map.get(pid) else {
+            continue;
+        };
+        let spend = p.store.load().await.map_or(0.0, |s| s.spend.total_cost_usd);
+        let workers = p.store.workers().await.unwrap_or_default();
+        let online: Vec<String> = workers
+            .iter()
+            .map(|w| w.worker.split('@').next().unwrap_or("").to_owned())
+            .collect();
+        pstats.insert(pid.clone(), (spend, workers.len(), online));
+    }
+    let users = match app.auth.clone() {
+        Some(auth) => auth.list_users().await,
+        None => Vec::new(),
+    };
+    let spaces = app.spaces.inner.lock().await.spaces.clone();
+    let mut assigned: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let spaces_json: Vec<serde_json::Value> = spaces
+        .iter()
+        .map(|s| {
+            let mut spend = 0.0;
+            let mut online: Vec<String> = Vec::new();
+            for pid in &s.projects {
+                assigned.insert(pid.clone());
+                if let Some((sp, _, on)) = pstats.get(pid) {
+                    spend += sp;
+                    online.extend(on.clone());
+                }
+            }
+            let members = users
+                .iter()
+                .filter(|u| {
+                    s.admins.iter().any(|a| a.eq_ignore_ascii_case(&u.username))
+                        || u.projects.iter().any(|p| s.projects.contains(p))
+                })
+                .count();
+            serde_json::json!({
+                "id": s.id, "name": s.name, "tagline": s.tagline,
+                "admins": s.admins, "projects": s.projects,
+                "members": members, "spend": spend,
+                "online": online,
+            })
+        })
+        .collect();
+    let unassigned: Vec<String> = order
+        .iter()
+        .filter(|p| !assigned.contains(*p))
+        .cloned()
+        .collect();
+    Json(serde_json::json!({
+        "spaces": spaces_json,
+        "unassigned_projects": unassigned,
+        "users": users.iter().map(|u| serde_json::json!({
+            "username": u.username, "name": u.name, "role": u.role.as_str(),
+            "projects": u.projects,
+        })).collect::<Vec<_>>(),
+        "totals": {
+            "projects": order.len(),
+            "users": users.len(),
+            "spend": pstats.values().map(|(s,_,_)| s).sum::<f64>(),
+            "online": pstats.values().map(|(_,n,_)| n).sum::<usize>(),
+        },
+    }))
+    .into_response()
 }
 
 /// Company-level overview: every project's health + spend + who's online, plus

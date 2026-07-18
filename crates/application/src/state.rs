@@ -960,7 +960,8 @@ fn general_channel_record() -> Channel {
 /// Turn a display name into a URL-safe channel slug: lowercase, spaces and runs
 /// of punctuation collapsed to single hyphens, trimmed. `"Design Review!"` →
 /// `"design-review"`.
-pub(crate) fn slugify(name: &str) -> String {
+#[must_use]
+pub fn slugify(name: &str) -> String {
     let mut out = String::new();
     let mut prev_dash = false;
     for c in name.trim().chars() {

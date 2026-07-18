@@ -172,14 +172,14 @@ impl FileAuthService {
         match file.users.iter_mut().find(|u| u.username == username) {
             Some(existing) => {
                 existing.hash = hash;
-                existing.role = AuthRole::Admin;
+                existing.role = AuthRole::Super;
             }
             None => file.users.push(StoredUser {
                 username: username.to_owned(),
                 hash,
                 name: String::new(),
                 email: String::new(),
-                role: AuthRole::Admin,
+                role: AuthRole::Super,
                 totp_secret: None,
                 projects: Vec::new(),
             }),
