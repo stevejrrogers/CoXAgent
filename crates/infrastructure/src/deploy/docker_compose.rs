@@ -47,6 +47,29 @@ async fn compose_project_on_port(port: &str) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
+/// The id of ANY container publishing `port` (compose-labelled or not).
+async fn container_on_port(port: &str) -> Option<String> {
+    let out = Command::new("docker")
+        .args([
+            "ps",
+            "--filter",
+            &format!("publish={port}"),
+            "--format",
+            "{{.ID}}",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .ok()?;
+    let id = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_owned();
+    (!id.is_empty()).then_some(id)
+}
+
 async fn running_services(work_dir: &Path) -> Vec<String> {
     let Ok(out) = Command::new("docker")
         .args(["compose", "ps", "--services", "--status", "running"])
@@ -243,37 +266,57 @@ impl DeployPort for DockerComposeDeploy {
         // project and retry once — instead of failing every cycle until a human
         // notices.
         let mut evicted = None;
-        if !output.status.success() {
-            let err = String::from_utf8_lossy(&output.stderr).to_string();
-            if err.contains("port is already allocated") {
-                if let Some(port) = extract_bind_port(&err) {
-                    if let Some(project) = compose_project_on_port(&port).await {
-                        let _ = Command::new("docker")
-                            .args(["compose", "-p", &project, "down", "--remove-orphans"])
-                            .stdin(std::process::Stdio::null())
-                            .kill_on_drop(true)
-                            .output()
-                            .await;
-                        evicted = Some(project);
-                        let mut retry = Command::new("docker");
-                        retry
-                            .args(["compose", "up", "-d", "--build"])
-                            .current_dir(work_dir)
-                            .stdin(std::process::Stdio::null())
-                            .kill_on_drop(true);
-                        output = tokio::time::timeout(DEPLOY_TIMEOUT, retry.output())
-                            .await
-                            .map_err(|_| PortError::Backend("docker compose timed out".to_owned()))?
-                            .map_err(|e| PortError::Backend(format!("spawn docker: {e}")))?;
-                    }
-                }
+        // Up to two eviction+retry rounds: round 1 handles a stale compose
+        // project; round 2 (or when no compose label exists) stops whatever
+        // raw container is squatting the port. Docker also needs a beat to
+        // release a freshly-stopped binding, hence the short sleep.
+        for round in 0..2u8 {
+            if output.status.success() {
+                break;
             }
+            let err = String::from_utf8_lossy(&output.stderr).to_string();
+            if !err.contains("port is already allocated") {
+                break;
+            }
+            let Some(port) = extract_bind_port(&err) else {
+                break;
+            };
+            if let Some(project) = compose_project_on_port(&port).await {
+                let _ = Command::new("docker")
+                    .args(["compose", "-p", &project, "down", "--remove-orphans"])
+                    .stdin(std::process::Stdio::null())
+                    .kill_on_drop(true)
+                    .output()
+                    .await;
+                evicted = Some(format!("compose project `{project}`"));
+            } else if let Some(id) = container_on_port(&port).await {
+                let _ = Command::new("docker")
+                    .args(["stop", &id])
+                    .stdin(std::process::Stdio::null())
+                    .kill_on_drop(true)
+                    .output()
+                    .await;
+                evicted = Some(format!("container `{id}`"));
+            } else if round > 0 {
+                break; // nothing visible holds the port — give up, report
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            let mut retry = Command::new("docker");
+            retry
+                .args(["compose", "up", "-d", "--build"])
+                .current_dir(work_dir)
+                .stdin(std::process::Stdio::null())
+                .kill_on_drop(true);
+            output = tokio::time::timeout(DEPLOY_TIMEOUT, retry.output())
+                .await
+                .map_err(|_| PortError::Backend("docker compose timed out".to_owned()))?
+                .map_err(|e| PortError::Backend(format!("spawn docker: {e}")))?;
         }
 
         let success = output.status.success();
         let summary = if success {
             let note = evicted
-                .map(|p| format!(" (evicted stale compose project `{p}` off the port)"))
+                .map(|p| format!(" (evicted stale {p} off the port)"))
                 .unwrap_or_default();
             match running_services(work_dir).await {
                 services if !services.is_empty() => {

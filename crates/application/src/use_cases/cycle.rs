@@ -1260,8 +1260,18 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // Leader-only tail: deploy, whole-build verification, governance, and PR
         // review/merge each act on the shared build/repo and must run once.
         if leader {
-            // Deploy after code changes so TEST verifies a running build.
-            if (report.feature_done.is_some() || report.bug_fixed.is_some())
+            // Deploy after code changes so TEST verifies a running build — and
+            // ALSO retry when the last deploy failed, even with no new code:
+            // transient causes (a port squatter that's since gone, docker
+            // hiccups) must self-resolve, not sit red until a human clicks.
+            let last_deploy_failed = self
+                .store
+                .load()
+                .await
+                .ok()
+                .and_then(|s| s.deploy)
+                .is_some_and(|d| !d.ok);
+            if (report.feature_done.is_some() || report.bug_fixed.is_some() || last_deploy_failed)
                 && self.deploy.is_some()
             {
                 if let Some(deploy) = &self.deploy {
@@ -1573,6 +1583,30 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// Post the daily digest into the team chat, at most once per UTC day (the
     /// marker lives in state, so restarts and multiple operators can't repeat
     /// it). The very first run only stamps the day — no digest of nothing.
+    /// Append a promoted team lesson to the repo's `CLAUDE.md` under a
+    /// dedicated section — versioned via git, read by the engine on EVERY
+    /// machine. Dedupes on exact text. Returns whether anything was written.
+    fn promote_team_note(&self, note: &str) -> bool {
+        const HEADER: &str = "## Team learnings (auto-promoted by memory hygiene)";
+        let path = self.work_dir.join("CLAUDE.md");
+        let cur = std::fs::read_to_string(&path).unwrap_or_default();
+        if cur.contains(note) {
+            return false;
+        }
+        let mut next = cur.clone();
+        if !next.contains(HEADER) {
+            if !next.is_empty() && !next.ends_with('\n') {
+                next.push('\n');
+            }
+            next.push('\n');
+            next.push_str(HEADER);
+            next.push('\n');
+        }
+        use std::fmt::Write as _;
+        let _ = writeln!(next, "- {note}");
+        std::fs::write(&path, next).is_ok()
+    }
+
     /// Where the claude CLI keeps its per-project auto-memory for this
     /// codebase: `~/.claude/projects/<work_dir with '/'→'-'>/memory`.
     fn engine_memory_dir(&self) -> Option<std::path::PathBuf> {
@@ -1635,9 +1669,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 .and_then(|m| m.modified())
                 .unwrap_or(std::time::UNIX_EPOCH)
         });
+        // Batch scales with pressure: normally 3/day; when the memory dir has
+        // grown past its budget, judge up to 10 so it converges back under.
+        let total: u64 = files
+            .iter()
+            .filter_map(|p| std::fs::metadata(p).ok())
+            .map(|m| m.len())
+            .sum();
+        let batch = if total > 150_000 { 10 } else { 3 };
         let mut actions: Vec<String> = Vec::new();
-        // Bounded: at most 3 judged per day keeps the token cost trivial.
-        for path in files.into_iter().take(3) {
+        for path in files.into_iter().take(batch) {
             let Ok(content) = std::fs::read_to_string(&path) else {
                 continue;
             };
@@ -1661,7 +1702,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                      KEEP — still accurate and worth its size.\n\
                      DELETE — mostly stale/contradicting; better gone than misleading.\n\
                      REWRITE\\n<new content> — keep the still-true parts, corrected to match \
-                     the law, compressed under 2500 characters, same frontmatter style.",
+                     the law, compressed under 2500 characters, same frontmatter style.\n\
+                     Additionally, if the file contains a durable, TEAM-WIDE lesson (true on \
+                     every machine, worth versioning), append at the very end:\n\
+                     TEAM-NOTE: <one paragraph, under 500 characters>",
                     invariants = crate::prompts::PROCESS_INVARIANTS,
                 ),
                 work_dir: self.work_dir.clone(),
@@ -1670,9 +1714,21 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             let Ok(o) = self.engine.run(request).await else {
                 continue;
             };
-            let out = o.stdout.trim();
+            let full = o.stdout.trim();
+            // A durable team-wide lesson gets PROMOTED into the repo's CLAUDE.md
+            // — versioned, shared by every machine — before the verdict applies.
+            let (out, team_note) = match full.split_once("TEAM-NOTE:") {
+                Some((v, note)) => (v.trim(), Some(note.trim().to_owned())),
+                None => (full, None),
+            };
+            if let Some(note) = team_note.filter(|n| n.len() > 40 && n.len() < 1000) {
+                if self.promote_team_note(&note) {
+                    actions.push(format!("📌 {name} → CLAUDE.md: {note}"));
+                }
+            }
             if out.starts_with("DELETE") {
                 if std::fs::remove_file(&path).is_ok() {
+                    prune_memory_index(&dir, &name);
                     actions.push(format!("🗑️ {name} — stale, contradicted current process"));
                 }
             } else if let Some(rest) = out.strip_prefix("REWRITE") {
@@ -2584,6 +2640,23 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             self.work_dir.clone(),
             self.config.architecture.clone(),
         )
+    }
+}
+
+/// Drop dangling index lines from the memory dir's `MEMORY.md` after a file is
+/// deleted — a broken index quietly poisons future recall.
+fn prune_memory_index(dir: &std::path::Path, deleted: &str) {
+    let idx = dir.join("MEMORY.md");
+    let Ok(cur) = std::fs::read_to_string(&idx) else {
+        return;
+    };
+    let next: String = cur
+        .lines()
+        .filter(|l| !l.contains(deleted))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if next != cur {
+        let _ = std::fs::write(&idx, next + "\n");
     }
 }
 
