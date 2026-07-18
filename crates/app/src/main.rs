@@ -1282,6 +1282,19 @@ async fn run_loop(
     // `cox-server run` keeps its run-immediately default.
     let wait_for_start = std::env::var("COXAGENT_WAIT_FOR_START").is_ok_and(|v| v == "1");
 
+    // Fast job poll: a human's force-merge queued by the hub starts within
+    // ~15s on this runner instead of waiting for the next full cycle.
+    let uc = Arc::new(uc);
+    {
+        let uc = Arc::clone(&uc);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                uc.drain_jobs().await;
+            }
+        });
+    }
+
     let mut cycle = 0u64;
     while !shutdown.is_triggered() {
         // Honour this operator's per-user Start/Stop from the web: idle (without

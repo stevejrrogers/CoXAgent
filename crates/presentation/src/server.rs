@@ -804,6 +804,15 @@ async fn terminal_ws_ep(
     let Some(p) = app.project(&pid).await else {
         return not_found();
     };
+    // Execution-plane guard: a hardened control-plane deployment (K8s gateway)
+    // sets COXAGENT_NO_INLINE_EXEC=1 — no shells in this process, ever.
+    if std::env::var("COXAGENT_NO_INLINE_EXEC").is_ok_and(|v| v == "1") {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "terminals are disabled on the control plane — connect via a runner",
+        )
+            .into_response();
+    }
     app.audit
         .record(coxagent_application::ports::outbound::AuditRecord {
             at: coxagent_application::state::now_rfc3339(),
@@ -3334,6 +3343,33 @@ async fn pr_action_ep(
     // Per-PR in-flight guard: two users clicking Force at once would run two
     // engines in the SAME work_dir, corrupting each other's resolution.
     if action == "force-merge" {
+        // Execution-plane routing: with a live runner registered, the job is
+        // queued for IT to execute (the control plane never runs engines when
+        // it doesn't have to); the runner's 15s poll picks it up. Only when no
+        // runner is alive does the hub fall back to executing inline.
+        let live_runner = p.store.workers().await.is_ok_and(|w| !w.is_empty());
+        if live_runner {
+            let queued =
+                coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+                    if s.jobs.iter().any(|j| {
+                        j.kind == "force_merge" && j.args.get("pr") == Some(&serde_json::json!(num))
+                    }) {
+                        return Ok(()); // already queued — idempotent
+                    }
+                    s.jobs.push(coxagent_application::state::PendingJob {
+                        id: coxagent_application::state::mint_id(),
+                        kind: "force_merge".to_owned(),
+                        args: serde_json::json!({ "pr": num }),
+                        queued_at: coxagent_application::state::now_rfc3339(),
+                        queued_by: "web".to_owned(),
+                    });
+                    Ok(())
+                })
+                .await;
+            if queued.is_ok() {
+                return Json(serde_json::json!({ "ok": true, "queued": true })).into_response();
+            }
+        }
         let key = (pid.clone(), num);
         {
             let mut inflight = force_inflight().lock().await;

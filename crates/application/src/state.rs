@@ -306,6 +306,21 @@ pub struct DeployStatus {
     pub summary: String,
 }
 
+/// One queued execution job (control plane → runner). The hub NEVER executes
+/// these itself when a live runner exists — execution stays on the execution
+/// plane. Claim-and-remove is atomic via `mutate_state`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingJob {
+    pub id: String,
+    /// "force_merge" today; the kind namespace is owned by `contracts::JobSpec`.
+    pub kind: String,
+    #[serde(default)]
+    pub args: serde_json::Value,
+    pub queued_at: String,
+    #[serde(default)]
+    pub queued_by: String,
+}
+
 /// A sprint (scrum mode): a fixed window of cycles with a goal and a committed
 /// set of tickets. Kanban mode leaves this `None`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -445,6 +460,10 @@ pub struct ProjectState {
     /// audit of `~/.claude` project memory happens once a day, not every cycle.
     #[serde(default)]
     pub last_memory_hygiene_day: String,
+    /// Execution jobs the control plane queued for a runner (e.g. a human's
+    /// force-merge). Runners claim + remove atomically via `mutate_state`.
+    #[serde(default)]
+    pub jobs: Vec<PendingJob>,
     /// The sprint number the clean-base drain notice was last announced for, so
     /// the SA explains the "merge everything first" hold once per sprint, not
     /// every cycle.
@@ -474,6 +493,7 @@ impl Default for ProjectState {
             schema_version: SCHEMA_VERSION,
             queue_recovery: false,
             last_memory_hygiene_day: String::new(),
+            jobs: Vec::new(),
             alias: String::new(),
             display_name: None,
             current_version: SemVer::default(),

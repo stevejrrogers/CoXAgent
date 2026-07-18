@@ -29,6 +29,8 @@ spec:
           ports:
             - containerPort: {{ .Values.hub.port }}
           env:
+            - name: COXAGENT_NO_INLINE_EXEC
+              value: "1"
             - name: COXAGENT_ADMIN_USER
               valueFrom: { secretKeyRef: { name: {{ .Values.backing.existingSecret }}, key: admin-user } }
             - name: COXAGENT_ADMIN_PASSWORD

@@ -1107,6 +1107,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let leader = self.store.acquire_leader(&me, &now).await.unwrap_or(true);
         // Merge-queue recovery flag (set by the leader once the queue blows up).
         let mut recovery = false;
+        // Human-queued execution jobs (force-merge …) run before anything else.
+        self.drain_jobs().await;
         // Announce presence in the shared registry so every dashboard (even on
         // another machine) can list this team as online.
         let _ = self
@@ -1951,6 +1953,122 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             fix_budget -= 1;
             if fix_budget == 0 {
                 break;
+            }
+        }
+    }
+
+    /// Drain queued execution jobs (control plane → this runner). Called at the
+    /// top of every cycle AND from the operator's fast 15s poll, so a human's
+    /// force-merge starts within seconds, not a full cycle later. One job per
+    /// call; claim-and-remove is atomic so parallel operators never double-run.
+    pub async fn drain_jobs(&self) {
+        let job: Option<crate::state::PendingJob> = {
+            let mut taken = None;
+            let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                taken = if s.jobs.is_empty() {
+                    None
+                } else {
+                    Some(s.jobs.remove(0))
+                };
+                Ok(())
+            })
+            .await;
+            taken
+        };
+        let Some(job) = job else { return };
+        match job.kind.as_str() {
+            "force_merge" => {
+                let num = job.args.get("pr").and_then(serde_json::Value::as_u64);
+                if let Some(num) = num {
+                    self.force_merge_job(num, &job.queued_by).await;
+                }
+            }
+            other => {
+                tracing::warn!("unknown queued job kind {other} — dropped");
+            }
+        }
+    }
+
+    /// Execute a human-ordered force-merge ON THE RUNNER: resolve conflicts on
+    /// the PR branch, verify (markers + forge-mergeable), merge, and narrate to
+    /// #agents. Same machinery as address_pr_feedback, same hard gates.
+    async fn force_merge_job(&self, num: u64, by: &str) {
+        let Some(forge) = self.forge.clone() else {
+            return;
+        };
+        let say = |msg: String| {
+            let store = Arc::clone(&self.store);
+            async move {
+                let _ = crate::ports::outbound::mutate_state(store.as_ref(), |s| {
+                    s.post_chat_in("SA", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+                    Ok(())
+                })
+                .await;
+            }
+        };
+        let Ok(prs) = forge.list_open_prs().await else {
+            return;
+        };
+        let Some(pr) = prs.into_iter().find(|p| p.number == num) else {
+            say(format!(
+                "⚡ Force-merge #{num} ({by}): PR không còn mở — bỏ qua."
+            ))
+            .await;
+            return;
+        };
+        if !pr.mergeable {
+            say(format!(
+                "⚡ Force-merge #{num} ({by}): runner đang gỡ conflict trên `{}`…",
+                pr.head
+            ))
+            .await;
+            let request = crate::ports::outbound::AgentRequest {
+                role: coxagent_domain::Role::DevBug,
+                system_prompt: crate::prompts::system_prompt(crate::prompts::DEV),
+                task_prompt: format!(
+                    "URGENT: a human ordered PR #{num} (branch `{h}`) force-merged. It has merge \
+                     conflicts with `{b}`.\n\
+                     1. `git fetch origin && git checkout {h} && git pull origin {h}`\n\
+                     2. `git merge origin/{b}` and resolve EVERY conflict, preserving both this \
+                     branch's fix and what already landed on {b}.\n\
+                     3. Run the build/tests to make sure nothing broke.\n\
+                     4. `git add -A && git commit -m \"fix: resolve conflicts for #{num}\"` then \
+                     `git push origin {h}`.",
+                    h = pr.head,
+                    b = pr.base,
+                ),
+                work_dir: self.work_dir.clone(),
+                timeout: std::time::Duration::from_secs(1800),
+            };
+            let ok = matches!(self.engine.run(request).await, Ok(o) if o.succeeded());
+            if let Some(git) = &self.git {
+                let _ = git.checkout_branch(&self.work_dir, self.flow_base()).await;
+            }
+            if !ok {
+                say(format!(
+                    "⚡ Force-merge #{num}: gỡ conflict THẤT BẠI — cần xử lý tay: {}",
+                    pr.url
+                ))
+                .await;
+                return;
+            }
+            if let Err(why) = self.verify_conflict_resolution(num).await {
+                say(format!(
+                    "⚡ Force-merge #{num}: verification từ chối ({why}) — KHÔNG merge: {}",
+                    pr.url
+                ))
+                .await;
+                return;
+            }
+        }
+        match forge.merge_pr(num).await {
+            Ok(()) => say(format!("⚡ Force-merge #{num} ({by}): ✅ đã merge.")).await,
+            Err(e) => {
+                say(format!(
+                    "⚡ Force-merge #{num}: merge bị từ chối — {e}: {}",
+                    pr.url
+                ))
+                .await;
             }
         }
     }

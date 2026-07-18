@@ -70,8 +70,12 @@ Key decisions:
   Every privileged rule is enforced **server-side** and audited; UI hiding is
   cosmetics only.
 - DMs are participants-only — no admin override, by test.
-- Terminal/PTY: any writing member, every session audited; runs on the
-  execution plane (target state: never in the gateway process).
+- Terminal/PTY: any writing member, every session audited. On hardened control
+  planes `COXAGENT_NO_INLINE_EXEC=1` refuses shells outright (the Helm hub sets
+  it) — terminals belong to the execution plane.
+- Human-ordered execution (force-merge) is **queued** (`state.jobs`) and picked
+  up by a live runner within ~15s; the hub only executes inline when no runner
+  is registered (solo-desktop mode).
 - Session cookies: HttpOnly + SameSite=Strict, `Secure` added behind TLS.
 - Secrets: env vars first; `coordination.json` supports `${VAR}` placeholders
   and is clamped to mode 600.
