@@ -436,6 +436,11 @@ pub struct ProjectState {
     /// burning tokens forever; entries are dropped when the PR closes.
     #[serde(default)]
     pub pr_fix_attempts: std::collections::BTreeMap<u64, u32>,
+    /// The sprint number the clean-base drain notice was last announced for, so
+    /// the SA explains the "merge everything first" hold once per sprint, not
+    /// every cycle.
+    #[serde(default)]
+    pub drain_notice_sprint: u32,
     /// Whether the Ops/SRE monitor currently sees the deployed app as down —
     /// tracked so it files exactly one bug per outage and can announce recovery.
     #[serde(default)]
@@ -478,6 +483,7 @@ impl Default for ProjectState {
             sprint_goal: String::new(),
             last_digest_day: String::new(),
             pr_fix_attempts: std::collections::BTreeMap::new(),
+            drain_notice_sprint: 0,
             ops_down: false,
             spend_today_usd: 0.0,
             spend_day: String::new(),

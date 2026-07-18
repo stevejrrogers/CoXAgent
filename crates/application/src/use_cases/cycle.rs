@@ -796,10 +796,37 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             Arc::clone(&self.engine),
             self.work_dir.clone(),
         )
-        .with_language(self.config.workflow.language);
+        .with_language(self.config.workflow.language)
+        .with_repo_note(self.pr_queue_note().await);
         if let Err(e) = uc.execute().await {
             tracing::warn!("sprint planning: {e}");
         }
+    }
+
+    /// A one-line summary of the open-PR queue for planning ("6 open PRs into
+    /// main (#80 #82 …), 3 with merge conflicts"), or empty when clean/no forge.
+    async fn pr_queue_note(&self) -> String {
+        let Some(forge) = &self.forge else {
+            return String::new();
+        };
+        let Ok(prs) = forge.list_open_prs().await else {
+            return String::new();
+        };
+        let target = self.flow_base().to_owned();
+        let open: Vec<_> = prs.into_iter().filter(|p| p.base == target).collect();
+        if open.is_empty() {
+            return String::new();
+        }
+        let conflicted = open.iter().filter(|p| !p.mergeable).count();
+        let ids = open
+            .iter()
+            .map(|p| format!("#{}", p.number))
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!(
+            "- Open PR queue into {target}: {} PR(s) ({ids}), {conflicted} with merge conflicts.",
+            open.len()
+        )
     }
 
     /// Run the Backlog Grooming ceremony: BA/SA/PO refine the top un-ready items
@@ -1754,9 +1781,54 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
         if self.clean_base_required().await {
             tracing::info!("clean-base gate: {open} open PR(s) must merge before refactor work");
+            self.announce_drain_hold(open).await;
             return true;
         }
         open >= limit as usize
+    }
+
+    /// The SA says the quiet part out loud, once per sprint: the refactor is ON
+    /// HOLD until every open PR merges — posted to the Scrum feed AND #agents
+    /// so the human sees the plan instead of a silently paused team.
+    async fn announce_drain_hold(&self, open: usize) {
+        let Ok(state) = self.store.load().await else {
+            return;
+        };
+        let sprint_no = state.sprint.as_ref().map_or(0, |s| s.number);
+        if state.drain_notice_sprint == sprint_no {
+            return;
+        }
+        drop(state);
+        let vi = self.config.workflow.language.is_vi();
+        let msg = if vi {
+            format!(
+                "🏗️ Sprint refactor tạm HOÃN khởi công: còn {open} PR đang mở — refactor trên nền \
+                 chưa merge sạch sẽ làm các PR đó không thể merge nổi sau này. Kế hoạch: team dồn \
+                 toàn lực merge/đóng hết queue (fix conflict 2 PR/cycle, cũ nhất trước), queue sạch \
+                 là refactor bắt đầu ngay. Bạn có thể tự merge các PR xanh trong tab Review để đẩy \
+                 nhanh."
+            )
+        } else {
+            format!(
+                "🏗️ Refactor sprint ON HOLD: {open} PR(s) still open — restructuring on an \
+                 unmerged base would make them unmergeable. Plan: the team drains the whole queue \
+                 first (2 conflict-fixes per cycle, oldest first); the refactor starts the moment \
+                 it's empty. You can speed this up by merging green PRs in the Review tab."
+            )
+        };
+        let ok = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+            if s.drain_notice_sprint == sprint_no {
+                return Ok(()); // another operator announced first
+            }
+            s.drain_notice_sprint = sprint_no;
+            s.post_comment("SA", &msg, None);
+            s.post_chat_in("SA", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+            Ok(())
+        })
+        .await;
+        if ok.is_ok() {
+            tracing::info!("SA announced clean-base drain hold for sprint {sprint_no}");
+        }
     }
 
     /// A restructure is planned or underway: architecture refactor mode is on,

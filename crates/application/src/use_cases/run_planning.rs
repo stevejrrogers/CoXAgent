@@ -36,6 +36,9 @@ pub struct RunPlanningUseCase<S: StateStorePort + ?Sized, E: AgentEnginePort + ?
     engine: Arc<E>,
     work_dir: PathBuf,
     lang: crate::config::Language,
+    /// Extra repo reality (e.g. the open-PR queue) the team must weigh in
+    /// planning — so the SA judges "can this sprint even start?" out loud.
+    repo_note: String,
 }
 
 impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunPlanningUseCase<S, E> {
@@ -45,6 +48,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunPlanningUseCase
             engine,
             work_dir,
             lang: crate::config::Language::En,
+            repo_note: String::new(),
         }
     }
 
@@ -52,6 +56,14 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunPlanningUseCase
     #[must_use]
     pub fn with_language(mut self, lang: crate::config::Language) -> Self {
         self.lang = lang;
+        self
+    }
+
+    /// Attach repo reality (e.g. "6 open PRs, 3 conflicted") for the team to
+    /// weigh during planning.
+    #[must_use]
+    pub fn with_repo_note(mut self, note: impl Into<String>) -> Self {
+        self.repo_note = note.into();
         self
     }
 
@@ -64,11 +76,22 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunPlanningUseCase
             return Ok(());
         };
 
+        let repo = if self.repo_note.trim().is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\nREPO REALITY the team MUST address before committing:\n{}\n\
+                 If this blocks the goal (e.g. a restructure cannot start on a dirty merge \
+                 queue), the SA must SAY SO and the SM's commitment must state the unblock \
+                 plan first (e.g. \"merge/close every open PR, then start\").\n",
+                self.repo_note.trim()
+            )
+        };
         let task = format!(
-            "{context}\nRun a full sprint planning now. Each teammate weighs in from their angle — \
-             is the scope realistic, what's the biggest risk or dependency, and what (if anything) \
-             should we defer? Then SM confirms the final commitment in 2-3 sentences: the goal, \
-             what we're committing to, and anything explicitly deferred. Be decisive."
+            "{context}{repo}\nRun a full sprint planning now. Each teammate weighs in from their \
+             angle — is the scope realistic, what's the biggest risk or dependency, and what (if \
+             anything) should we defer? Then SM confirms the final commitment in 2-3 sentences: \
+             the goal, what we're committing to, and anything explicitly deferred. Be decisive."
         );
         let turns = ceremony::run_transcript(
             self.engine.as_ref(),
