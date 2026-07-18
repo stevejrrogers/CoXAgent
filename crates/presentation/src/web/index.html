@@ -80,6 +80,19 @@
   .segseg .sdel{margin-left:1px;font-size:13px;line-height:1;opacity:0;width:0;overflow:hidden;transition:opacity .12s;color:inherit}
   .segseg:hover .sdel{opacity:.6;width:14px}
   .segseg .sdel:hover{opacity:1}
+  .segmore{flex:none;display:inline-flex;align-items:center;gap:5px;border:none;background:transparent;color:var(--muted);font-family:inherit;font-size:12px;font-weight:700;padding:6px 10px;border-radius:8px;cursor:pointer;white-space:nowrap}
+  .segmore:hover{color:var(--text);background:var(--card)}
+  .segmore.on{background:var(--accent);color:#fff}
+  .projmore{position:absolute;top:calc(100% + 8px);right:0;z-index:250;width:260px;max-height:min(60vh,420px);display:flex;flex-direction:column;background:var(--card);border:1px solid var(--border2);border-radius:12px;box-shadow:0 18px 50px rgba(0,0,0,.45);padding:8px;animation:cmpop .14s ease}
+  .projmore[hidden]{display:none}
+  .projmore .pm-search{display:flex;align-items:center;gap:7px;background:var(--card2);border:1px solid var(--border2);border-radius:8px;padding:6px 9px;margin-bottom:7px}
+  .projmore .pm-search input{flex:1;border:none;background:transparent;color:var(--text);font-family:inherit;font-size:12.5px;outline:none}
+  .projmore .pm-list{overflow-y:auto;display:flex;flex-direction:column;gap:1px}
+  .pm-item{display:flex;align-items:center;gap:8px;border:none;background:transparent;color:var(--text);font-family:inherit;font-size:12.5px;font-weight:600;padding:7px 9px;border-radius:8px;cursor:pointer;text-align:left;white-space:nowrap;overflow:hidden}
+  .pm-item span{overflow:hidden;text-overflow:ellipsis}
+  .pm-item:hover{background:var(--card2)}
+  .pm-item.on{color:var(--accent2)}
+  .pm-item .sdot{width:7px;height:7px;border-radius:50%;flex:none}
   /* Project goal card (Overview) */
   .goalcard{background:linear-gradient(180deg,color-mix(in srgb,var(--accent2) 7%,var(--card)),var(--card));border:1px solid var(--border);border-left:3px solid var(--accent2);border-radius:var(--r);padding:15px 18px;margin-bottom:16px}
   .gc-h{display:flex;align-items:center;gap:8px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--accent2)}
@@ -1237,7 +1250,10 @@ body:not(.manage) .manage-only { display: none !important; }
       <button class="iconbtn" onclick="openCmdk()" title="Search &amp; jump — ⌘K"><i class="ti ti-search"></i></button>
       <span class="iconbtn viewers-pill" id="viewers-chip" title="distinct users viewing" style="display:none"><i class="ti ti-eye"></i> <span id="viewers-n">1</span></span>
       <div class="tb-div"></div>
-      <div class="segproj" id="proj-rail"></div>
+      <div style="position:relative;display:flex;align-items:center">
+        <div class="segproj" id="proj-rail"></div>
+        <div id="proj-more-menu" class="projmore" hidden></div>
+      </div>
       <button onclick="openNewProject()" title="New project" class="iconbtn"><i class="ti ti-plus"></i></button>
       <span id="connlbl" hidden></span><span id="pg-sub" hidden></span>
       <div class="topbar-proj" style="display:none">
@@ -4168,15 +4184,58 @@ function renderProjBtn(){
 // Header project switcher — a single segmented control (not floating pills, not
 // a dropdown): one click switches, active segment filled, a colour dot keeps
 // each project recognisable, and an inline × (on hover) removes one.
+// Up to this many pills stay inline; beyond that the rest collapse behind a
+// "+N" button with a searchable menu (the active project is always a pill).
+const MAX_PROJ_PILLS=5;
 function renderProjRail(){
   const rail=document.getElementById("proj-rail");if(!rail)return;
-  if(!PROJECTS.length){rail.innerHTML='<span class="segproj-empty">No projects yet</span>';return;}
-  rail.innerHTML=PROJECTS.map(p=>{const on=p.id===PID;const label=p.alias||p.name;
+  if(!PROJECTS.length){rail.innerHTML='<span class="segproj-empty">No projects yet</span>';closeProjMore();return;}
+  let vis=PROJECTS,more=[];
+  if(PROJECTS.length>MAX_PROJ_PILLS){
+    vis=PROJECTS.slice(0,MAX_PROJ_PILLS);
+    if(PID&&!vis.some(p=>p.id===PID)){
+      const act=PROJECTS.find(p=>p.id===PID);
+      if(act)vis=vis.slice(0,MAX_PROJ_PILLS-1).concat([act]);
+    }
+    const shown=new Set(vis.map(p=>p.id));
+    more=PROJECTS.filter(p=>!shown.has(p.id));
+  }
+  const pill=p=>{const on=p.id===PID;const label=p.alias||p.name;
     return `<button class="segseg${on?' on':''}" title="${esc(p.name)}" onclick="switchProject('${esc(p.id)}')">
       <span class="sdot" style="background:${projColor(p.id)}"></span><span>${esc(label)}</span>
       <i class="ti ti-x sdel" title="Remove ${esc(p.name)}" onclick="event.stopPropagation();deleteProject('${esc(p.id)}')"></i>
-    </button>`;}).join("");
+    </button>`;};
+  rail.innerHTML=vis.map(pill).join("")
+    +(more.length?`<button class="segmore" id="proj-more-btn" title="${more.length} more projects" onclick="toggleProjMore(event)"><i class="ti ti-dots"></i> +${more.length}</button>`:"");
+  if(!more.length)closeProjMore();
   const act=rail.querySelector(".segseg.on");if(act)act.scrollIntoView({inline:"nearest",block:"nearest"});
+}
+function toggleProjMore(e){
+  e.stopPropagation();
+  const m=document.getElementById("proj-more-menu");if(!m)return;
+  if(!m.hidden){closeProjMore();return;}
+  m.hidden=false;window._pmq="";renderProjMore();
+  const b=document.getElementById("proj-more-btn");if(b)b.classList.add("on");
+  setTimeout(()=>{const i=m.querySelector("input");if(i)i.focus();
+    document.addEventListener("click",closeProjMoreOnOutside);},0);
+}
+function renderProjMore(){
+  const m=document.getElementById("proj-more-menu");if(!m||m.hidden)return;
+  const q=(window._pmq||"").toLowerCase();
+  const list=PROJECTS.filter(p=>!q||(p.alias||"").toLowerCase().includes(q)||p.name.toLowerCase().includes(q));
+  m.innerHTML=`<div class="pm-search"><i class="ti ti-search"></i><input placeholder="Tìm project…" value="${esc(window._pmq||"")}" oninput="window._pmq=this.value;renderProjMore()" onclick="event.stopPropagation()"></div>
+    <div class="pm-list">${list.map(p=>`<button class="pm-item${p.id===PID?' on':''}" onclick="closeProjMore();switchProject('${esc(p.id)}')">
+      <span class="sdot" style="background:${projColor(p.id)}"></span><span>${esc(p.alias||p.name)}</span></button>`).join("")||'<span class="segproj-empty">no match</span>'}</div>`;
+  const i=m.querySelector("input");if(i){const v=i.value;i.focus();i.setSelectionRange(v.length,v.length);}
+}
+function closeProjMore(){
+  const m=document.getElementById("proj-more-menu");if(m)m.hidden=true;
+  const b=document.getElementById("proj-more-btn");if(b)b.classList.remove("on");
+  document.removeEventListener("click",closeProjMoreOnOutside);
+}
+function closeProjMoreOnOutside(e){
+  const m=document.getElementById("proj-more-menu");
+  if(m&&!m.contains(e.target))closeProjMore();
 }
 // Stable per-project colour for its switcher dot.
 function projColor(id){const pal=["#38bdf8","#a78bfa","#f472b6","#34d399","#fbbf24","#fb7185"];
