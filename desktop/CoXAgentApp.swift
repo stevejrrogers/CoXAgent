@@ -264,7 +264,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         URLSession.shared.dataTask(with: health) { _, resp, _ in
             DispatchQueue.main.async {
                 if let http = resp as? HTTPURLResponse, http.statusCode == 200 {
-                    self.web.load(URLRequest(url: URL(string: "\(self.base)/")!))
+                    var req = URLRequest(url: URL(string: "\(self.base)/")!)
+                    // The SPA is tiny and versioned with the hub — never let a
+                    // stale cached copy outlive an upgrade.
+                    req.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+                    self.web.load(req)
                 } else if attempt < 80 {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
                         self.loadWhenReady(attempt + 1)

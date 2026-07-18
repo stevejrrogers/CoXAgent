@@ -1242,7 +1242,7 @@ textarea.np-in{resize:vertical;line-height:1.5}
     </div>
   </div>
   <aside class="side">
-    <div class="brand"><div class="mk"><i class="ti ti-hexagon-letter-c"></i></div><div><div class="nm">CoXAgent</div><div class="tg">autonomous dev team</div></div></div>
+    <div class="brand"><div class="mk"><i class="ti ti-hexagon-letter-c"></i></div><div><div class="nm">CoXAgent</div><div class="tg">autonomous dev team · <span id="brand-ver"></span></div></div></div>
     <div class="modeseg">
       <button id="mode-manage" style="display:none" onclick="setMode('manage')" title="Manage"><i class="ti ti-shield-cog"></i><span class="lbl">Manage</span></button>
       <button id="mode-ws" class="on" onclick="setMode('workspace')" title="Space"><i class="ti ti-layout-grid"></i><span class="lbl">Space</span></button>
@@ -4689,6 +4689,7 @@ function startApp(){
   checkAgentSetup(false);
   ensureNotifPermission();
   checkAppUpdate();setInterval(checkAppUpdate,30*60*1000);
+  fetch("/api/health").then(r=>r.json()).then(h=>{const b=document.getElementById("brand-ver");if(b&&h.version)b.textContent="v"+h.version;}).catch(()=>{});
 }
 const AGENT_CLIS={claude:{label:"Claude Code",desc:"Anthropic's coding agent",install:"curl -fsSL https://claude.ai/install.sh | bash",docs:"https://claude.com/claude-code"},
   opencode:{label:"opencode",desc:"open-source multi-model agent",install:"curl -fsSL https://opencode.ai/install | bash",docs:"https://opencode.ai"}};
