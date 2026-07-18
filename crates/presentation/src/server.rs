@@ -84,6 +84,29 @@ pub type ProjectRemover =
     Arc<dyn Fn(String) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync>;
 
 /// Record one audit entry through the injected sink (fire-and-forget).
+/// Baseline security headers on every response: no MIME sniffing, no framing
+/// (clickjacking), same-origin referrers.
+async fn security_headers_mw(
+    req: Request<axum::body::Body>,
+    next: Next,
+) -> axum::response::Response {
+    let mut resp = next.run(req).await;
+    let h = resp.headers_mut();
+    h.insert(
+        "X-Content-Type-Options",
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    h.insert(
+        "X-Frame-Options",
+        axum::http::HeaderValue::from_static("DENY"),
+    );
+    h.insert(
+        "Referrer-Policy",
+        axum::http::HeaderValue::from_static("same-origin"),
+    );
+    resp
+}
+
 async fn audit_push(sink: &Arc<dyn AuditPort>, user: &str, action: String, status: u16) {
     sink.record(AuditRecord {
         at: now_rfc3339(),
@@ -908,6 +931,7 @@ pub async fn serve_full(
         .route("/api/projects/:pid/transcripts/:name", get(get_transcript))
         .route("/api/projects/:pid/events", get(events_ep))
         .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth_mw))
+        .layer(axum::middleware::from_fn(security_headers_mw))
         .with_state(state);
 
     // Bind loopback by default (safe for local use); a container sets
@@ -4875,6 +4899,58 @@ struct SpaceReq {
     projects: Vec<String>,
 }
 
+/// Validate a space payload against reality: length caps, admins must be real
+/// accounts, projects must be registered — a typo must fail loudly, not create
+/// silently-broken scoping. Returns the normalized (deduped) lists.
+async fn validate_space_req(
+    app: &AppState,
+    req: &SpaceReq,
+) -> Result<(Vec<String>, Vec<String>), String> {
+    if req.name.trim().chars().count() > 60 {
+        return Err("name too long (max 60)".into());
+    }
+    if req.tagline.chars().count() > 160 {
+        return Err("tagline too long (max 160)".into());
+    }
+    if req.admins.len() > 20 || req.projects.len() > 100 {
+        return Err("too many admins/projects".into());
+    }
+    let known_users: std::collections::HashSet<String> = match app.auth.clone() {
+        Some(auth) => auth
+            .list_users()
+            .await
+            .into_iter()
+            .map(|u| u.username.to_lowercase())
+            .collect(),
+        None => std::collections::HashSet::new(),
+    };
+    let mut admins = Vec::new();
+    for a in &req.admins {
+        let a = a.trim().to_owned();
+        if a.is_empty() || admins.contains(&a) {
+            continue;
+        }
+        if !known_users.is_empty() && !known_users.contains(&a.to_lowercase()) {
+            return Err(format!("unknown user: {a}"));
+        }
+        admins.push(a);
+    }
+    let known_projects: std::collections::HashSet<String> =
+        app.order.read().await.iter().cloned().collect();
+    let mut projects = Vec::new();
+    for p in &req.projects {
+        let p = p.trim().to_owned();
+        if p.is_empty() || projects.contains(&p) {
+            continue;
+        }
+        if !known_projects.contains(&p) {
+            return Err(format!("unknown project: {p}"));
+        }
+        projects.push(p);
+    }
+    Ok((admins, projects))
+}
+
 /// Create a space (super admin only).
 async fn space_create_ep(
     State(app): State<AppState>,
@@ -4888,6 +4964,10 @@ async fn space_create_ep(
     if name.is_empty() {
         return (StatusCode::BAD_REQUEST, "name required").into_response();
     }
+    let (admins, projects) = match validate_space_req(&app, &req).await {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
     let id = coxagent_application::state::slugify(&name);
     let by = resolve_username(&app, &headers).await;
     {
@@ -4899,8 +4979,8 @@ async fn space_create_ep(
             id: id.clone(),
             name,
             tagline: req.tagline.trim().to_owned(),
-            admins: req.admins,
-            projects: req.projects,
+            admins,
+            projects,
             created_by: by,
             created_at: coxagent_application::state::now_rfc3339(),
         });
@@ -4918,6 +4998,10 @@ async fn space_update_ep(
 ) -> axum::response::Response {
     let sup = is_super(&app, &headers).await;
     let me = resolve_username(&app, &headers).await;
+    let (admins, projects) = match validate_space_req(&app, &req).await {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
     {
         let mut doc = app.spaces.inner.lock().await;
         let Some(space) = doc.spaces.iter_mut().find(|s| s.id == sid) else {
@@ -4933,8 +5017,8 @@ async fn space_update_ep(
         req.tagline.trim().clone_into(&mut space.tagline);
         // Only the super admin reshapes membership/projects of a space.
         if sup {
-            space.admins = req.admins;
-            space.projects = req.projects;
+            space.admins = admins;
+            space.projects = projects;
         }
     }
     app.spaces.save().await;
@@ -5077,8 +5161,12 @@ async fn manage_space_detail_ep(
     let mut projects = Vec::new();
     let mut user_spend: HashMap<String, f64> = HashMap::new();
     for pid in &space.projects {
-        let Some(p) = projects_map.get(pid) else { continue };
-        let Ok(st) = p.store.load().await else { continue };
+        let Some(p) = projects_map.get(pid) else {
+            continue;
+        };
+        let Ok(st) = p.store.load().await else {
+            continue;
+        };
         for (op, v) in &st.spend.by_operator {
             let user = op.split('@').next().unwrap_or(op).to_owned();
             *user_spend.entry(user).or_insert(0.0) += v.cost_usd;
@@ -5106,7 +5194,10 @@ async fn manage_space_detail_ep(
     let members: Vec<serde_json::Value> = users
         .iter()
         .filter(|u| {
-            space.admins.iter().any(|a| a.eq_ignore_ascii_case(&u.username))
+            space
+                .admins
+                .iter()
+                .any(|a| a.eq_ignore_ascii_case(&u.username))
                 || u.projects.iter().any(|p| space.projects.contains(p))
         })
         .map(|u| {

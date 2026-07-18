@@ -1006,6 +1006,10 @@
   .mg-sprintbar div{height:100%;background:var(--accent2)}
   .mg-sprint span{font-size:10.5px;color:var(--dim)}
   .mg-rolesel{background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:7px;padding:4px 8px;font-size:12px}
+  .mg-picker{display:flex;flex-wrap:wrap;gap:6px;flex:1}
+  .mg-pick{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--border2);border-radius:16px;padding:4px 11px;font-size:12px;cursor:pointer;color:var(--muted);user-select:none}
+  .mg-pick input{display:none}
+  .mg-pick.on{color:var(--accent2);border-color:var(--accent2);background:color-mix(in srgb,var(--accent2) 10%,transparent)}
   .ctime{color:var(--dim)}
   .cbub{background:var(--card);border:1px solid var(--border);border-radius:12px;border-top-left-radius:3px;padding:9px 13px;font-size:13px;line-height:1.5;color:var(--text);white-space:pre-wrap;word-break:break-word}
   /* rendered-markdown message body: flow like HTML, chat-sized elements */
@@ -2081,8 +2085,8 @@ function renderMgSpaces(){
     <div id="mg-create" hidden><div class="panel frm" style="margin-bottom:14px">
       <div class="fr"><span class="lbl">Name</span><input id="mg-sp-name" placeholder="e.g. Product Team A"></div>
       <div class="fr"><span class="lbl">Tagline</span><input id="mg-sp-tag" placeholder="what this space builds"></div>
-      <div class="fr"><span class="lbl">Admins</span><input id="mg-sp-admins" placeholder="usernames, comma-separated"></div>
-      <div class="fr"><span class="lbl">Projects</span><input id="mg-sp-projects" placeholder="ids, comma (available: ${esc(allP.join(', '))})"></div>
+      <div class="fr" style="align-items:flex-start"><span class="lbl">Admins</span>${mgPicker("mg-sp-admins",(MG.users||[]).map(u=>u.username),[])}</div>
+      <div class="fr" style="align-items:flex-start"><span class="lbl">Projects</span>${mgPicker("mg-sp-projects",allP,[])}</div>
       <div class="fr"><span class="lbl"></span><button class="pri" onclick="mgCreateSpace()"><i class="ti ti-check"></i> Create</button></div>
     </div></div>
     <div class="wsgrid">${(MG.spaces||[]).map(sp=>`
@@ -2097,10 +2101,16 @@ function renderMgSpaces(){
     ${(MG.unassigned_projects||[]).length?`<div class="panel" style="margin-top:14px;font-size:12.5px;color:var(--muted)"><i class="ti ti-alert-triangle" style="color:var(--amber)"></i> Chưa thuộc space nào: <b>${esc((MG.unassigned_projects||[]).join(", "))}</b> — gán qua Edit space.</div>`:""}`;
 }
 function mgToggleCreate(){const b=document.getElementById("mg-create");if(b)b.hidden=!b.hidden;}
-function csv(id){return (val(id)||"").split(",").map(x=>x.trim()).filter(Boolean);}
+// Checkbox-chip picker over real data — no free-text CSV (typos must be impossible).
+function mgPicker(id,items,selected){
+  const sel=new Set(selected||[]);
+  return `<div class="mg-picker" id="${id}">${items.map(it=>
+    `<label class="mg-pick ${sel.has(it)?"on":""}"><input type="checkbox" value="${esc(it)}" ${sel.has(it)?"checked":""} onchange="this.parentElement.classList.toggle('on',this.checked)"><span>${esc(it)}</span></label>`).join("")||'<span class="wsc-off">none available</span>'}</div>`;
+}
+function picked(id){return Array.from(document.querySelectorAll('#'+id+' input:checked')).map(i=>i.value);}
 async function mgCreateSpace(){
   const name=val("mg-sp-name").trim();if(!name){toasty("Đặt tên space","warn");return;}
-  try{const r=await fetch("/api/spaces",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name,tagline:val("mg-sp-tag"),admins:csv("mg-sp-admins"),projects:csv("mg-sp-projects")})});
+  try{const r=await fetch("/api/spaces",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name,tagline:val("mg-sp-tag"),admins:picked("mg-sp-admins"),projects:picked("mg-sp-projects")})});
     if(r.ok){toasty("Space đã tạo","ok");renderManage();}else toasty("Failed: "+await r.text(),"err");}catch(e){}}
 async function openMgSpace(id){
   nav("mg-space");
@@ -2144,16 +2154,18 @@ function mgEditSpaceInline(id){
   const box=document.getElementById("mg-edit-inline");if(!box)return;
   if(!box.hidden){box.hidden=true;return;}
   box.hidden=false;
+  const allP=((MG||{}).spaces||[]).flatMap(x=>x.projects||[]).concat((MG||{}).unassigned_projects||[]);
+  const uniqP=[...new Set(allP)];
   box.innerHTML=`<div class="panel frm" style="margin-bottom:14px">
     <div class="fr"><span class="lbl">Name</span><input id="mge-name" value="${esc(sp.name)}"></div>
     <div class="fr"><span class="lbl">Tagline</span><input id="mge-tag" value="${esc(sp.tagline||"")}"></div>
-    <div class="fr"><span class="lbl">Admins</span><input id="mge-admins" value="${esc((sp.admins||[]).join(", "))}"></div>
-    <div class="fr"><span class="lbl">Projects</span><input id="mge-projects" value="${esc((sp.projects||[]).join(", "))}"></div>
+    <div class="fr" style="align-items:flex-start"><span class="lbl">Admins</span>${mgPicker("mge-admins",((MG||{}).users||[]).map(u=>u.username),sp.admins||[])}</div>
+    <div class="fr" style="align-items:flex-start"><span class="lbl">Projects</span>${mgPicker("mge-projects",uniqP,sp.projects||[])}</div>
     <div class="fr"><span class="lbl"></span><button class="pri" onclick="mgSaveSpace('${esc(id)}')"><i class="ti ti-check"></i> Save</button>
       <button class="gc-btn" onclick="mgDeleteSpace('${esc(id)}')"><i class="ti ti-trash"></i> Delete space</button></div></div>`;
 }
 async function mgSaveSpace(id){
-  try{const r=await fetch("/api/spaces/"+id,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:val("mge-name"),tagline:val("mge-tag"),admins:csv("mge-admins"),projects:csv("mge-projects")})});
+  try{const r=await fetch("/api/spaces/"+id,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:val("mge-name"),tagline:val("mge-tag"),admins:picked("mge-admins"),projects:picked("mge-projects")})});
     if(r.ok){toasty("Đã lưu","ok");MG=null;await renderManage();openMgSpace(id);}else toasty("Failed: "+await r.text(),"err");}catch(e){}}
 async function mgDeleteSpace(id){
   if(!confirm("Xoá space "+id+"? (Không xoá project/user — chỉ bỏ nhóm.)"))return;
