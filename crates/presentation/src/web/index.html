@@ -344,7 +344,10 @@
   .nav a:hover{background:var(--card);color:var(--text)} .nav a.on{background:var(--accentbg);color:var(--accent2)}
   /* Workspace | Chat mode switch, below the brand */
   .modeseg{display:flex;gap:3px;background:var(--card2);border:1px solid var(--border2);border-radius:11px;padding:3px;margin:4px 0 2px}
-  .modeseg button{flex:1;display:flex;align-items:center;justify-content:center;gap:6px;background:transparent;border:none;color:var(--muted);font-family:inherit;font-size:12.5px;font-weight:600;padding:8px 6px;border-radius:8px;cursor:pointer;position:relative}
+  .modeseg button{flex:0 0 auto;display:flex;align-items:center;justify-content:center;gap:6px;background:transparent;border:none;color:var(--muted);font-family:inherit;font-size:12.5px;font-weight:600;padding:8px 10px;border-radius:8px;cursor:pointer;position:relative;transition:flex .18s ease,background .15s,color .15s;min-width:0}
+  .modeseg button .lbl{display:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .modeseg button.on{flex:1 1 auto}
+  .modeseg button.on .lbl{display:inline}
   .modeseg button.on{background:var(--accent);color:#fff}
   .modeseg button:not(.on):hover{color:var(--text)}
   .modeseg button i{font-size:15px}
@@ -1010,6 +1013,18 @@
   .mg-pick{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--border2);border-radius:16px;padding:4px 11px;font-size:12px;cursor:pointer;color:var(--muted);user-select:none}
   .mg-pick input{display:none}
   .mg-pick.on{color:var(--accent2);border-color:var(--accent2);background:color-mix(in srgb,var(--accent2) 10%,transparent)}
+  .coxmodal{position:fixed;inset:0;z-index:300;display:flex;align-items:center;justify-content:center}
+  .coxmodal[hidden]{display:none}
+  .coxmodal-back{position:absolute;inset:0;background:rgba(0,0,0,.55);backdrop-filter:blur(2px)}
+  .coxmodal-card{position:relative;width:min(440px,90vw);background:var(--card);border:1px solid var(--border2);border-radius:16px;padding:22px;box-shadow:0 24px 70px rgba(0,0,0,.5);animation:cmpop .16s ease}
+  @keyframes cmpop{from{transform:scale(.96);opacity:0}to{transform:scale(1);opacity:1}}
+  .coxmodal-title{font-size:15.5px;font-weight:700;margin-bottom:6px}
+  .coxmodal-msg{font-size:13px;color:var(--muted);line-height:1.55;margin-bottom:14px;white-space:pre-wrap}
+  .coxmodal-input{width:100%;box-sizing:border-box;background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:10px;padding:10px 12px;font-size:13px;font-family:inherit;margin-bottom:14px;resize:vertical}
+  .coxmodal-input:focus{outline:none;border-color:var(--accent)}
+  .coxmodal-acts{display:flex;justify-content:flex-end;gap:8px}
+  .coxmodal-card.danger .coxmodal-title{color:var(--red)}
+  .coxmodal-card.danger #cm-ok{background:var(--red)}
   .ctime{color:var(--dim)}
   .cbub{background:var(--card);border:1px solid var(--border);border-radius:12px;border-top-left-radius:3px;padding:9px 13px;font-size:13px;line-height:1.5;color:var(--text);white-space:pre-wrap;word-break:break-word}
   /* rendered-markdown message body: flow like HTML, chat-sized elements */
@@ -1127,12 +1142,24 @@ body:not(.manage) .manage-only { display: none !important; }
     <div id="lg-err" style="color:var(--red);font-size:12px;min-height:16px;margin:4px 0"></div>
     <button class="pri" onclick="doLogin()" style="width:100%;justify-content:center"><i class="ti ti-login"></i> Sign in</button>
   </div></div>
+  <div id="cox-modal" class="coxmodal" hidden>
+    <div class="coxmodal-back" onclick="coxModalCancel()"></div>
+    <div class="coxmodal-card">
+      <div class="coxmodal-title" id="cm-title"></div>
+      <div class="coxmodal-msg" id="cm-msg"></div>
+      <textarea id="cm-input" class="coxmodal-input" rows="3" hidden></textarea>
+      <div class="coxmodal-acts">
+        <button class="gc-btn" id="cm-cancel" onclick="coxModalCancel()">Cancel</button>
+        <button class="pri" id="cm-ok" onclick="coxModalOk()">OK</button>
+      </div>
+    </div>
+  </div>
   <aside class="side">
     <div class="brand"><div class="mk"><i class="ti ti-hexagon-letter-c"></i></div><div><div class="nm">CoXAgent</div><div class="tg">autonomous dev team</div></div></div>
     <div class="modeseg">
-      <button id="mode-manage" style="display:none" onclick="setMode('manage')"><i class="ti ti-shield-cog"></i> Manage</button>
-      <button id="mode-ws" class="on" onclick="setMode('workspace')"><i class="ti ti-layout-grid"></i> Space</button>
-      <button id="mode-chat" onclick="setMode('chat')"><i class="ti ti-message-circle"></i> Chat<span class="modeseg-badge" id="mode-chat-badge" style="display:none"></span></button>
+      <button id="mode-manage" style="display:none" onclick="setMode('manage')" title="Manage"><i class="ti ti-shield-cog"></i><span class="lbl">Manage</span></button>
+      <button id="mode-ws" class="on" onclick="setMode('workspace')" title="Space"><i class="ti ti-layout-grid"></i><span class="lbl">Space</span></button>
+      <button id="mode-chat" onclick="setMode('chat')" title="Chat"><i class="ti ti-message-circle"></i><span class="lbl">Chat</span><span class="modeseg-badge" id="mode-chat-badge" style="display:none"></span></button>
     </div>
     <!-- Chat mode: channel list replaces the workspace menu -->
     <div class="chatside" id="chat-side">
@@ -2168,7 +2195,7 @@ async function mgSaveSpace(id){
   try{const r=await fetch("/api/spaces/"+id,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:val("mge-name"),tagline:val("mge-tag"),admins:picked("mge-admins"),projects:picked("mge-projects")})});
     if(r.ok){toasty("Đã lưu","ok");MG=null;await renderManage();openMgSpace(id);}else toasty("Failed: "+await r.text(),"err");}catch(e){}}
 async function mgDeleteSpace(id){
-  if(!confirm("Xoá space "+id+"? (Không xoá project/user — chỉ bỏ nhóm.)"))return;
+  if(!(await coxModal({title:"Xoá space "+id+"?",message:"Không xoá project hay user — chỉ bỏ nhóm tổ chức này.",danger:true,confirmText:"Delete"})))return;
   try{await fetch("/api/spaces/"+id,{method:"DELETE"});nav("mg-spaces");renderManage();}catch(e){}}
 function renderMgPeople(){
   const el=document.getElementById("mg-people-body");if(!el||!MG)return;
@@ -2614,7 +2641,7 @@ async function reviewRun(btn,path,who){
   btn.innerHTML=old;btn.disabled=false;
 }
 async function startDiscussion(){
-  const topic=prompt("Discussion topic for the team (PO + SA weigh in, SM decides):");
+  const topic=await coxModal({title:"Agent discussion",message:"Chủ đề để team thảo luận — PO + SA cho ý kiến, SM chốt.",input:{placeholder:"e.g. có nên chuyển store sang Postgres ngay sprint này không?",multiline:true},confirmText:"Start discussion"});
   if(!topic||!topic.trim())return;
   const lbl=document.getElementById("disc-run-label");lbl.textContent="Agents discussing…";
   document.getElementById("disc-filter").value="";
@@ -2747,6 +2774,35 @@ let SEEN=new Set(), chatPrimed=false;
 let MODE=(localStorage.getItem("cox_mode")==="chat")?"chat":"workspace";
 function isChatMode(){return MODE==="chat";}
 function markSeen(m){SEEN.add(chatKey(m));}
+// Enterprise modal replacing browser prompt()/confirm(): returns a Promise —
+// resolves the input string (or true) on confirm, null on cancel.
+let _cmResolve=null;
+function coxModal(o){
+  return new Promise(res=>{
+    _cmResolve=res;
+    const m=document.getElementById("cox-modal");
+    document.getElementById("cm-title").textContent=o.title||"Confirm";
+    document.getElementById("cm-msg").textContent=o.message||"";
+    const inp=document.getElementById("cm-input");
+    inp.hidden=!o.input; inp.value=(o.input&&o.input.value)||""; inp.placeholder=(o.input&&o.input.placeholder)||"";
+    document.getElementById("cm-ok").textContent=o.confirmText||"OK";
+    document.getElementById("cm-cancel").textContent=o.cancelText||"Cancel";
+    m.querySelector(".coxmodal-card").classList.toggle("danger",!!o.danger);
+    m.hidden=false;
+    if(o.input)setTimeout(()=>inp.focus(),30);
+    m.onkeydown=e=>{if(e.key==="Escape")coxModalCancel();if(e.key==="Enter"&&(e.metaKey||!o.input||!(o.input.multiline)))coxModalOk();};
+    m.tabIndex=-1;m.focus();
+  });
+}
+function coxModalOk(){
+  const m=document.getElementById("cox-modal");const inp=document.getElementById("cm-input");
+  const val=inp.hidden?true:inp.value.trim();
+  m.hidden=true; if(_cmResolve){_cmResolve(val);_cmResolve=null;}
+}
+function coxModalCancel(){
+  const m=document.getElementById("cox-modal");m.hidden=true;
+  if(_cmResolve){_cmResolve(null);_cmResolve=null;}
+}
 function updateSegments(){
   const mg=document.getElementById("mode-manage");
   if(mg)mg.style.display=(ME&&ME.role==="super")?"":"none";
@@ -4539,9 +4595,11 @@ function renderDiff(t){
   flush();return out||'<div class="empty" style="padding:20px">no changes</div>';}
 async function prAction(num,action){
   let comment="";
-  if(action==="request-changes"){comment=prompt("What changes should the agent make?");if(comment===null)return;}
-  if(action==="merge"&&!confirm("Merge PR #"+num+"? This ships the code."))return;
-  if(action==="force-merge"&&!confirm("FORCE merge PR #"+num+"?\n\nSA sẽ gỡ conflict ngay (nếu có) rồi merge thẳng vào main — kể cả khi chưa có CI check. Theo dõi tiến trình trong #agents."))return;
+  if(action==="request-changes"){
+    comment=await coxModal({title:"Request changes on PR #"+num,message:"Mô tả rõ cần sửa gì — DEV agent sẽ đọc và tự xử lý ở cycle tới.",input:{placeholder:"e.g. thêm test cho case token hết hạn; đừng đổi API public",multiline:true},confirmText:"Request changes"});
+    if(comment===null||comment==="")return;}
+  if(action==="merge"&&!(await coxModal({title:"Merge PR #"+num+"?",message:"Squash-merge vào main và xoá branch — chính thức ship code này.",confirmText:"Merge"})))return;
+  if(action==="force-merge"&&!(await coxModal({title:"⚡ Force-merge PR #"+num+"?",message:"SA sẽ gỡ conflict ngay (nếu có) rồi merge thẳng vào main — kể cả khi chưa có CI check. Theo dõi tiến trình trong #agents.",danger:true,confirmText:"Force merge"})))return;
   if(action==="preview")toasty("Building preview of PR #"+num+"… (docker build, may take a minute)","ok");
   try{const r=await fetch(api("/prs/"+num+"/"+action),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({comment})});
     if(r.ok){
