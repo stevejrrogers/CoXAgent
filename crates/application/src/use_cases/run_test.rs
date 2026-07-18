@@ -38,14 +38,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
     /// [`AppError`] on engine failure or unparseable output.
     pub async fn execute(&self) -> Result<Vec<TicketId>, AppError> {
         let _choice = self.config.engine.resolve(Role::Test);
-        let memory = self.store.load().await.map_or_else(
-            |_| String::new(),
-            |s| prompts::team_memory_block(&s.decisions, &s.lessons),
+        let (memory, shipped) = self.store.load().await.map_or_else(
+            |_| (String::new(), String::new()),
+            |s| {
+                (
+                    prompts::team_memory_block(&s.decisions, &s.lessons),
+                    shipped_block(&s),
+                )
+            },
         );
         let request = AgentRequest {
             role: Role::Test,
             system_prompt: prompts::system_prompt(prompts::TEST),
-            task_prompt: format!("Test the current build and report new bugs.{memory}"),
+            task_prompt: format!("Test the current build and report new bugs.{shipped}{memory}"),
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(1800),
         };
@@ -122,6 +127,38 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
         }
         Ok(filed)
     }
+}
+
+/// What just shipped and is awaiting verification, WITH its acceptance
+/// criteria — so TEST verifies the actual contract of each change instead of
+/// poking the app blind. Newest first, bounded.
+fn shipped_block(state: &crate::state::ProjectState) -> String {
+    use std::fmt::Write as _;
+    let recent: Vec<_> = state
+        .tickets
+        .iter()
+        .rev()
+        .filter(|t| {
+            matches!(
+                t.status(),
+                coxagent_domain::Status::Done | coxagent_domain::Status::Fixed
+            )
+        })
+        .take(6)
+        .collect();
+    if recent.is_empty() {
+        return String::new();
+    }
+    let mut out =
+        String::from("\n\nJUST SHIPPED — verify each against its acceptance criteria first:\n");
+    for t in recent {
+        let _ = writeln!(out, "- {} {}", t.id(), t.title());
+        for c in t.acceptance_criteria() {
+            let cap: String = c.chars().take(160).collect();
+            let _ = writeln!(out, "    AC: {cap}");
+        }
+    }
+    out.chars().take(2500).collect()
 }
 
 #[cfg(test)]

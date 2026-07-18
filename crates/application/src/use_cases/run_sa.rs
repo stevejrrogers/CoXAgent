@@ -166,7 +166,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             role: Role::Sa,
             system_prompt: prompts::system_prompt(prompts::SA),
             task_prompt: format!(
-                "Design feature {id}: {title}{}{memory}",
+                "Design feature {id}: {title}{}{}{memory}",
+                prompts::focus_block(&self.work_dir, title),
                 prompts::repo_map_block(&self.work_dir, self.config.workflow.token_saver),
             ),
             work_dir: self.work_dir.clone(),

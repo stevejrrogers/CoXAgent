@@ -318,8 +318,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 prompts::system_prompt(prompts::DEV)
             ),
             task_prompt: format!(
-                "Ticket {id}: {title}\n{}\nImplement it now.{}{}",
+                "Ticket {id}: {title}\n{}\nImplement it now.{}{}{}",
                 ticket_brief(ticket),
+                prompts::focus_block(
+                    &self.work_dir,
+                    &format!(
+                        "{title} {}",
+                        ticket
+                            .and_then(|t| t.design().technical.as_ref())
+                            .map_or("", |d| d.approach.as_str())
+                    ),
+                ),
                 prompts::repo_map_block(&self.work_dir, self.config.workflow.token_saver),
                 prompts::team_memory_block(&state.decisions, &state.lessons),
             ),

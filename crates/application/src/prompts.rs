@@ -212,6 +212,47 @@ pub fn repo_map_block(work_dir: &std::path::Path, enabled: bool) -> String {
     )
 }
 
+/// A TICKET-SCOPED slice of the code graph: the symbols/files most relevant to
+/// `query` (title + design), grouped by file, plus who calls the top hits — so
+/// DEV/SA jump straight to the right code instead of exploring, and see the
+/// blast radius before changing it. Empty when no graph is built yet.
+#[must_use]
+pub fn focus_block(work_dir: &std::path::Path, query: &str) -> String {
+    use std::fmt::Write as _;
+    let Some(g) = crate::codegraph::CodeGraph::load(work_dir) else {
+        return String::new();
+    };
+    let hits = g.relevance_search(query, 12);
+    if hits.is_empty() {
+        return String::new();
+    }
+    // Group by file, preserving relevance order of first appearance.
+    let mut files: Vec<(String, Vec<String>)> = Vec::new();
+    for s in &hits {
+        match files.iter_mut().find(|(f, _)| *f == s.file) {
+            Some((_, syms)) => syms.push(s.name.clone()),
+            None => files.push((s.file.clone(), vec![s.name.clone()])),
+        }
+    }
+    let mut out = String::from("\n\nLIKELY RELEVANT CODE (from the code graph — start here):\n");
+    for (f, syms) in files.iter().take(6) {
+        let _ = writeln!(out, "- {f}: {}", syms.join(", "));
+    }
+    // Blast radius: callers of the top two hits.
+    for s in hits.iter().take(2) {
+        let callers = g.callers(&s.name);
+        if !callers.is_empty() {
+            let list: Vec<String> = callers
+                .iter()
+                .take(5)
+                .map(|(caller, file, line)| format!("{caller} ({file}:{line})"))
+                .collect();
+            let _ = writeln!(out, "- callers of `{}`: {}", s.name, list.join(", "));
+        }
+    }
+    out.chars().take(1800).collect()
+}
+
 /// Fold the team's durable memory — decisions/conventions plus retro lessons —
 /// into a prompt block so every agent stays consistent with what's been decided
 /// and learned, instead of re-deriving (and contradicting) each call. Empty when
