@@ -367,12 +367,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     pr.number
                 ))
                 .await;
-                // A conflict comment on a PR is a dead-end — no agent works PRs.
-                // Turn it into a chore so a DEV actually rebases/resolves it,
-                // draining the pile-up instead of leaving it stuck.
-                if !pr.mergeable {
-                    self.file_conflict_chore(pr.number, &pr.head).await;
-                }
+                // Conflicts are resolved IN PLACE on the original branch by
+                // address_pr_feedback — never filed as tickets: a ticket spawns
+                // a NEW branch + PR, which is how a queue explodes.
                 continue;
             }
             let Ok(diff) = forge.pr_diff(pr.number).await else {
@@ -1093,6 +1090,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         };
         let now = crate::state::now_rfc3339();
         let leader = self.store.acquire_leader(&me, &now).await.unwrap_or(true);
+        // Merge-queue recovery flag (set by the leader once the queue blows up).
+        let mut recovery = false;
         // Announce presence in the shared registry so every dashboard (even on
         // another machine) can list this team as online.
         let _ = self
@@ -1121,6 +1120,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // a glance, so the user doesn't need the dashboard open to keep up.
             self.post_daily_digest().await;
 
+            // Merge-queue recovery gate: with a blown-up queue the ONLY useful
+            // work is merging — creative roles are paused below.
+            recovery = self.run_queue_recovery(self.open_pr_count().await).await;
+
             // Ops/SRE: ping the deployed app; file a bug + alert on an outage.
             self.ops_monitor().await;
 
@@ -1147,10 +1150,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // correct for every n including 1 (unlike `cycle % n == 1`).
             let ba_every = self.config.workflow.ba_every_n_cycles;
             if !refactoring && ba_every > 0 && (cycle - 1) % ba_every == 0 {
-                self.report("BA", "proposing features");
-                match self.ba().execute().await {
-                    Ok(ids) => report.ba_created = ids,
-                    Err(e) => report.errors.push(format!("BA: {e}")),
+                if recovery {
+                    report
+                        .errors
+                        .push("BA: paused — merge-queue recovery".to_owned());
+                } else {
+                    self.report("BA", "proposing features");
+                    match self.ba().execute().await {
+                        Ok(ids) => report.ba_created = ids,
+                        Err(e) => report.errors.push(format!("BA: {e}")),
+                    }
                 }
             }
 
@@ -1279,16 +1288,24 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 .as_ref()
                 .or(report.bug_fixed.as_ref())
                 .map_or_else(|| "build".to_owned(), ToString::to_string);
-            self.report("TEST", &verifying);
-            match self.test().execute().await {
-                Ok(ids) => report.bugs_filed = ids,
-                Err(e) => report.errors.push(format!("TEST: {e}")),
-            }
+            if recovery {
+                // TEST would only re-discover bugs whose fixes are stuck in the
+                // queue and file duplicates — hold it until the queue drains.
+                report
+                    .errors
+                    .push("TEST: paused — merge-queue recovery".to_owned());
+            } else {
+                self.report("TEST", &verifying);
+                match self.test().execute().await {
+                    Ok(ids) => report.bugs_filed = ids,
+                    Err(e) => report.errors.push(format!("TEST: {e}")),
+                }
 
-            // Governance: architecture-conformance drift becomes tracked bugs.
-            match self.conformance().execute().await {
-                Ok(mut ids) => report.bugs_filed.append(&mut ids),
-                Err(e) => report.errors.push(format!("CONFORMANCE: {e}")),
+                // Governance: architecture-conformance drift becomes tracked bugs.
+                match self.conformance().execute().await {
+                    Ok(mut ids) => report.bugs_filed.append(&mut ids),
+                    Err(e) => report.errors.push(format!("CONFORMANCE: {e}")),
+                }
             }
 
             // Auto-merge: SA deep-dives open PRs and merges or requests changes.
@@ -1352,75 +1369,6 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 ok,
                 summary: summary.to_owned(),
             });
-            let _ = self.store.save(&state).await;
-        }
-    }
-
-    /// Turn a failed deploy into a high-priority bug so DEV-BUG will fix it.
-    /// Deduped: only one open "Deploy failing" bug exists at a time, refreshed
-    /// with the latest error. Returns the new ticket id when one is filed.
-    /// Turn a stuck (conflicted) PR into a chore so a DEV rebases and resolves
-    /// it — otherwise conflicted PRs pile up forever. Deduped per PR number.
-    async fn file_conflict_chore(&self, pr: u64, head: &str) {
-        use coxagent_domain::ticket::{Complexity, Priority, TicketType};
-        let marker = format!("Resolve merge conflict on PR #{pr}");
-        let Ok(state) = self.store.load().await else {
-            return;
-        };
-        if state
-            .tickets
-            .iter()
-            .any(|t| t.title().starts_with(&marker) && t.status() != coxagent_domain::Status::Done)
-        {
-            return;
-        }
-        let adder = crate::use_cases::AddTicketUseCase::new(Arc::clone(&self.store));
-        let Ok(id) = adder
-            .execute(crate::use_cases::AddTicketInput {
-                ticket_type: TicketType::Chore,
-                title: marker,
-                description: format!(
-                    "PR #{pr} (branch `{head}`) has merge conflicts with the base branch. \
-                     Check out `{head}`, rebase it onto the latest base, resolve every conflict \
-                     keeping both sides' intended behaviour, run the build/tests, and push so the \
-                     PR becomes mergeable."
-                ),
-                priority: Priority::High,
-                complexity: Complexity::Small,
-                has_ui: false,
-                acceptance_criteria: vec![
-                    format!("PR #{pr} is mergeable (no conflicts)"),
-                    "No behaviour from either side is lost".to_owned(),
-                ],
-            })
-            .await
-        else {
-            return;
-        };
-
-        // A rebase is mechanical — it needs no architecture. Attach a minimal
-        // technical design and ready it directly so a DEV picks it up next cycle
-        // instead of waiting a full SA pass. Then post it as a visible ACTION so
-        // the raised blocker is tied to concrete, tracked work in the feed.
-        if let Ok(mut state) = self.store.load().await {
-            if let Some(t) = state.ticket_mut(&id) {
-                let design = coxagent_domain::TechnicalDesign {
-                    approach: format!(
-                        "Rebase `{head}` onto base and resolve conflicts; no design change."
-                    ),
-                    ..Default::default()
-                };
-                let _ = t.set_technical_design(coxagent_domain::Role::Sa, design);
-                let _ = t.transition_to(coxagent_domain::Role::Sa, coxagent_domain::Status::Ready);
-            }
-            let action = if self.config.workflow.language.is_vi() {
-                format!("🎫 Action: đã tạo {id} — DEV rebase & xử lý merge conflict cho PR #{pr}.")
-            } else {
-                format!(
-                    "🎫 Action: {id} filed — DEV to rebase & resolve merge conflict on PR #{pr}."
-                )
-            };
-            state.post_comment("SM", &action, None);
             let _ = self.store.save(&state).await;
         }
     }
@@ -1658,13 +1606,18 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let mut queue: Vec<_> = prs.into_iter().filter(|p| p.base == target).collect();
         queue.sort_by(|a, b| a.created.cmp(&b.created));
         // Normally 1 fix per cycle bounds token cost; under the clean-base gate
-        // (refactor waiting on an empty queue) drain twice as fast.
-        let mut fix_budget: u32 = if self.clean_base_required().await {
+        // (refactor waiting on an empty queue) drain twice as fast; in full
+        // queue RECOVERY (nothing else runs) drain as hard as we can afford.
+        let recovering = self.store.load().await.is_ok_and(|s| s.queue_recovery);
+        let mut fix_budget: u32 = if recovering {
+            4
+        } else if self.clean_base_required().await {
             2
         } else {
             1
         };
-        for pr in queue.into_iter().take(6) {
+        let scan = if recovering { 20 } else { 6 };
+        for pr in queue.into_iter().take(scan) {
             // What needs fixing? Explicit review feedback, and/or merge conflicts
             // — conflicts are handled IMMEDIATELY, not parked for a review round.
             let feedback = forge.pr_feedback(pr.number).await.unwrap_or_default();
@@ -1798,6 +1751,105 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// The SA says the quiet part out loud, once per sprint: the refactor is ON
     /// HOLD until every open PR merges — posted to the Scrum feed AND #agents
     /// so the human sees the plan instead of a silently paused team.
+    /// Open PRs into the flow base, when git+forge are configured.
+    async fn open_pr_count(&self) -> Option<usize> {
+        if !self.config.git.enabled || self.config.git.max_open_prs == 0 {
+            return None;
+        }
+        let forge = self.forge.as_ref()?;
+        let prs = forge.list_open_prs().await.ok()?;
+        let target = self.flow_base();
+        Some(prs.iter().filter(|p| p.base == target).count())
+    }
+
+    /// Recovery trips when the queue is at 2× the WIP limit (min 8) — past that
+    /// point normal cycles can never drain it, so the team must switch to
+    /// merge-only work.
+    fn recovery_threshold(&self) -> usize {
+        (self.config.git.max_open_prs as usize * 2).max(8)
+    }
+
+    /// Merge-queue RECOVERY: entered automatically when the queue blows past
+    /// [`Self::recovery_threshold`]. While active, cycles do merge/conflict work
+    /// ONLY — no BA proposals, no TEST bug-filing (they just re-discover bugs
+    /// whose fixes are stuck in the queue), no new branches. On entry: announce
+    /// in #agents, reset the per-PR fix-attempt brakes so parked PRs get retried,
+    /// and close obsolete "Resolve merge conflict on PR #N" resolver-PRs (that
+    /// anti-pattern is exactly what piled the queue up). Exits, with an
+    /// announcement, once the queue is back under the WIP limit.
+    async fn run_queue_recovery(&self, open: Option<usize>) -> bool {
+        let Some(open) = open else { return false };
+        let limit = self.config.git.max_open_prs as usize;
+        let vi = self.config.workflow.language.is_vi();
+        if open < self.recovery_threshold() {
+            // Below the trip point. If we were recovering and are now under the
+            // WIP limit, declare recovery over.
+            if open <= limit {
+                let msg = if vi {
+                    format!("✅ Queue đã hồi phục — còn {open} PR mở (limit {limit}). Team quay lại làm việc bình thường.")
+                } else {
+                    format!("✅ Merge queue recovered — {open} open PR(s) (limit {limit}). Back to normal work.")
+                };
+                let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                    if s.queue_recovery {
+                        s.queue_recovery = false;
+                        s.post_chat_in("SA", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+                    }
+                    Ok(())
+                })
+                .await;
+            }
+            return false;
+        }
+        let msg = if vi {
+            format!(
+                "🚨 RECOVERY MODE: {open} PR đang mở (ngưỡng {}). Từ giờ mỗi cycle chỉ merge + gỡ \
+                 conflict — không code mới, không file bug mới (bug cũ chưa merge thì test lại chỉ \
+                 đẻ trùng). Đóng các PR 'resolve conflict' mồ côi. Queue về dưới {limit} là team \
+                 chạy lại bình thường.",
+                self.recovery_threshold()
+            )
+        } else {
+            format!(
+                "🚨 RECOVERY MODE: {open} open PRs (threshold {}). Cycles now do merge/conflict \
+                 work only — no new code, no new bug filing. Obsolete resolver-PRs get closed. \
+                 Normal work resumes under {limit} open PRs.",
+                self.recovery_threshold()
+            )
+        };
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+            if !s.queue_recovery {
+                s.queue_recovery = true;
+                // Give every parked PR another shot under the new regime.
+                s.pr_fix_attempts.clear();
+                s.post_comment("SA", &msg, None);
+                s.post_chat_in("SA", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+            }
+            Ok(())
+        })
+        .await;
+        // Resolver-PRs ("Resolve merge conflict on PR #N") are the anti-pattern
+        // that inflated the queue — conflicts are fixed on the ORIGINAL branch by
+        // address_pr_feedback, so these are pure noise. Close them.
+        if let Some(forge) = &self.forge {
+            if let Ok(prs) = forge.list_open_prs().await {
+                for p in prs
+                    .iter()
+                    .filter(|p| p.title.contains("Resolve merge conflict on PR #"))
+                {
+                    if forge.close_pr(p.number).await.is_ok() {
+                        self.log_git(&format!(
+                            "recovery: closed obsolete resolver PR #{} ({})",
+                            p.number, p.title
+                        ))
+                        .await;
+                    }
+                }
+            }
+        }
+        true
+    }
+
     async fn announce_drain_hold(&self, open: usize) {
         let Ok(state) = self.store.load().await else {
             return;

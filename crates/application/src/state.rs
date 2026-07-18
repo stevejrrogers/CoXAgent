@@ -436,6 +436,11 @@ pub struct ProjectState {
     /// burning tokens forever; entries are dropped when the PR closes.
     #[serde(default)]
     pub pr_fix_attempts: std::collections::BTreeMap<u64, u32>,
+    /// True while the team is in merge-queue RECOVERY: the open-PR count blew
+    /// past twice the WIP limit, so cycles do merge/conflict work only until
+    /// the queue is back under the limit.
+    #[serde(default)]
+    pub queue_recovery: bool,
     /// The sprint number the clean-base drain notice was last announced for, so
     /// the SA explains the "merge everything first" hold once per sprint, not
     /// every cycle.
@@ -463,6 +468,7 @@ impl Default for ProjectState {
     fn default() -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
+            queue_recovery: false,
             alias: String::new(),
             display_name: None,
             current_version: SemVer::default(),

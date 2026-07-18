@@ -182,8 +182,8 @@ impl ForgePort for GhForge {
             .gh(&[
                 // gh caps at 30 without --limit — with a long queue the sweep
                 // and WIP gate would silently see only the newest PRs.
-                "pr", "list", "--repo", &self.repo, "--state", "open", "--limit", "200",
-                "--json", PR_FIELDS,
+                "pr", "list", "--repo", &self.repo, "--state", "open", "--limit", "200", "--json",
+                PR_FIELDS,
             ])
             .await?;
         let raws: Vec<RawPr> = serde_json::from_str(&json)
