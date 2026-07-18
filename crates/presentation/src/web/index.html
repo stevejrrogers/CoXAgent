@@ -1814,7 +1814,7 @@ function metricsFrom(s){const t=s.tickets||[],h=s.history||[],isF=x=>x.type!=="b
     inflight:t.filter(x=>isF(x)&&(x.status==="ready"||x.status==="in_progress")).length,
     openBugs:t.filter(x=>x.type==="bug"&&x.status==="open").length,
     docd:t.filter(x=>x.status==="documented").length,releases:h.length};}
-function kpi(k,v){return `<div class="kpi"><div class="ic"><i class="ti ${KPI_IC[k]||'ti-point'}"></i></div><div class="v">${v}</div><div class="k">${k}</div></div>`;}
+function kpi(k,v,sub){return `<div class="kpi"><div class="ic"><i class="ti ${KPI_IC[k]||'ti-point'}"></i></div><div class="v">${v}</div><div class="k">${k}${sub?` <span style="color:var(--green);font-weight:600">· ${sub}</span>`:""}</div></div>`;}
 function alertsHtml(s,m,spend){
   const al=[];
   if(s.deploy&&!s.deploy.ok)al.push(["red","cloud-x","Last deployment failed",esc(s.deploy.summary)]);
@@ -2190,6 +2190,18 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
   }else if(CUR==="insights"){
     const sp=s.spend||{by_role:{}};const tok=(sp.input_tokens||0)+(sp.output_tokens||0);
     document.getElementById("cost-kpis").innerHTML=[kpi("Total spend",money(sp.total_cost_usd)),kpi("Tokens",fmtK(tok)),kpi("Runs",sp.runs||0)].join("");
+    // Counterfactual annotation, async: what this would have cost WITHOUT the
+    // token-saver. Saved chars ≈ 4 chars/token, priced at this project's own
+    // blended $/token — estimates, marked with ~.
+    fetch("/api/token-saver").then(r=>r.json()).then(ts=>{
+      if(!(ts&&ts.saved>0&&tok>0))return;
+      const savedTok=Math.round(ts.saved/4);
+      const wouldTok=tok+savedTok;
+      const wouldCost=(sp.total_cost_usd||0)*(wouldTok/tok);
+      const el=document.getElementById("cost-kpis");if(!el||CUR!=="insights")return;
+      el.innerHTML=[kpi("Total spend",money(sp.total_cost_usd),"không nén: ~"+money(wouldCost)),
+        kpi("Tokens",fmtK(tok),"không nén: ~"+fmtK(wouldTok)),kpi("Runs",sp.runs||0)].join("");
+    }).catch(()=>{});
     const roles=Object.entries(sp.by_role||{}).sort((a,b)=>b[1]-a[1]);
     const max=roles.length?roles[0][1]:1;
     document.getElementById("cost-roles").innerHTML=roles.length?roles.map(([r,c])=>{
