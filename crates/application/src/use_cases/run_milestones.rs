@@ -126,10 +126,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunMilestonesUseCase<S, E> {
 }
 
 fn prompt_system() -> String {
-    crate::prompts::system_prompt(
-        "You are the Product Owner. Turn the goal into a sequential milestone roadmap — a few \
-         meaningful, shippable outcomes, each possibly spanning several sprints.",
-    )
+    crate::prompts::system_prompt(crate::prompts::PO)
 }
 
 fn parse(raw: &str) -> Result<Vec<MilestoneOut>, String> {

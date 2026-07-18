@@ -93,7 +93,10 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunStandupUseCase<
             self.engine.as_ref(),
             &self.work_dir,
             self.lang,
-            "You are facilitating an autonomous software team's daily standup.",
+            &format!(
+                "{}\n\nYou are facilitating this team's daily standup.",
+                crate::prompts::SM
+            ),
             &roster,
             &task,
         )
