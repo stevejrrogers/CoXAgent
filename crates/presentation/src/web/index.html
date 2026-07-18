@@ -147,7 +147,16 @@
   .cg-fm{font-size:11.5px;color:var(--dim);margin-top:3px;display:flex;align-items:center;gap:6px}
   .cg-badge{background:var(--card2);border-radius:5px;padding:1px 7px;font-size:10px;color:var(--muted)}
   .cg-sym{cursor:pointer} .cg-sym:hover{background:var(--card2)}
-  .cg-graph{background:var(--card);border:1px solid var(--border);border-radius:10px;overflow:hidden}
+  .cg-graph{background:var(--card);border:1px solid var(--border);border-radius:10px;overflow:hidden;cursor:grab}
+  .cg-graph:active{cursor:grabbing}
+  .cg-hubs{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px}
+  .cg-hub{display:inline-flex;align-items:center;gap:6px;background:var(--card);border:1px solid var(--border2);border-radius:20px;padding:5px 12px;color:var(--muted);font-family:ui-monospace,monospace;font-size:11.5px;cursor:pointer}
+  .cg-hub:hover{color:var(--text);border-color:var(--amber)}
+  .cg-hub b{color:var(--amber)}
+  .cg-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:8px;font-size:11.5px;color:var(--muted)}
+  .cg-leg{display:inline-flex;align-items:center;gap:5px}
+  .cg-leg .sdot{width:8px;height:8px;border-radius:50%;display:inline-block}
+  .cg-card{background:var(--card);border:1px solid var(--accent);border-radius:10px;padding:11px 13px;margin-top:10px;animation:cmpop .15s ease}
   .cg-svg{width:100%;height:auto;display:block}
   .cg-edges line{stroke:var(--border2);stroke-width:1}
   .cg-edges line.hot{stroke:var(--accent2);stroke-width:2}
@@ -4805,8 +4814,11 @@ function renderCodeMapMain(d){
    </div>
    <div style="font-size:11px;color:var(--dim);margin:4px 0 12px">built ${esc((d.built_at||'').slice(0,16).replace('T',' '))} · agents also read <code style="font-family:ui-monospace,monospace">.coxagent/REPO_MAP.md</code></div>
    <div class="cg-langs">${langChips}</div>
-   <div class="sec" style="margin-top:6px">Dependency graph <span style="font-size:11px;color:var(--dim);font-weight:400">· how files import each other — hover a node</span></div>
+   <div class="sec" style="margin-top:6px">Dependency graph <span style="font-size:11px;color:var(--dim);font-weight:400">· hover highlights · click pins · scroll zooms · drag pans</span></div>
+   <div id="cg-hubs" class="cg-hubs"></div>
    <div id="cg-graph" class="cg-graph"><div class="empty" style="padding:20px">loading graph…</div></div>
+   <div id="cg-legend" class="cg-legend"></div>
+   <div id="cg-info"></div>
    <div class="cg-search" style="margin-top:14px"><i class="ti ti-search"></i><input id="cg-q" placeholder="Search symbols — functions, structs, classes…" oninput="cgSearch(this.value)" autocomplete="off"></div>
    <div id="cg-results"></div>
    <div class="sec" style="margin-top:16px">Top files <span style="font-size:11px;color:var(--dim);font-weight:400">· most symbols first</span></div>
@@ -4814,11 +4826,30 @@ function renderCodeMapMain(d){
   cgLoadGraph();
 }
 const CG_LANGCOL={rust:"#dea584",python:"#4b8bbe",typescript:"#3178c6",tsx:"#3178c6",javascript:"#e8d44d",go:"#00add8",java:"#e76f00",csharp:"#68217a",swift:"#f05138",ruby:"#cc342d",c:"#8a8a8a",cpp:"#f34b7d",php:"#777bb4"};
+// Stable colour per top-level module (folder) — far more informative than
+// per-language colouring in a single-language repo.
+const CG_MODPAL=["#38bdf8","#a78bfa","#34d399","#fbbf24","#f472b6","#fb7185","#5eead4","#c4b5fd","#fca5a5","#86efac"];
+function cgModule(p){const seg=p.split("/");if(seg.length<2)return "(root)";
+  // Generic containers (crates/, packages/…) aren't modules — descend one level.
+  const generic=["crates","packages","apps","libs","src","modules","services"];
+  return generic.includes(seg[0])&&seg.length>2?seg[0]+"/"+seg[1]:seg[0];}
+function cgModColor(mods,m){return CG_MODPAL[mods.indexOf(m)%CG_MODPAL.length];}
 async function cgLoadGraph(){
   const box=document.getElementById("cg-graph");if(!box)return;
   let d={};try{d=await(await fetch(api("/codegraph/deps"))).json();}catch(e){}
   if(!d.nodes||!d.nodes.length){box.innerHTML='<div class="empty" style="padding:20px;font-size:12px">no import relationships detected between files</div>';return;}
+  // Hubs: the most-connected files — the heart of the codebase.
+  const degAll={};(d.links||[]).forEach(l=>{degAll[l.source]=(degAll[l.source]||0)+1;degAll[l.target]=(degAll[l.target]||0)+1;});
+  const hubs=Object.entries(degAll).sort((a,b)=>b[1]-a[1]).slice(0,6);
+  const hubEl=document.getElementById("cg-hubs");
+  if(hubEl)hubEl.innerHTML=hubs.map(([f,n])=>`<button class="cg-hub" onclick="cgFocusNode('${esc(f)}')" title="${esc(f)}"><i class="ti ti-flame" style="color:var(--amber)"></i> ${esc(f.split("/").slice(-1)[0])} <b>${n}</b></button>`).join("");
   cgRenderGraph(box,d.nodes,d.links||[]);
+}
+function cgFocusNode(path){
+  const box=document.getElementById("cg-graph");if(!box)return;
+  const g=[...box.querySelectorAll(".cgn")].find(n=>n.dataset.path===path);
+  if(g){g.dispatchEvent(new Event("mouseenter"));box.scrollIntoView({behavior:"smooth",block:"center"});
+    setTimeout(()=>g.dispatchEvent(new Event("mouseleave")),2500);}
 }
 // Tiny force-directed layout (no libs): repulsion + link springs + centering.
 function cgRenderGraph(box,rawNodes,rawLinks){
@@ -4837,20 +4868,56 @@ function cgRenderGraph(box,rawNodes,rawLinks){
     for(const n of nodes){n.x+=n.vx;n.y+=n.vy;n.x=Math.max(24,Math.min(W-24,n.x));n.y=Math.max(20,Math.min(H-20,n.y));}
   }
   const short=p=>p.split("/").slice(-1)[0];
+  // Colour by top-level module: structure jumps out even in a one-language repo.
+  const mods=[...new Set(nodes.map(n=>cgModule(n.id)))].sort();
   const line=links.map(l=>`<line class="cge" data-s="${l.s}" data-t="${l.t}" x1="${nodes[l.s].x.toFixed(1)}" y1="${nodes[l.s].y.toFixed(1)}" x2="${nodes[l.t].x.toFixed(1)}" y2="${nodes[l.t].y.toFixed(1)}"/>`).join("");
-  const circ=nodes.map((n,i)=>{const r=Math.max(4,Math.min(13,4+Math.sqrt(n.symbols||0)*1.3));const col=CG_LANGCOL[n.lang]||"#888";
+  const circ=nodes.map((n,i)=>{const r=Math.max(4,Math.min(14,4+Math.sqrt(deg[i]||0)*2.2));const col=cgModColor(mods,cgModule(n.id));
     const showLabel=(deg[i]||0)>=2;
-    return `<g class="cgn" data-i="${i}" transform="translate(${n.x.toFixed(1)},${n.y.toFixed(1)})"><title>${esc(n.id)} · ${n.symbols} symbols · ${deg[i]||0} links</title>
+    return `<g class="cgn" data-i="${i}" data-path="${esc(n.id)}" transform="translate(${n.x.toFixed(1)},${n.y.toFixed(1)})"><title>${esc(n.id)} · ${n.symbols} symbols · ${deg[i]||0} links</title>
       <circle r="${r.toFixed(1)}" fill="${col}"/>${showLabel?`<text x="${(r+3).toFixed(1)}" y="3" class="cgl">${esc(short(n.id))}</text>`:''}</g>`;}).join("");
-  box.innerHTML=`<svg viewBox="0 0 ${W} ${H}" class="cg-svg"><g class="cg-edges">${line}</g><g class="cg-nodes">${circ}</g></svg>`;
-  // Hover a node → highlight its edges + neighbours.
+  box.innerHTML=`<svg viewBox="0 0 ${W} ${H}" class="cg-svg"><g class="cg-view"><g class="cg-edges">${line}</g><g class="cg-nodes">${circ}</g></g></svg>`;
+  const legend=document.getElementById("cg-legend");
+  if(legend)legend.innerHTML=mods.map(m=>`<span class="cg-leg"><span class="sdot" style="background:${cgModColor(mods,m)}"></span>${esc(m)}</span>`).join("");
+  // Hover highlights; click pins the highlight + shows an info card.
+  let pinned=-1;
+  const highlight=i=>{const nb=new Set([i]);
+    box.querySelectorAll(".cge").forEach(e=>{const s=+e.dataset.s,t=+e.dataset.t;const on=s===i||t===i;e.classList.toggle("hot",on);if(on){nb.add(s);nb.add(t);}});
+    box.querySelectorAll(".cgn").forEach(n=>n.classList.toggle("dim",!nb.has(+n.dataset.i)));};
+  const clear=()=>{box.querySelectorAll(".cge").forEach(e=>e.classList.remove("hot"));box.querySelectorAll(".cgn").forEach(n=>n.classList.remove("dim"));};
+  const info=document.getElementById("cg-info");
+  const showInfo=i=>{const n=nodes[i];if(!info)return;
+    const ins=links.filter(l=>l.t===i).length,outs=links.filter(l=>l.s===i).length;
+    info.innerHTML=`<div class="cg-card"><div class="cg-fp" style="font-weight:700">${esc(n.id)}</div>
+      <div class="cg-fm">${n.symbols||0} symbols · <span style="color:var(--green)">${ins} imported-by</span> · <span style="color:var(--accent2)">${outs} imports</span> · module <b>${esc(cgModule(n.id))}</b></div>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button class="gc-btn" onclick="openFile('${esc(n.id)}')"><i class="ti ti-file-code"></i> Preview</button>
+        <button class="gc-btn" onclick="cgSearchFileSyms('${esc(short(n.id))}')"><i class="ti ti-search"></i> Symbols</button>
+        <button class="gc-btn" onclick="document.getElementById('cg-info').innerHTML='';"><i class="ti ti-x"></i></button>
+      </div></div>`;};
   box.querySelectorAll(".cgn").forEach(g=>{
-    g.addEventListener("mouseenter",()=>{const i=+g.dataset.i;const nb=new Set([i]);
-      box.querySelectorAll(".cge").forEach(e=>{const s=+e.dataset.s,t=+e.dataset.t;const on=s===i||t===i;e.classList.toggle("hot",on);if(on){nb.add(s);nb.add(t);}});
-      box.querySelectorAll(".cgn").forEach(n=>n.classList.toggle("dim",!nb.has(+n.dataset.i)));});
-    g.addEventListener("mouseleave",()=>{box.querySelectorAll(".cge").forEach(e=>e.classList.remove("hot"));box.querySelectorAll(".cgn").forEach(n=>n.classList.remove("dim"));});
+    g.addEventListener("mouseenter",()=>{if(pinned<0)highlight(+g.dataset.i);});
+    g.addEventListener("mouseleave",()=>{if(pinned<0)clear();});
+    g.addEventListener("click",e=>{e.stopPropagation();const i=+g.dataset.i;
+      if(pinned===i){pinned=-1;clear();if(info)info.innerHTML="";return;}
+      pinned=i;highlight(i);showInfo(i);});
   });
+  // Wheel zoom + drag pan on the inner group (viewBox stays fixed).
+  const svg=box.querySelector(".cg-svg"),view=box.querySelector(".cg-view");
+  let zx=1,tx=0,ty=0,drag=null;
+  const apply=()=>view.setAttribute("transform",`translate(${tx},${ty}) scale(${zx})`);
+  svg.addEventListener("wheel",e=>{e.preventDefault();
+    const nz=Math.max(.5,Math.min(4,zx*(e.deltaY<0?1.12:.89)));
+    const pt=svg.createSVGPoint();pt.x=e.offsetX/svg.clientWidth*W;pt.y=e.offsetY/svg.clientHeight*H;
+    tx=pt.x-(pt.x-tx)*(nz/zx);ty=pt.y-(pt.y-ty)*(nz/zx);zx=nz;apply();},{passive:false});
+  svg.addEventListener("mousedown",e=>{drag={x:e.clientX,y:e.clientY,tx,ty};});
+  window.addEventListener("mousemove",e=>{if(!drag)return;
+    tx=drag.tx+(e.clientX-drag.x)/svg.clientWidth*W;ty=drag.ty+(e.clientY-drag.y)/svg.clientHeight*H;apply();});
+  window.addEventListener("mouseup",()=>{drag=null;});
+  svg.addEventListener("click",()=>{if(pinned>=0){pinned=-1;clear();if(info)info.innerHTML="";}});
 }
+// Search box helper: prefill with a file's stem to list its symbols.
+function cgSearchFileSyms(stem){const q=document.getElementById("cg-q");if(!q)return;
+  q.value=stem.replace(/\.[a-z]+$/,"");q.focus();cgSearch(q.value);}
 async function buildCodeMap(btn){const o=btn.innerHTML;btn.innerHTML='<i class="ti ti-loader-2 att-spin"></i> Indexing…';btn.disabled=true;
   try{const d=await(await fetch(api("/codegraph/build"),{method:"POST"})).json();CG=d;renderCodeMapMain(d);toasty("Code map built — "+d.files+" files, "+d.symbols+" symbols","ok");}
   catch(e){toasty("Build failed","err");btn.innerHTML=o;btn.disabled=false;}
