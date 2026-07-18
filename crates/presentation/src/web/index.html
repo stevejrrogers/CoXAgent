@@ -1284,7 +1284,7 @@ textarea.np-in{resize:vertical;line-height:1.5}
     <div id="user-badge" class="userbox">
       <div class="uavatar"><span id="ub-initials">U</span></div>
       <div class="uinfo"><div id="ub-name" class="uname"></div><span id="ub-role" class="urole"></span></div>
-      <button id="getapp-btn" onclick="openGetApp()" title="Get the app" class="ulogout"><i id="getapp-ic" class="ti ti-download"></i><span class="upd-dot" hidden></span></button>
+      <button id="getapp-btn" onclick="openGetApp()" title="Get the app" class="ulogout"><i id="getapp-ic" class="ti ti-download"></i><span id="getapp-ver" hidden style="font-size:11px;font-weight:700;margin-left:5px;letter-spacing:.01em"></span><span class="upd-dot" hidden></span></button>
       <button onclick="doLogout()" title="Sign out" class="ulogout"><i class="ti ti-logout"></i></button>
     </div>
   </aside>
@@ -1293,6 +1293,10 @@ textarea.np-in{resize:vertical;line-height:1.5}
     <div class="np-head"><div class="np-mark"><i class="ti ti-download"></i></div>
       <div><h3>Get CoXAgent</h3><div class="np-sub" id="ga-ver"></div></div></div>
     <div id="ga-list" style="display:flex;flex-direction:column;gap:8px"></div>
+    <div id="ga-notes" hidden style="margin-top:14px">
+      <div style="font-size:11.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);margin-bottom:6px">What's new</div>
+      <div id="ga-notes-body" style="background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:11px 13px;font-size:12.5px;color:var(--muted);line-height:1.6;white-space:pre-wrap;max-height:180px;overflow-y:auto"></div>
+    </div>
   </div></div>
 
   <main class="main">
@@ -2571,12 +2575,16 @@ async function checkAppUpdate(){
     btn.title=newer?("CoXAgent "+d.latest_version+" đã có — bấm để cập nhật"):"Get the app";
     const dot=btn.querySelector(".upd-dot");if(dot)dot.hidden=!newer;
     if(ic)ic.className=newer?"ti ti-rocket":"ti ti-download";
+    const ver=document.getElementById("getapp-ver");
+    if(ver){ver.hidden=!newer;ver.textContent=newer?("v"+d.latest_version):"";}
   }
 }
 function coxSelfUpdate(url){
   try{
     window.webkit.messageHandlers.coxupdate.postMessage(url);
     toasty("Đang tải bản cập nhật — app sẽ tự khởi động lại khi xong","ok");
+    const ic=document.getElementById("getapp-ic");
+    if(ic)ic.className="ti ti-loader-2 att-spin";
     close_("ov-getapp");
   }catch(e){window.open(url,"_blank");}
 }
@@ -2587,7 +2595,11 @@ async function openGetApp(){
   await checkAppUpdate();
   const d=window._appLatest||{downloads:{}};
   const dl=d.downloads||{};
-  document.getElementById("ga-ver").textContent=d.latest_version?("phiên bản mới nhất: "+d.latest_version):"chưa cấu hình release — Settings → Workspace";
+  const upToDate=d.latest_version&&d.hub_version&&!verGt(d.latest_version,d.hub_version);
+  document.getElementById("ga-ver").textContent=
+    !d.latest_version?"chưa cấu hình release — Settings → Workspace"
+    :upToDate?("bạn đang chạy v"+d.hub_version+" — mới nhất ✓")
+    :("bạn đang chạy v"+d.hub_version+" → mới nhất v"+d.latest_version);
   const plats=[["macos","macOS","brand-apple",".dmg"],["windows","Windows","brand-windows",".exe"],["linux","Linux","brand-ubuntu",".tar.gz"],["ios","iOS","device-mobile","App Store / TestFlight"]];
   const mine=/Mac/i.test(navigator.platform)?"macos":/Win/i.test(navigator.platform)?"windows":/Linux/i.test(navigator.platform)?"linux":"";
   // Inside the macOS shell we can self-update in place — one click, app
@@ -2600,6 +2612,9 @@ async function openGetApp(){
       return `<button onclick="coxSelfUpdate(location.origin+'/api/app/download/macos.dmg')" class="gc-btn" style="display:flex;align-items:center;gap:10px;padding:12px 14px;border-color:var(--accent);cursor:pointer;width:100%;text-align:left"><i class="ti ti-${icon}" style="font-size:19px"></i><b style="flex:1">${label}</b><span style="font-size:11px;color:var(--accent2)">cập nhật & tự khởi động lại</span><i class="ti ti-refresh"></i></button>`;
     return `<a href="${esc(url)}" target="_blank" rel="noopener" class="gc-btn" style="display:flex;align-items:center;gap:10px;padding:12px 14px;text-decoration:none;${on?"border-color:var(--accent)":""}"><i class="ti ti-${icon}" style="font-size:19px"></i><b style="flex:1">${label}</b><span style="font-size:11px;color:var(--dim)">${hint}${on?" · máy này":""}</span><i class="ti ti-download"></i></a>`;
   }).join("");
+  const nw=document.getElementById("ga-notes");
+  if(nw){const has=!!(d.notes&&d.notes.trim())&&!upToDate;nw.hidden=!has;
+    if(has)document.getElementById("ga-notes-body").textContent=d.notes.trim();}
   document.getElementById("ov-getapp").classList.add("open");
 }
 // Projects the caller may invite into: super = every project; space admin =
@@ -4682,7 +4697,8 @@ function startApp(){
   loadProjects();
   checkAgentSetup(false);
   ensureNotifPermission();
-  checkAppUpdate();setInterval(checkAppUpdate,30*60*1000);
+  checkAppUpdate();setInterval(checkAppUpdate,5*60*1000);
+  window.addEventListener("focus",()=>checkAppUpdate());
   fetch("/api/health").then(r=>r.json()).then(h=>{const b=document.getElementById("brand-ver");if(b&&h.version)b.textContent="v"+h.version;}).catch(()=>{});
 }
 const AGENT_CLIS={claude:{label:"Claude Code",desc:"Anthropic's coding agent",install:"curl -fsSL https://claude.ai/install.sh | bash",docs:"https://claude.com/claude-code"},

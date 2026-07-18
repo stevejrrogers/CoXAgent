@@ -239,6 +239,10 @@ struct DownloadsCfg {
     /// App Store / TestFlight link — iOS can't sideload, so this is a URL only.
     #[serde(default)]
     ios: String,
+    /// Release notes of the latest version (from the GitHub release body,
+    /// capped) — shown as "What's new" in the update modal.
+    #[serde(default)]
+    notes: String,
 }
 
 /// One shareable invite link: whoever opens it can create their own account
@@ -1679,6 +1683,7 @@ async fn app_latest_ep(State(app): State<AppState>) -> impl IntoResponse {
         "downloads": {
             "macos": d.macos, "windows": d.windows, "linux": d.linux, "ios": d.ios,
         },
+        "notes": d.notes,
         "releases_repo": d.releases_repo,
     }))
 }
@@ -1789,7 +1794,7 @@ async fn releases_watchdog(app: AppState) {
                     "api",
                     &format!("repos/{}/releases/latest", repo.trim()),
                     "--jq",
-                    "{tag: .tag_name, assets: [.assets[] | {name, url: .browser_download_url}]}",
+                    "{tag: .tag_name, body: .body, assets: [.assets[] | {name, url: .browser_download_url}]}",
                 ])
                 .stdin(std::process::Stdio::null())
                 .output()
@@ -1831,6 +1836,13 @@ async fn releases_watchdog(app: AppState) {
                         if !tag.is_empty() {
                             d.latest_version = tag;
                         }
+                        d.notes = v
+                            .get("body")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("")
+                            .chars()
+                            .take(1500)
+                            .collect();
                         // Auto-fill only where no manual override exists.
                         if d.macos.is_empty() || d.macos.contains("/releases/") {
                             d.macos = dmg;
