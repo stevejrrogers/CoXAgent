@@ -41,17 +41,6 @@ services:
     volumes: ["coxagent_mongo:/data/db"]
     restart: unless-stopped
 
-  # Throwaway Postgres the CXC test-suite points at (55432).
-  test-db:
-    image: postgres:16-alpine
-    container_name: cxc-test-pg
-    environment:
-      POSTGRES_DB: cxc
-      POSTGRES_USER: cxc
-      POSTGRES_PASSWORD: cxc
-    ports: ["55432:5432"]
-    restart: unless-stopped
-
 volumes:
   cox_pgdata:
     external: true
