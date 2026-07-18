@@ -1161,7 +1161,12 @@ body:not(.manage) .manage-only { display: none !important; }
 .urole{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;padding:1px 6px;border-radius:5px;align-self:flex-start}
 .urole.admin{background:var(--amber)22;color:var(--amber)}
 .urole.viewer{background:var(--accent2)22;color:var(--accent2)}
-.ulogout{background:none;border:1px solid var(--border2);color:var(--muted);cursor:pointer;font-size:15px;padding:6px 8px;border-radius:8px;line-height:0}
+.ulogout{background:none;border:1px solid var(--border2);color:var(--muted);cursor:pointer;font-size:15px;padding:6px 8px;border-radius:8px;line-height:0;position:relative}
+/* Update available: the get-app button lights up and gently pulses */
+#getapp-btn.has-update{color:#fff;background:var(--accent);border-color:var(--accent);animation:updpulse 2s ease-in-out infinite}
+#getapp-btn.has-update .upd-dot{position:absolute;top:-3px;right:-3px;width:9px;height:9px;border-radius:50%;background:var(--amber);border:2px solid var(--panel);animation:upddot 1.2s ease-in-out infinite}
+@keyframes updpulse{0%,100%{box-shadow:0 0 0 0 color-mix(in srgb,var(--accent) 55%,transparent)}50%{box-shadow:0 0 0 7px transparent}}
+@keyframes upddot{0%,100%{transform:scale(1)}50%{transform:scale(1.35)}}
 .ulogout:hover{color:var(--red);border-color:var(--red)}
 .npmode{flex:1;display:flex;align-items:center;justify-content:center;gap:7px;background:transparent;border:none;color:var(--muted);cursor:pointer;font-size:12.5px;font-weight:600;padding:9px;border-radius:8px;font-family:inherit;transition:background .15s,color .15s}
 .npmode.on{background:var(--accent);color:#fff}
@@ -1279,7 +1284,7 @@ textarea.np-in{resize:vertical;line-height:1.5}
     <div id="user-badge" class="userbox">
       <div class="uavatar"><span id="ub-initials">U</span></div>
       <div class="uinfo"><div id="ub-name" class="uname"></div><span id="ub-role" class="urole"></span></div>
-      <button onclick="openGetApp()" title="Get the app" class="ulogout"><i class="ti ti-download"></i></button>
+      <button id="getapp-btn" onclick="openGetApp()" title="Get the app" class="ulogout"><i id="getapp-ic" class="ti ti-download"></i><span class="upd-dot" hidden></span></button>
       <button onclick="doLogout()" title="Sign out" class="ulogout"><i class="ti ti-logout"></i></button>
     </div>
   </aside>
@@ -2554,10 +2559,20 @@ function verGt(a,b){const pa=String(a).split(".").map(Number),pb=String(b).split
 async function checkAppUpdate(){
   let d=null;try{d=await(await fetch("/api/app/latest")).json();}catch(e){return;}
   window._appLatest=d;
+  const newer=!!(d.latest_version&&d.hub_version&&verGt(d.latest_version,d.hub_version));
+  // The get-app button transforms while an update exists: rocket icon, accent
+  // pulse + amber dot — visible even after the toast was dismissed.
+  const btn=document.getElementById("getapp-btn"),ic=document.getElementById("getapp-ic");
+  if(btn){
+    btn.classList.toggle("has-update",newer);
+    btn.title=newer?("CoXAgent "+d.latest_version+" đã có — bấm để cập nhật"):"Get the app";
+    const dot=btn.querySelector(".upd-dot");if(dot)dot.hidden=!newer;
+    if(ic)ic.className=newer?"ti ti-rocket":"ti ti-download";
+  }
   const nb=document.getElementById("update-banner");
-  if(d.latest_version&&d.hub_version&&verGt(d.latest_version,d.hub_version)&&localStorage.getItem("coxskipver")!==d.latest_version){
+  if(newer&&localStorage.getItem("coxskipver")!==d.latest_version){
     document.getElementById("upd-title").textContent="CoXAgent "+d.latest_version+" đã có";
-    document.getElementById("upd-sub").textContent="bạn đang chạy "+d.hub_version+" — tải bản mới rồi cài đè là xong";
+    document.getElementById("upd-sub").textContent="bạn đang chạy "+d.hub_version+" — bấm Tải về để tự cập nhật";
     nb.hidden=false;
   }else nb.hidden=true;
 }
