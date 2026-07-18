@@ -937,6 +937,8 @@
   .drainbar i{color:var(--amber);font-size:19px;margin-top:1px}
   .drainbar b{color:var(--amber)}
   .drainbar a{color:var(--accent2);cursor:pointer;text-decoration:underline;white-space:nowrap}
+  .gc-btn.forcemg{color:var(--amber);border-color:color-mix(in srgb,var(--amber) 45%,var(--border2))}
+  .gc-btn.forcemg:hover{background:color-mix(in srgb,var(--amber) 14%,transparent)}
   @keyframes drainpulse{0%,100%{box-shadow:0 0 0 0 color-mix(in srgb,var(--amber) 28%,transparent)}50%{box-shadow:0 0 0 6px transparent}}
   /* Workspace home */
   #view-home{max-width:1180px}
@@ -4314,7 +4316,8 @@ async function renderReview(){
         <button class="gc-btn" title="Run THIS branch on the app port so you can see it before approving" onclick="prAction(${p.number},'preview')"><i class="ti ti-eye"></i> Preview</button>
         <button class="gc-btn" title="Stop the preview and restore the main build" onclick="prAction(${p.number},'preview-stop')"><i class="ti ti-eye-off"></i></button>
         ${rev?`<button class="gc-btn" onclick="prAction(${p.number},'request-changes')"><i class="ti ti-arrow-back-up"></i> Changes</button>
-        <button class="gc-btn pri" ${p.mergeable?'':'disabled'} onclick="prAction(${p.number},'merge')"><i class="ti ti-git-merge"></i> Merge</button>`:''}
+        <button class="gc-btn pri" ${p.mergeable?'':'disabled'} onclick="prAction(${p.number},'merge')"><i class="ti ti-git-merge"></i> Merge</button>
+        <button class="gc-btn forcemg" title="SA gỡ conflict NGAY (nếu có) rồi merge PR này — theo dõi tiến trình trong #agents" onclick="prAction(${p.number},'force-merge')"><i class="ti ti-bolt"></i> Force</button>`:''}
       </div>
     </div>`).join("")+`</div>`;
 }
@@ -4347,11 +4350,13 @@ async function prAction(num,action){
   let comment="";
   if(action==="request-changes"){comment=prompt("What changes should the agent make?");if(comment===null)return;}
   if(action==="merge"&&!confirm("Merge PR #"+num+"? This ships the code."))return;
+  if(action==="force-merge"&&!confirm("FORCE merge PR #"+num+"?\n\nSA sẽ gỡ conflict ngay (nếu có) rồi merge thẳng vào main — kể cả khi chưa có CI check. Theo dõi tiến trình trong #agents."))return;
   if(action==="preview")toasty("Building preview of PR #"+num+"… (docker build, may take a minute)","ok");
   try{const r=await fetch(api("/prs/"+num+"/"+action),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({comment})});
     if(r.ok){
       if(action==="preview"){const d=await r.json().catch(()=>({}));
         toasty("Preview live"+(d.url?" — "+d.url:""),"ok");if(d.url)window.open(d.url,"_blank");}
+      else if(action==="force-merge"){toasty("⚡ SA đang force-merge #"+num+" — xem tiến trình trong #agents","ok");}
       else toasty(action==="merge"?"Merged ✓":action==="request-changes"?"Changes requested — a DEV agent will address it next cycle":action==="preview-stop"?"Preview stopped — main restored":"Done","ok");
       renderReview();}
     else{toasty("Failed: "+(await r.text()||r.status),"err");}

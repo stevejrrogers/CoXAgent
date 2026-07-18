@@ -2818,6 +2818,11 @@ async fn pr_action_ep(
     if action == "preview" || action == "preview-stop" {
         return pr_preview(&p, forge, num, action == "preview").await;
     }
+    // Force-merge runs in the background (conflict fix can take minutes).
+    if action == "force-merge" {
+        tokio::spawn(force_merge(p.clone(), num));
+        return Json(serde_json::json!({ "ok": true, "started": true })).into_response();
+    }
     let result = match action.as_str() {
         "merge" => forge.merge_pr(num).await,
         "request-changes" => {
@@ -2834,6 +2839,100 @@ async fn pr_action_ep(
     match result {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Force-merge one PR on the human's order: if it's already green, merge now;
+/// if it's blocked (conflicts), a DEV agent resolves them IMMEDIATELY (not next
+/// cycle), pushes, and then the merge lands. Progress is narrated in `#agents`.
+async fn force_merge(p: ProjectHandle, num: u64) {
+    let Some(forge) = p.forge.clone() else { return };
+    let say = |msg: String| {
+        let store = Arc::clone(&p.store);
+        async move {
+            let _ = coxagent_application::ports::outbound::mutate_state(store.as_ref(), |s| {
+                s.post_chat_in(
+                    "SA",
+                    &msg,
+                    coxagent_application::state::AGENTS_CHANNEL,
+                    Vec::new(),
+                );
+                Ok(())
+            })
+            .await;
+        }
+    };
+    let find = || async {
+        forge
+            .list_open_prs()
+            .await
+            .ok()
+            .and_then(|prs| prs.into_iter().find(|x| x.number == num))
+    };
+    let Some(pr) = find().await else {
+        say(format!("⚡ Force-merge #{num}: PR không còn mở — bỏ qua.")).await;
+        return;
+    };
+    // Blocked? Fix it right now with a DEV engine pass.
+    if !pr.mergeable {
+        say(format!(
+            "⚡ Force-merge #{num}: đang gỡ conflict trên `{}` ngay bây giờ…",
+            pr.head
+        ))
+        .await;
+        let request = coxagent_application::ports::outbound::AgentRequest {
+            role: coxagent_domain::Role::DevBug,
+            system_prompt: coxagent_application::prompts::system_prompt(
+                coxagent_application::prompts::DEV,
+            ),
+            task_prompt: format!(
+                "URGENT: a human ordered PR #{num} (branch `{h}`) force-merged. It has merge \
+                 conflicts with `{b}`.\n\
+                 1. `git fetch origin && git checkout {h} && git pull origin {h}`\n\
+                 2. `git merge origin/{b}` and resolve EVERY conflict, preserving both this \
+                 branch's fix and what already landed on {b}.\n\
+                 3. Run the build/tests to make sure nothing broke.\n\
+                 4. `git add -A && git commit -m \"fix: resolve conflicts for #{num}\"` then \
+                 `git push origin {h}`.",
+                h = pr.head,
+                b = pr.base,
+            ),
+            work_dir: p.work_dir.clone(),
+            timeout: std::time::Duration::from_secs(1800),
+        };
+        match p.engine.run(request).await {
+            Ok(o) if o.succeeded() => {}
+            _ => {
+                say(format!(
+                    "⚡ Force-merge #{num}: gỡ conflict THẤT BẠI — cần bạn xử lý tay: {}",
+                    pr.url
+                ))
+                .await;
+                return;
+            }
+        }
+        // Give the forge a moment to recompute mergeability.
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    }
+    // Merge (retry once after a short wait — mergeability can lag a push).
+    for attempt in 0..2u8 {
+        match forge.merge_pr(num).await {
+            Ok(()) => {
+                say(format!("⚡ Force-merge #{num}: ĐÃ MERGE ✓")).await;
+                return;
+            }
+            Err(e) if attempt == 0 => {
+                tracing::warn!("force-merge #{num} first attempt: {e}");
+                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+            }
+            Err(e) => {
+                say(format!(
+                    "⚡ Force-merge #{num}: merge bị từ chối ({e}) — xem PR: {}",
+                    pr.url
+                ))
+                .await;
+            }
+        }
     }
 }
 
