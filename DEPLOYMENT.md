@@ -76,6 +76,37 @@ Chart layout mirrors the target architecture:
 | `COXAGENT_ADMIN_USER/PASSWORD` | First-run Super Admin bootstrap |
 | `COXAGENT_OPERATOR` | Headless runner identity (`name@host` attribution) |
 
+## MCP (connect agents & IDE clients)
+
+The hub speaks MCP at `POST /api/mcp` (streamable HTTP JSON-RPC) with the same
+authz as the REST API. Tools: `search_symbols`, `symbol_refs`, `get_ticket`,
+`pr_queue`, `report_blocker` — every call is audited.
+
+`.mcp.json` for a project checkout (claude CLI / Claude Desktop / Cursor):
+
+```json
+{
+  "mcpServers": {
+    "coxagent": {
+      "type": "http",
+      "url": "http://127.0.0.1:4000/api/mcp",
+      "headers": { "Authorization": "Bearer <coxagent API token>" }
+    }
+  }
+}
+```
+
+Create API tokens in Users → API tokens; scope-check happens server-side per
+project argument.
+
+## Service roles (until the 4-binary split lands)
+
+| Target service | Run today as |
+|---|---|
+| cox-gateway | `coxagent hub` + `COXAGENT_NO_INLINE_EXEC=1` (Helm sets it) |
+| cox-runner | `coxagent run` (`COXAGENT_OPERATOR` identity) |
+| cox-realtime / cox-knowledge | inside the hub process (split scheduled) |
+
 ## Upgrade & rollback
 
 - The hub is safe to restart at any time: sessions persist, runners re-attach,

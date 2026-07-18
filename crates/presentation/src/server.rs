@@ -914,6 +914,181 @@ async fn terminal_socket(mut socket: WebSocket, work_dir: PathBuf, user: String,
     tracing::info!("terminal session closed ({user} on {pid})");
 }
 
+/// MCP server (streamable-HTTP JSON-RPC) — the gateway's third transport
+/// beside REST and WS. Engines and MCP clients (claude CLI, Claude Desktop,
+/// Cursor) PULL exactly the context they need instead of being fed capped
+/// prompt blocks. Same authz as REST (session cookie or API token via the
+/// auth middleware); every tools/call is audited.
+async fn mcp_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<serde_json::Value>,
+) -> axum::response::Response {
+    let id = req.get("id").cloned();
+    let method = req
+        .get("method")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let rpc = |id: Option<serde_json::Value>, result: serde_json::Value| {
+        Json(serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result })).into_response()
+    };
+    let rpc_err = |id: Option<serde_json::Value>, code: i64, msg: &str| {
+        Json(serde_json::json!({ "jsonrpc": "2.0", "id": id,
+            "error": { "code": code, "message": msg } }))
+        .into_response()
+    };
+    match method {
+        "initialize" => rpc(
+            id,
+            serde_json::json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": { "tools": {} },
+                "serverInfo": { "name": "coxagent", "version": env!("CARGO_PKG_VERSION") }
+            }),
+        ),
+        "notifications/initialized" | "notifications/cancelled" => {
+            StatusCode::ACCEPTED.into_response()
+        }
+        "ping" => rpc(id, serde_json::json!({})),
+        "tools/list" => rpc(id, serde_json::json!({ "tools": mcp_tool_specs() })),
+        "tools/call" => {
+            let user = resolve_username(&app, &headers).await;
+            let name = req
+                .pointer("/params/name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let args = req
+                .pointer("/params/arguments")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            audit_push(
+                &app.audit,
+                &user,
+                format!(
+                    "MCP {name} {}",
+                    args.get("project")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("")
+                ),
+                200,
+            )
+            .await;
+            match mcp_call(&app, name, &args).await {
+                Ok(text) => rpc(
+                    id,
+                    serde_json::json!({ "content": [{ "type": "text", "text": text }] }),
+                ),
+                Err(msg) => rpc(
+                    id,
+                    serde_json::json!({ "content": [{ "type": "text", "text": msg }],
+                        "isError": true }),
+                ),
+            }
+        }
+        _ => rpc_err(id, -32601, "method not found"),
+    }
+}
+
+/// The MCP tool catalogue — kept small and high-signal on purpose.
+fn mcp_tool_specs() -> serde_json::Value {
+    let proj = serde_json::json!({ "type": "string", "description": "project id, e.g. cxc" });
+    serde_json::json!([
+        { "name": "search_symbols",
+          "description": "Search the project's code graph for symbols/files relevant to a query — use before reading code blindly.",
+          "inputSchema": { "type": "object", "properties": { "project": proj, "query": { "type": "string" } }, "required": ["project", "query"] } },
+        { "name": "symbol_refs",
+          "description": "All references, callers and callees of a symbol — impact analysis before changing it.",
+          "inputSchema": { "type": "object", "properties": { "project": proj, "name": { "type": "string" } }, "required": ["project", "name"] } },
+        { "name": "get_ticket",
+          "description": "Full ticket detail: description, acceptance criteria, technical/UX design, status.",
+          "inputSchema": { "type": "object", "properties": { "project": proj, "id": { "type": "string" } }, "required": ["project", "id"] } },
+        { "name": "pr_queue",
+          "description": "Open pull requests with mergeable/CI state — check before opening a new branch.",
+          "inputSchema": { "type": "object", "properties": { "project": proj }, "required": ["project"] } },
+        { "name": "report_blocker",
+          "description": "Report a blocker to the team's #agents channel so a human sees it.",
+          "inputSchema": { "type": "object", "properties": { "project": proj, "note": { "type": "string" } }, "required": ["project", "note"] } }
+    ])
+}
+
+/// Dispatch one MCP tool call onto the SAME internals the REST API uses.
+async fn mcp_call(app: &AppState, name: &str, args: &serde_json::Value) -> Result<String, String> {
+    let pid = args
+        .get("project")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("missing 'project'")?;
+    let p = app.project(pid).await.ok_or("unknown project")?;
+    let s = |k: &str| {
+        args.get(k)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    };
+    match name {
+        "search_symbols" => {
+            let q = s("query").ok_or("missing 'query'")?;
+            let g = coxagent_application::codegraph::CodeGraph::load(&p.work_dir)
+                .ok_or("code graph not built yet")?;
+            serde_json::to_string_pretty(&g.relevance_search(q, 30)).map_err(|e| e.to_string())
+        }
+        "symbol_refs" => {
+            let sym = s("name").ok_or("missing 'name'")?.to_owned();
+            let wd = p.work_dir.clone();
+            let refs = tokio::task::spawn_blocking({
+                let (wd, sym) = (wd.clone(), sym.clone());
+                move || coxagent_application::codegraph::references(&wd, &sym, 100)
+            })
+            .await
+            .unwrap_or_default();
+            let (inbound, outbound) = coxagent_application::codegraph::CodeGraph::load(&wd)
+                .map(|g| (g.callers(&sym), g.callees(&sym)))
+                .unwrap_or_default();
+            serde_json::to_string_pretty(&serde_json::json!({
+                "refs": refs, "callers": inbound, "callees": outbound
+            }))
+            .map_err(|e| e.to_string())
+        }
+        "get_ticket" => {
+            let tid = s("id").ok_or("missing 'id'")?;
+            let state = p.store.load().await.map_err(|e| e.to_string())?;
+            let t = state
+                .tickets
+                .iter()
+                .find(|t| t.id().to_string() == tid)
+                .ok_or("ticket not found")?;
+            serde_json::to_string_pretty(t).map_err(|e| e.to_string())
+        }
+        "pr_queue" => {
+            let forge = p.forge.clone().ok_or("no forge configured")?;
+            let prs = forge.list_open_prs().await.map_err(|e| e.to_string())?;
+            let rows: Vec<_> = prs
+                .iter()
+                .map(|x| {
+                    serde_json::json!({ "number": x.number, "title": x.title,
+                        "mergeable": x.mergeable, "ci": x.ci, "created": x.created })
+                })
+                .collect();
+            serde_json::to_string_pretty(&rows).map_err(|e| e.to_string())
+        }
+        "report_blocker" => {
+            let note = s("note").ok_or("missing 'note'")?.to_owned();
+            coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |st| {
+                st.post_chat_in(
+                    "ENGINE",
+                    &format!("🚧 Blocker: {note}"),
+                    coxagent_application::state::AGENTS_CHANNEL,
+                    Vec::new(),
+                );
+                Ok(())
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+            Ok("reported to #agents".to_owned())
+        }
+        _ => Err(format!("unknown tool {name}")),
+    }
+}
+
 /// Bridge the in-process chat broadcast onto Redis pub/sub (`cox:events`), so
 /// every hub instance sees every event — the piece that makes the gateway
 /// horizontally scalable. Loop safety: outbound frames carry this instance's
@@ -1130,6 +1305,7 @@ pub async fn serve_full(
             get(|| async { ([("content-type", "application/javascript")], XTERM_FIT_JS) }),
         )
         .route("/api/health", get(health))
+        .route("/api/mcp", post(mcp_ep))
         .route("/api/auth/login", post(login_ep))
         .route("/api/auth/logout", post(logout_ep))
         .route("/api/auth/me", get(me_ep))
