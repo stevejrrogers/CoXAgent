@@ -1444,6 +1444,7 @@ pub async fn serve_full(
         .route("/api/health", get(health))
         .route("/api/mcp", post(mcp_ep))
         .route("/api/app/latest", get(app_latest_ep))
+        .route("/api/app/download/:file", get(app_download_ep))
         .route("/api/auth/login", post(login_ep))
         .route("/api/auth/logout", post(logout_ep))
         .route("/api/auth/me", get(me_ep))
@@ -1680,6 +1681,92 @@ async fn app_latest_ep(State(app): State<AppState>) -> impl IntoResponse {
         },
         "releases_repo": d.releases_repo,
     }))
+}
+
+/// Stream a release asset through the hub — the repo may be PRIVATE, so
+/// clients can't hit GitHub's download URLs anonymously; the hub's `gh` auth
+/// does it server-side and the token never leaves this process. Public path
+/// (it serves the installer, same trust as the login page); path ends in the
+/// real file extension so the native updater's checks hold.
+async fn app_download_ep(
+    State(app): State<AppState>,
+    Path(file): Path<String>,
+) -> axum::response::Response {
+    let (repo, ver) = {
+        let d = &app.workspace.inner.lock().await.downloads;
+        (d.releases_repo.trim().to_owned(), d.latest_version.clone())
+    };
+    if repo.is_empty() || ver.is_empty() {
+        return (StatusCode::NOT_FOUND, "no release configured").into_response();
+    }
+    let want: &[&str] = match file.as_str() {
+        "macos.dmg" => &[".dmg"],
+        "windows.exe" => &[".exe", ".msi", "windows-x64.zip"],
+        "linux.tar.gz" => &["linux-x64.tar.gz", "linux.tar.gz", ".appimage", ".deb"],
+        _ => return (StatusCode::NOT_FOUND, "unknown platform").into_response(),
+    };
+    let tag = format!("v{ver}");
+    let Ok(meta) = tokio::process::Command::new("gh")
+        .args([
+            "api",
+            &format!("repos/{repo}/releases/tags/{tag}"),
+            "--jq",
+            "[.assets[] | {id, name}]",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+    else {
+        return internal_error("gh unavailable");
+    };
+    let assets: Vec<serde_json::Value> = serde_json::from_slice(&meta.stdout).unwrap_or_default();
+    let found = assets.iter().find(|a| {
+        a.get("name")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|n| {
+                let n = n.to_lowercase();
+                want.iter().any(|w| n.ends_with(w))
+            })
+    });
+    let Some(asset) = found else {
+        return (StatusCode::NOT_FOUND, "no asset for this platform").into_response();
+    };
+    let id = asset
+        .get("id")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let name = asset
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("download")
+        .to_owned();
+    let Ok(bin) = tokio::process::Command::new("gh")
+        .args([
+            "api",
+            &format!("repos/{repo}/releases/assets/{id}"),
+            "-H",
+            "Accept: application/octet-stream",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+    else {
+        return internal_error("asset fetch failed");
+    };
+    if !bin.status.success() || bin.stdout.len() < 1024 {
+        return internal_error("asset fetch failed");
+    }
+    (
+        [
+            (header::CONTENT_TYPE, "application/octet-stream".to_owned()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{name}\""),
+            ),
+        ],
+        bin.stdout,
+    )
+        .into_response()
 }
 
 /// Poll GitHub Releases (via the `gh` CLI already required for the forge) every
@@ -6439,6 +6526,9 @@ async fn auth_mw(
         || path == "/api/auth/login"
         // Embedded static assets (vendored JS/CSS) — same trust level as "/".
         || path.starts_with("/assets/")
+        // Installer downloads: same trust as the login page; the native
+        // updater's URLSession has no web session to present.
+        || path.starts_with("/api/app/download/")
         || path.starts_with("/api/chat/hook/")
         // Invite flow: the invite token IS the credential for joining.
         || path.starts_with("/join/")

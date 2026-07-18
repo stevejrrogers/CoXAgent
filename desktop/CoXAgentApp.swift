@@ -393,15 +393,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     func selfUpdate(urlString: String) {
-        guard let url = URL(string: urlString), url.scheme == "https",
-              url.pathExtension.lowercased() == "dmg" else {
+        // HTTPS, or plain http ONLY to the local hub (the download proxy).
+        guard let url = URL(string: urlString),
+              url.path.lowercased().hasSuffix(".dmg"),
+              url.scheme == "https"
+                || (url.scheme == "http" && ["127.0.0.1", "localhost"].contains(url.host ?? "")) else {
             if let u = URL(string: urlString) { NSWorkspace.shared.open(u) }
             return
         }
         updateSay("Đang tải bản cập nhật…")
-        let task = URLSession.shared.downloadTask(with: url) { temp, _, err in
-            guard let temp = temp, err == nil else {
-                self.updateSay("Tải thất bại — mở trình duyệt để tải tay.")
+        let task = URLSession.shared.downloadTask(with: url) { temp, resp, err in
+            // A 404/500 body is NOT a dmg — verify status and a sane size
+            // before ever touching hdiutil.
+            let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            let size = temp.flatMap { try? FileManager.default.attributesOfItem(atPath: $0.path)[.size] as? Int } ?? 0
+            guard let temp = temp, err == nil, status == 200, size > 1_000_000 else {
+                self.notifLog("selfUpdate download rejected: status=\(status) size=\(size) err=\(String(describing: err))")
+                self.updateSay("Tải thất bại (status \(status)) — mở trình duyệt để tải tay.")
                 NSWorkspace.shared.open(url)
                 return
             }

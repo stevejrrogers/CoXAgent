@@ -2602,8 +2602,8 @@ async function openGetApp(){
   document.getElementById("ga-list").innerHTML=plats.map(([k,label,icon,hint])=>{
     const url=dl[k];const on=k===mine;
     if(!url)return `<div class="gc-btn" style="display:flex;align-items:center;gap:10px;padding:12px 14px;opacity:.45;cursor:default"><i class="ti ti-${icon}" style="font-size:19px"></i><b style="flex:1">${label}</b><span style="font-size:11px">chưa có bản build</span></div>`;
-    if(k==="macos"&&canSelf&&url.toLowerCase().endsWith(".dmg"))
-      return `<button onclick="coxSelfUpdate('${esc(url)}')" class="gc-btn" style="display:flex;align-items:center;gap:10px;padding:12px 14px;border-color:var(--accent);cursor:pointer;width:100%;text-align:left"><i class="ti ti-${icon}" style="font-size:19px"></i><b style="flex:1">${label}</b><span style="font-size:11px;color:var(--accent2)">cập nhật & tự khởi động lại</span><i class="ti ti-refresh"></i></button>`;
+    if(k==="macos"&&canSelf)
+      return `<button onclick="coxSelfUpdate(location.origin+'/api/app/download/macos.dmg')" class="gc-btn" style="display:flex;align-items:center;gap:10px;padding:12px 14px;border-color:var(--accent);cursor:pointer;width:100%;text-align:left"><i class="ti ti-${icon}" style="font-size:19px"></i><b style="flex:1">${label}</b><span style="font-size:11px;color:var(--accent2)">cập nhật & tự khởi động lại</span><i class="ti ti-refresh"></i></button>`;
     return `<a href="${esc(url)}" target="_blank" rel="noopener" class="gc-btn" style="display:flex;align-items:center;gap:10px;padding:12px 14px;text-decoration:none;${on?"border-color:var(--accent)":""}"><i class="ti ti-${icon}" style="font-size:19px"></i><b style="flex:1">${label}</b><span style="font-size:11px;color:var(--dim)">${hint}${on?" · máy này":""}</span><i class="ti ti-download"></i></a>`;
   }).join("");
   document.getElementById("ov-getapp").classList.add("open");
