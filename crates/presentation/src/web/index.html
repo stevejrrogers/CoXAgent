@@ -80,6 +80,13 @@
   .segseg .sdel{margin-left:1px;font-size:13px;line-height:1;opacity:0;width:0;overflow:hidden;transition:opacity .12s;color:inherit}
   .segseg:hover .sdel{opacity:.6;width:14px}
   .segseg .sdel:hover{opacity:1}
+  .spacebar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+  .spchip{display:inline-flex;align-items:center;gap:7px;background:var(--card);border:1px solid var(--border2);border-radius:20px;padding:7px 14px;color:var(--muted);font-family:inherit;font-size:12.5px;font-weight:600;cursor:pointer;transition:border-color .15s,color .15s}
+  .spchip:hover{color:var(--text);border-color:var(--accent)}
+  .spchip.on{background:var(--accent);border-color:var(--accent);color:#fff}
+  .spchip .sdot{width:7px;height:7px;border-radius:50%}
+  .spchip.on .sdot{background:#fff}
+  .spchip .spn{font-size:11px;opacity:.65;font-weight:700}
   .segmore{flex:none;display:inline-flex;align-items:center;gap:5px;border:none;background:transparent;color:var(--muted);font-family:inherit;font-size:12px;font-weight:700;padding:6px 10px;border-radius:8px;cursor:pointer;white-space:nowrap}
   .segmore:hover{color:var(--text);background:var(--card)}
   .segmore.on{background:var(--accent);color:#fff}
@@ -2303,33 +2310,37 @@ function renderMgUsage(){
     <div class="panel">${us.map(([n,c])=>bar(n,c,usMax,"var(--amber)")).join("")||'<div class="empty">no per-user spend yet</div>'}</div>`;
 }
 // ---- Workspace home: company hero, my agents, project grid, members, invites ----
+// Home space filter: "" = all spaces the user can see; persisted per browser.
+function homeSpace(){return localStorage.getItem("coxhomespace")||"";}
+function setHomeSpace(id){localStorage.setItem("coxhomespace",id||"");renderHome();}
 async function renderHome(){
-  let ov={projects:[],members:[],workspace:{}},me={agents:[]};
-  try{[ov,me]=await Promise.all([fetch("/api/workspace/overview").then(r=>r.json()),fetch("/api/me/agents").then(r=>r.json())]);}catch(e){return;}
-  const w=ov.workspace||{};const totalSpend=(ov.projects||[]).reduce((a,p)=>a+(p.spend||0),0);
-  const online=new Set();(ov.projects||[]).forEach(p=>(p.online||[]).forEach(o=>online.add(o)));
+  let ov={projects:[],members:[],workspace:{}},me={agents:[]},spd={spaces:[]};
+  try{[ov,me,spd]=await Promise.all([fetch("/api/workspace/overview").then(r=>r.json()),fetch("/api/me/agents").then(r=>r.json()),fetch("/api/spaces").then(r=>r.json()).catch(()=>({spaces:[]}))]);}catch(e){return;}
+  const w=ov.workspace||{};
+  const spaces=(spd&&spd.spaces)||[];
+  let sel=homeSpace();if(sel&&!spaces.some(s=>s.id===sel)){sel="";localStorage.removeItem("coxhomespace");}
+  const selSp=spaces.find(s=>s.id===sel)||null;
+  // Scope the dashboard to the picked space (projects, stats, hero identity).
+  const allProjects=ov.projects||[];
+  const projects=selSp?allProjects.filter(p=>(selSp.projects||[]).includes(p.id)):allProjects;
+  const totalSpend=projects.reduce((a,p)=>a+(p.spend||0),0);
+  const online=new Set();projects.forEach(p=>(p.online||[]).forEach(o=>online.add(o)));
   // Sidebar "Home" shows the company name once the workspace exists.
   const navH=document.getElementById("nav-home");
   if(navH)navH.innerHTML=w.name?`<i class="ti ti-building-skyscraper"></i> ${esc(w.name)}`:'<i class="ti ti-home"></i> Home';
-  const isAdmin=ME&&ME.role==="admin";
-  if(!w.name&&isAdmin){
-    // First run: the admin CREATES the workspace here — one clear step.
-    document.getElementById("ws-hero").innerHTML=`<div class="wshero wssetup">
-      <div style="flex:1;min-width:260px"><div class="wsname"><i class="ti ti-building-skyscraper"></i> Tạo workspace của công ty</div>
-        <div class="wstag">Đặt tên công ty — rồi mời đồng nghiệp bằng invite link bên dưới. Bạn (admin) là chủ workspace.</div>
-        <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap">
-          <input id="wsn0" placeholder="Tên công ty, vd. Straw Hat Labs" style="flex:1;min-width:200px;background:var(--card);color:var(--text);border:1px solid var(--border2);border-radius:10px;padding:11px 13px">
-          <input id="wst0" placeholder="tagline (tuỳ chọn)" style="flex:1;min-width:160px;background:var(--card);color:var(--text);border:1px solid var(--border2);border-radius:10px;padding:11px 13px">
-          <button class="pri" onclick="createWs()"><i class="ti ti-rocket"></i> Tạo workspace</button>
-        </div></div></div>`;
-  }else{
-    const nm=w.name||"Your workspace";
-    const stat=(v,l)=>`<div class="wsstat"><b>${v}</b><span>${l}</span></div>`;
-    document.getElementById("ws-hero").innerHTML=`<div class="wshero">
+  const isAdmin=ME&&(ME.role==="admin"||ME.role==="super");
+  const nm=selSp?selSp.name:(w.name||"Your workspace");
+  const tag=selSp?(selSp.tagline||`${(selSp.projects||[]).length} projects · space`):(w.tagline||"one company · many projects · autonomous teams");
+  const stat=(v,l)=>`<div class="wsstat"><b>${v}</b><span>${l}</span></div>`;
+  const spaceBar=spaces.length?`<div class="spacebar">
+      <button class="spchip${sel?"":" on"}" onclick="setHomeSpace('')"><i class="ti ti-layout-grid"></i> All</button>
+      ${spaces.map(s=>`<button class="spchip${sel===s.id?" on":""}" onclick="setHomeSpace('${esc(s.id)}')"><span class="sdot" style="background:${projColor(s.id)}"></span>${esc(s.name)}<span class="spn">${(s.projects||[]).length}</span></button>`).join("")}
+    </div>`:"";
+  document.getElementById("ws-hero").innerHTML=spaceBar+`<div class="wshero">
       <div class="wsmark">${esc(initials(nm))}</div>
-      <div><div class="wsname">${esc(nm)}</div><div class="wstag">${esc(w.tagline||"one company · many projects · autonomous teams")}</div></div>
-      <div class="wsstats">${stat((ov.projects||[]).length,"Projects")}${stat((ov.members||[]).length,"Members")}${stat(online.size,"Online")}${stat(money(totalSpend),"Spend")}</div></div>`;
-  }
+      <div><div class="wsname">${esc(nm)}</div><div class="wstag">${esc(tag)}</div></div>
+      <div class="wsstats">${stat(projects.length,"Projects")}${stat((ov.members||[]).length,"Members")}${stat(online.size,"Online")}${stat(money(totalSpend),"Spend")}</div></div>`;
+  ov=Object.assign({},ov,{projects});
   document.getElementById("ws-myagents").innerHTML=(me.agents||[]).length?(me.agents||[]).map(a=>{
     const st=a.online?`<span class="wsdot on"></span><b>${esc((a.role||"").toUpperCase())}</b> ${a.ticket?`<span class="tid">${esc(a.ticket)}</span>`:""}`
       :(a.desired===false?'<span class="wsdot off"></span>stopped':'<span class="wsdot idle"></span>idle');
@@ -2350,7 +2361,7 @@ async function renderHome(){
     </div>`).join("")||'<div class="empty">no projects yet</div>';
   document.getElementById("ws-members").innerHTML=(ov.members||[]).map(m=>
     `<span class="wsmem" title="${esc((m.projects||[]).join(", ")||"all projects")}"><span class="wsava">${esc(initials(m.name||m.username))}</span> ${esc(m.name||m.username)} ${m.role==="admin"?'<i class="ti ti-crown" style="color:var(--amber)" title="workspace admin"></i>':""}<span class="wsrole">${esc(m.role)}</span></span>`).join("")||'<div class="empty">running open — no accounts</div>';
-  if(ME&&ME.role==="admin")renderWsAdmin(w);
+  if(isAdmin)renderWsAdmin(w);
 }
 async function myAgentCtl(pid,op,action){
   try{
@@ -2394,12 +2405,6 @@ async function renderWsAdmin(w){
     </div>`;
 }
 async function saveWs(){try{await fetch("/api/workspace",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:val("wsn"),tagline:val("wst"),accent:"",conventions:val("wsc")})});toasty("Saved — conventions apply to new agent runs","ok");renderHome();}catch(e){}}
-// First-run: the admin creates the workspace (name + tagline), then invites.
-async function createWs(){
-  const name=val("wsn0").trim();if(!name){toasty("Đặt tên công ty trước nhé","warn");return;}
-  try{await fetch("/api/workspace",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name,tagline:val("wst0"),accent:""})});
-    toasty("Workspace \""+name+"\" đã tạo — giờ mời đồng nghiệp bằng invite link","ok");renderHome();
-  }catch(e){}}
 async function createInvite(){
   const projects=(val("inv-projects")||"").split(",").map(s=>s.trim()).filter(Boolean);
   try{const r=await(await fetch("/api/workspace/invites",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({role:val("inv-role"),projects,uses:parseInt(val("inv-uses")||"5",10)})})).json();
