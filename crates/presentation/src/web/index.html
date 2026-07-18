@@ -1142,6 +1142,24 @@ body:not(.manage) .manage-only { display: none !important; }
     <div id="lg-err" style="color:var(--red);font-size:12px;min-height:16px;margin:4px 0"></div>
     <button class="pri" onclick="doLogin()" style="width:100%;justify-content:center"><i class="ti ti-login"></i> Sign in</button>
   </div></div>
+  <div id="sp-modal" class="coxmodal" hidden>
+    <div class="coxmodal-back" onclick="closeSpaceModal()"></div>
+    <div class="coxmodal-card" style="width:min(560px,92vw)">
+      <div class="coxmodal-title" id="spm-title">New space</div>
+      <div class="coxmodal-msg" id="spm-msg"></div>
+      <div class="frm">
+        <div class="fr"><span class="lbl">Name</span><input id="spm-name" placeholder="e.g. Product Team A" maxlength="60"></div>
+        <div class="fr"><span class="lbl">Tagline</span><input id="spm-tag" placeholder="what this space builds" maxlength="160"></div>
+        <div class="fr" style="align-items:flex-start"><span class="lbl">Admins</span><div id="spm-admins-box" style="flex:1"></div></div>
+        <div class="fr" style="align-items:flex-start"><span class="lbl">Projects</span><div id="spm-projects-box" style="flex:1"></div></div>
+      </div>
+      <div class="coxmodal-acts" style="margin-top:14px">
+        <button class="gc-btn" id="spm-del" hidden onclick="mgDeleteSpace(SPM_ID)" style="margin-right:auto;color:var(--red)"><i class="ti ti-trash"></i> Delete</button>
+        <button class="gc-btn" onclick="closeSpaceModal()">Cancel</button>
+        <button class="pri" id="spm-ok" onclick="submitSpaceModal()"><i class="ti ti-check"></i> Create</button>
+      </div>
+    </div>
+  </div>
   <div id="cox-modal" class="coxmodal" hidden>
     <div class="coxmodal-back" onclick="coxModalCancel()"></div>
     <div class="coxmodal-card">
@@ -2093,11 +2111,10 @@ let MG=null;
 const ROLE_COLORS={super:"#f59e0b",admin:"#22d3ee",director:"#a78bfa",manager:"#a78bfa",techlead:"#a78bfa",fe:"#34d399",be:"#60a5fa",ba:"#f472b6",viewer:"#6b7280"};
 function roleChip(r,n){const c=ROLE_COLORS[r]||"#6b7280";return `<span class="mg-rolechip" style="--rc:${c}">${esc(r)}${n!==undefined?` <b>${n}</b>`:""}</span>`;}
 async function renderManage(){
-  // Live refresh (SSE/poll) must never clobber an in-progress form: if the
-  // create panel is open or the user is typing in a Manage input, skip this
-  // repaint — the next event after they finish will catch the view up.
-  const cr=document.getElementById("mg-create");
-  if(cr&&!cr.hidden)return;
+  // Live refresh (SSE/poll) must never clobber what the user is doing: skip
+  // the repaint while typing in a Manage input (e.g. the Users search) — the
+  // next event after they finish will catch the view up. The space form lives
+  // in #sp-modal outside this view, so repaints can't touch it.
   const a=document.activeElement;
   if(a&&(a.tagName==="INPUT"||a.tagName==="TEXTAREA")&&a.closest('[id^="view-mg-"]'))return;
   try{MG=await(await fetch("/api/manage/overview")).json();}catch(e){return;}
@@ -2115,14 +2132,7 @@ function renderMgSpaces(){
       <div><div class="wsname">Hub control</div><div class="wstag">mọi space · mọi project · một màn hình</div></div>
       <div class="wsstats">${stat(t.projects||0,"Projects")}${stat((MG.spaces||[]).length,"Spaces")}${stat(t.users||0,"Users")}${stat(t.online||0,"Online")}${stat(money(t.spend||0),"Spend")}</div></div>
     <div class="wshead" style="margin-bottom:12px"><span class="wssec" style="margin:0">Spaces</span>
-      <button class="pri" onclick="mgToggleCreate()"><i class="ti ti-plus"></i> New space</button></div>
-    <div id="mg-create" hidden><div class="panel frm" style="margin-bottom:14px">
-      <div class="fr"><span class="lbl">Name</span><input id="mg-sp-name" placeholder="e.g. Product Team A"></div>
-      <div class="fr"><span class="lbl">Tagline</span><input id="mg-sp-tag" placeholder="what this space builds"></div>
-      <div class="fr" style="align-items:flex-start"><span class="lbl">Admins</span>${mgPicker("mg-sp-admins",(MG.users||[]).map(u=>u.username),[])}</div>
-      <div class="fr" style="align-items:flex-start"><span class="lbl">Projects</span>${mgPicker("mg-sp-projects",allP,[])}</div>
-      <div class="fr"><span class="lbl"></span><button class="pri" onclick="mgCreateSpace()"><i class="ti ti-check"></i> Create</button></div>
-    </div></div>
+      <button class="pri" onclick="openSpaceModal()"><i class="ti ti-plus"></i> New space</button></div>
     <div class="wsgrid">${(MG.spaces||[]).map(sp=>`
       <div class="wscard mgcard" onclick="openMgSpace('${esc(sp.id)}')">
         <div class="wsc-h"><b>${esc(sp.name)}</b><span class="wsc-v">${esc(sp.id)}</span></div>
@@ -2134,7 +2144,43 @@ function renderMgSpaces(){
       </div>`).join("")||'<div class="empty">chưa có space — bấm New space</div>'}</div>
     ${(MG.unassigned_projects||[]).length?`<div class="panel" style="margin-top:14px;font-size:12.5px;color:var(--muted)"><i class="ti ti-alert-triangle" style="color:var(--amber)"></i> Chưa thuộc space nào: <b>${esc((MG.unassigned_projects||[]).join(", "))}</b> — gán qua Edit space.</div>`:""}`;
 }
-function mgToggleCreate(){const b=document.getElementById("mg-create");if(b)b.hidden=!b.hidden;}
+// Space create/edit lives in a modal OUTSIDE the re-rendered view, so the live
+// refresh (SSE/3s poll) can repaint the Spaces grid freely without touching it.
+let SPM_ID=null; // null = creating; otherwise the space id being edited
+function openSpaceModal(id){
+  SPM_ID=id||null;
+  const sp=id?(((MG||{}).spaces||[]).find(x=>x.id===id)||null):null;
+  if(id&&!sp)return;
+  const allP=[...new Set(((MG||{}).spaces||[]).flatMap(x=>x.projects||[]).concat((MG||{}).unassigned_projects||[]))];
+  document.getElementById("spm-title").textContent=sp?("Edit space — "+sp.name):"New space";
+  document.getElementById("spm-msg").textContent=sp?"":"Nhóm projects + chỉ định space admin.";
+  document.getElementById("spm-name").value=sp?sp.name:"";
+  document.getElementById("spm-tag").value=sp?(sp.tagline||""):"";
+  document.getElementById("spm-admins-box").innerHTML=mgPicker("spm-admins",((MG||{}).users||[]).map(u=>u.username),sp?(sp.admins||[]):[]);
+  document.getElementById("spm-projects-box").innerHTML=mgPicker("spm-projects",allP,sp?(sp.projects||[]):[]);
+  document.getElementById("spm-del").hidden=!sp;
+  document.getElementById("spm-ok").innerHTML='<i class="ti ti-check"></i> '+(sp?"Save":"Create");
+  const m=document.getElementById("sp-modal");m.hidden=false;
+  m.onkeydown=e=>{if(e.key==="Escape")closeSpaceModal();};m.tabIndex=-1;
+  setTimeout(()=>document.getElementById("spm-name").focus(),30);
+}
+function closeSpaceModal(){document.getElementById("sp-modal").hidden=true;SPM_ID=null;}
+async function submitSpaceModal(){
+  const name=val("spm-name").trim();if(!name){toasty("Đặt tên space","warn");return;}
+  const body=JSON.stringify({name,tagline:val("spm-tag"),admins:picked("spm-admins"),projects:picked("spm-projects")});
+  const ok=document.getElementById("spm-ok");ok.disabled=true;
+  try{
+    const r=await(SPM_ID
+      ?fetch("/api/spaces/"+encodeURIComponent(SPM_ID),{method:"PUT",headers:{"Content-Type":"application/json"},body})
+      :fetch("/api/spaces",{method:"POST",headers:{"Content-Type":"application/json"},body}));
+    if(r.ok){
+      toasty(SPM_ID?"Đã lưu":"Space đã tạo","ok");
+      const id=SPM_ID;closeSpaceModal();MG=null;await renderManage();
+      if(id&&CUR==="mg-space")openMgSpace(id);
+    }else toasty("Failed: "+await r.text(),"err");
+  }catch(e){toasty("Network error","err");}
+  ok.disabled=false;
+}
 // Checkbox-chip picker over real data — no free-text CSV (typos must be impossible).
 function mgPicker(id,items,selected){
   const sel=new Set(selected||[]);
@@ -2142,10 +2188,6 @@ function mgPicker(id,items,selected){
     `<label class="mg-pick ${sel.has(it)?"on":""}"><input type="checkbox" value="${esc(it)}" ${sel.has(it)?"checked":""} onchange="this.parentElement.classList.toggle('on',this.checked)"><span>${esc(it)}</span></label>`).join("")||'<span class="wsc-off">none available</span>'}</div>`;
 }
 function picked(id){return Array.from(document.querySelectorAll('#'+id+' input:checked')).map(i=>i.value);}
-async function mgCreateSpace(){
-  const name=val("mg-sp-name").trim();if(!name){toasty("Đặt tên space","warn");return;}
-  try{const r=await fetch("/api/spaces",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name,tagline:val("mg-sp-tag"),admins:picked("mg-sp-admins"),projects:picked("mg-sp-projects")})});
-    if(r.ok){toasty("Space đã tạo","ok");const cr=document.getElementById("mg-create");if(cr)cr.hidden=true;if(document.activeElement)document.activeElement.blur();renderManage();}else toasty("Failed: "+await r.text(),"err");}catch(e){}}
 async function openMgSpace(id){
   nav("mg-space");
   const el=document.getElementById("mg-space-body");if(el)el.innerHTML='<div class="empty">loading…</div>';
@@ -2165,8 +2207,7 @@ function renderMgSpaceDetail(d){
       <div><div class="wsname">${esc(sp.name||"")}</div><div class="wstag">${esc(sp.tagline||"")} · admins: ${esc((sp.admins||[]).join(", ")||"—")}</div></div>
       <div class="wsstats">${stat(ps.length,"Projects")}${stat(ms.length,"Members")}${stat(shipped,"Shipped")}${stat(fmtK(tokens),"Tokens")}${stat(money(spend),"Spend")}</div></div>
     <div class="wshead" style="margin-bottom:12px"><span class="wssec" style="margin:0">Projects</span>
-      <button class="gc-btn" onclick="mgEditSpaceInline('${esc(sp.id)}')"><i class="ti ti-pencil"></i> Edit space</button></div>
-    <div id="mg-edit-inline" hidden></div>
+      <button class="gc-btn" onclick="openSpaceModal('${esc(sp.id)}')"><i class="ti ti-pencil"></i> Edit space</button></div>
     <div class="wsgrid" style="margin-bottom:20px">${ps.map(p=>{
       const sprint=p.sprint?`<div class="mg-sprint"><div class="mg-sprintbar"><div style="width:${p.sprint.committed?Math.round((p.sprint.done||0)/p.sprint.committed*100):0}%"></div></div><span>S${p.sprint.number}: ${p.sprint.done||0}/${p.sprint.committed||0} · ${esc((p.sprint.goal||"").slice(0,60))}</span></div>`:"";
       return `<div class="wscard" onclick="switchProject('${esc(p.id)}');setMode('workspace');nav('overview')">
@@ -2183,27 +2224,9 @@ function renderMgSpaceDetail(d){
         <span class="wsstate">${roleChip(m.role)}</span>
         <span class="wsspend">${money(m.spend||0)}</span></div>`).join("")||'<div class="empty">no members</div>'}</div>`;
 }
-function mgEditSpaceInline(id){
-  const sp=((MG||{}).spaces||[]).find(x=>x.id===id);if(!sp)return;
-  const box=document.getElementById("mg-edit-inline");if(!box)return;
-  if(!box.hidden){box.hidden=true;return;}
-  box.hidden=false;
-  const allP=((MG||{}).spaces||[]).flatMap(x=>x.projects||[]).concat((MG||{}).unassigned_projects||[]);
-  const uniqP=[...new Set(allP)];
-  box.innerHTML=`<div class="panel frm" style="margin-bottom:14px">
-    <div class="fr"><span class="lbl">Name</span><input id="mge-name" value="${esc(sp.name)}"></div>
-    <div class="fr"><span class="lbl">Tagline</span><input id="mge-tag" value="${esc(sp.tagline||"")}"></div>
-    <div class="fr" style="align-items:flex-start"><span class="lbl">Admins</span>${mgPicker("mge-admins",((MG||{}).users||[]).map(u=>u.username),sp.admins||[])}</div>
-    <div class="fr" style="align-items:flex-start"><span class="lbl">Projects</span>${mgPicker("mge-projects",uniqP,sp.projects||[])}</div>
-    <div class="fr"><span class="lbl"></span><button class="pri" onclick="mgSaveSpace('${esc(id)}')"><i class="ti ti-check"></i> Save</button>
-      <button class="gc-btn" onclick="mgDeleteSpace('${esc(id)}')"><i class="ti ti-trash"></i> Delete space</button></div></div>`;
-}
-async function mgSaveSpace(id){
-  try{const r=await fetch("/api/spaces/"+id,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:val("mge-name"),tagline:val("mge-tag"),admins:picked("mge-admins"),projects:picked("mge-projects")})});
-    if(r.ok){toasty("Đã lưu","ok");MG=null;await renderManage();openMgSpace(id);}else toasty("Failed: "+await r.text(),"err");}catch(e){}}
 async function mgDeleteSpace(id){
   if(!(await coxModal({title:"Xoá space "+id+"?",message:"Không xoá project hay user — chỉ bỏ nhóm tổ chức này.",danger:true,confirmText:"Delete"})))return;
-  try{await fetch("/api/spaces/"+id,{method:"DELETE"});nav("mg-spaces");renderManage();}catch(e){}}
+  try{await fetch("/api/spaces/"+encodeURIComponent(id),{method:"DELETE"});closeSpaceModal();MG=null;nav("mg-spaces");renderManage();}catch(e){toasty("Network error","err");}}
 function renderMgPeople(){
   const el=document.getElementById("mg-people-body");if(!el||!MG)return;
   const q=(window._mgq||"").toLowerCase();
