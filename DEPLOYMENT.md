@@ -113,3 +113,18 @@ project argument.
   an interrupted agent run is retried by the normal cycle machinery.
 - Rolling upgrade order: runners → hub (contracts are versioned; frames with a
   different `CONTRACT_VERSION` are skipped, not misparsed).
+
+## App distribution & in-app updates
+
+1. Tag a release: `git tag v0.94.0 && git push origin v0.94.0` — the `release`
+   workflow builds the macOS `.dmg`, Windows `.exe`, and Linux `.tar.gz` and
+   attaches them to the GitHub Release.
+2. Point the hub at the repo once: Settings → Workspace → App downloads →
+   `releases_repo` (e.g. `stevejrrogers/CoXAgent`). The hub polls the latest
+   release every 30 minutes and republishes version + per-platform URLs at
+   `GET /api/app/latest`. Manual URL fields override auto-detected assets;
+   iOS is always a manual App Store / TestFlight link.
+3. Every signed-in client compares the hub's version with the latest release:
+   newer → a top banner ("CoXAgent X đã có — Update") opens the Get-CoXAgent
+   modal, which highlights the platform the user is on. The download icon next
+   to the user badge opens the same modal any time.

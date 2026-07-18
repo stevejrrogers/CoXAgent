@@ -1,35 +1,57 @@
-name: Release
-
+# Builds the CoXAgent apps for every desktop platform whenever a release tag is
+# pushed, and attaches them to the GitHub Release. The hub polls this repo's
+# latest release (Settings → Workspace → Downloads / releases_repo) and every
+# signed-in client then shows an "update available" notice with the right link.
+#
+#   git tag v0.94.0 && git push origin v0.94.0
+name: release
 on:
   push:
-    tags: ['v*']
+    tags: ["v*"]
 
 permissions:
   contents: write
 
 jobs:
-  build:
-    strategy:
-      matrix:
-        include:
-          - os: macos-latest
-            target: aarch64-apple-darwin
-          - os: macos-13
-            target: x86_64-apple-darwin
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-    runs-on: ${{ matrix.os }}
+  macos:
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-      - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }} -p coxagent-app
-      - name: Package
-        run: tar czf coxagent-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release coxagent
+      - name: Build .app + .dmg
+        run: ./scripts/build-macos-app.sh
+      - name: Rename with version
+        run: cp desktop/build/CoXAgent.dmg "CoXAgent-${GITHUB_REF_NAME}.dmg"
       - uses: softprops/action-gh-release@v2
         with:
-          files: coxagent-${{ matrix.target }}.tar.gz
-          generate_release_notes: true
+          files: CoXAgent-*.dmg
+
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build server binary
+        run: cargo build --release -p coxagent-app
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/release/coxagent dist/
+          tar -C dist -czf "coxagent-${GITHUB_REF_NAME}-linux.tar.gz" coxagent
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: coxagent-*-linux.tar.gz
+
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build server binary
+        run: cargo build --release -p coxagent-app
+      - name: Package
+        shell: pwsh
+        run: Copy-Item target/release/coxagent.exe "CoXAgent-$env:GITHUB_REF_NAME.exe"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: CoXAgent-*.exe

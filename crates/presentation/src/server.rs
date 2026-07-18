@@ -212,6 +212,33 @@ struct WorkspaceDoc {
     conventions: String,
     #[serde(default)]
     invites: Vec<Invite>,
+    /// Client-app distribution: where users download CoXAgent for each
+    /// platform, refreshed automatically from GitHub Releases when
+    /// `releases_repo` is set (manual URLs act as overrides).
+    #[serde(default)]
+    downloads: DownloadsCfg,
+}
+
+/// Per-platform download links + the release source of truth.
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+struct DownloadsCfg {
+    /// `owner/name` GitHub repo whose Releases carry the app builds. When set,
+    /// a background task polls the latest release and fills version + asset
+    /// URLs automatically after every deploy that tags a release.
+    #[serde(default)]
+    releases_repo: String,
+    /// Newest published app version (auto from releases, or set manually).
+    #[serde(default)]
+    latest_version: String,
+    #[serde(default)]
+    macos: String,
+    #[serde(default)]
+    windows: String,
+    #[serde(default)]
+    linux: String,
+    /// App Store / TestFlight link — iOS can't sideload, so this is a URL only.
+    #[serde(default)]
+    ios: String,
 }
 
 /// One shareable invite link: whoever opens it can create their own account
@@ -1282,6 +1309,8 @@ pub async fn serve_full(
     tokio::spawn(space_budget_watchdog(state.clone()));
     // Nightly snapshots of the hub-level documents (workspace, spaces, chat).
     tokio::spawn(nightly_backup(state.clone(), backup_dir));
+    // App-release watcher: new tagged builds surface as update notices.
+    tokio::spawn(releases_watchdog(state.clone()));
     // Cross-instance realtime: bridge the local chat broadcast onto Redis
     // pub/sub so N hub instances fan out the same events (no-op without Redis).
     if let Ok(url) = std::env::var("COXAGENT_REDIS_URL") {
@@ -1306,6 +1335,7 @@ pub async fn serve_full(
         )
         .route("/api/health", get(health))
         .route("/api/mcp", post(mcp_ep))
+        .route("/api/app/latest", get(app_latest_ep))
         .route("/api/auth/login", post(login_ep))
         .route("/api/auth/logout", post(logout_ep))
         .route("/api/auth/me", get(me_ep))
@@ -1527,7 +1557,106 @@ async fn index() -> impl IntoResponse {
 }
 
 async fn health() -> impl IntoResponse {
-    Json(serde_json::json!({ "status": "ok" }))
+    Json(serde_json::json!({ "status": "ok", "version": env!("CARGO_PKG_VERSION") }))
+}
+
+/// What clients need to offer downloads + update notices: the hub's own
+/// version, the newest published app version, and per-platform URLs.
+async fn app_latest_ep(State(app): State<AppState>) -> impl IntoResponse {
+    let d = app.workspace.inner.lock().await.downloads.clone();
+    Json(serde_json::json!({
+        "hub_version": env!("CARGO_PKG_VERSION"),
+        "latest_version": d.latest_version,
+        "downloads": {
+            "macos": d.macos, "windows": d.windows, "linux": d.linux, "ios": d.ios,
+        },
+        "releases_repo": d.releases_repo,
+    }))
+}
+
+/// Poll GitHub Releases (via the `gh` CLI already required for the forge) every
+/// 30 minutes and refresh version + per-platform asset URLs — so a release
+/// tagged by CI shows up as an update notice in every client, no manual step.
+/// Manual URLs in the config win over auto-detected assets.
+async fn releases_watchdog(app: AppState) {
+    loop {
+        let repo = app
+            .workspace
+            .inner
+            .lock()
+            .await
+            .downloads
+            .releases_repo
+            .clone();
+        if !repo.trim().is_empty() {
+            let out = tokio::process::Command::new("gh")
+                .args([
+                    "api",
+                    &format!("repos/{}/releases/latest", repo.trim()),
+                    "--jq",
+                    "{tag: .tag_name, assets: [.assets[] | {name, url: .browser_download_url}]}",
+                ])
+                .stdin(std::process::Stdio::null())
+                .output()
+                .await;
+            if let Ok(o) = out {
+                if o.status.success() {
+                    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&o.stdout) {
+                        let tag = v
+                            .get("tag")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("")
+                            .trim_start_matches('v')
+                            .to_owned();
+                        let pick = |exts: &[&str]| -> String {
+                            v.get("assets")
+                                .and_then(serde_json::Value::as_array)
+                                .and_then(|a| {
+                                    a.iter().find(|x| {
+                                        x.get("name")
+                                            .and_then(serde_json::Value::as_str)
+                                            .is_some_and(|n| {
+                                                let n = n.to_lowercase();
+                                                exts.iter().any(|e| n.ends_with(e))
+                                            })
+                                    })
+                                })
+                                .and_then(|x| x.get("url").and_then(serde_json::Value::as_str))
+                                .unwrap_or("")
+                                .to_owned()
+                        };
+                        let (dmg, exe, lin) = (
+                            pick(&[".dmg"]),
+                            pick(&[".exe", ".msi"]),
+                            pick(&[".appimage", ".deb", "-linux.tar.gz"]),
+                        );
+                        let mut doc = app.workspace.inner.lock().await;
+                        let d = &mut doc.downloads;
+                        let changed = !tag.is_empty() && d.latest_version != tag;
+                        if !tag.is_empty() {
+                            d.latest_version = tag;
+                        }
+                        // Auto-fill only where no manual override exists.
+                        if d.macos.is_empty() || d.macos.contains("/releases/") {
+                            d.macos = dmg;
+                        }
+                        if d.windows.is_empty() || d.windows.contains("/releases/") {
+                            d.windows = exe;
+                        }
+                        if d.linux.is_empty() || d.linux.contains("/releases/") {
+                            d.linux = lin;
+                        }
+                        drop(doc);
+                        if changed {
+                            app.workspace.save().await;
+                            tracing::info!("app release refreshed from {repo}");
+                        }
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1800)).await;
+    }
 }
 
 /// Agent CLIs detected on this machine's PATH — so the dashboard can show what
@@ -5252,6 +5381,9 @@ struct WorkspacePutReq {
     accent: String,
     #[serde(default)]
     conventions: Option<String>,
+    /// Download/release config — only overwritten when provided.
+    #[serde(default)]
+    downloads: Option<DownloadsCfg>,
 }
 
 /// Set the workspace identity (admin — writes are admin-gated by middleware).
@@ -5267,6 +5399,9 @@ async fn workspace_put_ep(
         // Conventions edited on their own screen; only overwrite when provided.
         if let Some(c) = &req.conventions {
             c.trim().clone_into(&mut w.conventions);
+        }
+        if let Some(d) = req.downloads {
+            w.downloads = d;
         }
     }
     app.workspace.save().await;

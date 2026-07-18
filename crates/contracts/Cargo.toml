@@ -1,6 +1,6 @@
 [package]
 name = "coxagent-contracts"
-version = "0.0.0"
+version.workspace = true
 edition = "2021"
 license = "MIT"
 description = "Shared wire contracts (DTOs + events) between CoXAgent services"

@@ -1279,9 +1279,21 @@ textarea.np-in{resize:vertical;line-height:1.5}
     <div id="user-badge" class="userbox">
       <div class="uavatar"><span id="ub-initials">U</span></div>
       <div class="uinfo"><div id="ub-name" class="uname"></div><span id="ub-role" class="urole"></span></div>
+      <button onclick="openGetApp()" title="Get the app" class="ulogout"><i class="ti ti-download"></i></button>
       <button onclick="doLogout()" title="Sign out" class="ulogout"><i class="ti ti-logout"></i></button>
     </div>
   </aside>
+  <div id="update-banner" hidden style="position:fixed;top:0;left:0;right:0;z-index:400;display:flex;align-items:center;justify-content:center;gap:12px;background:var(--accent);color:#fff;padding:8px 14px;font-size:13px;font-weight:600">
+    <i class="ti ti-rocket"></i><span id="upd-text"></span>
+    <button onclick="openGetApp()" style="background:rgba(255,255,255,.18);border:none;color:#fff;border-radius:8px;padding:5px 13px;font-weight:700;cursor:pointer;font-family:inherit">Update</button>
+    <button onclick="document.getElementById('update-banner').hidden=true" style="background:transparent;border:none;color:#fff;opacity:.7;cursor:pointer"><i class="ti ti-x"></i></button>
+  </div>
+  <div class="ov" id="ov-getapp" onclick="if(event.target===this)close_('ov-getapp')"><div class="modal" style="max-width:460px">
+    <span class="x" onclick="close_('ov-getapp')"><i class="ti ti-x"></i></span>
+    <div class="np-head"><div class="np-mark"><i class="ti ti-download"></i></div>
+      <div><h3>Get CoXAgent</h3><div class="np-sub" id="ga-ver"></div></div></div>
+    <div id="ga-list" style="display:flex;flex-direction:column;gap:8px"></div>
+  </div></div>
 
   <main class="main">
     <div class="topbar">
@@ -2497,6 +2509,15 @@ async function renderWsAdmin(w){
       <div class="fr"><span class="lbl">Tagline</span><input id="wst" value="${esc(w.tagline||"")}" placeholder="what your company does"></div>
       <div class="fr" style="align-items:flex-start"><span class="lbl">Conventions</span>
         <textarea id="wsc" rows="4" placeholder="Company rules injected into EVERY agent on every project, e.g.\n- Comments & docs in Vietnamese\n- Follow hexagonal architecture; no logic in handlers\n- Prefer the existing UI components, never add a CSS framework" style="flex:1;background:var(--card);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 11px;font-size:12.5px;font-family:inherit">${esc(w.conventions||"")}</textarea></div>
+      <div class="fr" style="align-items:flex-start"><span class="lbl">App downloads</span>
+        <div style="flex:1;display:flex;flex-direction:column;gap:7px">
+          <input id="dl-repo" value="${esc((w.downloads||{}).releases_repo||"")}" placeholder="GitHub repo chứa release builds, vd. stevejrrogers/CoXAgent">
+          <div style="font-size:11px;color:var(--dim)">Đặt repo là đủ: hub tự lấy version + link .dmg/.exe/.tar.gz từ GitHub Releases mỗi 30 phút (CI build khi push tag v*). Các ô dưới chỉ để override thủ công.${(w.downloads||{}).latest_version?` · bản mới nhất: <b>${esc(w.downloads.latest_version)}</b>`:""}</div>
+          <input id="dl-mac" value="${esc((w.downloads||{}).macos||"")}" placeholder="macOS .dmg URL (auto)">
+          <input id="dl-win" value="${esc((w.downloads||{}).windows||"")}" placeholder="Windows .exe URL (auto)">
+          <input id="dl-lin" value="${esc((w.downloads||{}).linux||"")}" placeholder="Linux .tar.gz URL (auto)">
+          <input id="dl-ios" value="${esc((w.downloads||{}).ios||"")}" placeholder="iOS — App Store / TestFlight URL">
+        </div></div>
       <div class="fr"><span class="lbl"></span><button class="pri" onclick="saveWs()"><i class="ti ti-check"></i> Save</button></div>
     </div>
     <div class="sec">Invite people</div>
@@ -2517,7 +2538,38 @@ async function renderWsAdmin(w){
         <button class="ticket-actions" onclick="revokeInvite('${esc(i.token)}')"><i class="ti ti-trash"></i></button></div>`).join(""):'<div class="empty" style="padding:6px">no active invites</div>'}
     </div>`;
 }
-async function saveWs(){try{await fetch("/api/workspace",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:val("wsn"),tagline:val("wst"),accent:"",conventions:val("wsc")})});toasty("Saved — conventions apply to new agent runs","ok");renderHome();}catch(e){}}
+async function saveWs(){try{
+  const downloads={releases_repo:val("dl-repo"),latest_version:(window._appLatest&&window._appLatest.latest_version)||"",macos:val("dl-mac"),windows:val("dl-win"),linux:val("dl-lin"),ios:val("dl-ios")};
+  await fetch("/api/workspace",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:val("wsn"),tagline:val("wst"),accent:"",conventions:val("wsc"),downloads})});
+  toasty("Saved — conventions apply to new agent runs","ok");checkAppUpdate();renderHome();}catch(e){}}
+// ── App distribution: update banner + downloads modal ────────────────────────
+// The hub polls GitHub Releases (releases_repo) and republishes version + URLs
+// at /api/app/latest; every client compares against the hub's own version.
+function verGt(a,b){const pa=String(a).split(".").map(Number),pb=String(b).split(".").map(Number);
+  for(let i=0;i<3;i++){const x=pa[i]||0,y=pb[i]||0;if(x!==y)return x>y;}return false;}
+async function checkAppUpdate(){
+  let d=null;try{d=await(await fetch("/api/app/latest")).json();}catch(e){return;}
+  window._appLatest=d;
+  const nb=document.getElementById("update-banner");
+  if(d.latest_version&&d.hub_version&&verGt(d.latest_version,d.hub_version)&&localStorage.getItem("coxskipver")!==d.latest_version){
+    document.getElementById("upd-text").textContent="CoXAgent "+d.latest_version+" đã có (bạn đang chạy "+d.hub_version+")";
+    nb.hidden=false;
+  }else nb.hidden=true;
+}
+function openGetApp(){
+  const d=window._appLatest||{downloads:{}};
+  const dl=d.downloads||{};
+  document.getElementById("ga-ver").textContent=d.latest_version?("phiên bản mới nhất: "+d.latest_version):"chưa cấu hình release — Settings → Workspace";
+  const plats=[["macos","macOS","brand-apple",".dmg"],["windows","Windows","brand-windows",".exe"],["linux","Linux","brand-ubuntu",".tar.gz"],["ios","iOS","device-mobile","App Store / TestFlight"]];
+  const mine=/Mac/i.test(navigator.platform)?"macos":/Win/i.test(navigator.platform)?"windows":/Linux/i.test(navigator.platform)?"linux":"";
+  document.getElementById("ga-list").innerHTML=plats.map(([k,label,icon,hint])=>{
+    const url=dl[k];const on=k===mine;
+    return url
+      ?`<a href="${esc(url)}" target="_blank" rel="noopener" class="gc-btn" style="display:flex;align-items:center;gap:10px;padding:12px 14px;text-decoration:none;${on?"border-color:var(--accent)":""}"><i class="ti ti-${icon}" style="font-size:19px"></i><b style="flex:1">${label}</b><span style="font-size:11px;color:var(--dim)">${hint}${on?" · máy này":""}</span><i class="ti ti-download"></i></a>`
+      :`<div class="gc-btn" style="display:flex;align-items:center;gap:10px;padding:12px 14px;opacity:.45;cursor:default"><i class="ti ti-${icon}" style="font-size:19px"></i><b style="flex:1">${label}</b><span style="font-size:11px">chưa có bản build</span></div>`;
+  }).join("");
+  document.getElementById("ov-getapp").classList.add("open");
+}
 // Projects the caller may invite into: super = every project; space admin =
 // projects of their spaces (mirrors the server-side invite scoping).
 function invProjectPicker(){
@@ -4598,6 +4650,7 @@ function startApp(){
   loadProjects();
   checkAgentSetup(false);
   ensureNotifPermission();
+  checkAppUpdate();setInterval(checkAppUpdate,30*60*1000);
 }
 const AGENT_CLIS={claude:{label:"Claude Code",desc:"Anthropic's coding agent",install:"curl -fsSL https://claude.ai/install.sh | bash",docs:"https://claude.com/claude-code"},
   opencode:{label:"opencode",desc:"open-source multi-model agent",install:"curl -fsSL https://opencode.ai/install | bash",docs:"https://opencode.ai"}};
