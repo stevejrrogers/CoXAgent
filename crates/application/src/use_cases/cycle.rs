@@ -1622,6 +1622,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // rest have to re-resolve — the opposite order feeds the conflict cascade.
         let mut queue: Vec<_> = prs.into_iter().filter(|p| p.base == target).collect();
         queue.sort_by(|a, b| a.created.cmp(&b.created));
+        // Normally 1 fix per cycle bounds token cost; under the clean-base gate
+        // (refactor waiting on an empty queue) drain twice as fast.
+        let mut fix_budget: u32 = if self.clean_base_required().await {
+            2
+        } else {
+            1
+        };
         for pr in queue.into_iter().take(6) {
             // What needs fixing? Explicit review feedback, and/or merge conflicts
             // — conflicts are handled IMMEDIATELY, not parked for a review round.
@@ -1717,12 +1724,18 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 }
             }
             self.report_idle();
-            break; // one PR per cycle
+            fix_budget -= 1;
+            if fix_budget == 0 {
+                break;
+            }
         }
     }
 
-    /// Whether the open-PR queue has hit the WIP limit (`git.max_open_prs`) —
-    /// the signal to stop opening new branches and drain reviews instead.
+    /// Whether the open-PR queue blocks NEW branch work. Normally that's the
+    /// WIP limit (`git.max_open_prs`); but when the team is about to
+    /// RESTRUCTURE (refactor mode, or a sprint goal that says so), the bar is a
+    /// CLEAN BASE — every open PR must merge or close first, because branches
+    /// cut before a restructure can never merge sanely after it.
     async fn pr_queue_full(&self) -> bool {
         let limit = self.config.git.max_open_prs;
         if !self.config.git.enabled || limit == 0 {
@@ -1736,7 +1749,39 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         };
         let target = self.flow_base();
         let open = prs.iter().filter(|p| p.base == target).count();
+        if open == 0 {
+            return false;
+        }
+        if self.clean_base_required().await {
+            tracing::info!("clean-base gate: {open} open PR(s) must merge before refactor work");
+            return true;
+        }
         open >= limit as usize
+    }
+
+    /// A restructure is planned or underway: architecture refactor mode is on,
+    /// or the PO's sprint goal reads like a refactor/migration.
+    async fn clean_base_required(&self) -> bool {
+        let Ok(state) = self.store.load().await else {
+            return false;
+        };
+        if state.refactor_mode {
+            return true;
+        }
+        let goal = state
+            .sprint
+            .as_ref()
+            .map(|s| s.goal.to_lowercase())
+            .unwrap_or_default();
+        [
+            "refactor",
+            "restructure",
+            "migrat",
+            "tái cấu trúc",
+            "cấu trúc lại",
+        ]
+        .iter()
+        .any(|k| goal.contains(k))
     }
 
     /// Ops/SRE monitor: once the app has been deployed, ping its published port
