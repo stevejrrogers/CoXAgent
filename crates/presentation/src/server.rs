@@ -697,6 +697,76 @@ pub struct HubExtras {
 }
 
 /// Assemble the shared [`AppState`] from the registered projects and hub extras.
+/// Space budget ENFORCEMENT (not just display): every 5 minutes each space's
+/// total spend is compared to its cap; the first breach pauses every runner and
+/// registered operator of the space's projects and posts one notice to each
+/// project's #agents. Re-arms when the cap is raised above the spend (or the
+/// cap is removed) — so topping up the budget lets a Start actually stick.
+async fn space_budget_watchdog(app: AppState) {
+    let mut flagged: std::collections::HashSet<String> = std::collections::HashSet::new();
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+        let spaces = app.spaces.inner.lock().await.spaces.clone();
+        for sp in spaces {
+            if sp.budget_usd <= 0.0 {
+                flagged.remove(&sp.id);
+                continue;
+            }
+            let handles: Vec<ProjectHandle> = {
+                let projects = app.projects.read().await;
+                sp.projects
+                    .iter()
+                    .filter_map(|pid| projects.get(pid).cloned())
+                    .collect()
+            };
+            let mut spend = 0.0;
+            for p in &handles {
+                if let Ok(st) = p.store.load().await {
+                    spend += st.spend.total_cost_usd;
+                }
+            }
+            if spend < sp.budget_usd {
+                flagged.remove(&sp.id);
+                continue;
+            }
+            if !flagged.insert(sp.id.clone()) {
+                continue; // already enforced for this breach
+            }
+            tracing::warn!(
+                "space {} over budget (${spend:.2} >= ${:.2}) — pausing its agents",
+                sp.id,
+                sp.budget_usd
+            );
+            let msg = format!(
+                "⛔ BUDGET: space \"{}\" đã đốt ${spend:.2} / cap ${:.2} — toàn bộ agent của \
+                 space bị TẠM DỪNG. Super Admin nâng budget (Manage → Edit space) rồi Start lại \
+                 để tiếp tục.",
+                sp.name, sp.budget_usd
+            );
+            for p in &handles {
+                p.runner.pause();
+                if let Ok(workers) = p.store.workers().await {
+                    for w in workers {
+                        let _ = p.store.set_desired(&w.worker, false).await;
+                    }
+                }
+                let _ =
+                    coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+                        s.post_chat_in(
+                            "COX",
+                            &msg,
+                            coxagent_application::state::AGENTS_CHANNEL,
+                            Vec::new(),
+                        );
+                        s.log_activity("COX", "space budget cap reached — agents paused", None);
+                        Ok(())
+                    })
+                    .await;
+            }
+        }
+    }
+}
+
 async fn build_state(
     projects: Vec<ProjectHandle>,
     audit: Arc<dyn AuditPort>,
@@ -751,6 +821,8 @@ pub async fn serve_full(
     extras: HubExtras,
 ) -> std::io::Result<()> {
     let state = build_state(projects, audit, extras).await;
+    // Space budget enforcement runs for the life of the hub.
+    tokio::spawn(space_budget_watchdog(state.clone()));
 
     let app = Router::new()
         .route("/", get(index))
