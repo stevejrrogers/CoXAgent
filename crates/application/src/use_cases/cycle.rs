@@ -420,9 +420,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         if !self.config.workflow.token_saver {
             return;
         }
-        // Only index a real project root (marked by coxagent.json) — never a
-        // bare/arbitrary working directory.
-        if !self.work_dir.join("coxagent.json").exists() {
+        // Only index a real managed codebase — marked by coxagent.json in the
+        // codebase itself OR (the standard layout) in the workspace root one
+        // level up (<ws>/coxagent.json beside <ws>/codebase). The old
+        // codebase-only check never matched the standard layout, so the map
+        // silently went stale forever.
+        let managed = self.work_dir.join("coxagent.json").exists()
+            || self
+                .work_dir
+                .parent()
+                .is_some_and(|p| p.join("coxagent.json").exists());
+        if !managed {
             return;
         }
         let map = self.work_dir.join(".coxagent").join("codegraph.json");
