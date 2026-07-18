@@ -1264,6 +1264,10 @@ async fn create_project(
         if !sup && !space.admins.iter().any(|a| a.eq_ignore_ascii_case(&me)) {
             return (StatusCode::FORBIDDEN, "not an admin of this space").into_response();
         }
+    } else if !app.spaces.inner.lock().await.spaces.is_empty() {
+        // Once spaces exist, every project must belong to one — enforced here,
+        // not just in the UI, so API/service-account callers can't skip it.
+        return (StatusCode::BAD_REQUEST, "space is required").into_response();
     }
     let Some(factory) = app.factory.clone() else {
         return (

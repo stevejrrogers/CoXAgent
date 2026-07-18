@@ -4405,9 +4405,9 @@ async function loadNpSpaces(){
   row.style.display="none";sel.innerHTML="";
   let d=null;try{d=await(await fetch("/api/spaces")).json();}catch(e){return;}
   const sps=(d&&d.spaces)||[];if(!sps.length)return;
-  sel.innerHTML='<option value="">— không gán space —</option>'
-    +sps.map(s=>`<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("");
-  if(sps.length===1)sel.value=sps[0].id;
+  // Every project must belong to a space — no unassigned option.
+  sel.innerHTML=sps.map(s=>`<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("");
+  sel.value=sps[0].id;
   row.style.display="";
 }
 async function refineGoal(){
