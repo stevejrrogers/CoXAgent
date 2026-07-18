@@ -99,13 +99,25 @@ authz as the REST API. Tools: `search_symbols`, `symbol_refs`, `get_ticket`,
 Create API tokens in Users → API tokens; scope-check happens server-side per
 project argument.
 
-## Service roles (until the 4-binary split lands)
+## Service binaries (the physical split)
 
-| Target service | Run today as |
-|---|---|
-| cox-gateway | `coxagent hub` + `COXAGENT_NO_INLINE_EXEC=1` (Helm sets it) |
-| cox-runner | `coxagent run` (`COXAGENT_OPERATOR` identity) |
-| cox-realtime / cox-knowledge | inside the hub process (split scheduled) |
+Four role binaries build from one codebase (`cargo build --bins -p coxagent-app`);
+each enforces its surface in-process (wrong endpoint → 503), so a mis-routed
+load balancer fails loudly instead of leaking surfaces:
+
+| Binary | Serves | Notes |
+|---|---|---|
+| `cox-all` | everything | self-host default — identical to `coxagent hub` |
+| `cox-gateway` | REST + MCP + SPA | shell-free (`COXAGENT_NO_INLINE_EXEC` auto-set) |
+| `cox-realtime` | WS/SSE (chat, docs, events, terminal) + health | scale on connections; needs the Redis bus |
+| `cox-knowledge` | health + batch loops (budgets, backups, releases) | single replica |
+| *(runner)* | `coxagent run` | execution plane: agents, git, docker, jobs |
+
+Config is env-only for the role binaries: `COXAGENT_REGISTRY` (default
+`~/CoXAgent/registry.json`), `COXAGENT_PORT` (default 4000), plus the backing
+env vars above. Split deployments require Redis (`cox:events`) and an LB that
+sends `/…/ws`, `/…/events`, `/…/terminal` to realtime pods — everything else to
+gateway pods. Start with `cox-all`; split only when load asks for it.
 
 ## Upgrade & rollback
 

@@ -813,6 +813,9 @@ async fn terminal_ws_ep(
     headers: axum::http::HeaderMap,
     ws: WebSocketUpgrade,
 ) -> axum::response::Response {
+    if let Some(resp) = role_guard(true) {
+        return resp;
+    }
     if !origin_ok(&headers) {
         return (StatusCode::FORBIDDEN, "cross-origin websocket rejected").into_response();
     }
@@ -939,6 +942,52 @@ async fn terminal_socket(mut socket: WebSocket, work_dir: PathBuf, user: String,
     }
     let _ = child.kill();
     tracing::info!("terminal session closed ({user} on {pid})");
+}
+
+/// Which surface this process serves — the physical service split. One binary,
+/// four roles (`COXAGENT_ROLE`): `all` (default, self-host single process),
+/// `gateway` (REST + MCP, no sockets), `realtime` (WS/SSE only), `knowledge`
+/// (batch loops only). A load balancer routes paths to the right pods; the
+/// role guard makes serving the wrong surface impossible, not just unrouted.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum HubRole {
+    All,
+    Gateway,
+    Realtime,
+    Knowledge,
+}
+
+fn hub_role() -> HubRole {
+    static ROLE: std::sync::OnceLock<HubRole> = std::sync::OnceLock::new();
+    *ROLE.get_or_init(
+        || match std::env::var("COXAGENT_ROLE").unwrap_or_default().as_str() {
+            "gateway" => HubRole::Gateway,
+            "realtime" => HubRole::Realtime,
+            "knowledge" => HubRole::Knowledge,
+            _ => HubRole::All,
+        },
+    )
+}
+
+/// 503 unless this process's role serves the given surface.
+fn role_guard(need_realtime: bool) -> Option<axum::response::Response> {
+    let ok = match hub_role() {
+        HubRole::All => true,
+        HubRole::Gateway => !need_realtime,
+        HubRole::Realtime => need_realtime,
+        HubRole::Knowledge => false,
+    };
+    if ok {
+        None
+    } else {
+        Some(
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "wrong service role for this endpoint — check the load balancer routing",
+            )
+                .into_response(),
+        )
+    }
 }
 
 /// MCP server (streamable-HTTP JSON-RPC) — the gateway's third transport
@@ -1305,17 +1354,24 @@ pub async fn serve_full(
         .unwrap_or_else(|| PathBuf::from("."))
         .join("backups");
     let state = build_state(projects, audit, extras).await;
-    // Space budget enforcement runs for the life of the hub.
-    tokio::spawn(space_budget_watchdog(state.clone()));
-    // Nightly snapshots of the hub-level documents (workspace, spaces, chat).
-    tokio::spawn(nightly_backup(state.clone(), backup_dir));
-    // App-release watcher: new tagged builds surface as update notices.
-    tokio::spawn(releases_watchdog(state.clone()));
+    tracing::info!("hub role: {:?}", hub_role());
+    // Batch/watchdog loops belong to the knowledge role (and the all-in-one).
+    if matches!(hub_role(), HubRole::All | HubRole::Knowledge) {
+        // Space budget enforcement runs for the life of the hub.
+        tokio::spawn(space_budget_watchdog(state.clone()));
+        // Nightly snapshots of the hub-level documents (workspace, spaces, chat).
+        tokio::spawn(nightly_backup(state.clone(), backup_dir));
+        // App-release watcher: new tagged builds surface as update notices.
+        tokio::spawn(releases_watchdog(state.clone()));
+    }
     // Cross-instance realtime: bridge the local chat broadcast onto Redis
     // pub/sub so N hub instances fan out the same events (no-op without Redis).
-    if let Ok(url) = std::env::var("COXAGENT_REDIS_URL") {
-        if !url.trim().is_empty() {
-            tokio::spawn(redis_bus_bridge(state.clone(), url));
+    // Gateway needs it too — REST-posted chat must reach realtime pods.
+    if !matches!(hub_role(), HubRole::Knowledge) {
+        if let Ok(url) = std::env::var("COXAGENT_REDIS_URL") {
+            if !url.trim().is_empty() {
+                tokio::spawn(redis_bus_bridge(state.clone(), url));
+            }
         }
     }
 
@@ -3211,6 +3267,9 @@ async fn docs_ws_ep(
     headers: axum::http::HeaderMap,
     ws: WebSocketUpgrade,
 ) -> axum::response::Response {
+    if let Some(resp) = role_guard(true) {
+        return resp;
+    }
     if !origin_ok(&headers) {
         return (StatusCode::FORBIDDEN, "cross-origin websocket rejected").into_response();
     }
@@ -4442,6 +4501,9 @@ async fn syschat_ws_ep(
     headers: axum::http::HeaderMap,
     ws: WebSocketUpgrade,
 ) -> axum::response::Response {
+    if let Some(resp) = role_guard(true) {
+        return resp;
+    }
     if !origin_ok(&headers) {
         return (StatusCode::FORBIDDEN, "cross-origin websocket rejected").into_response();
     }
@@ -4613,6 +4675,9 @@ async fn chat_ws_ep(
     headers: axum::http::HeaderMap,
     ws: WebSocketUpgrade,
 ) -> axum::response::Response {
+    if let Some(resp) = role_guard(true) {
+        return resp;
+    }
     if !origin_ok(&headers) {
         return (StatusCode::FORBIDDEN, "cross-origin websocket rejected").into_response();
     }
@@ -6283,15 +6348,38 @@ async fn resolve_principal(
 /// RBAC gate. Open (pass-through) when no auth is configured. Otherwise: the
 /// SPA shell, health, and login are public; every other route needs a valid
 /// session, and mutating methods (except logout) need an admin.
+#[allow(clippy::too_many_lines)] // linear gate list; splitting hides the order
 async fn auth_mw(
     State(app): State<AppState>,
     req: Request<axum::body::Body>,
     next: Next,
 ) -> axum::response::Response {
+    let path = req.uri().path().to_owned();
+    // Physical service split: a realtime pod serves only sockets, a knowledge
+    // pod serves nothing but health — enforced here, not by routing hope.
+    // (Realtime endpoints carry their own guard; this blocks the REST surface.)
+    let realtime_path = path.ends_with("/ws")
+        || path.ends_with("/events")
+        || path.ends_with("/terminal")
+        || path.contains("/docs-ws");
+    let role_ok = match hub_role() {
+        HubRole::All => true,
+        HubRole::Gateway => !realtime_path,
+        HubRole::Realtime => {
+            realtime_path || path == "/api/health" || path == "/api/auth/me" || path == "/"
+        }
+        HubRole::Knowledge => path == "/api/health",
+    };
+    if !role_ok {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "wrong service role for this endpoint",
+        )
+            .into_response();
+    }
     let Some(auth) = app.auth.clone() else {
         return next.run(req).await;
     };
-    let path = req.uri().path().to_owned();
     // Public routes: the SPA shell, health, login, and incoming webhooks (the
     // webhook token is the credential, so no session is required).
     if path == "/"
