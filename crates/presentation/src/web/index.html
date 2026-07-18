@@ -2327,6 +2327,14 @@ async function renderHome(){
   const projects=selSp?allProjects.filter(p=>(selSp.projects||[]).includes(p.id)):allProjects;
   const totalSpend=projects.reduce((a,p)=>a+(p.spend||0),0);
   const online=new Set();projects.forEach(p=>(p.online||[]).forEach(o=>online.add(o)));
+  // Scope agents + team to the picked space too — a space with no projects
+  // must show an empty dashboard, not the whole hub's.
+  const pidSet=new Set(projects.map(p=>p.id));
+  const agents=selSp?(me.agents||[]).filter(a=>pidSet.has(a.project)):(me.agents||[]);
+  const members=selSp?(ov.members||[]).filter(m=>
+      (selSp.admins||[]).some(a=>a.toLowerCase()===(m.username||"").toLowerCase())
+      ||(m.projects||[]).some(p=>pidSet.has(p)))
+    :(ov.members||[]);
   // Sidebar "Home" shows the company name once the workspace exists.
   const navH=document.getElementById("nav-home");
   if(navH)navH.innerHTML=w.name?`<i class="ti ti-building-skyscraper"></i> ${esc(w.name)}`:'<i class="ti ti-home"></i> Home';
@@ -2341,9 +2349,9 @@ async function renderHome(){
   document.getElementById("ws-hero").innerHTML=spaceBar+`<div class="wshero">
       <div class="wsmark">${esc(initials(nm))}</div>
       <div><div class="wsname">${esc(nm)}</div><div class="wstag">${esc(tag)}</div></div>
-      <div class="wsstats">${stat(projects.length,"Projects")}${stat((ov.members||[]).length,"Members")}${stat(online.size,"Online")}${stat(money(totalSpend),"Spend")}</div></div>`;
-  ov=Object.assign({},ov,{projects});
-  document.getElementById("ws-myagents").innerHTML=(me.agents||[]).length?(me.agents||[]).map(a=>{
+      <div class="wsstats">${stat(projects.length,"Projects")}${stat(members.length,"Members")}${stat(online.size,"Online")}${stat(money(totalSpend),"Spend")}</div></div>`;
+  ov=Object.assign({},ov,{projects,members});
+  document.getElementById("ws-myagents").innerHTML=agents.length?agents.map(a=>{
     const st=a.online?`<span class="wsdot on"></span><b>${esc((a.role||"").toUpperCase())}</b> ${a.ticket?`<span class="tid">${esc(a.ticket)}</span>`:""}`
       :(a.desired===false?'<span class="wsdot off"></span>stopped':'<span class="wsdot idle"></span>idle');
     const op=a.operator?`'${esc(a.operator)}'`:null;
