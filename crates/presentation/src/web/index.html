@@ -1429,7 +1429,14 @@ textarea.np-in{resize:vertical;line-height:1.5}
       </div></div>
       <div class="view" id="view-roadmap"><div id="roadmap-body"></div></div>
       <div class="view" id="view-review"><div id="rv-drain"></div><div id="review-body"></div></div>
-      <div class="view" id="view-codemap"><div id="codemap-body"></div></div>
+      <div class="view" id="view-codemap">
+        <div style="display:flex;gap:4px;background:var(--card2);border:1px solid var(--border2);border-radius:10px;padding:3px;margin-bottom:14px;width:fit-content">
+          <button id="cmt-map" class="npmode on" onclick="setCodemapTab('map')" style="padding:7px 16px"><i class="ti ti-sitemap"></i> Map</button>
+          <button id="cmt-files" class="npmode" onclick="setCodemapTab('files')" style="padding:7px 16px"><i class="ti ti-folder"></i> Files</button>
+        </div>
+        <div id="codemap-body"></div>
+        <div id="ws-panel" hidden></div>
+      </div>
       <div class="ov" id="ov-diff" onclick="if(event.target===this)close_('ov-diff')"><div class="modal" style="max-width:960px">
         <span class="x" onclick="close_('ov-diff')"><i class="ti ti-x"></i></span>
         <h3 id="diff-title" style="font-size:14px;font-family:ui-monospace,monospace"><i class="ti ti-git-pull-request" style="color:var(--accent2)"></i> diff</h3>
@@ -1725,7 +1732,7 @@ const fmtK=n=>{n=Number(n)||0;return n>=1000?(n/1000).toFixed(1)+"k":String(n);}
 const AC={BA:"--blue","DEV-FEATURE":"--green","DEV-BUG":"--red",SA:"--purple",TEST:"--teal",DOCS:"--blue",PO:"--amber",SM:"--teal",PD:"--purple",USER:"--accent"};
 // Stable nicknames so each role reads as one consistent person, not a label.
 const AGENT_NICK={BA:"Bella",PO:"Pola",SM:"Sam",SA:"Aria","DEV-FEATURE":"Finn","DEV-BUG":"Bex",TEST:"Quinn",DOCS:"Dana",PD:"Piper"};
-const TITLES={"mg-spaces":["Spaces","every team space in the hub"],"mg-space":["Space","deep dive"],"mg-users":["Users","everyone across the hub"],"mg-usage":["Usage","who burns what"],home:["Home","your company · projects · your agents"],overview:["Overview","project health at a glance"],team:["Agents","your autonomous workers"],board:["Work","board · sprint · backlog"],activity:["Activity","what the agents are doing"],roadmap:["Roadmap","now · next · later, auto-generated"],discuss:["Scrum","standups, sprint events & team threads"],docs:["Wiki","product & technical knowledge base"],codemap:["Code map","symbols & dependencies the agents navigate"],chat:["Chat","talk with your teammates"],review:["Review","open pull requests — approve & merge"],people:["People","per-user activity & productivity"],audit:["Audit","who did what, when"],access:["Users","accounts, project access & tokens"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
+const TITLES={"mg-spaces":["Spaces","every team space in the hub"],"mg-space":["Space","deep dive"],"mg-users":["Users","everyone across the hub"],"mg-usage":["Usage","who burns what"],home:["Home","your company · projects · your agents"],overview:["Overview","project health at a glance"],team:["Agents","your autonomous workers"],board:["Work","board · sprint · backlog"],activity:["Activity","what the agents are doing"],roadmap:["Roadmap","now · next · later, auto-generated"],discuss:["Scrum","standups, sprint events & team threads"],docs:["Wiki","product & technical knowledge base"],codemap:["Code map","files · symbols · dependencies the agents navigate"],chat:["Chat","talk with your teammates"],review:["Review","open pull requests — approve & merge"],people:["People","per-user activity & productivity"],audit:["Audit","who did what, when"],access:["Users","accounts, project access & tokens"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
 const esc=s=>(s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 const cvar=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim()||"#888";
 let STATE={}, CUR="overview", BF="all", INIT_ACT=false, WORKTAB="board";
@@ -3665,7 +3672,6 @@ async function loadSettings(){let cfg={};try{cfg=await(await fetch(api("/config"
       <button class="settab-btn" data-t="engines" onclick="setSetTab('engines')"><i class="ti ti-cpu"></i> Engines</button>
       <button class="settab-btn" data-t="workflow" onclick="setSetTab('workflow')"><i class="ti ti-adjustments"></i> Workflow</button>
       <button class="settab-btn" data-t="git" onclick="setSetTab('git')"><i class="ti ti-git-branch"></i> Git</button>
-      <button class="settab-btn" data-t="workspace" onclick="setSetTab('workspace')"><i class="ti ti-folder"></i> Workspace</button>
     </div>
     <div class="settab" data-p="engines">
       ${detBanner}
@@ -3716,10 +3722,8 @@ async function loadSettings(){let cfg={};try{cfg=await(await fetch(api("/config"
         <div class="fr"><span class="lbl">Auto-merge</span><select id="git-am"><option value="false" ${!git.auto_merge?'selected':''}>off — you merge from the Review tab</option><option value="true" ${git.auto_merge?'selected':''}>on — SA approves &amp; merges automatically</option></select><span class="hint">On: SA merges on approve (never on failing CI). Off: approval is only a suggestion; request-changes still loops back to the agent to fix.</span></div>
       </div>
     </div>
-    <div class="settab" data-p="workspace" hidden><div id="ws-panel"></div></div>
     <div class="set-footer"><button class="save" onclick="saveSettings()"><i class="ti ti-device-floppy"></i> Save changes</button><span id="save-note"></span><span class="set-foothint">Other settings apply on the next restart</span></div>`;
-  setSetTab(window._setTab||"engines");
-  loadWorkspace("");}
+  setSetTab(window._setTab==="workspace"?"engines":(window._setTab||"engines"));}
 function copyText(btn,text){navigator.clipboard&&navigator.clipboard.writeText(text);
   const old=btn.innerHTML;btn.innerHTML='<i class="ti ti-check"></i>';setTimeout(()=>{btn.innerHTML=old;},1200);}
 function openConnect(provider){const gl=provider==="gitlab";
@@ -4169,7 +4173,7 @@ function connect(){if(ES)ES.close();if(poll){clearInterval(poll);poll=null;}
 function loadBudget(){fetch(api("/config")).then(r=>r.json()).then(c=>{window._budget=(c.workflow&&c.workflow.budget_usd)||null;if(CUR==="insights")renderActive();}).catch(()=>{});}
 let PROJECTS=[];
 function projInitial(p){return (p.alias||p.name||"P").trim().charAt(0).toUpperCase()||"P";}
-function switchProject(id){PID=id;INIT_ACT=false;GOAL_LOADED_PID=null;localStorage.setItem("coxpid",id);closeProjMenu();renderProjBtn();loadBudget();loadComments();connect();if(CUR==="settings")loadWorkspace("");
+function switchProject(id){PID=id;INIT_ACT=false;GOAL_LOADED_PID=null;localStorage.setItem("coxpid",id);closeProjMenu();renderProjBtn();loadBudget();loadComments();connect();if(CUR==="codemap"&&window._cmTab==="files"){window._wsPath="";loadWorkspace("");}
   // Chat is system-wide; switching project only refreshes which project channels show.
   loadChannels();}
 function fileIcon(name){const e=(name.split(".").pop()||"").toLowerCase();
@@ -4767,6 +4771,16 @@ async function prAction(num,action){
   }catch(e){toasty("Network error","err");}
 }
 // ── Code map: symbol & dependency graph the agents navigate ──────────────────
+// One screen, two lenses on the same codebase: Map (symbol graph) | Files
+// (the real workspace file browser, previously buried in Settings).
+function setCodemapTab(t){
+  window._cmTab=t;
+  document.getElementById("cmt-map").classList.toggle("on",t==="map");
+  document.getElementById("cmt-files").classList.toggle("on",t==="files");
+  document.getElementById("codemap-body").hidden=t!=="map";
+  const ws=document.getElementById("ws-panel");ws.hidden=t!=="files";
+  if(t==="files")loadWorkspace(window._wsPath||"");
+}
 let CG=null,cgT=null;
 async function renderCodeMap(){
   const el=document.getElementById("codemap-body");if(!el)return;
