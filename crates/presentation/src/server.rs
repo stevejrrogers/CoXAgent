@@ -767,6 +767,142 @@ async fn space_budget_watchdog(app: AppState) {
     }
 }
 
+/// Embedded terminal (IDE-style): a real PTY in the project's codebase dir,
+/// bridged over this WebSocket. Arbitrary shell = full host access, so the
+/// gate is hard: Admin/Super only, and every session start is audited.
+/// Protocol: client sends JSON text frames {"input": "..."} and
+/// {"resize": {"cols": N, "rows": N}}; server sends raw output as binary.
+async fn terminal_ws_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    headers: axum::http::HeaderMap,
+    ws: WebSocketUpgrade,
+) -> axum::response::Response {
+    if !origin_ok(&headers) {
+        return (StatusCode::FORBIDDEN, "cross-origin websocket rejected").into_response();
+    }
+    let user = match &app.auth {
+        Some(auth) => match resolve_principal(auth, &headers).await {
+            Some(u)
+                if matches!(
+                    u.role,
+                    coxagent_application::auth::AuthRole::Admin
+                        | coxagent_application::auth::AuthRole::Super
+                ) =>
+            {
+                u.username
+            }
+            Some(_) => {
+                return (StatusCode::FORBIDDEN, "admin role required").into_response();
+            }
+            None => return (StatusCode::UNAUTHORIZED, "unauthenticated").into_response(),
+        },
+        None => "user".to_owned(),
+    };
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    app.audit
+        .record(coxagent_application::ports::outbound::AuditRecord {
+            at: coxagent_application::state::now_rfc3339(),
+            user: user.clone(),
+            action: format!("TERMINAL open {pid}"),
+            status: 101,
+        })
+        .await;
+    let work_dir = p.work_dir.clone();
+    ws.max_message_size(256 * 1024)
+        .on_upgrade(move |socket| terminal_socket(socket, work_dir, user, pid))
+}
+
+async fn terminal_socket(mut socket: WebSocket, work_dir: PathBuf, user: String, pid: String) {
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+    let pty = native_pty_system();
+    let Ok(pair) = pty.openpty(PtySize {
+        rows: 30,
+        cols: 100,
+        pixel_width: 0,
+        pixel_height: 0,
+    }) else {
+        let _ = socket
+            .send(Message::Text("\r\n[pty unavailable]\r\n".into()))
+            .await;
+        return;
+    };
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_owned());
+    let mut cmd = CommandBuilder::new(&shell);
+    cmd.arg("-l");
+    cmd.env("TERM", "xterm-256color");
+    if work_dir.is_dir() {
+        cmd.cwd(&work_dir);
+    }
+    let Ok(mut child) = pair.slave.spawn_command(cmd) else {
+        let _ = socket
+            .send(Message::Text("\r\n[shell spawn failed]\r\n".into()))
+            .await;
+        return;
+    };
+    drop(pair.slave);
+    let Ok(mut reader) = pair.master.try_clone_reader() else {
+        return;
+    };
+    let Ok(mut writer) = pair.master.take_writer() else {
+        return;
+    };
+    tracing::info!("terminal session opened by {user} on {pid}");
+    // Blocking PTY reads → channel → WS.
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = [0u8; 8192];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if tx.blocking_send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    let master = pair.master;
+    loop {
+        tokio::select! {
+            out = rx.recv() => {
+                if let Some(bytes) = out {
+                    if socket.send(Message::Binary(bytes)).await.is_err() { break; }
+                } else { // shell exited
+                    let _ = socket.send(Message::Text("\r\n[session ended]\r\n".into())).await;
+                    break;
+                }
+            }
+            msg = socket.recv() => {
+                let Some(Ok(msg)) = msg else { break };
+                if let Message::Text(t) = msg {
+                    let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) else { continue };
+                    if let Some(input) = v.get("input").and_then(|x| x.as_str()) {
+                        use std::io::Write;
+                        if writer.write_all(input.as_bytes()).is_err() { break; }
+                        let _ = writer.flush();
+                    } else if let Some(r) = v.get("resize") {
+                        let cols = r.get("cols").and_then(serde_json::Value::as_u64).unwrap_or(100);
+                        let rows = r.get("rows").and_then(serde_json::Value::as_u64).unwrap_or(30);
+                        #[allow(clippy::cast_possible_truncation)]
+                        let _ = master.resize(PtySize {
+                            rows: rows.clamp(4, 300) as u16,
+                            cols: cols.clamp(20, 500) as u16,
+                            pixel_width: 0, pixel_height: 0,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    let _ = child.kill();
+    tracing::info!("terminal session closed ({user} on {pid})");
+}
+
 async fn build_state(
     projects: Vec<ProjectHandle>,
     audit: Arc<dyn AuditPort>,
@@ -950,6 +1086,7 @@ pub async fn serve_full(
         )
         .route("/api/projects/:pid/docs/:id/ai-edit", post(doc_ai_edit_ep))
         .route("/api/projects/:pid/docs/:id/ws", get(docs_ws_ep))
+        .route("/api/projects/:pid/terminal", get(terminal_ws_ep))
         .route("/api/projects/:pid/codegraph", get(codegraph_ep))
         .route("/api/projects/:pid/codegraph/refs", get(codegraph_refs_ep))
         .route("/api/projects/:pid/codegraph/deps", get(codegraph_deps_ep))
