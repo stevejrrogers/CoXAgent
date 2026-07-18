@@ -2257,6 +2257,7 @@ const SLASH_CMDS=[
   ["/standup","","SM runs a standup roundup"],
   ["/arch","","SA reviews architecture & files refactors"],
   ["/docs","","DOCS reviews the Wiki & fills gaps"],
+  ["/merge","","SA merges every green open PR right now (oldest first)"],
   ["/digest","","Post a daily digest (shipped · spend · sprint) to chat"],
   ["/start","","Start your operator"],
   ["/stop","","Stop your operator"],
@@ -2279,6 +2280,8 @@ async function handleSlash(body){
       setDiscBusy("Team is discussing "+arg+"…");
       try{await fetch(api("/discuss"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({topic:arg})});}catch(e){}
       refreshDisc();return true;
+    case "merge": case "merge_queue":
+      mergeSweep(); return true;
     case "digest":
       try{await fetch(api("/digest"),{method:"POST"});toasty("Digest posted to chat","ok");}catch(e){}
       refreshDisc();return true;
@@ -4254,14 +4257,31 @@ function goalIsRefactor(){
 }
 async function drainBanner(elId){
   const el=document.getElementById(elId);if(!el)return;
-  if(!goalIsRefactor()){el.innerHTML="";return;}
+  const sweepBtn=`<button class="gc-btn pri" onclick="mergeSweep()" title="SA merges every green PR right now (oldest first) — no tokens"><i class="ti ti-git-merge"></i> SA merge sweep</button>`;
+  // The Review tab always offers the sweep, drain or not.
+  const toolbar=elId==="rv-drain"?`<div style="display:flex;justify-content:flex-end;margin-bottom:10px">${sweepBtn}</div>`:"";
+  if(!goalIsRefactor()){el.innerHTML=toolbar;return;}
   if(Date.now()-DRAIN_CACHE.t>15000){
-    try{const prs=await(await fetch(api("/prs"))).json();DRAIN_CACHE={t:Date.now(),n:Array.isArray(prs)?prs.length:0};}catch(e){return;}
+    try{const prs=await(await fetch(api("/prs"))).json();DRAIN_CACHE={t:Date.now(),n:Array.isArray(prs)?prs.length:0};}catch(e){el.innerHTML=toolbar;return;}
   }
-  el.innerHTML=DRAIN_CACHE.n>0?`<div class="drainbar"><i class="ti ti-barrier-block"></i>
+  el.innerHTML=(DRAIN_CACHE.n>0?`<div class="drainbar"><i class="ti ti-barrier-block"></i>
     <div><b>CLEAN-BASE DRAIN</b> — refactor đang chờ merge sạch <b>${DRAIN_CACHE.n} PR</b>.
     Mọi agent của mọi user tạm NGỪNG mở việc mới — chỉ fix conflict &amp; merge (cũ nhất trước).
-    <a onclick="nav('review')">Mở Review để merge PR xanh →</a></div></div>`:"";
+    <a onclick="nav('review')">Mở Review để merge PR xanh →</a> ${sweepBtn}</div></div>`:"")+toolbar;
+}
+// Ask the SA to merge every green open PR right now (oldest first). Token-free;
+// results are announced in #agents and summarised in a toast.
+async function mergeSweep(){
+  toasty("SA đang quét queue & merge PR xanh…","ok");
+  try{
+    const r=await fetch(api("/merge-sweep"),{method:"POST"});
+    if(!r.ok){toasty("Sweep failed: "+(await r.text()||r.status),"err");return;}
+    const d=await r.json();
+    const m=(d.merged||[]).length,s=(d.skipped||[]).length;
+    toasty(m?`Đã merge ${m} PR ✓${s?` · còn ${s} chưa đủ điều kiện`:""}`:`Chưa merge được PR nào${s?` — ${s} cái đang conflict/CI`:""}`,m?"ok":"warn");
+    DRAIN_CACHE.t=0;
+    if(CUR==="review")renderReview(); if(CUR==="overview")drainBanner("ov-drain");
+  }catch(e){toasty("Network error","err");}
 }
 async function renderReview(){
   drainBanner("rv-drain");

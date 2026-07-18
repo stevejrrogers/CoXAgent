@@ -22,6 +22,8 @@ pub struct RunChatReplyUseCase<S: StateStorePort + ?Sized, E: AgentEnginePort + 
     lang: Language,
     deploy: Option<Arc<dyn DeployPort>>,
     host_port: Option<u16>,
+    /// Code host + target branch, so chat can trigger an SA merge sweep.
+    forge: Option<(Arc<dyn crate::ports::outbound::ForgePort>, String)>,
 }
 
 /// Common docker-compose filenames we treat as "already has a deploy setup".
@@ -48,7 +50,19 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             lang,
             deploy: None,
             host_port: None,
+            forge: None,
         }
+    }
+
+    /// Give the chat the ability to run an SA merge sweep over PRs into `target`.
+    #[must_use]
+    pub fn with_forge(
+        mut self,
+        forge: Arc<dyn crate::ports::outbound::ForgePort>,
+        target: impl Into<String>,
+    ) -> Self {
+        self.forge = Some((forge, target.into()));
+        self
     }
 
     /// Give the chat the ability to actually deploy/run the app on request.
@@ -91,6 +105,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
              ACTION: bug: <title> :: <desc> :: <low|medium|high>     — file a bug at that priority\n\
              ACTION: priority: <ticket-id> :: <low|medium|high>      — reprioritise an existing ticket\n\
              ACTION: deploy                     — build & run the app now (docker compose up)\n\
+             ACTION: merge_queue                — SA merges every green open PR right now\n\
              ACTION: none                       — just talking / asking\n\n\
              For a real decision that needs the team (should we build X? which approach?), prefer \
              `discuss:` so PO and SA debate and the SM decides. Set a sensible priority when you \
@@ -165,6 +180,16 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             self.reprioritize(rest).await;
         } else if lower.starts_with("deploy") {
             self.deploy_now().await;
+        } else if lower.starts_with("merge_queue") || lower.starts_with("merge queue") {
+            if let Some((forge, target)) = &self.forge {
+                let _ = crate::use_cases::merge_sweep(
+                    forge.as_ref(),
+                    self.store.as_ref(),
+                    target,
+                    self.lang.is_vi(),
+                )
+                .await;
+            }
         }
         Ok(())
     }

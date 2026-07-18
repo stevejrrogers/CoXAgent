@@ -733,6 +733,7 @@ pub async fn serve_full(
         .route("/api/projects/:pid/control/:action", post(control_ep))
         .route("/api/projects/:pid/sprint/goal", post(set_sprint_goal_ep))
         .route("/api/projects/:pid/digest", post(digest_ep))
+        .route("/api/projects/:pid/merge-sweep", post(merge_sweep_ep))
         .route(
             "/api/workspace",
             get(workspace_get_ep).put(workspace_put_ep),
@@ -3811,6 +3812,14 @@ async fn chat_reply_ep(
             .with_deploy(Arc::clone(d))
             .with_host_port(cfg.deploy.host_port);
     }
+    if let Some(f) = &p.forge {
+        let target = if cfg.git.target_branch.trim().is_empty() {
+            cfg.git.default_branch.clone()
+        } else {
+            cfg.git.target_branch.clone()
+        };
+        uc = uc.with_forge(Arc::clone(f), target);
+    }
     match uc.execute(msg).await {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => internal_error(&e.to_string()),
@@ -4720,6 +4729,37 @@ fn html_escape(s: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
+}
+
+/// On-demand SA merge sweep: merge every green PR in the queue right now
+/// (oldest first), report to `#agents`, and return the outcome. Token-free.
+async fn merge_sweep_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Some(forge) = &p.forge else {
+        return (StatusCode::NOT_IMPLEMENTED, "forge not configured").into_response();
+    };
+    // Target branch + ceremony language from the project config file.
+    let cfg = std::fs::read_to_string(&p.config_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .unwrap_or_default();
+    let target = cfg["git"]["target_branch"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| cfg["git"]["default_branch"].as_str())
+        .unwrap_or("main")
+        .to_owned();
+    let vi = cfg["workflow"]["language"].as_str() == Some("vi");
+    let out =
+        coxagent_application::use_cases::merge_sweep(forge.as_ref(), p.store.as_ref(), &target, vi)
+            .await;
+    Json(serde_json::json!({ "ok": true, "merged": out.merged, "skipped": out.skipped }))
+        .into_response()
 }
 
 #[derive(serde::Deserialize)]
