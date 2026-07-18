@@ -1,0 +1,15 @@
+[package]
+name = "cox-knowledge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "CoXAgent knowledge service — thin composition root over coxagent-app"
+
+[dependencies]
+coxagent-app = { path = "../../app" }
+tokio = { workspace = true }
+
+[[bin]]
+name = "cox-knowledge"
+path = "src/main.rs"

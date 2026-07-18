@@ -469,6 +469,38 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
+name = "cox-gateway"
+version = "0.94.0"
+dependencies = [
+ "coxagent-app",
+ "tokio",
+]
+
+[[package]]
+name = "cox-knowledge"
+version = "0.94.0"
+dependencies = [
+ "coxagent-app",
+ "tokio",
+]
+
+[[package]]
+name = "cox-realtime"
+version = "0.94.0"
+dependencies = [
+ "coxagent-app",
+ "tokio",
+]
+
+[[package]]
+name = "cox-runner"
+version = "0.94.0"
+dependencies = [
+ "coxagent-app",
+ "tokio",
+]
+
+[[package]]
 name = "coxagent-app"
 version = "0.94.0"
 dependencies = [

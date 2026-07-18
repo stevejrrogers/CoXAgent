@@ -1,0 +1,15 @@
+[package]
+name = "cox-runner"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "CoXAgent runner service — the execution plane (agents, git, docker)"
+
+[dependencies]
+coxagent-app = { path = "../../app" }
+tokio = { workspace = true }
+
+[[bin]]
+name = "cox-runner"
+path = "src/main.rs"

@@ -101,7 +101,8 @@ project argument.
 
 ## Service binaries (the physical split)
 
-Four role binaries build from one codebase (`cargo build --bins -p coxagent-app`);
+Five role binaries build from one codebase (`cargo build --workspace --bins`),
+each its own crate under `crates/services/` (plus `cox-all` in the app crate);
 each enforces its surface in-process (wrong endpoint → 503), so a mis-routed
 load balancer fails loudly instead of leaking surfaces:
 
@@ -111,7 +112,7 @@ load balancer fails loudly instead of leaking surfaces:
 | `cox-gateway` | REST + MCP + SPA | shell-free (`COXAGENT_NO_INLINE_EXEC` auto-set) |
 | `cox-realtime` | WS/SSE (chat, docs, events, terminal) + health | scale on connections; needs the Redis bus |
 | `cox-knowledge` | health + batch loops (budgets, backups, releases) | single replica |
-| *(runner)* | `coxagent run` | execution plane: agents, git, docker, jobs |
+| `cox-runner` | agent cycles, git, docker, queued jobs | env: COXAGENT_STATE_DIR + COXAGENT_WORK_DIR (+OPERATOR) |
 
 Config is env-only for the role binaries: `COXAGENT_REGISTRY` (default
 `~/CoXAgent/registry.json`), `COXAGENT_PORT` (default 4000), plus the backing

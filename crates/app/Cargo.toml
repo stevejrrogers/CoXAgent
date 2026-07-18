@@ -13,17 +13,7 @@ path = "src/main.rs"
 name = "cox-all"
 path = "src/bin/service.rs"
 
-[[bin]]
-name = "cox-gateway"
-path = "src/bin/service.rs"
 
-[[bin]]
-name = "cox-realtime"
-path = "src/bin/service.rs"
-
-[[bin]]
-name = "cox-knowledge"
-path = "src/bin/service.rs"
 
 [dependencies]
 coxagent-domain.workspace = true

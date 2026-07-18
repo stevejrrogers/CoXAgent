@@ -25,12 +25,12 @@ spec:
         - name: hub
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          args: ["hub", "--port", "{{ .Values.hub.port }}"]
+          command: [{{ .Values.hub.binary | default "cox-all" | quote }}]
           ports:
             - containerPort: {{ .Values.hub.port }}
           env:
-            - name: COXAGENT_NO_INLINE_EXEC
-              value: "1"
+            - name: COXAGENT_PORT
+              value: {{ .Values.hub.port | quote }}
             - name: COXAGENT_ADMIN_USER
               valueFrom: { secretKeyRef: { name: {{ .Values.backing.existingSecret }}, key: admin-user } }
             - name: COXAGENT_ADMIN_PASSWORD

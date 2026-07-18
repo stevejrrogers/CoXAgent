@@ -22,8 +22,12 @@ spec:
       containers:
         - name: runner
           image: "{{ .Values.runner.image.repository }}:{{ .Values.runner.image.tag }}"
-          args: ["run", "--headless"]
+          command: ["cox-runner"]
           env:
+            - name: COXAGENT_STATE_DIR
+              value: /data/project/state
+            - name: COXAGENT_WORK_DIR
+              value: /data/project/codebase
             - name: COXAGENT_OPERATOR
               value: {{ .Values.runner.operatorName | quote }}
             {{- include "coxagent.envFromSecret" . | nindent 12 }}

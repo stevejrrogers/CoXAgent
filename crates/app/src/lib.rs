@@ -727,10 +727,39 @@ async fn build_audit() -> Arc<dyn coxagent_application::ports::outbound::AuditPo
     Arc::new(MemoryAuditSink::default())
 }
 
-/// Serve many projects from a hub registry file (the `hub` command). The
-/// registry is a JSON array of `{ "id", "path" }` where `path` is a workspace
-/// dir containing `state/` and `codebase/`.
-/// Serve the hub (all roles, or the surface selected by `COXAGENT_ROLE`).
+/// Entry for a dedicated runner service (cox-runner): one project's operator
+/// loop, configured purely by env — 12-factor, no CLI parsing.
+///
+/// # Errors
+/// Returns an error when the store can't be built or the loop fails fatally.
+pub async fn operator_main(
+    state_dir: std::path::PathBuf,
+    work_dir: std::path::PathBuf,
+    max_cycles: Option<u64>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    load_coordination(
+        state_dir
+            .parent()
+            .and_then(Path::parent)
+            .unwrap_or(&state_dir),
+    );
+    let pid = state_dir.parent().and_then(Path::file_name).map_or_else(
+        || "default".to_owned(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    run_loop(
+        make_store(&pid, &state_dir).await?,
+        &state_dir,
+        work_dir,
+        String::new(),
+        max_cycles,
+    )
+    .await
+}
+
+/// Serve many projects from a hub registry file — all roles, or the surface
+/// selected by `COXAGENT_ROLE`. The registry is a JSON array of
+/// `{ "id", "path" }` where `path` contains `state/` and `codebase/`.
 ///
 /// # Errors
 /// Returns an error when the registry can't be read or the port can't bind.

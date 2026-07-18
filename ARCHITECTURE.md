@@ -15,7 +15,9 @@ crates/
 ├── infrastructure/  # Adapters: Postgres/Redis/MinIO/Mongo, gh/glab, docker, pty,
 │                    # engines (claude/opencode), tree-sitter codegraph.
 ├── presentation/    # HTTP/WS/MCP surface + embedded SPA (web/index.html).
-└── app/             # Composition root: wires ports → adapters, CLI (hub / run).
+├── app/             # Composition root, CLI (`coxagent`) + self-host `cox-all`.
+└── services/        # Production binaries, one thin crate per plane:
+                     #   gateway/ · runner/ · realtime/ · knowledge/
 ```
 
 Rules that keep this healthy:

@@ -1,0 +1,15 @@
+[package]
+name = "cox-realtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "CoXAgent realtime service — thin composition root over coxagent-app"
+
+[dependencies]
+coxagent-app = { path = "../../app" }
+tokio = { workspace = true }
+
+[[bin]]
+name = "cox-realtime"
+path = "src/main.rs"

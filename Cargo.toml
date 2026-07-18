@@ -7,6 +7,10 @@ members = [
     "crates/infrastructure",
     "crates/presentation",
     "crates/app",
+    "crates/services/gateway",
+    "crates/services/runner",
+    "crates/services/realtime",
+    "crates/services/knowledge",
 ]
 # The desktop shell pulls heavy GUI deps (tao/wry) and is built separately.
 exclude = ["desktop/coxagent-desktop"]
