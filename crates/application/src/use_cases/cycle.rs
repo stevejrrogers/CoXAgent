@@ -1587,6 +1587,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// dedicated section — versioned via git, read by the engine on EVERY
     /// machine. Dedupes on exact text. Returns whether anything was written.
     fn promote_team_note(&self, note: &str) -> bool {
+        use std::fmt::Write as _;
         const HEADER: &str = "## Team learnings (auto-promoted by memory hygiene)";
         let path = self.work_dir.join("CLAUDE.md");
         let cur = std::fs::read_to_string(&path).unwrap_or_default();
@@ -1602,7 +1603,6 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             next.push_str(HEADER);
             next.push('\n');
         }
-        use std::fmt::Write as _;
         let _ = writeln!(next, "- {note}");
         std::fs::write(&path, next).is_ok()
     }
