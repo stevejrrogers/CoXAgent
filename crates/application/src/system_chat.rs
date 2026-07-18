@@ -142,6 +142,8 @@ impl SystemChat {
         let is_admin = ctx.user(user).is_some_and(|u| u.admin);
         match self.resolve(channel_id, ctx) {
             Some(c) if c.kind == "general" => true,
+            // DM content is participants-only — no admin override.
+            Some(c) if c.kind == "dm" => c.members.iter().any(|m| m == user),
             Some(c) => is_admin || c.can_view(user),
             None => false,
         }
@@ -160,7 +162,13 @@ impl SystemChat {
             }
         }
         for c in &self.channels {
-            if is_admin || c.can_view(user) {
+            // DMs are private to their two participants — the admin override
+            // must never surface other people's direct messages.
+            if c.kind == "dm" {
+                if c.members.iter().any(|m| m == user) {
+                    out.push(c.clone());
+                }
+            } else if is_admin || c.can_view(user) {
                 out.push(c.clone());
             }
         }
@@ -424,6 +432,19 @@ mod tests {
         assert!(sc.can_view("cxc", "alice", &c));
         assert!(!sc.can_view("cxc", "bob", &c));
         assert!(sc.can_view("cxc", "root", &c));
+    }
+
+    #[test]
+    fn dms_are_participants_only_even_for_admins() {
+        let mut sc = SystemChat::default();
+        let c = ctx();
+        let dm = sc.open_dm("alice", "bob").expect("dm");
+        // Participants see the DM (list + content); the admin sees neither.
+        assert!(sc.channels_for("alice", &c).iter().any(|x| x.id == dm.id));
+        assert!(sc.channels_for("bob", &c).iter().any(|x| x.id == dm.id));
+        assert!(sc.can_view(&dm.id, "alice", &c));
+        assert!(!sc.channels_for("root", &c).iter().any(|x| x.id == dm.id));
+        assert!(!sc.can_view(&dm.id, "root", &c));
     }
 
     #[test]

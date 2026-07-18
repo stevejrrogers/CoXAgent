@@ -2788,10 +2788,11 @@ async function loadChannels(){
 }
 function renderChannels(){
   const box=document.getElementById("chan-list");if(!box)return;
-  box.innerHTML=CHANNELS.map(c=>{
+  // DMs live in the DIRECT MESSAGES section below — never in the channel list.
+  box.innerHTML=CHANNELS.filter(c=>(c.kind||"")!=="dm").map(c=>{
     const kind=c.kind||(c.id==="general"?"general":"private");
     const u=UNREAD[c.id]||0;
-    const icon=kind==="dm"?"message-2":kind==="private"?"lock":"hash";
+    const icon=kind==="private"?"lock":"hash";
     return `<div class="chanitem${c.id===CURCHAN?' on':''}${u?' unread':''}" onclick="selectChannel('${esc(c.id)}')">
       <i class="ti ti-${icon}"></i><span class="channm">${esc(chanDisplay(c))}</span>${u?`<span class="chanbadge">${u>99?'99+':u}</span>`:''}</div>`;}).join("");
   updateChannelBell();
