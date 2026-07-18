@@ -781,19 +781,13 @@ async fn terminal_ws_ep(
     if !origin_ok(&headers) {
         return (StatusCode::FORBIDDEN, "cross-origin websocket rejected").into_response();
     }
+    // Every working member gets a shell (like opening the OS terminal) — only
+    // the read-only legacy Viewer is excluded. Each session start is audited.
     let user = match &app.auth {
         Some(auth) => match resolve_principal(auth, &headers).await {
-            Some(u)
-                if matches!(
-                    u.role,
-                    coxagent_application::auth::AuthRole::Admin
-                        | coxagent_application::auth::AuthRole::Super
-                ) =>
-            {
-                u.username
-            }
+            Some(u) if u.role.can_write() => u.username,
             Some(_) => {
-                return (StatusCode::FORBIDDEN, "admin role required").into_response();
+                return (StatusCode::FORBIDDEN, "read-only role").into_response();
             }
             None => return (StatusCode::UNAUTHORIZED, "unauthenticated").into_response(),
         },

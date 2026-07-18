@@ -148,12 +148,20 @@
   .cg-badge{background:var(--card2);border-radius:5px;padding:1px 7px;font-size:10px;color:var(--muted)}
   .cg-sym{cursor:pointer} .cg-sym:hover{background:var(--card2)}
   /* Embedded terminal */
-  .term-bar{display:flex;align-items:center;gap:9px;margin-bottom:10px}
-  .term-dot{width:8px;height:8px;border-radius:50%;background:var(--dim)}
-  .term-dot.on{background:var(--green);box-shadow:0 0 6px var(--green)}
-  .term-dot.off{background:var(--red)}
-  .term-host{background:#0b0e14;border:1px solid var(--border2);border-radius:10px;padding:8px;height:calc(100vh - 190px);min-height:320px}
-  .term-host .xterm{height:100%}
+  .term-bar{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+  .term-tabs{display:flex;gap:4px;flex-wrap:wrap}
+  .term-tab{display:inline-flex;align-items:center;gap:7px;background:var(--card);border:1px solid var(--border2);border-radius:8px;padding:6px 11px;color:var(--muted);font-family:inherit;font-size:12px;font-weight:600;cursor:pointer}
+  .term-tab.on{background:#0b0e14;color:var(--text);border-color:var(--accent)}
+  .term-tab .tdot{width:7px;height:7px;border-radius:50%;background:var(--red)}
+  .term-tab.live .tdot{background:var(--green)}
+  .term-tab .tx{opacity:.5;font-size:12px;line-height:1}
+  .term-tab .tx:hover{opacity:1;color:var(--red)}
+  .term-add{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;background:var(--card);border:1px solid var(--border2);border-radius:8px;color:var(--muted);cursor:pointer;font-size:15px}
+  .term-add:hover{color:var(--text);border-color:var(--accent)}
+  .term-host{background:#0b0e14;border:1px solid var(--border2);border-radius:10px;padding:8px;height:calc(100vh - 190px);min-height:320px;position:relative}
+  .term-pane{position:absolute;inset:8px}
+  .term-pane[hidden]{display:none}
+  .term-pane .xterm{height:100%}
   .cg-graph{background:var(--card);border:1px solid var(--border);border-radius:10px;overflow:hidden;cursor:grab}
   .cg-graph:active{cursor:grabbing}
   .cg-hubs{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px}
@@ -1253,7 +1261,7 @@ textarea.np-in{resize:vertical;line-height:1.5}
       <a data-v="discuss" onclick="nav('discuss')"><i class="ti ti-messages"></i> Scrum</a>
       <a data-v="docs" onclick="nav('docs')"><i class="ti ti-book-2"></i> Wiki</a>
       <a data-v="codemap" onclick="nav('codemap')"><i class="ti ti-sitemap"></i> Code map</a>
-      <a data-v="terminal" class="admin-only" onclick="nav('terminal')"><i class="ti ti-terminal-2"></i> Terminal</a>
+      <a data-v="terminal" onclick="nav('terminal')"><i class="ti ti-terminal-2"></i> Terminal</a>
       <a data-v="insights" onclick="nav('insights')"><i class="ti ti-coin"></i> Cost</a>
       <a data-v="people" class="admin-only" onclick="nav('people')"><i class="ti ti-user-star"></i> People</a>
       <a data-v="audit" class="admin-only" onclick="nav('audit')"><i class="ti ti-shield-lock"></i> Audit</a>
@@ -1451,10 +1459,10 @@ textarea.np-in{resize:vertical;line-height:1.5}
       <div class="view" id="view-review"><div id="rv-drain"></div><div id="review-body"></div></div>
       <div class="view" id="view-terminal">
         <div class="term-bar">
-          <span id="term-status" class="term-dot off"></span>
-          <span id="term-label" style="font-size:12.5px;color:var(--muted)">not connected</span>
+          <div id="term-tabs" class="term-tabs"></div>
+          <button class="term-add" onclick="termNew()" title="New terminal"><i class="ti ti-plus"></i></button>
           <div style="flex:1"></div>
-          <button class="gc-btn" onclick="termReconnect()"><i class="ti ti-refresh"></i> New session</button>
+          <span id="term-label" style="font-size:12px;color:var(--dim);font-family:ui-monospace,monospace"></span>
         </div>
         <div id="term-host" class="term-host"></div>
       </div>
@@ -4864,50 +4872,81 @@ async function prAction(num,action){
 // Admin/Super only (server-enforced). One live session per app; switching
 // projects or clicking New session replaces it. xterm.js loads lazily from CDN
 // the first time the view opens, so app boot stays light.
-let TERM=null,TERM_WS=null,TERM_FIT=null,TERM_PID=null,TERM_LOADING=false;
+let TERMS=[],TERM_SEQ=0,TERM_ACTIVE=null,TERM_LOADING=false;
 function termLib(){
-  if(window.Terminal)return Promise.resolve();
+  if(window.Terminal&&window.FitAddon)return Promise.resolve();
   if(TERM_LOADING)return TERM_LOADING;
   const css=document.createElement("link");css.rel="stylesheet";
   css.href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css";
   document.head.appendChild(css);
   const load=src=>new Promise((res,rej)=>{const s=document.createElement("script");s.src=src;s.onload=res;s.onerror=rej;document.head.appendChild(s);});
   TERM_LOADING=load("https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js")
-    .then(()=>load("https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"));
+    .then(()=>load("https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"))
+    .catch(e=>{TERM_LOADING=false;throw e;});
   return TERM_LOADING;
 }
-async function openTerminal(){
+function termTabsRender(){
+  const box=document.getElementById("term-tabs");if(!box)return;
+  box.innerHTML=TERMS.map(t=>`<span class="term-tab${t.id===TERM_ACTIVE?" on":""}${t.live?" live":""}" onclick="termSelect(${t.id})">
+    <span class="tdot"></span>${esc(t.name)}
+    <i class="ti ti-x tx" onclick="event.stopPropagation();termClose(${t.id})"></i></span>`).join("");
+  const lbl=document.getElementById("term-label");
+  const a=TERMS.find(t=>t.id===TERM_ACTIVE);
+  if(lbl)lbl.textContent=a?`${a.pid} · ${a.term.cols}×${a.term.rows}`:"";
+}
+async function termNew(){
   if(!PID){toasty("Chọn project trước","warn");return;}
-  if(TERM&&TERM_PID===PID&&TERM_WS&&TERM_WS.readyState===1){TERM.focus();return;}
   try{await termLib();}catch(e){toasty("Không tải được xterm.js (cần mạng)","err");return;}
-  termKill();
-  TERM_PID=PID;
-  const host=document.getElementById("term-host");host.innerHTML="";
-  TERM=new window.Terminal({fontFamily:"ui-monospace,Menlo,monospace",fontSize:12.5,cursorBlink:true,
+  const id=++TERM_SEQ;
+  const host=document.getElementById("term-host");
+  const pane=document.createElement("div");pane.className="term-pane";pane.id="term-pane-"+id;
+  host.appendChild(pane);
+  const term=new window.Terminal({fontFamily:"ui-monospace,Menlo,monospace",fontSize:12.5,cursorBlink:true,
     theme:{background:"#0b0e14",foreground:"#d8dee9",cursor:"#38bdf8",selectionBackground:"#264f78"}});
-  TERM_FIT=new window.FitAddon.FitAddon();TERM.loadAddon(TERM_FIT);
-  TERM.open(host);TERM_FIT.fit();
+  const fit=new window.FitAddon.FitAddon();term.loadAddon(fit);
+  term.open(pane);
   const proto=location.protocol==="https:"?"wss":"ws";
   const ws=new WebSocket(`${proto}://${location.host}/api/projects/${encodeURIComponent(PID)}/terminal`);
-  ws.binaryType="arraybuffer";TERM_WS=ws;
-  const status=(on,txt)=>{const d=document.getElementById("term-status"),l=document.getElementById("term-label");
-    if(d)d.className="term-dot "+(on?"on":"off");if(l)l.textContent=txt;};
-  ws.onopen=()=>{status(true,PID+" · "+(TERM.cols+"×"+TERM.rows));
-    ws.send(JSON.stringify({resize:{cols:TERM.cols,rows:TERM.rows}}));TERM.focus();};
-  ws.onmessage=e=>{TERM.write(typeof e.data==="string"?e.data:new Uint8Array(e.data));};
-  ws.onclose=e=>{status(false,e.code===1008||e.code===4403?"không đủ quyền (Admin/Super)":"disconnected — bấm New session");};
-  ws.onerror=()=>status(false,"connection error");
-  TERM.onData(d=>{if(ws.readyState===1)ws.send(JSON.stringify({input:d}));});
-  TERM.onResize(({cols,rows})=>{if(ws.readyState===1)ws.send(JSON.stringify({resize:{cols,rows}}));
-    status(ws.readyState===1,PID+" · "+cols+"×"+rows);});
-  if(!window._termRO){window._termRO=new ResizeObserver(()=>{if(TERM_FIT&&CUR==="terminal")try{TERM_FIT.fit();}catch(e){}});
-    window._termRO.observe(host);}
+  ws.binaryType="arraybuffer";
+  const t={id,name:"zsh "+id,pid:PID,term,fit,ws,live:false};
+  TERMS.push(t);
+  ws.onopen=()=>{t.live=true;fit.fit();ws.send(JSON.stringify({resize:{cols:term.cols,rows:term.rows}}));termTabsRender();term.focus();};
+  ws.onmessage=e=>{term.write(typeof e.data==="string"?e.data:new Uint8Array(e.data));};
+  ws.onclose=e=>{t.live=false;
+    term.write("\r\n\x1b[2m["+(e.code===1008?"read-only role":"session closed")+" — bấm + để mở terminal mới]\x1b[0m\r\n");
+    termTabsRender();};
+  ws.onerror=()=>{t.live=false;termTabsRender();};
+  term.onData(d=>{if(ws.readyState===1)ws.send(JSON.stringify({input:d}));});
+  term.onResize(()=>{if(ws.readyState===1)ws.send(JSON.stringify({resize:{cols:term.cols,rows:term.rows}}));termTabsRender();});
+  termSelect(id);
 }
-function termKill(){
-  if(TERM_WS){try{TERM_WS.close();}catch(e){}TERM_WS=null;}
-  if(TERM){try{TERM.dispose();}catch(e){}TERM=null;}
+function termSelect(id){
+  TERM_ACTIVE=id;
+  TERMS.forEach(t=>{const p=document.getElementById("term-pane-"+t.id);if(p)p.hidden=t.id!==id;});
+  const a=TERMS.find(t=>t.id===id);
+  if(a){try{a.fit.fit();}catch(e){}a.term.focus();}
+  termTabsRender();
 }
-function termReconnect(){termKill();openTerminal();}
+function termClose(id){
+  const i=TERMS.findIndex(t=>t.id===id);if(i<0)return;
+  const t=TERMS[i];
+  try{t.ws.close();}catch(e){}
+  try{t.term.dispose();}catch(e){}
+  const p=document.getElementById("term-pane-"+id);if(p)p.remove();
+  TERMS.splice(i,1);
+  if(TERM_ACTIVE===id)TERM_ACTIVE=TERMS.length?TERMS[Math.max(0,i-1)].id:null;
+  if(TERM_ACTIVE!==null)termSelect(TERM_ACTIVE);else termTabsRender();
+}
+function termKill(){while(TERMS.length)termClose(TERMS[0].id);}
+async function openTerminal(){
+  if(!TERMS.length){await termNew();}
+  else if(TERM_ACTIVE!==null)termSelect(TERM_ACTIVE);
+  if(!window._termRO){
+    window._termRO=new ResizeObserver(()=>{if(CUR!=="terminal")return;
+      const a=TERMS.find(t=>t.id===TERM_ACTIVE);if(a)try{a.fit.fit();}catch(e){}});
+    window._termRO.observe(document.getElementById("term-host"));
+  }
+}
 // ── Code map: symbol & dependency graph the agents navigate ──────────────────
 // One screen, two lenses on the same codebase: Map (symbol graph) | Files
 // (the real workspace file browser, previously buried in Settings).
