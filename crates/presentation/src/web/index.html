@@ -931,6 +931,13 @@
   .slash-arg{color:var(--muted);font-family:ui-monospace,monospace;font-size:11px}
   .slash-desc{color:var(--dim);margin-left:auto;font-size:11px}
   .cbub.working{color:var(--muted);font-style:italic;font-size:12.5px;display:inline-flex;align-items:center;gap:7px}
+  .drainbar{display:flex;gap:12px;align-items:flex-start;margin-bottom:14px;padding:14px 16px;border-radius:12px;font-size:13px;line-height:1.55;
+    border:1px solid color-mix(in srgb,var(--amber) 55%,var(--border));background:color-mix(in srgb,var(--amber) 12%,var(--card));
+    animation:drainpulse 2.4s ease-in-out infinite}
+  .drainbar i{color:var(--amber);font-size:19px;margin-top:1px}
+  .drainbar b{color:var(--amber)}
+  .drainbar a{color:var(--accent2);cursor:pointer;text-decoration:underline;white-space:nowrap}
+  @keyframes drainpulse{0%,100%{box-shadow:0 0 0 0 color-mix(in srgb,var(--amber) 28%,transparent)}50%{box-shadow:0 0 0 6px transparent}}
   /* Workspace home */
   #view-home{max-width:1180px}
   .wshero{display:flex;align-items:center;gap:22px;flex-wrap:wrap;padding:26px 28px;border:1px solid var(--border);border-radius:18px;
@@ -1183,6 +1190,7 @@ body:not(.manage) .manage-only { display: none !important; }
         <div class="manage-only" id="ws-admin" hidden></div>
       </div>
       <div class="view on" id="view-overview">
+        <div id="ov-drain"></div>
         <div id="ov-alerts"></div>
         <div id="ov-goal"></div>
         <div class="kpis" id="kpis"></div>
@@ -1300,7 +1308,7 @@ body:not(.manage) .manage-only { display: none !important; }
         <div id="cn-msg" class="eu-msg"></div>
       </div></div>
       <div class="view" id="view-roadmap"><div id="roadmap-body"></div></div>
-      <div class="view" id="view-review"><div id="review-body"></div></div>
+      <div class="view" id="view-review"><div id="rv-drain"></div><div id="review-body"></div></div>
       <div class="view" id="view-codemap"><div id="codemap-body"></div></div>
       <div class="ov" id="ov-diff" onclick="if(event.target===this)close_('ov-diff')"><div class="modal" style="max-width:960px">
         <span class="x" onclick="close_('ov-diff')"><i class="ti ti-x"></i></span>
@@ -1903,6 +1911,7 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
     const m=metricsFrom(s);
     const spend=s.spend||{};
     document.getElementById("ov-alerts").innerHTML=alertsHtml(s,m,spend);
+    drainBanner("ov-drain");
     document.getElementById("kpis").innerHTML=[kpi("Shipped",m.shipped),kpi("In flight",m.inflight),kpi("Open bugs",m.openBugs),kpi("Documented",m.docd),kpi("Releases",m.releases),kpi("Cost",money(spend.total_cost_usd))].join("");
     renderHealth(s);
     const dp=s.deploy;
@@ -4235,7 +4244,27 @@ async function saveRename(){const name=(document.getElementById("rn-name").value
 }
 // ── Code review: open PRs from the forge, approve / merge / request changes ──
 function canReview(){return ME&&(ME.role==="admin"||ME.role==="reviewer");}
+// ── Clean-base drain banner: BIG visible hold notice while a refactor waits
+// on the merge queue. Every agent of every user is paused for new work — the
+// banner says so and points at the way out (merge green PRs).
+let DRAIN_CACHE={t:0,n:0};
+function goalIsRefactor(){
+  const g=(((STATE||{}).sprint||{}).goal||"")+" "+((STATE||{}).sprint_goal||"");
+  return ((STATE||{}).refactor_mode===true)||/refactor|restructure|migrat|tái cấu trúc|cấu trúc lại/i.test(g);
+}
+async function drainBanner(elId){
+  const el=document.getElementById(elId);if(!el)return;
+  if(!goalIsRefactor()){el.innerHTML="";return;}
+  if(Date.now()-DRAIN_CACHE.t>15000){
+    try{const prs=await(await fetch(api("/prs"))).json();DRAIN_CACHE={t:Date.now(),n:Array.isArray(prs)?prs.length:0};}catch(e){return;}
+  }
+  el.innerHTML=DRAIN_CACHE.n>0?`<div class="drainbar"><i class="ti ti-barrier-block"></i>
+    <div><b>CLEAN-BASE DRAIN</b> — refactor đang chờ merge sạch <b>${DRAIN_CACHE.n} PR</b>.
+    Mọi agent của mọi user tạm NGỪNG mở việc mới — chỉ fix conflict &amp; merge (cũ nhất trước).
+    <a onclick="nav('review')">Mở Review để merge PR xanh →</a></div></div>`:"";
+}
 async function renderReview(){
+  drainBanner("rv-drain");
   const el=document.getElementById("review-body");if(!el)return;
   el.innerHTML='<div class="empty">loading pull requests…</div>';
   let d={};try{d=await(await fetch(api("/prs"))).json();}catch(e){el.innerHTML='<div class="empty">unable to load</div>';return;}
