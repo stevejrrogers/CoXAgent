@@ -2408,9 +2408,14 @@ async fn token_saver_ep() -> axum::response::Response {
                 let mut it = line.split_whitespace();
                 if let (Some(b), Some(a)) = (it.next(), it.next()) {
                     if let (Ok(b), Ok(a)) = (b.parse::<u64>(), a.parse::<u64>()) {
-                        samples += 1;
-                        before += b;
-                        after += a;
+                        // A compressor row can never grow; such rows are torn
+                        // concurrent writes — skip them instead of poisoning
+                        // the totals.
+                        if a <= b {
+                            samples += 1;
+                            before += b;
+                            after += a;
+                        }
                     }
                 }
             }

@@ -1522,7 +1522,10 @@ fn record_compression(before: usize, after: usize) {
         .append(true)
         .open(std::path::Path::new(&dir).join("savings.log"))
     {
-        let _ = writeln!(f, "{before} {after}");
+        // ONE write_all per line: many shim processes append concurrently, and
+        // writeln! can split its write — torn lines glued two records together
+        // and wrecked the stats. O_APPEND + a single small write is atomic.
+        let _ = f.write_all(format!("{before} {after}\n").as_bytes());
     }
 }
 
