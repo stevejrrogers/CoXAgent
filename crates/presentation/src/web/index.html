@@ -4391,7 +4391,11 @@ function setProjMode(m){PROJ_MODE=m;
   document.getElementById("npm-new").classList.toggle("on",m==="new");
   document.getElementById("npm-import").classList.toggle("on",m==="import");
   document.getElementById("np-path-row").style.display=m==="import"?"flex":"none";
-  document.getElementById("np-goal-row").style.display=m==="import"?"none":"flex";
+  // Goal (+ AI drafting) applies to both modes — an imported codebase needs a
+  // brief just as much; it merges into the auto-detected comprehension context.
+  document.getElementById("np-goal").placeholder=m==="import"
+    ?"Hướng đi tiếp cho codebase này — e.g. 'ổn định hoá, thêm thanh toán, mobile app'. Click Draft để BA/PO viết brief."
+    :"Rough idea — e.g. 'a secure team chat, more private than WhatsApp'. Click Draft to have BA/PO turn it into a project brief you review.";
   document.getElementById("np-submit-label").textContent=m==="import"?"Import project":"Create project";}
 function openNewProject(){["np-name","np-alias","np-path","np-goal"].forEach(i=>document.getElementById(i).value="");document.getElementById("np-err").textContent="";setProjMode("new");loadNpSpaces();document.getElementById("ov-newproj").classList.add("open");setTimeout(()=>document.getElementById("np-name").focus(),50);}
 // Space picker in the New-project form: only the spaces the caller may file
@@ -4430,7 +4434,7 @@ async function createProject(){
   const sp=document.getElementById("np-space");if(sp&&sp.value)body.space=sp.value;
   if(PROJ_MODE==="import"){const p=document.getElementById("np-path").value.trim();
     if(!p){err.textContent="Enter the codebase path to import.";return;}body.existing=p;}
-  else{const g=document.getElementById("np-goal").value.trim();if(g)body.goal=g;}
+  const g=document.getElementById("np-goal").value.trim();if(g)body.goal=g;
   err.style.color="var(--red)";err.textContent=PROJ_MODE==="import"?"Importing…":"Creating…";
   try{
     const r=await fetch("/api/projects",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
