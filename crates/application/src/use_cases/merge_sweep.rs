@@ -41,6 +41,15 @@ pub async fn merge_sweep<S: StateStorePort + ?Sized>(
             out.skipped.push((pr.number, "CI pending".to_owned()));
             continue;
         }
+        // Never merge a diff carrying committed conflict markers — "mergeable"
+        // only means git found no NEW conflicts, not that old ones were fixed.
+        if let Ok(diff) = forge.pr_diff(pr.number).await {
+            if crate::use_cases::cycle::diff_has_conflict_markers(&diff) {
+                out.skipped
+                    .push((pr.number, "committed conflict markers in diff".to_owned()));
+                continue;
+            }
+        }
         match forge.merge_pr(pr.number).await {
             Ok(()) => out.merged.push(pr.number),
             Err(e) => out.skipped.push((pr.number, format!("merge refused: {e}"))),

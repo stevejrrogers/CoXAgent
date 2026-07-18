@@ -375,6 +375,21 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             let Ok(diff) = forge.pr_diff(pr.number).await else {
                 continue;
             };
+            // Hard gate: a diff carrying committed conflict markers must NEVER
+            // merge, no matter what the review says.
+            if diff_has_conflict_markers(&diff) {
+                let reason = "Committed git conflict markers found in the diff — the conflict \
+                              was not actually resolved. Fix the affected files and push again.";
+                let _ = forge.request_changes(pr.number, reason).await;
+                self.record_review(pr.number, "request_changes", reason)
+                    .await;
+                self.log_git(&format!(
+                    "SA blocked PR #{}: committed conflict markers",
+                    pr.number
+                ))
+                .await;
+                continue;
+            }
             match self.sa_review(&pr.title, &pr.head, &diff).await {
                 Some((true, summary)) => {
                     self.record_review(pr.number, "approve", &summary).await;
@@ -1681,30 +1696,64 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 work_dir: self.work_dir.clone(),
                 timeout: std::time::Duration::from_secs(1800),
             };
-            match self.engine.run(request).await {
+            let outcome = self.engine.run(request).await;
+            // The engine may leave the checkout on the PR branch — always park
+            // the shared work_dir back on the base branch for the next stage.
+            if let Some(git) = &self.git {
+                let _ = git.checkout_branch(&self.work_dir, target).await;
+            }
+            match outcome {
                 Ok(o) if o.succeeded() => {
-                    let _ = forge
-                        .comment_pr(
-                            pr.number,
-                            "🔧 Addressed the review feedback — changes pushed to this branch. \
-                             Please take another look.",
-                        )
-                        .await;
-                    self.log_git(&format!("DEV addressed feedback on PR #{}", pr.number))
-                        .await;
+                    // A conflict fix counts ONLY after independent verification —
+                    // a bad "resolution" that merges is how you ship broken code.
+                    let verified = if conflicted {
+                        self.verify_conflict_resolution(pr.number).await
+                    } else {
+                        Ok(())
+                    };
                     let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
                         *s.pr_fix_attempts.entry(pr.number).or_insert(0) += 1;
                         Ok(())
                     })
                     .await;
-                    self.notify(
-                        "pr_fixed",
-                        format!(
-                            "PR #{} — review feedback addressed and pushed; ready for another look: {}",
-                            pr.number, pr.url
-                        ),
-                    )
-                    .await;
+                    match verified {
+                        Ok(()) => {
+                            let _ = forge
+                                .comment_pr(
+                                    pr.number,
+                                    "🔧 Addressed the review feedback — changes pushed to this \
+                                     branch. Please take another look.",
+                                )
+                                .await;
+                            self.log_git(&format!("DEV addressed feedback on PR #{}", pr.number))
+                                .await;
+                            self.notify(
+                                "pr_fixed",
+                                format!(
+                                    "PR #{} — review feedback addressed and pushed; ready for \
+                                     another look: {}",
+                                    pr.number, pr.url
+                                ),
+                            )
+                            .await;
+                        }
+                        Err(why) => {
+                            let _ = forge
+                                .request_changes(
+                                    pr.number,
+                                    &format!(
+                                        "⛔ Conflict-resolution verification FAILED: {why}. This \
+                                         branch must NOT be merged until a clean pass fixes it."
+                                    ),
+                                )
+                                .await;
+                            self.log_git(&format!(
+                                "conflict fix on PR #{} REJECTED by verification: {why}",
+                                pr.number
+                            ))
+                            .await;
+                        }
+                    }
                 }
                 _ => {
                     self.log_git(&format!("feedback fix on PR #{} failed", pr.number))
@@ -1717,6 +1766,36 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 break;
             }
         }
+    }
+
+    /// PROVE a conflict "resolution" actually worked — never trust the engine's
+    /// word for it. (1) The pushed diff must contain no conflict markers;
+    /// (2) the forge must report the PR mergeable again (GitHub recomputes
+    /// lazily, so poll briefly). Returns the failure reason otherwise.
+    async fn verify_conflict_resolution(&self, num: u64) -> Result<(), String> {
+        let Some(forge) = &self.forge else {
+            return Ok(());
+        };
+        if let Ok(diff) = forge.pr_diff(num).await {
+            if diff_has_conflict_markers(&diff) {
+                return Err(
+                    "the pushed diff still contains git conflict markers (<<<<<<< / >>>>>>>)"
+                        .to_owned(),
+                );
+            }
+        }
+        for wait in [10u64, 20, 30] {
+            tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+            if let Ok(prs) = forge.list_open_prs().await {
+                match prs.iter().find(|p| p.number == num) {
+                    // Merged or closed in the meantime — done either way.
+                    None => return Ok(()),
+                    Some(p) if p.mergeable => return Ok(()),
+                    Some(_) => {}
+                }
+            }
+        }
+        Err("GitHub still reports the branch conflicted after the fix".to_owned())
     }
 
     /// Whether the open-PR queue blocks NEW branch work. Normally that's the
@@ -2374,6 +2453,40 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             self.work_dir.clone(),
             self.config.architecture.clone(),
         )
+    }
+}
+
+/// Committed git conflict markers in a PR diff — the tell-tale of a botched
+/// "resolution". Only added (`+`) and context (` `) lines count; removed
+/// (`-`) marker lines are the fix, not the disease.
+pub(crate) fn diff_has_conflict_markers(diff: &str) -> bool {
+    diff.lines().any(|l| {
+        l.starts_with("+<<<<<<< ")
+            || l.starts_with(" <<<<<<< ")
+            || l.starts_with("+>>>>>>> ")
+            || l.starts_with(" >>>>>>> ")
+    })
+}
+
+#[cfg(test)]
+mod marker_tests {
+    use super::diff_has_conflict_markers;
+
+    #[test]
+    fn detects_committed_markers_only() {
+        // Added marker = botched resolution.
+        assert!(diff_has_conflict_markers(
+            "+<<<<<<< HEAD\n+x\n+>>>>>>> main\n"
+        ));
+        // Context (already-committed) marker counts too.
+        assert!(diff_has_conflict_markers(" <<<<<<< HEAD\n stuff\n"));
+        // REMOVING markers is the fix — must not trip the gate.
+        assert!(!diff_has_conflict_markers(
+            "-<<<<<<< HEAD\n-old\n->>>>>>> main\n+resolved\n"
+        ));
+        // ======= alone is ambiguous (markdown underline) — not a trigger.
+        assert!(!diff_has_conflict_markers("+=======\n+Title\n"));
+        assert!(!diff_has_conflict_markers("+normal code line\n context\n"));
     }
 }
 
