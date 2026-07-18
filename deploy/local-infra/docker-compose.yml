@@ -1,0 +1,61 @@
+# Local CoXAgent backing services, grouped as ONE compose project so Docker
+# Desktop shows a tidy "cox-infra" group instead of loose containers.
+# Reuses the EXISTING named volumes — migrating from the old `docker run`
+# containers loses no data. Bring up with:
+#   docker compose -f deploy/local-infra/docker-compose.yml up -d
+name: cox-infra
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: cox-pg
+    environment:
+      POSTGRES_DB: coxagent
+      POSTGRES_USER: coxagent
+      POSTGRES_PASSWORD: cox_13946
+    ports: ["5432:5432"]
+    volumes: ["cox_pgdata:/var/lib/postgresql/data"]
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: cox-redis
+    ports: ["6379:6379"]
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio
+    container_name: coxagent-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: coxagent
+      MINIO_ROOT_PASSWORD: coxagent123
+    ports: ["9000:9000", "9001:9001"]
+    volumes: ["coxagent-minio:/data"]
+    restart: unless-stopped
+
+  mongo:
+    image: mongo:7
+    container_name: cox-mongo
+    ports: ["27017:27017"]
+    volumes: ["coxagent_mongo:/data/db"]
+    restart: unless-stopped
+
+  # Throwaway Postgres the CXC test-suite points at (55432).
+  test-db:
+    image: postgres:16-alpine
+    container_name: cxc-test-pg
+    environment:
+      POSTGRES_DB: cxc
+      POSTGRES_USER: cxc
+      POSTGRES_PASSWORD: cxc
+    ports: ["55432:5432"]
+    restart: unless-stopped
+
+volumes:
+  cox_pgdata:
+    external: true
+  coxagent-minio:
+    external: true
+  coxagent_mongo:
+    external: true
