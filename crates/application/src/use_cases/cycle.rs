@@ -1767,6 +1767,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// `CLOSE` (superseded / wrong direction) or `INSTRUCT` (concrete steps,
     /// left as review feedback so the normal fix loop picks them up with one
     /// informed retry). One rescue per PR, tracked in state.
+    // One linear rescue pass: claim → investigate → verdict → apply.
+    #[allow(clippy::too_many_lines)]
     async fn sa_rescue_pr(&self, pr: &crate::ports::outbound::PullRequest) {
         let Some(forge) = self.forge.clone() else {
             return;
@@ -1798,12 +1800,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 "PR #{n} (`{h}`) has failed TWO fix rounds and is blocking the merge queue. \
                  You are the architect deciding its fate — no more blind retries.\n\n\
                  TITLE: {t}\n\nDIFF (truncated):\n{diff}\n\n\
-                 Investigate against the current base branch (you are in the repo). Reply with \
+                 Investigate against the current base branch (you are in the repo). You are \
+                 the last line of technical defense — prefer SOLVING it yourself. Reply with \
                  EXACTLY one of:\n\
+                 FIXED — you already unblocked it YOURSELF in this run: checked out `{h}`, \
+                 resolved the problem, ran the build/tests green, committed and pushed. \
+                 (Do the work first, then reply FIXED.)\n\
                  CLOSE — the change is superseded by what already landed, or fundamentally \
                  wrong; closing loses nothing.\n\
-                 INSTRUCT\n<numbered, concrete steps a DEV can follow to unblock this exact PR \
-                 — name files, name the conflict, name what to keep>",
+                 INSTRUCT\n<numbered, concrete steps for a DEV — ONLY when the blocker is \
+                 genuinely not technical (needs product/human input)>",
                 n = pr.number,
                 h = pr.head,
                 t = pr.title,
@@ -1815,6 +1821,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             Ok(o) if o.succeeded() => o.stdout.trim().to_owned(),
             _ => String::new(),
         };
+        // The SA may have switched branches while fixing — repark the checkout.
+        if let Some(git) = &self.git {
+            let _ = git.checkout_branch(&self.work_dir, self.flow_base()).await;
+        }
         let say = |msg: String| {
             let store = Arc::clone(&self.store);
             async move {
@@ -1825,7 +1835,30 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 .await;
             }
         };
-        if out.starts_with("CLOSE") {
+        if out.starts_with("FIXED") {
+            // Trust but verify — the SA's word passes the same gates as anyone's.
+            match self.verify_conflict_resolution(pr.number).await {
+                Ok(()) => {
+                    let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                        s.pr_fix_attempts.remove(&pr.number);
+                        Ok(())
+                    })
+                    .await;
+                    say(format!(
+                        "🧯 SM→SA rescue PR #{}: SA TỰ XỬ xong — verification pass, chờ merge sweep.",
+                        pr.number
+                    ))
+                    .await;
+                }
+                Err(why) => {
+                    say(format!(
+                        "🧯 SM→SA rescue PR #{}: SA báo FIXED nhưng verification từ chối ({why}) — chuyển người quyết.",
+                        pr.number
+                    ))
+                    .await;
+                }
+            }
+        } else if out.starts_with("CLOSE") {
             let _ = forge
                 .comment_pr(
                     pr.number,
