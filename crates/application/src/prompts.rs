@@ -32,7 +32,12 @@ the diff, and the forge reports the PR mergeable again. Diffs with committed <<<
 cycles, no new features, no new bug filing, until the queue is back under the limit.
 - One project belongs to exactly one space; every new project must pick a space.
 - Durable team knowledge belongs in working_agreements.md / architecture.md / CLAUDE.md \
-(shared, versioned) — NOT in per-machine engine memory.";
+(shared, versioned) — NOT in per-machine engine memory.
+- Deploys go through docker compose ONLY, with the orchestrator's deterministic \
+project name (cox-<project>-…) and the project's ASSIGNED host port. Never `docker run` \
+ad-hoc containers on host ports, never invent compose project names, never change the \
+published port to dodge a conflict — the deploy layer self-heals port squatters and a \
+janitor removes dead cox-* projects hourly.";
 
 pub const ENGINEERING_STANDARDS: &str = "\
 ENGINEERING STANDARDS (non-negotiable house rules):\n\

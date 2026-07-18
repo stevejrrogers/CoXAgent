@@ -1254,6 +1254,56 @@ async fn redis_bus_bridge(app: AppState, url: String) {
     }
 }
 
+/// Docker janitor: agents deploy a lot — the host must not silt up. Hourly:
+/// any `cox-*` compose project whose containers are ALL stopped gets a full
+/// `down --remove-orphans` (dead previews, stale deploys), then dangling
+/// build images are pruned. Scoped strictly to the `cox-` prefix — the
+/// backing-services group (`cox-infra`) is running, so it is never touched.
+async fn docker_janitor() {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        let Ok(out) = tokio::process::Command::new("docker")
+            .args(["compose", "ls", "-a", "--format", "json"])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .await
+        else {
+            continue;
+        };
+        let Ok(list) = serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout) else {
+            continue;
+        };
+        for p in &list {
+            let name = p
+                .get("Name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let status = p
+                .get("Status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            // Only OUR projects, and only fully-stopped ones.
+            if !name.starts_with("cox-") || name == "cox-infra" {
+                continue;
+            }
+            if status.contains("running") {
+                continue;
+            }
+            let _ = tokio::process::Command::new("docker")
+                .args(["compose", "-p", name, "down", "--remove-orphans"])
+                .stdin(std::process::Stdio::null())
+                .output()
+                .await;
+            tracing::info!("docker janitor: removed dead compose project {name}");
+        }
+        let _ = tokio::process::Command::new("docker")
+            .args(["image", "prune", "-f"])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .await;
+    }
+}
+
 /// Disaster-recovery floor for the hub-level app_kv documents: once a day,
 /// snapshot workspace + spaces + system chat as dated JSON under
 /// `<hub_dir>/backups/YYYY-MM-DD/`, pruning snapshots older than 14 days.
@@ -1363,6 +1413,8 @@ pub async fn serve_full(
         tokio::spawn(nightly_backup(state.clone(), backup_dir));
         // App-release watcher: new tagged builds surface as update notices.
         tokio::spawn(releases_watchdog(state.clone()));
+        // Keep the docker host clean of dead agent deploys.
+        tokio::spawn(docker_janitor());
     }
     // Cross-instance realtime: bridge the local chat broadcast onto Redis
     // pub/sub so N hub instances fan out the same events (no-op without Redis).

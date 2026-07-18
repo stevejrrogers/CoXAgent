@@ -70,9 +70,37 @@ async fn container_on_port(port: &str) -> Option<String> {
     (!id.is_empty()).then_some(id)
 }
 
+/// Deterministic compose project name for a deploy dir: `cox-<parent>-<dir>`
+/// (sanitized). Ends the era of accidental project names like "116" or
+/// "codebase" colliding/littering docker — every CoXAgent deploy is grouped
+/// and identifiable, and the janitor can target the `cox-` prefix safely.
+fn compose_project_name(work_dir: &Path) -> String {
+    let comp = |o: Option<&std::ffi::OsStr>| {
+        o.map(|s| s.to_string_lossy().to_lowercase())
+            .unwrap_or_default()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect::<String>()
+    };
+    let dir = comp(work_dir.file_name());
+    let parent = comp(work_dir.parent().and_then(|p| p.file_name()));
+    let mut name = format!("cox-{parent}-{dir}");
+    name.truncate(60);
+    name.trim_matches('-').to_owned()
+}
+
 async fn running_services(work_dir: &Path) -> Vec<String> {
+    let proj = compose_project_name(work_dir);
     let Ok(out) = Command::new("docker")
-        .args(["compose", "ps", "--services", "--status", "running"])
+        .args([
+            "compose",
+            "-p",
+            &proj,
+            "ps",
+            "--services",
+            "--status",
+            "running",
+        ])
         .current_dir(work_dir)
         .stdin(std::process::Stdio::null())
         .output()
@@ -175,8 +203,9 @@ impl DeployPort for DockerComposeDeploy {
     }
 
     async fn down(&self, work_dir: &Path) -> Result<(), PortError> {
+        let proj = compose_project_name(work_dir);
         let _ = Command::new("docker")
-            .args(["compose", "down", "--remove-orphans"])
+            .args(["compose", "-p", &proj, "down", "--remove-orphans"])
             .current_dir(work_dir)
             .stdin(std::process::Stdio::null())
             .output()
@@ -240,8 +269,9 @@ impl DeployPort for DockerComposeDeploy {
         // ports, so `up` fails with "port is already allocated" — a recurring,
         // self-inflicted deploy blocker. `down --remove-orphans` releases the
         // project's own ports (and orphaned services) so `up` starts clean.
+        let proj = compose_project_name(work_dir);
         let _ = Command::new("docker")
-            .args(["compose", "down", "--remove-orphans"])
+            .args(["compose", "-p", &proj, "down", "--remove-orphans"])
             .current_dir(work_dir)
             .stdin(std::process::Stdio::null())
             .kill_on_drop(true)
@@ -250,6 +280,7 @@ impl DeployPort for DockerComposeDeploy {
 
         let mut cmd = Command::new("docker");
         cmd.arg("compose")
+            .args(["-p", &proj])
             .arg("up")
             .arg("-d")
             .arg("--build")
@@ -305,7 +336,7 @@ impl DeployPort for DockerComposeDeploy {
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             let mut retry = Command::new("docker");
             retry
-                .args(["compose", "up", "-d", "--build"])
+                .args(["compose", "-p", &proj, "up", "-d", "--build"])
                 .current_dir(work_dir)
                 .stdin(std::process::Stdio::null())
                 .kill_on_drop(true);
