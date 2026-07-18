@@ -989,6 +989,23 @@
   .wsrole-x{color:var(--muted);font-size:12px}
   .wsrole-x b{color:var(--accent2);font-family:ui-monospace,monospace;margin-right:4px}
   .wshero.wssetup{border-color:color-mix(in srgb,var(--accent2) 45%,var(--border))}
+  /* Manage mode: its own sidebar */
+  .managenav{display:none}
+  body.mode-manage #ws-nav{display:none}
+  body.mode-manage .managenav{display:block}
+  .mgside-hd{font-size:10px;font-weight:800;letter-spacing:.12em;color:var(--amber);margin:6px 12px 8px;opacity:.9}
+  .mg-rolechip{display:inline-flex;align-items:center;gap:4px;font-size:10.5px;font-family:ui-monospace,monospace;text-transform:uppercase;color:var(--rc);border:1px solid color-mix(in srgb,var(--rc) 45%,transparent);background:color-mix(in srgb,var(--rc) 10%,transparent);border-radius:6px;padding:2px 7px;margin:0 4px 4px 0}
+  .mg-rolechip b{font-weight:700}
+  .mg-admins{display:flex;align-items:center;gap:5px;margin-top:10px}
+  .mg-adminlbl{font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .mg-roles{margin-top:10px;min-height:22px}
+  .mgcard:hover{border-color:var(--amber)}
+  .wsava.on{box-shadow:0 0 0 2px color-mix(in srgb,var(--green) 60%,transparent)}
+  .mg-sprint{margin-top:10px}
+  .mg-sprintbar{background:var(--card2);border-radius:5px;height:6px;overflow:hidden;margin-bottom:4px}
+  .mg-sprintbar div{height:100%;background:var(--accent2)}
+  .mg-sprint span{font-size:10.5px;color:var(--dim)}
+  .mg-rolesel{background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:7px;padding:4px 8px;font-size:12px}
   .ctime{color:var(--dim)}
   .cbub{background:var(--card);border:1px solid var(--border);border-radius:12px;border-top-left-radius:3px;padding:9px 13px;font-size:13px;line-height:1.5;color:var(--text);white-space:pre-wrap;word-break:break-word}
   /* rendered-markdown message body: flow like HTML, chat-sized elements */
@@ -1109,8 +1126,8 @@ body:not(.manage) .manage-only { display: none !important; }
   <aside class="side">
     <div class="brand"><div class="mk"><i class="ti ti-hexagon-letter-c"></i></div><div><div class="nm">CoXAgent</div><div class="tg">autonomous dev team</div></div></div>
     <div class="modeseg">
-      <button id="mode-manage" style="display:none" onclick="nav('manage')"><i class="ti ti-shield-cog"></i> Manage</button>
-      <button id="mode-ws" class="on" onclick="setMode('workspace')"><i class="ti ti-layout-grid"></i> Workspace</button>
+      <button id="mode-manage" style="display:none" onclick="setMode('manage')"><i class="ti ti-shield-cog"></i> Manage</button>
+      <button id="mode-ws" class="on" onclick="setMode('workspace')"><i class="ti ti-layout-grid"></i> Space</button>
       <button id="mode-chat" onclick="setMode('chat')"><i class="ti ti-message-circle"></i> Chat<span class="modeseg-badge" id="mode-chat-badge" style="display:none"></span></button>
     </div>
     <!-- Chat mode: channel list replaces the workspace menu -->
@@ -1137,6 +1154,12 @@ body:not(.manage) .manage-only { display: none !important; }
       <a data-v="audit" class="admin-only" onclick="nav('audit')"><i class="ti ti-shield-lock"></i> Audit</a>
       <a data-v="access" class="manage-only" onclick="nav('access')"><i class="ti ti-user-cog"></i> Users</a>
       <a data-v="settings" class="manage-only" onclick="nav('settings')"><i class="ti ti-settings"></i> Settings</a>
+    </nav>
+    <nav class="nav managenav" id="manage-side">
+      <div class="mgside-hd">SUPER ADMIN</div>
+      <a data-v="mg-spaces" onclick="nav('mg-spaces')"><i class="ti ti-building-community"></i> Spaces</a>
+      <a data-v="mg-users" onclick="nav('mg-users')"><i class="ti ti-users"></i> Users</a>
+      <a data-v="mg-usage" onclick="nav('mg-usage')"><i class="ti ti-chart-bar"></i> Usage</a>
     </nav>
     <div id="user-badge" class="userbox">
       <div class="uavatar"><span id="ub-initials">U</span></div>
@@ -1173,16 +1196,10 @@ body:not(.manage) .manage-only { display: none !important; }
         <div id="proj-menu" class="projmenu"></div>
       </div></div>
     <div class="content">
-      <div class="view" id="view-manage">
-        <div class="settabs">
-          <button class="settab-btn" data-t="mg-spaces" onclick="setMgTab('mg-spaces')"><i class="ti ti-building-community"></i> Spaces</button>
-          <button class="settab-btn" data-t="mg-people" onclick="setMgTab('mg-people')"><i class="ti ti-users"></i> People</button>
-          <button class="settab-btn" data-t="mg-usage" onclick="setMgTab('mg-usage')"><i class="ti ti-chart-bar"></i> Usage</button>
-        </div>
-        <div class="settab" data-p="mg-spaces"><div id="mg-spaces-body"></div></div>
-        <div class="settab" data-p="mg-people" hidden><div id="mg-people-body"></div></div>
-        <div class="settab" data-p="mg-usage" hidden><div id="mg-usage-body"></div></div>
-      </div>
+      <div class="view" id="view-mg-spaces"><div id="mg-spaces-body"></div></div>
+      <div class="view" id="view-mg-space"><div id="mg-space-body"></div></div>
+      <div class="view" id="view-mg-users"><div id="mg-people-body"></div></div>
+      <div class="view" id="view-mg-usage"><div id="mg-usage-body"></div></div>
       <div class="view" id="view-home">
         <div id="ws-hero"></div>
         <div class="wslayout">
@@ -1609,7 +1626,7 @@ const fmtK=n=>{n=Number(n)||0;return n>=1000?(n/1000).toFixed(1)+"k":String(n);}
 const AC={BA:"--blue","DEV-FEATURE":"--green","DEV-BUG":"--red",SA:"--purple",TEST:"--teal",DOCS:"--blue",PO:"--amber",SM:"--teal",PD:"--purple",USER:"--accent"};
 // Stable nicknames so each role reads as one consistent person, not a label.
 const AGENT_NICK={BA:"Bella",PO:"Pola",SM:"Sam",SA:"Aria","DEV-FEATURE":"Finn","DEV-BUG":"Bex",TEST:"Quinn",DOCS:"Dana",PD:"Piper"};
-const TITLES={manage:["Manage","spaces · people · usage — super admin"],home:["Home","your company · projects · your agents"],overview:["Overview","project health at a glance"],team:["Agents","your autonomous workers"],board:["Work","board · sprint · backlog"],activity:["Activity","what the agents are doing"],roadmap:["Roadmap","now · next · later, auto-generated"],discuss:["Scrum","standups, sprint events & team threads"],docs:["Wiki","product & technical knowledge base"],codemap:["Code map","symbols & dependencies the agents navigate"],chat:["Chat","talk with your teammates"],review:["Review","open pull requests — approve & merge"],people:["People","per-user activity & productivity"],audit:["Audit","who did what, when"],access:["Users","accounts, project access & tokens"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
+const TITLES={"mg-spaces":["Spaces","every team space in the hub"],"mg-space":["Space","deep dive"],"mg-users":["Users","everyone across the hub"],"mg-usage":["Usage","who burns what"],home:["Home","your company · projects · your agents"],overview:["Overview","project health at a glance"],team:["Agents","your autonomous workers"],board:["Work","board · sprint · backlog"],activity:["Activity","what the agents are doing"],roadmap:["Roadmap","now · next · later, auto-generated"],discuss:["Scrum","standups, sprint events & team threads"],docs:["Wiki","product & technical knowledge base"],codemap:["Code map","symbols & dependencies the agents navigate"],chat:["Chat","talk with your teammates"],review:["Review","open pull requests — approve & merge"],people:["People","per-user activity & productivity"],audit:["Audit","who did what, when"],access:["Users","accounts, project access & tokens"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
 const esc=s=>(s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 const cvar=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim()||"#888";
 let STATE={}, CUR="overview", BF="all", INIT_ACT=false, WORKTAB="board";
@@ -1621,7 +1638,9 @@ function setWorkTab(w){WORKTAB=w;
   renderActive();}
 
 function nav(v){
-  // Navigating a workspace view leaves Chat mode and shows the menu again.
+  // Manage views live in manage mode; everything else in workspace mode.
+  if(String(v).startsWith("mg-")&&MODE!=="manage"){MODE="manage";localStorage.setItem("cox_mode",MODE);document.body.classList.add("mode-manage");document.body.classList.remove("mode-chat");}
+  if(!String(v).startsWith("mg-")&&MODE==="manage"){MODE="workspace";localStorage.setItem("cox_mode",MODE);document.body.classList.remove("mode-manage");}
   if(isChatMode())setMode("workspace");
   // Management surfaces are Admin + lead only — bounce members to Overview.
   if((v==="settings"||v==="access")&&!canManage())v="overview";
@@ -2037,21 +2056,16 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
         <div style="color:var(--dim);font-size:11px;margin-top:8px">Loop auto-pauses when the cap is reached.</div>`;
     }else{document.getElementById("cost-budget").innerHTML='<div class="empty">no budget cap set — add "budget_usd" in coxagent.json</div>';}
     renderTokenSaver();
-  }else if(CUR==="discuss"){renderDiscuss();}else if(CUR==="roadmap"){renderRoadmap();}else if(CUR==="home"){renderHome();}else if(CUR==="manage"){renderManage();}}
-// ---- Manage (super admin): spaces · people · usage --------------------------
+  }else if(CUR==="discuss"){renderDiscuss();}else if(CUR==="roadmap"){renderRoadmap();}else if(CUR==="home"){renderHome();}else if(CUR==="mg-spaces"){renderManage();}else if(CUR==="mg-users"){renderManage();}else if(CUR==="mg-usage"){renderManage();}}
+// ---- Manage (super admin): spaces · users · usage ---------------------------
 let MG=null;
-function setMgTab(name){
-  document.querySelectorAll('#view-manage .settab-btn').forEach(b=>b.classList.toggle("on",b.dataset.t===name));
-  document.querySelectorAll('#view-manage .settab').forEach(pn=>{pn.hidden=pn.dataset.p!==name;});
-}
+const ROLE_COLORS={super:"#f59e0b",admin:"#22d3ee",director:"#a78bfa",manager:"#a78bfa",techlead:"#a78bfa",fe:"#34d399",be:"#60a5fa",ba:"#f472b6",viewer:"#6b7280"};
+function roleChip(r,n){const c=ROLE_COLORS[r]||"#6b7280";return `<span class="mg-rolechip" style="--rc:${c}">${esc(r)}${n!==undefined?` <b>${n}</b>`:""}</span>`;}
 async function renderManage(){
   try{MG=await(await fetch("/api/manage/overview")).json();}catch(e){return;}
-  if(!document.querySelector('#view-manage .settab-btn.on'))setMgTab('mg-spaces');
-  renderMgSpaces();renderMgPeople();renderMgUsage();
-}
-function spaceChips(sp){
-  return `<div class="wsc-stats"><span>📁 ${(sp.projects||[]).length}</span><span>👥 ${sp.members||0}</span><span>${money(sp.spend||0)}</span></div>
-    <div class="wsc-online">${(sp.online||[]).slice(0,8).map(o=>`<span class="wsava" title="${esc(o)}">${esc(initials(o))}</span>`).join("")||'<span class="wsc-off">no one online</span>'}</div>`;
+  if(CUR==="mg-spaces")renderMgSpaces();
+  else if(CUR==="mg-users")renderMgPeople();
+  else if(CUR==="mg-usage")renderMgUsage();
 }
 function renderMgSpaces(){
   const el=document.getElementById("mg-spaces-body");if(!el||!MG)return;
@@ -2059,81 +2073,125 @@ function renderMgSpaces(){
   const stat=(v,l)=>`<div class="wsstat"><b>${v}</b><span>${l}</span></div>`;
   const allP=(MG.spaces||[]).flatMap(s=>s.projects||[]).concat(MG.unassigned_projects||[]);
   el.innerHTML=`
-    <div class="wshero" style="margin-bottom:16px"><div class="wsmark"><i class="ti ti-shield-cog"></i></div>
-      <div><div class="wsname">Hub control</div><div class="wstag">every space, every project, one view</div></div>
+    <div class="wshero" style="margin-bottom:18px"><div class="wsmark"><i class="ti ti-shield-cog"></i></div>
+      <div><div class="wsname">Hub control</div><div class="wstag">mọi space · mọi project · một màn hình</div></div>
       <div class="wsstats">${stat(t.projects||0,"Projects")}${stat((MG.spaces||[]).length,"Spaces")}${stat(t.users||0,"Users")}${stat(t.online||0,"Online")}${stat(money(t.spend||0),"Spend")}</div></div>
-    <div class="wssec">Spaces</div>
-    <div class="wsgrid" style="margin-bottom:18px">${(MG.spaces||[]).map(sp=>`
-      <div class="wscard" style="cursor:default">
-        <div class="wsc-h"><b>${esc(sp.name)}</b><span class="wsc-v">${esc(sp.id)}</span></div>
-        <div class="wstag" style="font-size:12px">${esc(sp.tagline||"")}</div>
-        ${spaceChips(sp)}
-        <div style="margin-top:10px;font-size:11.5px;color:var(--dim)">admins: ${esc((sp.admins||[]).join(", ")||"—")}<br>projects: ${esc((sp.projects||[]).join(", ")||"—")}</div>
-        <div style="display:flex;gap:6px;margin-top:12px">
-          <button class="gc-btn" onclick="mgEditSpace('${esc(sp.id)}')"><i class="ti ti-pencil"></i> Edit</button>
-          <button class="gc-btn" onclick="mgDeleteSpace('${esc(sp.id)}')"><i class="ti ti-trash"></i></button>
-        </div>
-        <div id="mg-edit-${esc(sp.id)}" hidden></div>
-      </div>`).join("")||'<div class="empty">chưa có space nào — tạo bên dưới</div>'}</div>
-    ${(MG.unassigned_projects||[]).length?`<div class="panel" style="margin-bottom:16px;font-size:12.5px;color:var(--muted)"><i class="ti ti-alert-triangle" style="color:var(--amber)"></i> Projects chưa thuộc space nào: <b>${esc((MG.unassigned_projects||[]).join(", "))}</b></div>`:""}
-    <div class="wssec">Create space</div>
-    <div class="panel frm">
+    <div class="wshead" style="margin-bottom:12px"><span class="wssec" style="margin:0">Spaces</span>
+      <button class="pri" onclick="mgToggleCreate()"><i class="ti ti-plus"></i> New space</button></div>
+    <div id="mg-create" hidden><div class="panel frm" style="margin-bottom:14px">
       <div class="fr"><span class="lbl">Name</span><input id="mg-sp-name" placeholder="e.g. Product Team A"></div>
       <div class="fr"><span class="lbl">Tagline</span><input id="mg-sp-tag" placeholder="what this space builds"></div>
       <div class="fr"><span class="lbl">Admins</span><input id="mg-sp-admins" placeholder="usernames, comma-separated"></div>
-      <div class="fr"><span class="lbl">Projects</span><input id="mg-sp-projects" placeholder="ids, comma-separated (available: ${esc(allP.join(', '))})"></div>
-      <div class="fr"><span class="lbl"></span><button class="pri" onclick="mgCreateSpace()"><i class="ti ti-plus"></i> Create space</button></div>
-    </div>`;
+      <div class="fr"><span class="lbl">Projects</span><input id="mg-sp-projects" placeholder="ids, comma (available: ${esc(allP.join(', '))})"></div>
+      <div class="fr"><span class="lbl"></span><button class="pri" onclick="mgCreateSpace()"><i class="ti ti-check"></i> Create</button></div>
+    </div></div>
+    <div class="wsgrid">${(MG.spaces||[]).map(sp=>`
+      <div class="wscard mgcard" onclick="openMgSpace('${esc(sp.id)}')">
+        <div class="wsc-h"><b>${esc(sp.name)}</b><span class="wsc-v">${esc(sp.id)}</span></div>
+        <div class="wstag" style="font-size:12px;min-height:16px">${esc(sp.tagline||"")}</div>
+        <div class="mg-admins">${(sp.admins||[]).map(a=>`<span class="wsava" title="space admin: ${esc(a)}">${esc(initials(a))}</span>`).join("")}<span class="mg-adminlbl">${esc((sp.admins||[]).join(", ")||"no admin")}</span></div>
+        <div class="mg-roles">${Object.entries(sp.roles||{}).map(([r,n])=>roleChip(r,n)).join("")||'<span class="wsc-off">no members</span>'}</div>
+        <div class="wsc-stats"><span>📁 ${(sp.projects||[]).length} projects</span><span>👥 ${sp.members||0}</span><span style="color:var(--amber)">🔥 ${money(sp.spend||0)}</span></div>
+        <div class="wsc-online">${(sp.online||[]).slice(0,8).map(o=>`<span class="wsava on" title="${esc(o)}">${esc(initials(o))}</span>`).join("")||'<span class="wsc-off">no one online</span>'}</div>
+      </div>`).join("")||'<div class="empty">chưa có space — bấm New space</div>'}</div>
+    ${(MG.unassigned_projects||[]).length?`<div class="panel" style="margin-top:14px;font-size:12.5px;color:var(--muted)"><i class="ti ti-alert-triangle" style="color:var(--amber)"></i> Chưa thuộc space nào: <b>${esc((MG.unassigned_projects||[]).join(", "))}</b> — gán qua Edit space.</div>`:""}`;
 }
+function mgToggleCreate(){const b=document.getElementById("mg-create");if(b)b.hidden=!b.hidden;}
 function csv(id){return (val(id)||"").split(",").map(x=>x.trim()).filter(Boolean);}
 async function mgCreateSpace(){
   const name=val("mg-sp-name").trim();if(!name){toasty("Đặt tên space","warn");return;}
   try{const r=await fetch("/api/spaces",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name,tagline:val("mg-sp-tag"),admins:csv("mg-sp-admins"),projects:csv("mg-sp-projects")})});
     if(r.ok){toasty("Space đã tạo","ok");renderManage();}else toasty("Failed: "+await r.text(),"err");}catch(e){}}
-function mgEditSpace(id){
-  const sp=(MG.spaces||[]).find(x=>x.id===id);if(!sp)return;
-  const box=document.getElementById("mg-edit-"+id);if(!box)return;
+async function openMgSpace(id){
+  nav("mg-space");
+  const el=document.getElementById("mg-space-body");if(el)el.innerHTML='<div class="empty">loading…</div>';
+  let d=null;try{d=await(await fetch("/api/manage/spaces/"+encodeURIComponent(id))).json();}catch(e){return;}
+  renderMgSpaceDetail(d);
+}
+function renderMgSpaceDetail(d){
+  const el=document.getElementById("mg-space-body");if(!el||!d)return;
+  const sp=d.space||{},ps=d.projects||[],ms=d.members||[];
+  const spend=ps.reduce((a,p)=>a+(p.spend||0),0),tokens=ps.reduce((a,p)=>a+(p.tokens||0),0);
+  const shipped=ps.reduce((a,p)=>a+(p.shipped||0),0);
+  const stat=(v,l)=>`<div class="wsstat"><b>${v}</b><span>${l}</span></div>`;
+  document.getElementById("pg-title").textContent=sp.name||"Space";
+  el.innerHTML=`
+    <button class="gc-btn" style="margin-bottom:14px" onclick="nav('mg-spaces')"><i class="ti ti-arrow-left"></i> Spaces</button>
+    <div class="wshero" style="margin-bottom:18px"><div class="wsmark">${esc(initials(sp.name||"S"))}</div>
+      <div><div class="wsname">${esc(sp.name||"")}</div><div class="wstag">${esc(sp.tagline||"")} · admins: ${esc((sp.admins||[]).join(", ")||"—")}</div></div>
+      <div class="wsstats">${stat(ps.length,"Projects")}${stat(ms.length,"Members")}${stat(shipped,"Shipped")}${stat(fmtK(tokens),"Tokens")}${stat(money(spend),"Spend")}</div></div>
+    <div class="wshead" style="margin-bottom:12px"><span class="wssec" style="margin:0">Projects</span>
+      <button class="gc-btn" onclick="mgEditSpaceInline('${esc(sp.id)}')"><i class="ti ti-pencil"></i> Edit space</button></div>
+    <div id="mg-edit-inline" hidden></div>
+    <div class="wsgrid" style="margin-bottom:20px">${ps.map(p=>{
+      const sprint=p.sprint?`<div class="mg-sprint"><div class="mg-sprintbar"><div style="width:${p.sprint.committed?Math.round((p.sprint.done||0)/p.sprint.committed*100):0}%"></div></div><span>S${p.sprint.number}: ${p.sprint.done||0}/${p.sprint.committed||0} · ${esc((p.sprint.goal||"").slice(0,60))}</span></div>`:"";
+      return `<div class="wscard" onclick="switchProject('${esc(p.id)}');setMode('workspace');nav('overview')">
+        <div class="wsc-h"><b>${esc(p.name||p.id)}</b><span class="wsc-v">v${esc(p.version||"0")}</span></div>
+        <div class="wsc-stats"><span>🚀 ${p.shipped||0}</span><span>⚙️ ${p.in_flight||0}</span><span>🐛 ${p.bugs_open||0}</span></div>
+        <div class="wsc-stats" style="margin-top:6px"><span>${fmtK(p.tokens||0)} tok</span><span style="color:var(--amber)">${money(p.spend||0)}</span></div>
+        ${sprint}
+        <div class="wsc-online">${(p.online||[]).map(o=>`<span class="wsava on" title="${esc(o)}">${esc(initials(o))}</span>`).join("")||'<span class="wsc-off">no one online</span>'}</div>
+      </div>`;}).join("")||'<div class="empty">space chưa có project — gán qua Edit space</div>'}</div>
+    <div class="wssec">Members</div>
+    <div class="panel">${ms.sort((a,b)=>(b.spend||0)-(a.spend||0)).map(m=>`
+      <div class="wsrow"><span class="wsava">${esc(initials(m.name||m.username))}</span>
+        <span class="wsproj">${esc(m.name||m.username)} ${m.is_space_admin?'<i class="ti ti-crown" style="color:var(--amber)" title="space admin"></i>':""}</span>
+        <span class="wsstate">${roleChip(m.role)}</span>
+        <span class="wsspend">${money(m.spend||0)}</span></div>`).join("")||'<div class="empty">no members</div>'}</div>`;
+}
+function mgEditSpaceInline(id){
+  const sp=((MG||{}).spaces||[]).find(x=>x.id===id);if(!sp)return;
+  const box=document.getElementById("mg-edit-inline");if(!box)return;
   if(!box.hidden){box.hidden=true;return;}
   box.hidden=false;
-  box.innerHTML=`<div style="margin-top:10px;display:flex;flex-direction:column;gap:6px">
-    <input id="mge-name-${id}" value="${esc(sp.name)}" placeholder="name">
-    <input id="mge-tag-${id}" value="${esc(sp.tagline||"")}" placeholder="tagline">
-    <input id="mge-admins-${id}" value="${esc((sp.admins||[]).join(", "))}" placeholder="admins (comma)">
-    <input id="mge-projects-${id}" value="${esc((sp.projects||[]).join(", "))}" placeholder="projects (comma)">
-    <button class="pri" onclick="mgSaveSpace('${id}')"><i class="ti ti-check"></i> Save</button></div>`;
+  box.innerHTML=`<div class="panel frm" style="margin-bottom:14px">
+    <div class="fr"><span class="lbl">Name</span><input id="mge-name" value="${esc(sp.name)}"></div>
+    <div class="fr"><span class="lbl">Tagline</span><input id="mge-tag" value="${esc(sp.tagline||"")}"></div>
+    <div class="fr"><span class="lbl">Admins</span><input id="mge-admins" value="${esc((sp.admins||[]).join(", "))}"></div>
+    <div class="fr"><span class="lbl">Projects</span><input id="mge-projects" value="${esc((sp.projects||[]).join(", "))}"></div>
+    <div class="fr"><span class="lbl"></span><button class="pri" onclick="mgSaveSpace('${esc(id)}')"><i class="ti ti-check"></i> Save</button>
+      <button class="gc-btn" onclick="mgDeleteSpace('${esc(id)}')"><i class="ti ti-trash"></i> Delete space</button></div></div>`;
 }
 async function mgSaveSpace(id){
-  try{const r=await fetch("/api/spaces/"+id,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:val("mge-name-"+id),tagline:val("mge-tag-"+id),admins:csv("mge-admins-"+id),projects:csv("mge-projects-"+id)})});
-    if(r.ok){toasty("Đã lưu","ok");renderManage();}else toasty("Failed: "+await r.text(),"err");}catch(e){}}
+  try{const r=await fetch("/api/spaces/"+id,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:val("mge-name"),tagline:val("mge-tag"),admins:csv("mge-admins"),projects:csv("mge-projects")})});
+    if(r.ok){toasty("Đã lưu","ok");MG=null;await renderManage();openMgSpace(id);}else toasty("Failed: "+await r.text(),"err");}catch(e){}}
 async function mgDeleteSpace(id){
   if(!confirm("Xoá space "+id+"? (Không xoá project/user — chỉ bỏ nhóm.)"))return;
-  try{await fetch("/api/spaces/"+id,{method:"DELETE"});renderManage();}catch(e){}}
+  try{await fetch("/api/spaces/"+id,{method:"DELETE"});nav("mg-spaces");renderManage();}catch(e){}}
 function renderMgPeople(){
   const el=document.getElementById("mg-people-body");if(!el||!MG)return;
+  const q=(window._mgq||"").toLowerCase();
   const spaceOf=u=>(MG.spaces||[]).filter(s=>(s.admins||[]).includes(u.username)||(u.projects||[]).some(p=>(s.projects||[]).includes(p))).map(s=>s.name).join(", ");
   const roles=["super","admin","director","manager","techlead","ba","fe","be","viewer"];
-  el.innerHTML=`<div class="panel">${(MG.users||[]).map(u=>`
+  const list=(MG.users||[]).filter(u=>!q||u.username.toLowerCase().includes(q)||(u.name||"").toLowerCase().includes(q));
+  el.innerHTML=`<div class="dmsearch" style="margin-bottom:12px;max-width:340px"><i class="ti ti-search"></i><input placeholder="Tìm user…" value="${esc(window._mgq||"")}" oninput="window._mgq=this.value;renderMgPeople()"></div>
+  <div class="panel">${list.sort((a,b)=>(b.spend||0)-(a.spend||0)).map(u=>`
     <div class="wsrow"><span class="wsava">${esc(initials(u.name||u.username))}</span>
       <span class="wsproj">${esc(u.name||u.username)} <span style="color:var(--dim);font-weight:400">@${esc(u.username)}</span></span>
-      <span class="wsstate">${esc(spaceOf(u)||"chưa thuộc space")}</span>
-      <select onchange="mgSetRole('${esc(u.username)}',this.value,'${esc(u.name||"")}')" style="background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:7px;padding:4px 8px;font-size:12px">
+      <span class="wsstate">${esc(spaceOf(u)||"chưa thuộc space")} · ${(u.projects||[]).length} projects</span>
+      <span class="wsspend" title="tổng token đã đốt">${money(u.spend||0)}</span>
+      <select onchange="mgSetRole('${esc(u.username)}',this.value,'${esc(u.name||"")}')" class="mg-rolesel">
         ${roles.map(r=>`<option value="${r}" ${u.role===r?"selected":""}>${r}</option>`).join("")}
       </select></div>`).join("")||'<div class="empty">no users</div>'}</div>`;
 }
 async function mgSetRole(username,role,name){
   try{const r=await fetch("/api/auth/users/"+encodeURIComponent(username),{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name,email:"",role})});
     if(r.ok)toasty(username+" → "+role,"ok");else toasty("Failed: "+await r.text(),"err");}catch(e){}
-  renderManage();
+  MG=null;renderManage();
 }
 function renderMgUsage(){
   const el=document.getElementById("mg-usage-body");if(!el||!MG)return;
-  const rows=(MG.spaces||[]).map(s=>[s.name,s.spend||0]).sort((a,b)=>b[1]-a[1]);
-  const max=rows.length?Math.max(rows[0][1],0.01):1;
-  el.innerHTML=`<div class="panel">${rows.map(([n,c])=>`
-    <div style="display:flex;align-items:center;gap:12px;padding:8px 0"><span style="min-width:140px;font-size:12.5px">${esc(n)}</span>
-      <div style="flex:1;background:var(--card2);border-radius:6px;height:8px;overflow:hidden"><div style="width:${Math.max(3,Math.round(c/max*100))}%;height:100%;background:var(--accent2)"></div></div>
-      <span style="font-size:12px;font-family:ui-monospace,monospace;min-width:64px;text-align:right">${money(c)}</span></div>`).join("")||'<div class="empty">no spend yet</div>'}
-    </div>`;
+  const bar=(n,c,max,color)=>`<div style="display:flex;align-items:center;gap:12px;padding:8px 0"><span style="min-width:150px;font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(n)}</span>
+    <div style="flex:1;background:var(--card2);border-radius:6px;height:8px;overflow:hidden"><div style="width:${Math.max(3,Math.round(c/max*100))}%;height:100%;background:${color}"></div></div>
+    <span style="font-size:12px;font-family:ui-monospace,monospace;min-width:64px;text-align:right">${money(c)}</span></div>`;
+  const sp=(MG.spaces||[]).map(s=>[s.name,s.spend||0]).sort((a,b)=>b[1]-a[1]);
+  const spMax=sp.length?Math.max(sp[0][1],0.01):1;
+  const us=(MG.users||[]).map(u=>[u.name||u.username,u.spend||0]).filter(x=>x[1]>0).sort((a,b)=>b[1]-a[1]).slice(0,10);
+  const usMax=us.length?Math.max(us[0][1],0.01):1;
+  el.innerHTML=`<div class="wssec">Spend by space</div>
+    <div class="panel" style="margin-bottom:18px">${sp.map(([n,c])=>bar(n,c,spMax,"var(--accent2)")).join("")||'<div class="empty">no spend yet</div>'}</div>
+    <div class="wssec">Top burners 🔥</div>
+    <div class="panel">${us.map(([n,c])=>bar(n,c,usMax,"var(--amber)")).join("")||'<div class="empty">no per-user spend yet</div>'}</div>`;
 }
 // ---- Workspace home: company hero, my agents, project grid, members, invites ----
 async function renderHome(){
@@ -2680,25 +2738,26 @@ function markSeen(m){SEEN.add(chatKey(m));}
 function updateSegments(){
   const mg=document.getElementById("mode-manage");
   if(mg)mg.style.display=(ME&&ME.role==="super")?"":"none";
-  if(mg)mg.classList.toggle("on",CUR==="manage"&&!isChatMode());
+  if(mg)mg.classList.toggle("on",MODE==="manage");
   const ws=document.getElementById("mode-ws");
-  if(ws)ws.classList.toggle("on",!isChatMode()&&CUR!=="manage");
+  if(ws)ws.classList.toggle("on",MODE==="workspace");
   const ch=document.getElementById("mode-chat");
-  if(ch)ch.classList.toggle("on",isChatMode());
+  if(ch)ch.classList.toggle("on",MODE==="chat");
 }
 function setMode(m){
-  MODE=(m==="chat")?"chat":"workspace";
+  MODE=(m==="chat")?"chat":(m==="manage")?"manage":"workspace";
   localStorage.setItem("cox_mode",MODE);
   applyMode();
 }
 function applyMode(){
-  const chat=isChatMode();
+  const chat=isChatMode(),manage=MODE==="manage";
   document.body.classList.toggle("mode-chat",chat);
-  const ws=document.getElementById("mode-ws"),ch=document.getElementById("mode-chat");
-  if(ws)ws.classList.toggle("on",!chat);
-  if(ch)ch.classList.toggle("on",chat);
+  document.body.classList.toggle("mode-manage",manage);
   if(chat){renderChannels();selectChannel(CURCHAN);clearUnread(CURCHAN);
     setTimeout(()=>{const i=document.getElementById("chat-input");if(i)i.focus();},40);}
+  // Entering Manage lands on Spaces; leaving it returns to the workspace views.
+  if(manage&&!String(CUR).startsWith("mg-"))nav("mg-spaces");
+  if(!manage&&String(CUR).startsWith("mg-"))nav("overview");
   updateModeBadge();
   try{updateSegments();}catch(e){}
 }

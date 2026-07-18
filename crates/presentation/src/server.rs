@@ -824,6 +824,7 @@ pub async fn serve_full(
             axum::routing::put(space_update_ep).delete(space_delete_ep),
         )
         .route("/api/manage/overview", get(manage_overview_ep))
+        .route("/api/manage/spaces/:sid", get(manage_space_detail_ep))
         .route("/api/me/agents", get(my_agents_ep))
         .route("/join/:token", get(join_page_ep))
         .route("/api/workspace/join", post(join_ep))
@@ -4967,13 +4968,21 @@ async fn manage_overview_ep(
     }
     let order = app.order.read().await.clone();
     let projects_map = app.projects.read().await.clone();
-    // Per-project stats once.
+    // Per-project stats once, plus per-user spend rolled up across projects.
     let mut pstats: HashMap<String, (f64, usize, Vec<String>)> = HashMap::new();
+    let mut user_spend: HashMap<String, f64> = HashMap::new();
     for pid in &order {
         let Some(p) = projects_map.get(pid) else {
             continue;
         };
-        let spend = p.store.load().await.map_or(0.0, |s| s.spend.total_cost_usd);
+        let mut spend = 0.0;
+        if let Ok(st) = p.store.load().await {
+            spend = st.spend.total_cost_usd;
+            for (op, v) in &st.spend.by_operator {
+                let user = op.split('@').next().unwrap_or(op).to_owned();
+                *user_spend.entry(user).or_insert(0.0) += v.cost_usd;
+            }
+        }
         let workers = p.store.workers().await.unwrap_or_default();
         let online: Vec<String> = workers
             .iter()
@@ -4999,17 +5008,22 @@ async fn manage_overview_ep(
                     online.extend(on.clone());
                 }
             }
-            let members = users
+            let member_list: Vec<_> = users
                 .iter()
                 .filter(|u| {
                     s.admins.iter().any(|a| a.eq_ignore_ascii_case(&u.username))
                         || u.projects.iter().any(|p| s.projects.contains(p))
                 })
-                .count();
+                .collect();
+            let mut roles: std::collections::BTreeMap<String, usize> =
+                std::collections::BTreeMap::new();
+            for u in &member_list {
+                *roles.entry(u.role.as_str().to_owned()).or_default() += 1;
+            }
             serde_json::json!({
                 "id": s.id, "name": s.name, "tagline": s.tagline,
                 "admins": s.admins, "projects": s.projects,
-                "members": members, "spend": spend,
+                "members": member_list.len(), "roles": roles, "spend": spend,
                 "online": online,
             })
         })
@@ -5025,6 +5039,7 @@ async fn manage_overview_ep(
         "users": users.iter().map(|u| serde_json::json!({
             "username": u.username, "name": u.name, "role": u.role.as_str(),
             "projects": u.projects,
+            "spend": user_spend.get(&u.username).copied().unwrap_or(0.0),
         })).collect::<Vec<_>>(),
         "totals": {
             "projects": order.len(),
@@ -5034,6 +5049,76 @@ async fn manage_overview_ep(
         },
     }))
     .into_response()
+}
+
+/// Deep-dive one space (super admin): every project's health/spend/sprint,
+/// and every member with their role and burn — the drill-down behind a card.
+async fn manage_space_detail_ep(
+    State(app): State<AppState>,
+    Path(sid): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    if !is_super(&app, &headers).await {
+        return (StatusCode::FORBIDDEN, "super admin required").into_response();
+    }
+    let Some(space) = app
+        .spaces
+        .inner
+        .lock()
+        .await
+        .spaces
+        .iter()
+        .find(|s| s.id == sid)
+        .cloned()
+    else {
+        return not_found();
+    };
+    let projects_map = app.projects.read().await.clone();
+    let mut projects = Vec::new();
+    let mut user_spend: HashMap<String, f64> = HashMap::new();
+    for pid in &space.projects {
+        let Some(p) = projects_map.get(pid) else { continue };
+        let Ok(st) = p.store.load().await else { continue };
+        for (op, v) in &st.spend.by_operator {
+            let user = op.split('@').next().unwrap_or(op).to_owned();
+            *user_spend.entry(user).or_insert(0.0) += v.cost_usd;
+        }
+        let m = coxagent_application::metrics::compute(&st);
+        let workers = p.store.workers().await.unwrap_or_default();
+        projects.push(serde_json::json!({
+            "id": p.id, "name": p.name, "version": m.version,
+            "shipped": m.features_shipped, "in_flight": m.features_in_flight,
+            "bugs_open": m.bugs_open, "total_tickets": m.total_tickets,
+            "spend": st.spend.total_cost_usd,
+            "tokens": st.spend.input_tokens + st.spend.output_tokens,
+            "sprint": st.sprint.as_ref().map(|s| serde_json::json!({
+                "number": s.number, "goal": s.goal,
+                "done": coxagent_application::sprint::done_count(&st),
+                "committed": s.committed.len(),
+            })),
+            "online": workers.iter().map(|w| w.worker.split('@').next().unwrap_or("").to_owned()).collect::<Vec<_>>(),
+        }));
+    }
+    let users = match app.auth.clone() {
+        Some(auth) => auth.list_users().await,
+        None => Vec::new(),
+    };
+    let members: Vec<serde_json::Value> = users
+        .iter()
+        .filter(|u| {
+            space.admins.iter().any(|a| a.eq_ignore_ascii_case(&u.username))
+                || u.projects.iter().any(|p| space.projects.contains(p))
+        })
+        .map(|u| {
+            serde_json::json!({
+                "username": u.username, "name": u.name, "role": u.role.as_str(),
+                "is_space_admin": space.admins.iter().any(|a| a.eq_ignore_ascii_case(&u.username)),
+                "spend": user_spend.get(&u.username).copied().unwrap_or(0.0),
+            })
+        })
+        .collect();
+    Json(serde_json::json!({ "space": space, "projects": projects, "members": members }))
+        .into_response()
 }
 
 /// Company-level overview: every project's health + spend + who's online, plus
