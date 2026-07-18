@@ -1,0 +1,88 @@
+# CoXAgent — Architecture
+
+> Status: modular monolith today, four-service target approved. This document is
+> the single source of truth for the shape of the system; update it in the same
+> PR as any structural change.
+
+## Layers (hexagonal — unchanged across all deploy shapes)
+
+```
+crates/
+├── domain/          # Entities & invariants (tickets, roles, transitions). No IO.
+├── application/     # Use-cases + ports. ALL orchestration law lives here
+│                    # (cycle, merge queue, recovery mode, memory hygiene…).
+├── contracts/       # Versioned wire types between services (BusEnvelope, JobSpec).
+├── infrastructure/  # Adapters: Postgres/Redis/MinIO/Mongo, gh/glab, docker, pty,
+│                    # engines (claude/opencode), tree-sitter codegraph.
+├── presentation/    # HTTP/WS/MCP surface + embedded SPA (web/index.html).
+└── app/             # Composition root: wires ports → adapters, CLI (hub / run).
+```
+
+Rules that keep this healthy:
+
+- **Dependencies point inward only.** `application` never imports `infrastructure`.
+- **Process law is code, not prompts** — WIP limits, recovery mode, conflict
+  verification, budget caps are enforced in `application`, and summarized for
+  agents in `prompts::PROCESS_INVARIANTS` (update both together).
+- **Every external system sits behind a port.** Swapping Postgres↔file,
+  gh↔glab, claude↔opencode is an adapter change, never a use-case change.
+
+## Runtime today (two roles, one binary)
+
+- **hub** — serves the dashboard + API + WS + MCP-to-be, owns hub-level
+  watchdogs (space budgets, nightly backups, Redis event bus bridge).
+- **operator/runner** — executes agent cycles (BA→SA→DEV→TEST), git, docker
+  deploys. Many operators coordinate through Postgres (leader election,
+  per-ticket claims with leases) — never through shared memory.
+
+## Target: four services (approved)
+
+| Service | Role | Scaling |
+|---|---|---|
+| cox-gateway | Control plane: REST + **MCP** + authz + audit + policy | Stateless, N replicas |
+| cox-runner | Execution plane: agents, git, docker, PTY terminals | Per-tenant containers, resource-capped |
+| cox-realtime | Long-lived WS: chat, presence, docs collab, terminal bridge | Scales on connection count |
+| cox-knowledge | Batch: codegraph, wiki, memory hygiene, digests | Single instance, restart-safe |
+
+Key decisions:
+
+- **MCP is a gateway transport, not a fifth service** — same use-cases, same
+  authz, same audit as REST.
+- **Self-host still ships one binary** (`cox-all` composes all four in-process);
+  SaaS deploys them separately. Same code, two deploy shapes.
+- Gateway↔runner traffic rides Postgres (claims + leases) until real load
+  justifies a queue (NATS slot reserved in `contracts`).
+- Cross-instance realtime rides Redis pub/sub (`cox:events`, `BusEnvelope`).
+
+## Data stores
+
+| Store | Holds | Notes |
+|---|---|---|
+| Postgres | Project state, auth, audit, job claims | System of record; app_kv JSON docs (workspace/spaces/chat) |
+| Redis | Sessions, leader/lease coordination, event bus | Ephemeral by design |
+| MinIO (S3) | Chat/ticket files, agent logs | |
+| MongoDB | Wiki/docs pages | Optional; falls back to state.json |
+| `<hub>/backups/` | Nightly JSON snapshots of hub docs | 14-day retention |
+
+## Security model
+
+- Roles: `super` (hub-wide) → `admin` → leads → members → `viewer` (read-only).
+  Every privileged rule is enforced **server-side** and audited; UI hiding is
+  cosmetics only.
+- DMs are participants-only — no admin override, by test.
+- Terminal/PTY: any writing member, every session audited; runs on the
+  execution plane (target state: never in the gateway process).
+- Session cookies: HttpOnly + SameSite=Strict, `Secure` added behind TLS.
+- Secrets: env vars first; `coordination.json` supports `${VAR}` placeholders
+  and is clamped to mode 600.
+
+## Agent process law (the parts that keep production sane)
+
+- PR queue: WIP limit gates new branches; ≥2× limit trips **recovery mode**
+  (merge-only cycles, resolver-PRs auto-closed, BA/TEST paused).
+- Conflicts: resolved on the original branch, then **verified** (no committed
+  markers + forge reports mergeable) before anything may merge.
+- Deploys: self-heal port squatters (compose project → raw container), and a
+  red deploy retries next cycle without waiting for new code.
+- Engine memory: daily hygiene judges `~/.claude` project memory against
+  `PROCESS_INVARIANTS`; durable lessons are promoted into `CLAUDE.md`.

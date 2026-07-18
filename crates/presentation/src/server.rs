@@ -952,12 +952,8 @@ async fn redis_bus_bridge(app: AppState, url: String) {
                     };
                     let env = BusEnvelope::new(&origin, "syschat", v);
                     if let Ok(frame) = serde_json::to_string(&env) {
-                        let _: Result<(), _> = redis::AsyncCommands::publish(
-                            &mut conn,
-                            "cox:events",
-                            frame,
-                        )
-                        .await;
+                        let _: Result<(), _> =
+                            redis::AsyncCommands::publish(&mut conn, "cox:events", frame).await;
                     }
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;

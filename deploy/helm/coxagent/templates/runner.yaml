@@ -1,0 +1,31 @@
+{{- if .Values.runner.enabled }}
+# EXECUTION PLANE — the only pods that run agent engines, git and builds.
+# Isolated from the hub on purpose: a compromised or runaway agent is contained
+# here, resource-capped, and never shares a process with the API.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-runner
+  labels: {{- include "coxagent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: runner
+spec:
+  replicas: {{ .Values.runner.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: runner
+  template:
+    metadata:
+      labels: {{- include "coxagent.labels" . | nindent 8 }}
+        app.kubernetes.io/component: runner
+    spec:
+      containers:
+        - name: runner
+          image: "{{ .Values.runner.image.repository }}:{{ .Values.runner.image.tag }}"
+          args: ["run", "--headless"]
+          env:
+            - name: COXAGENT_OPERATOR
+              value: {{ .Values.runner.operatorName | quote }}
+            {{- include "coxagent.envFromSecret" . | nindent 12 }}
+          resources: {{- toYaml .Values.runner.resources | nindent 12 }}
+{{- end }}

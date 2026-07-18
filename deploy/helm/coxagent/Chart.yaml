@@ -1,0 +1,6 @@
+apiVersion: v2
+name: coxagent
+description: CoXAgent — autonomous dev-team hub (control plane + execution runners)
+type: application
+version: 0.1.0
+appVersion: "0.93"

@@ -1,0 +1,49 @@
+# CoXAgent Helm values.
+# Architecture note: today one image serves both roles; the chart already
+# separates CONTROL PLANE (hub) from EXECUTION PLANE (runner) so the move to
+# dedicated cox-gateway/cox-runner binaries is a values change, not a re-chart.
+
+image:
+  repository: ghcr.io/stevejrrogers/coxagent
+  tag: latest
+  pullPolicy: IfNotPresent
+
+hub:
+  replicas: 1            # >1 requires redis (event bus) — enforced by template
+  port: 4000
+  resources:
+    requests: { cpu: 250m, memory: 256Mi }
+    limits:   { cpu: "1",  memory: 1Gi }
+
+runner:
+  enabled: true
+  replicas: 1
+  # The runner executes agents (claude/opencode), git and docker — give it an
+  # image that carries those CLIs, or mount them. Keep it OUT of the hub pods.
+  image:
+    repository: ghcr.io/stevejrrogers/coxagent-runner
+    tag: latest
+  operatorName: k8s-runner
+  resources:
+    requests: { cpu: "1",  memory: 1Gi }
+    limits:   { cpu: "4",  memory: 8Gi }
+
+# External backing services (managed offerings recommended in production).
+# Every credential comes from an existing Secret — never inline in values.
+backing:
+  existingSecret: coxagent-secrets   # keys: db-dsn, auth-dsn, redis-url, s3-access-key, s3-secret-key, admin-user, admin-password
+  s3Endpoint: ""                     # e.g. https://minio.internal:9000
+  s3Bucket: coxagent
+  mongoUrl: ""                       # optional docs store
+  mongoDb: coxagent
+
+ingress:
+  enabled: false
+  className: nginx
+  host: coxagent.example.com
+  tlsSecret: ""                      # cert-manager secret; TLS terminates here
+
+persistence:
+  hubData:
+    size: 5Gi
+    storageClass: ""

@@ -1,0 +1,83 @@
+{{- if and (gt (int .Values.hub.replicas) 1) (not .Values.backing.existingSecret) }}
+{{- fail "hub.replicas > 1 requires the Redis event bus (backing.existingSecret with redis-url)" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-hub
+  labels: {{- include "coxagent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hub
+spec:
+  replicas: {{ .Values.hub.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: hub
+  template:
+    metadata:
+      labels: {{- include "coxagent.labels" . | nindent 8 }}
+        app.kubernetes.io/component: hub
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: hub
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["hub", "--port", "{{ .Values.hub.port }}"]
+          ports:
+            - containerPort: {{ .Values.hub.port }}
+          env:
+            - name: COXAGENT_ADMIN_USER
+              valueFrom: { secretKeyRef: { name: {{ .Values.backing.existingSecret }}, key: admin-user } }
+            - name: COXAGENT_ADMIN_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ .Values.backing.existingSecret }}, key: admin-password } }
+            - name: COXAGENT_S3_ENDPOINT
+              value: {{ .Values.backing.s3Endpoint | quote }}
+            - name: COXAGENT_S3_BUCKET
+              value: {{ .Values.backing.s3Bucket | quote }}
+            - name: COXAGENT_MONGO_URL
+              value: {{ .Values.backing.mongoUrl | quote }}
+            - name: COXAGENT_MONGO_DB
+              value: {{ .Values.backing.mongoDb | quote }}
+            {{- include "coxagent.envFromSecret" . | nindent 12 }}
+          readinessProbe:
+            httpGet: { path: /api/health, port: {{ .Values.hub.port }} }
+            initialDelaySeconds: 5
+          livenessProbe:
+            httpGet: { path: /api/health, port: {{ .Values.hub.port }} }
+            initialDelaySeconds: 15
+          resources: {{- toYaml .Values.hub.resources | nindent 12 }}
+          volumeMounts:
+            - { name: data, mountPath: /data }
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-hub-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-hub
+  labels: {{- include "coxagent.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: hub
+  ports:
+    - port: 80
+      targetPort: {{ .Values.hub.port }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Release.Name }}-hub-data
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- with .Values.persistence.hubData.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.hubData.size }}
