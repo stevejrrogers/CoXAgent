@@ -222,7 +222,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 prompts::system_prompt(prompts::DEV)
             ),
             task_prompt: format!(
-                "Ticket {id}: {title}\n\nImplement it now.{}{}",
+                "Ticket {id}: {title}\n{}\nImplement it now.{}{}",
+                ticket_brief(ticket),
                 prompts::repo_map_block(&self.work_dir, self.config.workflow.token_saver),
                 prompts::team_memory_block(&state.decisions, &state.lessons),
             ),
@@ -230,6 +231,54 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             timeout: Duration::from_secs(3600),
         }
     }
+}
+
+/// The full working brief for a ticket, BOUNDED: the description (what & why),
+/// the acceptance criteria, and the SA's technical design — so the DEV builds
+/// what was specified instead of guessing from the title (and the SA's design
+/// tokens aren't wasted). Caps keep a verbose ticket from bloating the prompt.
+fn ticket_brief(ticket: Option<&coxagent_domain::Ticket>) -> String {
+    use std::fmt::Write as _;
+    let Some(t) = ticket else {
+        return String::new();
+    };
+    let cap = |s: &str, n: usize| -> String {
+        if s.chars().count() <= n {
+            s.trim().to_owned()
+        } else {
+            let cut: String = s.chars().take(n).collect();
+            format!("{}…", cut.trim_end())
+        }
+    };
+    let mut out = String::new();
+    if !t.description().trim().is_empty() {
+        let _ = write!(out, "\nWHAT & WHY:\n{}\n", cap(t.description(), 1500));
+    }
+    if !t.acceptance_criteria().is_empty() {
+        out.push_str("\nACCEPTANCE CRITERIA (all must pass):\n");
+        for c in t.acceptance_criteria() {
+            let _ = writeln!(out, "- {}", cap(c, 200));
+        }
+    }
+    if let Some(d) = &t.design().technical {
+        out.push_str("\nTECHNICAL DESIGN (from the SA — follow it, flag if it's wrong):\n");
+        if !d.approach.trim().is_empty() {
+            let _ = writeln!(out, "- Approach: {}", cap(&d.approach, 1200));
+        }
+        if !d.files.is_empty() {
+            let _ = writeln!(out, "- Files: {}", cap(&d.files.join(", "), 600));
+        }
+        if !d.api_contract.trim().is_empty() {
+            let _ = writeln!(out, "- API contract: {}", cap(&d.api_contract, 800));
+        }
+        if !d.data_changes.trim().is_empty() {
+            let _ = writeln!(out, "- Data changes: {}", cap(&d.data_changes, 600));
+        }
+        if !d.test_plan.trim().is_empty() {
+            let _ = writeln!(out, "- Test plan: {}", cap(&d.test_plan, 800));
+        }
+    }
+    out
 }
 
 /// Current UTC time as an RFC3339 string, or a stable fallback if formatting

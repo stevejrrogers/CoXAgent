@@ -74,14 +74,15 @@ impl AgentEnginePort for ClaudeEngine {
     }
 
     async fn run(&self, request: AgentRequest) -> Result<AgentOutcome, PortError> {
-        let prompt = format!(
-            "{}\n\n---\n\n{}",
-            request.system_prompt, request.task_prompt
-        );
-
         let mut cmd = Command::new(&self.binary);
+        // The role/system text goes through --append-system-prompt, NOT folded
+        // into -p: it joins the CLI's cached system block, so the stable prefix
+        // (base + standards + role) gets prompt-cache READ hits across
+        // back-to-back agent runs instead of being re-billed every call.
         cmd.arg("-p")
-            .arg(prompt)
+            .arg(&request.task_prompt)
+            .arg("--append-system-prompt")
+            .arg(&request.system_prompt)
             .arg("--model")
             .arg(&self.model)
             // Stream-json + verbose emits every step (assistant text, tool_use,

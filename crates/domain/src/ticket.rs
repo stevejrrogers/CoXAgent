@@ -169,6 +169,12 @@ impl Ticket {
         })
     }
 
+    /// The human description of the work (what & why).
+    #[must_use]
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+
     /// The acceptance criteria checklist (at most 5 entries).
     #[must_use]
     pub fn acceptance_criteria(&self) -> &[String] {
