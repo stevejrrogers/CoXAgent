@@ -218,6 +218,31 @@ mod role_tests {
     }
 
     #[test]
+    fn super_is_the_only_hub_wide_role() {
+        assert!(AuthRole::Super.is_super());
+        assert!(AuthRole::Super.can_manage());
+        assert!(AuthRole::Super.can_write());
+        // No other role — including Admin — is hub-wide super.
+        for r in AuthRole::all() {
+            if *r != AuthRole::Super {
+                assert!(!r.is_super(), "{} must not be super", r.as_str());
+            }
+        }
+        assert_eq!(AuthRole::Super.as_str(), "super");
+        assert_eq!(AuthRole::Super.label(), "Super Admin");
+        // Both accepted spellings parse to Super; serde wire form round-trips.
+        assert_eq!(AuthRole::from_str_lenient("super"), AuthRole::Super);
+        assert_eq!(AuthRole::from_str_lenient("SuperAdmin"), AuthRole::Super);
+        assert_eq!(AuthRole::from_str_lenient("super_admin"), AuthRole::Super);
+        let json = serde_json::to_string(&AuthRole::Super).unwrap();
+        assert_eq!(json, "\"super\"");
+        assert_eq!(
+            serde_json::from_str::<AuthRole>("\"super\"").unwrap(),
+            AuthRole::Super
+        );
+    }
+
+    #[test]
     fn round_trips_wire_labels() {
         for r in AuthRole::all() {
             assert_eq!(AuthRole::from_str_lenient(r.as_str()), *r);

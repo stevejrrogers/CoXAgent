@@ -574,14 +574,15 @@ impl AuthPort for FileAuthService {
             if !exists {
                 return false;
             }
-            // Never remove the last admin — that would lock everyone out.
+            // Never remove the last admin/super — that would lock everyone out.
+            let is_admin_tier = |r: AuthRole| matches!(r, AuthRole::Admin | AuthRole::Super);
             let admins_left = users
                 .iter()
-                .filter(|u| u.role == AuthRole::Admin && u.username != username)
+                .filter(|u| is_admin_tier(u.role) && u.username != username)
                 .count();
             let removing_admin = users
                 .iter()
-                .any(|u| u.username == username && u.role == AuthRole::Admin);
+                .any(|u| u.username == username && is_admin_tier(u.role));
             if removing_admin && admins_left == 0 {
                 return false;
             }
@@ -718,7 +719,7 @@ mod tests {
         };
         let user = svc.user_for(&token).await.expect("session");
         assert_eq!(user.username, "root");
-        assert_eq!(user.role, AuthRole::Admin);
+        assert_eq!(user.role, AuthRole::Super);
         assert!(user.role.can_write());
         svc.logout(&token).await;
         assert!(svc.user_for(&token).await.is_none());

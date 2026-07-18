@@ -981,7 +981,7 @@ pub fn slugify(name: &str) -> String {
 
 #[cfg(test)]
 mod channel_tests {
-    use super::{slugify, ProjectState, GENERAL_CHANNEL};
+    use super::{slugify, ProjectState, AGENTS_CHANNEL, GENERAL_CHANNEL};
 
     #[test]
     fn slugify_makes_safe_ids() {

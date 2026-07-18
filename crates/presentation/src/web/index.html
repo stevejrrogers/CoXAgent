@@ -2636,8 +2636,8 @@ async function reviewRun(btn,path,who){
     if(r.ok){const d=await r.json();const n=d.filed??d.written??0;
       toasty(who+" review done"+(n?" — "+n+" item(s)":" — nothing needed"),"ok");
       const s=await(await fetch(api("/state"))).json();render(s);renderDiscuss();
-    } else {alert("Review failed: "+(await r.text()||r.status)+" (needs a configured engine).");}
-  }catch(e){alert("Network error.");}
+    } else {toasty("Review failed: "+(await r.text()||r.status)+" (needs a configured engine)","err");}
+  }catch(e){toasty("Network error","err");}
   btn.innerHTML=old;btn.disabled=false;
 }
 async function startDiscussion(){
@@ -2647,9 +2647,9 @@ async function startDiscussion(){
   document.getElementById("disc-filter").value="";
   try{
     const r=await fetch(api("/discuss"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({topic:topic.trim()})});
-    if(!r.ok){alert("Discussion failed: "+(await r.text()||r.status)+" (needs a configured engine).");}
+    if(!r.ok){toasty("Discussion failed: "+(await r.text()||r.status)+" (needs a configured engine)","err");}
     else{const s=await(await fetch(api("/state"))).json();render(s);renderDiscuss();}
-  }catch(e){alert("Network error.");}
+  }catch(e){toasty("Network error","err");}
   lbl.textContent="Start agent discussion";
 }
 function sendComment(){const inp=document.getElementById("disc-input");const body=inp.value.trim();
@@ -2739,7 +2739,7 @@ async function loadChatHistory(){
   renderChatList(true);
 }
 async function createChannel(){
-  const name=prompt("New channel name (e.g. design-review):");
+  const name=await coxModal({title:"New channel",message:"Tên channel mới (chữ thường, gạch nối).",input:{placeholder:"e.g. design-review"},confirmText:"Create"});
   if(!name||!name.trim())return;
   try{
     const r=await fetch("/api/chat/channels",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:name.trim()})});
@@ -2751,7 +2751,7 @@ async function createChannel(){
   }catch(e){toasty("could not create channel","err");}
 }
 async function inviteToChannel(){
-  const who=prompt("Invite whom? (username)\nTip: append \"  +invite\" to also let them invite others.");
+  const who=await coxModal({title:"Invite to channel",message:"Username cần mời. Tip: thêm \" +invite\" để họ cũng được quyền mời người khác.",input:{placeholder:"username  (+invite)"},confirmText:"Invite"});
   if(!who||!who.trim())return;
   let user=who.trim(),delegate=false;
   if(/\+invite\s*$/i.test(user)){delegate=true;user=user.replace(/\+invite\s*$/i,"").trim();}
@@ -3775,17 +3775,17 @@ function renderDocsList(){
   box.innerHTML=node(root,0)||'<div class="empty" style="padding:14px 8px;font-size:12px">Empty. Create a folder (＋) or page.</div>';
 }
 async function newFolder(parent){
-  const name=prompt("Folder name"+(parent?(" under "+parent):"")+":");if(!name||!name.trim())return;
+  const name=await coxModal({title:"New folder",message:parent?("Tạo folder trong \""+parent+"\"."):"Tạo folder ở root.",input:{placeholder:"Folder name"},confirmText:"Create"});if(!name||!name.trim())return;
   const path=(parent?parent+"/":"")+name.trim().replace(/\//g,"-");
   try{await fetch(api("/doc-folders"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path})});}catch(e){}
   if(parent)docExp().add(parent);docExp().add(path);saveExp();await loadDocs();
 }
-async function deleteFolder(path){if(!confirm('Delete folder "'+path+'" and everything inside it?'))return;
+async function deleteFolder(path){if(!await coxModal({title:"Delete folder",message:'Xoá folder "'+path+'" và toàn bộ nội dung bên trong? Không hoàn tác được.',danger:true,confirmText:"Delete"}))return;
   try{await fetch(api("/doc-folders/delete"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path})});}catch(e){}
   await loadDocs();
 }
 async function moveDoc(id){const cur=DOCS.find(d=>d.id===id);if(!cur)return;
-  const folder=prompt("Move to folder path (blank = root):",cur.folder||"");if(folder===null)return;
+  const folder=await coxModal({title:"Move page",message:"Folder đích (để trống = root).",input:{placeholder:"e.g. Technical/Architecture",value:cur.folder||""},confirmText:"Move"});if(folder===null)return;
   try{await fetch(api("/docs/"+id+"/move"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:folder.trim()})});}catch(e){}
   if(folder.trim())docExp().add(folder.trim());saveExp();await loadDocs();}
 function openDoc(id){if(typeof docsWsClose==="function")docsWsClose();DOC_CUR=id;DOC_EDIT=false;renderDocsList();renderDocMain();}
@@ -3833,9 +3833,9 @@ function renderDocMain(){
   el.innerHTML=`<div class="doc-head"><div><span class="doc-cat-tag ${esc(d.category)}">${crumb}</span><h2>${esc(d.title)}</h2>${meta}</div>${actions}</div><div class="doc-body md">${mdRender(d.body)}</div>`;
 }
 async function newDoc(folder){
-  const title=prompt("New page title:");if(!title||!title.trim())return;
+  const title=await coxModal({title:"New page",message:"Tiêu đề trang mới.",input:{placeholder:"Page title"},confirmText:"Next"});if(!title||!title.trim())return;
   // Folder given (from a tree node) → use it; else ask.
-  if(folder===undefined||folder===null){folder=(prompt("Folder path (e.g. Product, Technical/Architecture) — blank for root:","")||"").trim();}
+  if(folder===undefined||folder===null){folder=(await coxModal({title:"New page",message:"Folder chứa trang (để trống = root).",input:{placeholder:"e.g. Product, Technical/Architecture"},confirmText:"Create"}));if(folder===null)return;folder=folder.trim();}
   if(folder)docExp().add(folder),saveExp();
   await putDoc("", folder, title.trim(), "# "+title.trim()+"\n\nWrite here…");DOC_EDIT=true;renderDocMain();
 }
@@ -3852,7 +3852,10 @@ function rtCodeBlock(){rtInsert('<pre class="codeblock">code</pre><p><br></p>');
 function rtChecklist(){rtInsert('<ul class="tasklist"><li data-checked="false">To do</li></ul><p><br></p>');}
 function rtHr(){rtInsert('<hr><p><br></p>');}
 function rtTable(){let h='<table><tbody>';for(let r=0;r<3;r++){h+='<tr>';for(let c=0;c<3;c++){h+=(r===0?'<th>Head '+(c+1)+'</th>':'<td>&nbsp;</td>');}h+='</tr>';}h+='</tbody></table><p><br></p>';rtInsert(h);}
-function rtLink(){const url=prompt("Link URL:","https://");if(!url)return;const s=window.getSelection();const t=(s&&s.toString())||url;if(s&&s.toString())document.execCommand("createLink",false,url);else rtInsert('<a href="'+esc(url)+'" target="_blank" rel="noopener">'+esc(t)+'</a>&nbsp;');rtDirty();}
+async function rtLink(){const s0=window.getSelection();const saved=(s0&&s0.rangeCount)?s0.getRangeAt(0).cloneRange():null;
+  const url=await coxModal({title:"Insert link",message:"URL để chèn vào trang.",input:{placeholder:"https://…",value:"https://"},confirmText:"Insert"});if(!url)return;
+  if(saved){const s=window.getSelection();s.removeAllRanges();s.addRange(saved);}
+  const s=window.getSelection();const t=(s&&s.toString())||url;if(s&&s.toString())document.execCommand("createLink",false,url);else rtInsert('<a href="'+esc(url)+'" target="_blank" rel="noopener">'+esc(t)+'</a>&nbsp;');rtDirty();}
 function docEditInit(d){
   const rich=rtRich();if(!rich)return;
   // Enter makes <p> (not <div>) so the HTML→Markdown pass is predictable.
@@ -4004,7 +4007,7 @@ async function putDoc(id, folder, title, body){
 }
 async function askAiEdit(){
   const d=currentDoc();if(!d)return;
-  const instruction=prompt("How should the AI revise this page?\n(e.g. \"add a section on error handling\", \"make it shorter and clearer\")");
+  const instruction=await coxModal({title:"AI revise",message:"AI nên sửa trang này thế nào?",input:{placeholder:"e.g. add a section on error handling; make it shorter and clearer",multiline:true},confirmText:"Revise"});
   if(!instruction||!instruction.trim())return;
   const el=document.getElementById("docs-main");
   el.innerHTML='<div class="docs-empty"><i class="ti ti-loader-2 att-spin"></i><div>DOCS agent is revising…</div></div>';
@@ -4016,7 +4019,8 @@ async function askAiEdit(){
   renderDocsList();renderDocMain();
 }
 async function deleteDoc(){
-  const d=currentDoc();if(!d||!confirm("Delete this page?"))return;
+  const d=currentDoc();if(!d)return;
+  if(!await coxModal({title:"Delete page",message:'Xoá trang "'+(d.title||d.id)+'"? Không hoàn tác được.',danger:true,confirmText:"Delete"}))return;
   try{await fetch(api("/docs/"+encodeURIComponent(d.id)),{method:"DELETE"});}catch(e){}
   DOC_CUR=null;DOC_EDIT=false;await loadDocs();
 }
@@ -4209,7 +4213,10 @@ const TK_ROLE_COLOR={BA:"var(--accent2)",PO:"var(--amber)",SA:"var(--purple)",PD
 function tkRich(){return document.getElementById("nt-desc");}
 function tkFmt(cmd){document.execCommand(cmd,false,null);tkRich().focus();}
 function tkCode(){const s=window.getSelection();const t=s&&s.toString();document.execCommand("insertHTML",false,t?'<code>'+esc(t)+'</code>&nbsp;':'<code>code</code>&nbsp;');tkRich().focus();}
-function tkLink(){const url=prompt("Link URL:","https://");if(!url)return;const s=window.getSelection();if(s&&s.toString())document.execCommand("createLink",false,url);else document.execCommand("insertHTML",false,'<a href="'+esc(url)+'" target="_blank" rel="noopener">'+esc(url)+'</a>&nbsp;');tkRich().focus();}
+async function tkLink(){const s0=window.getSelection();const saved=(s0&&s0.rangeCount)?s0.getRangeAt(0).cloneRange():null;
+  const url=await coxModal({title:"Insert link",message:"URL để chèn vào ticket.",input:{placeholder:"https://…",value:"https://"},confirmText:"Insert"});if(!url)return;
+  if(saved){const s=window.getSelection();s.removeAllRanges();s.addRange(saved);}
+  const s=window.getSelection();if(s&&s.toString())document.execCommand("createLink",false,url);else document.execCommand("insertHTML",false,'<a href="'+esc(url)+'" target="_blank" rel="noopener">'+esc(url)+'</a>&nbsp;');tkRich().focus();}
 function ntDescGet(){return htmlToMd(tkRich()).trim();}
 function ntDescSet(md){const r=tkRich();if(r)r.innerHTML=md?mdRender(md):"";}
 async function teamAnalyze(){
@@ -4311,14 +4318,14 @@ async function createProject(){
 async function deleteProject(id){
   id=id||PID;if(!id)return;
   const p=PROJECTS.find(x=>x.id===id);const nm=p?p.name:id;
-  if(!confirm("Remove project \""+nm+"\" from CoXAgent?\n\nIts workspace files stay on disk; only the registration is removed."))return;
+  if(!await coxModal({title:"Remove project",message:'Gỡ project "'+nm+'" khỏi CoXAgent? File workspace vẫn còn trên disk; chỉ gỡ đăng ký.',danger:true,confirmText:"Remove"}))return;
   try{
     const r=await fetch("/api/projects/"+encodeURIComponent(id),{method:"DELETE"});
-    if(!r.ok){alert("Delete failed: "+(await r.text()||r.status));return;}
+    if(!r.ok){toasty("Delete failed: "+(await r.text()||r.status),"err");return;}
     if(id===PID)localStorage.removeItem("coxpid");
     closeProjMenu();
     await loadProjects();
-  }catch(e){alert("Network error.");}
+  }catch(e){toasty("Network error","err");}
 }
 let ME=null;
 async function boot(){
@@ -4764,7 +4771,7 @@ async function resetUserPassword(){if(!EU_USER)return;
     else{msg.style.color="var(--red)";msg.textContent=await r.text()||"Failed.";}
   }catch(e){msg.style.color="var(--red)";msg.textContent="Network error.";}
 }
-async function deleteUser(username){if(!confirm("Remove this account?"))return;try{const r=await fetch("/api/auth/users/"+username,{method:"DELETE"});if(!r.ok)document.getElementById("usr-err").textContent=await r.text();renderUsers();}catch(e){}}
+async function deleteUser(username){if(!await coxModal({title:"Remove account",message:"Xoá tài khoản \""+username+"\"? Không hoàn tác được.",danger:true,confirmText:"Remove"}))return;try{const r=await fetch("/api/auth/users/"+username,{method:"DELETE"});if(!r.ok)document.getElementById("usr-err").textContent=await r.text();renderUsers();}catch(e){}}
 async function assignUser(pid,username){try{await fetch("/api/projects/"+pid+"/members",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:decodeURIComponent(username)})});renderUsers();}catch(e){}}
 async function unassignUser(pid,username){try{await fetch("/api/projects/"+pid+"/members/"+username,{method:"DELETE"});renderUsers();}catch(e){}}
 function fmtBytes(n){return n<1024?n+" B":n<1048576?(n/1024).toFixed(1)+" KB":(n/1048576).toFixed(1)+" MB";}
@@ -4858,7 +4865,7 @@ async function renderTeamsOnline(){
     }).join("")+`</div></div>`;
 }
 async function stopOperator(op){
-  if(!confirm("Stop operator "+op+"? It will idle (stop spending tokens) until it's started again."))return;
+  if(!await coxModal({title:"Stop operator",message:"Dừng operator "+op+"? Nó sẽ idle (không đốt token) cho tới khi được start lại.",confirmText:"Stop"}))return;
   try{await fetch(api("/operators/"+encodeURIComponent(op)+"/stop"),{method:"POST"});}catch(e){}
   setTimeout(renderTeamsOnline,600);
 }
