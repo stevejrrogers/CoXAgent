@@ -1818,6 +1818,10 @@ function metricsFrom(s){const t=s.tickets||[],h=s.history||[],isF=x=>x.type!=="b
     inflight:t.filter(x=>isF(x)&&(x.status==="ready"||x.status==="in_progress")).length,
     openBugs:t.filter(x=>x.type==="bug"&&x.status==="open").length,
     docd:t.filter(x=>x.status==="documented").length,releases:h.length};}
+// Write innerHTML only when the content actually changed — the live refresh
+// repaints every few seconds, and identical rewrites restart CSS animations
+// (bars, pulses) making the whole page judder.
+function setHTML(el,html){if(!el)return;if(el.__h!==html){el.__h=html;el.innerHTML=html;}}
 function kpi(k,v,sub){return `<div class="kpi"><div class="ic"><i class="ti ${KPI_IC[k]||'ti-point'}"></i></div><div class="v">${v}</div><div class="k">${k}${sub?` <span style="color:var(--green);font-weight:600">· ${sub}</span>`:""}</div></div>`;}
 function alertsHtml(s,m,spend){
   const al=[];
@@ -2193,40 +2197,45 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
     renderTranscripts();
   }else if(CUR==="insights"){
     const sp=s.spend||{by_role:{}};const tok=(sp.input_tokens||0)+(sp.output_tokens||0);
-    document.getElementById("cost-kpis").innerHTML=[kpi("Total spend",money(sp.total_cost_usd)),kpi("Tokens",fmtK(tok)),kpi("Runs",sp.runs||0)].join("");
-    // Counterfactual annotation, async: what this would have cost WITHOUT the
-    // token-saver. Saved chars ≈ 4 chars/token, priced at this project's own
-    // blended $/token — estimates, marked with ~.
-    fetch("/api/token-saver").then(r=>r.json()).then(ts=>{
-      if(!(ts&&ts.saved>0&&tok>0))return;
-      const savedTok=Math.round(ts.saved/4);
-      const wouldTok=tok+savedTok;
-      const wouldCost=(sp.total_cost_usd||0)*(wouldTok/tok);
-      const el=document.getElementById("cost-kpis");if(!el||CUR!=="insights")return;
-      el.innerHTML=[kpi("Total spend",money(sp.total_cost_usd),"không nén: ~"+money(wouldCost)),
-        kpi("Tokens",fmtK(tok),"không nén: ~"+fmtK(wouldTok)),kpi("Runs",sp.runs||0)].join("");
-    }).catch(()=>{});
+    // Counterfactual (what it would cost WITHOUT the token-saver) comes from a
+    // cached fetch — cards render in ONE pass, no flash-then-replace.
+    const drawKpis=()=>{
+      let subTok="",subCost="";
+      const ts=window._tsCache;
+      if(ts&&ts.saved>0&&tok>0){
+        const wouldTok=tok+Math.round(ts.saved/4);
+        subTok="không nén: ~"+fmtK(wouldTok);
+        subCost="không nén: ~"+money((sp.total_cost_usd||0)*(wouldTok/tok));
+      }
+      setHTML(document.getElementById("cost-kpis"),
+        [kpi("Total spend",money(sp.total_cost_usd),subCost),kpi("Tokens",fmtK(tok),subTok),kpi("Runs",sp.runs||0)].join(""));
+    };
+    drawKpis();
+    if(!window._tsCacheAt||Date.now()-window._tsCacheAt>60000){
+      window._tsCacheAt=Date.now();
+      fetch("/api/token-saver").then(r=>r.json()).then(ts=>{window._tsCache=ts;if(CUR==="insights")drawKpis();}).catch(()=>{});
+    }
     const roles=Object.entries(sp.by_role||{}).sort((a,b)=>b[1]-a[1]);
     const max=roles.length?roles[0][1]:1;
-    document.getElementById("cost-roles").innerHTML=roles.length?roles.map(([r,c])=>{
+    setHTML(document.getElementById("cost-roles"),roles.length?roles.map(([r,c])=>{
       const col=cvar(AC[r.toUpperCase().replace("_","-")]||"--accent2");const pct=Math.max(3,Math.round(c/max*100));
       return `<div style="display:flex;align-items:center;gap:12px;padding:8px 0"><span style="min-width:110px;font-size:12px">${esc(r)}</span>
         <div style="flex:1;background:var(--card2);border-radius:6px;height:8px;overflow:hidden"><div style="width:${pct}%;height:100%;background:${col}"></div></div>
-        <span style="font-size:12px;font-family:ui-monospace,monospace;min-width:58px;text-align:right">${money(c)}</span></div>`;}).join(""):'<div class="empty">no spend yet — runs on scripted/mock cost $0</div>';
+        <span style="font-size:12px;font-family:ui-monospace,monospace;min-width:58px;text-align:right">${money(c)}</span></div>`;}).join(""):'<div class="empty">no spend yet — runs on scripted/mock cost $0</div>');
     const ops=Object.entries(sp.by_operator||{}).map(([o,v])=>[o,v||{}]).sort((a,b)=>(b[1].cost_usd||0)-(a[1].cost_usd||0));
     const omax=ops.length?(ops[0][1].cost_usd||0):1;
-    document.getElementById("cost-operators").innerHTML=ops.length?ops.map(([o,v])=>{
+    setHTML(document.getElementById("cost-operators"),ops.length?ops.map(([o,v])=>{
       const c=v.cost_usd||0;const tk=(v.input_tokens||0)+(v.output_tokens||0);const pct=Math.max(3,Math.round(c/(omax||1)*100));
       return `<div style="display:flex;align-items:center;gap:12px;padding:8px 0"><span style="min-width:150px;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(o)}">${esc(o)}</span>
         <div style="flex:1;background:var(--card2);border-radius:6px;height:8px;overflow:hidden"><div style="width:${pct}%;height:100%;background:var(--accent)"></div></div>
         <span style="font-size:11px;color:var(--muted);min-width:64px;text-align:right">${fmtK(tk)} tok</span>
-        <span style="font-size:12px;font-family:ui-monospace,monospace;min-width:58px;text-align:right">${money(c)}</span></div>`;}).join(""):'<div class="empty">no per-user spend yet — starts recording once an operator runs a cycle</div>';
+        <span style="font-size:12px;font-family:ui-monospace,monospace;min-width:58px;text-align:right">${money(c)}</span></div>`;}).join(""):'<div class="empty">no per-user spend yet — starts recording once an operator runs a cycle</div>');
     const cap=(window._budget!==undefined)?window._budget:null;
     if(cap&&cap>0){const used=Math.min(100,Math.round((sp.total_cost_usd||0)/cap*100));
-      document.getElementById("cost-budget").innerHTML=`<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:8px"><span>${money(sp.total_cost_usd)} of ${money(cap)}</span><span style="color:var(--muted)">${used}%</span></div>
+      setHTML(document.getElementById("cost-budget"),`<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:8px"><span>${money(sp.total_cost_usd)} of ${money(cap)}</span><span style="color:var(--muted)">${used}%</span></div>
         <div style="background:var(--card2);border-radius:6px;height:10px;overflow:hidden"><div style="width:${used}%;height:100%;background:${used>=90?'var(--red)':used>=70?'var(--amber)':'var(--accent2)'}"></div></div>
-        <div style="color:var(--dim);font-size:11px;margin-top:8px">Loop auto-pauses when the cap is reached.</div>`;
-    }else{document.getElementById("cost-budget").innerHTML='<div class="empty">no budget cap set — add "budget_usd" in coxagent.json</div>';}
+        <div style="color:var(--dim);font-size:11px;margin-top:8px">Loop auto-pauses when the cap is reached.</div>`);
+    }else{setHTML(document.getElementById("cost-budget"),'<div class="empty">no budget cap set — add "budget_usd" in coxagent.json</div>');}
     renderTokenSaver();
   }else if(CUR==="discuss"){renderDiscuss();}else if(CUR==="roadmap"){renderRoadmap();}else if(CUR==="home"){renderHome();}else if(CUR==="mg-spaces"){renderManage();}else if(CUR==="mg-users"){renderManage();}else if(CUR==="mg-usage"){renderManage();}else if(CUR==="mg-audit"){renderManage();}}
 // ---- Manage (super admin): spaces · users · usage ---------------------------
@@ -2636,14 +2645,14 @@ async function revokeInvite(t){try{await fetch("/api/workspace/invites/"+t,{meth
 async function renderTokenSaver(){
   const el=document.getElementById("cost-tokensaver");if(!el)return;
   let d={};try{d=await(await fetch("/api/token-saver")).json();}catch(e){return;}
-  if(!d.samples){el.innerHTML='<div class="empty" style="padding:6px">No compressions recorded yet — the saver kicks in on large/noisy tool output while agents run.</div>';return;}
+  if(!d.samples){setHTML(el,'<div class="empty" style="padding:6px">No compressions recorded yet — the saver kicks in on large/noisy tool output while agents run.</div>');return;}
   const fc=n=>n>=1e6?(n/1e6).toFixed(1)+"M":n>=1e3?(n/1e3).toFixed(1)+"K":String(n);
-  el.innerHTML=`<div style="display:flex;gap:26px;flex-wrap:wrap;align-items:flex-end">
+  setHTML(el,`<div style="display:flex;gap:26px;flex-wrap:wrap;align-items:flex-end">
     <div><div style="font-size:27px;font-weight:700;color:var(--green);letter-spacing:-.02em;line-height:1">${d.pct}%</div><div style="font-size:12px;color:var(--muted);margin-top:4px">output shrunk</div></div>
     <div><div style="font-size:20px;font-weight:600">${fc(d.saved)}</div><div style="font-size:12px;color:var(--muted)">chars saved</div></div>
     <div><div style="font-size:20px;font-weight:600">${fc(d.before)} → ${fc(d.after)}</div><div style="font-size:12px;color:var(--muted)">before → after</div></div>
     <div><div style="font-size:20px;font-weight:600">${d.samples}</div><div style="font-size:12px;color:var(--muted)">tool outputs compressed</div></div>
-  </div><div style="margin-top:14px;background:var(--card2);border-radius:6px;height:8px;overflow:hidden"><div style="width:${Math.min(100,d.pct)}%;height:100%;background:var(--green)"></div></div>`;}
+  </div><div style="margin-top:14px;background:var(--card2);border-radius:6px;height:8px;overflow:hidden"><div style="width:${Math.min(100,d.pct)}%;height:100%;background:var(--green)"></div></div>`);}
 
 function cmpVer(a,b){const pa=(a||"0.0.0").split(".").map(Number),pb=(b||"0.0.0").split(".").map(Number);
   for(let i=0;i<3;i++){if((pa[i]||0)!==(pb[i]||0))return (pa[i]||0)-(pb[i]||0);}return 0;}
