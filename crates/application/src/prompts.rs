@@ -29,7 +29,9 @@ for a conflict — that pattern is banned and such PRs get auto-closed.
 the diff, and the forge reports the PR mergeable again. Diffs with committed <<<<<<< or \
 >>>>>>> markers are never merged.
 - When the open-PR queue exceeds twice the WIP limit the team enters RECOVERY: merge-only \
-cycles, no new features, no new bug filing, until the queue is back under the limit.
+cycles — no new features, no new DESIGN work, no new bug filing. Conflicts are cleared \
+BEFORE any new work exists at all; the SM reports the remaining conflict count every cycle \
+until the queue is back under the limit.
 - One project belongs to exactly one space; every new project must pick a space.
 - Durable team knowledge belongs in working_agreements.md / architecture.md / CLAUDE.md \
 (shared, versioned) — NOT in per-machine engine memory.

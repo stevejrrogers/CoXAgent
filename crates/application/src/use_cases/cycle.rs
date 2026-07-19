@@ -1208,15 +1208,25 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // SA/PD/DEV/DOCS report "working now" from inside, only after they win
         // the per-ticket claim — so a runner that loses the race (or has nothing
         // to do) shows idle instead of falsely mirroring the busy one.
-        match self.sa().execute().await {
-            Ok(id) => report.sa_readied = id,
-            Err(e) => report.errors.push(format!("SA: {e}")),
-        }
+        //
+        // RECOVERY law: conflicts are cleared BEFORE any new feature work —
+        // that includes design. Designing new tickets during recovery just
+        // grows the backlog pressure that caused the pile-up.
+        if recovery {
+            report
+                .errors
+                .push("SA/PD: design paused — merge-queue recovery, conflicts first".to_owned());
+        } else {
+            match self.sa().execute().await {
+                Ok(id) => report.sa_readied = id,
+                Err(e) => report.errors.push(format!("SA: {e}")),
+            }
 
-        // PD authors UX for a UI ticket SA left pending, taking it to ready.
-        match self.pd().execute().await {
-            Ok(id) => report.pd_designed = id,
-            Err(e) => report.errors.push(format!("PD: {e}")),
+            // PD authors UX for a UI ticket SA left pending, taking it to ready.
+            match self.pd().execute().await {
+                Ok(id) => report.pd_designed = id,
+                Err(e) => report.errors.push(format!("PD: {e}")),
+            }
         }
 
         // PR-queue backpressure: when too many PRs are already open, STOP
@@ -2112,13 +2122,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // queue RECOVERY (nothing else runs) drain as hard as we can afford.
         let recovering = self.store.load().await.is_ok_and(|s| s.queue_recovery);
         let mut fix_budget: u32 = if recovering {
-            4
+            8
         } else if self.clean_base_required().await {
             2
         } else {
             1
         };
-        let scan = if recovering { 20 } else { 6 };
+        // In recovery scan the WHOLE queue — capacity is bounded by fix_budget,
+        // not by how far we look; skipping fixable PRs just slows the drain.
+        let scan = if recovering { usize::MAX } else { 6 };
         for pr in queue.into_iter().take(scan) {
             // What needs fixing? Explicit review feedback, and/or merge conflicts
             // — conflicts are handled IMMEDIATELY, not parked for a review round.
@@ -2520,6 +2532,34 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         })
         .await;
         self.report("SM", &format!("recovery: draining {open} open PRs"));
+        // SM highlights the drain status EVERY recovery cycle — the team (and
+        // any human watching chat) always knows how many conflicts stand
+        // between them and new feature work.
+        if let Some(forge) = &self.forge {
+            if let Ok(prs) = forge.list_open_prs().await {
+                let conflicted = prs.iter().filter(|p| !p.mergeable).count();
+                let status = if vi {
+                    format!(
+                        "🔧 Recovery: còn {open} PR mở, {conflicted} dính conflict. Luật: xử hết \
+                         conflict TRƯỚC rồi mới design/feature mới — DEV fix 8 conflict/cycle \
+                         (cũ nhất trước), SA re-review và merge ngay khi xanh."
+                    )
+                } else {
+                    format!(
+                        "🔧 Recovery: {open} open PRs, {conflicted} conflicting. Law: conflicts \
+                         are cleared BEFORE any new design/feature work — DEV fixes 8 per cycle \
+                         (oldest first), SA re-reviews and merges as soon as they're green."
+                    )
+                };
+                let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                    if s.queue_recovery {
+                        s.post_chat_in("SM", &status, crate::state::AGENTS_CHANNEL, Vec::new());
+                    }
+                    Ok(())
+                })
+                .await;
+            }
+        }
         // Resolver-PRs ("Resolve merge conflict on PR #N") are the anti-pattern
         // that inflated the queue — conflicts are fixed on the ORIGINAL branch by
         // address_pr_feedback, so these are pure noise. Close them.
