@@ -1655,6 +1655,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         if claimed.is_err() {
             return; // another operator ran it today
         }
+        self.report("SM", "memory hygiene");
         let Some(dir) = self.engine_memory_dir() else {
             return;
         };
@@ -2301,6 +2302,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let Some(forge) = self.forge.clone() else {
             return;
         };
+        self.report("SA", &format!("force-merging PR #{num} for {by}"));
         let say = |msg: String| {
             let store = Arc::clone(&self.store);
             async move {
@@ -2517,6 +2519,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             Ok(())
         })
         .await;
+        self.report("SM", &format!("recovery: draining {open} open PRs"));
         // Resolver-PRs ("Resolve merge conflict on PR #N") are the anti-pattern
         // that inflated the queue — conflicts are fixed on the ORIGINAL branch by
         // address_pr_feedback, so these are pure noise. Close them.
