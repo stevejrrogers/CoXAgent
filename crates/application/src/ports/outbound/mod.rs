@@ -16,7 +16,7 @@ pub use deploy::{DeployPort, DeployReport};
 pub use doc_store::DocStorePort;
 pub use engine::{AgentEnginePort, AgentOutcome, AgentRequest, Usage};
 pub use forge::{ForgePort, PrFeedback, PullRequest};
-pub use git::{GitAuthor, GitPort};
+pub use git::{GitAuthor, GitPort, SyncBase};
 pub use kv_doc::KvDocPort;
 pub use notify::{ChatNotifier, FanoutNotifier, NotifierPort, NotifyEvent, NullNotifier};
 pub use state_store::{mutate_state, StateStorePort, WorkerEntry};

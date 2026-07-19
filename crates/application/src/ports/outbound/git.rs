@@ -52,4 +52,30 @@ pub trait GitPort: Send + Sync {
     /// # Errors
     /// [`PortError::Backend`] on a git/network failure.
     async fn push(&self, work_dir: &Path, branch: &str) -> Result<(), PortError>;
+
+    /// Bring the latest `origin/<base>` INTO the current branch (fetch + merge).
+    /// This is the "PRs are born mergeable" law: called before every push/PR so
+    /// conflicts surface — and get resolved — on the branch, never in the queue.
+    ///
+    /// # Errors
+    /// [`PortError::Backend`] if git cannot fetch or the merge cannot start.
+    async fn sync_base(&self, work_dir: &Path, base: &str) -> Result<SyncBase, PortError>;
+
+    /// Abort an in-progress merge, restoring the branch to its pre-merge state.
+    ///
+    /// # Errors
+    /// [`PortError::Backend`] on a git failure.
+    async fn abort_merge(&self, work_dir: &Path) -> Result<(), PortError>;
+}
+
+/// Outcome of [`GitPort::sync_base`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyncBase {
+    /// Branch already contained the base tip — nothing to do.
+    UpToDate,
+    /// Base merged in cleanly (a merge commit was created).
+    Merged,
+    /// The merge stopped on conflicts; the listed files have conflict markers
+    /// and the merge is left in progress for a resolver to finish.
+    Conflicts(Vec<String>),
 }

@@ -206,6 +206,66 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// Ship a just-completed ticket through the git flow, when enabled:
     /// commit the work on a per-ticket branch (`feat/<id>`, stacked on the
     /// current tip so nothing is lost while PRs await review), push it, and —
+    /// Finish an in-progress merge of `base` into `branch`: a DEV engine call
+    /// reads both sides of every conflicted file, resolves preserving both
+    /// intents, and completes the merge commit. Returns true only when the
+    /// resolution is VERIFIED: no conflict markers left in the previously
+    /// conflicted files and the base tip is an ancestor of HEAD.
+    async fn resolve_merge_in_progress(&self, branch: &str, base: &str, files: &[String]) -> bool {
+        self.report(
+            "DEV-BUG",
+            &format!("resolving {base} conflicts on {branch}"),
+        );
+        let listing = files
+            .iter()
+            .map(|f| format!("- {f}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let task = format!(
+            "A `git merge origin/{base}` into branch `{branch}` is IN PROGRESS in this working \
+             directory and stopped on conflicts in:\n{listing}\n\n\
+             Resolve the merge INTELLIGENTLY:\n\
+             1. For every conflicted file, read BOTH sides and understand what each change is \
+             trying to do — then produce a resolution that preserves the intent of BOTH the \
+             branch's work and what landed on {base}. Never blindly pick one side.\n\
+             2. Remove every conflict marker (<<<<<<< ======= >>>>>>>), `git add` the files, and \
+             complete the merge commit (`git commit --no-edit`).\n\
+             3. Make sure the project still builds and its tests pass; fix fallout from the merge \
+             if needed (as additional commits on this branch).\n\
+             Do NOT switch branches, do NOT push, do NOT abort the merge."
+        );
+        let request = AgentRequest {
+            role: coxagent_domain::Role::DevBug,
+            system_prompt: crate::prompts::system_prompt(crate::prompts::DEV),
+            task_prompt: task,
+            work_dir: self.work_dir.clone(),
+            timeout: std::time::Duration::from_secs(1200),
+        };
+        let Ok(outcome) = self.engine.run(request).await else {
+            return false;
+        };
+        if !outcome.succeeded() {
+            return false;
+        }
+        // Trust nothing: verify markers are gone from the files git flagged…
+        for f in files {
+            if let Ok(text) = std::fs::read_to_string(self.work_dir.join(f)) {
+                if text
+                    .lines()
+                    .any(|l| l.starts_with("<<<<<<< ") || l.starts_with(">>>>>>> "))
+                {
+                    return false;
+                }
+            }
+        }
+        // …and that the merge actually completed (base tip now an ancestor).
+        let Some(git) = &self.git else { return false };
+        matches!(
+            git.sync_base(&self.work_dir, base).await,
+            Ok(crate::ports::outbound::SyncBase::UpToDate)
+        )
+    }
+
     /// when `auto_pr` — open a PR into the default branch for a human to review.
     /// Best-effort at every step: any failure is logged and never stalls the
     /// cycle. `kind` is `feat`/`fix`.
@@ -251,6 +311,43 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             Err(e) => {
                 self.log_git(&format!("commit failed for {id}: {e}")).await;
                 return;
+            }
+        }
+
+        // Law: PRs are born mergeable. Bring the latest base INTO the branch
+        // before pushing; a conflict is read, understood, and resolved HERE on
+        // the branch — never left for the queue to discover.
+        let base = self.flow_base().to_owned();
+        match git.sync_base(&self.work_dir, &base).await {
+            Ok(crate::ports::outbound::SyncBase::UpToDate) => {}
+            Ok(crate::ports::outbound::SyncBase::Merged) => {
+                self.log_git(&format!("merged latest {base} into {branch}"))
+                    .await;
+            }
+            Ok(crate::ports::outbound::SyncBase::Conflicts(files)) => {
+                self.log_git(&format!(
+                    "{branch}: {} file(s) conflict with {base} — resolving on the branch",
+                    files.len()
+                ))
+                .await;
+                if self.resolve_merge_in_progress(&branch, &base, &files).await {
+                    self.log_git(&format!(
+                        "{branch}: conflicts with {base} resolved in place"
+                    ))
+                    .await;
+                } else {
+                    // Never push a half-done merge: restore the branch and let
+                    // the drain loop (which re-runs this law) pick it up.
+                    let _ = git.abort_merge(&self.work_dir).await;
+                    self.log_git(&format!(
+                        "{branch}: conflict resolution failed — merge aborted, drain will retry"
+                    ))
+                    .await;
+                }
+            }
+            Err(e) => {
+                self.log_git(&format!("sync {base} into {branch} failed: {e}"))
+                    .await;
             }
         }
 
@@ -3309,6 +3406,16 @@ mod tests {
             Ok(Some("abc1234".to_owned()))
         }
         async fn push(&self, _: &std::path::Path, _: &str) -> Result<(), PortError> {
+            Ok(())
+        }
+        async fn sync_base(
+            &self,
+            _: &std::path::Path,
+            _: &str,
+        ) -> Result<crate::ports::outbound::SyncBase, PortError> {
+            Ok(crate::ports::outbound::SyncBase::UpToDate)
+        }
+        async fn abort_merge(&self, _: &std::path::Path) -> Result<(), PortError> {
             Ok(())
         }
     }

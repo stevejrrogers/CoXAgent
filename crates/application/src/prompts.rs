@@ -22,6 +22,9 @@ Output exactly what the task asks for and nothing else.";
 /// hygiene validates learned notes against exactly this text.
 pub const PROCESS_INVARIANTS: &str = "\
 CURRENT PROCESS LAW (orchestrator-enforced — anything contradicting this is WRONG):
+- PRs are BORN mergeable: before pushing a branch or opening a PR, merge the latest base \
+branch INTO your branch first; any conflict is read, understood, and resolved intelligently \
+right there — preserving BOTH sides' intent — before the push ever happens.
 - Merge conflicts are resolved IN PLACE on the ORIGINAL branch (fetch, merge base in, \
 resolve, push). NEVER file 'Resolve merge conflict' tickets and NEVER open a new branch/PR \
 for a conflict — that pattern is banned and such PRs get auto-closed.
@@ -181,7 +184,10 @@ build and the relevant tests and make them green BEFORE declaring done — \
 \"compiles\" is not \"works\". Add/adjust tests for the behaviour you change; a \
 bug fix ships with a regression test.\n\
 Keep the change focused — no drive-by rewrites, no scope creep; if the ticket \
-turns out bigger or different than specified, say so instead of improvising. \
+turns out bigger or different than specified, say so instead of improvising.\n\
+Your PR is born mergeable: before finishing, merge the latest base branch into \
+your branch; on conflict, read both sides, understand each change's intent, and \
+resolve preserving both — then make the build/tests green again. \
 When done, print a one-line summary.";
 
 /// Test/QA — verifies the deployed work and reports bugs as a strict JSON array.
