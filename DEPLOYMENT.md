@@ -179,3 +179,21 @@ gateway pods. Start with `cox-all`; split only when load asks for it.
   (`cox-<parent>-<dir>`); an hourly hub janitor `down`s fully-stopped `cox-*`
   projects (never `cox-infra`) and prunes dangling images. Manual sweep:
   `./scripts/docker-clean.sh` (`--deep` adds builder cache).
+
+## Migrate to another machine
+
+Everything portable in one tarball + one command on the new machine:
+
+```sh
+# old machine
+scripts/migrate-export.sh            # → cox-export-YYYYmmdd-HHMM.tar.gz
+# new machine (Docker installed, repo cloned)
+scripts/migrate-import.sh cox-export-YYYYmmdd-HHMM.tar.gz
+```
+
+Export carries Postgres (all state/users/tickets/KV), Mongo (wiki), MinIO
+uploads, and `~/CoXAgent` configs. Import creates the volumes, brings up
+`cox-infra`, and restores everything. Redis is ephemeral and codebases
+re-clone from git. Credentials never travel: run `claude` + `gh auth login`
+on the new machine, then launch the app — the team resumes from Postgres
+exactly where it stopped.
