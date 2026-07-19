@@ -875,6 +875,25 @@
   .sprintpct{text-align:right;flex:none}
   .sprintpct .v{font-size:26px;font-weight:800;color:var(--accent2);line-height:1}
   .sprintpct .k{font-size:10.5px;color:var(--dim);margin-top:2px}
+  /* Meetings: sidebar list, meeting room grid */
+  .meet-item{display:flex;align-items:center;gap:8px;padding:6px 9px;border-radius:8px;cursor:pointer;font-size:12.5px;color:var(--muted)}
+  .meet-item:hover{background:var(--card2);color:var(--text)}
+  .meet-item .mi-t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .meet-item .mi-when{font-size:11px;color:var(--dim);flex:none}
+  .meet-item.live .mi-when{color:var(--green);font-weight:700}
+  .meet-item.live i{color:var(--green)}
+  #ov-meet .lbl{width:74px;flex:none}
+  #ov-meet .fr{flex-wrap:wrap;row-gap:8px}
+  #ov-meet .fr input,#ov-meet .fr select{max-width:100%}
+  .roombox{background:var(--card);border:1px solid var(--border2);border-radius:16px;padding:16px;width:min(880px,94vw);max-height:90vh;display:flex;flex-direction:column}
+  .room-hd{display:flex;align-items:center;gap:8px;font-size:14px;margin-bottom:12px}
+  .room-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;overflow:auto}
+  .room-tile{position:relative;background:var(--card2);border-radius:12px;aspect-ratio:16/10;overflow:hidden;display:grid;place-items:center}
+  .room-tile video{width:100%;height:100%;object-fit:cover}
+  .room-tile .rt-name{position:absolute;left:8px;bottom:6px;font-size:11.5px;background:#0008;color:#fff;padding:2px 8px;border-radius:99px}
+  .room-tile .rt-av{width:56px;height:56px;border-radius:50%;background:var(--accent2)22;color:var(--accent2);display:grid;place-items:center;font-weight:800;font-size:20px}
+  .rt-ringbtn{display:inline-flex;align-items:center;gap:5px;background:var(--card2);border:1px solid var(--border2);color:var(--muted);border-radius:99px;padding:4px 10px;font-size:11.5px;cursor:pointer;font-family:inherit}
+  .rt-ringbtn:hover{color:var(--text);border-color:var(--accent2)}
   /* Proper sprint view: ring, stats, board columns, burndown */
   .sp-ring{--p:0;width:74px;height:74px;border-radius:50%;flex:none;display:grid;place-items:center;background:conic-gradient(var(--accent2) calc(var(--p)*1%),var(--card2) 0)}
   .sp-ring .in{width:58px;height:58px;border-radius:50%;background:var(--card);display:grid;place-items:center;text-align:center}
@@ -1255,6 +1274,8 @@ textarea.np-in{resize:vertical;line-height:1.5}
       <div class="chanrail-hd" style="margin-top:10px"><span>Direct messages</span></div>
       <div class="dmsearch"><i class="ti ti-search"></i><input id="dm-search" placeholder="Find a teammate…" autocomplete="off" oninput="renderDMList()"></div>
       <div class="chanlist" id="dm-list"></div>
+      <div class="chanrail-hd" style="margin-top:10px"><span>Meetings</span><div class="chanrail-actions"><button class="chanadd" onclick="openMeetModal()" title="Book a meeting"><i class="ti ti-plus"></i></button></div></div>
+      <div class="chanlist" id="meet-list"></div>
     </div>
     <nav class="nav" id="ws-nav">
       <a data-v="home" id="nav-home" onclick="nav('home')"><i class="ti ti-home"></i> Home</a>
@@ -1652,6 +1673,43 @@ textarea.np-in{resize:vertical;line-height:1.5}
     <div class="inc-ctl">
       <button class="callctl end" onclick="declineCall()" title="Decline"><i class="ti ti-phone-off"></i></button>
       <button class="callctl accept" onclick="acceptCall()" title="Accept"><i class="ti ti-phone"></i></button>
+    </div>
+  </div></div>
+
+  <div class="ov" id="ov-meet"><div class="modal" style="max-width:430px">
+    <h3 id="mt-title-hd" style="margin:0 0 3px">Book a meeting</h3>
+    <div class="msub" style="margin-bottom:12px">Everyone invited gets a reminder, then a ring at start if they haven't joined.</div>
+    <div class="frm">
+      <div class="fr"><span class="lbl">Title</span><input id="mt-title" placeholder="e.g. Sprint review" style="flex:1"/></div>
+      <div class="fr"><span class="lbl">When</span><input id="mt-date" type="date" style="width:140px"/><input id="mt-time" type="time" style="width:100px"/></div>
+      <div class="fr"><span class="lbl">Duration</span><select id="mt-dur"><option value="15">15 min</option><option value="30" selected>30 min</option><option value="45">45 min</option><option value="60">1 hour</option><option value="90">1.5 hours</option><option value="120">2 hours</option></select>
+        <span class="lbl" style="width:auto">Remind</span><select id="mt-remind"><option value="0">off</option><option value="5">5 min</option><option value="10" selected>10 min</option><option value="30">30 min</option><option value="60">1 h</option></select></div>
+      <div class="fr" style="align-items:flex-start"><span class="lbl">Invite</span><div id="mt-people" style="flex:1;display:flex;flex-wrap:wrap;gap:6px"></div></div>
+    </div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
+      <button class="btn-ghost" onclick="close_('ov-meet')">Cancel</button>
+      <button class="save" onclick="saveMeeting()"><i class="ti ti-calendar-plus"></i> Book</button>
+    </div>
+    <div id="mt-msg" style="font-size:12px;color:var(--red);margin-top:8px"></div>
+  </div></div>
+  <div class="ov" id="ov-meetring"><div class="modal incbox" style="max-width:340px;text-align:center">
+    <div class="inc-av" style="background:var(--accent2)22;color:var(--accent2)"><i class="ti ti-calendar-event"></i></div>
+    <h3 id="mr-title" style="margin:12px 0 2px">—</h3>
+    <div class="msub" id="mr-sub">Meeting is starting</div>
+    <div class="inc-ctl">
+      <button class="callctl end" onclick="dismissMeetRing()" title="Not now"><i class="ti ti-x"></i></button>
+      <button class="callctl accept" onclick="joinFromRing()" title="Join"><i class="ti ti-video"></i></button>
+    </div>
+  </div></div>
+  <div class="ov" id="ov-room"><div class="roombox">
+    <div class="room-hd"><i class="ti ti-calendar-event" style="color:var(--accent2)"></i> <b id="room-title">Meeting</b>
+      <span id="room-count" class="msub" style="margin-left:8px"></span><span style="flex:1"></span>
+      <div id="room-absent" style="display:flex;gap:6px"></div></div>
+    <div class="room-grid" id="room-grid"></div>
+    <div class="call-ctl" style="position:static;transform:none;justify-content:center;margin-top:10px">
+      <button class="callctl" id="room-mute" onclick="roomMute()" title="Mute"><i class="ti ti-microphone"></i></button>
+      <button class="callctl" id="room-cam" onclick="roomCam()" title="Camera"><i class="ti ti-video"></i></button>
+      <button class="callctl end" onclick="leaveRoom(true)" title="Leave"><i class="ti ti-phone-off"></i></button>
     </div>
   </div></div>
 
@@ -2988,6 +3046,7 @@ let CHANNELS=[], CURCHAN="general";
 async function openChat(){
   applyMode();
   loadMembers();
+  loadMeetings();
   await loadChannels();
   selectChannel(CURCHAN);
   openChatWS();
@@ -3321,6 +3380,8 @@ async function startCall(peer,video){
 }
 async function onSignal(msg){
   const from=msg.from,kind=msg.kind,p=msg.payload||{};
+  if(kind&&kind.startsWith("meeting-")){onMeetingSignal(kind,p);return;}
+  if(kind&&kind.startsWith("m-")){onMeetMesh(kind,from,p);return;}
   if(kind==="offer"){
     if(CALL.pc){sendSignal(from,"hangup",{});return;} // busy
     CALL.incoming={from,sdp:p.sdp,video:p.video};showIncoming(from,p.video);
@@ -3382,6 +3443,145 @@ function callCurrent(video){
   if(!other){toasty("Open a direct message to call","err");return;}
   startCall(other,video);
 }
+// ── Meetings: calendar, reminders/rings, and the mesh meeting room ───────────
+let MEETINGS=[]; let MEET={id:null,pcs:{},streams:{},local:null,meta:null};
+let MEETRING=null; // pending ring {meeting}
+async function loadMeetings(){try{MEETINGS=await(await fetch("/api/meetings")).json();}catch(e){MEETINGS=[];}renderMeetList();}
+function meetWhen(m){const d=new Date(m.start);const today=new Date().toDateString()===d.toDateString();
+  const t=d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
+  return today?t:d.toLocaleDateString([],{month:"short",day:"numeric"})+" "+t;}
+function meetLive(m){const s=new Date(m.start).getTime();return Date.now()>=s&&Date.now()<s+m.duration_min*60000;}
+function renderMeetList(){const el=document.getElementById("meet-list");if(!el)return;
+  const up=MEETINGS.filter(m=>new Date(m.start).getTime()+m.duration_min*60000>Date.now());
+  setHTML(el,up.length?up.map(m=>`<div class="meet-item ${meetLive(m)?'live':''}" onclick="openMeeting('${m.id}')" title="${esc(m.title)} — ${(m.participants||[]).map(memberName).map(esc).join(', ')}">
+      <i class="ti ti-calendar-event"></i><span class="mi-t">${esc(m.title)}</span>
+      <span class="mi-when">${meetLive(m)?'LIVE':esc(meetWhen(m))}</span></div>`).join("")
+    :'<div style="font-size:11.5px;color:var(--dim);padding:4px 9px">No meetings — book one with +</div>');}
+function openMeetModal(){
+  const box=document.getElementById("mt-people");
+  const me=(ME&&ME.username)||"";
+  box.innerHTML=MEMBERS.filter(u=>u.username!==me).map(u=>`<label class="rt-ringbtn" style="cursor:pointer"><input type="checkbox" value="${esc(u.username)}" style="accent-color:var(--accent2)"> ${esc(memberName(u.username))}</label>`).join("")||'<span style="color:var(--dim);font-size:12px">No teammates yet</span>';
+  const now=new Date(Date.now()+15*60000);
+  document.getElementById("mt-date").value=now.toISOString().slice(0,10);
+  document.getElementById("mt-time").value=now.toTimeString().slice(0,5);
+  document.getElementById("mt-title").value="";document.getElementById("mt-msg").textContent="";
+  document.getElementById("ov-meet").classList.add("open");
+  setTimeout(()=>document.getElementById("mt-title").focus(),40);}
+async function saveMeeting(){const msg=document.getElementById("mt-msg");
+  const title=document.getElementById("mt-title").value.trim();
+  if(!title){msg.textContent="Give the meeting a title.";return;}
+  const start=new Date(document.getElementById("mt-date").value+"T"+document.getElementById("mt-time").value);
+  if(isNaN(start)||start.getTime()<Date.now()-60000){msg.textContent="Pick a future time.";return;}
+  const participants=[...document.querySelectorAll("#mt-people input:checked")].map(i=>i.value);
+  try{const r=await fetch("/api/meetings",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({title,start:start.toISOString(),duration_min:parseInt(val("mt-dur"),10),participants,remind_min:parseInt(val("mt-remind"),10)})});
+    if(r.ok){close_("ov-meet");toasty("Meeting booked — invitations sent","ok");loadMeetings();}
+    else msg.textContent=await r.text()||"Could not book.";
+  }catch(e){msg.textContent="Network error.";}}
+function openMeeting(id){const m=MEETINGS.find(x=>x.id===id);if(!m)return;
+  if(meetLive(m)||new Date(m.start).getTime()-Date.now()<5*60000){joinMeeting(id);return;}
+  const mine=ME&&(m.created_by===ME.username);
+  if(mine&&confirm(`"${m.title}" — ${meetWhen(m)}\n\nCancel this meeting?`))cancelMeeting(id);
+  else toasty(`${m.title} · ${meetWhen(m)} · ${(m.participants||[]).map(memberName).join(", ")}`,"ok");}
+async function cancelMeeting(id){
+  try{const r=await fetch("/api/meetings/"+id,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({cancel:true})});
+    if(r.ok){toasty("Meeting cancelled","ok");loadMeetings();}else toasty(await r.text()||"Cannot cancel","err");
+  }catch(e){toasty("Network error","err");}}
+// Reminder / start / ring frames from the server (or a nudging teammate).
+function onMeetingSignal(kind,p){const m=(p&&p.meeting)||{};
+  if(kind==="meeting-invite"){toasty(`📅 ${memberName(m.created_by)} invited you: ${m.title} · ${meetWhen(m)}`,"ok");loadMeetings();return;}
+  if(kind==="meeting-cancel"){toasty(`📅 Meeting cancelled: ${m.title}`,"ok");loadMeetings();return;}
+  if(kind==="meeting-remind"){toasty(`⏰ ${m.title} starts at ${meetWhen(m)}`,"ok");chime();sysNotify(`Meeting soon: ${m.title}`,`Starts ${meetWhen(m)}`);return;}
+  if(kind==="meeting-start"){toasty(`📅 ${m.title} is starting — join from the Meetings list`,"ok");chime();sysNotify(`Meeting started: ${m.title}`,"Click to join");loadMeetings();return;}
+  if(kind==="meeting-ring"){
+    if(MEET.id===m.id)return; // already in the room
+    MEETRING={meeting:m};
+    document.getElementById("mr-title").textContent=m.title||"Meeting";
+    document.getElementById("mr-sub").textContent="You're being called into this meeting";
+    document.getElementById("ov-meetring").classList.add("open");chime();
+    sysNotify(`📞 ${m.title}`,"You're being called into the meeting");}}
+function sysNotify(title,body){try{
+  if(window.Notification&&Notification.permission==="granted"&&!document.hasFocus())new Notification(title,{body});
+}catch(e){}}
+function dismissMeetRing(){MEETRING=null;document.getElementById("ov-meetring").classList.remove("open");}
+function joinFromRing(){const r=MEETRING;dismissMeetRing();if(r&&r.meeting)joinMeeting(r.meeting.id);}
+// ── The room: full-mesh WebRTC (one RTCPeerConnection per present peer) ──────
+function meetSignal(to,kind,payload){payload=payload||{};payload.mid=MEET.id;sendSignal(to,kind,payload);}
+async function joinMeeting(id){
+  if(CALL.pc){toasty("Finish your current call first","err");return;}
+  if(MEET.id===id)return;
+  if(MEET.id)leaveRoom(false);
+  let m;try{const r=await fetch("/api/meetings/"+id+"/join",{method:"POST"});
+    if(!r.ok){toasty(await r.text()||"Cannot join","err");return;}m=await r.json();
+  }catch(e){toasty("Network error","err");return;}
+  try{MEET.local=await navigator.mediaDevices.getUserMedia({audio:true,video:true});}
+  catch(e){try{MEET.local=await navigator.mediaDevices.getUserMedia({audio:true});}
+    catch(e2){MEET.local=new MediaStream();toasty("No mic/camera — joining view-only","ok");}}
+  MEET.id=id;MEET.meta=m;MEET.pcs={};MEET.streams={};
+  openRoomUI(m);
+  // Announce to everyone invited; whoever is present offers back to us.
+  const me=(ME&&ME.username)||"";
+  (m.participants||[]).filter(u=>u!==me).forEach(u=>meetSignal(u,"m-hello",{}));
+  loadMeetings();}
+async function meetPC(peer){
+  if(MEET.pcs[peer])return MEET.pcs[peer];
+  const pc=new RTCPeerConnection({iceServers:await iceConfig()});
+  MEET.pcs[peer]=pc;
+  MEET.local.getTracks().forEach(t=>pc.addTrack(t,MEET.local));
+  pc.onicecandidate=e=>{if(e.candidate)meetSignal(peer,"m-ice",{candidate:e.candidate});};
+  pc.ontrack=e=>{if(e.streams[0]){MEET.streams[peer]=e.streams[0];renderRoom();}};
+  pc.onconnectionstatechange=()=>{if(["failed","closed"].includes(pc.connectionState))dropPeer(peer);};
+  return pc;}
+function dropPeer(peer){const pc=MEET.pcs[peer];if(pc){try{pc.close();}catch(_){}}
+  delete MEET.pcs[peer];delete MEET.streams[peer];renderRoom();}
+async function onMeetMesh(kind,from,p){
+  if(!MEET.id||!p||p.mid!==MEET.id){
+    // A hello for a room we're not in — ignore; rings handle invitations.
+    return;}
+  if(kind==="m-hello"){ // newcomer announced — the present side sends the offer
+    const pc=await meetPC(from);
+    const offer=await pc.createOffer();await pc.setLocalDescription(offer);
+    meetSignal(from,"m-offer",{sdp:pc.localDescription});renderRoom();
+  }else if(kind==="m-offer"){
+    const pc=await meetPC(from);
+    await pc.setRemoteDescription(p.sdp);
+    const ans=await pc.createAnswer();await pc.setLocalDescription(ans);
+    meetSignal(from,"m-answer",{sdp:pc.localDescription});renderRoom();
+  }else if(kind==="m-answer"){
+    const pc=MEET.pcs[from];if(pc){try{await pc.setRemoteDescription(p.sdp);}catch(_){}}
+  }else if(kind==="m-ice"){
+    const pc=MEET.pcs[from];if(pc&&p.candidate){try{await pc.addIceCandidate(p.candidate);}catch(_){}}
+  }else if(kind==="m-leave"){dropPeer(from);}}
+function openRoomUI(m){document.getElementById("room-title").textContent=m.title;
+  document.getElementById("ov-room").classList.add("open");renderRoom();}
+function renderRoom(){const grid=document.getElementById("room-grid");if(!grid||!MEET.id)return;
+  const me=(ME&&ME.username)||"";
+  const tiles=[{u:me,stream:MEET.local,self:true},
+    ...Object.keys(MEET.pcs).map(u=>({u,stream:MEET.streams[u]}))];
+  grid.innerHTML=tiles.map(t=>`<div class="room-tile" id="tile-${esc(t.u)}">
+      ${t.stream&&t.stream.getVideoTracks().some(v=>v.enabled)?`<video autoplay playsinline ${t.self?"muted":""} data-u="${esc(t.u)}"></video>`:`<div class="rt-av">${esc((memberName(t.u)||"?").slice(0,2).toUpperCase())}</div>`}
+      <span class="rt-name">${esc(memberName(t.u))}${t.self?" (you)":""}</span></div>`).join("");
+  tiles.forEach(t=>{const v=grid.querySelector(`video[data-u="${CSS.escape(t.u)}"]`);if(v&&t.stream)v.srcObject=t.stream;});
+  document.getElementById("room-count").textContent=`${tiles.length} in room`;
+  // Absent invitees get a Ring button (server relays a meeting-ring to them).
+  const present=new Set(tiles.map(t=>t.u));
+  const absent=((MEET.meta&&MEET.meta.participants)||[]).filter(u=>!present.has(u));
+  document.getElementById("room-absent").innerHTML=absent.map(u=>`<button class="rt-ringbtn" onclick="ringUser('${esc(u)}')" title="Ring ${esc(memberName(u))}"><i class="ti ti-bell-ringing"></i> ${esc(memberName(u))}</button>`).join("");}
+async function ringUser(u){try{
+  const r=await fetch("/api/meetings/"+MEET.id+"/ring",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({user:u})});
+  if(r.ok)toasty(`Ringing ${memberName(u)}…`,"ok");else toasty(await r.text()||"Cannot ring","err");
+}catch(e){toasty("Network error","err");}}
+function roomMute(){const t=MEET.local&&MEET.local.getAudioTracks()[0];if(t){t.enabled=!t.enabled;document.getElementById("room-mute").classList.toggle("off",!t.enabled);}}
+function roomCam(){const t=MEET.local&&MEET.local.getVideoTracks()[0];if(t){t.enabled=!t.enabled;document.getElementById("room-cam").classList.toggle("off",!t.enabled);renderRoom();}}
+function leaveRoom(notify){
+  if(notify!==false)Object.keys(MEET.pcs).forEach(u=>meetSignal(u,"m-leave",{}));
+  Object.values(MEET.pcs).forEach(pc=>{try{pc.close();}catch(_){}});
+  if(MEET.local)MEET.local.getTracks().forEach(t=>t.stop());
+  MEET={id:null,pcs:{},streams:{},local:null,meta:null};
+  document.getElementById("ov-room").classList.remove("open");
+  loadMeetings();}
+// Refresh the sidebar clock-face (LIVE badges) once a minute.
+setInterval(renderMeetList,60000);
 // ── Emoji picker (shared: composer insert + message reactions) ───────────────
 const EMOJI_CATS=[
   {n:"Smileys",i:"mood-smile",e:"😀 😃 😄 😁 😆 😅 🤣 😂 🙂 🙃 😉 😊 😇 🥰 😍 🤩 😘 😗 😚 😙 😋 😛 😜 🤪 😝 🤑 🤗 🤭 🤫 🤔 🤐 😐 😑 😶 😏 😒 🙄 😬 😮‍💨 🤥 😌 😔 😪 🤤 😴 😷 🤒 🤕 🤢 🤮 🤧 🥵 🥶 🥴 😵 🤯 🤠 🥳 😎 🤓 🧐 😕 😟 🙁 😮 😯 😲 😳 🥺 😦 😧 😨 😰 😥 😢 😭 😱 😖 😣 😞 😓 😩 😫 🥱 😤 😡 😠 🤬 😈 👿 💀 💩 🤡 👻 👽 🤖".split(" ")},
@@ -4610,7 +4810,9 @@ function renderProjMenu(){
 async function loadProjects(){
   let list=[];try{list=await(await fetch("/api/projects")).json();}catch(e){}
   PROJECTS=list;
-  if(!list.length){renderProjBtn();return;}
+  // System chat + meetings are WORKSPACE-level: connect the live socket even
+  // with zero projects, so invites/reminders/rings always reach the user.
+  if(!list.length){renderProjBtn();initChatBackground();return;}
   const saved=localStorage.getItem("coxpid");
   PID=(saved&&list.some(p=>p.id===saved))?saved:list[0].id;
   renderProjBtn();

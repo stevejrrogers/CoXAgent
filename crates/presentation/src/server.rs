@@ -375,6 +375,427 @@ impl Ws {
     }
 }
 
+/// A booked meeting. Times are RFC3339 UTC; the watchdog drives reminders,
+/// start announcements, and auto-ringing of absent participants.
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
+struct Meeting {
+    id: String,
+    title: String,
+    /// RFC3339 start instant.
+    start: String,
+    duration_min: u32,
+    created_by: String,
+    participants: Vec<String>,
+    /// Minutes before start to remind (0 = no reminder).
+    #[serde(default)]
+    remind_min: u32,
+    /// Who has actually entered the meeting room.
+    #[serde(default)]
+    joined: Vec<String>,
+    #[serde(default)]
+    reminded: bool,
+    #[serde(default)]
+    start_announced: bool,
+    /// One automatic ring of the not-yet-joined, ~1 min after start.
+    #[serde(default)]
+    auto_rang: bool,
+    #[serde(default)]
+    cancelled: bool,
+}
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct MeetingsDoc {
+    meetings: Vec<Meeting>,
+}
+
+/// Meeting store: shared KV (`app_kv` key `meetings`) when configured, else a
+/// local `meetings.json` under the hub dir — same shape as [`Ws`].
+#[derive(Clone)]
+struct Mt {
+    inner: Arc<tokio::sync::Mutex<MeetingsDoc>>,
+    path: PathBuf,
+    store: Option<Arc<dyn coxagent_application::ports::outbound::KvDocPort>>,
+}
+
+impl Mt {
+    async fn load(
+        dir: &std::path::Path,
+        store: Option<Arc<dyn coxagent_application::ports::outbound::KvDocPort>>,
+    ) -> Self {
+        let path = dir.join("meetings.json");
+        let text = if let Some(s) = &store {
+            s.load("meetings").await.ok().flatten()
+        } else {
+            std::fs::read_to_string(&path).ok()
+        };
+        let inner = text
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        Self {
+            inner: Arc::new(tokio::sync::Mutex::new(inner)),
+            path,
+            store,
+        }
+    }
+
+    async fn save(&self) {
+        let json = { serde_json::to_string(&*self.inner.lock().await).unwrap_or_default() };
+        if let Some(s) = &self.store {
+            if let Err(e) = s.save("meetings", &json).await {
+                tracing::warn!("meetings save failed: {e}");
+            }
+            return;
+        }
+        let _ = std::fs::write(&self.path, json);
+    }
+}
+
+/// One meeting-event frame, delivered over the system-chat WebSocket to a
+/// single user (`to`-filtered by the socket loop, like call signaling).
+fn meeting_frame(kind: &str, to: &str, m: &Meeting) -> String {
+    serde_json::json!({
+        "type": "signal", "from": "SYSTEM", "to": to, "kind": kind,
+        "payload": { "meeting": {
+            "id": m.id, "title": m.title, "start": m.start,
+            "duration_min": m.duration_min, "created_by": m.created_by,
+            "participants": m.participants, "joined": m.joined,
+        }}
+    })
+    .to_string()
+}
+
+fn parse_rfc3339(s: &str) -> Option<time::OffsetDateTime> {
+    time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok()
+}
+
+/// Drives the meeting lifecycle: reminder before start, a "meeting started"
+/// nudge to everyone at start, and ONE automatic ring of participants who
+/// still haven't joined a minute in. Meetings a day past their end are pruned.
+async fn meeting_watchdog(app: AppState) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        let now = time::OffsetDateTime::now_utc();
+        let mut frames: Vec<String> = Vec::new();
+        let mut dirty = false;
+        {
+            let mut doc = app.meetings.inner.lock().await;
+            doc.meetings.retain(|m| {
+                let keep = parse_rfc3339(&m.start).is_none_or(|s| {
+                    now < s
+                        + time::Duration::minutes(i64::from(m.duration_min))
+                        + time::Duration::days(1)
+                });
+                if !keep {
+                    dirty = true;
+                }
+                keep
+            });
+            for m in &mut doc.meetings {
+                if m.cancelled {
+                    continue;
+                }
+                let Some(start) = parse_rfc3339(&m.start) else {
+                    continue;
+                };
+                let end = start + time::Duration::minutes(i64::from(m.duration_min));
+                if m.remind_min > 0
+                    && !m.reminded
+                    && now >= start - time::Duration::minutes(i64::from(m.remind_min))
+                    && now < start
+                {
+                    m.reminded = true;
+                    dirty = true;
+                    for u in &m.participants {
+                        frames.push(meeting_frame("meeting-remind", u, m));
+                    }
+                }
+                if !m.start_announced && now >= start && now < end {
+                    m.start_announced = true;
+                    dirty = true;
+                    for u in &m.participants {
+                        frames.push(meeting_frame("meeting-start", u, m));
+                    }
+                }
+                if !m.auto_rang && now >= start + time::Duration::seconds(60) && now < end {
+                    m.auto_rang = true;
+                    dirty = true;
+                    for u in &m.participants {
+                        if !m.joined.contains(u) {
+                            frames.push(meeting_frame("meeting-ring", u, m));
+                        }
+                    }
+                }
+            }
+        }
+        if dirty {
+            app.meetings.save().await;
+        }
+        for f in frames {
+            let _ = app.syschat.tx.send(f);
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct MeetingReq {
+    title: String,
+    start: String,
+    duration_min: Option<u32>,
+    participants: Vec<String>,
+    #[serde(default)]
+    remind_min: Option<u32>,
+}
+
+/// List meetings the caller is part of (participant or creator), soonest first.
+async fn meetings_list_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let Some(user) = principal_name(&app, &headers).await else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let doc = app.meetings.inner.lock().await;
+    let mut mine: Vec<Meeting> = doc
+        .meetings
+        .iter()
+        .filter(|m| !m.cancelled && (m.created_by == user || m.participants.contains(&user)))
+        .cloned()
+        .collect();
+    mine.sort_by(|a, b| a.start.cmp(&b.start));
+    Json(mine).into_response()
+}
+
+/// Book a meeting. Any signed-in user; the creator is always a participant.
+/// Every invitee gets an immediate in-app invite frame.
+async fn meeting_create_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<MeetingReq>,
+) -> axum::response::Response {
+    let Some(user) = principal_name(&app, &headers).await else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let title = req.title.trim();
+    if title.is_empty() || title.chars().count() > 120 {
+        return (StatusCode::BAD_REQUEST, "title is required (≤120 chars)").into_response();
+    }
+    let Some(start) = parse_rfc3339(&req.start) else {
+        return (StatusCode::BAD_REQUEST, "start must be RFC3339").into_response();
+    };
+    if start < time::OffsetDateTime::now_utc() - time::Duration::minutes(1) {
+        return (StatusCode::BAD_REQUEST, "start is in the past").into_response();
+    }
+    let mut participants: Vec<String> = req
+        .participants
+        .into_iter()
+        .map(|p| p.trim().to_owned())
+        .filter(|p| !p.is_empty())
+        .collect();
+    if !participants.iter().any(|p| p == &user) {
+        participants.push(user.clone());
+    }
+    participants.dedup();
+    let m = Meeting {
+        id: format!("mtg-{:08x}", rand_u32()),
+        title: title.to_owned(),
+        start: req.start.clone(),
+        duration_min: req.duration_min.unwrap_or(30).clamp(5, 480),
+        created_by: user.clone(),
+        participants,
+        remind_min: req.remind_min.unwrap_or(10).min(1440),
+        ..Meeting::default()
+    };
+    {
+        let mut doc = app.meetings.inner.lock().await;
+        doc.meetings.push(m.clone());
+    }
+    app.meetings.save().await;
+    audit_push(
+        &app.audit,
+        &user,
+        format!("meeting booked: {} ({})", m.title, m.id),
+        200,
+    )
+    .await;
+    for u in m.participants.iter().filter(|u| **u != user) {
+        let _ = app.syschat.tx.send(meeting_frame("meeting-invite", u, &m));
+    }
+    Json(m).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct MeetingPatch {
+    #[serde(default)]
+    cancel: Option<bool>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    start: Option<String>,
+    #[serde(default)]
+    duration_min: Option<u32>,
+    #[serde(default)]
+    participants: Option<Vec<String>>,
+}
+
+/// Edit or cancel a meeting — creator or a management role only.
+async fn meeting_patch_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<MeetingPatch>,
+) -> axum::response::Response {
+    let Some(auth) = app.auth.clone() else {
+        return (StatusCode::NOT_IMPLEMENTED, "auth not configured").into_response();
+    };
+    let Some(caller) = resolve_principal(&auth, &headers).await else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let mut notify: Vec<String> = Vec::new();
+    let mut cancelled_m: Option<Meeting> = None;
+    {
+        let mut doc = app.meetings.inner.lock().await;
+        let Some(m) = doc.meetings.iter_mut().find(|m| m.id == id) else {
+            return (StatusCode::NOT_FOUND, "no such meeting").into_response();
+        };
+        if m.created_by != caller.username && !caller.role.can_manage() {
+            return (StatusCode::FORBIDDEN, "only the organiser can change this").into_response();
+        }
+        if req.cancel == Some(true) {
+            m.cancelled = true;
+            cancelled_m = Some(m.clone());
+        } else {
+            if let Some(t) = &req.title {
+                if !t.trim().is_empty() {
+                    m.title = t.trim().to_owned();
+                }
+            }
+            if let Some(s) = &req.start {
+                if parse_rfc3339(s).is_some() {
+                    m.start = s.clone();
+                    // A moved meeting reminds/announces again at the new time.
+                    m.reminded = false;
+                    m.start_announced = false;
+                    m.auto_rang = false;
+                }
+            }
+            if let Some(d) = req.duration_min {
+                m.duration_min = d.clamp(5, 480);
+            }
+            if let Some(p) = req.participants {
+                let mut p: Vec<String> = p
+                    .into_iter()
+                    .map(|x| x.trim().to_owned())
+                    .filter(|x| !x.is_empty())
+                    .collect();
+                if !p.iter().any(|x| x == &m.created_by) {
+                    p.push(m.created_by.clone());
+                }
+                p.dedup();
+                m.participants = p;
+            }
+            notify.clone_from(&m.participants);
+        }
+    }
+    app.meetings.save().await;
+    if let Some(m) = &cancelled_m {
+        for u in &m.participants {
+            let _ = app.syschat.tx.send(meeting_frame("meeting-cancel", u, m));
+        }
+    }
+    audit_push(
+        &app.audit,
+        &caller.username,
+        format!("meeting updated: {id}"),
+        200,
+    )
+    .await;
+    let _ = notify;
+    Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+/// Enter the meeting room: records the caller as joined and returns the
+/// meeting (with who's already in) so the client can offer to present peers.
+async fn meeting_join_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    let Some(user) = principal_name(&app, &headers).await else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let out;
+    {
+        let mut doc = app.meetings.inner.lock().await;
+        let Some(m) = doc.meetings.iter_mut().find(|m| m.id == id) else {
+            return (StatusCode::NOT_FOUND, "no such meeting").into_response();
+        };
+        if !m.participants.contains(&user) && m.created_by != user {
+            return (StatusCode::FORBIDDEN, "not invited").into_response();
+        }
+        if !m.joined.contains(&user) {
+            m.joined.push(user.clone());
+        }
+        out = m.clone();
+    }
+    app.meetings.save().await;
+    Json(out).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct MeetingRingReq {
+    user: String,
+}
+
+/// Ring one participant who hasn't joined — any participant can nudge.
+async fn meeting_ring_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<MeetingRingReq>,
+) -> axum::response::Response {
+    let Some(user) = principal_name(&app, &headers).await else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let m = {
+        let doc = app.meetings.inner.lock().await;
+        let Some(m) = doc.meetings.iter().find(|m| m.id == id) else {
+            return (StatusCode::NOT_FOUND, "no such meeting").into_response();
+        };
+        if !m.participants.contains(&user) && m.created_by != user {
+            return (StatusCode::FORBIDDEN, "not invited").into_response();
+        }
+        if !m.participants.contains(&req.user) {
+            return (StatusCode::BAD_REQUEST, "target is not a participant").into_response();
+        }
+        m.clone()
+    };
+    let _ = app
+        .syschat
+        .tx
+        .send(meeting_frame("meeting-ring", &req.user, &m));
+    audit_push(
+        &app.audit,
+        &user,
+        format!("meeting ring: {} → {}", id, req.user),
+        200,
+    )
+    .await;
+    Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+/// The caller's username, via session cookie or bearer token.
+async fn principal_name(app: &AppState, headers: &axum::http::HeaderMap) -> Option<String> {
+    let auth = app.auth.clone()?;
+    resolve_principal(&auth, headers).await.map(|u| u.username)
+}
+
+fn rand_u32() -> u32 {
+    use std::hash::{BuildHasher, Hasher};
+    std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish() as u32
+}
+
 /// Default blob storage: local disk under a root, used when no S3/MinIO backend
 /// is injected. Keys are relative paths (e.g. `chat/<file>`).
 struct DiskStorage {
@@ -442,6 +863,8 @@ struct AppState {
     workspace: Ws,
     /// Multi-space registry (super-admin managed groups of projects+admins).
     spaces: Sp,
+    /// Booked meetings (calendar) — reminders/rings driven by a watchdog.
+    meetings: Mt,
     /// Blob storage for uploaded files (local disk by default, or S3/MinIO).
     storage: Arc<dyn coxagent_application::ports::outbound::StoragePort>,
     /// Server-side documentation store (MongoDB) when configured; `None` falls
@@ -1360,9 +1783,11 @@ async fn build_state(
     let hub_dir = extras.hub_dir.unwrap_or_else(|| PathBuf::from("."));
     let kv = extras.syschat_store.clone();
     let kv2 = extras.syschat_store.clone();
+    let kv3 = extras.syschat_store.clone();
     let syschat = SysChat::load(&hub_dir, extras.syschat_store).await;
     let workspace = Ws::load(&hub_dir, kv).await;
     let spaces = Sp::load(&hub_dir, kv2).await;
+    let meetings = Mt::load(&hub_dir, kv3).await;
     AppState {
         projects: Arc::new(RwLock::new(map)),
         chat_bus: Arc::new(RwLock::new(HashMap::new())),
@@ -1380,6 +1805,7 @@ async fn build_state(
         syschat,
         workspace,
         spaces,
+        meetings,
         storage: extras.storage.unwrap_or_else(|| {
             Arc::new(DiskStorage {
                 root: hub_dir.join("blobs"),
@@ -1413,6 +1839,8 @@ pub async fn serve_full(
     if matches!(hub_role(), HubRole::All | HubRole::Knowledge) {
         // Space budget enforcement runs for the life of the hub.
         tokio::spawn(space_budget_watchdog(state.clone()));
+        // Meeting reminders, start announcements, and absent-participant rings.
+        tokio::spawn(meeting_watchdog(state.clone()));
         // Nightly snapshots of the hub-level documents (workspace, spaces, chat).
         tokio::spawn(nightly_backup(state.clone(), backup_dir));
         // App-release watcher: new tagged builds surface as update notices.
@@ -1465,6 +1893,13 @@ pub async fn serve_full(
             "/api/auth/my/tokens",
             get(my_tokens_ep).post(create_my_token_ep),
         )
+        .route(
+            "/api/meetings",
+            get(meetings_list_ep).post(meeting_create_ep),
+        )
+        .route("/api/meetings/:id", axum::routing::patch(meeting_patch_ep))
+        .route("/api/meetings/:id/join", post(meeting_join_ep))
+        .route("/api/meetings/:id/ring", post(meeting_ring_ep))
         .route(
             "/api/auth/my/tokens/:label",
             axum::routing::delete(revoke_my_token_ep),
@@ -6577,6 +7012,7 @@ async fn auth_mw(
     ) && path != "/api/auth/logout"
         && !path.starts_with("/api/auth/2fa/") // self-service, any signed-in user
         && !path.starts_with("/api/auth/my/") // personal MCP tokens: self-service
+        && !path.starts_with("/api/meetings") // booking meetings: any signed-in user
         && !path.ends_with("/chat") // team chat is open to any signed-in user
         && path != "/api/chat/send" // system chat send: any signed-in user
         && path != "/api/chat/dm" // open a DM: any signed-in user
