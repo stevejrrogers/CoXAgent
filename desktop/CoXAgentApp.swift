@@ -28,8 +28,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         var raw: String?
         if let u = ProcessInfo.processInfo.environment["COXAGENT_HUB_URL"], !u.isEmpty {
             raw = u
-        } else if let s = try? String(contentsOfFile: workspace() + "/hub.url", encoding: .utf8) {
+        } else if let s = try? String(contentsOfFile: workspace() + "/hub.url", encoding: .utf8),
+            !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             raw = s
+        } else if let b = Bundle.main.object(forInfoDictionaryKey: "CoxDefaultHubURL") as? String,
+            !b.isEmpty {
+            // Baked at build time (COXAGENT_DEFAULT_HUB) — a company build that
+            // points at its hosted hub out of the box.
+            raw = b
         }
         guard var u = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !u.isEmpty else {
             return nil

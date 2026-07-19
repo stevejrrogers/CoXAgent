@@ -67,6 +67,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key><string>12.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
+  <key>CoxDefaultHubURL</key><string>${COXAGENT_DEFAULT_HUB:-}</string>
   <key>NSCameraUsageDescription</key><string>CoXAgent uses your camera for video calls in team chat.</string>
   <key>NSMicrophoneUsageDescription</key><string>CoXAgent uses your microphone for voice and video calls in team chat.</string>
 </dict></plist>
