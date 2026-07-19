@@ -26,6 +26,21 @@ cp .env.example .env   # fill in domain, admin password, secrets
 docker compose up -d
 ```
 
+**Full split on one host** — the same 4-service shape as Helm (gateway /
+realtime / knowledge as separate containers, Caddy routing sockets to
+realtime), for independent scaling/restarts per plane:
+
+```sh
+cd deploy
+docker compose -f docker-compose.split.yml up -d
+docker compose -f docker-compose.split.yml up -d --scale gateway=3   # scale the API
+```
+
+The runner service is behind a `runner` profile and OFF by default — agent
+CLIs (claude/opencode) and their logins live on operator machines, so run
+`cox-runner` natively there; only enable the container if your image bundles
+a CLI.
+
 - TLS terminates at Caddy; the app adds `Secure` to session cookies
   automatically behind it.
 - Backups: hub documents snapshot nightly to the app volume under

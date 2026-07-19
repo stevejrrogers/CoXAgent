@@ -1,0 +1,157 @@
+# FULL CoXAgent production deploy — the 4-service split, one container per
+# role, matching the Helm chart's shape. Use this over docker-compose.yml when
+# you want independent scaling/restarts per plane on a single Docker host.
+#
+#   caddy (HTTPS) ─┬─ /…/ws /…/events /…/terminal /…/docs-ws → realtime
+#                  └─ everything else                         → gateway
+#   runner   — the agent worker (cycles). Needs an agent CLI (claude/opencode)
+#              + its credentials, so by default it runs NATIVELY on operator
+#              machines, not here. Enable the container only if your image
+#              bundles a CLI:  docker compose --profile runner up -d
+#   knowledge — codegraph indexing; internal only.
+#
+# Same .env as docker-compose.yml. Run:
+#   docker compose -f docker-compose.split.yml up -d
+name: coxagent
+
+x-app-env: &app-env
+  COXAGENT_ADMIN_USER: ${ADMIN_USER}
+  COXAGENT_ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+  COXAGENT_S3_ENDPOINT: http://minio:9000
+  COXAGENT_S3_BUCKET: coxagent
+  COXAGENT_S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+  COXAGENT_S3_SECRET_KEY: ${S3_SECRET_KEY}
+  COXAGENT_MONGO_URL: mongodb://${MONGO_USER}:${MONGO_PASSWORD}@mongo:27017/?authSource=admin
+  COXAGENT_MONGO_DB: coxagent
+  COXAGENT_DB_DSN: postgres://${PG_USER}:${PG_PASSWORD}@db:5432/coxagent
+  COXAGENT_REDIS_URL: redis://redis:6379
+  COXAGENT_TURN_URL: turn:${PUBLIC_IP}:3478
+  COXAGENT_TURN_SECRET: ${TURN_SECRET}
+
+services:
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY}
+    volumes:
+      - minio:/data
+    restart: unless-stopped
+
+  mongo:
+    image: mongo:7
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD}
+    volumes:
+      - mongo:/data/db
+    restart: unless-stopped
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${PG_USER}
+      POSTGRES_PASSWORD: ${PG_PASSWORD}
+      POSTGRES_DB: coxagent
+    volumes:
+      - db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    restart: unless-stopped
+
+  coturn:
+    image: coturn/coturn
+    network_mode: host
+    command:
+      - -n
+      - --use-auth-secret
+      - --static-auth-secret=${TURN_SECRET}
+      - --realm=coxagent
+      - --no-tls
+      - --no-dtls
+      - --min-port=49160
+      - --max-port=49200
+      - --external-ip=${PUBLIC_IP}
+    restart: unless-stopped
+
+  # Control plane: REST + MCP + authz + audit. Stateless — scale with
+  # `docker compose up -d --scale gateway=3` behind Caddy.
+  gateway:
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    command: ["cox-gateway"]
+    environment: *app-env
+    volumes:
+      - appdata:/data
+    depends_on: [minio, mongo, db, redis]
+    restart: unless-stopped
+
+  # Socket plane: chat/collab/terminal WebSockets + SSE.
+  realtime:
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    command: ["cox-realtime"]
+    environment: *app-env
+    volumes:
+      - appdata:/data
+    depends_on: [db, redis]
+    restart: unless-stopped
+
+  # Knowledge plane: codegraph indexing / REPO_MAP. Internal only (health-only
+  # HTTP surface, enforced in-process by COXAGENT_ROLE).
+  knowledge:
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    command: ["cox-knowledge"]
+    environment: *app-env
+    volumes:
+      - appdata:/data
+    depends_on: [db, redis]
+    restart: unless-stopped
+
+  # Agent worker. DISABLED by default: agent CLIs (claude/opencode) and their
+  # logins live on operator machines; run `cox-runner` natively there instead.
+  # Only enable this if your image bundles a CLI + credentials.
+  runner:
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    command: ["cox-runner"]
+    profiles: ["runner"]
+    environment:
+      <<: *app-env
+      COXAGENT_STATE_DIR: /data/state
+      COXAGENT_WORK_DIR: /work
+      COXAGENT_OPERATOR: ${RUNNER_OPERATOR:-runner@compose}
+    volumes:
+      - appdata:/data
+      - runner_work:/work
+    depends_on: [db, redis]
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./Caddyfile.split:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [gateway, realtime]
+    restart: unless-stopped
+
+volumes:
+  minio:
+  mongo:
+  db:
+  appdata:
+  runner_work:
+  caddy_data:
+  caddy_config:

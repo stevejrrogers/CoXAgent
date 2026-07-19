@@ -1,0 +1,8 @@
+# Routing for the 4-service split: socket traffic → realtime, rest → gateway.
+# The path set MUST mirror `realtime_path` in the hub middleware (server.rs) —
+# the in-process COXAGENT_ROLE gate is the enforcement; this is just routing.
+{$DOMAIN} {
+	@sockets path */ws */events */terminal *docs-ws*
+	reverse_proxy @sockets realtime:4000
+	reverse_proxy gateway:4000
+}
