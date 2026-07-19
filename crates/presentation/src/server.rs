@@ -1461,6 +1461,14 @@ pub async fn serve_full(
             "/api/auth/tokens/:label",
             axum::routing::delete(revoke_token_ep),
         )
+        .route(
+            "/api/auth/my/tokens",
+            get(my_tokens_ep).post(create_my_token_ep),
+        )
+        .route(
+            "/api/auth/my/tokens/:label",
+            axum::routing::delete(revoke_my_token_ep),
+        )
         .route("/api/auth/2fa/enroll", post(enroll_2fa_ep))
         .route("/api/auth/2fa/enable", post(enable_2fa_ep))
         .route("/api/auth/2fa/disable", post(disable_2fa_ep))
@@ -6568,6 +6576,7 @@ async fn auth_mw(
             | axum::http::Method::PATCH
     ) && path != "/api/auth/logout"
         && !path.starts_with("/api/auth/2fa/") // self-service, any signed-in user
+        && !path.starts_with("/api/auth/my/") // personal MCP tokens: self-service
         && !path.ends_with("/chat") // team chat is open to any signed-in user
         && path != "/api/chat/send" // system chat send: any signed-in user
         && path != "/api/chat/dm" // open a DM: any signed-in user
@@ -6683,6 +6692,112 @@ async fn list_tokens_ep(
         return (StatusCode::FORBIDDEN, "admin role required").into_response();
     }
     Json(auth.list_tokens().await).into_response()
+}
+
+/// Prefix that namespaces a user's personal (self-service) tokens. Personal
+/// tokens are minted at the caller's OWN role — never an elevation — and are
+/// the credential the Settings → MCP tab hands to MCP clients.
+fn personal_token_prefix(username: &str) -> String {
+    format!("user:{}:", username.to_ascii_lowercase())
+}
+
+/// List the caller's own personal tokens (metadata only). Any signed-in user.
+async fn my_tokens_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let Some(auth) = app.auth.clone() else {
+        return Json(Vec::<coxagent_application::TokenInfo>::new()).into_response();
+    };
+    let Some(user) = resolve_principal(&auth, &headers).await else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let prefix = personal_token_prefix(&user.username);
+    let mine: Vec<_> = auth
+        .list_tokens()
+        .await
+        .into_iter()
+        .filter(|t| t.label.starts_with(&prefix))
+        .collect();
+    Json(mine).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct CreateMyTokenReq {
+    label: String,
+}
+
+/// Mint a personal API token bound to the caller's own account and role.
+/// Any signed-in user; the secret is returned once and never stored.
+async fn create_my_token_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<CreateMyTokenReq>,
+) -> axum::response::Response {
+    let Some(auth) = app.auth.clone() else {
+        return (StatusCode::NOT_IMPLEMENTED, "auth not configured").into_response();
+    };
+    let Some(user) = resolve_principal(&auth, &headers).await else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let short = req
+        .label
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .take(40)
+        .collect::<String>();
+    if short.is_empty() {
+        return (StatusCode::BAD_REQUEST, "label is required").into_response();
+    }
+    let label = format!("{}{short}", personal_token_prefix(&user.username));
+    match auth.create_token(&label, user.role).await {
+        Some(secret) => {
+            audit_push(
+                &app.audit,
+                &user.username,
+                format!("personal token minted: {label}"),
+                200,
+            )
+            .await;
+            Json(serde_json::json!({
+                "ok": true, "label": label, "token": secret,
+                "note": "store this now — it is not shown again",
+            }))
+            .into_response()
+        }
+        None => (StatusCode::CONFLICT, "label already in use").into_response(),
+    }
+}
+
+/// Revoke one of the caller's OWN personal tokens. Any signed-in user; the
+/// prefix check makes it impossible to revoke another account's token.
+async fn revoke_my_token_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(label): Path<String>,
+) -> axum::response::Response {
+    let Some(auth) = app.auth.clone() else {
+        return (StatusCode::NOT_IMPLEMENTED, "auth not configured").into_response();
+    };
+    let Some(user) = resolve_principal(&auth, &headers).await else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    if !label.starts_with(&personal_token_prefix(&user.username)) {
+        return (StatusCode::FORBIDDEN, "not your token").into_response();
+    }
+    if auth.revoke_token(&label).await {
+        audit_push(
+            &app.audit,
+            &user.username,
+            format!("personal token revoked: {label}"),
+            200,
+        )
+        .await;
+        Json(serde_json::json!({ "ok": true })).into_response()
+    } else {
+        (StatusCode::NOT_FOUND, "no such token").into_response()
+    }
 }
 
 /// Revoke an API token by label. Admin-only (write gate in middleware).

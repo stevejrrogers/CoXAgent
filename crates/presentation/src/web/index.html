@@ -1272,7 +1272,7 @@ textarea.np-in{resize:vertical;line-height:1.5}
       <a data-v="people" class="admin-only" onclick="nav('people')"><i class="ti ti-user-star"></i> People</a>
       <a data-v="audit" class="admin-only" onclick="nav('audit')"><i class="ti ti-shield-lock"></i> Audit</a>
       <a data-v="access" class="manage-only" onclick="nav('access')"><i class="ti ti-user-cog"></i> Users</a>
-      <a data-v="settings" class="manage-only" onclick="nav('settings')"><i class="ti ti-settings"></i> Settings</a>
+      <a data-v="settings" onclick="nav('settings')"><i class="ti ti-settings"></i> Settings</a>
     </nav>
     <nav class="nav managenav" id="manage-side">
       <div class="mgside-hd">SUPER ADMIN</div>
@@ -1802,8 +1802,9 @@ function nav(v){
   if(String(v).startsWith("mg-")&&MODE!=="manage"){MODE="manage";localStorage.setItem("cox_mode",MODE);document.body.classList.add("mode-manage");document.body.classList.remove("mode-chat");}
   if(!String(v).startsWith("mg-")&&MODE==="manage"){MODE="workspace";localStorage.setItem("cox_mode",MODE);document.body.classList.remove("mode-manage");}
   if(isChatMode())setMode("workspace");
-  // Management surfaces are Admin + lead only — bounce members to Overview.
-  if((v==="settings"||v==="access")&&!canManage())v="overview";
+  // User administration is Admin + lead only — bounce members to Overview.
+  // Settings is open to everyone (members see the self-service MCP tab).
+  if(v==="access"&&!canManage())v="overview";
   CUR=v;location.hash=v;
   document.querySelectorAll(".view").forEach(x=>x.classList.remove("on"));
   document.getElementById("view-"+v).classList.add("on");
@@ -3833,7 +3834,15 @@ async function postTicketComment(tid){
   try{await fetch(api("/comments"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({body,ticket:tid})});}catch(e){}
   inp.disabled=false;await renderTicketComments(tid);inp.focus();
 }
-async function loadSettings(){let cfg={};try{cfg=await(await fetch(api("/config"))).json();}catch(e){}window._cfg=cfg;
+async function loadSettings(){
+  if(!canManage()){
+    // Member-tier users get self-service settings only: the MCP tab.
+    document.getElementById("settings-body").innerHTML=`
+      <div class="settabs"><button class="settab-btn on" data-t="mcp"><i class="ti ti-plug-connected"></i> MCP</button></div>
+      <div class="settab" data-p="mcp"><div id="mcp-panel"></div></div>`;
+    window._setTab="mcp";renderMcpPanel();return;
+  }
+  let cfg={};try{cfg=await(await fetch(api("/config"))).json();}catch(e){}window._cfg=cfg;
   let td={tools:[]};try{td=await(await fetch("/api/tooling")).json();}catch(e){}
   let ga={};try{ga=await(await fetch(api("/git/auth"))).json();}catch(e){}
   const tools=td.tools||[];const missing=tools.filter(t=>!t.present).length;
@@ -3883,6 +3892,7 @@ async function loadSettings(){let cfg={};try{cfg=await(await fetch(api("/config"
       <button class="settab-btn" data-t="engines" onclick="setSetTab('engines')"><i class="ti ti-cpu"></i> Engines</button>
       <button class="settab-btn" data-t="workflow" onclick="setSetTab('workflow')"><i class="ti ti-adjustments"></i> Workflow</button>
       <button class="settab-btn" data-t="git" onclick="setSetTab('git')"><i class="ti ti-git-branch"></i> Git</button>
+      <button class="settab-btn" data-t="mcp" onclick="setSetTab('mcp')"><i class="ti ti-plug-connected"></i> MCP</button>
     </div>
     <div class="settab" data-p="engines">
       ${detBanner}
@@ -3933,6 +3943,7 @@ async function loadSettings(){let cfg={};try{cfg=await(await fetch(api("/config"
         <div class="fr"><span class="lbl">Auto-merge</span><select id="git-am"><option value="false" ${!git.auto_merge?'selected':''}>off — you merge from the Review tab</option><option value="true" ${git.auto_merge?'selected':''}>on — SA approves &amp; merges automatically</option></select><span class="hint">On: SA merges on approve (never on failing CI). Off: approval is only a suggestion; request-changes still loops back to the agent to fix.</span></div>
       </div>
     </div>
+    <div class="settab" data-p="mcp" hidden><div id="mcp-panel"></div></div>
     <div class="set-footer"><button class="save" onclick="saveSettings()"><i class="ti ti-device-floppy"></i> Save changes</button><span id="save-note"></span><span class="set-foothint">Other settings apply on the next restart</span></div>`;
   setSetTab(window._setTab==="workspace"?"engines":(window._setTab||"engines"));}
 function copyText(btn,text){navigator.clipboard&&navigator.clipboard.writeText(text);
@@ -3960,7 +3971,58 @@ async function submitConnect(){const token=document.getElementById("cn-token").v
 function setSetTab(name){window._setTab=name;
   document.querySelectorAll(".settab-btn").forEach(b=>b.classList.toggle("on",b.dataset.t===name));
   document.querySelectorAll(".settab").forEach(p=>{p.hidden=p.dataset.p!==name;});
+  if(name==="mcp")renderMcpPanel();
 }
+// ---- MCP self-service (every signed-in user) ----------------------------
+function mcpSnippets(token){const url=location.origin+"/api/mcp";const t=token||"<YOUR-TOKEN>";
+  return [
+    {name:"Claude Code",file:".mcp.json (repo root)",code:JSON.stringify({mcpServers:{coxagent:{type:"http",url,headers:{Authorization:"Bearer "+t}}}},null,2)},
+    {name:"opencode",file:"opencode.json (repo root)",code:JSON.stringify({"$schema":"https://opencode.ai/config.json",mcp:{coxagent:{type:"remote",url,enabled:true,headers:{Authorization:"Bearer "+t}}}},null,2)},
+    {name:"Other MCP clients",file:"streamable HTTP",code:`URL:    ${url}\nHeader: Authorization: Bearer ${t}`}
+  ];}
+async function renderMcpPanel(){const el=document.getElementById("mcp-panel");if(!el)return;
+  let toks=[];try{const r=await fetch("/api/auth/my/tokens");if(r.ok)toks=await r.json();}catch(e){}
+  const fresh=window._mcpFresh; // {label,token} — shown once after minting
+  const tools=[["search_symbols","find code symbols across the project"],["symbol_refs","who calls / references a symbol"],["get_ticket","full ticket detail"],["pr_queue","open PRs + review state"],["report_blocker","file a blocker to the team"]];
+  setHTML(el,`
+    <div class="panel" style="margin-bottom:12px">
+      <div style="font-size:13px;font-weight:700;margin-bottom:4px"><i class="ti ti-plug-connected" style="color:var(--accent2)"></i> CoXAgent MCP server</div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Connect any MCP-capable agent (Claude Code, opencode, IDEs…) to this hub — it gets the code knowledge graph and team tools with your permissions.</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px">${tools.map(([n,d])=>`<span class="tk" title="${esc(d)}" style="background:var(--card2);border:1px solid var(--border2)">${n}</span>`).join("")}</div>
+    </div>
+    <div class="panel" style="margin-bottom:12px">
+      <div style="font-size:13px;font-weight:700;margin-bottom:6px"><i class="ti ti-key" style="color:var(--accent2)"></i> Your access tokens</div>
+      ${fresh?`<div style="background:var(--green)18;border:1px solid var(--green)55;border-radius:8px;padding:9px 12px;margin-bottom:9px;font-size:12px">
+        <b style="color:var(--green)">Token created.</b> Copy it now — it is not shown again.<br>
+        <code style="user-select:all;word-break:break-all">${esc(fresh.token)}</code>
+        <button class="toolcopy" onclick="copyText(this,'${esc(fresh.token)}')" title="Copy"><i class="ti ti-copy"></i></button></div>`:""}
+      ${toks.length?toks.map(t=>`<div style="display:flex;align-items:center;gap:8px;font-size:12px;padding:4px 0;border-bottom:1px solid var(--border2)">
+        <i class="ti ti-key" style="color:var(--dim)"></i><code style="flex:1">${esc(t.label)}</code>
+        <span style="color:var(--dim)">${esc((t.created||"").slice(0,10))}</span>
+        <button class="btn-ghost" style="color:var(--red)" onclick="revokeMyToken('${esc(t.label)}')" title="Revoke"><i class="ti ti-trash"></i></button></div>`).join("")
+      :`<div style="font-size:12px;color:var(--dim);padding:2px 0 6px">No personal tokens yet — create one to connect your tools.</div>`}
+      <div style="display:flex;gap:8px;margin-top:9px">
+        <input id="mcp-tok-label" placeholder="label — e.g. laptop, vscode" style="width:220px;background:var(--card);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:7px 11px;font-size:12.5px"/>
+        <button class="save" onclick="createMyToken()"><i class="ti ti-plus"></i> Create token</button>
+      </div>
+      <div style="font-size:11.5px;color:var(--dim);margin-top:6px">Tokens act as <b>you</b> with your current role — never more. Revoke any you no longer use.</div>
+    </div>
+    ${mcpSnippets(fresh&&fresh.token).map(s=>`<div class="panel" style="margin-bottom:12px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><b style="font-size:12.5px">${esc(s.name)}</b><span style="font-size:11.5px;color:var(--dim)">${esc(s.file)}</span>
+        <span style="flex:1"></span><button class="toolcopy" onclick='copyText(this,${JSON.stringify(s.code)})' title="Copy"><i class="ti ti-copy"></i></button></div>
+      <pre style="margin:0;background:var(--card);border:1px solid var(--border2);border-radius:8px;padding:10px 12px;font-size:11.5px;overflow-x:auto">${esc(s.code)}</pre></div>`).join("")}`);
+}
+async function createMyToken(){const label=(document.getElementById("mcp-tok-label")||{}).value||"";
+  if(!label.trim()){toasty("Enter a label first","err");return;}
+  try{const r=await fetch("/api/auth/my/tokens",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({label})});
+    if(r.ok){window._mcpFresh=await r.json();renderMcpPanel();}
+    else toasty(await r.text()||"Could not create token","err");
+  }catch(e){toasty("Network error","err");}}
+async function revokeMyToken(label){
+  try{const r=await fetch("/api/auth/my/tokens/"+encodeURIComponent(label),{method:"DELETE"});
+    if(r.ok){if(window._mcpFresh&&window._mcpFresh.label===label)window._mcpFresh=null;toasty("Token revoked","ok");renderMcpPanel();}
+    else toasty(await r.text()||"Could not revoke","err");
+  }catch(e){toasty("Network error","err");}}
 function toggleRoleOverrides(btn){const box=btn.nextElementSibling;const open=box.hasAttribute("hidden");
   if(open){box.removeAttribute("hidden");btn.classList.add("open");}else{box.setAttribute("hidden","");btn.classList.remove("open");}
 }

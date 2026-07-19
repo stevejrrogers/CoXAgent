@@ -96,8 +96,14 @@ authz as the REST API. Tools: `search_symbols`, `symbol_refs`, `get_ticket`,
 }
 ```
 
-Create API tokens in Users → API tokens; scope-check happens server-side per
-project argument.
+**Self-service setup lives in Settings → MCP** (visible to every signed-in
+user): mint a personal token there — it acts as *you* at your own role, never
+an elevation — and copy the ready-made config for Claude Code (`.mcp.json`),
+opencode (`opencode.json`), or any other MCP client. Personal tokens are
+namespaced `user:<name>:<label>`, are listable/revocable only by their owner
+(admins see all in Users → API tokens), and every mint/revoke is audited.
+Admin-minted service-account tokens remain in Users → API tokens;
+scope-check happens server-side per project argument.
 
 ## Service binaries (the physical split)
 
