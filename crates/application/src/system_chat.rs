@@ -16,6 +16,7 @@ use crate::state::{
     MAX_CHAT,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// An incoming webhook: a secret token that lets an external system post to a
 /// channel without a login.
@@ -40,6 +41,12 @@ pub struct SystemChat {
     /// Incoming webhooks (external systems posting into channels).
     #[serde(default)]
     pub webhooks: Vec<Webhook>,
+    /// Pinned message ids per channel: channel_id → [msg_id, ...]
+    #[serde(default)]
+    pub pins: HashMap<String, Vec<String>>,
+    /// Topic strings for computed channels (general, project) stored here.
+    #[serde(default)]
+    pub topics: HashMap<String, String>,
 }
 
 /// A project the hub knows about, for provisioning its channel.
@@ -95,6 +102,7 @@ impl SystemChat {
             created_at: String::new(),
             kind: "general".to_owned(),
             project: String::new(),
+            topic: String::new(),
         }
     }
 
@@ -115,6 +123,7 @@ impl SystemChat {
             created_at: String::new(),
             kind: "project".to_owned(),
             project: p.id.clone(),
+            topic: String::new(),
         }
     }
 
@@ -200,9 +209,13 @@ impl SystemChat {
             at: now_rfc3339(),
             user: user.to_owned(),
             body: body.to_owned(),
+            edited: None,
             channel: channel_id.to_owned(),
             attachments,
             reactions: Vec::new(),
+            thread_id: None,
+            reply_count: 0,
+            deleted: false,
         });
         let overflow = self.chat.len().saturating_sub(MAX_CHAT);
         if overflow > 0 {
@@ -276,6 +289,27 @@ impl SystemChat {
 
     /// Create a private channel owned by `owner`. Collides against general,
     /// project channels, and existing private channels.
+    /// Set channel topic
+    /// Set channel topic
+    pub fn topic(&mut self, channel_id: &str, topic: String) {
+        if let Some(ch) = self.channels.iter_mut().find(|c| c.id == channel_id) {
+            ch.topic = topic.clone();
+            return;
+        }
+        if topic.is_empty() {
+            self.topics.remove(channel_id);
+        } else {
+            self.topics.insert(channel_id.to_owned(), topic);
+        }
+    }
+    /// Get channel topic
+    pub fn get_topic(&self, channel_id: &str) -> String {
+        if let Some(ch) = self.channels.iter().find(|c| c.id == channel_id) {
+            if !ch.topic.is_empty() { return ch.topic.clone(); }
+        }
+        self.topics.get(channel_id).cloned().unwrap_or_default()
+    }
+
     ///
     /// # Errors
     /// A human-readable message when the name is invalid or already taken.
@@ -307,6 +341,7 @@ impl SystemChat {
             created_at: now_rfc3339(),
             kind: "private".to_owned(),
             project: String::new(),
+            topic: String::new(),
         };
         self.channels.push(ch.clone());
         Ok(ch)
@@ -360,6 +395,7 @@ impl SystemChat {
             created_at: now_rfc3339(),
             kind: "dm".to_owned(),
             project: String::new(),
+            topic: String::new(),
         };
         self.channels.push(ch.clone());
         Ok(ch)

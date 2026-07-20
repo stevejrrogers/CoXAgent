@@ -818,8 +818,24 @@ pub async fn run_hub(registry: &Path, port: u16) -> Result<(), Box<dyn std::erro
     });
 
     // A hub-level engine for cross-project drafting (e.g. project goals), built
-    // from the first project's config; its work dir is the registry directory.
-    let analyzer = build_engine(&Config::default(), logs_dir(&base))
+    // from opencode which supports any provider.
+    let analyzer = build_engine(&Config {
+        engine: coxagent_application::config::EngineMapping {
+            default: coxagent_application::config::EngineChoice {
+                engine: coxagent_application::config::EngineKind::Opencode,
+                model: "bizbrain/DeepSeek-V4-Pro".to_owned(),
+            },
+            per_role: std::collections::HashMap::new(),
+            fallbacks: Vec::new(),
+            auto_fallback: true,
+        },
+        git: Default::default(),
+        workflow: Default::default(),
+        architecture: Vec::new(),
+        deploy: Default::default(),
+        policy: Default::default(),
+    },
+    logs_dir(&base))
         .ok()
         .map(|(e, _)| {
             let engine: Arc<dyn coxagent_application::ports::outbound::AgentEnginePort> = e;

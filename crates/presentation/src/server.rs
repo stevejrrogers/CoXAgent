@@ -4,7 +4,7 @@
 //! registers many. Routes are scoped `/api/projects/:pid/...`.
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{header, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -14,9 +14,11 @@ use axum::Router;
 use coxagent_application::auth::AuthPort;
 use coxagent_application::metrics;
 use coxagent_application::ports::outbound::{AuditPort, AuditRecord, StateStorePort};
+use coxagent_application::state::ChatMsg;
 use coxagent_application::use_cases::RunnerHandle;
 use coxagent_application::Config;
 use coxagent_application::DocPage;
+use serde_json::json;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::future::Future;
@@ -401,6 +403,8 @@ struct Meeting {
     auto_rang: bool,
     #[serde(default)]
     cancelled: bool,
+    #[serde(default)]
+    agenda: String,
 }
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
@@ -544,6 +548,8 @@ struct MeetingReq {
     participants: Vec<String>,
     #[serde(default)]
     remind_min: Option<u32>,
+    #[serde(default)]
+    agenda: Option<String>,
 }
 
 /// List meetings the caller is part of (participant or creator), soonest first.
@@ -603,6 +609,7 @@ async fn meeting_create_ep(
         created_by: user.clone(),
         participants,
         remind_min: req.remind_min.unwrap_or(10).min(1440),
+        agenda: req.agenda.unwrap_or_default(),
         ..Meeting::default()
     };
     {
@@ -635,6 +642,8 @@ struct MeetingPatch {
     duration_min: Option<u32>,
     #[serde(default)]
     participants: Option<Vec<String>>,
+    #[serde(default)]
+    agenda: Option<String>,
 }
 
 /// Edit or cancel a meeting — creator or a management role only.
@@ -692,6 +701,9 @@ async fn meeting_patch_ep(
                 }
                 p.dedup();
                 m.participants = p;
+            }
+            if let Some(a) = req.agenda {
+                m.agenda = a;
             }
             notify.clone_from(&m.participants);
         }
@@ -1934,10 +1946,18 @@ pub async fn serve_full(
             get(syschat_channels_ep).post(syschat_create_ep),
         )
         .route("/api/chat/channels/:cid/invite", post(syschat_invite_ep))
+        .route("/api/chat/channel/:cid/topic", axum::routing::patch(syschat_topic_ep).get(syschat_topic_get_ep))
+        .route("/api/chat/channels/:cid/topic", axum::routing::patch(syschat_topic_ep).get(syschat_topic_get_ep))
         .route("/api/chat/messages", get(syschat_messages_ep))
         .route("/api/chat/members", get(syschat_members_ep))
         .route("/api/chat/dm", post(syschat_dm_ep))
         .route("/api/chat/react", post(syschat_react_ep))
+        .route("/api/chat/messages/:mid/reply", post(syschat_reply_ep))
+        .route("/api/chat/messages/:mid/thread", get(syschat_thread_ep))
+        .route("/api/chat/messages/:mid", axum::routing::patch(syschat_edit_ep).delete(syschat_delete_ep))
+        .route("/api/chat/search", get(syschat_search_ep))
+        .route("/api/chat/messages/:mid/pin", post(syschat_pin_ep))
+        .route("/api/chat/pins", get(syschat_pins_ep))
         .route(
             "/api/chat/webhooks",
             get(syschat_webhooks_list_ep).post(syschat_webhook_create_ep),
@@ -1953,6 +1973,7 @@ pub async fn serve_full(
         .route("/api/chat/upload", post(syschat_upload_ep))
         .route("/api/chat/media/:file", get(syschat_media_ep))
         .route("/api/engines", get(engines_ep))
+        .route("/api/engines/opencode/models", get(opencode_models_ep))
         .route("/api/tooling", get(tooling_ep))
         .route("/api/analyze-goal", post(analyze_goal_ep))
         .route("/api/projects", get(list_projects).post(create_project))
@@ -2318,6 +2339,29 @@ async fn engines_ep(State(app): State<AppState>) -> impl IntoResponse {
         .map(|(name, path)| serde_json::json!({ "name": name, "path": path }))
         .collect();
     Json(list)
+}
+
+/// Detect opencode models from the live CLI: runs `opencode models`, parses
+/// output into provider/model pairs. Returns empty list on any failure.
+async fn opencode_models_ep() -> impl IntoResponse {
+    let output = tokio::process::Command::new("opencode")
+        .arg("models")
+        .output()
+        .await;
+    let stdout = match output {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        _ => return Json(Vec::<serde_json::Value>::new()).into_response(),
+    };
+    let mut models = Vec::new();
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.contains("No models") || line.contains("Error") { continue; }
+        let parts: Vec<&str> = line.splitn(2, '/').collect();
+        if parts.len() == 2 {
+            models.push(serde_json::json!({ "provider": parts[0], "model": parts[1], "full": line }));
+        }
+    }
+    Json(models).into_response()
 }
 
 /// Developer tooling the git/deploy flow needs (git, gh, glab, docker) — which
@@ -4962,6 +5006,167 @@ async fn syschat_webhook_delete_ep(
     Json(serde_json::json!({ "ok": removed })).into_response()
 }
 
+// ── Threads ──────────────────────────────────────────────────────────────
+async fn syschat_reply_ep(
+    State(app): State<AppState>,
+    Path(mid): Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<PostChatReq>,
+) -> axum::response::Response {
+    let user = resolve_username(&app, &headers).await;
+    if user.is_empty() { return (StatusCode::UNAUTHORIZED, "sign in").into_response(); }
+    let body = body.body.trim().to_owned();
+    if body.is_empty() { return (StatusCode::BAD_REQUEST, "empty message").into_response(); }
+    if body.len() > CHAT_MAX_CHARS { return (StatusCode::PAYLOAD_TOO_LARGE, "too long").into_response(); }
+    let mid_clone = mid.clone();
+    let mut sc = app.syschat.inner.lock().await;
+    let channel = match sc.chat.iter().find(|m| m.id == mid_clone).map(|p| p.channel.clone()) {
+        Some(ch) => ch,
+        None => return (StatusCode::NOT_FOUND, "parent not found").into_response(),
+    };
+    let msg = ChatMsg::reply(&user, &body, &channel, &mid_clone);
+    sc.chat.push(msg.clone());
+    if let Some(p) = sc.chat.iter_mut().find(|m| m.id == mid_clone) { p.reply_count = p.reply_count.saturating_add(1); }
+
+    drop(sc);
+    app.syschat.save().await;
+    let frame = json!({ "op": "msg", "msg": msg });
+    let _ = app.syschat.tx.send(frame.to_string());
+    (StatusCode::CREATED, Json(msg)).into_response()
+}
+async fn syschat_thread_ep(
+    State(app): State<AppState>,
+    Path(mid): Path<String>,
+) -> axum::response::Response {
+    let sc = app.syschat.inner.lock().await;
+    let parent = sc.chat.iter().find(|m| m.id == mid);
+    let _channel = match parent { Some(p) => p.channel.clone(), None => return (StatusCode::NOT_FOUND, "not found").into_response() };
+    let replies: Vec<ChatMsg> = sc.chat.iter().filter(|m| m.thread_id.as_deref() == Some(&mid)).cloned().collect();
+    Json(serde_json::json!({ "parent": parent, "replies": replies })).into_response()
+}
+
+// ── Edit / Delete ────────────────────────────────────────────────────────
+async fn syschat_edit_ep(
+    State(app): State<AppState>,
+    Path(mid): Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<PostChatReq>,
+) -> axum::response::Response {
+    let user = resolve_username(&app, &headers).await;
+    if user.is_empty() { return (StatusCode::UNAUTHORIZED, "sign in").into_response(); }
+    let new_body = body.body.trim().to_owned();
+    if new_body.is_empty() { return (StatusCode::BAD_REQUEST, "empty").into_response(); }
+    let mut sc = app.syschat.inner.lock().await;
+    let Some(msg) = sc.chat.iter_mut().find(|m| m.id == mid) else { return (StatusCode::NOT_FOUND, "not found").into_response(); };
+    if msg.user != user { return (StatusCode::FORBIDDEN, "not yours").into_response(); }
+    msg.body = new_body;
+    msg.edited = Some(now_rfc3339());
+    let edited = msg.clone();
+    drop(sc);
+    app.syschat.save().await;
+    let frame = json!({ "op": "edit", "msg": edited });
+    let _ = app.syschat.tx.send(frame.to_string());
+    Json(edited).into_response()
+}
+async fn syschat_delete_ep(
+    State(app): State<AppState>,
+    Path(mid): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let user = resolve_username(&app, &headers).await;
+    if user.is_empty() { return (StatusCode::UNAUTHORIZED, "sign in").into_response(); }
+    let mut sc = app.syschat.inner.lock().await;
+    let Some(msg) = sc.chat.iter_mut().find(|m| m.id == mid) else { return (StatusCode::NOT_FOUND, "not found").into_response(); };
+    if msg.user != user { return (StatusCode::FORBIDDEN, "not yours").into_response(); }
+    msg.deleted = true;
+    msg.body = String::new();
+    drop(sc);
+    app.syschat.save().await;
+    let frame = json!({ "op": "delete", "msg": { "id": mid } });
+    let _ = app.syschat.tx.send(frame.to_string());
+    Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+// ── Search ───────────────────────────────────────────────────────────────
+async fn syschat_search_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    let user = resolve_username(&app, &headers).await;
+    let ctx = app.chat_context().await;
+    let term = q.get("q").map(|s| s.to_lowercase()).unwrap_or_default();
+    if term.is_empty() { return Json(Vec::<ChatMsg>::new()).into_response(); }
+    let sc = app.syschat.inner.lock().await;
+    let results: Vec<ChatMsg> = sc.chat.iter().filter(|m| {
+        !m.deleted && sc.can_view(&m.channel, &user, &ctx) &&
+        (m.body.to_lowercase().contains(&term) || m.user.to_lowercase().contains(&term))
+    }).rev().take(50).cloned().collect();
+    Json(results).into_response()
+}
+
+// ── Pin ──────────────────────────────────────────────────────────────────
+async fn syschat_pin_ep(
+    State(app): State<AppState>,
+    Path(mid): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let user = resolve_username(&app, &headers).await;
+    if user.is_empty() { return (StatusCode::UNAUTHORIZED, "sign in").into_response(); }
+    let mid_clone = mid.clone();
+    let mut sc = app.syschat.inner.lock().await;
+    let channel = match sc.chat.iter().find(|m| m.id == mid_clone).map(|m| m.channel.clone()) {
+        Some(ch) => ch,
+        None => return (StatusCode::NOT_FOUND, "not found").into_response(),
+    };
+    let pins = sc.pins.entry(channel.clone()).or_default();
+    if pins.contains(&mid_clone) {
+        pins.retain(|p| p != &mid_clone);
+    } else {
+        pins.push(mid_clone.clone());
+    }
+    let pinned = pins.contains(&mid_clone);
+    let pins_clone = pins.clone();
+    drop(sc);
+    app.syschat.save().await;
+    let _ = app.syschat.tx.send(json!({ "op": "pin", "channel": channel, "pins": pins_clone }).to_string());
+    Json(serde_json::json!({ "ok": true, "pinned": pinned })).into_response()
+}
+async fn syschat_pins_ep(
+    State(app): State<AppState>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    let ch = q.get("channel").cloned().unwrap_or_default();
+    let sc = app.syschat.inner.lock().await;
+    let pins = sc.pins.get(&ch).cloned().unwrap_or_default();
+    let msgs: Vec<ChatMsg> = pins.iter().filter_map(|id| sc.chat.iter().find(|m| m.id == *id && !m.deleted && m.channel == ch)).cloned().collect();
+    Json(msgs).into_response()
+}
+
+// ── Topic ──────────────────────────────────────────────────────────────────
+#[derive(serde::Deserialize)]
+struct TopicReq { topic: String }
+async fn syschat_topic_ep(
+    State(app): State<AppState>,
+    Path(cid): Path<String>,
+    Json(body): Json<TopicReq>,
+) -> axum::response::Response {
+    let topic = body.topic.trim().to_owned();
+    let mut sc = app.syschat.inner.lock().await;
+    sc.topic(&cid, topic);
+    drop(sc);
+    app.syschat.save().await;
+    Json(serde_json::json!({"ok":true})).into_response()
+}
+async fn syschat_topic_get_ep(
+    State(app): State<AppState>,
+    Path(cid): Path<String>,
+) -> axum::response::Response {
+    let sc = app.syschat.inner.lock().await;
+    let topic = sc.get_topic(&cid);
+    Json(serde_json::json!({"topic": topic})).into_response()
+}
+
 #[derive(serde::Deserialize)]
 struct HookPostReq {
     #[serde(default)]
@@ -7016,6 +7221,7 @@ async fn auth_mw(
         && !path.ends_with("/chat") // team chat is open to any signed-in user
         && path != "/api/chat/send" // system chat send: any signed-in user
         && path != "/api/chat/dm" // open a DM: any signed-in user
+        && !path.starts_with("/api/engines/opencode") // opencode model list: any signed-in user
         && !path.contains("/channels") // create/invite channels: any signed-in user
         && !path.ends_with("/upload"); // uploads are open to any signed-in user
     let method = req.method().clone();

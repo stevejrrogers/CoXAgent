@@ -18,3 +18,4 @@ sessions.json
 # macOS app build artifacts
 desktop/build/
 /dist/
+node_modules/

@@ -114,6 +114,17 @@ pub async fn brownfield<S: StateStorePort + 'static>(
     if !config_path.exists() {
         let mut cfg = Config::default();
         cfg.architecture.clone_from(&rules);
+        // Prefer opencode as default engine (supports any provider) if detected,
+        // otherwise keep claude default which works with API keys.
+        let engine = coxagent_infrastructure::discover()
+            .iter()
+            .find(|d| d.kind == coxagent_application::config::EngineKind::Opencode)
+            .map(|_| coxagent_application::config::EngineKind::Opencode)
+            .unwrap_or(coxagent_application::config::EngineKind::Claude);
+        cfg.engine.default.engine = engine;
+        if engine == coxagent_application::config::EngineKind::Opencode {
+            cfg.engine.default.model = String::new(); // opencode auto-picks default
+        }
         std::fs::write(&config_path, serde_json::to_string_pretty(&cfg)?)?;
     }
     let context_path = state_dir.join("project_context.md");

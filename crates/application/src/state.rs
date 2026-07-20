@@ -89,6 +89,9 @@ pub struct ChatMsg {
     /// The authenticated username of the sender.
     pub user: String,
     pub body: String,
+    /// Edited timestamp (set when message is edited)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edited: Option<String>,
     /// The channel this message belongs to. Defaults to [`GENERAL_CHANNEL`] for
     /// messages written before channels existed.
     #[serde(default = "general_channel")]
@@ -99,6 +102,15 @@ pub struct ChatMsg {
     /// Emoji reactions, each with the users who reacted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reactions: Vec<Reaction>,
+    /// Thread parent message id (absent for top-level messages)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    /// Number of thread replies (populated for top-level messages)
+    #[serde(default)]
+    pub reply_count: u32,
+    /// Whether this message was deleted (soft delete)
+    #[serde(default)]
+    pub deleted: bool,
 }
 
 /// One emoji reaction on a message and the users who added it.
@@ -106,6 +118,24 @@ pub struct ChatMsg {
 pub struct Reaction {
     pub emoji: String,
     pub users: Vec<String>,
+}
+
+impl ChatMsg {
+    pub fn reply(user: &str, body: &str, channel: &str, thread_id: &str) -> Self {
+        Self {
+            id: mint_id(),
+            at: now_rfc3339(),
+            user: user.to_owned(),
+            body: body.to_owned(),
+            edited: None,
+            channel: channel.to_owned(),
+            attachments: Vec::new(),
+            reactions: Vec::new(),
+            thread_id: Some(thread_id.to_owned()),
+            reply_count: 0,
+            deleted: false,
+        }
+    }
 }
 
 /// Keep the team chat bounded per project.
@@ -148,6 +178,9 @@ pub struct Channel {
     /// For a `"project"` channel, the project id it mirrors. Empty otherwise.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub project: String,
+    /// Optional channel topic/description
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub topic: String,
 }
 
 fn chan_kind_private() -> String {
@@ -681,9 +714,13 @@ impl ProjectState {
             at: now_rfc3339(),
             user: user.to_owned(),
             body: body.to_owned(),
+            edited: None,
             channel: channel.to_owned(),
             attachments,
             reactions: Vec::new(),
+            thread_id: None,
+            reply_count: 0,
+            deleted: false,
         });
         let overflow = self.chat.len().saturating_sub(MAX_CHAT);
         if overflow > 0 {
@@ -908,6 +945,7 @@ impl ProjectState {
             inviters: Vec::new(),
             created_at: now_rfc3339(),
             kind: "private".to_owned(),
+            topic: String::new(),
             project: String::new(),
         };
         self.channels.push(ch.clone());
@@ -986,6 +1024,7 @@ fn agents_channel_record() -> Channel {
         inviters: Vec::new(),
         created_at: String::new(),
         kind: "general".to_owned(),
+            topic: String::new(),
         project: String::new(),
     }
 }
@@ -999,6 +1038,7 @@ fn general_channel_record() -> Channel {
         inviters: Vec::new(),
         created_at: String::new(),
         kind: "general".to_owned(),
+            topic: String::new(),
         project: String::new(),
     }
 }

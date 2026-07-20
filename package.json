@@ -1,0 +1,24 @@
+{
+  "name": "coxagent",
+  "version": "1.0.0",
+  "description": "An autonomous multi-agent software team. A continuous loop of role-agents — BA → SA → PD → DEV → TEST → DOCS, with code-enforced governance — carries a ticket from proposal to a running, tested, documented build over a managed codebase. See [ARCHITECTURE.md](ARCHITECTURE.md) for the current architecture, [DEPLOYMENT.md](DEPLOYMENT.md) for the three deploy shapes (macOS app, docker-compose, Kubernetes/Helm), and [PLAN.md](PLAN.md) for the original design.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stevejrrogers/CoXAgent.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/stevejrrogers/CoXAgent/issues"
+  },
+  "homepage": "https://github.com/stevejrrogers/CoXAgent#readme",
+  "devDependencies": {
+    "@playwright/test": "^1.61.1"
+  }
+}
