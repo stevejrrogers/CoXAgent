@@ -96,6 +96,7 @@ pub async fn brownfield<S: StateStorePort + 'static>(
         |a| a.to_uppercase(),
     );
     state.alias = alias.clone();
+    state.display_name = Some(name.to_owned());
     store.save(&state).await?;
 
     // Git is mandatory (branch-per-ticket, audit trail). Initialise + baseline
@@ -114,8 +115,7 @@ pub async fn brownfield<S: StateStorePort + 'static>(
     if !config_path.exists() {
         let mut cfg = Config::default();
         cfg.architecture.clone_from(&rules);
-        // Prefer opencode as default engine (supports any provider) if detected,
-        // otherwise keep claude default which works with API keys.
+        // Prefer opencode as default engine (supports any provider) if detected.
         let engine = coxagent_infrastructure::discover()
             .iter()
             .find(|d| d.kind == coxagent_application::config::EngineKind::Opencode)
@@ -123,8 +123,9 @@ pub async fn brownfield<S: StateStorePort + 'static>(
             .unwrap_or(coxagent_application::config::EngineKind::Claude);
         cfg.engine.default.engine = engine;
         if engine == coxagent_application::config::EngineKind::Opencode {
-            cfg.engine.default.model = String::new(); // opencode auto-picks default
+            cfg.engine.default.model = "bizbrain/DeepSeek-V4-Pro".to_owned();
         }
+        cfg.engine.auto_fallback = false;
         std::fs::write(&config_path, serde_json::to_string_pretty(&cfg)?)?;
     }
     let context_path = state_dir.join("project_context.md");

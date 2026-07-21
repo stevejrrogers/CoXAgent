@@ -124,6 +124,17 @@ pub trait StateStorePort: Send + Sync {
         Ok(true)
     }
 
+    /// Release a per-ticket stage lease (e.g., after SA/PD/DOCS engine failure).
+    /// Default is a no-op (single-runner mode has no coordination).
+    async fn release_stage(
+        &self,
+        _id: &TicketId,
+        _stage: &str,
+        _worker: &str,
+    ) -> Result<(), PortError> {
+        Ok(())
+    }
+
     /// Record this runner's live presence (`account@host`, current role, current
     /// ticket) in the shared worker registry, so every dashboard can show all
     /// teams. Best-effort; the default is a no-op (single-runner needs none).

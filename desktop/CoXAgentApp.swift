@@ -99,6 +99,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         FileManager.default.homeDirectoryForCurrentUser.path + "/CoXAgent"
     }
 
+    /// Load KEY=VALUE pairs from the `.env` file next to the binary into `env`.
+    /// Existing keys are never overwritten — env vars have priority.
+    func loadDotEnv(into env: inout [String: String]) {
+        let path = Bundle.main.executableURL!
+            .deletingLastPathComponent()
+            .appendingPathComponent(".env")
+            .path
+        guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return }
+        for line in text.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
+            guard let eq = trimmed.firstIndex(of: "=") else { continue }
+            let key = String(trimmed[..<eq]).trimmingCharacters(in: .whitespaces)
+            let val = String(trimmed[trimmed.index(after: eq)...]).trimmingCharacters(in: .whitespaces)
+            if env[key] == nil {
+                env[key] = val
+            }
+        }
+    }
+
     // Give subprocesses a login-like PATH so `claude`/`docker` are found even
     // when launched from Finder (which has a minimal PATH).
     func richEnv() -> [String: String] {
@@ -173,6 +193,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
         // First run: optionally set a login, then onboard a default project.
         var hubEnv = richEnv()
+        // Load DB creds from .env file in the app bundle so coordination.json
+        // placeholders (${VAR}) resolve — credentials never touch json on disk.
+        loadDotEnv(into: &hubEnv)
         if !fm.fileExists(atPath: reg) {
             // Ask once whether to protect the app with a login.
             if !fm.fileExists(atPath: authPath), let pw = promptForPassword() {

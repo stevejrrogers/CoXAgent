@@ -19,3 +19,5 @@ sessions.json
 desktop/build/
 /dist/
 node_modules/
+/data/registry.json
+/data/coordination.json

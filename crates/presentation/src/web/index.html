@@ -1408,7 +1408,7 @@ textarea.np-in{resize:vertical;line-height:1.5}
   <aside class="side">
     <div class="brand"><div class="mk"><i class="ti ti-hexagon-letter-c"></i></div><div><div class="nm">CoXAgent</div><div class="tg">autonomous dev team · <span id="brand-ver"></span></div></div></div>
     <div class="modeseg">
-      <button id="mode-manage" style="display:none" onclick="setMode('manage')" title="Manage"><i class="ti ti-shield-cog"></i><span class="lbl">Manage</span></button>
+      <button id="mode-manage" style="display:none" onclick="setMode('manage');nav('mg-spaces')" title="Manage"><i class="ti ti-shield-cog"></i><span class="lbl">Manage</span></button>
       <button id="mode-ws" class="on" onclick="setMode('workspace')" title="Space"><i class="ti ti-layout-grid"></i><span class="lbl">Space</span></button>
       <button id="mode-chat" onclick="setMode('chat')" title="Chat"><i class="ti ti-message-circle"></i><span class="lbl">Chat</span><span class="modeseg-badge" id="mode-chat-badge" style="display:none"></span></button>
     </div>
@@ -1441,11 +1441,6 @@ textarea.np-in{resize:vertical;line-height:1.5}
       <a data-v="audit" class="admin-only" onclick="nav('audit')"><i class="ti ti-shield-lock"></i> Audit</a>
       <a data-v="access" class="manage-only" onclick="nav('access')"><i class="ti ti-user-cog"></i> Users</a>
       <a data-v="settings" onclick="nav('settings')"><i class="ti ti-settings"></i> Settings</a>
-    </nav>
-    <div class="mgside-hd adm-hd" id="adm-section" style="display:none;margin-top:14px">Administration</div>
-    <nav class="nav" id="adm-nav" style="display:none;margin-top:0">
-      <a id="adm-ws" onclick="nav('home');if(CUR==='home')renderHome();"><i class="ti ti-building-cog"></i> Manage workspace</a>
-      <a id="adm-users" onclick="nav('access')"><i class="ti ti-user-cog"></i> Users</a>
     </nav>
     <nav class="nav managenav" id="manage-side">
       <div class="mgside-hd">SUPER ADMIN</div>
@@ -1522,7 +1517,6 @@ textarea.np-in{resize:vertical;line-height:1.5}
             <div id="ws-members"></div>
           </aside>
         </div>
-        <div id="ws-admin"></div>
       </div>
       <div class="view on" id="view-overview">
         <div id="ov-drain"></div>
@@ -1747,13 +1741,13 @@ textarea.np-in{resize:vertical;line-height:1.5}
                 <button class="chanadd" onclick="generateDocs()" id="docs-gen" title="Generate/refresh with the DOCS agent"><i class="ti ti-sparkles"></i></button>
                 <button class="chanadd" onclick="newFolder('')" title="New folder"><i class="ti ti-folder-plus"></i></button>
                 <button class="chanadd" onclick="newDoc()" title="New page"><i class="ti ti-plus"></i></button>
+              </div>
             </div>
+            <div id="docs-list"></div>
           </div>
-          </div>
-      </div>
           <div class="docsmain" id="docs-main"></div>
         </div>
-    </div>
+      </div>
     <!-- Chat conversation — fills the main area when the Chat tab is active -->
     <div id="chat-main">
       <div class="chatwrap">
@@ -2379,9 +2373,8 @@ function renderSidebar(s){
   document.getElementById("ver").textContent=s.current_version||"0.0.0";
   document.getElementById("pn-tickets").textContent=(s.tickets||[]).length+" tickets";
   document.title="CoXAgent · "+(document.getElementById("proj-name").textContent||"");}
-function renderActive(){const s=STATE; if(!s.tickets&&!s.activity)return;
+function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overview")return;
   if(CUR==="overview"){
-    loadGoal();
     if(!(s.tickets||[]).length&&!(s.activity||[]).length){
       document.getElementById("kpis").innerHTML=`<div class="panel" style="grid-column:1/-1;text-align:center;padding:40px 20px">
         <i class="ti ti-rocket" style="font-size:34px;color:var(--accent2)"></i>
@@ -2801,81 +2794,6 @@ async function renderHome(){
     </div>`).join("")||'<div class="empty">no projects yet</div>';
   document.getElementById("ws-members").innerHTML=(ov.members||[]).map(m=>
     `<span class="wsmem" title="${esc((m.projects||[]).join(", ")||"all projects")}"><span class="wsava">${esc(initials(m.name||m.username))}</span> ${esc(m.name||m.username)} ${m.role==="admin"?'<i class="ti ti-crown" style="color:var(--amber)" title="workspace admin"></i>':""}<span class="wsrole">${esc(m.role)}</span></span>`).join("")||'<div class="empty">running open — no accounts</div>';
-  if(isAdmin)renderWsAdmin(w);
-}
-async function myAgentCtl(pid,op,action){
-  try{
-    if(op){await fetch(`/api/projects/${pid}/operators/${encodeURIComponent(op)}/${action}`,{method:"POST"});}
-    if(action==="start"){await fetch(`/api/projects/${pid}/control/resume`,{method:"POST"});}
-    else if(!op){await fetch(`/api/projects/${pid}/control/stop`,{method:"POST"});}
-    toasty(action==="start"?"Starting your agent…":"Stopping your agent…","ok");
-  }catch(e){}
-  setTimeout(renderHome,900);
-}
-async function renderWsAdmin(w){
-  // Pull the full workspace doc (includes conventions, not in the overview).
-  try{const full=await(await fetch("/api/workspace")).json();w=Object.assign({},w,full);}catch(e){}
-  let invites=[];try{invites=await(await fetch("/api/workspace/invites")).json();}catch(e){}
-  document.getElementById("ws-admin").innerHTML=`
-    <div class="sec" style="margin-bottom:12px">Spaces <span style="font-size:11px;color:var(--dim);font-weight:400">· manage every team space</span></div>
-    <div style="display:flex;gap:10px;margin-bottom:14px">
-      <div style="position:relative;flex:1;max-width:340px"><i class="ti ti-search" style="position:absolute;left:10px;top:8px;color:var(--muted);font-size:14px"></i><input id="sp-search" placeholder="Search spaces…" style="padding-left:32px;border:1px solid var(--border);border-radius:9px;background:var(--card);color:var(--text);font-size:12.5px;height:34px;width:100%" oninput="renderSpCards()"></div>
-      <button class="pri" onclick="openSpaceModal();setTimeout(()=>{const i=document.getElementById('spm-name');if(i)i.focus();},80)"><i class="ti ti-plus"></i> New space</button>
-    </div>
-    <div class="wsgrid" id="sp-cards"></div>
-    <div class="sec" style="margin:24px 0 12px">Workspace settings <span style="font-size:11px;color:var(--dim);font-weight:400">· admin</span></div>
-    <div class="panel frm">
-      <div class="fr"><span class="lbl">Company name</span><input id="wsn" value="${esc(w.name||"")}" placeholder="e.g. Straw Hat Labs"></div>
-      <div class="fr"><span class="lbl">Tagline</span><input id="wst" value="${esc(w.tagline||"")}" placeholder="what your company does"></div>
-      <div class="fr" style="align-items:flex-start"><span class="lbl">Conventions</span>
-        <textarea id="wsc" rows="4" placeholder="Company rules injected into EVERY agent on every project, e.g.\n- Comments & docs in Vietnamese\n- Follow hexagonal architecture; no logic in handlers\n- Prefer the existing UI components, never add a CSS framework" style="flex:1;background:var(--card);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 11px;font-size:12.5px;font-family:inherit">${esc(w.conventions||"")}</textarea></div>
-      <div class="fr" style="align-items:flex-start"><span class="lbl">App downloads</span>
-        <div style="flex:1;display:flex;flex-direction:column;gap:7px">
-          <input id="dl-repo" value="${esc((w.downloads||{}).releases_repo||"")}" placeholder="GitHub repo chứa release builds, vd. stevejrrogers/CoXAgent">
-          <div style="font-size:11px;color:var(--dim)">Đặt repo là đủ: hub tự lấy version + link .dmg/.exe/.tar.gz từ GitHub Releases mỗi 30 phút (CI build khi push tag v*). Các ô dưới chỉ để override thủ công.${(w.downloads||{}).latest_version?` · bản mới nhất: <b>${esc(w.downloads.latest_version)}</b>`:""}</div>
-          <input id="dl-mac" value="${esc((w.downloads||{}).macos||"")}" placeholder="macOS .dmg URL (auto)">
-          <input id="dl-win" value="${esc((w.downloads||{}).windows||"")}" placeholder="Windows .exe URL (auto)">
-          <input id="dl-lin" value="${esc((w.downloads||{}).linux||"")}" placeholder="Linux .tar.gz URL (auto)">
-          <input id="dl-ios" value="${esc((w.downloads||{}).ios||"")}" placeholder="iOS — App Store / TestFlight URL">
-        </div></div>
-      <div class="fr"><span class="lbl"></span><button class="pri" onclick="saveWs()"><i class="ti ti-check"></i> Save</button></div>
-    </div>
-    <div class="sec" style="margin:24px 0 12px">Invite people</div>
-    <div class="panel frm">
-      <div class="wsroles">
-        <span class="wsrole-x"><b>admin</b> quản trị workspace: dự án, thành viên, invite — như bạn</span>
-        <span class="wsrole-x"><b>be / fe</b> thành viên: làm việc + chạy agent trong dự án được gán</span>
-        <span class="wsrole-x"><b>viewer</b> chỉ xem, không sửa gì</span>
-      </div>
-      <div class="fr"><span class="lbl">Role</span><select id="inv-role"><option value="viewer">viewer — chỉ xem</option><option value="be">be — member (backend)</option><option value="fe">fe — member (frontend)</option><option value="admin">admin — đồng quản trị workspace</option></select>
-        <span class="lbl" style="min-width:auto">Uses</span><input id="inv-uses" type="number" value="5" min="1" style="width:70px">
-        <button class="pri" onclick="createInvite()"><i class="ti ti-link"></i> Create link</button></div>
-      <div class="fr" style="align-items:flex-start"><span class="lbl">Projects</span><div style="flex:1">${invProjectPicker()}</div></div>
-      <div id="inv-new"></div>
-      ${invites.length?invites.map(i=>`<div class="wsrow"><span class="wsproj" style="font-family:ui-monospace,monospace;font-size:11px">/join/${esc(i.token.slice(0,14))}…</span>
-        <span class="wsstate">${esc(i.role)} · ${esc((i.projects||[]).join(", ")||"no projects")} · ${i.uses_left} use(s) left</span>
-        <button class="ticket-actions" onclick="copyInvite('${esc(i.token)}')"><i class="ti ti-copy"></i> Copy</button>
-        <button class="ticket-actions" onclick="revokeInvite('${esc(i.token)}')"><i class="ti ti-trash"></i></button></div>`).join(""):'<div class="empty" style="padding:6px">no active invites</div>'}
-    </div>`;
-  renderSpCards();
-
-}
-async function renderSpCards(){
-  const el=document.getElementById("sp-cards");if(!el)return;
-  try{
-    const mg=await(await fetch("/api/manage/overview")).json();
-    const spaces=mg.spaces||[];const totals=mg.totals||{};
-    const q=(val("sp-search")||"").toLowerCase().trim();
-    const filtered=q?spaces.filter(s=>s.name.toLowerCase().includes(q)||s.id.toLowerCase().includes(q)||(s.tagline||"").toLowerCase().includes(q)):spaces;
-    el.innerHTML=filtered.map(sp=>`<div class="wscard mgcard" onclick="openMgSpace('${esc(sp.id)}')">
-      <div class="wsc-h"><b>${esc(sp.name)}</b><span class="wsc-v">${esc(sp.id)}</span></div>
-      <div class="wstag" style="font-size:12px;min-height:16px">${esc(sp.tagline||"")}</div>
-      <div class="mg-stats"><span><i class="ti ti-folder"></i> ${(sp.projects||[]).length} projects</span><span><i class="ti ti-users"></i> ${sp.members||0} members</span><span><i class="ti ti-coin"></i> ${money(sp.spend||0)}${sp.budget_usd?` / ${money(sp.budget_usd)}`:""}</span>${sp.tokens?`<span><i class="ti ti-cpu"></i> ${sp.tokens>=1000000?(sp.tokens/1e6).toFixed(1)+'M':sp.tokens>=1000?(sp.tokens/1e3).toFixed(1)+'K':sp.tokens} tokens</span>`:""}${sp.budget_usd&&sp.spend>=sp.budget_usd?'<span style="color:var(--red);font-weight:700"><i class="ti ti-alert-triangle"></i> over budget</span>':""}</div>
-      <div class="mg-admins">${(sp.admins||[]).map(a=>`<span class="wsava" title="space admin: ${esc(a)}">${esc(initials(a))}</span>`).join("")}<span class="mg-adminlbl">${esc((sp.admins||[]).join(", ")||"no admin")}</span></div>
-      <div class="mg-roles">${Object.entries(sp.roles||{}).map(([r,n])=>roleChip(r,n)).join("")||'<span class="wsc-off">no members</span>'}</div>
-      ${(sp.online||[]).length?`<div class="wsc-online">${sp.online.slice(0,8).map(o=>`<span class="wsava on" title="${esc(o)}">${esc(initials(o))}</span>`).join("")}</div>`:""}
-    </div>`).join("")||'<div class="empty">No spaces yet — create your first one</div>';
-  }catch(e){el.innerHTML='<div class="empty">Could not load spaces</div>';}
 }
 async function saveWs(){try{
   const downloads={releases_repo:val("dl-repo"),latest_version:(window._appLatest&&window._appLatest.latest_version)||"",macos:val("dl-mac"),windows:val("dl-win"),linux:val("dl-lin"),ios:val("dl-ios")};
@@ -2952,7 +2870,7 @@ function invProjectPicker(){
 async function createInvite(){
   const projects=picked("inv-projpick");
   try{const r=await(await fetch("/api/workspace/invites",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({role:val("inv-role"),projects,uses:parseInt(val("inv-uses")||"5",10)})})).json();
-    if(r.ok){const url=location.origin+r.url;document.getElementById("inv-new").innerHTML=`<div class="wsrow" style="background:color-mix(in srgb,var(--green) 8%,transparent)"><span class="wsproj" style="font-family:ui-monospace,monospace;font-size:12px;user-select:all">${esc(url)}</span><button class="ticket-actions" onclick="navigator.clipboard.writeText('${esc(url)}');toasty('Copied','ok')"><i class="ti ti-copy"></i> Copy</button></div>`;renderWsAdmin({name:val("wsn"),tagline:val("wst")});}
+    if(r.ok){const url=location.origin+r.url;document.getElementById("inv-new").innerHTML=`<div class="wsrow" style="background:color-mix(in srgb,var(--green) 8%,transparent)"><span class="wsproj" style="font-family:ui-monospace,monospace;font-size:12px;user-select:all">${esc(url)}</span><button class="ticket-actions" onclick="navigator.clipboard.writeText('${esc(url)}');toasty('Copied','ok')"><i class="ti ti-copy"></i> Copy</button></div>`;renderHome();}
   }catch(e){}}
 function copyInvite(t){navigator.clipboard.writeText(location.origin+"/join/"+t);toasty("Invite link copied","ok");}
 async function revokeInvite(t){try{await fetch("/api/workspace/invites/"+t,{method:"DELETE"});renderHome();}catch(e){}}
@@ -3429,9 +3347,6 @@ function updateSegments(){
   const mg=document.getElementById("mode-manage");
   if(mg)mg.style.display=(ME&&ME.role==="super")?"":"none";
   if(mg)mg.classList.toggle("on",MODE==="manage");
-  const isAdmin=ME&&(ME.role==="super"||ME.role==="admin");
-  const showAdm=isAdmin&&!isChatMode()&&MODE!=="manage";
-  [document.getElementById("adm-section"),document.getElementById("adm-nav")].forEach(el=>{if(el)el.style.display=showAdm?"":"none";});
   const ws=document.getElementById("mode-ws");
   if(ws)ws.classList.toggle("on",MODE==="workspace");
   const ch=document.getElementById("mode-chat");
@@ -5688,7 +5603,7 @@ function roleLabel(r){return ROLE_LABELS[r]||r;}
 function roleCanWrite(r){return r!=="viewer";}
 function roleCanCreateChannel(r){return r==="admin"||LEAD_ROLES.includes(r);}
 // Management surfaces (Settings, Users) are Admin + lead tier only.
-function roleCanManage(r){return r==="admin"||LEAD_ROLES.includes(r);}
+function roleCanManage(r){return r==="super"||r==="admin"||LEAD_ROLES.includes(r);}
 function canManage(){return !ME||!ME.auth||roleCanManage(ME.role);}
 // Only the legacy read-only Viewer gets a locked-down UI; every real role writes.
 function applyRole(){
@@ -6212,12 +6127,17 @@ async function renderSessions(){
   const el=document.getElementById("team-sessions");if(!el)return;
   let ss=[];try{ss=await(await fetch("/api/auth/sessions")).json();}catch(e){}
   if(!Array.isArray(ss)||!ss.length){el.innerHTML="";return;}
-  const rows=ss.map(x=>`<div class="sessrow">
+  const MAX = 5;
+  const showAll = ss.length > MAX;
+  const items = showAll ? ss.slice(0, MAX) : ss;
+  const hidden = showAll ? ss.length - MAX : 0;
+  const rows=items.map(x=>`<div class="sessrow">
     <div class="sessic"><i class="ti ti-${deviceIcon(x.label)}"></i></div>
     <div style="flex:1;min-width:0"><div class="sessname">${esc(x.label)}${x.current?' <span class="pbadge on">this device</span>':''}</div>
       <div class="ameta">signed in ${relTime(x.at)}</div></div></div>`).join("");
   el.innerHTML=`<div class="sec">Your devices <span style="font-size:11px;color:var(--dim);font-weight:400">· where <b style="color:var(--text)">${esc((ME&&ME.username)||'you')}</b> is signed in (${ss.length})</span></div>
     <div class="panel"><div class="alist">${rows}</div>
+    ${hidden>0?`<div style="font-size:11px;color:var(--dim);margin-top:6px">and ${hidden} more…</div>`:''}
     <div style="font-size:11px;color:var(--dim);margin-top:8px">Agents run on the hub, so Start/Step/Pause from any of these controls the same loop.</div></div>`;
 }
 async function renderTeamPeople(){

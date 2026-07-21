@@ -109,6 +109,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
             })
             .await?;
         if !outcome.succeeded() {
+            self.store.release_stage(&id, "docs", &worker).await.ok();
             return Err(PortError::Backend(format!(
                 "DOCS engine failed on {id}: {}",
                 outcome.stderr.trim()

@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 
 /// CLI entry shared by every service binary (coxagent, cox-gateway, …).
 pub async fn cli_main() -> ExitCode {
@@ -547,18 +548,54 @@ async fn build_project(
             None
         };
     let forge_for_handle = forge.clone();
-    let mut cycle_uc = RunCycleUseCase::new(Arc::clone(&store), engine, config, work_dir, context)
-        .with_meter(meter)
+    let concurrency = config.workflow.concurrency.max(1);
+    let handle = Arc::new(RunnerHandle::new());
+
+    // Leader runner: singleton phases (BA, PO, standup, etc.)
+    {
+        let leader = RunCycleUseCase::new(
+            Arc::clone(&store),
+            engine.clone(),
+            config.clone(),
+            work_dir.clone(),
+            context.clone(),
+        )
+        .with_meter(meter.clone())
         .with_live_budget(Arc::clone(&live_budget))
         .with_deploy(Arc::new(DockerComposeDeploy::new()))
         .with_git(Arc::new(coxagent_infrastructure::SystemGit::new()));
-    if let Some(f) = forge {
-        cycle_uc = cycle_uc.with_forge(f);
+        let leader = if let Some(ref f) = forge {
+            leader.with_forge(Arc::clone(f))
+        } else {
+            leader
+        };
+        let leader = leader.with_notifier(build_notifier(Arc::clone(&store), webhook.clone()));
+        let wh = Arc::clone(&handle);
+        tokio::spawn(async move { run_forever(wh, leader, sleep).await });
     }
-    cycle_uc = cycle_uc.with_notifier(build_notifier(Arc::clone(&store), webhook));
-    let handle = Arc::new(RunnerHandle::new());
-    let loop_handle = Arc::clone(&handle);
-    tokio::spawn(async move { run_forever(loop_handle, cycle_uc, sleep).await });
+
+    tracing::info!("[{id}] spawning {} worker runner(s) (total {} runners)", concurrency.saturating_sub(1), concurrency);
+    for _ in 1..concurrency {
+        let worker = RunCycleUseCase::new(
+            Arc::clone(&store),
+            engine.clone(),
+            config.clone(),
+            work_dir.clone(),
+            context.clone(),
+        )
+        .with_meter(meter.clone())
+        .with_live_budget(Arc::clone(&live_budget))
+        .with_deploy(Arc::new(DockerComposeDeploy::new()))
+        .with_git(Arc::new(coxagent_infrastructure::SystemGit::new()));
+        let worker = if let Some(ref f) = forge {
+            worker.with_forge(Arc::clone(f))
+        } else {
+            worker
+        };
+        let worker = worker.with_notifier(build_notifier(Arc::clone(&store), webhook.clone()));
+        let wh = Arc::clone(&handle);
+        tokio::spawn(async move { run_forever(wh, worker, Duration::from_secs(5)).await });
+    }
 
     // Auto-resume this machine's operator if the user left it running last time
     // (per-operator desired state). This restores only THIS user's operator —
@@ -861,16 +898,15 @@ pub async fn run_hub(registry: &Path, port: u16) -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
-/// Remove a project entry (by id) from the hub registry file.
+/// Remove a project entry (by id) from the hub registry file (atomic via temp file rename).
 fn remove_from_registry(registry_path: &Path, id: &str) -> Result<(), String> {
+    let tmp = registry_path.with_extension("json.tmp");
     let text = std::fs::read_to_string(registry_path).map_err(|e| e.to_string())?;
     let mut arr: Vec<serde_json::Value> = serde_json::from_str(&text).map_err(|e| e.to_string())?;
     arr.retain(|e| e.get("id").and_then(|v| v.as_str()) != Some(id));
-    std::fs::write(
-        registry_path,
-        serde_json::to_string_pretty(&arr).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())
+    std::fs::write(&tmp, serde_json::to_string_pretty(&arr).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, registry_path).map_err(|e| e.to_string())
 }
 
 /// Wire RBAC. An admin is (re-)provisioned from the `COXAGENT_ADMIN_USER` /
@@ -1058,12 +1094,14 @@ fn unique_id(base: &Path, seed: &str) -> String {
         .unwrap_or_else(|| format!("{seed}-x"))
 }
 
-/// Append `{ id, path }` to the hub registry JSON array (best-effort persistence).
+/// Append `{ id, path }` to the hub registry JSON array (atomic via temp file rename).
 fn append_registry(registry_path: &Path, id: &str, path: &Path) -> std::io::Result<()> {
+    let tmp = registry_path.with_extension("json.tmp");
     let text = std::fs::read_to_string(registry_path).unwrap_or_else(|_| "[]".to_owned());
     let mut arr: Vec<serde_json::Value> = serde_json::from_str(&text).unwrap_or_default();
     arr.push(serde_json::json!({ "id": id, "path": path }));
-    std::fs::write(registry_path, serde_json::to_string_pretty(&arr)?)
+    std::fs::write(&tmp, serde_json::to_string_pretty(&arr)?)?;
+    std::fs::rename(&tmp, registry_path)
 }
 
 /// The metered + transcript-logging + per-role-routing engine plus the spend
@@ -1112,20 +1150,28 @@ fn effective_fallbacks(config: &Config) -> Vec<coxagent_application::config::Eng
             });
         }
     };
-    // Cheap same-CLI tier for Claude (sonnet → haiku) — the highest-value step.
-    if default_kind == EngineKind::Claude && config.engine.default.model != "haiku" {
-        push(EngineKind::Claude, "haiku".to_owned());
+    // Cheap same-CLI tier: haiku for Claude, a lightweight model for opencode.
+    match default_kind {
+        EngineKind::Claude if config.engine.default.model != "haiku" => {
+            push(EngineKind::Claude, "haiku".to_owned());
+        }
+        EngineKind::Opencode if config.engine.default.model != "bizbrain/Qwen3.6-35B-A3B-thinking" => {
+            push(EngineKind::Opencode, "bizbrain/Qwen3.6-35B-A3B-thinking".to_owned());
+        }
+        _ => {}
     }
-    // Every other installed CLI, best-effort model (scripted/mock never auto-added).
+    // Every other installed CLI as a backup engine.
     for d in discover() {
+        if d.kind == default_kind {
+            continue;
+        }
         let model = match d.kind {
             EngineKind::Claude => "haiku".to_owned(),
-            EngineKind::Opencode => config.engine.default.model.clone(),
+            EngineKind::Opencode => "bizbrain/Qwen3.6-35B-A3B-thinking".to_owned(),
+            EngineKind::Hermes => "hermes-3-llama-3.2-3b".to_owned(),
             _ => continue,
         };
-        if d.kind != default_kind {
-            push(d.kind, model);
-        }
+        push(d.kind, model);
     }
     out
 }

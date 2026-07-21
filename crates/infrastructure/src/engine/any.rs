@@ -2,7 +2,7 @@
 //! the composition root can pick an engine from config without boxing a trait
 //! object. Add a variant here when a new engine adapter lands.
 
-use crate::engine::{ClaudeEngine, OpencodeEngine, ScriptedEngine};
+use crate::engine::{ClaudeEngine, HermesEngine, OpencodeEngine, ScriptedEngine};
 use async_trait::async_trait;
 use coxagent_application::config::{EngineChoice, EngineKind};
 use coxagent_application::ports::outbound::{AgentEnginePort, AgentOutcome, AgentRequest};
@@ -12,6 +12,7 @@ use coxagent_application::PortError;
 pub enum AnyEngine {
     Opencode(OpencodeEngine),
     Claude(ClaudeEngine),
+    Hermes(HermesEngine),
     Scripted(ScriptedEngine),
 }
 
@@ -25,6 +26,7 @@ impl AnyEngine {
         match choice.engine {
             EngineKind::Opencode => Ok(Self::Opencode(OpencodeEngine::new(choice.model.clone()))),
             EngineKind::Claude => Ok(Self::Claude(ClaudeEngine::new(choice.model.clone()))),
+            EngineKind::Hermes => Ok(Self::Hermes(HermesEngine::new(choice.model.clone()))),
             EngineKind::Scripted => Ok(Self::Scripted(ScriptedEngine::new())),
             other => Err(PortError::Backend(format!(
                 "no adapter for engine {other:?} yet"
@@ -39,6 +41,7 @@ impl AgentEnginePort for AnyEngine {
         match self {
             AnyEngine::Opencode(e) => e.id(),
             AnyEngine::Claude(e) => e.id(),
+            AnyEngine::Hermes(e) => e.id(),
             AnyEngine::Scripted(e) => e.id(),
         }
     }
@@ -47,6 +50,7 @@ impl AgentEnginePort for AnyEngine {
         match self {
             AnyEngine::Opencode(e) => e.run(request).await,
             AnyEngine::Claude(e) => e.run(request).await,
+            AnyEngine::Hermes(e) => e.run(request).await,
             AnyEngine::Scripted(e) => e.run(request).await,
         }
     }

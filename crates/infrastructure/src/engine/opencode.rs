@@ -46,6 +46,7 @@ impl AgentEnginePort for OpencodeEngine {
             request.system_prompt, request.task_prompt
         );
 
+        let prompt_len = prompt.len();
         let mut cmd = Command::new(&self.binary);
         cmd.arg("run")
             .arg("--model")
@@ -69,8 +70,18 @@ impl AgentEnginePort for OpencodeEngine {
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
             exit_code: output.status.code(),
-            usage: None,
+            usage: Some(coxagent_application::ports::outbound::engine::Usage {
+                input_tokens: estimate_tokens_raw(prompt_len),
+                output_tokens: estimate_tokens_raw(output.stdout.len()),
+                cost_usd: 0.0,
+            }),
             trace: String::new(),
         })
     }
+}
+
+/// Rough token estimate (~3.8 chars per token).
+fn estimate_tokens_raw(len: usize) -> u64 {
+    if len == 0 { return 0; }
+    (len as f64 / 3.8).ceil() as u64
 }

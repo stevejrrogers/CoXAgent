@@ -102,6 +102,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
             .run(self.build_request(&id, &title, &memory))
             .await?;
         if !outcome.succeeded() {
+            self.store.release_stage(&id, "pd", &worker).await.ok();
             return Err(PortError::Backend(format!(
                 "PD engine failed on {id}: {}",
                 outcome.stderr.trim()
@@ -120,7 +121,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
                 .await;
                 match fixed.as_deref().map(parse_ux) {
                     Some(Ok(u)) => u,
-                    _ => return Err(PortError::Corrupt(format!("PD output: {first}")).into()),
+                    _ => {
+                        self.store.release_stage(&id, "pd", &worker).await.ok();
+                        return Err(PortError::Corrupt(format!("PD output: {first}")).into());
+                    }
                 }
             }
         };

@@ -373,6 +373,27 @@ impl SqlAuthService {
             .map_err(|e| format!("connection: {e}"))
     }
 
+    async fn load_user_projects(&self, username: &str) -> Vec<String> {
+        let Ok(client) = self.client().await else {
+            return Vec::new();
+        };
+        let row = client
+            .query_opt(
+                "SELECT projects FROM auth_users WHERE username = $1",
+                &[&username],
+            )
+            .await;
+        match row {
+            Ok(Some(r)) => {
+                let json: serde_json::Value = r.get(0);
+                json.as_array()
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+                    .unwrap_or_default()
+            }
+            _ => Vec::new(),
+        }
+    }
+
     fn is_locked(&self, username: &str) -> bool {
         self.attempts.lock().is_ok_and(|a| {
             a.get(username)
@@ -448,6 +469,8 @@ impl AuthPort for SqlAuthService {
         self.clear_failures(username);
         let token = mint_token();
         let at = now_rfc3339();
+        // Load this user's project assignments so per-project access control works.
+        let projects = self.load_user_projects(username).await;
         // Persist first so a crash right after login still leaves a valid,
         // restorable session — then cache it in memory for fast validation.
         self.persist_session(&token, username, role, &at).await;
@@ -457,7 +480,7 @@ impl AuthPort for SqlAuthService {
                 name: String::new(),
                 email: String::new(),
                 role,
-                projects: Vec::new(),
+                projects,
             },
             expires: Instant::now() + SESSION_TTL,
             label: String::new(),

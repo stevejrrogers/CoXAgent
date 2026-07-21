@@ -113,6 +113,16 @@ async fn security_headers_mw(
     resp
 }
 
+/// Extract the project ID from a URL path like `/api/projects/:pid/...`.
+fn extract_pid_from_path(path: &str) -> Option<&str> {
+    // match /api/projects/<pid> or /api/projects/<pid>/...
+    if let Some(rest) = path.strip_prefix("/api/projects/") {
+        rest.split('/').next()
+    } else {
+        None
+    }
+}
+
 async fn audit_push(sink: &Arc<dyn AuditPort>, user: &str, action: String, status: u16) {
     sink.record(AuditRecord {
         at: now_rfc3339(),
@@ -1059,11 +1069,11 @@ impl AppState {
 
     /// Get (or lazily create) the live chat channel for a project.
     async fn chat_channel(&self, pid: &str) -> ChatChannel {
-        if let Some(ch) = self.chat_bus.read().await.get(pid) {
-            return ch.clone();
-        }
-        let mut bus = self.chat_bus.write().await;
-        bus.entry(pid.to_owned())
+        // Use write lock directly to avoid TOCTOU race between read and write.
+        self.chat_bus
+            .write()
+            .await
+            .entry(pid.to_owned())
             .or_insert_with(|| ChatChannel {
                 tx: tokio::sync::broadcast::channel(256).0,
                 write_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -2658,6 +2668,30 @@ async fn create_project(
     if name.is_empty() {
         return (StatusCode::BAD_REQUEST, "name is required").into_response();
     }
+    // Validate brownfield import path: must be under the hub's workspace root
+    // or under /tmp (safe sandbox). Reject paths pointing to system directories.
+    if let Some(ref existing) = req.existing {
+        if !existing.trim().is_empty() {
+            let p = std::path::Path::new(existing.trim());
+            // Resolve to absolute canonical path to prevent symlink tricks.
+            if let Ok(real) = p.canonicalize() {
+                // Allow under /tmp or under $HOME (typical user repos).
+                // Block system directories.
+                let path_str = real.to_string_lossy();
+                // Block if path equals a blocked directory, or if it starts with
+                // a blocked directory plus '/', to catch `/private/etc/foo` etc.
+                let blocked_prefixes = ["/etc", "/private/etc", "/root",
+                    "/var/run", "/var/log", "/usr/lib", "/usr/sbin",
+                    "/bin", "/sbin", "/dev", "/proc", "/sys"];
+                let blocked = blocked_prefixes.iter().any(|pfx| {
+                    path_str == *pfx || path_str.starts_with(pfx) && path_str.as_bytes().get(pfx.len()).copied() == Some(b'/')
+                });
+                if blocked {
+                    return (StatusCode::FORBIDDEN, "cannot import from this path").into_response();
+                }
+            }
+        }
+    }
     let handle = match factory(NewProjectReq {
         name,
         alias: req.alias,
@@ -2756,6 +2790,15 @@ async fn delete_project_ep(
     p.runner.stop();
     app.projects.write().await.remove(&pid);
     app.order.write().await.retain(|id| id != &pid);
+    // Clean up space references so no dangling project IDs remain.
+    {
+        let mut sp = app.spaces.inner.lock().await;
+        for space in &mut sp.spaces {
+            space.projects.retain(|p| p != &pid);
+        }
+        drop(sp);
+        app.spaces.save().await;
+    }
     if let Some(remover) = &app.remover {
         if let Err(e) = remover(pid.clone()).await {
             return internal_error(&e);
@@ -6434,10 +6477,10 @@ async fn join_ep(
             .into_response();
     };
     let username = req.username.trim().to_owned();
-    if username.is_empty() || req.password.len() < 4 {
+    if username.is_empty() || req.password.len() < 8 {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error":"username and a password (4+ chars) required"})),
+            Json(serde_json::json!({"error":"username and a password (8+ chars) required"})),
         )
             .into_response();
     }
@@ -7250,6 +7293,20 @@ async fn auth_mw(
         )
             .into_response();
     }
+    // Per-project access control: extract pid from URL path and verify the
+    // user is assigned to that project (Super/Admin bypass, members checked).
+    if let Some(pid) = extract_pid_from_path(&path) {
+        let is_super_or_admin = user.role == coxagent_application::auth::AuthRole::Super
+            || user.role == coxagent_application::auth::AuthRole::Admin;
+        if !is_super_or_admin && !user.projects.iter().any(|p| p == pid) {
+            audit_push(&app.audit, &username, format!("{method} {path}"), 403).await;
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({ "error": "not a member of this project" })),
+            )
+                .into_response();
+        }
+    }
     // PR review actions (merge / request-changes / close) are allowed for
     // reviewers as well as admins; every other write stays admin-only.
     let is_review_action = path.contains("/prs/");
@@ -7564,7 +7621,7 @@ async fn reset_password_ep(
     let Some(auth) = app.auth.clone() else {
         return (StatusCode::NOT_IMPLEMENTED, "auth not configured").into_response();
     };
-    if req.password.len() < 4 {
+    if req.password.len() < 8 {
         return (StatusCode::BAD_REQUEST, "password too short").into_response();
     }
     if auth.set_password(&username, &req.password).await {
@@ -7608,17 +7665,18 @@ async fn list_members_ep(
     let Some(auth) = app.auth.clone() else {
         return Json(serde_json::json!([])).into_response();
     };
-    // The People view lists a project's members to anyone on the project.
-    let allowed = resolve_principal(&auth, &headers)
-        .await
-        .is_some_and(|u| u.role.can_write());
-    if !allowed {
+    // Only admins/super can see the full member list; regular members see only
+    // users assigned to their project (filtered by project membership).
+    let user = resolve_principal(&auth, &headers).await;
+    let Some(user) = user else {
         return (StatusCode::FORBIDDEN, "sign-in required").into_response();
-    }
+    };
+    let is_privileged = user.role.can_manage();
     let out: Vec<serde_json::Value> = auth
         .list_users()
         .await
         .into_iter()
+        .filter(|u| is_privileged || u.projects.iter().any(|p| p.as_str() == pid.as_str()))
         .map(|u| {
             serde_json::json!({
                 "username": u.username,

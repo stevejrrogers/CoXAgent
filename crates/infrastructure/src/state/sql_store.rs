@@ -309,6 +309,17 @@ impl StateStorePort for SqlStateStore {
         if let Some(r) = &self.redis {
             return r.set_desired(operator, running).await;
         }
+        // Postgres-only fallback: persist to project_coord table with kind='desired'.
+        let client = self.client().await.map_err(|e| PortError::Backend(e.to_string()))?;
+        client
+            .execute(
+                "INSERT INTO project_coord (project_id, kind, coord_key, worker, at)
+                 VALUES ($1, 'desired', $2, $3, NOW())
+                 ON CONFLICT (project_id, kind, coord_key) DO UPDATE SET worker = $3, at = NOW()",
+                &[&self.project_id, &format!("op:{operator}"), &running.to_string()],
+            )
+            .await
+            .map_err(|e| PortError::Backend(e.to_string()))?;
         Ok(())
     }
 
@@ -316,7 +327,16 @@ impl StateStorePort for SqlStateStore {
         if let Some(r) = &self.redis {
             return r.get_desired(operator).await;
         }
-        Ok(None)
+        // Postgres-only fallback.
+        let client = self.client().await.map_err(|e| PortError::Backend(e.to_string()))?;
+        let row = client
+            .query_opt(
+                "SELECT worker FROM project_coord WHERE project_id = $1 AND kind = 'desired' AND coord_key = $2",
+                &[&self.project_id, &format!("op:{operator}")],
+            )
+            .await
+            .map_err(|e| PortError::Backend(e.to_string()))?;
+        Ok(row.and_then(|r| r.get::<_, String>(0).parse::<bool>().ok()))
     }
 
     async fn acquire_operator(&self, operator: &str, instance: &str) -> Result<bool, PortError> {

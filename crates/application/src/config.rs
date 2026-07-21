@@ -55,6 +55,17 @@ pub struct EngineChoice {
     pub model: String,
 }
 
+impl EngineChoice {
+    /// Sanity-check the model string against a simple allowlist pattern to
+    /// prevent accidental CLI argument injection through the config file.
+    pub fn is_model_valid(&self) -> bool {
+        self.model
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '/' || c == '-' || c == ':')
+            && !self.model.is_empty()
+    }
+}
+
 /// Engine mapping: a default plus optional per-role overrides. This is where
 /// cost is tuned — expensive models for DEV/SA, cheap ones for BA/DOCS.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,6 +144,10 @@ pub struct WorkflowConfig {
     pub feature_dev_enabled: bool,
     /// Seconds to sleep between cycles.
     pub sleep_seconds: u64,
+    /// Number of parallel worker runners (dev/test/docs phases). Leader phases
+    /// (BA/PO/standup) still singleton. Default 1.
+    #[serde(default = "default_concurrency")]
+    pub concurrency: u32,
     /// Optional spend cap in USD; the loop pauses when total spend reaches it.
     #[serde(default)]
     pub budget_usd: Option<f64>,
@@ -168,6 +183,10 @@ fn default_sprint_len() -> u64 {
     10
 }
 
+fn default_concurrency() -> u32 {
+    1
+}
+
 /// Live, runtime-adjustable spend caps. Shared between the config API and the
 /// running cycle loop so budget changes apply immediately without a restart.
 /// `None` on a field means "no cap" (unlimited) for that dimension.
@@ -189,6 +208,7 @@ impl Default for WorkflowConfig {
             feature_dev_enabled: true,
             ops_monitor: true,
             sleep_seconds: 30,
+            concurrency: 1,
             budget_usd: None,
             mode: Mode::Kanban,
             sprint_length_cycles: default_sprint_len(),

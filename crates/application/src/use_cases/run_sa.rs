@@ -109,6 +109,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             .run(self.build_request(&id, &title, &memory))
             .await?;
         if !outcome.succeeded() {
+            self.store.release_stage(&id, "sa", &worker).await.ok();
             return Err(PortError::Backend(format!(
                 "SA engine failed on {id}: {}",
                 outcome.stderr.trim()
@@ -127,7 +128,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
                 .await;
                 match fixed.as_deref().map(parse_design) {
                     Some(Ok(d)) => d,
-                    _ => return Err(PortError::Corrupt(format!("SA output: {first}")).into()),
+                    _ => {
+                        self.store.release_stage(&id, "sa", &worker).await.ok();
+                        return Err(PortError::Corrupt(format!("SA output: {first}")).into());
+                    }
                 }
             }
         };
