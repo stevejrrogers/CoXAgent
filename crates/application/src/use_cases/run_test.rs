@@ -20,6 +20,7 @@ pub struct RunTestUseCase<S: StateStorePort, E: AgentEnginePort> {
     engine: Arc<E>,
     config: Config,
     work_dir: PathBuf,
+    context: Option<String>,
 }
 
 impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
@@ -29,7 +30,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
             engine,
             config,
             work_dir,
+            context: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_context(mut self, context: Option<String>) -> Self {
+        self.context = context;
+        self
     }
 
     /// Execute one test pass, returning the ids of newly filed bugs.
@@ -47,10 +55,23 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
                 )
             },
         );
+        let context_block = self
+            .context
+            .as_deref()
+            .filter(|c| !c.trim().is_empty())
+            .map(|c| {
+                format!(
+                    "\n\n## Project context (goal, stack, what was built — test against this):\n{c}\n"
+                )
+            })
+            .unwrap_or_default();
+        let repo_map = prompts::repo_map_block(&self.work_dir, self.config.workflow.token_saver);
         let request = AgentRequest {
             role: Role::Test,
             system_prompt: prompts::system_prompt(prompts::TEST),
-            task_prompt: format!("Test the current build and report new bugs.{shipped}{memory}"),
+            task_prompt: format!(
+                "Test the current build and report new bugs.{context_block}{shipped}{memory}{repo_map}"
+            ),
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(1800),
         };
@@ -132,7 +153,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
 /// What just shipped and is awaiting verification, WITH its acceptance
 /// criteria — so TEST verifies the actual contract of each change instead of
 /// poking the app blind. Newest first, bounded.
-fn shipped_block(state: &crate::state::ProjectState) -> String {
+pub fn shipped_block(state: &crate::state::ProjectState) -> String {
     use std::fmt::Write as _;
     let recent: Vec<_> = state
         .tickets

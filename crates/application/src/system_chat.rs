@@ -319,6 +319,24 @@ impl SystemChat {
         owner: &str,
         ctx: &ChatContext,
     ) -> Result<Channel, String> {
+        self.create_channel_with_kind(name, owner, "private", ctx)
+    }
+
+    /// Create a channel with an explicit `kind` (`"private"` or `"public"`).
+    ///
+    /// # Errors
+    /// When the name is invalid, the channel already exists, or the kind is
+    /// not `"private"` or `"public"`.
+    pub fn create_channel_with_kind(
+        &mut self,
+        name: &str,
+        owner: &str,
+        kind: &str,
+        ctx: &ChatContext,
+    ) -> Result<Channel, String> {
+        if kind != "private" && kind != "public" {
+            return Err("kind must be 'private' or 'public'".to_owned());
+        }
         let id = slugify(name);
         if id.is_empty() {
             return Err("channel name must contain letters or numbers".to_owned());
@@ -339,7 +357,7 @@ impl SystemChat {
             members: vec![owner.to_owned()],
             inviters: Vec::new(),
             created_at: now_rfc3339(),
-            kind: "private".to_owned(),
+            kind: kind.to_owned(),
             project: String::new(),
             topic: String::new(),
         };

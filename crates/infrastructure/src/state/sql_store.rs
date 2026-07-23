@@ -56,6 +56,10 @@ pub struct SqlStateStore {
     pool: Pool,
     project_id: String,
     redis: Option<super::RedisCoord>,
+    /// Optional local JSON mirror — best-effort backup written on every
+    /// Postgres save so a lost Postgres volume can be re-seeded from disk
+    /// (the seed logic in `app::make_store` picks it up automatically).
+    local_mirror: Option<super::JsonStateStore>,
 }
 
 impl SqlStateStore {
@@ -75,6 +79,7 @@ impl SqlStateStore {
             pool,
             project_id: project_id.into(),
             redis: None,
+            local_mirror: None,
         };
         store.migrate().await?;
         Ok(store)
@@ -89,6 +94,31 @@ impl SqlStateStore {
     pub fn with_redis(mut self, url: &str) -> Result<Self, PortError> {
         self.redis = Some(super::RedisCoord::connect(url, self.project_id.clone())?);
         Ok(self)
+    }
+
+    /// Mirror every Postgres `save` to a local JSON file at `state_dir`. The
+    /// mirror is best-effort: a write failure is logged and never fails the
+    /// Postgres write. On startup the hub's seed logic re-imports this file
+    /// when Postgres is empty — so a lost Postgres volume loses no work.
+    ///
+    /// # Errors
+    /// [`PortError::Backend`] if the directory cannot be created.
+    pub fn with_local_mirror(mut self, state_dir: &std::path::Path) -> Result<Self, PortError> {
+        self.local_mirror = Some(super::JsonStateStore::new(state_dir)?);
+        Ok(self)
+    }
+
+    /// Best-effort write to the local JSON mirror. Never returns an error — a
+    /// backup failure must not block the authoritative Postgres write.
+    async fn mirror_save(&self, state: &ProjectState) {
+        if let Some(mirror) = &self.local_mirror {
+            if let Err(e) = mirror.save(state).await {
+                tracing::warn!(
+                    "[{}] local JSON mirror write failed (Postgres remains authoritative): {e}",
+                    self.project_id
+                );
+            }
+        }
     }
 
     async fn client(&self) -> Result<deadpool_postgres::Client, PortError> {
@@ -178,6 +208,7 @@ impl StateStorePort for SqlStateStore {
                 "state changed since last read (concurrent writer)".to_owned(),
             ));
         }
+        self.mirror_save(state).await;
         Ok(())
     }
 
@@ -227,6 +258,7 @@ impl StateStorePort for SqlStateStore {
         tx.commit()
             .await
             .map_err(|e| PortError::Backend(format!("commit: {e}")))?;
+        self.mirror_save(&state).await;
         Ok(true)
     }
 

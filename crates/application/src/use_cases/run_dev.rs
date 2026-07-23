@@ -62,6 +62,7 @@ pub struct RunDevUseCase<S: StateStorePort, E: AgentEnginePort> {
     /// Test runner for the mechanical Definition-of-Done check: after the
     /// engine finishes, the suite must be green or the ticket is NOT done.
     verify: Option<Arc<dyn crate::ports::outbound::DeployPort>>,
+    context: Option<String>,
 }
 
 impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
@@ -81,7 +82,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             worker: String::new(),
             phase: None,
             verify: None,
+            context: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_context(mut self, context: Option<String>) -> Self {
+        self.context = context;
+        self
     }
 
     /// Attach the test runner enforcing the mechanical DoD (green tests).
@@ -311,6 +319,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         } else {
             String::new()
         };
+        let context_block = self
+            .context
+            .as_deref()
+            .filter(|c| !c.trim().is_empty())
+            .map(|c| format!("\n\n## Project context (goal, stack, scope, constraints):\n{c}\n"))
+            .unwrap_or_default();
         AgentRequest {
             role: self.mode.role(),
             system_prompt: format!(
@@ -318,7 +332,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 prompts::system_prompt(prompts::DEV)
             ),
             task_prompt: format!(
-                "Ticket {id}: {title}\n{}\nImplement it now.{}{}{}",
+                "Ticket {id}: {title}\n{}\nImplement it now.{context_block}{}{}{}",
                 ticket_brief(ticket),
                 prompts::focus_block(
                     &self.work_dir,
@@ -342,7 +356,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
 /// the acceptance criteria, and the SA's technical design — so the DEV builds
 /// what was specified instead of guessing from the title (and the SA's design
 /// tokens aren't wasted). Caps keep a verbose ticket from bloating the prompt.
-fn ticket_brief(ticket: Option<&coxagent_domain::Ticket>) -> String {
+pub fn ticket_brief(ticket: Option<&coxagent_domain::Ticket>) -> String {
     use std::fmt::Write as _;
     let Some(t) = ticket else {
         return String::new();

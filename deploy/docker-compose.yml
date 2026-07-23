@@ -71,6 +71,7 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
     environment:
+      COXAGENT_HOST: 0.0.0.0
       COXAGENT_ADMIN_USER: ${ADMIN_USER}
       COXAGENT_ADMIN_PASSWORD: ${ADMIN_PASSWORD}
       # File storage → MinIO (over the internal docker network).
@@ -88,8 +89,11 @@ services:
       # TURN for calls — the browser reaches coturn at the PUBLIC IP directly.
       COXAGENT_TURN_URL: turn:${PUBLIC_IP}:3478
       COXAGENT_TURN_SECRET: ${TURN_SECRET}
+      COXAGENT_REGISTRY: /data/registry.json
     volumes:
       - appdata:/data
+      - ./data/TL:/data/TL:rw
+      - ./data/registry.json:/data/registry.json:rw
     depends_on:
       - minio
       - mongo

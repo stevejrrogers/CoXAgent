@@ -15,6 +15,7 @@
 name: coxagent
 
 x-app-env: &app-env
+  COXAGENT_HOST: 0.0.0.0
   COXAGENT_REGISTRY: /root/CoXAgent/registry.json
   COXAGENT_ADMIN_USER: ${ADMIN_USER}
   COXAGENT_ADMIN_PASSWORD: ${ADMIN_PASSWORD}
@@ -33,6 +34,9 @@ services:
   minio:
     image: minio/minio
     command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
     environment:
       MINIO_ROOT_USER: ${S3_ACCESS_KEY}
       MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY}
@@ -42,6 +46,8 @@ services:
 
   mongo:
     image: mongo:7
+    ports:
+      - "27017:27017"
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER}
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD}

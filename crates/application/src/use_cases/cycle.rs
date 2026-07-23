@@ -3132,6 +3132,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         )
         .with_worker(self.worker.clone())
         .with_phase(self.phase.clone())
+        .with_context(Some(self.context.clone()))
     }
 
     fn milestones(&self) -> crate::use_cases::RunMilestonesUseCase<S, E> {
@@ -3162,6 +3163,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         )
         .with_worker(self.worker.clone())
         .with_phase(self.phase.clone())
+        .with_context(Some(self.context.clone()))
     }
 
     fn dev(&self, mode: DevMode) -> RunDevUseCase<S, E> {
@@ -3175,6 +3177,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         .with_worker(self.worker.clone())
         .with_phase(self.phase.clone())
         .with_verify(self.deploy.clone())
+        .with_context(Some(self.context.clone()))
     }
 
     fn test(&self) -> RunTestUseCase<S, E> {
@@ -3184,6 +3187,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             self.config.clone(),
             self.work_dir.clone(),
         )
+        .with_context(Some(self.context.clone()))
     }
 
     fn docs(&self) -> RunDocsUseCase<S, E> {
@@ -3195,6 +3199,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         )
         .with_worker(self.worker.clone())
         .with_phase(self.phase.clone())
+        .with_context(Some(self.context.clone()))
     }
 
     fn conformance(&self) -> RunConformanceUseCase<S> {

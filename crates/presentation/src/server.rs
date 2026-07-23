@@ -2770,10 +2770,11 @@ async fn delete_project_ep(
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
     // Deleting a project is destructive — restrict to admins and the lead tier
-    // (Director/Manager/*Lead). Everyone else is forbidden.
+    // (Director/Manager/*Lead). Everyone else is forbidden. Super (hub-wide
+    // owner) is included via `can_manage`.
     if let Some(auth) = &app.auth {
         let allowed = match resolve_principal(auth, &headers).await {
-            Some(u) => u.role == coxagent_application::auth::AuthRole::Admin || u.role.is_lead(),
+            Some(u) => u.role.can_manage(),
             None => false,
         };
         if !allowed {
@@ -2803,6 +2804,47 @@ async fn delete_project_ep(
         if let Err(e) = remover(pid.clone()).await {
             return internal_error(&e);
         }
+    }
+    // Clean up the project directory on disk. For imported projects this only
+    // removes the CoXAgent workspace scaffolding (state/, coxagent.json, etc.)
+    // — never the original imported codebase.
+    if let Some(root) = p.config_path.parent() {
+        let project_dir = root.to_path_buf();
+        let codebase_linked = project_dir.join("codebase.lnk").exists();
+        // Spawn cleanup in the background — errors are logged, never surfaced.
+        tokio::spawn(async move {
+            if codebase_linked {
+                // Imported project: only delete CoXAgent scaffolding, not the code.
+                let _ = std::fs::remove_file(project_dir.join("codebase.lnk"));
+                if let Err(e) = std::fs::remove_dir_all(project_dir.join("state")) {
+                    tracing::warn!("delete_project: cannot remove state dir: {e}");
+                }
+                let _ = std::fs::remove_file(project_dir.join("coxagent.json"));
+                if let Ok(entries) = std::fs::read_dir(&project_dir) {
+                    if entries.count() == 0 {
+                        let _ = std::fs::remove_dir(&project_dir);
+                    }
+                }
+            } else {
+                // Greenfield: remove the entire project workspace.
+                if let Err(e) = std::fs::remove_dir_all(&project_dir) {
+                    tracing::warn!("delete_project: cannot remove project dir: {e}");
+                }
+            }
+            // Also clean up the Docker compose project if it was deployed.
+            let container_name = format!("cox-{pid}-codebase-app-1");
+            if let Ok(out) = std::process::Command::new("docker")
+                .args(["stop", &container_name])
+                .output()
+            {
+                if !out.status.success() {
+                    tracing::warn!("delete_project: docker stop {container_name} failed");
+                }
+            }
+            let _ = std::process::Command::new("docker")
+                .args(["rm", &container_name])
+                .output();
+        });
     }
     Json(serde_json::json!({ "ok": true })).into_response()
 }
@@ -3536,6 +3578,8 @@ async fn channels_list_ep(
 #[derive(serde::Deserialize)]
 struct CreateChannelReq {
     name: String,
+    #[serde(default)]
+    kind: Option<String>,
 }
 
 /// Create a private channel owned by the signed-in user.
@@ -4844,7 +4888,8 @@ async fn syschat_create_ep(
     let ctx = app.chat_context().await;
     let result = {
         let mut sc = app.syschat.inner.lock().await;
-        sc.create_channel(&req.name, &user, &ctx)
+        let kind = req.kind.as_deref().unwrap_or("private");
+        sc.create_channel_with_kind(&req.name, &user, kind, &ctx)
     };
     match result {
         Ok(ch) => {
@@ -7553,11 +7598,19 @@ async fn list_users_ep(
 /// Create or update a user account (admin-only via the write gate).
 async fn create_user_ep(
     State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<CreateUserReq>,
 ) -> axum::response::Response {
     let Some(auth) = app.auth.clone() else {
         return (StatusCode::NOT_IMPLEMENTED, "auth not configured").into_response();
     };
+    // Only admins and leads can create user accounts.
+    let is_admin = resolve_principal(&auth, &headers)
+        .await
+        .is_some_and(|u| u.role.can_manage());
+    if !is_admin {
+        return (StatusCode::FORBIDDEN, "admin role required").into_response();
+    }
     if req.username.trim().is_empty() || req.password.is_empty() {
         return (StatusCode::BAD_REQUEST, "username and password required").into_response();
     }

@@ -181,7 +181,7 @@
   .cg-edges line.hot{stroke:var(--accent2);stroke-width:2}
   .cgn{cursor:default;transition:opacity .1s} .cgn.dim{opacity:.18}
   .cgn circle{stroke:var(--card);stroke-width:1.5}
-  .cgl{font-size:9px;fill:var(--muted);font-family:ui-monospace,Menlo,monospace}
+  .cgl{font-size:9px;fill:var(--muted);font-family:ui-monospace,Menlo,monospace;pointer-events:none}
   .cgi-list{margin-top:12px;max-height:62vh;overflow:auto;display:flex;flex-direction:column;gap:10px}
   .cgi-file{border:1px solid var(--border);border-radius:9px;overflow:hidden}
   .cgi-fp{background:var(--card2);padding:7px 11px;font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--text);display:flex;align-items:center;gap:6px}
@@ -490,7 +490,8 @@
   body.mode-chat .runner{display:none}
   body.mode-chat .main{display:flex;flex-direction:column;overflow:hidden}
   body.mode-chat .topbar{display:none}
-  body.mode-chat .content{display:none}
+  body.mode-chat .content{display:contents}
+  body.mode-chat .content .view{display:none !important}
   body.mode-chat #chat-main{display:flex}
   /* In-app chat notification toasts (permission-free, clickable) */
   #chat-toasts{position:fixed;right:18px;bottom:18px;z-index:70;display:flex;flex-direction:column;gap:8px;max-width:340px}
@@ -620,14 +621,16 @@
   .dot{width:7px;height:7px;border-radius:50%;background:var(--dim);flex-shrink:0}
   .dot.live{background:var(--green);box-shadow:0 0 0 3px rgba(74,222,128,.18);animation:pulse 1.8s infinite}
   .dot.paused{background:var(--amber)} .dot.off{background:var(--red)}
-  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
-  .main{flex:1;min-width:0;height:100vh;overflow:auto}
-  .topbar{position:sticky;top:0;z-index:4;background:rgba(10,10,15,.82);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);padding:15px 28px;display:flex;align-items:center;gap:12px}
-  .topbar h1{font-size:17px;font-weight:600;margin:0} .topbar .sub{font-size:12px;color:var(--muted);margin-left:2px}
-  .topbar .sp{flex:1}
-  .chip{display:flex;align-items:center;gap:7px;background:var(--card);border:1px solid var(--border);border-radius:20px;padding:6px 12px;font-size:12px;color:var(--muted)}
-  .content{padding:24px 28px;max-width:1340px}
-  .view{display:none} .view.on{display:block}
+   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+    .main{flex:1;min-width:0;height:100vh;overflow:auto}
+   .topbar{position:sticky;top:0;z-index:4;background:rgba(10,10,15,.82);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);padding:15px 28px;display:flex;align-items:center;gap:12px}
+   .topbar h1{font-size:17px;font-weight:600;margin:0} .topbar .sub{font-size:12px;color:var(--muted);margin-left:2px}
+   .topbar .sp{flex:1}
+   .chip{display:flex;align-items:center;gap:7px;background:var(--card);border:1px solid var(--border);border-radius:20px;padding:6px 12px;font-size:12px;color:var(--muted)}
+      .content{padding:24px 28px;margin:0 auto;box-sizing:border-box}
+     @media(max-width:900px){.side{display:none}.content{padding:16px 18px;max-width:100% !important;margin:0}.topbar{flex-wrap:wrap}}
+     @media(max-width:600px){.content{padding:12px 14px}.topbar-proj .projbtn{min-width:140px;max-width:180px}}
+   .view{display:none} .view.on{display:block}
   /* Scrum is a conversation surface — let it break out of the centered reading
      column and fill the full width + height like a chat app. Flexbox (not a
      magic-number height) so the composer always sits flush at the bottom. */
@@ -996,7 +999,7 @@
   .chatdock .chatlayout{height:100vh;min-height:0;gap:0}
   .chatdock .chanrail{border:none;border-right:1px solid var(--border);border-radius:0;width:172px}
   .chatdock .chatwrap{border:none;border-radius:0;height:100vh}
-  .main{flex:1;min-width:0}
+   .main{flex:1;min-width:0;height:100vh;overflow:auto}
   .chatreopen{position:fixed;right:20px;bottom:20px;width:52px;height:52px;border-radius:50%;background:var(--accent);color:#fff;border:none;cursor:pointer;font-size:22px;box-shadow:0 8px 22px rgba(0,0,0,.32);display:flex;align-items:center;justify-content:center;z-index:55}
   .chatreopen:hover{filter:brightness(1.08)}
   .chatreopen-badge{position:absolute;top:-3px;right:-3px;min-width:20px;height:20px;padding:0 5px;border-radius:10px;background:var(--red);color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center}
@@ -1317,6 +1320,8 @@ body.viewer .ctlrow, body.viewer .projadd, body.viewer .pi-del, body.viewer .tic
 body:not(.admin) .admin-only { display: none !important; }
 body:not(.manage) .manage-only { display: none !important; }
 .pri{background:var(--accent);color:#fff;border:1px solid transparent;border-radius:9px;padding:9px 14px;font-size:13px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:6px;font-family:inherit}
+.add-user-btn{padding:8px 16px;font-size:12.5px}
+.invite-btn{padding:9px 22px;font-size:13.5px}
 .pri:hover{background:var(--accenth)}
 .userbox{display:none;align-items:center;gap:10px;margin-top:auto;padding:8px 10px;background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--border2);border-radius:12px}
 .uavatar{width:34px;height:34px;flex-shrink:0;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2))}
@@ -1414,7 +1419,7 @@ textarea.np-in{resize:vertical;line-height:1.5}
     </div>
     <!-- Chat mode: channel list replaces the workspace menu -->
     <div class="chatside" id="chat-side">
-      <div class="chanrail-hd"><span>Channels</span><div class="chanrail-actions"><button class="chanadd manage-only" onclick="createChannel()" title="Create channel (leads & admins)"><i class="ti ti-plus"></i></button></div></div>
+      <div class="chanrail-hd"><span>Channels</span><div class="chanrail-actions"><button class="chanadd" id="btn-newchan" onclick="createChannel()" title="Create channel (leads & admins)"><i class="ti ti-plus"></i></button></div></div>
       <div class="chanlist" id="chan-list"></div>
       <div class="chanrail-hd" style="margin-top:10px"><span>Direct messages</span></div>
       <div class="dmsearch"><i class="ti ti-search"></i><input id="dm-search" placeholder="Find a teammate…" autocomplete="off" oninput="renderDMList()"></div>
@@ -1603,19 +1608,20 @@ textarea.np-in{resize:vertical;line-height:1.5}
         <div class="eu-pwrow"><input id="eu-pass" class="eu-in" type="password" placeholder="new temporary password"><button class="gc-btn" onclick="resetUserPassword()">Reset</button></div>
         <div id="eu-msg" class="eu-msg"></div>
       </div></div>
-      <div class="ov" id="ov-invite" onclick="if(event.target===this)close_('ov-invite')"><div class="modal" style="max-width:580px">
+      <div class="ov" id="ov-invite" onclick="if(event.target===this)close_('ov-invite')"><div class="modal" style="max-width:620px">
         <span class="x" onclick="close_('ov-invite')"><i class="ti ti-x"></i></span>
-        <h3 style="font-size:15px"><i class="ti ti-user-plus" style="color:var(--accent2)"></i> Add team member</h3>
-        <div class="msub">They can sign in with these credentials and join any projects you pick.</div>
+        <h3 style="font-size:16px;margin-bottom:4px"><i class="ti ti-user-plus" style="color:var(--accent2);margin-right:6px"></i> Add team member</h3>
+        <div class="msub" style="margin-bottom:18px">Create an account with a role, assign them to a space, and pick their projects.</div>
         <div class="invite-grid">
           <div class="fld"><label>Full name</label><input id="usr-fullname" placeholder="e.g. Ada Lovelace"></div>
           <div class="fld"><label>Email</label><input id="usr-email" type="email" placeholder="ada@team.io"></div>
           <div class="fld"><label>Username</label><input id="usr-name" placeholder="ada"></div>
-          <div class="fld"><label>Temporary password</label><input id="usr-pass" type="password" placeholder="they can change it later"></div>
-          <div class="fld fld-wide"><label>Role</label><select id="usr-role" class="sel"></select></div>
+          <div class="fld"><label>Password</label><input id="usr-pass" type="password" placeholder="they can change it later"></div>
+          <div class="fld" style="grid-column:1"><label>Role</label><select id="usr-role" class="sel"></select></div>
+          <div class="fld" style="grid-column:2"><label>Space</label><select id="usr-space" class="sel" onchange="renderUserProjPicker()"><option value="">— all projects —</option></select></div>
         </div>
-        <div class="fld" style="margin-top:12px"><label>Assign to projects</label><div class="uprojpick" id="usr-projpick"></div></div>
-        <div class="invite-foot"><span id="usr-err" class="usr-err"></span><button class="gc-btn" onclick="close_('ov-invite')">Cancel</button><button class="pri" onclick="createUser()"><i class="ti ti-user-plus"></i> Invite member</button></div>
+        <div class="fld" style="margin-top:14px"><label>Assign to projects</label><div class="uprojpick" id="usr-projpick"></div></div>
+        <div class="invite-foot"><span id="usr-err" class="usr-err"></span><button class="gc-btn" onclick="close_('ov-invite')">Cancel</button><button class="pri invite-btn" onclick="createUser()"><i class="ti ti-user-plus"></i> Invite member</button></div>
       </div></div>
       <div class="ov" id="ov-rename" onclick="if(event.target===this)close_('ov-rename')"><div class="modal" style="max-width:420px">
         <span class="x" onclick="close_('ov-rename')"><i class="ti ti-x"></i></span>
@@ -2094,7 +2100,8 @@ function nav(v){
   document.getElementById("pg-title").textContent=TITLES[v][0];
   document.getElementById("pg-sub").textContent=TITLES[v][1];
   try{updateSegments();}catch(e){}
-  if(v==="settings")loadSettings(); else if(v==="calendar"){if(!Array.isArray(MEETINGS))MEETINGS=[];loadMeetings().then(renderCalendar).catch(()=>{MEETINGS=[];renderCalendar();});} else if(v==="discuss"){loadComments();} else if(v==="docs"){loadDocs();} else if(v==="people"){renderPeople();} else if(v==="audit"){renderAudit();} else if(v==="access"){renderAccess();} else if(v==="roadmap"){renderRoadmap();} else if(v==="review"){renderReview();} else if(v==="codemap"){renderCodeMap();} else if(v==="terminal"){openTerminal();} else renderActive();}
+   if(v==="settings")loadSettings(); else if(v==="calendar"){if(!Array.isArray(MEETINGS))MEETINGS=[];loadMeetings().then(renderCalendar).catch(()=>{MEETINGS=[];renderCalendar();});} else if(v==="discuss"){loadComments();} else if(v==="docs"){loadDocs();} else if(v==="people"){renderPeople();} else if(v==="audit"){renderAudit();} else if(v==="access"){renderAccess();} else if(v==="roadmap"){renderRoadmap();} else if(v==="review"){renderReview();} else if(v==="codemap"){renderCodeMap();} else if(v==="terminal"){openTerminal();} else renderActive();
+   setTimeout(centerContent,50);}
 function initials(r){return r.replace("DEV-","").slice(0,2);}
 function metricsFrom(s){const t=s.tickets||[],h=s.history||[],isF=x=>x.type!=="bug";
   return {shipped:t.filter(x=>isF(x)&&(x.status==="done"||x.status==="documented")).length,
@@ -2694,18 +2701,37 @@ async function mgDeleteSpace(id){
 function renderMgPeople(){
   const el=document.getElementById("mg-people-body");if(!el||!MG)return;
   const q=(window._mgq||"").toLowerCase();
+  const sf=(window._mgspace||"");
+  const pf=(window._mgproj||"");
   const spaceOf=u=>(MG.spaces||[]).filter(s=>(s.admins||[]).includes(u.username)||(u.projects||[]).some(p=>(s.projects||[]).includes(p))).map(s=>s.name).join(", ");
   const roles=["super","admin","director","manager","techlead","ba","fe","be","viewer"];
-  const list=(MG.users||[]).filter(u=>!q||u.username.toLowerCase().includes(q)||(u.name||"").toLowerCase().includes(q));
-  el.innerHTML=`<div class="dmsearch" style="margin-bottom:12px;max-width:340px"><i class="ti ti-search"></i><input placeholder="Tìm user…" value="${esc(window._mgq||"")}" oninput="window._mgq=this.value;renderMgPeople()"></div>
-  <div class="panel">${list.sort((a,b)=>(b.spend||0)-(a.spend||0)).map(u=>`
-    <div class="wsrow"><span class="wsava">${esc(initials(u.name||u.username))}</span>
+  var list=(MG.users||[]).filter(u=>!q||u.username.toLowerCase().includes(q)||(u.name||"").toLowerCase().includes(q));
+  // Filter by space
+  if(sf){list=list.filter(u=>spaceOf(u).toLowerCase().includes(sf.toLowerCase()));}
+  // Filter by project
+  if(pf){list=list.filter(u=>(u.projects||[]).some(function(p){return p===pf||(p||"").toLowerCase()===pf.toLowerCase();}));}
+  // Build space & project filter options
+  var spaceOpts='<option value="">— all spaces —</option>'+((MG.spaces||[]).map(function(s){return '<option value="'+esc(s.id)+'"'+(sf===s.id?' selected':'')+'>'+esc(s.name||s.id)+'</option>';}).join(""));
+  var allPids=new Set();(MG.users||[]).forEach(function(u){(u.projects||[]).forEach(function(p){allPids.add(p);});});
+  var projOpts='<option value="">— all projects —</option>'+Array.from(allPids).sort().map(function(p){var nm=(PROJECTS.find(function(x){return x.id===p;})||{}).name||p;return '<option value="'+esc(p)+'"'+(pf===p?' selected':'')+'>'+esc(nm)+'</option>';}).join("");
+
+  el.innerHTML=`<div class="sec" style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px;flex-wrap:wrap">
+    <span style="font-size:14px;font-weight:600;display:flex;align-items:center;gap:8px"><i class="ti ti-users" style="color:var(--accent2)"></i> ${list.length} user${list.length!==1?"s":""}</span>
+    <button class="pri add-user-btn" onclick="openInvite()"><i class="ti ti-user-plus"></i> Add user</button>
+  </div>
+  <div class="sec" style="display:flex;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap">
+    <div class="dmsearch" style="max-width:220px;margin:0"><i class="ti ti-search"></i><input placeholder="Tìm user…" value="${esc(q)}" oninput="window._mgq=this.value;renderMgPeople()"></div>
+    <select class="sel" style="max-width:200px;height:36px;font-size:12.5px;padding:0 10px" onchange="window._mgspace=this.value;renderMgPeople()">${spaceOpts}</select>
+    <select class="sel" style="max-width:200px;height:36px;font-size:12.5px;padding:0 10px" onchange="window._mgproj=this.value;renderMgPeople()">${projOpts}</select>
+  </div>
+  <div class="panel">${list.sort(function(a,b){return(b.spend||0)-(a.spend||0);}).map(function(u){
+    return `<div class="wsrow"><span class="wsava">${esc(initials(u.name||u.username))}</span>
       <span class="wsproj">${esc(u.name||u.username)} <span style="color:var(--dim);font-weight:400">@${esc(u.username)}</span></span>
       <span class="wsstate">${esc(spaceOf(u)||"chưa thuộc space")} · ${(u.projects||[]).length} projects</span>
       <span class="wsspend" title="tổng token đã đốt">${money(u.spend||0)}</span>
       <select onchange="mgSetRole('${esc(u.username)}',this.value,'${esc(u.name||"")}')" class="mg-rolesel">
-        ${roles.map(r=>`<option value="${r}" ${u.role===r?"selected":""}>${r}</option>`).join("")}
-      </select></div>`).join("")||'<div class="empty">no users</div>'}</div>`;
+        ${roles.map(function(r){return '<option value="'+r+'"'+(u.role===r?' selected':'')+'>'+roleLabel(r)+'</option>';}).join("")}
+      </select></div>`;}).join("")||'<div class="empty">no users</div>'}</div>`;
 }
 async function mgSetRole(username,role,name){
   try{const r=await fetch("/api/auth/users/"+encodeURIComponent(username),{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name,email:"",role})});
@@ -3279,15 +3305,17 @@ async function loadChatHistory(){
   renderChatList(true);
 }
 async function createChannel(){
-  const name=await coxModal({title:"New channel",message:"Tên channel mới (chữ thường, gạch nối).",input:{placeholder:"e.g. design-review"},confirmText:"Create"});
+  const name=await coxModal({title:"New channel",message:"Enter channel name. Add +public at the end for a public channel (anyone can join), otherwise it will be private (invite-only).",input:{placeholder:"e.g. design-review  or  general-chat +public"},confirmText:"Create"});
   if(!name||!name.trim())return;
+  let n=name.trim();let kind="private";
+  if(/\s+\+public\s*$/i.test(n)){kind="public";n=n.replace(/\s+\+public\s*$/i,"").trim();}
   try{
-    const r=await fetch("/api/chat/channels",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:name.trim()})});
+    const r=await fetch("/api/chat/channels",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n,kind})});
     if(!r.ok){toasty(await r.text()||"could not create channel","err");return;}
     const ch=await r.json();
     await loadChannels();
     selectChannel(ch.id);
-    toasty("Channel #"+ch.name+" created","ok");
+    toasty("Channel #"+ch.name+" created ("+kind+")","ok");
   }catch(e){toasty("could not create channel","err");}
 }
 async function inviteToChannel(){
@@ -3313,6 +3341,7 @@ let SEEN=new Set(), chatPrimed=false;
 // Sidebar mode: "workspace" (menu + views) or "chat" (channels + conversation).
 let MODE=(localStorage.getItem("cox_mode")==="chat")?"chat":"workspace";
 function isChatMode(){return MODE==="chat";}
+function isManageMode(){return MODE==="manage";}
 function markSeen(m){SEEN.add(chatKey(m));}
 // Enterprise modal replacing browser prompt()/confirm(): returns a Promise —
 // resolves the input string (or true) on confirm, null on cancel.
@@ -4220,6 +4249,25 @@ function updateTitle(){
   const base=document.title.replace(/^\(\d+\)\s*/,"");
   document.title=(n>0&&document.hidden)?`(${n}) ${base}`:base;
 }
+window.centerContent = function centerContent(){
+  const content=document.querySelector('.content');
+  if(!content)return;
+  const vw=window.innerWidth;
+  if(vw<=900){content.style.width='';content.style.marginLeft='';return;}
+  const sideW=246;
+  const available=vw-sideW;
+  const cols={2000:3800,1800:2800,1600:2200,1440:1600,1340:0};
+  let maxW=1340;
+  for(const[w,bp]of Object.entries(cols)){
+    if(vw>=parseInt(bp)){maxW=parseInt(w);break;}
+  }
+  const w=Math.min(maxW,available-20);
+  const ml=Math.max(0,(available-w)/2);
+  content.style.width=w+'px';
+  content.style.marginLeft=ml+'px';
+}
+window.addEventListener('resize',centerContent);
+document.addEventListener('visibilitychange',()=>{setTimeout(centerContent,50)});
 // Notification transport. Inside the macOS shell (WKWebView) the web
 // Notification API doesn't exist, so we bridge to the native app, which posts a
 // real macOS notification. In a normal browser we use the Notification API.
@@ -5447,7 +5495,7 @@ function setProjMode(m){PROJ_MODE=m;
     ?"Hướng đi tiếp cho codebase này — e.g. 'ổn định hoá, thêm thanh toán, mobile app'. Click Draft để BA/PO viết brief."
     :"Rough idea — e.g. 'a secure team chat, more private than WhatsApp'. Click Draft to have BA/PO turn it into a project brief you review.";
   document.getElementById("np-submit-label").textContent=m==="import"?"Import project":"Create project";}
-function openNewProject(){["np-name","np-alias","np-path","np-goal"].forEach(i=>document.getElementById(i).value="");document.getElementById("np-err").textContent="";setProjMode("new");loadNpSpaces();document.getElementById("ov-newproj").classList.add("open");setTimeout(()=>document.getElementById("np-name").focus(),50);}
+function openNewProject(){["np-name","np-alias","np-path","np-goal"].forEach(i=>document.getElementById(i).value="");document.getElementById("np-err").textContent="";setProjMode("new");document.getElementById("ov-newproj").classList.add("open");setTimeout(()=>document.getElementById("np-name").focus(),50);return loadNpSpaces();}
 // Space picker in the New-project form: only the spaces the caller may file
 // into (all for super, own for a space admin); hidden when none exist.
 async function loadNpSpaces(){
@@ -5488,12 +5536,12 @@ async function createProject(){
   err.style.color="var(--red)";err.textContent=PROJ_MODE==="import"?"Importing…":"Creating…";
   try{
     const r=await fetch("/api/projects",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
-    if(!r.ok){err.textContent=await r.text()||"Failed.";return;}
+    if(!r.ok){const msg=await r.text()||"Failed.";err.textContent=msg;toast(msg,"err");return;}
     const {id}=await r.json();
     close_("ov-newproj");toast("Project created","ok");
     await loadProjects();
     if(id){switchProject(id);}
-  }catch(e){err.textContent="Network error.";}
+  }catch(e){err.textContent="Network error.";toast("Network error","err");}
 }
 async function deleteProject(id){
   id=id||PID;if(!id)return;
@@ -5526,6 +5574,7 @@ function startApp(){
   checkAppUpdate();setInterval(checkAppUpdate,5*60*1000);
   window.addEventListener("focus",()=>checkAppUpdate());
   fetch("/api/health").then(r=>r.json()).then(h=>{const b=document.getElementById("brand-ver");if(b&&h.version)b.textContent="v"+h.version;}).catch(()=>{});
+  setTimeout(centerContent,200);
 }
 const AGENT_CLIS={claude:{label:"Claude Code",desc:"Anthropic's coding agent",install:"curl -fsSL https://claude.ai/install.sh | bash",docs:"https://claude.com/claude-code"},
   opencode:{label:"opencode",desc:"open-source multi-model agent",install:"curl -fsSL https://opencode.ai/install | bash",docs:"https://opencode.ai"}};
@@ -5533,10 +5582,12 @@ async function checkAgentSetup(force){
   let list=[];try{list=await(await fetch("/api/engines")).json();}catch(e){}
   const have=new Set((list||[]).map(e=>e.name.toLowerCase()));
   window._engines=have;
-  // Only auto-open once per browser unless the user re-checks from Settings.
   const dismissed=localStorage.getItem("coxSetupDone")==="1";
   const runnable=[...have].some(n=>n==="claude"||n==="opencode");
   if(runnable)localStorage.setItem("coxSetupDone","1");
+  // If engines list is empty (Docker/no CLI), auto-dismiss so dashboard works
+  // without showing the setup wizard on every login.
+  if(have.size===0){localStorage.setItem("coxSetupDone","1");}
   if(!force&&(runnable||dismissed))return;
   renderSetupWizard(have);
   document.getElementById("ov-setup").classList.add("open");
@@ -5557,7 +5608,10 @@ function renderSetupWizard(have){
       <h3>Connect a coding agent</h3>
       <p>CoXAgent runs local agent CLIs to do the work. ${anyOk?'You\'re ready to go — an agent was detected.':'Install one below (Claude Code is free to start), then re-check.'}</p></div>
     ${rows}
-    <div class="setnote"><i class="ti ti-info-circle"></i> Run the command in your terminal, then press <b>Re-check</b>. CoXAgent detects CLIs on your <code>PATH</code>.</div>`;
+    <div class="setnote"><i class="ti ti-info-circle"></i> Run the command in your terminal, then press <b>Re-check</b>. CoXAgent detects CLIs on your <code>PATH</code>.</div>
+    <div style="margin-top:14px;text-align:center">
+      <button class="btn-ghost" onclick="dismissSetup()" style="font-size:13px">I'll set it up later</button>
+    </div>`;
 }
 function copyCmd(k){const el=document.getElementById("cmd-"+k);if(!el)return;
   navigator.clipboard.writeText(el.textContent).then(()=>{el.parentElement.classList.add("copied");setTimeout(()=>el.parentElement.classList.remove("copied"),1200);}).catch(()=>{});}
@@ -5598,10 +5652,11 @@ async function doLogin(){
 async function doLogout(){try{await fetch("/api/auth/logout",{method:"POST"});}catch(e){}location.reload();}
 // Role capabilities (mirror of AuthRole in the backend).
 const LEAD_ROLES=["director","manager","techlead","dslead","dalead"];
-const ROLE_LABELS={admin:"Admin",director:"Director",manager:"Manager",techlead:"Tech.Lead",dslead:"DS.Lead",dalead:"DA.Lead",ba:"BA",fe:"FE",be:"BE",aie:"AIE",ds:"DS",da:"DA",de:"DE",reviewer:"Reviewer",viewer:"Viewer"};
+const ROLE_LABELS={super:"Super Admin",admin:"Admin",director:"Director",manager:"Manager",techlead:"Tech.Lead",dslead:"DS.Lead",dalead:"DA.Lead",ba:"BA",fe:"FE",be:"BE",aie:"AIE",ds:"DS",da:"DA",de:"DE",reviewer:"Reviewer",viewer:"Viewer"};
 function roleLabel(r){return ROLE_LABELS[r]||r;}
 function roleCanWrite(r){return r!=="viewer";}
-function roleCanCreateChannel(r){return r==="admin"||LEAD_ROLES.includes(r);}
+function roleCanCreateChannel(r){return r==="super"||r==="admin"||LEAD_ROLES.includes(r);}
+function canCreateChannel(){return !ME||!ME.auth||roleCanCreateChannel(ME.role);}
 // Management surfaces (Settings, Users) are Admin + lead tier only.
 function roleCanManage(r){return r==="super"||r==="admin"||LEAD_ROLES.includes(r);}
 function canManage(){return !ME||!ME.auth||roleCanManage(ME.role);}
@@ -5613,6 +5668,9 @@ function applyRole(){
   document.body.classList.toggle("viewer",!!isViewer);
   document.body.classList.toggle("admin",!!isAdmin);
   document.body.classList.toggle("manage",canManage());
+  // Show/hide create-channel button based on permissions.
+  const btn=document.getElementById("btn-newchan");
+  if(btn)btn.style.display=canCreateChannel()?"inline-flex":"none";
   const badge=document.getElementById("user-badge");
   if(ME&&ME.auth){badge.style.display="flex";
     document.getElementById("ub-initials").textContent=(ME.username||"?").slice(0,2).toUpperCase();
@@ -5623,7 +5681,7 @@ function applyRole(){
 // Build <option>s for a role <select> (excludes legacy reviewer/viewer).
 function roleOptions(sel){
   return Object.keys(ROLE_LABELS).filter(r=>r!=="reviewer"&&r!=="viewer")
-    .map(r=>`<option value="${r}"${r===sel?' selected':''}>${roleLabel(r)}${r==="admin"?" — full access":(roleCanCreateChannel(r)?" — lead":"")}</option>`).join("");
+    .map(r=>`<option value="${r}"${r===sel?' selected':''}>${roleLabel(r)}${r==="super"?" — hub-wide":(r==="admin"?" — full access":(roleCanCreateChannel(r)?" — lead":""))}</option>`).join("");
 }
 let USERS=[];
 function renderUsers(){
@@ -5657,12 +5715,39 @@ function renderUsers(){
   }).catch(()=>{list.innerHTML='<div class="empty">unable to load users</div>';});
 }
 // Multi-select project checkboxes for the create form (a user can join many).
-function renderUserProjPicker(){
+// Filters by the selected space in #usr-space.
+async function renderUserProjPicker(){
   const el=document.getElementById("usr-projpick");if(!el)return;
-  if(!PROJECTS.length){el.innerHTML='<span style="font-size:12px;color:var(--dim)">no projects yet</span>';return;}
-  el.innerHTML=PROJECTS.map(p=>`<label class="uprojchk"><input type="checkbox" value="${esc(p.id)}"><span class="sdot" style="background:${projColor(p.id)}"></span>${esc(p.name)}</label>`).join("");
+  const spaceSel=document.getElementById("usr-space");
+  const sid=spaceSel?spaceSel.value:"";
+  let projects=PROJECTS;
+  // If a space is selected, fetch that space's project list to filter.
+  if(sid){
+    try{
+      const r=await fetch("/api/spaces");const d=await r.json();
+      const sp=(d.spaces||[]).find(s=>s.id===sid);
+      if(sp&&sp.projects&&sp.projects.length){
+        const pidSet=new Set(sp.projects);
+        projects=PROJECTS.filter(p=>pidSet.has(p.id));
+      }
+    }catch(e){}
+  }
+  if(!projects.length){el.innerHTML='<span style="font-size:12px;color:var(--dim)">no projects in this space</span>';return;}
+  el.innerHTML=projects.map(p=>`<label class="uprojchk"><input type="checkbox" value="${esc(p.id)}"><span class="sdot" style="background:${projColor(p.id)}"></span>${esc(p.name)}</label>`).join("");
 }
-function openInvite(){
+async function openInvite(){
+  // Populate space dropdown from /api/spaces
+  const spaceSel=document.getElementById("usr-space");
+  if(spaceSel){
+    spaceSel.innerHTML='<option value="">— all projects —</option>';
+    try{
+      const r=await fetch("/api/spaces");
+      const d=await r.json();
+      const spaces=(d&&d.spaces)||[];
+      spaceSel.innerHTML='<option value="">— all projects —</option>'+
+        spaces.map(s=>{var nm=esc(s.name);var n=(s.projects||[]).length;return `<option value="${esc(s.id)}">${nm} · ${n} project${n!==1?"s":""}</option>`;}).join("");
+    }catch(e){}
+  }
   renderUserProjPicker();
   document.getElementById("usr-role").innerHTML=roleOptions("ba");
   ["usr-fullname","usr-email","usr-name","usr-pass"].forEach(id=>{const e=document.getElementById(id);if(e)e.value="";});
@@ -5956,7 +6041,14 @@ function cgFocusNode(path){
 // Tiny force-directed layout (no libs): repulsion + link springs + centering.
 function cgRenderGraph(box,rawNodes,rawLinks){
   const W=800,H=460,cx=W/2,cy=H/2;
-  const nodes=rawNodes.map(n=>({...n,x:cx+(Math.random()-.5)*W*.6,y:cy+(Math.random()-.5)*H*.6,vx:0,vy:0}));
+  // Limit to top 90 most-connected nodes — prevents visual clutter.
+  const MAX_NODES=90;
+  const deg={};
+  rawLinks.forEach(l=>{deg[l.source]=(deg[l.source]||0)+1;deg[l.target]=(deg[l.target]||0)+1;});
+  const keepIds=new Set(
+    rawNodes.map(n=>[n.id,(deg[n.id]||0)]).sort((a,b)=>b[1]-a[1]).slice(0,MAX_NODES).map(x=>x[0])
+  );
+  const nodes=rawNodes.filter(n=>keepIds.has(n.id)).map(n=>({...n,x:cx+(Math.random()-.5)*W*.6,y:cy+(Math.random()-.5)*H*.6,vx:0,vy:0}));
   const idx={};nodes.forEach((n,i)=>idx[n.id]=i);
   const links=rawLinks.filter(l=>idx[l.source]!=null&&idx[l.target]!=null).map(l=>({s:idx[l.source],t:idx[l.target]}));
   const deg={};links.forEach(l=>{deg[l.s]=(deg[l.s]||0)+1;deg[l.t]=(deg[l.t]||0)+1;});
@@ -6071,7 +6163,8 @@ async function createUser(){
     if(!r.ok){err.textContent=await r.text()||"Failed.";return;}
     ["usr-name","usr-pass","usr-fullname","usr-email"].forEach(id=>document.getElementById(id).value="");
     document.querySelectorAll("#usr-projpick input:checked").forEach(c=>c.checked=false);
-    close_("ov-invite");toasty("Member added","ok");renderUsers();
+    close_("ov-invite");toasty("Member added","ok");
+    if(isManageMode()){MG=null;renderManage();}else{renderUsers();}
   }catch(e){err.textContent="Network error.";}
 }
 let EU_USER=null;
@@ -6127,18 +6220,18 @@ async function renderSessions(){
   const el=document.getElementById("team-sessions");if(!el)return;
   let ss=[];try{ss=await(await fetch("/api/auth/sessions")).json();}catch(e){}
   if(!Array.isArray(ss)||!ss.length){el.innerHTML="";return;}
-  const MAX = 5;
-  const showAll = ss.length > MAX;
-  const items = showAll ? ss.slice(0, MAX) : ss;
-  const hidden = showAll ? ss.length - MAX : 0;
-  const rows=items.map(x=>`<div class="sessrow">
-    <div class="sessic"><i class="ti ti-${deviceIcon(x.label)}"></i></div>
-    <div style="flex:1;min-width:0"><div class="sessname">${esc(x.label)}${x.current?' <span class="pbadge on">this device</span>':''}</div>
-      <div class="ameta">signed in ${relTime(x.at)}</div></div></div>`).join("");
-  el.innerHTML=`<div class="sec">Your devices <span style="font-size:11px;color:var(--dim);font-weight:400">· where <b style="color:var(--text)">${esc((ME&&ME.username)||'you')}</b> is signed in (${ss.length})</span></div>
-    <div class="panel"><div class="alist">${rows}</div>
-    ${hidden>0?`<div style="font-size:11px;color:var(--dim);margin-top:6px">and ${hidden} more…</div>`:''}
-    <div style="font-size:11px;color:var(--dim);margin-top:8px">Agents run on the hub, so Start/Step/Pause from any of these controls the same loop.</div></div>`;
+  // Only show current device — not history.
+  var cur=ss.find(function(s){return s.current;});
+  if(!cur){el.innerHTML="";return;}
+  el.innerHTML=`<div class="sec" style="margin-top:0">Your device</div>
+    <div class="panel" style="margin-top:6px">
+      <div class="sessrow">
+        <div class="sessic"><i class="ti ti-${deviceIcon(cur.label)}"></i></div>
+        <div style="flex:1;min-width:0"><div class="sessname">${esc(cur.label)} <span class="pbadge on">this device</span></div>
+          <div class="ameta">signed in ${relTime(cur.at)}</div>
+        </div>
+      </div>
+    </div>`;
 }
 async function renderTeamPeople(){
   const el=document.getElementById("team-people");if(!el)return;

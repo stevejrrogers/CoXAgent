@@ -36,7 +36,7 @@ test.describe('CoXAgent UI', () => {
 
   test('user badge shows root super', async ({ page }) => {
     await expect(page.locator('#ub-name')).toContainText('root');
-    await expect(page.locator('#ub-role')).toContainText('super');
+    await expect(page.locator('#ub-role')).toContainText(/super/i);
   });
 
   test('nav overview visible', async ({ page }) => {

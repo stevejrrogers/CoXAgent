@@ -930,12 +930,25 @@ impl ProjectState {
     /// # Errors
     /// A human-readable message when the name is invalid or already taken.
     pub fn create_channel(&mut self, name: &str, owner: &str) -> Result<Channel, String> {
+        self.create_channel_with_kind(name, owner, "private")
+    }
+
+    /// Create a channel with an explicit kind. Valid kinds: `"private"`, `"public"`.
+    pub fn create_channel_with_kind(
+        &mut self,
+        name: &str,
+        owner: &str,
+        kind: &str,
+    ) -> Result<Channel, String> {
         let id = slugify(name);
         if id.is_empty() {
             return Err("channel name must contain letters or numbers".to_owned());
         }
         if id == GENERAL_CHANNEL || self.channels.iter().any(|c| c.id == id) {
             return Err(format!("channel #{id} already exists"));
+        }
+        if kind != "private" && kind != "public" {
+            return Err("kind must be 'private' or 'public'".to_owned());
         }
         let ch = Channel {
             id,
@@ -944,7 +957,7 @@ impl ProjectState {
             members: vec![owner.to_owned()],
             inviters: Vec::new(),
             created_at: now_rfc3339(),
-            kind: "private".to_owned(),
+            kind: kind.to_owned(),
             topic: String::new(),
             project: String::new(),
         };

@@ -24,6 +24,11 @@ pub struct RunChatReplyUseCase<S: StateStorePort + ?Sized, E: AgentEnginePort + 
     host_port: Option<u16>,
     /// Code host + target branch, so chat can trigger an SA merge sweep.
     forge: Option<(Arc<dyn crate::ports::outbound::ForgePort>, String)>,
+    context: Option<String>,
+    /// Callback: create a new project from scratch. Returns a human-readable status message.
+    new_project_fn: Option<Arc<dyn Fn(String, Option<String>) -> Result<String, String> + Send + Sync>>,
+    /// Callback: import an existing codebase. Returns a human-readable status message.
+    import_project_fn: Option<Arc<dyn Fn(String, String, Option<String>) -> Result<String, String> + Send + Sync>>,
 }
 
 /// Common docker-compose filenames we treat as "already has a deploy setup".
@@ -51,7 +56,34 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             deploy: None,
             host_port: None,
             forge: None,
+            context: None,
+            new_project_fn: None,
+            import_project_fn: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_new_project_fn(
+        mut self,
+        f: Arc<dyn Fn(String, Option<String>) -> Result<String, String> + Send + Sync>,
+    ) -> Self {
+        self.new_project_fn = Some(f);
+        self
+    }
+
+    #[must_use]
+    pub fn with_import_project_fn(
+        mut self,
+        f: Arc<dyn Fn(String, String, Option<String>) -> Result<String, String> + Send + Sync>,
+    ) -> Self {
+        self.import_project_fn = Some(f);
+        self
+    }
+
+    #[must_use]
+    pub fn with_context(mut self, context: Option<String>) -> Self {
+        self.context = context;
+        self
     }
 
     /// Give the chat the ability to run an SA merge sweep over PRs into `target`.
@@ -97,16 +129,24 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
              If the request is ambiguous or you need a detail to do it right, ASK a crisp \
              clarifying question instead of guessing. Keep it concise.\n\n\
              You can also DO things by appending EXACTLY ONE final line:\n\
+             ACTION: new_project: <name> :: <alias>              — create a new project from scratch\n\
+             ACTION: import: <path> :: <name> :: <alias>         — import an existing codebase\n\
              ACTION: arch_review                — review the architecture, file refactor tickets\n\
              ACTION: docs_review                — fill missing Wiki docs\n\
+             ACTION: sa_design: <ticket-id>     — SA designs ONE ticket (runs the SA agent now)\n\
+             ACTION: implement: <ticket-id>     — code the ticket NOW (DEV runs, writes code, tests)\n\
+             ACTION: test: <ticket-id>          — QA tests the deployed ticket, files bugs\n\
              ACTION: standup                    — run a standup\n\
              ACTION: discuss: <topic>           — kick off a team discussion (PO+SA weigh in, SM decides)\n\
              ACTION: feature: <title> :: <desc> :: <low|medium|high> — add a feature to the backlog at that priority\n\
              ACTION: bug: <title> :: <desc> :: <low|medium|high>     — file a bug at that priority\n\
              ACTION: priority: <ticket-id> :: <low|medium|high>      — reprioritise an existing ticket\n\
+             ACTION: implement: <ticket-id>    — code the ticket NOW (DEV runs, writes code, tests)\n\
              ACTION: deploy                     — build & run the app now (docker compose up)\n\
              ACTION: merge_queue                — SA merges every green open PR right now\n\
              ACTION: none                       — just talking / asking\n\n\
+             For `implement:`, only use it when the human explicitly says \"code it\", \"implement\", \
+             \"build it\", \"do it\", \"làm đi\" — never auto-implement. The DEV runs and writes real code.\n\
              For a real decision that needs the team (should we build X? which approach?), prefer \
              `discuss:` so PO and SA debate and the SM decides. Set a sensible priority when you \
              file work.\n\
@@ -135,7 +175,11 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             return Ok(());
         }
         let sprint = self.sprint_number().await;
-        if lower.starts_with("arch_review") {
+        if let Some(rest) = strip_kw(a, "new_project") {
+            self.new_project(rest).await;
+        } else if let Some(rest) = strip_kw(a, "import") {
+            self.import_project(rest).await;
+        } else if lower.starts_with("arch_review") {
             let uc = super::RunArchitectureAuditUseCase::new(
                 Arc::clone(&self.store),
                 Arc::clone(&self.engine),
@@ -170,12 +214,18 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
                 .with_language(self.lang);
                 let _ = uc.execute(rest).await;
             }
+        } else if let Some(rest) = strip_kw(a, "sa_design") {
+            self.design_ticket(rest.trim()).await;
         } else if let Some(rest) = strip_kw(a, "feature") {
             self.file_ticket(coxagent_domain::TicketType::Feature, rest, "PO")
                 .await;
         } else if let Some(rest) = strip_kw(a, "bug") {
             self.file_ticket(coxagent_domain::TicketType::Bug, rest, "TEST")
                 .await;
+        } else if let Some(rest) = strip_kw(a, "implement") {
+            self.implement_ticket(rest).await;
+        } else if let Some(rest) = strip_kw(a, "test") {
+            self.test_ticket(rest.trim()).await;
         } else if let Some(rest) = strip_kw(a, "priority") {
             self.reprioritize(rest).await;
         } else if lower.starts_with("deploy") {
@@ -192,6 +242,237 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             }
         }
         Ok(())
+    }
+
+    /// Run the DEV agent for this specific ticket. Uses the engine directly
+    /// to code a single ticket (the chat-requested implementation).
+    async fn implement_ticket(&self, rest: &str) {
+        use coxagent_domain::TicketId;
+        let tid_s = rest.trim();
+        let Ok(tid) = TicketId::new(tid_s) else {
+            let msg = if self.lang.is_vi() {
+                format!("{tid_s} không phải ticket ID hợp lệ.")
+            } else {
+                format!("{tid_s} is not a valid ticket ID.")
+            };
+            self.post("DEV-BUG", &msg).await;
+            return;
+        };
+        // Check the ticket exists and has a design
+        let Ok(state) = self.store.load().await else {
+            return;
+        };
+        let Some(_ticket) = state.ticket(&tid) else {
+            let msg = if self.lang.is_vi() {
+                format!("❌ Ticket {tid} không tồn tại.")
+            } else {
+                format!("❌ Ticket {tid} does not exist.")
+            };
+            self.post("DEV-BUG", &msg).await;
+            return;
+        };
+        let announce = if self.lang.is_vi() {
+            format!("🔨 Đang code ticket {tid}... (DEV đang làm việc, đợi chút)")
+        } else {
+            format!("🔨 Implementing ticket {tid}... (DEV is working, hold tight)")
+        };
+        self.post("DEV-FEATURE", &announce).await;
+
+        // Build the DEV prompt manually — same as RunDevUseCase but without the
+        // full state-machine cycle (claim/release handled inline).
+        let memory = crate::prompts::team_memory_block(&state.decisions, &state.lessons);
+        let title = _ticket.title().to_owned();
+        let brief = super::run_dev::ticket_brief(Some(_ticket));
+        let fp = crate::prompts::focus_block(
+            &self.work_dir,
+            &format!("{title} {}", _ticket.design().technical.as_ref().map_or("", |d| d.approach.as_str())),
+        );
+        let rp = crate::prompts::repo_map_block(&self.work_dir, self.token_saver);
+
+        let request = crate::ports::outbound::AgentRequest {
+            role: coxagent_domain::Role::DevFeature,
+            system_prompt: crate::prompts::system_prompt(crate::prompts::DEV),
+            task_prompt: format!(
+                "Ticket {tid}: {title}\n{brief}\nImplement it now.{fp}{rp}{memory}"
+            ),
+            work_dir: self.work_dir.clone(),
+            timeout: std::time::Duration::from_secs(3600),
+        };
+        match self.engine.run(request).await {
+            Ok(outcome) if outcome.succeeded() => {
+                // Mark the ticket as done if possible
+                let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                    if let Some(t) = s.ticket_mut(&tid) {
+                        let _ = t.transition_to(coxagent_domain::Role::DevFeature, coxagent_domain::Status::Done);
+                    }
+                    Ok(())
+                }).await;
+                let done = if self.lang.is_vi() {
+                    format!("✅ Đã code xong ticket {tid}! DEV đã implement. Build & tests: {}", outcome.stdout.lines().last().unwrap_or("done"))
+                } else {
+                    format!("✅ Ticket {tid} implemented! DEV coded it. {}", outcome.stdout.lines().last().unwrap_or("done"))
+                };
+                self.post("DEV-FEATURE", &done).await;
+            }
+            Ok(outcome) => {
+                let msg = format!("❌ DEV failed on {tid}: {}", outcome.stderr.lines().last().unwrap_or("unknown error"));
+                self.post("DEV-BUG", &msg).await;
+            }
+            Err(e) => {
+                let msg = format!("❌ DEV engine error on {tid}: {e}");
+                self.post("DEV-BUG", &msg).await;
+            }
+        }
+    }
+
+    /// SA designs a single ticket from chat.
+    async fn design_ticket(&self, rest: &str) {
+        use coxagent_domain::TicketId;
+        let Ok(tid) = TicketId::new(rest) else { return };
+        let state = self.store.load().await.ok();
+        let title = state.as_ref().and_then(|s| s.ticket(&tid).map(|t| t.title().to_owned())).unwrap_or_default();
+        let _has_design = state.as_ref().and_then(|s| s.ticket(&tid)).is_some_and(|t| t.design().technical.is_some());
+        let memory = state.as_ref().map_or(String::new(), |s| crate::prompts::team_memory_block(&s.decisions, &s.lessons));
+        let announce = if self.lang.is_vi() {
+            format!("🎨 SA đang design ticket {tid}: {title}...")
+        } else {
+            format!("🎨 SA designing ticket {tid}: {title}...")
+        };
+        self.post("SA", &announce).await;
+
+        let fp = crate::prompts::focus_block(&self.work_dir, &title);
+        let rp = crate::prompts::repo_map_block(&self.work_dir, self.token_saver);
+        let request = crate::ports::outbound::AgentRequest {
+            role: coxagent_domain::Role::Sa,
+            system_prompt: crate::prompts::system_prompt(crate::prompts::SA),
+            task_prompt: format!("Design feature {tid}: {title}{fp}{rp}{memory}"),
+            work_dir: self.work_dir.clone(),
+            timeout: std::time::Duration::from_secs(1200),
+        };
+        match self.engine.run(request).await {
+            Ok(o) if o.succeeded() => {
+                // Parse SA output and attach design
+                if let Some(ref _s) = state {
+                    if let Ok(design) = serde_json::from_str::<serde_json::Value>(&o.stdout) {
+                        let td = coxagent_domain::TechnicalDesign {
+                            approach: design.get("approach").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
+                            files: design.get("files").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default(),
+                            api_contract: design.get("api_contract").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
+                            data_changes: design.get("data_changes").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
+                            test_plan: design.get("test_plan").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
+                        };
+                        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                            if let Some(t) = s.ticket_mut(&tid) {
+                                let _ = t.set_technical_design(coxagent_domain::Role::Sa, td.clone());
+                            }
+                            Ok(())
+                        }).await;
+                    }
+                }
+                let done = if self.lang.is_vi() {
+                    format!("✅ SA đã design xong ticket {tid}. Có thể dùng `ACTION: implement: {tid}` để code.")
+                } else {
+                    format!("✅ SA designed ticket {tid}. Use `ACTION: implement: {tid}` to code it.")
+                };
+                self.post("SA", &done).await;
+            }
+            _ => { self.post("SA", &format!("❌ SA failed on {tid}")).await; }
+        }
+    }
+
+    /// QA tests a deployed ticket from chat.
+    async fn test_ticket(&self, rest: &str) {
+        use coxagent_domain::TicketId;
+        let Ok(tid) = TicketId::new(rest) else { return };
+        self.post("TEST", &format!("🧪 QA testing ticket {tid}...")).await;
+        let state = self.store.load().await.ok();
+        let shipped = state.as_ref().map_or(String::new(), |s| crate::use_cases::run_test::shipped_block(s));
+        let memory = state.as_ref().map_or(String::new(), |s| crate::prompts::team_memory_block(&s.decisions, &s.lessons));
+        let request = crate::ports::outbound::AgentRequest {
+            role: coxagent_domain::Role::Test,
+            system_prompt: crate::prompts::system_prompt(crate::prompts::TEST),
+            task_prompt: format!(
+                "Test ticket {tid} and report bugs. Focus on this ticket's acceptance criteria first, then risk-based testing.{shipped}{memory}"
+            ),
+            work_dir: self.work_dir.clone(),
+            timeout: std::time::Duration::from_secs(1800),
+        };
+        match self.engine.run(request).await {
+            Ok(o) if o.succeeded() => {
+                if let Ok(bugs) = serde_json::from_str::<Vec<serde_json::Value>>(&o.stdout) {
+                    let adder = crate::use_cases::AddTicketUseCase::new(Arc::clone(&self.store));
+                    let mut filed = 0;
+                    for b in bugs {
+                        let title = b.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                        let desc = b.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                        let prio_str = b.get("priority").and_then(|v| v.as_str()).unwrap_or("medium");
+                        let cx_str = b.get("complexity").and_then(|v| v.as_str()).unwrap_or("small");
+                        if title.is_empty() { continue; }
+                        let _ = adder.execute(crate::use_cases::AddTicketInput {
+                            ticket_type: coxagent_domain::TicketType::Bug,
+                            title: title.to_owned(),
+                            description: desc.to_owned(),
+                            priority: parse_priority(prio_str).unwrap_or(coxagent_domain::Priority::Medium),
+                            complexity: match cx_str {
+                                "large" => coxagent_domain::Complexity::Large,
+                                "medium" => coxagent_domain::Complexity::Medium,
+                                _ => coxagent_domain::Complexity::Small,
+                            },
+                            has_ui: b.get("has_ui").and_then(|v| v.as_bool()).unwrap_or(false),
+                            acceptance_criteria: vec![],
+                        }).await.ok();
+                        filed += 1;
+                    }
+                    let done = if filed > 0 {
+                        format!("🧪 QA tested {tid} — filed {filed} bug(s)")
+                    } else {
+                        format!("✅ QA tested {tid} — no bugs found!")
+                    };
+                    self.post("TEST", &done).await;
+                }
+            }
+            _ => { self.post("TEST", &format!("❌ TEST failed on {tid}")).await; }
+        }
+    }
+
+    /// Create a new project from scratch via chat: `<name> :: <alias>`
+    async fn new_project(&self, rest: &str) {
+        let parts: Vec<&str> = rest.splitn(2, "::").map(|s| s.trim()).collect();
+        let name = parts.first().unwrap_or(&"").to_string();
+        let alias = parts.get(1).map(|s| s.to_string()).filter(|s| !s.is_empty());
+        if name.is_empty() {
+            self.post("SM", "Usage: new_project: Project Name :: ALIAS").await;
+            return;
+        }
+        self.post("SM", &format!("🆕 Creating project '{}'...", name)).await;
+        let result = match &self.new_project_fn {
+            Some(f) => f(name, alias),
+            None => Err("Project creation not wired (run coxagent hub directly)".into()),
+        };
+        match result {
+            Ok(msg) => { self.post("SM", &msg).await; }
+            Err(e) => { self.post("SM", &format!("❌ Failed: {e}")).await; }
+        }
+    }
+
+    async fn import_project(&self, rest: &str) {
+        let parts: Vec<&str> = rest.splitn(3, "::").map(|s| s.trim()).collect();
+        let path = parts.first().unwrap_or(&"").to_string();
+        let name = parts.get(1).unwrap_or(&"").to_string();
+        let alias = parts.get(2).map(|s| s.to_string()).filter(|s| !s.is_empty());
+        if path.is_empty() || name.is_empty() {
+            self.post("SM", "Usage: import: /path/to/codebase :: Project Name :: ALIAS").await;
+            return;
+        }
+        self.post("SM", &format!("📂 Importing '{}' from {path}...", name)).await;
+        let result = match &self.import_project_fn {
+            Some(f) => f(path, name, alias),
+            None => Err("Project import not wired (run coxagent hub directly)".into()),
+        };
+        match result {
+            Ok(msg) => { self.post("SM", &msg).await; }
+            Err(e) => { self.post("SM", &format!("❌ Failed: {e}")).await; }
+        }
     }
 
     /// Reprioritise an existing ticket from chat: `<id> :: <level>` (or space).
@@ -397,7 +678,18 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             .iter()
             .filter(|t| t.ticket_type() == TicketType::Bug && t.status() == Status::Open)
             .count();
-        let mut out = String::from("Project status:\n");
+        let mut out = String::new();
+
+        // ── Project context (goal, stack, scope, constraints) ──
+        if let Some(ref ctx) = self.context {
+            if !ctx.trim().is_empty() {
+                out.push_str("Project context (goal, stack, scope, constraints):\n");
+                out.push_str(ctx);
+                out.push_str("\n\n");
+            }
+        }
+
+        out.push_str("Project status:\n");
         if let Some(sp) = &s.sprint {
             let _ = writeln!(out, "- Sprint #{} — goal: {}", sp.number, sp.goal);
         }
@@ -413,6 +705,19 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             "(The app auto-deploys via docker compose after DEV each cycle; you can also deploy \
              on request with ACTION: deploy.)\n",
         );
+        // Open backlog so the agent knows what's there and can avoid duplicates.
+        let pending: Vec<_> = s
+            .tickets
+            .iter()
+            .filter(|t| matches!(t.status(), Status::Pending | Status::Ready | Status::Open))
+            .take(10)
+            .collect();
+        if !pending.is_empty() {
+            out.push_str("Open tickets (don't file duplicates):\n");
+            for t in pending {
+                let _ = writeln!(out, "- {} [{:?}] {} ({:?})", t.id(), t.ticket_type(), t.title(), t.priority());
+            }
+        }
         if !s.decisions.is_empty() {
             out.push_str("Team decisions/conventions (honour these):\n");
             for d in s.decisions.iter().rev().take(6).rev() {
@@ -533,6 +838,6 @@ fn split_action(raw: &str) -> (String, String) {
             let body: Vec<&str> = raw.lines().take(i).collect();
             return (body.join("\n"), rest.trim().to_owned());
         }
-    }
+     }
     (raw.to_owned(), String::new())
 }

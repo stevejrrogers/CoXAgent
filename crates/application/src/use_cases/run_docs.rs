@@ -20,6 +20,7 @@ pub struct RunDocsUseCase<S: StateStorePort, E: AgentEnginePort> {
     work_dir: PathBuf,
     worker: String,
     phase: Option<crate::use_cases::runner::PhaseReporter>,
+    context: Option<String>,
 }
 
 impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
@@ -31,7 +32,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
             work_dir,
             worker: String::new(),
             phase: None,
+            context: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_context(mut self, context: Option<String>) -> Self {
+        self.context = context;
+        self
     }
 
     /// Set this runner's identity (`account@host`) so the DOCS stage is claimed
@@ -98,12 +106,25 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
             .collect();
 
         let _choice = self.config.engine.resolve(Role::Docs);
+        let context_block = self
+            .context
+            .as_deref()
+            .filter(|c| !c.trim().is_empty())
+            .map(|c| {
+                format!("\n\n## Project context (goal, stack — doc within this framing):\n{c}\n")
+            })
+            .unwrap_or_default();
+        let repo_map =
+            prompts::repo_map_block(&self.work_dir, self.config.workflow.token_saver);
         let outcome = self
             .engine
             .run(AgentRequest {
                 role: Role::Docs,
                 system_prompt: prompts::system_prompt(prompts::DOCS),
-                task_prompt: build_docs_prompt(&id, &title, space, &existing_subs),
+                task_prompt: format!(
+                    "{}{context_block}{repo_map}",
+                    build_docs_prompt(&id, &title, space, &existing_subs)
+                ),
                 work_dir: self.work_dir.clone(),
                 timeout: Duration::from_secs(900),
             })

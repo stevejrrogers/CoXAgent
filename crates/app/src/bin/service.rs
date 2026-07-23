@@ -13,6 +13,15 @@ async fn main() -> ExitCode {
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
+    // When the hub server spawns command-wrapping shims, they pipe tool
+    // output through `{exe} compress --cmd <tool>`. The `cox-all` binary
+    // (this entrypoint) needs to recognise that subcommand and delegate to
+    // the CLI dispatcher — otherwise it would try to start another hub
+    // server and fail with "Address already in use".
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(|s| s.as_str()) == Some("compress") {
+        return coxagent_app::cli_main().await;
+    }
     let role = match name.as_str() {
         "cox-gateway" => "gateway",
         "cox-realtime" => "realtime",

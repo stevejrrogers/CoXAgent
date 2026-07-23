@@ -69,10 +69,10 @@ impl AuthRole {
         self.can_write() || matches!(self, Self::Reviewer)
     }
 
-    /// Whether this role may create chat channels: Admin and the lead tier.
+    /// Whether this role may create chat channels: Super, Admin, and the lead tier.
     #[must_use]
     pub fn can_create_channel(self) -> bool {
-        matches!(self, Self::Admin) || self.is_lead()
+        matches!(self, Self::Super | Self::Admin) || self.is_lead()
     }
 
     /// Whether this role may access management surfaces — project Settings and

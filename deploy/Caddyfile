@@ -1,5 +1,4 @@
-# Automatic HTTPS (Let's Encrypt) for your domain, reverse-proxying the app.
-# WebSockets (chat + calls signaling) are proxied transparently.
-{$DOMAIN} {
+# Local dev: plain HTTP, no TLS.
+:80 {
 	reverse_proxy app:4000
 }

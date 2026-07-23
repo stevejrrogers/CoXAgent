@@ -36,6 +36,7 @@ pub struct RunSaUseCase<S: StateStorePort, E: AgentEnginePort> {
     work_dir: PathBuf,
     worker: String,
     phase: Option<crate::use_cases::runner::PhaseReporter>,
+    context: Option<String>,
 }
 
 impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
@@ -47,7 +48,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             work_dir,
             worker: String::new(),
             phase: None,
+            context: None,
         }
+    }
+
+    /// Attach the project context (`project_context.md`) so the SA understands
+    /// the goal, stack, scope, and constraints before designing.
+    #[must_use]
+    pub fn with_context(mut self, context: Option<String>) -> Self {
+        self.context = context;
+        self
     }
 
     /// Set this runner's identity (`account@host`) so the SA stage is claimed
@@ -166,11 +176,22 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
 
     fn build_request(&self, id: &TicketId, title: &str, memory: &str) -> AgentRequest {
         let _choice = self.config.engine.resolve(Role::Sa);
+        let context_block = self
+            .context
+            .as_deref()
+            .filter(|c| !c.trim().is_empty())
+            .map(|c| {
+                format!(
+                    "\n\n## Project context (goal, stack, scope, constraints — design within this):\n{c}\n"
+                )
+            })
+            .unwrap_or_default();
+        let stack = prompts::stack_constraints(&self.config.architecture);
         AgentRequest {
             role: Role::Sa,
             system_prompt: prompts::system_prompt(prompts::SA),
             task_prompt: format!(
-                "Design feature {id}: {title}{}{}{memory}",
+                "Design feature {id}: {title}{context_block}{stack}{}{}{memory}",
                 prompts::focus_block(&self.work_dir, title),
                 prompts::repo_map_block(&self.work_dir, self.config.workflow.token_saver),
             ),

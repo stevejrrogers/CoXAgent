@@ -36,6 +36,7 @@ pub struct RunPdUseCase<S: StateStorePort, E: AgentEnginePort> {
     work_dir: PathBuf,
     worker: String,
     phase: Option<crate::use_cases::runner::PhaseReporter>,
+    context: Option<String>,
 }
 
 impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
@@ -47,7 +48,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
             work_dir,
             worker: String::new(),
             phase: None,
+            context: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_context(mut self, context: Option<String>) -> Self {
+        self.context = context;
+        self
     }
 
     /// Set this runner's identity (`account@host`) so the PD stage is claimed
@@ -153,10 +161,22 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
 
     fn build_request(&self, id: &TicketId, title: &str, memory: &str) -> AgentRequest {
         let _choice = self.config.engine.resolve(Role::Pd);
+        let context_block = self
+            .context
+            .as_deref()
+            .filter(|c| !c.trim().is_empty())
+            .map(|c| {
+                format!("\n\n## Project context (goal, stack, scope, design system — stay consistent):\n{c}\n")
+            })
+            .unwrap_or_default();
         AgentRequest {
             role: Role::Pd,
             system_prompt: prompts::system_prompt(prompts::PD),
-            task_prompt: format!("Design the UX for feature {id}: {title}{memory}"),
+            task_prompt: format!(
+                "Design the UX for feature {id}: {title}{context_block}{memory}{}{}",
+                prompts::focus_block(&self.work_dir, title),
+                prompts::repo_map_block(&self.work_dir, self.config.workflow.token_saver),
+            ),
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(1200),
         }
