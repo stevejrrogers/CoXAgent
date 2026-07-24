@@ -5454,6 +5454,16 @@ async fn syschat_socket(mut socket: WebSocket, app: AppState, user: String) {
                     }
                     continue;
                 }
+                // Typing indicators: broadcast to other users, don't persist.
+                if parsed.as_ref().and_then(|v| v.get("op")).and_then(|o| o.as_str()) == Some("typing") {
+                    if let Some(mut v) = parsed.clone() {
+                        if let Some(obj) = v.as_object_mut() {
+                            obj.insert("user".to_owned(), serde_json::Value::String(user.clone()));
+                            let _ = app.syschat.tx.send(v.to_string());
+                        }
+                    }
+                    continue;
+                }
                 let body = parsed.as_ref()
                     .and_then(|v| v.get("body").and_then(|b| b.as_str()).map(str::to_owned))
                     .unwrap_or_else(|| text.clone());

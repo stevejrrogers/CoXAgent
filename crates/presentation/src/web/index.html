@@ -3408,7 +3408,7 @@ function updateModeBadge(){
 }
 // Central handler for every incoming chat message (live socket or fallback).
 function onChatIncoming(m){
-  if(m.op==="typing"){TYPING.set(m.user,Date.now());renderTyping();return;}
+  if(m.op==="typing"){if(m.user&&m.user!==ME?.username){TYPING.set(m.user,Date.now());renderTyping();}return;}
   if(m.op==="status"){/* status broadcast handled elsewhere */return;}
   if(m.op==="edit"){const idx=CHAT.findIndex(x=>x.id===m.msg.id);if(idx>=0){CHAT[idx].body=m.msg.body;CHAT[idx].edited=m.msg.edited;renderChatList(true);}return;}
   if(m.op==="delete"){const idx=CHAT.findIndex(x=>x.id===m.msg.id);if(idx>=0){CHAT[idx].deleted=true;CHAT[idx].body="";renderChatList(true);}return;}
