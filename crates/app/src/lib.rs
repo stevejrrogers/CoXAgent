@@ -800,7 +800,23 @@ pub async fn operator_main(
 ///
 /// # Errors
 /// Returns an error when the registry can't be read or the port can't bind.
-pub async fn run_hub(registry: &Path, port: u16) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    // If the requested port is in use, scan upward for a free one so the hub
+    // never fails to start — especially important when the Docker stack (which
+    // uses port 4000 internally) and the desktop app share the same host.
+    {
+        let mut free = false;
+        for _ in 0..50 {
+            match std::net::TcpListener::bind(("127.0.0.1", port)) {
+                Ok(_) => { free = true; break; }
+                Err(_) => port += 1,
+            }
+        }
+        if !free {
+            return Err(format!("no free port found starting at {port}").into());
+        }
+    }
+    tracing::info!("hub binding to port {port}");
     #[derive(serde::Deserialize)]
     struct Entry {
         id: String,
@@ -1067,6 +1083,23 @@ fn assign_host_port(
         }
     }
     let _ = base; // reserved for future host-wide allocation policy
+    // Also exclude ports published by Docker containers so a new project never
+    // picks a port already serving another app.
+    if let Ok(out) = std::process::Command::new("docker")
+        .args(["ps", "--format", "{{.Ports}}"])
+        .output()
+    {
+        let text = String::from_utf8_lossy(&out.stdout);
+        for pair in text.split_whitespace() {
+            if let Some((host, _)) = pair.split_once("->") {
+                if let Some((_, hp)) = host.rsplit_once(':') {
+                    if let Ok(p) = hp.parse::<u16>() {
+                        used.insert(p);
+                    }
+                }
+            }
+        }
+    }
     let port = (PORT_BASE..PORT_BASE + 500)
         .find(|p| !used.contains(p))
         .unwrap_or(PORT_BASE);
