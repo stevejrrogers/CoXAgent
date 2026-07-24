@@ -6051,7 +6051,6 @@ function cgRenderGraph(box,rawNodes,rawLinks){
   const nodes=rawNodes.filter(n=>keepIds.has(n.id)).map(n=>({...n,x:cx+(Math.random()-.5)*W*.6,y:cy+(Math.random()-.5)*H*.6,vx:0,vy:0}));
   const idx={};nodes.forEach((n,i)=>idx[n.id]=i);
   const links=rawLinks.filter(l=>idx[l.source]!=null&&idx[l.target]!=null).map(l=>({s:idx[l.source],t:idx[l.target]}));
-  const deg={};links.forEach(l=>{deg[l.s]=(deg[l.s]||0)+1;deg[l.t]=(deg[l.t]||0)+1;});
   for(let it=0;it<220;it++){
     const k=it<160?1:.4;
     for(let i=0;i<nodes.length;i++){let fx=0,fy=0;

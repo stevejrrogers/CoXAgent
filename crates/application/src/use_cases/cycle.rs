@@ -109,6 +109,8 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     /// This runner's identity (`account@host`) — recorded as the ticket claim
     /// owner so concurrent runners on a shared backlog never collide.
     worker: String,
+    /// Last scrum discussion topic — skip duplicate discussions.
+    last_discussion_topic: Mutex<String>,
 }
 
 impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
@@ -133,6 +135,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             forge: None,
             phase: None,
             worker: String::new(),
+            last_discussion_topic: Mutex::new(String::new()),
         }
     }
 
@@ -2850,6 +2853,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         else {
             return;
         };
+        // Skip if we discussed the exact same topic last cycle — prevents
+        // duplicate noise when the trigger condition persists across cycles.
+        {
+            let mut last = self.last_discussion_topic.lock().unwrap();
+            if *last == topic {
+                return;
+            }
+            *last = topic.clone();
+        }
         self.report("SM", "scrum discussion");
         let uc = crate::use_cases::RunDiscussionUseCase::new(
             Arc::clone(&self.store),
