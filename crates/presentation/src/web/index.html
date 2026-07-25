@@ -166,7 +166,16 @@
   .term-pane{position:absolute;inset:8px}
   .term-pane[hidden]{display:none}
   .term-pane .xterm{height:100%}
-  .cg-graph{background:var(--card);border:1px solid var(--border);border-radius:10px;overflow:hidden;cursor:grab}
+  /* Jarvis-style HUD: deep-space bg, grid, sweep, glow */
+  .cg-graph{position:relative;border:1px solid #164e63;border-radius:12px;overflow:hidden;cursor:grab;
+    background:radial-gradient(ellipse at 50% 35%,#0b1a2e 0%,#060b14 70%,#04070d 100%);
+    box-shadow:inset 0 0 60px rgba(34,211,238,.05),0 0 24px rgba(34,211,238,.07)}
+  .cg-graph::before{content:"";position:absolute;inset:0;pointer-events:none;
+    background:linear-gradient(rgba(56,189,248,.045) 1px,transparent 1px),linear-gradient(90deg,rgba(56,189,248,.045) 1px,transparent 1px);
+    background-size:36px 36px}
+  .cg-graph::after{content:"";position:absolute;top:0;bottom:0;left:-140px;width:120px;pointer-events:none;
+    background:linear-gradient(90deg,transparent,rgba(34,211,238,.06),transparent);animation:cgsweep 7s linear infinite}
+  @keyframes cgsweep{to{left:100%}}
   .cg-graph:active{cursor:grabbing}
   .cg-hubs{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px}
   .cg-hub{display:inline-flex;align-items:center;gap:6px;background:var(--card);border:1px solid var(--border2);border-radius:20px;padding:5px 12px;color:var(--muted);font-family:ui-monospace,monospace;font-size:11.5px;cursor:pointer}
@@ -176,12 +185,20 @@
   .cg-leg{display:inline-flex;align-items:center;gap:5px}
   .cg-leg .sdot{width:8px;height:8px;border-radius:50%;display:inline-block}
   .cg-card{background:var(--card);border:1px solid var(--accent);border-radius:10px;padding:11px 13px;margin-top:10px;animation:cmpop .15s ease}
-  .cg-svg{width:100%;height:auto;display:block}
-  .cg-edges line{stroke:var(--border2);stroke-width:1}
-  .cg-edges line.hot{stroke:var(--accent2);stroke-width:2}
-  .cgn{cursor:default;transition:opacity .1s} .cgn.dim{opacity:.18}
-  .cgn circle{stroke:var(--card);stroke-width:1.5}
-  .cgl{font-size:9px;fill:var(--muted);font-family:ui-monospace,Menlo,monospace;pointer-events:none}
+  .cg-svg{width:100%;height:auto;display:block;position:relative}
+  .cg-edges path{fill:none;stroke:rgba(94,234,212,.15);stroke-width:1}
+  .cg-edges path.hot{stroke:url(#cgHot);stroke-width:2;stroke-dasharray:6 5;animation:cgflow .5s linear infinite;
+    filter:drop-shadow(0 0 3px rgba(34,211,238,.8))}
+  @keyframes cgflow{to{stroke-dashoffset:-11}}
+  .cgn{cursor:default;transition:opacity .15s} .cgn.dim{opacity:.12}
+  .cg-core{stroke:rgba(255,255,255,.35);stroke-width:1}
+  .cg-ring{fill:none;stroke-width:1;opacity:.5;stroke-dasharray:4 6;animation:cgspin 14s linear infinite;
+    transform-box:fill-box;transform-origin:center}
+  @keyframes cgspin{to{transform:rotate(360deg)}}
+  .cg-pulse{fill:none;stroke-width:1.5;animation:cgpulse 2.6s ease-out infinite;transform-box:fill-box;transform-origin:center}
+  @keyframes cgpulse{0%{transform:scale(1);opacity:.7}100%{transform:scale(2.4);opacity:0}}
+  .cgl{font-size:9px;fill:#9bd7f2;font-family:ui-monospace,Menlo,monospace;pointer-events:none;letter-spacing:.4px;
+    paint-order:stroke;stroke:rgba(4,10,18,.85);stroke-width:2.5px}
   .cgi-list{margin-top:12px;max-height:62vh;overflow:auto;display:flex;flex-direction:column;gap:10px}
   .cgi-file{border:1px solid var(--border);border-radius:9px;overflow:hidden}
   .cgi-fp{background:var(--card2);padding:7px 11px;font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--text);display:flex;align-items:center;gap:6px}
@@ -6182,27 +6199,48 @@ function cgRenderGraph(box,rawNodes,rawLinks){
   const keepIds=new Set(
     rawNodes.map(n=>[n.id,(deg[n.id]||0)]).sort((a,b)=>b[1]-a[1]).slice(0,MAX_NODES).map(x=>x[0])
   );
-  const nodes=rawNodes.filter(n=>keepIds.has(n.id)).map(n=>({...n,x:cx+(Math.random()-.5)*W*.6,y:cy+(Math.random()-.5)*H*.6,vx:0,vy:0}));
+  const nodes=rawNodes.filter(n=>keepIds.has(n.id)).map(n=>({...n,x:cx+(Math.random()-.5)*W*.6,y:cy+(Math.random()-.5)*H*.6,vx:0,vy:0,ph:Math.random()*Math.PI*2,sp:.4+Math.random()*.5}));
   const idx={};nodes.forEach((n,i)=>idx[n.id]=i);
   const links=rawLinks.filter(l=>idx[l.source]!=null&&idx[l.target]!=null).map(l=>({s:idx[l.source],t:idx[l.target]}));
   for(let it=0;it<220;it++){
     const k=it<160?1:.4;
     for(let i=0;i<nodes.length;i++){let fx=0,fy=0;
       for(let j=0;j<nodes.length;j++){if(i===j)continue;let dx=nodes[i].x-nodes[j].x,dy=nodes[i].y-nodes[j].y;let d2=dx*dx+dy*dy+.01;let f=2600/d2;fx+=dx*f;fy+=dy*f;}
-      fx+=(cx-nodes[i].x)*.012;fy+=(cy-nodes[i].y)*.012;
+      fx+=(cx-nodes[i].x)*.022;fy+=(cy-nodes[i].y)*.022;
       nodes[i].vx=(nodes[i].vx+fx*k)*.82;nodes[i].vy=(nodes[i].vy+fy*k)*.82;}
     for(const l of links){const a=nodes[l.s],b=nodes[l.t];let dx=b.x-a.x,dy=b.y-a.y,dist=Math.sqrt(dx*dx+dy*dy)||1;let f=(dist-90)*.02*k;let ux=dx/dist*f,uy=dy/dist*f;a.vx+=ux;a.vy+=uy;b.vx-=ux;b.vy-=uy;}
-    for(const n of nodes){n.x+=n.vx;n.y+=n.vy;n.x=Math.max(24,Math.min(W-24,n.x));n.y=Math.max(20,Math.min(H-20,n.y));}
+    for(const n of nodes){n.x+=n.vx;n.y+=n.vy;n.x=Math.max(46,Math.min(W-46,n.x));n.y=Math.max(34,Math.min(H-34,n.y));}
   }
   const short=p=>p.split("/").slice(-1)[0];
   // Colour by top-level module: structure jumps out even in a one-language repo.
   const mods=[...new Set(nodes.map(n=>cgModule(n.id)))].sort();
-  const line=links.map(l=>`<line class="cge" data-s="${l.s}" data-t="${l.t}" x1="${nodes[l.s].x.toFixed(1)}" y1="${nodes[l.s].y.toFixed(1)}" x2="${nodes[l.t].x.toFixed(1)}" y2="${nodes[l.t].y.toFixed(1)}"/>`).join("");
-  const circ=nodes.map((n,i)=>{const r=Math.max(4,Math.min(14,4+Math.sqrt(deg[i]||0)*2.2));const col=cgModColor(mods,cgModule(n.id));
-    const showLabel=(deg[i]||0)>=2;
-    return `<g class="cgn" data-i="${i}" data-path="${esc(n.id)}" transform="translate(${n.x.toFixed(1)},${n.y.toFixed(1)})"><title>${esc(n.id)} · ${n.symbols} symbols · ${deg[i]||0} links</title>
-      <circle r="${r.toFixed(1)}" fill="${col}"/>${showLabel?`<text x="${(r+3).toFixed(1)}" y="3" class="cgl">${esc(short(n.id))}</text>`:''}</g>`;}).join("");
-  box.innerHTML=`<svg viewBox="0 0 ${W} ${H}" class="cg-svg"><g class="cg-view"><g class="cg-edges">${line}</g><g class="cg-nodes">${circ}</g></g></svg>`;
+  // Curved edge: quadratic through a perpendicular-offset midpoint.
+  const edgeD=(a,b)=>{const mx=(a.x+b.x)/2,my=(a.y+b.y)/2,dx=b.x-a.x,dy=b.y-a.y,k=.14;
+    return `M${a.x.toFixed(1)},${a.y.toFixed(1)} Q${(mx-dy*k).toFixed(1)},${(my+dx*k).toFixed(1)} ${b.x.toFixed(1)},${b.y.toFixed(1)}`;};
+  const line=links.map(l=>`<path class="cge" data-s="${l.s}" data-t="${l.t}" d="${edgeD(nodes[l.s],nodes[l.t])}"/>`).join("");
+  // NOTE: degree is keyed by node id (path), not index — the old deg[i] lookup
+  // silently returned undefined, flattening every node to the minimum size.
+  const circ=nodes.map((n,i)=>{const dg=deg[n.id]||0;const r=Math.max(5,Math.min(15,5+Math.sqrt(dg)*2.2));const col=cgModColor(mods,cgModule(n.id));
+    const hub=dg>=8,showLabel=dg>=2;
+    return `<g class="cgn" data-i="${i}" data-path="${esc(n.id)}" transform="translate(${n.x.toFixed(1)},${n.y.toFixed(1)})"><title>${esc(n.id)} · ${n.symbols} symbols · ${dg} links</title>
+      <circle class="cg-ring" r="${(r+4).toFixed(1)}" style="stroke:${col}"/>
+      ${hub?`<circle class="cg-pulse" r="${(r+4).toFixed(1)}" style="stroke:${col}"/>`:''}
+      <circle class="cg-core" r="${r.toFixed(1)}" fill="${col}" filter="url(#cgGlow)"/>
+      ${showLabel?`<text x="${(r+6).toFixed(1)}" y="3" class="cgl">${esc(short(n.id))}</text>`:''}</g>`;}).join("");
+  box.innerHTML=`<svg viewBox="0 0 ${W} ${H}" class="cg-svg"><defs>
+    <filter id="cgGlow" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="2.6" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <linearGradient id="cgHot" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#22d3ee"/><stop offset="1" stop-color="#a78bfa"/></linearGradient>
+  </defs><g class="cg-view"><g class="cg-edges">${line}</g><g class="cg-nodes">${circ}</g></g></svg>`;
+  // Alive: nodes breathe on a gentle per-node sine drift; edges follow.
+  if(window._cgRaf)cancelAnimationFrame(window._cgRaf);
+  const gEls=[...box.querySelectorAll(".cgn")],pEls=[...box.querySelectorAll(".cge")],t0=performance.now();
+  const tick=t=>{if(!box.isConnected){window._cgRaf=null;return;}
+    const s=(t-t0)/1000;
+    nodes.forEach((n,i)=>{n.dx=n.x+Math.sin(s*n.sp+n.ph)*2.2;n.dy=n.y+Math.cos(s*n.sp*.8+n.ph)*2.2;
+      gEls[i].setAttribute("transform",`translate(${n.dx.toFixed(1)},${n.dy.toFixed(1)})`);});
+    pEls.forEach((p,j)=>{const l=links[j];p.setAttribute("d",edgeD({x:nodes[l.s].dx,y:nodes[l.s].dy},{x:nodes[l.t].dx,y:nodes[l.t].dy}));});
+    window._cgRaf=requestAnimationFrame(tick);};
+  window._cgRaf=requestAnimationFrame(tick);
   const legend=document.getElementById("cg-legend");
   if(legend)legend.innerHTML=mods.map(m=>`<span class="cg-leg"><span class="sdot" style="background:${cgModColor(mods,m)}"></span>${esc(m)}</span>`).join("");
   // Hover highlights; click pins the highlight + shows an info card.
