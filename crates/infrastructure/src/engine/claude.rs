@@ -51,6 +51,10 @@ pub struct ClaudeEngine {
     binary: String,
     /// This project's CoXAgent MCP endpoint, when reachable — see [`crate::engine::McpAccess`].
     mcp: Option<crate::engine::McpAccess>,
+    /// Retry escalation ladder: models for `escalation_level` 1, 2, … (last
+    /// entry repeats). Default `["opus"]` — a failed attempt retries on the
+    /// strongest Claude tier.
+    escalation: Vec<String>,
 }
 
 impl ClaudeEngine {
@@ -60,7 +64,27 @@ impl ClaudeEngine {
             model: model.into(),
             binary: "claude".to_owned(),
             mcp: None,
+            escalation: vec!["opus".to_owned()],
         }
+    }
+
+    /// Override the retry escalation ladder (empty keeps the default).
+    #[must_use]
+    pub fn with_escalation(mut self, ladder: Vec<String>) -> Self {
+        if !ladder.is_empty() {
+            self.escalation = ladder;
+        }
+        self
+    }
+
+    /// The model for a given escalation level: 0 = the configured model;
+    /// n ≥ 1 = ladder rung n (clamped to the last rung).
+    fn model_for(&self, level: u8) -> &str {
+        if level == 0 || self.escalation.is_empty() {
+            return &self.model;
+        }
+        let idx = usize::from(level - 1).min(self.escalation.len() - 1);
+        &self.escalation[idx]
     }
 
     #[must_use]
@@ -165,7 +189,7 @@ impl AgentEnginePort for ClaudeEngine {
             .arg("--append-system-prompt")
             .arg(&system_prompt)
             .arg("--model")
-            .arg(&self.model)
+            .arg(self.model_for(request.escalation_level))
             // Stream-json + verbose emits every step (assistant text, tool_use,
             // tool_result) plus a final result carrying usage/cost — so we can
             // show the detailed work log, not just the answer.
@@ -570,6 +594,7 @@ mod tests {
                 task_prompt: "task".to_owned(),
                 work_dir: dir.clone(),
                 timeout: std::time::Duration::from_secs(10),
+                escalation_level: 0,
             })
             .await
             .expect("fake binary run succeeds");
@@ -649,5 +674,18 @@ mod tests {
         );
         assert_eq!(super::extract_session(raw).as_deref(), Some("abc-123"));
         assert_eq!(super::extract_session("not json\n{}"), None);
+    }
+
+    #[test]
+    fn escalation_ladder_picks_stronger_models_on_retries() {
+        let e = super::ClaudeEngine::new("sonnet");
+        assert_eq!(e.model_for(0), "sonnet");
+        assert_eq!(e.model_for(1), "opus", "default ladder escalates to opus");
+        assert_eq!(e.model_for(9), "opus", "clamps to the last rung");
+        let e = super::ClaudeEngine::new("sonnet")
+            .with_escalation(vec!["opus".into(), "opus-max".into()]);
+        assert_eq!(e.model_for(1), "opus");
+        assert_eq!(e.model_for(2), "opus-max");
+        assert_eq!(e.model_for(3), "opus-max");
     }
 }

@@ -83,6 +83,13 @@ pub struct EngineMapping {
     /// `fallbacks` still take priority (tried first).
     #[serde(default = "default_true")]
     pub auto_fallback: bool,
+    /// Escalation ladder: models to try on RETRIES of a failed ticket —
+    /// attempt 2 uses `escalation[0]`, attempt 3 uses `escalation[1]`, and so
+    /// on (the last entry repeats). Empty = each engine's built-in ladder
+    /// (claude → opus; opencode → its configured custom providers first,
+    /// then built-in providers).
+    #[serde(default)]
+    pub escalation: Vec<String>,
 }
 
 impl EngineMapping {
@@ -172,6 +179,11 @@ pub struct WorkflowConfig {
     /// Language the Scrum ceremonies and team feed speak (English or Vietnamese).
     #[serde(default)]
     pub language: Language,
+    /// Cost approval gate: when the estimated cost of a DEV run on a ticket
+    /// (rolling average per role) exceeds this many USD, the ticket is HELD
+    /// until a human approves it from the dashboard. `None` = no gate.
+    #[serde(default)]
+    pub approve_over_usd: Option<f64>,
 }
 
 fn default_max_open_prs() -> u32 {
@@ -214,6 +226,7 @@ impl Default for WorkflowConfig {
             webhook_url: None,
             token_saver: true,
             language: Language::En,
+            approve_over_usd: None,
         }
     }
 }
@@ -363,6 +376,7 @@ impl Default for Config {
                 per_role: HashMap::new(),
                 fallbacks: Vec::new(),
                 auto_fallback: true,
+                escalation: Vec::new(),
             },
             git: GitConfig::default(),
             workflow: WorkflowConfig::default(),

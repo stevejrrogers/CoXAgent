@@ -103,6 +103,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
             ),
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(600),
+            escalation_level: 0,
         };
 
         let outcome = self.engine.run(request).await?;

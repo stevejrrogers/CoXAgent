@@ -79,6 +79,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> AnalyzeAttachmentU
             work_dir: self.work_dir.clone(),
             // Reading an image and reasoning about it can take a while.
             timeout: Duration::from_secs(180),
+            escalation_level: 0,
         };
         let outcome = self.engine.run(request).await?;
         if !outcome.succeeded() {

@@ -92,6 +92,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunArchitectureAud
             task_prompt: task,
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(1200),
+            escalation_level: 0,
         };
         let raw = match self.engine.run(request).await {
             Ok(o) if o.succeeded() => o.stdout,
@@ -334,6 +335,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunDocsAuditUseCas
                 task_prompt: format!("Document ticket {id}: {title}"),
                 work_dir: self.work_dir.clone(),
                 timeout: Duration::from_secs(900),
+                escalation_level: 0,
             };
             let body = match self.engine.run(request).await {
                 Ok(o) if o.succeeded() => o.stdout.trim().to_owned(),

@@ -39,7 +39,8 @@ impl<E: AgentEnginePort> AgentEnginePort for MeteringEngine<E> {
                 m.input_tokens += u.input_tokens;
                 m.output_tokens += u.output_tokens;
                 m.runs += 1;
-                *m.by_role.entry(role).or_default() += u.cost_usd;
+                *m.by_role.entry(role.clone()).or_default() += u.cost_usd;
+                *m.runs_by_role.entry(role).or_default() += 1;
             }
         }
         Ok(outcome)
@@ -63,6 +64,7 @@ impl<E: AgentEnginePort> AgentEnginePort for MeteringEngine<E> {
                 m.output_tokens += u.output_tokens;
                 m.runs += 1;
                 *m.by_role.entry("resume".to_owned()).or_default() += u.cost_usd;
+                *m.runs_by_role.entry("resume".to_owned()).or_default() += 1;
             }
         }
         Ok(outcome)
@@ -114,6 +116,7 @@ mod tests {
             task_prompt: String::new(),
             work_dir: PathBuf::from("/tmp"),
             timeout: Duration::from_secs(1),
+            escalation_level: 0,
         }
     }
 

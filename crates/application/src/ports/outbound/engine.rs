@@ -16,6 +16,11 @@ pub struct AgentRequest {
     pub task_prompt: String,
     pub work_dir: PathBuf,
     pub timeout: Duration,
+    /// Retry escalation level: 0 = first attempt (engine's configured model);
+    /// 1+ = the ticket already failed that many times, so the engine should
+    /// run a STRONGER model from its escalation ladder. Engines without a
+    /// ladder ignore it.
+    pub escalation_level: u8,
 }
 
 /// Token/cost usage reported by an engine, when it exposes it.

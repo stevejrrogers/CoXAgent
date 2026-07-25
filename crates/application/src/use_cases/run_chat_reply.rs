@@ -306,6 +306,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             ),
             work_dir: self.work_dir.clone(),
             timeout: std::time::Duration::from_secs(3600),
+            escalation_level: 0,
         };
         match self.engine.run(request).await {
             Ok(outcome) if outcome.succeeded() => {
@@ -378,6 +379,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             task_prompt: format!("Design feature {tid}: {title}{fp}{rp}{memory}"),
             work_dir: self.work_dir.clone(),
             timeout: std::time::Duration::from_secs(1200),
+            escalation_level: 0,
         };
         match self.engine.run(request).await {
             Ok(o) if o.succeeded() => {
@@ -461,6 +463,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             ),
             work_dir: self.work_dir.clone(),
             timeout: std::time::Duration::from_secs(1800),
+            escalation_level: 0,
         };
         match self.engine.run(request).await {
             Ok(o) if o.succeeded() => {
@@ -747,6 +750,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             task_prompt: task,
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(600),
+            escalation_level: 0,
         };
         let _ = self.engine.run(request).await;
     }
@@ -865,6 +869,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             task_prompt: task.to_owned(),
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(120),
+            escalation_level: 0,
         };
         let outcome = self.engine.run(request).await.ok()?;
         outcome

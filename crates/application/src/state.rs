@@ -316,10 +316,28 @@ pub struct Spend {
     /// Cost attributed per agent role (e.g. `dev_feature`).
     #[serde(default)]
     pub by_role: std::collections::BTreeMap<String, f64>,
+    /// Engine runs per role — divides `by_role` into an average cost per run,
+    /// the basis of the pre-claim cost estimate for the approval gate.
+    #[serde(default)]
+    pub runs_by_role: std::collections::BTreeMap<String, u64>,
     /// Usage attributed per operator (`account@host`) — the SaaS per-user view,
     /// so each user's token spend is measurable even though they share a project.
     #[serde(default)]
     pub by_operator: std::collections::BTreeMap<String, OperatorSpend>,
+}
+
+impl Spend {
+    /// Average observed cost of one engine run for `role_key` (e.g.
+    /// `dev_feature`), or `None` before any metered run of that role.
+    #[must_use]
+    pub fn avg_role_cost(&self, role_key: &str) -> Option<f64> {
+        let runs = *self.runs_by_role.get(role_key)?;
+        if runs == 0 {
+            return None;
+        }
+        #[allow(clippy::cast_precision_loss)]
+        Some(self.by_role.get(role_key).copied().unwrap_or(0.0) / runs as f64)
+    }
 }
 
 /// One operator's slice of the spend, for per-user token accounting.
@@ -484,6 +502,19 @@ pub struct ProjectState {
     /// burning tokens forever; entries are dropped when the PR closes.
     #[serde(default)]
     pub pr_fix_attempts: std::collections::BTreeMap<u64, u32>,
+    /// Engine conversation id of the last fix run per PR — the next fix round
+    /// RESUMES that conversation (the agent still has the branch, the feedback
+    /// and its own changes in context) instead of starting cold. Dropped with
+    /// `pr_fix_attempts` when the PR closes.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub pr_sessions: std::collections::BTreeMap<u64, String>,
+    /// Tickets held for HUMAN cost approval: estimated run cost exceeded
+    /// `workflow.approve_over_usd`. Value = the estimate shown to the human.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub cost_holds: std::collections::BTreeMap<String, f64>,
+    /// Tickets a human approved to run despite the cost estimate.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub cost_approved: std::collections::BTreeSet<String>,
     /// True while the team is in merge-queue RECOVERY: the open-PR count blew
     /// past twice the WIP limit, so cycles do merge/conflict work only until
     /// the queue is back under the limit.
@@ -573,6 +604,9 @@ impl Default for ProjectState {
             sprint_goal: String::new(),
             last_digest_day: String::new(),
             pr_fix_attempts: std::collections::BTreeMap::new(),
+            pr_sessions: std::collections::BTreeMap::new(),
+            cost_holds: std::collections::BTreeMap::new(),
+            cost_approved: std::collections::BTreeSet::new(),
             drain_notice_sprint: 0,
             ticket_fail_attempts: std::collections::BTreeMap::new(),
             ticket_journal: std::collections::BTreeMap::new(),
@@ -1410,5 +1444,15 @@ mod alias_tests {
         );
         st.journal_note("T-1", "   ");
         assert_eq!(st.ticket_journal["T-1"].len(), 4, "blank notes ignored");
+    }
+
+    #[test]
+    fn avg_role_cost_divides_by_runs() {
+        let mut sp = super::Spend::default();
+        assert!(sp.avg_role_cost("dev_feature").is_none());
+        sp.by_role.insert("dev_feature".into(), 3.0);
+        sp.runs_by_role.insert("dev_feature".into(), 4);
+        let avg = sp.avg_role_cost("dev_feature").unwrap();
+        assert!((avg - 0.75).abs() < 1e-9);
     }
 }

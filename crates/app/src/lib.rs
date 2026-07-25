@@ -886,7 +886,9 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
             let base = base.clone();
             let registry_path = registry_path.clone();
             let auth = auth.clone();
-            Box::pin(async move { onboard_project(&base, &registry_path, req, auth.as_ref()).await })
+            Box::pin(
+                async move { onboard_project(&base, &registry_path, req, auth.as_ref()).await },
+            )
         }
     });
     let remover: coxagent_presentation::ProjectRemover = Arc::new({
@@ -909,6 +911,7 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
                 per_role: std::collections::HashMap::new(),
                 fallbacks: Vec::new(),
                 auto_fallback: true,
+                escalation: Vec::new(),
             },
             git: Default::default(),
             workflow: Default::default(),
@@ -1041,16 +1044,16 @@ async fn ensure_internal_mcp_token(
     use coxagent_application::auth::AuthRole;
     let label = format!("internal:mcp:{identity}");
     auth.revoke_token(&label).await; // drop any stale token from a prior run
-    // NOT AuthRole::Viewer: `auth_mw` (server.rs) gates every POST as a write
-    // unless the path is explicitly exempted, and /api/mcp isn't (it's the
-    // single JSON-RPC endpoint for both reads like search_symbols and writes
-    // like report_blocker, so the middleware can't tell them apart from the
-    // HTTP verb alone). Viewer.can_write() is false, so a Viewer-scoped
-    // token would get 403'd on every call, including read-only ones. `Be` is
-    // the lowest member-tier role that still satisfies can_write() — chosen
-    // arbitrarily among the member tier, since none of them map naturally to
-    // "the agent working this project" and MCP tool access doesn't
-    // distinguish between member sub-roles.
+                                     // NOT AuthRole::Viewer: `auth_mw` (server.rs) gates every POST as a write
+                                     // unless the path is explicitly exempted, and /api/mcp isn't (it's the
+                                     // single JSON-RPC endpoint for both reads like search_symbols and writes
+                                     // like report_blocker, so the middleware can't tell them apart from the
+                                     // HTTP verb alone). Viewer.can_write() is false, so a Viewer-scoped
+                                     // token would get 403'd on every call, including read-only ones. `Be` is
+                                     // the lowest member-tier role that still satisfies can_write() — chosen
+                                     // arbitrarily among the member tier, since none of them map naturally to
+                                     // "the agent working this project" and MCP tool access doesn't
+                                     // distinguish between member sub-roles.
     match auth.create_token(&label, AuthRole::Be).await {
         Some(secret) => Some(secret),
         None => {
@@ -1250,8 +1253,13 @@ fn build_failover(
     choice: &coxagent_application::config::EngineChoice,
     fallbacks: &[coxagent_application::config::EngineChoice],
     mcp: Option<&coxagent_infrastructure::engine::McpAccess>,
+    escalation: &[String],
 ) -> Result<FailoverEngine<AnyEngine>, Box<dyn std::error::Error>> {
-    let mut engines = vec![AnyEngine::from_choice(choice, mcp.cloned())?];
+    let mut engines = vec![AnyEngine::from_choice_with_escalation(
+        choice,
+        mcp.cloned(),
+        escalation,
+    )?];
     for fb in fallbacks {
         match AnyEngine::from_choice(fb, mcp.cloned()) {
             Ok(e) => engines.push(e),
@@ -1321,10 +1329,15 @@ fn build_engine(
     mcp: Option<coxagent_infrastructure::engine::McpAccess>,
 ) -> Result<BuiltEngine, Box<dyn std::error::Error>> {
     let fallbacks = effective_fallbacks(config);
-    let default = build_failover(&config.engine.default, &fallbacks, mcp.as_ref())?;
+    let default = build_failover(
+        &config.engine.default,
+        &fallbacks,
+        mcp.as_ref(),
+        &config.engine.escalation,
+    )?;
     let mut per_role = std::collections::HashMap::new();
     for (role, choice) in &config.engine.per_role {
-        match build_failover(choice, &fallbacks, mcp.as_ref()) {
+        match build_failover(choice, &fallbacks, mcp.as_ref(), &config.engine.escalation) {
             Ok(e) => {
                 tracing::info!(
                     "role {role:?} routed to {:?}({})",
@@ -1396,7 +1409,13 @@ async fn run_loop(
         .await
         .ok()
         .flatten();
-    let mcp = build_mcp_access(&config, auth.as_ref(), &pid, &format!("{pid}:{mcp_operator}")).await;
+    let mcp = build_mcp_access(
+        &config,
+        auth.as_ref(),
+        &pid,
+        &format!("{pid}:{mcp_operator}"),
+    )
+    .await;
     let (engine, meter) = build_engine(&config, logs_dir(state_dir), mcp)?;
     let sleep = std::time::Duration::from_secs(config.workflow.sleep_seconds);
 
@@ -1840,7 +1859,12 @@ mod mcp_auth_tests {
         };
         let audit: Arc<dyn coxagent_application::ports::outbound::AuditPort> =
             Arc::new(MemoryAuditSink::default());
-        tokio::spawn(coxagent_presentation::serve_full(vec![], port, audit, extras));
+        tokio::spawn(coxagent_presentation::serve_full(
+            vec![],
+            port,
+            audit,
+            extras,
+        ));
 
         let client = reqwest::Client::new();
         let health_url = format!("http://127.0.0.1:{port}/api/health");
@@ -1870,7 +1894,12 @@ mod mcp_auth_tests {
 
         // No credential at all: /api/mcp isn't in auth_mw's public-path
         // allowlist, so this must be rejected, not silently allowed.
-        let resp = client.post(&url).json(&tools_list_body()).send().await.expect("request");
+        let resp = client
+            .post(&url)
+            .json(&tools_list_body())
+            .send()
+            .await
+            .expect("request");
         assert_eq!(
             resp.status(),
             401,
@@ -1984,6 +2013,7 @@ mod live_claude_mcp_test {
                     .to_owned(),
                 work_dir: std::path::PathBuf::from("/Users/steverogers/Projects/CoXAgent"),
                 timeout: Duration::from_secs(120),
+                escalation_level: 0,
             })
             .await
             .expect("claude run");

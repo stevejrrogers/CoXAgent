@@ -20,6 +20,8 @@ pub struct OpencodeEngine {
     binary: String,
     /// This project's CoXAgent MCP endpoint, when reachable — see [`crate::engine::McpAccess`].
     mcp: Option<crate::engine::McpAccess>,
+    /// Retry escalation ladder (see `with_escalation` / `model_for`).
+    escalation: Vec<String>,
 }
 
 impl OpencodeEngine {
@@ -29,7 +31,35 @@ impl OpencodeEngine {
             model: model.into(),
             binary: "opencode".to_owned(),
             mcp: None,
+            escalation: Vec::new(),
         }
+    }
+
+    /// Override the retry escalation ladder. Empty = auto-detect from the
+    /// opencode config at run time (custom providers first, then built-ins).
+    #[must_use]
+    pub fn with_escalation(mut self, ladder: Vec<String>) -> Self {
+        self.escalation = ladder;
+        self
+    }
+
+    /// The model for an escalation level: 0 = configured model; n ≥ 1 walks
+    /// the ladder (configured, else detected from opencode's own config —
+    /// CUSTOM providers take priority over built-in ones, per house policy).
+    fn model_for(&self, level: u8, work_dir: &std::path::Path) -> String {
+        if level == 0 {
+            return self.model.clone();
+        }
+        let ladder = if self.escalation.is_empty() {
+            detected_escalation(work_dir, &self.model)
+        } else {
+            self.escalation.clone()
+        };
+        if ladder.is_empty() {
+            return self.model.clone();
+        }
+        let idx = usize::from(level - 1).min(ladder.len() - 1);
+        ladder[idx].clone()
     }
 
     /// Override the binary path (used by discovery / tests).
@@ -208,7 +238,7 @@ impl AgentEnginePort for OpencodeEngine {
         let mut cmd = crate::proc::low_priority(&self.binary);
         cmd.arg("run")
             .arg("--model")
-            .arg(&self.model)
+            .arg(self.model_for(request.escalation_level, &request.work_dir))
             .arg("--dangerously-skip-permissions")
             .arg("--dir")
             .arg(&request.work_dir)
@@ -448,6 +478,85 @@ fn estimate_tokens_raw(len: usize) -> u64 {
     (len as f64 / 3.8).ceil() as u64
 }
 
+/// Provider ids opencode ships with. Anything else defined under `provider`
+/// in an opencode config is a CUSTOM provider (own endpoint/npm package) and,
+/// per house policy, custom providers are the FIRST escalation choice.
+const BUILTIN_PROVIDERS: &[&str] = &[
+    "anthropic",
+    "openai",
+    "google",
+    "azure",
+    "amazon-bedrock",
+    "openrouter",
+    "github-copilot",
+    "opencode",
+    "xai",
+    "groq",
+    "mistral",
+    "deepseek",
+];
+
+/// Escalation candidates detected from opencode's own config files
+/// (`<work_dir>/opencode.json`, then `~/.config/opencode/opencode.json`):
+/// every configured `provider/model`, CUSTOM providers first, built-ins after,
+/// preserving config order; the currently-selected model is excluded.
+fn detected_escalation(work_dir: &std::path::Path, current: &str) -> Vec<String> {
+    let mut configs = Vec::new();
+    for path in [
+        work_dir.join("opencode.json"),
+        dirs_config().join("opencode").join("opencode.json"),
+    ] {
+        if let Ok(raw) = std::fs::read_to_string(&path) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+                configs.push(v);
+            }
+        }
+    }
+    escalation_from_configs(&configs, current)
+}
+
+fn dirs_config() -> std::path::PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME").map_or_else(
+        || {
+            std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_default()
+                .join(".config")
+        },
+        std::path::PathBuf::from,
+    )
+}
+
+/// Pure ordering: custom-provider models first, then built-in-provider models.
+fn escalation_from_configs(configs: &[serde_json::Value], current: &str) -> Vec<String> {
+    let mut custom = Vec::new();
+    let mut builtin = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for cfg in configs {
+        let Some(providers) = cfg.get("provider").and_then(serde_json::Value::as_object) else {
+            continue;
+        };
+        for (pid, pdef) in providers {
+            let Some(models) = pdef.get("models").and_then(serde_json::Value::as_object) else {
+                continue;
+            };
+            for model in models.keys() {
+                let full = format!("{pid}/{model}");
+                if full == current || !seen.insert(full.clone()) {
+                    continue;
+                }
+                if BUILTIN_PROVIDERS.contains(&pid.as_str()) {
+                    builtin.push(full);
+                } else {
+                    custom.push(full);
+                }
+            }
+        }
+    }
+    custom.extend(builtin);
+    custom
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -577,6 +686,7 @@ mod tests {
                 task_prompt: "task".to_owned(),
                 work_dir: dir.clone(),
                 timeout: std::time::Duration::from_secs(10),
+                escalation_level: 0,
             })
             .await
             .expect("fake binary run succeeds");
@@ -685,5 +795,29 @@ mod tests {
         let nested = "{\"type\":\"text\",\"part\":{\"sessionID\":\"ses_n\"}}\n";
         assert_eq!(super::extract_session(nested).as_deref(), Some("ses_n"));
         assert_eq!(super::extract_session("{}"), None);
+    }
+
+    #[test]
+    fn escalation_prefers_custom_providers_over_builtins() {
+        let cfg: serde_json::Value = serde_json::json!({
+            "provider": {
+                "anthropic": {"models": {"claude-opus": {}}},
+                "bizbrain": {
+                    "options": {"baseURL": "https://llm.bizbrain.local/v1"},
+                    "models": {"DeepSeek-V4-Pro": {}, "Qwen3.6-35B-A3B-thinking": {}}
+                }
+            }
+        });
+        let ladder = super::escalation_from_configs(&[cfg], "bizbrain/Qwen3.6-35B-A3B-thinking");
+        assert_eq!(
+            ladder,
+            vec!["bizbrain/DeepSeek-V4-Pro", "anthropic/claude-opus"],
+            "custom provider first, built-in after, current model excluded"
+        );
+    }
+
+    #[test]
+    fn escalation_empty_when_no_config() {
+        assert!(super::escalation_from_configs(&[], "x/y").is_empty());
     }
 }

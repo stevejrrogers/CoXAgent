@@ -127,6 +127,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
                 ),
                 work_dir: self.work_dir.clone(),
                 timeout: Duration::from_secs(900),
+                escalation_level: 0,
             })
             .await?;
         if !outcome.succeeded() {

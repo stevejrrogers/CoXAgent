@@ -4660,6 +4660,7 @@ async function showTicket(id){
   if(tech)h+=`<div class="mrow" style="display:block;border:none"><span class="lbl">Technical spec</span><pre>${esc(tech.approach)}\nfiles: ${esc((tech.files||[]).join(", "))}\napi: ${esc(tech.api_contract)}\ntest: ${esc(tech.test_plan)}</pre></div>`;
   if(ux)h+=`<div class="mrow" style="display:block;border:none"><span class="lbl">UI/UX spec</span><pre>${esc(ux.user_flow)}\nscreens: ${esc((ux.screens||[]).join(", "))}</pre></div>`;
   const canWork=["pending","ready","open"].includes(t.status);
+  if(t.cost_hold!=null&&!t.cost_approved)h+=`<div class="mrow" style="display:block;border:1px solid var(--amber);border-radius:9px;padding:10px 12px;background:color-mix(in srgb,var(--amber) 9%,transparent)"><span style="color:var(--amber);font-weight:700"><i class="ti ti-currency-dollar"></i> Held for cost approval</span><div style="font-size:12.5px;color:var(--muted);margin-top:4px">Estimated ~$${(+t.cost_hold).toFixed(2)}/run exceeds the approval gate. Agents will skip this ticket until you approve it.</div><button class="pri" style="margin-top:8px" onclick="approveCost('${t.id}')"><i class="ti ti-check"></i> Approve run</button></div>`;
   h+=`<div class="tk-actions">
     <button class="tk-btn" onclick="editTicket('${t.id}')"><i class="ti ti-edit"></i> Edit</button>
     ${canWork?`<button class="tk-btn go" onclick="workNext('${t.id}')"><i class="ti ti-player-play-filled"></i> Work on this next</button>`:''}
@@ -4670,6 +4671,7 @@ async function showTicket(id){
   body.innerHTML=h;
   renderTicketComments(t.id);}
 async function rejectTicket(id){try{await fetch(api("/ticket/"+id+"/reject"),{method:"POST"});close_("ov-ticket");}catch(e){}}
+async function approveCost(id){try{await fetch(api("/ticket/"+id+"/approve-cost"),{method:"POST"});toasty("Approved — agents may run "+id,"ok");showTicket(id);}catch(e){toasty("Approve failed","err");}}
 function editTicket(id){const t=(STATE.tickets||[]).find(x=>x.id===id);if(!t)return;
   const body=document.getElementById("ticket-body");
   body.innerHTML=`<span class="x" onclick="showTicket('${id}')"><i class="ti ti-x"></i></span>

@@ -243,6 +243,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             task_prompt: task,
             work_dir: self.work_dir.clone(),
             timeout: std::time::Duration::from_secs(1200),
+            escalation_level: 0,
         };
         let Ok(outcome) = self.engine.run(request).await else {
             return false;
@@ -652,6 +653,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             task_prompt: task,
             work_dir: self.work_dir.clone(),
             timeout: std::time::Duration::from_secs(600),
+            escalation_level: 0,
         };
         let outcome = self.engine.run(request).await.ok()?;
         if !outcome.succeeded() {
@@ -873,6 +875,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             task_prompt: task,
             work_dir: self.work_dir.clone(),
             timeout: std::time::Duration::from_secs(600),
+            escalation_level: 0,
         };
         let Ok(outcome) = self.engine.run(request).await else {
             return;
@@ -997,6 +1000,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             ),
             work_dir: self.work_dir.clone(),
             timeout: std::time::Duration::from_secs(90),
+            escalation_level: 0,
         };
         let Ok(outcome) = self.engine.run(request).await else {
             return;
@@ -1831,6 +1835,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 ),
                 work_dir: self.work_dir.clone(),
                 timeout: std::time::Duration::from_secs(300),
+                escalation_level: 0,
             };
             let Ok(o) = self.engine.run(request).await else {
                 continue;
@@ -1931,6 +1936,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             ),
             work_dir: self.work_dir.clone(),
             timeout: std::time::Duration::from_secs(900),
+            escalation_level: 0,
         };
         let out = match self.engine.run(request).await {
             Ok(o) if o.succeeded() => o.stdout.trim().to_owned(),
@@ -1956,6 +1962,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 Ok(()) => {
                     let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
                         s.pr_fix_attempts.remove(&pr.number);
+                        s.pr_sessions.remove(&pr.number);
                         Ok(())
                     })
                     .await;
@@ -2063,6 +2070,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 ),
                 work_dir: self.work_dir.clone(),
                 timeout: std::time::Duration::from_secs(900),
+                escalation_level: 0,
             };
             let out = match self.engine.run(request).await {
                 Ok(o) if o.succeeded() => o.stdout.trim().chars().take(1200).collect::<String>(),
@@ -2289,25 +2297,65 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 ));
             }
             let asks = asks.join("\n");
-            let request = crate::ports::outbound::AgentRequest {
-                role: coxagent_domain::Role::DevBug,
-                system_prompt: crate::prompts::system_prompt(crate::prompts::DEV),
-                task_prompt: format!(
-                    "Pull request #{} (branch `{}`) is blocked and YOU are unblocking the merge \
-                     queue.\n\n\
-                     WHAT TO FIX:\n{asks}\n\n\
-                     Do exactly this:\n\
-                     1. `git fetch origin && git checkout {} && git pull origin {}`\n\
-                     2. Address the items above — nothing more.\n\
-                     3. Run the tests/build to make sure nothing broke.\n\
-                     4. `git add -A && git commit -m \"fix: unblock PR #{}\"` \
-                        and `git push origin {}`.\n",
-                    pr.number, pr.head, pr.head, pr.head, pr.number, pr.head
-                ),
-                work_dir: self.work_dir.clone(),
-                timeout: std::time::Duration::from_secs(1800),
+            let task_prompt = format!(
+                "Pull request #{} (branch `{}`) is blocked and YOU are unblocking the merge \
+                 queue.\n\n\
+                 WHAT TO FIX:\n{asks}\n\n\
+                 Do exactly this:\n\
+                 1. `git fetch origin && git checkout {} && git pull origin {}`\n\
+                 2. Address the items above — nothing more.\n\
+                 3. Run the tests/build to make sure nothing broke.\n\
+                 4. `git add -A && git commit -m \"fix: unblock PR #{}\"` \
+                    and `git push origin {}`.\n",
+                pr.number, pr.head, pr.head, pr.head, pr.number, pr.head
+            );
+            // Round 2 RESUMES round 1's conversation when the engine supports
+            // it — the agent still has the branch and feedback in context.
+            let prior_session = self
+                .store
+                .load()
+                .await
+                .ok()
+                .and_then(|s| s.pr_sessions.get(&pr.number).cloned());
+            let resumed = match &prior_session {
+                Some(sid) => self
+                    .engine
+                    .resume_run(
+                        sid,
+                        &task_prompt,
+                        &self.work_dir,
+                        std::time::Duration::from_secs(1800),
+                    )
+                    .await
+                    .ok(),
+                None => None,
             };
-            let outcome = self.engine.run(request).await;
+            let outcome = match resumed {
+                Some(o) => Ok(o),
+                None => {
+                    let request = crate::ports::outbound::AgentRequest {
+                        role: coxagent_domain::Role::DevBug,
+                        system_prompt: crate::prompts::system_prompt(crate::prompts::DEV),
+                        task_prompt,
+                        work_dir: self.work_dir.clone(),
+                        timeout: std::time::Duration::from_secs(1800),
+                        // Each prior fix round escalates the model ladder.
+                        escalation_level: u8::try_from(attempts.min(3)).unwrap_or(3),
+                    };
+                    self.engine.run(request).await
+                }
+            };
+            // Remember this run's conversation for the next fix round.
+            if let Ok(o) = &outcome {
+                if let Some(sid) = o.session_id.clone() {
+                    let n = pr.number;
+                    let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+                        s.pr_sessions.insert(n, sid.clone());
+                        Ok(())
+                    })
+                    .await;
+                }
+            }
             // The engine may leave the checkout on the PR branch — always park
             // the shared work_dir back on the base branch for the next stage.
             if let Some(git) = &self.git {
@@ -2462,6 +2510,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 ),
                 work_dir: self.work_dir.clone(),
                 timeout: std::time::Duration::from_secs(1800),
+                escalation_level: 0,
             };
             let ok = matches!(self.engine.run(request).await, Ok(o) if o.succeeded());
             if let Some(git) = &self.git {
@@ -3004,6 +3053,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             ),
             work_dir: self.work_dir.clone(),
             timeout: std::time::Duration::from_secs(300),
+            escalation_level: 0,
         };
         let Ok(outcome) = self.engine.run(request).await else {
             return;
@@ -3079,6 +3129,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 state.spend.runs += m.runs;
                 for (role, cost) in std::mem::take(&mut m.by_role) {
                     *state.spend.by_role.entry(role).or_default() += cost;
+                }
+                for (role, n) in std::mem::take(&mut m.runs_by_role) {
+                    *state.spend.runs_by_role.entry(role).or_default() += n;
                 }
                 // Attribute this cycle's spend to the operator that ran it, so
                 // each user's token usage is measurable in a shared project.

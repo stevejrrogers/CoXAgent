@@ -160,6 +160,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             self.worker.clone()
         };
         let now = now_rfc3339();
+        // Cost approval gate: estimate this role's run cost from the rolling
+        // average; a ticket estimated above `approve_over_usd` is HELD for a
+        // human instead of silently burning the budget.
+        let role_key = match self.mode {
+            DevMode::Bug => "dev_bug",
+            DevMode::Feature => "dev_feature",
+        };
+        let estimate = state.spend.avg_role_cost(role_key);
+        let mut new_holds: Vec<(String, f64)> = Vec::new();
         let mut chosen = None;
         for cand in self.candidates(&state) {
             // Parked: a ticket that failed 3 times needs a human, not more tokens.
@@ -172,10 +181,35 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             {
                 continue;
             }
+            if let (Some(cap), Some(est)) = (self.config.workflow.approve_over_usd, estimate) {
+                if est > cap && !state.cost_approved.contains(cand.as_str()) {
+                    if !state.cost_holds.contains_key(cand.as_str()) {
+                        new_holds.push((cand.to_string(), est));
+                    }
+                    continue;
+                }
+            }
             if self.store.claim_ticket(&cand, &worker, &now).await? {
                 chosen = Some(cand);
                 break;
             }
+        }
+        if !new_holds.is_empty() {
+            let cap = self.config.workflow.approve_over_usd.unwrap_or_default();
+            let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+                for (id, est) in &new_holds {
+                    s.cost_holds.insert(id.clone(), *est);
+                    s.post_comment(
+                        "SM",
+                        &format!(
+                            "⏸️ {id} held for cost approval: estimated ~${est:.2}/run                              exceeds the ${cap:.2} gate. Approve it from the ticket to run."
+                        ),
+                        Some(id.clone()),
+                    );
+                }
+                Ok(())
+            })
+            .await;
         }
         let Some(id) = chosen else {
             return Ok(None);
@@ -257,6 +291,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                         task_prompt: follow_up,
                         work_dir: self.work_dir.clone(),
                         timeout: Duration::from_secs(1800),
+                        escalation_level: 0,
                     };
                     let _ = self.engine.run(repair).await;
                 }
@@ -289,8 +324,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         crate::ports::outbound::mutate_state(self.store.as_ref(), |state| {
             transition(state, &id_c, role, status)
                 .map_err(|e| PortError::Corrupt(e.to_string()))?;
-            // Done — the work journal served its purpose.
+            // Done — the work journal and any cost hold served their purpose.
             state.ticket_journal.remove(&id_c.to_string());
+            state.cost_holds.remove(&id_c.to_string());
+            state.cost_approved.remove(&id_c.to_string());
             let version = state.current_version.bumped(bump);
             state.current_version = version.clone();
             let title = state
@@ -414,6 +451,18 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             ),
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(3600),
+            // Retry = escalate: each prior failed attempt bumps the level, so
+            // the engine runs a stronger model from its ladder (see
+            // EngineMapping.escalation) instead of failing identically again.
+            escalation_level: u8::try_from(
+                state
+                    .ticket_fail_attempts
+                    .get(&id.to_string())
+                    .copied()
+                    .unwrap_or(0)
+                    .min(3),
+            )
+            .unwrap_or(3),
         }
     }
 }

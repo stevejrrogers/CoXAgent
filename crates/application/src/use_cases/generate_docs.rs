@@ -174,6 +174,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> GenerateDocsUseCas
             task_prompt: task,
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(180),
+            escalation_level: 0,
         };
         let outcome = self.engine.run(request).await?;
         if !outcome.succeeded() {
@@ -208,6 +209,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> GenerateDocsUseCas
             task_prompt: task,
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(240),
+            escalation_level: 0,
         };
         match self.engine.run(request).await {
             Ok(o) if o.succeeded() => parse_pages(&o.stdout).unwrap_or_default(),

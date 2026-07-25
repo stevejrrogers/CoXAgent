@@ -95,6 +95,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDesignSystemUseCase<S, E> {
             task_prompt: "Establish the design system for this product.".to_owned(),
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(1200),
+            escalation_level: 0,
         }
     }
 }

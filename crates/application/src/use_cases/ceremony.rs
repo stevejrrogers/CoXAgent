@@ -81,6 +81,7 @@ pub async fn run_transcript_raw<E: AgentEnginePort + ?Sized>(
         task_prompt: task.to_owned(),
         work_dir: work_dir.to_path_buf(),
         timeout: Duration::from_secs(180),
+        escalation_level: 0,
     };
     let outcome = engine.run(request).await?;
     if !outcome.succeeded() {

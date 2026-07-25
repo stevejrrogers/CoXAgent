@@ -2229,6 +2229,10 @@ pub async fn serve_full(
         .route("/api/projects/:pid/ticket/:id", get(ticket_detail_ep))
         .route("/api/projects/:pid/ticket/:id/priority", post(set_priority))
         .route("/api/projects/:pid/ticket/:id/reject", post(reject_ticket))
+        .route(
+            "/api/projects/:pid/ticket/:id/approve-cost",
+            post(approve_cost),
+        )
         .route("/api/projects/:pid/ticket/:id/edit", post(edit_ticket))
         .route(
             "/api/projects/:pid/comments",
@@ -3061,6 +3065,7 @@ async fn analyze_goal_ep(
         ),
         work_dir,
         timeout: std::time::Duration::from_secs(120),
+        escalation_level: 0,
     };
     match engine.run(request).await {
         Ok(o) if o.succeeded() => {
@@ -3132,7 +3137,18 @@ async fn ticket_detail_ep(
             .iter()
             .find(|t| t.id().as_str() == id)
             .map_or_else(not_found, |t| {
-                Json(serde_json::to_value(t).unwrap_or_default()).into_response()
+                let mut v = serde_json::to_value(t).unwrap_or_default();
+                // Cost-gate surface: the hold estimate (if any) and whether a
+                // human already approved this ticket to run.
+                if let Some(obj) = v.as_object_mut() {
+                    if let Some(est) = state.cost_holds.get(&id) {
+                        obj.insert("cost_hold".into(), serde_json::json!(est));
+                    }
+                    if state.cost_approved.contains(&id) {
+                        obj.insert("cost_approved".into(), serde_json::json!(true));
+                    }
+                }
+                Json(v).into_response()
             }),
         Err(e) => internal_error(&e.to_string()),
     }
@@ -3365,6 +3381,7 @@ async fn ba_analyze(
         ),
         work_dir: p.work_dir.clone(),
         timeout: std::time::Duration::from_secs(120),
+        escalation_level: 0,
     };
     let outcome = match p.engine.run(request).await {
         Ok(o) if o.succeeded() => o,
@@ -3456,6 +3473,31 @@ async fn create_ticket(
             }
             Json(serde_json::json!({ "ok": true, "id": id.to_string() })).into_response()
         }
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Human approval for a cost-held ticket: clears the hold and whitelists the
+/// ticket so the DEV gate lets it run despite the estimate.
+async fn approve_cost(
+    State(app): State<AppState>,
+    Path((pid, id)): Path<(String, String)>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Ok(mut state) = p.store.load().await else {
+        return internal_error("load failed");
+    };
+    if state.cost_holds.remove(&id).is_none()
+        && !state.tickets.iter().any(|t| t.id().as_str() == id)
+    {
+        return (axum::http::StatusCode::NOT_FOUND, "no such ticket").into_response();
+    }
+    state.cost_approved.insert(id.clone());
+    state.log_activity("USER", "approved cost", Some(id));
+    match p.store.save(&state).await {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => internal_error(&e.to_string()),
     }
 }
@@ -4746,6 +4788,7 @@ async fn force_merge(p: ProjectHandle, num: u64) {
             ),
             work_dir: p.work_dir.clone(),
             timeout: std::time::Duration::from_secs(1800),
+            escalation_level: 0,
         };
         match p.engine.run(request).await {
             Ok(o) if o.succeeded() => {}

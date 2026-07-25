@@ -179,6 +179,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
             ),
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(1200),
+            escalation_level: 0,
         }
     }
 }
