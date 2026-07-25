@@ -6189,9 +6189,11 @@ function cgFocusNode(path){
   if(g){g.dispatchEvent(new Event("mouseenter"));box.scrollIntoView({behavior:"smooth",block:"center"});
     setTimeout(()=>g.dispatchEvent(new Event("mouseleave")),2500);}
 }
-// Tiny force-directed layout (no libs): repulsion + link springs + centering.
+// Tiny 3D force layout (no libs): repulsion + link springs in 3D, projected
+// with perspective onto the SVG — an auto-rotating hologram. Drag rotates,
+// wheel zooms, hover/click still highlight & pin.
 function cgRenderGraph(box,rawNodes,rawLinks){
-  const W=800,H=460,cx=W/2,cy=H/2;
+  const W=800,H=460,cx=W/2,cy=H/2,F=520,R=200;
   // Limit to top 90 most-connected nodes — prevents visual clutter.
   const MAX_NODES=90;
   const deg={};
@@ -6199,30 +6201,34 @@ function cgRenderGraph(box,rawNodes,rawLinks){
   const keepIds=new Set(
     rawNodes.map(n=>[n.id,(deg[n.id]||0)]).sort((a,b)=>b[1]-a[1]).slice(0,MAX_NODES).map(x=>x[0])
   );
-  const nodes=rawNodes.filter(n=>keepIds.has(n.id)).map(n=>({...n,x:cx+(Math.random()-.5)*W*.6,y:cy+(Math.random()-.5)*H*.6,vx:0,vy:0,ph:Math.random()*Math.PI*2,sp:.4+Math.random()*.5}));
+  const nodes=rawNodes.filter(n=>keepIds.has(n.id)).map(n=>({...n,
+    x:(Math.random()-.5)*R*1.6,y:(Math.random()-.5)*R*1.2,z:(Math.random()-.5)*R*1.6,
+    vx:0,vy:0,vz:0,ph:Math.random()*Math.PI*2,sp:.4+Math.random()*.5}));
   const idx={};nodes.forEach((n,i)=>idx[n.id]=i);
   const links=rawLinks.filter(l=>idx[l.source]!=null&&idx[l.target]!=null).map(l=>({s:idx[l.source],t:idx[l.target]}));
-  for(let it=0;it<220;it++){
-    const k=it<160?1:.4;
-    for(let i=0;i<nodes.length;i++){let fx=0,fy=0;
-      for(let j=0;j<nodes.length;j++){if(i===j)continue;let dx=nodes[i].x-nodes[j].x,dy=nodes[i].y-nodes[j].y;let d2=dx*dx+dy*dy+.01;let f=2600/d2;fx+=dx*f;fy+=dy*f;}
-      fx+=(cx-nodes[i].x)*.022;fy+=(cy-nodes[i].y)*.022;
-      nodes[i].vx=(nodes[i].vx+fx*k)*.82;nodes[i].vy=(nodes[i].vy+fy*k)*.82;}
-    for(const l of links){const a=nodes[l.s],b=nodes[l.t];let dx=b.x-a.x,dy=b.y-a.y,dist=Math.sqrt(dx*dx+dy*dy)||1;let f=(dist-90)*.02*k;let ux=dx/dist*f,uy=dy/dist*f;a.vx+=ux;a.vy+=uy;b.vx-=ux;b.vy-=uy;}
-    for(const n of nodes){n.x+=n.vx;n.y+=n.vy;n.x=Math.max(46,Math.min(W-46,n.x));n.y=Math.max(34,Math.min(H-34,n.y));}
+  for(let it=0;it<260;it++){
+    const k=it<180?1:.4;
+    for(let i=0;i<nodes.length;i++){let fx=0,fy=0,fz=0;
+      for(let j=0;j<nodes.length;j++){if(i===j)continue;
+        let dx=nodes[i].x-nodes[j].x,dy=nodes[i].y-nodes[j].y,dz=nodes[i].z-nodes[j].z;
+        let d2=dx*dx+dy*dy+dz*dz+.01;let f=5200/d2;fx+=dx*f;fy+=dy*f;fz+=dz*f;}
+      fx-=nodes[i].x*.02;fy-=nodes[i].y*.028;fz-=nodes[i].z*.02;
+      nodes[i].vx=(nodes[i].vx+fx*k)*.8;nodes[i].vy=(nodes[i].vy+fy*k)*.8;nodes[i].vz=(nodes[i].vz+fz*k)*.8;}
+    for(const l of links){const a=nodes[l.s],b=nodes[l.t];
+      let dx=b.x-a.x,dy=b.y-a.y,dz=b.z-a.z,dist=Math.sqrt(dx*dx+dy*dy+dz*dz)||1;
+      const f=(dist-120)*.02*k,ux=dx/dist*f,uy=dy/dist*f,uz=dz/dist*f;
+      a.vx+=ux;a.vy+=uy;a.vz+=uz;b.vx-=ux;b.vy-=uy;b.vz-=uz;}
+    for(const n of nodes){n.x+=n.vx;n.y+=n.vy;n.z+=n.vz;
+      const m=Math.sqrt(n.x*n.x+n.y*n.y+n.z*n.z);if(m>R){const s=R/m;n.x*=s;n.y*=s;n.z*=s;}}
   }
   const short=p=>p.split("/").slice(-1)[0];
   // Colour by top-level module: structure jumps out even in a one-language repo.
   const mods=[...new Set(nodes.map(n=>cgModule(n.id)))].sort();
-  // Curved edge: quadratic through a perpendicular-offset midpoint.
-  const edgeD=(a,b)=>{const mx=(a.x+b.x)/2,my=(a.y+b.y)/2,dx=b.x-a.x,dy=b.y-a.y,k=.14;
-    return `M${a.x.toFixed(1)},${a.y.toFixed(1)} Q${(mx-dy*k).toFixed(1)},${(my+dx*k).toFixed(1)} ${b.x.toFixed(1)},${b.y.toFixed(1)}`;};
-  const line=links.map(l=>`<path class="cge" data-s="${l.s}" data-t="${l.t}" d="${edgeD(nodes[l.s],nodes[l.t])}"/>`).join("");
-  // NOTE: degree is keyed by node id (path), not index — the old deg[i] lookup
-  // silently returned undefined, flattening every node to the minimum size.
+  // Static markup; the per-frame projection drives transform/opacity/order.
+  const line=links.map(l=>`<path class="cge" data-s="${l.s}" data-t="${l.t}" d=""/>`).join("");
   const circ=nodes.map((n,i)=>{const dg=deg[n.id]||0;const r=Math.max(5,Math.min(15,5+Math.sqrt(dg)*2.2));const col=cgModColor(mods,cgModule(n.id));
     const hub=dg>=8,showLabel=dg>=2;
-    return `<g class="cgn" data-i="${i}" data-path="${esc(n.id)}" transform="translate(${n.x.toFixed(1)},${n.y.toFixed(1)})"><title>${esc(n.id)} · ${n.symbols} symbols · ${dg} links</title>
+    return `<g class="cgn" data-i="${i}" data-path="${esc(n.id)}"><title>${esc(n.id)} · ${n.symbols} symbols · ${dg} links</title>
       <circle class="cg-ring" r="${(r+4).toFixed(1)}" style="stroke:${col}"/>
       ${hub?`<circle class="cg-pulse" r="${(r+4).toFixed(1)}" style="stroke:${col}"/>`:''}
       <circle class="cg-core" r="${r.toFixed(1)}" fill="${col}" filter="url(#cgGlow)"/>
@@ -6231,14 +6237,33 @@ function cgRenderGraph(box,rawNodes,rawLinks){
     <filter id="cgGlow" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="2.6" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
     <linearGradient id="cgHot" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#22d3ee"/><stop offset="1" stop-color="#a78bfa"/></linearGradient>
   </defs><g class="cg-view"><g class="cg-edges">${line}</g><g class="cg-nodes">${circ}</g></g></svg>`;
-  // Alive: nodes breathe on a gentle per-node sine drift; edges follow.
+  const gEls=[...box.querySelectorAll(".cgn")],pEls=[...box.querySelectorAll(".cge")];
+  const nodesG=box.querySelector(".cg-nodes");
+  // Camera: slow auto-spin, drag to rotate, wheel to zoom.
+  let yaw=0,pitch=.28,zoom=1,drag=null,frame=0;
+  const SPIN=.1; // rad/s
   if(window._cgRaf)cancelAnimationFrame(window._cgRaf);
-  const gEls=[...box.querySelectorAll(".cgn")],pEls=[...box.querySelectorAll(".cge")],t0=performance.now();
+  const t0=performance.now();let tPrev=t0;
   const tick=t=>{if(!box.isConnected){window._cgRaf=null;return;}
-    const s=(t-t0)/1000;
-    nodes.forEach((n,i)=>{n.dx=n.x+Math.sin(s*n.sp+n.ph)*2.2;n.dy=n.y+Math.cos(s*n.sp*.8+n.ph)*2.2;
-      gEls[i].setAttribute("transform",`translate(${n.dx.toFixed(1)},${n.dy.toFixed(1)})`);});
-    pEls.forEach((p,j)=>{const l=links[j];p.setAttribute("d",edgeD({x:nodes[l.s].dx,y:nodes[l.s].dy},{x:nodes[l.t].dx,y:nodes[l.t].dy}));});
+    const s=(t-t0)/1000,dt=Math.min(.05,(t-tPrev)/1000);tPrev=t;
+    if(!drag)yaw+=SPIN*dt;
+    const cY=Math.cos(yaw),sY=Math.sin(yaw),cP=Math.cos(pitch),sP=Math.sin(pitch);
+    nodes.forEach((n,i)=>{
+      // gentle 3D breathing per node
+      const bx=n.x+Math.sin(s*n.sp+n.ph)*3,by=n.y+Math.cos(s*n.sp*.8+n.ph)*3,bz=n.z+Math.sin(s*n.sp*.6+n.ph*2)*3;
+      const x1=bx*cY+bz*sY,z1=bz*cY-bx*sY;
+      const y2=by*cP-z1*sP,z2=z1*cP+by*sP;
+      const pr=F/(F+z2)*zoom;
+      n.px=cx+x1*pr;n.py=cy+y2*pr;n.pz=z2;
+      gEls[i].setAttribute("transform",`translate(${n.px.toFixed(1)},${n.py.toFixed(1)}) scale(${pr.toFixed(3)})`);
+      gEls[i].style.opacity=(.3+.7*Math.max(0,Math.min(1,(R-z2)/(2*R)))).toFixed(2);
+    });
+    pEls.forEach((p,j)=>{const a=nodes[links[j].s],b=nodes[links[j].t];
+      const mx=(a.px+b.px)/2,my=(a.py+b.py)/2,dx=b.px-a.px,dy=b.py-a.py;
+      p.setAttribute("d",`M${a.px.toFixed(1)},${a.py.toFixed(1)} Q${(mx-dy*.1).toFixed(1)},${(my+dx*.1).toFixed(1)} ${b.px.toFixed(1)},${b.py.toFixed(1)}`);
+      p.style.opacity=(.25+.75*Math.max(0,Math.min(1,(R-(a.pz+b.pz)/2)/(2*R)))).toFixed(2);});
+    // Painter's order: far nodes behind near ones (re-sorted sparsely).
+    if(++frame%12===0)[...gEls].sort((a,b)=>nodes[+b.dataset.i].pz-nodes[+a.dataset.i].pz).forEach(g=>nodesG.appendChild(g));
     window._cgRaf=requestAnimationFrame(tick);};
   window._cgRaf=requestAnimationFrame(tick);
   const legend=document.getElementById("cg-legend");
@@ -6262,23 +6287,23 @@ function cgRenderGraph(box,rawNodes,rawLinks){
   box.querySelectorAll(".cgn").forEach(g=>{
     g.addEventListener("mouseenter",()=>{if(pinned<0)highlight(+g.dataset.i);});
     g.addEventListener("mouseleave",()=>{if(pinned<0)clear();});
-    g.addEventListener("click",e=>{e.stopPropagation();const i=+g.dataset.i;
+    g.addEventListener("click",e=>{e.stopPropagation();if(drag&&drag.moved)return;const i=+g.dataset.i;
       if(pinned===i){pinned=-1;clear();if(info)info.innerHTML="";return;}
       pinned=i;highlight(i);showInfo(i);});
   });
-  // Wheel zoom + drag pan on the inner group (viewBox stays fixed).
-  const svg=box.querySelector(".cg-svg"),view=box.querySelector(".cg-view");
-  let zx=1,tx=0,ty=0,drag=null;
-  const apply=()=>view.setAttribute("transform",`translate(${tx},${ty}) scale(${zx})`);
+  // Drag rotates the hologram (not pan); wheel zooms the projection.
+  const svg=box.querySelector(".cg-svg");
   svg.addEventListener("wheel",e=>{e.preventDefault();
-    const nz=Math.max(.5,Math.min(4,zx*(e.deltaY<0?1.12:.89)));
-    const pt=svg.createSVGPoint();pt.x=e.offsetX/svg.clientWidth*W;pt.y=e.offsetY/svg.clientHeight*H;
-    tx=pt.x-(pt.x-tx)*(nz/zx);ty=pt.y-(pt.y-ty)*(nz/zx);zx=nz;apply();},{passive:false});
-  svg.addEventListener("mousedown",e=>{drag={x:e.clientX,y:e.clientY,tx,ty};});
+    zoom=Math.max(.5,Math.min(3.5,zoom*(e.deltaY<0?1.1:.9)));},{passive:false});
+  svg.addEventListener("mousedown",e=>{drag={x:e.clientX,y:e.clientY,moved:false};});
   window.addEventListener("mousemove",e=>{if(!drag)return;
-    tx=drag.tx+(e.clientX-drag.x)/svg.clientWidth*W;ty=drag.ty+(e.clientY-drag.y)/svg.clientHeight*H;apply();});
-  window.addEventListener("mouseup",()=>{drag=null;});
-  svg.addEventListener("click",()=>{if(pinned>=0){pinned=-1;clear();if(info)info.innerHTML="";}});
+    const dx=e.clientX-drag.x,dy=e.clientY-drag.y;drag.x=e.clientX;drag.y=e.clientY;
+    if(Math.abs(dx)+Math.abs(dy)>1)drag.moved=true;
+    yaw+=dx*.006;pitch=Math.max(-1.1,Math.min(1.1,pitch+dy*.004));});
+  // Clear drag on the next tick so the click handler can still see drag.moved.
+  window.addEventListener("mouseup",()=>{setTimeout(()=>{drag=null;},0);});
+  svg.addEventListener("click",()=>{if(drag&&drag.moved)return;
+    if(pinned>=0){pinned=-1;clear();if(info)info.innerHTML="";}});
 }
 // Search box helper: prefill with a file's stem to list its symbols.
 function cgSearchFileSyms(stem){const q=document.getElementById("cg-q");if(!q)return;
