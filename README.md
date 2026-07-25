@@ -45,6 +45,28 @@ Ports mean swaps, not rewrites: the state store is `JsonStateStore` locally and
 | **PO / SM** | Priority & rejection / sprint cadence | field-level role permissions |
 | **Governance** | Checks the codebase against declared stack rules | drift → bugs |
 
+### How the team stays smart, cheap and safe
+
+- **Context, not exploration**: agents get a repo map + code-graph MCP tools,
+  a relevance-ranked team memory, per-ticket work journals on retries, and
+  cross-project hub lessons — no cold re-reading every run.
+- **Escalation ladder**: a failed ticket retries on a stronger model
+  (`engine.escalation`; opencode auto-prefers your custom providers), and the
+  repair/PR-fix passes RESUME the same conversation instead of starting over.
+- **Quality gates**: TDD (TEST writes failing tests from acceptance criteria
+  before DEV codes), an SA critic pass on large designs, PD visual QA on real
+  screenshots, and context-appropriate **DoD evidence posted on the ticket
+  thread** — UI ⇒ screenshot, API ⇒ live request/response — required before
+  Verified.
+- **Self-tuning**: the loop reads its own evals daily and pulls its own
+  brakes (churn hot → bugs first; backlog fat → BA pauses), announced by SM.
+- **FinOps & safety**: budget caps (total/daily), a cost-approval gate for
+  expensive tickets, host-wide heavy-op gate + `nice`, per-workspace orphan
+  cleanup, docker resource clamps, and an opt-in write-sandbox (macOS
+  Seatbelt) for agent CLIs.
+- **Steer it live**: comment on an in-progress ticket and the agent's next
+  run treats it as instructions.
+
 ## Status — v2 (multi-tenant, RBAC, feature-complete)
 
 **Core loop.** Six-agent cycle plus architecture governance. Claim/release,
