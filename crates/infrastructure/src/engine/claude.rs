@@ -49,6 +49,8 @@ pub struct ClaudeEngine {
     /// Model alias or full name (e.g. `sonnet`, `opus`, `claude-sonnet-4-6`).
     model: String,
     binary: String,
+    /// This project's CoXAgent MCP endpoint, when reachable — see [`crate::engine::McpAccess`].
+    mcp: Option<crate::engine::McpAccess>,
 }
 
 impl ClaudeEngine {
@@ -57,6 +59,7 @@ impl ClaudeEngine {
         Self {
             model: model.into(),
             binary: "claude".to_owned(),
+            mcp: None,
         }
     }
 
@@ -65,6 +68,76 @@ impl ClaudeEngine {
         self.binary = binary.into();
         self
     }
+
+    /// Give this engine live access to the project's own code-graph MCP tools.
+    #[must_use]
+    pub fn with_mcp(mut self, mcp: Option<crate::engine::McpAccess>) -> Self {
+        self.mcp = mcp;
+        self
+    }
+}
+
+/// Build the `--mcp-config` JSON blob wiring a single HTTP MCP server named
+/// `coxagent` at `mcp.url`, with a bearer header when the hub has auth.
+fn mcp_config_json(mcp: &crate::engine::McpAccess) -> String {
+    let mut server = serde_json::json!({ "type": "http", "url": mcp.url });
+    if let Some(token) = &mcp.token {
+        server["headers"] = serde_json::json!({ "Authorization": format!("Bearer {token}") });
+    }
+    serde_json::json!({ "mcpServers": { "coxagent": server } }).to_string()
+}
+
+/// A `--mcp-config` file on disk, deleted on drop. `claude` accepts either
+/// inline JSON or a file path for this flag — a file is used here (not the
+/// inline JSON `mcp_config_json` builds) specifically so the bearer token
+/// never appears in `ps`/`/proc/<pid>/cmdline`, which any local user on a
+/// shared machine can read. Written with `0600` (owner-only) and placed
+/// outside the managed codebase so it's never at risk of `git add -A`.
+struct McpConfigFile(PathBuf);
+
+impl McpConfigFile {
+    fn write(mcp: &crate::engine::McpAccess) -> std::io::Result<Self> {
+        let dir = std::env::temp_dir().join("coxagent-mcp-config");
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("{}-{}.json", std::process::id(), fastrand_hex()));
+        std::fs::write(&path, mcp_config_json(mcp))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(Self(path))
+    }
+}
+
+impl Drop for McpConfigFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// A short random hex suffix so two runs starting in the same process/PID
+/// tick (or after a PID wraps) never collide on the same config file path.
+/// Not a security boundary — the directory + `0600` perms are.
+fn fastrand_hex() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or_default();
+    format!("{nanos:x}")
+}
+
+/// A short system-prompt addendum telling the agent its project id (needed on
+/// every MCP tool call) and nudging it toward the code-graph tools before
+/// blind exploration.
+fn mcp_prompt_hint(mcp: &crate::engine::McpAccess) -> String {
+    format!(
+        "\n\nThis project's id is `{}`. You have MCP tools `search_symbols` and \
+         `symbol_refs` (project=\"{}\") backed by the native code graph — use \
+         them to locate code and check blast radius before reading files blind.",
+        mcp.project, mcp.project
+    )
 }
 
 #[async_trait]
@@ -78,11 +151,17 @@ impl AgentEnginePort for ClaudeEngine {
         // The role/system text goes through --append-system-prompt, NOT folded
         // into -p: it joins the CLI's cached system block, so the stable prefix
         // (base + standards + role) gets prompt-cache READ hits across
-        // back-to-back agent runs instead of being re-billed every call.
+        // back-to-back agent runs instead of being re-billed every call. The
+        // MCP hint is appended here too — it's static per project, so it rides
+        // the same cached block instead of busting the cache like -p would.
+        let system_prompt = match &self.mcp {
+            Some(mcp) => format!("{}{}", request.system_prompt, mcp_prompt_hint(mcp)),
+            None => request.system_prompt.clone(),
+        };
         cmd.arg("-p")
             .arg(&request.task_prompt)
             .arg("--append-system-prompt")
-            .arg(&request.system_prompt)
+            .arg(&system_prompt)
             .arg("--model")
             .arg(&self.model)
             // Stream-json + verbose emits every step (assistant text, tool_use,
@@ -96,6 +175,22 @@ impl AgentEnginePort for ClaudeEngine {
             // No stdin: claude -p otherwise waits for piped input and warns/exits.
             .stdin(std::process::Stdio::null())
             .kill_on_drop(true);
+        // Held until this function returns (after the child has exited) so the
+        // file survives the whole run; deleted on drop either way — including
+        // on every early `?` return below.
+        let _mcp_config_file = match &self.mcp {
+            Some(mcp) => match McpConfigFile::write(mcp) {
+                Ok(f) => {
+                    cmd.arg("--mcp-config").arg(&f.0);
+                    Some(f)
+                }
+                Err(e) => {
+                    tracing::warn!("could not write MCP config file, running without MCP: {e}");
+                    None
+                }
+            },
+            None => None,
+        };
         crate::engine::apply_shim_path(&mut cmd);
 
         // Stream stdout line-by-line: render each event to the live log as it
@@ -317,4 +412,160 @@ fn parse_json_output(raw: &str) -> (String, Option<Usage>) {
             .unwrap_or(0.0),
     });
     (text, usage)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::McpAccess;
+
+    #[test]
+    fn mcp_config_json_includes_auth_header_when_token_present() {
+        let mcp = McpAccess {
+            url: "http://127.0.0.1:4000/api/mcp".to_owned(),
+            token: Some("secret123".to_owned()),
+            project: "cxc".to_owned(),
+        };
+        let v: serde_json::Value = serde_json::from_str(&mcp_config_json(&mcp)).expect("valid json");
+        assert_eq!(v["mcpServers"]["coxagent"]["type"], "http");
+        assert_eq!(v["mcpServers"]["coxagent"]["url"], "http://127.0.0.1:4000/api/mcp");
+        assert_eq!(
+            v["mcpServers"]["coxagent"]["headers"]["Authorization"],
+            "Bearer secret123"
+        );
+    }
+
+    #[test]
+    fn mcp_config_json_omits_headers_when_no_token() {
+        let mcp = McpAccess {
+            url: "http://127.0.0.1:4000/api/mcp".to_owned(),
+            token: None,
+            project: "cxc".to_owned(),
+        };
+        let v: serde_json::Value = serde_json::from_str(&mcp_config_json(&mcp)).expect("valid json");
+        assert!(v["mcpServers"]["coxagent"].get("headers").is_none());
+    }
+
+    /// End-to-end through the real `AgentEnginePort::run()` — a fake `claude`
+    /// binary (a shell script) captures its own argv instead of calling a
+    /// real LLM, so this proves `--mcp-config` is actually on the command
+    /// line the real spawn path builds, not just in the leaf JSON builder.
+    #[tokio::test]
+    async fn run_passes_mcp_config_flag_to_the_real_spawn() {
+        use coxagent_application::ports::outbound::{AgentEnginePort, AgentRequest};
+        use coxagent_domain::Role;
+
+        let dir = std::env::temp_dir().join(format!("claude-mcp-e2e-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+
+        let argv_capture = dir.join("argv.txt");
+        let mcp_config_capture = dir.join("mcp-config-seen.json");
+        let fake_bin = dir.join("fake-claude.sh");
+        // Also copies out whatever file --mcp-config points at, while it
+        // still exists (McpConfigFile deletes it once run() returns) — that's
+        // how this test can assert on its contents without re-exposing the
+        // token on the command line itself (which is the whole point of the
+        // fix: the URL/token live in the FILE, not argv).
+        std::fs::write(
+            &fake_bin,
+            format!(
+                "#!/bin/sh\n\
+                 printf '%s\\n' \"$@\" > {argv_capture:?}\n\
+                 prev=\"\"\n\
+                 for a in \"$@\"; do\n\
+                 \x20\x20if [ \"$prev\" = \"--mcp-config\" ]; then cp \"$a\" {mcp_config_capture:?}; fi\n\
+                 \x20\x20prev=\"$a\"\n\
+                 done\n\
+                 echo '{{\"type\":\"result\",\"result\":\"ok\",\"usage\":{{\"input_tokens\":1,\"output_tokens\":1}},\"total_cost_usd\":0.0}}'\n"
+            ),
+        )
+        .expect("write fake bin");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&fake_bin).expect("meta").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&fake_bin, perms).expect("chmod");
+        }
+
+        let engine = ClaudeEngine::new("test-model")
+            .with_binary(fake_bin.to_string_lossy())
+            .with_mcp(Some(McpAccess {
+                url: "http://127.0.0.1:4000/api/mcp".to_owned(),
+                token: Some("tok".to_owned()),
+                project: "cxc".to_owned(),
+            }));
+
+        let outcome = engine
+            .run(AgentRequest {
+                role: Role::DevFeature,
+                system_prompt: "sys".to_owned(),
+                task_prompt: "task".to_owned(),
+                work_dir: dir.clone(),
+                timeout: std::time::Duration::from_secs(10),
+            })
+            .await
+            .expect("fake binary run succeeds");
+        assert!(outcome.succeeded());
+
+        let argv = std::fs::read_to_string(&argv_capture).expect("argv captured");
+        assert!(argv.contains("--mcp-config"), "argv was:\n{argv}");
+        // The token must NOT be reachable from argv/ps — only from the file
+        // --mcp-config points at.
+        assert!(
+            !argv.contains("tok") && !argv.contains("Bearer"),
+            "token/header leaked into argv:\n{argv}"
+        );
+        assert!(argv.contains("cxc"), "system prompt hint should carry the project id");
+
+        let mcp_config: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&mcp_config_capture).expect("--mcp-config file was readable"),
+        )
+        .expect("valid json");
+        assert_eq!(
+            mcp_config["mcpServers"]["coxagent"]["url"],
+            "http://127.0.0.1:4000/api/mcp"
+        );
+        assert_eq!(
+            mcp_config["mcpServers"]["coxagent"]["headers"]["Authorization"],
+            "Bearer tok"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mcp_config_file_is_private_and_cleaned_up_on_drop() {
+        let mcp = McpAccess {
+            url: "http://127.0.0.1:4000/api/mcp".to_owned(),
+            token: Some("tok".to_owned()),
+            project: "cxc".to_owned(),
+        };
+        let path = {
+            let f = McpConfigFile::write(&mcp).expect("write");
+            let path = f.0.clone();
+            assert!(path.exists());
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
+                assert_eq!(mode, 0o600, "config file must be owner-only");
+            }
+            path
+            // `f` drops here
+        };
+        assert!(!path.exists(), "config file must be removed once the engine is done with it");
+    }
+
+    #[test]
+    fn mcp_prompt_hint_carries_the_project_id() {
+        let mcp = McpAccess {
+            url: "http://127.0.0.1:4000/api/mcp".to_owned(),
+            token: None,
+            project: "cxc".to_owned(),
+        };
+        let hint = mcp_prompt_hint(&mcp);
+        assert!(hint.contains("cxc"));
+        assert!(hint.contains("search_symbols"));
+    }
 }

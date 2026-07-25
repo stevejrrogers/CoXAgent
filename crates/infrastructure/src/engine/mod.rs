@@ -26,6 +26,23 @@ pub use routing::RoutingEngine;
 pub use scripted::ScriptedEngine;
 pub use transcript::TranscriptEngine;
 
+/// Loopback access to this project's own CoXAgent MCP endpoint (`/api/mcp`,
+/// see `crates/presentation/src/server.rs`), handed to an engine adapter so a
+/// spawned agent CLI can query the native code graph (`search_symbols`,
+/// `symbol_refs`, ...) live instead of relying only on the static repo-map /
+/// focus-block text baked into the prompt. `None` when no hub is reachable
+/// for this run (e.g. a bare `coxagent check`).
+#[derive(Debug, Clone)]
+pub struct McpAccess {
+    /// e.g. `http://127.0.0.1:4000/api/mcp`.
+    pub url: String,
+    /// Bearer token, when the hub has RBAC configured. `None` in open/local
+    /// mode, where `/api/mcp` accepts unauthenticated loopback calls.
+    pub token: Option<String>,
+    /// This project's id, passed as the `project` argument on every tool call.
+    pub project: String,
+}
+
 /// Prepend the command-output shim dir (from `COXAGENT_SHIM_DIR`) to the agent
 /// subprocess's PATH, so heavy tool output the agent triggers is compressed
 /// (rtk-style). No-op when unset. Applied to the agent process only — never the

@@ -115,13 +115,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
             })
             .unwrap_or_default();
         let repo_map = prompts::repo_map_block(&self.work_dir, self.config.workflow.token_saver);
+        let focus = prompts::focus_block(&self.work_dir, &title);
         let outcome = self
             .engine
             .run(AgentRequest {
                 role: Role::Docs,
                 system_prompt: prompts::system_prompt(prompts::DOCS),
                 task_prompt: format!(
-                    "{}{context_block}{repo_map}",
+                    "{}{context_block}{focus}{repo_map}",
                     build_docs_prompt(&id, &title, space, &existing_subs)
                 ),
                 work_dir: self.work_dir.clone(),

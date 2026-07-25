@@ -122,7 +122,7 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
         Command::RunBa { work_dir, context } => {
             let store = store().await?;
             let config = load_config(&args.state_dir);
-            let (engine, _meter) = build_engine(&config, logs_dir(&args.state_dir))?;
+            let (engine, _meter) = build_engine(&config, logs_dir(&args.state_dir), None)?;
             let uc = RunBaUseCase::new(Arc::clone(&store), engine, config, work_dir, context);
             let created = uc.execute().await?;
             let mut out = format!("BA proposed {} feature(s):\n", created.len());
@@ -490,12 +490,20 @@ async fn build_project(
     id: &str,
     state_dir: &Path,
     work_dir: PathBuf,
+    auth: Option<&Arc<dyn coxagent_application::auth::AuthPort>>,
 ) -> Result<coxagent_presentation::ProjectHandle, Box<dyn std::error::Error>> {
     use coxagent_application::use_cases::{run_forever, RunCycleUseCase, RunnerHandle};
 
     let store = make_store(id, state_dir).await?;
     let config = load_config(state_dir);
-    let (engine, meter) = build_engine(&config, logs_dir(state_dir))?;
+    // `auth` must be the SAME store the hub actually serves /api/mcp with —
+    // NOT re-derived from state_dir here. Each project can live under a
+    // different workspace root than the hub-wide auth.json (see run_hub's
+    // registry), so minting against a re-opened, path-guessed auth store
+    // would persist a token the real serving store never loads and every
+    // MCP call would 401.
+    let mcp = build_mcp_access(&config, auth, id, id).await;
+    let (engine, meter) = build_engine(&config, logs_dir(state_dir), mcp)?;
     let sleep = std::time::Duration::from_secs(config.workflow.sleep_seconds);
 
     let recovered = RecoverUseCase::new(Arc::clone(&store)).execute().await?;
@@ -648,10 +656,12 @@ async fn serve_with_runner(
     port: u16,
 ) -> Result<(), Box<dyn std::error::Error>> {
     enable_command_shims();
-    let project = build_project("default", state_dir, work_dir).await?;
-    let audit = build_audit().await;
-    // Single-project serve honors the same RBAC env vars as the hub.
+    // Single-project serve honors the same RBAC env vars as the hub. Built
+    // BEFORE build_project so the project's internal MCP token (see
+    // build_mcp_access) mints against this exact store, not a re-derived one.
     let auth = build_auth(state_dir.parent().unwrap_or(state_dir)).await?;
+    let project = build_project("default", state_dir, work_dir, auth.as_ref()).await?;
+    let audit = build_audit().await;
     let extras = coxagent_presentation::HubExtras {
         auth,
         engines: detected_engines(),
@@ -839,11 +849,19 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
         tracing::info!("hub: empty registry — serving with no projects yet");
     }
 
+    // Built BEFORE the per-project loop, and hub-wide (rooted at the
+    // registry, not any one project's workspace) so every project's internal
+    // MCP token (see build_mcp_access) mints against the SAME store this hub
+    // actually serves auth from below — each project's own e.path is a
+    // different directory than the registry's, so deriving auth per-project
+    // here would silently mint tokens nobody validates against.
+    let auth = build_auth(registry.parent().unwrap_or_else(|| Path::new("."))).await?;
+
     let mut projects = Vec::new();
     for e in entries {
         let state_dir = e.path.join("state");
         let work_dir = e.path.join("codebase");
-        match build_project(&e.id, &state_dir, work_dir).await {
+        match build_project(&e.id, &state_dir, work_dir, auth.as_ref()).await {
             Ok(p) => {
                 tracing::info!("hub: registered project '{}'", p.id);
                 projects.push(p);
@@ -863,10 +881,12 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
     let factory: coxagent_presentation::ProjectFactory = Arc::new({
         let base = base.clone();
         let registry_path = registry_path.clone();
+        let auth = auth.clone();
         move |req| {
             let base = base.clone();
             let registry_path = registry_path.clone();
-            Box::pin(async move { onboard_project(&base, &registry_path, req).await })
+            let auth = auth.clone();
+            Box::pin(async move { onboard_project(&base, &registry_path, req, auth.as_ref()).await })
         }
     });
     let remover: coxagent_presentation::ProjectRemover = Arc::new({
@@ -897,6 +917,7 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
             policy: Default::default(),
         },
         logs_dir(&base),
+        None,
     )
     .ok()
     .map(|(e, _)| {
@@ -904,12 +925,11 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
         (engine, base.clone())
     });
 
-    let auth = build_auth(registry.parent().unwrap_or_else(|| Path::new("."))).await?;
     let audit = build_audit().await;
     let extras = coxagent_presentation::HubExtras {
         factory: Some(factory),
         remover: Some(remover),
-        auth,
+        auth, // built above, before the per-project loop — see the comment there
         engines: detected_engines(),
         tooling: detected_tooling(),
         analyzer,
@@ -998,6 +1018,73 @@ async fn build_auth(
     }
 }
 
+/// A minted API token, scoped read-only, that this operator's spawned agent
+/// CLIs (claude/opencode) use to call the hub's own `/api/mcp` endpoint —
+/// letting agents query the code graph live instead of only through the
+/// static prompt text. Labeled `internal:mcp:<identity>` and filtered out of
+/// the admin dashboard's token list (`list_tokens_ep`) — it's plumbing, not a
+/// credential for a human to manage. Re-minted on every startup (the previous
+/// one for this identity is revoked first, keeping auth.json from
+/// accumulating dead entries across restarts); `None` when auth is disabled
+/// (`/api/mcp` accepts unauthenticated loopback calls in that mode) or
+/// minting fails.
+///
+/// Persisted (as a hash, like any other token) rather than held purely in
+/// memory: the operator that spawns the agent CLI and the hub that serves
+/// `/api/mcp` are not always the same OS process (see `Command::Run` vs
+/// `Command::Serve`), so the credential has to be checkable by whichever
+/// process is actually serving the request.
+async fn ensure_internal_mcp_token(
+    auth: &Arc<dyn coxagent_application::auth::AuthPort>,
+    identity: &str,
+) -> Option<String> {
+    use coxagent_application::auth::AuthRole;
+    let label = format!("internal:mcp:{identity}");
+    auth.revoke_token(&label).await; // drop any stale token from a prior run
+    // NOT AuthRole::Viewer: `auth_mw` (server.rs) gates every POST as a write
+    // unless the path is explicitly exempted, and /api/mcp isn't (it's the
+    // single JSON-RPC endpoint for both reads like search_symbols and writes
+    // like report_blocker, so the middleware can't tell them apart from the
+    // HTTP verb alone). Viewer.can_write() is false, so a Viewer-scoped
+    // token would get 403'd on every call, including read-only ones. `Be` is
+    // the lowest member-tier role that still satisfies can_write() — chosen
+    // arbitrarily among the member tier, since none of them map naturally to
+    // "the agent working this project" and MCP tool access doesn't
+    // distinguish between member sub-roles.
+    match auth.create_token(&label, AuthRole::Be).await {
+        Some(secret) => Some(secret),
+        None => {
+            tracing::warn!("could not mint internal MCP token for {identity}");
+            None
+        }
+    }
+}
+
+/// Build this run's loopback [`McpAccess`] for `project` (its id, as known to
+/// the hub — goes on every MCP tool call), when the hub is expected to be
+/// reachable on `config.deploy.host_port`. `token_identity` namespaces the
+/// internal token label (see [`ensure_internal_mcp_token`]) — pass something
+/// that's unique to the *process* minting it (e.g. including the operator
+/// name), not just the project, so two operators working the same project
+/// concurrently don't revoke each other's freshly minted token.
+async fn build_mcp_access(
+    config: &Config,
+    auth: Option<&Arc<dyn coxagent_application::auth::AuthPort>>,
+    project: &str,
+    token_identity: &str,
+) -> Option<coxagent_infrastructure::engine::McpAccess> {
+    let port = config.deploy.host_port.unwrap_or(4000);
+    let token = match auth {
+        Some(auth) => ensure_internal_mcp_token(auth, token_identity).await,
+        None => None, // open mode: /api/mcp accepts unauthenticated loopback calls
+    };
+    Some(coxagent_infrastructure::engine::McpAccess {
+        url: format!("http://127.0.0.1:{port}/api/mcp"),
+        token,
+        project: project.to_owned(),
+    })
+}
+
 /// Scaffold a new project workspace under `base`, seed it, append it to the hub
 /// registry, and build a live [`ProjectHandle`]. Used by the dashboard's
 /// "new project" flow.
@@ -1005,6 +1092,7 @@ async fn onboard_project(
     base: &Path,
     registry_path: &Path,
     req: coxagent_presentation::NewProjectReq,
+    auth: Option<&Arc<dyn coxagent_application::auth::AuthPort>>,
 ) -> Result<coxagent_presentation::ProjectHandle, String> {
     let name = req.name.trim();
     let derived = req
@@ -1059,7 +1147,7 @@ async fn onboard_project(
 
     append_registry(registry_path, &id, &proj_dir).map_err(|e| e.to_string())?;
 
-    build_project(&id, &state_dir, work_dir)
+    build_project(&id, &state_dir, work_dir, auth)
         .await
         .map_err(|e| e.to_string())
 }
@@ -1161,10 +1249,11 @@ type BuiltEngine = (
 fn build_failover(
     choice: &coxagent_application::config::EngineChoice,
     fallbacks: &[coxagent_application::config::EngineChoice],
+    mcp: Option<&coxagent_infrastructure::engine::McpAccess>,
 ) -> Result<FailoverEngine<AnyEngine>, Box<dyn std::error::Error>> {
-    let mut engines = vec![AnyEngine::from_choice(choice)?];
+    let mut engines = vec![AnyEngine::from_choice(choice, mcp.cloned())?];
     for fb in fallbacks {
-        match AnyEngine::from_choice(fb) {
+        match AnyEngine::from_choice(fb, mcp.cloned()) {
             Ok(e) => engines.push(e),
             Err(e) => tracing::warn!("skipping fallback engine {:?}: {e}", fb.engine),
         }
@@ -1229,12 +1318,13 @@ fn effective_fallbacks(config: &Config) -> Vec<coxagent_application::config::Eng
 fn build_engine(
     config: &Config,
     logs_dir: PathBuf,
+    mcp: Option<coxagent_infrastructure::engine::McpAccess>,
 ) -> Result<BuiltEngine, Box<dyn std::error::Error>> {
     let fallbacks = effective_fallbacks(config);
-    let default = build_failover(&config.engine.default, &fallbacks)?;
+    let default = build_failover(&config.engine.default, &fallbacks, mcp.as_ref())?;
     let mut per_role = std::collections::HashMap::new();
     for (role, choice) in &config.engine.per_role {
-        match build_failover(choice, &fallbacks) {
+        match build_failover(choice, &fallbacks, mcp.as_ref()) {
             Ok(e) => {
                 tracing::info!(
                     "role {role:?} routed to {:?}({})",
@@ -1285,7 +1375,29 @@ async fn run_loop(
     max_cycles: Option<u64>,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let config = load_config(state_dir);
-    let (engine, meter) = build_engine(&config, logs_dir(state_dir))?;
+    // Same project-id derivation as Command::Run/operator_main: the workspace
+    // dir name (e.g. `cxc`), not a fixed "default" — so this operator's MCP
+    // calls target the same project the hub knows it by.
+    let pid = state_dir.parent().and_then(Path::file_name).map_or_else(
+        || "default".to_owned(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    let mcp_operator = std::env::var("COXAGENT_OPERATOR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "worker".to_owned());
+    // A headless `coxagent run` has no hub of its own — it's a standalone
+    // process, so (unlike build_project's callers) it self-derives auth here
+    // rather than receiving an already-built store. This is only correct
+    // because `--state-dir` is conventionally the SAME workspace path the
+    // hub was started with (see Command::Run's doc comment on `pid`), so
+    // this resolves to the same auth.json the hub actually serves from.
+    let auth = build_auth(state_dir.parent().unwrap_or(state_dir))
+        .await
+        .ok()
+        .flatten();
+    let mcp = build_mcp_access(&config, auth.as_ref(), &pid, &format!("{pid}:{mcp_operator}")).await;
+    let (engine, meter) = build_engine(&config, logs_dir(state_dir), mcp)?;
     let sleep = std::time::Duration::from_secs(config.workflow.sleep_seconds);
 
     // Recovery: release any claims orphaned by a previous crash before looping.
@@ -1680,4 +1792,209 @@ fn render_discovery() -> String {
         let _ = writeln!(out, "  {:<10} {}", d.kind.as_binary(), d.path.display());
     }
     out
+}
+
+/// Real-server regression coverage for the bug caught in review: `/api/mcp`
+/// is a POST route, and `auth_mw` (presentation/src/server.rs) treats every
+/// POST as a write unless the path is explicitly exempted — it isn't. A
+/// `Viewer`-scoped token (can_write() == false) therefore gets 403'd on
+/// EVERY MCP call, including read-only ones like `search_symbols`, which is
+/// exactly why `ensure_internal_mcp_token` mints `AuthRole::Be` and not
+/// `Viewer`. These tests boot the real hub (real router, real `auth_mw`, real
+/// `FileAuthService`) and hit `/api/mcp` over real HTTP — no mocking of the
+/// auth gate — so a regression here fails loudly instead of silently
+/// 403-ing agents in production.
+#[cfg(test)]
+mod mcp_auth_tests {
+    use coxagent_application::auth::{AuthPort, AuthRole};
+    use coxagent_infrastructure::{FileAuthService, MemoryAuditSink};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// Boots a real `serve_full` hub with RBAC on (one bootstrapped admin,
+    /// two extra tokens minted), waits for `/api/health` to answer, and
+    /// returns the port, the two tokens under test, and the backing tempdir
+    /// (kept alive for the test's duration — `serve_full` writes hub-state
+    /// backups under it).
+    async fn boot_hub_with_tokens() -> (u16, String, String, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let auth_path = FileAuthService::default_path(dir.path());
+        FileAuthService::bootstrap_admin(&auth_path, "admin", "adminpassword1")
+            .expect("bootstrap admin");
+        let svc = FileAuthService::open(&auth_path).expect("open auth store");
+        let be_token = svc
+            .create_token("test:be", AuthRole::Be)
+            .await
+            .expect("mint Be token");
+        let viewer_token = svc
+            .create_token("test:viewer", AuthRole::Viewer)
+            .await
+            .expect("mint Viewer token");
+        let auth: Arc<dyn AuthPort> = Arc::new(svc);
+
+        let port = 47_654;
+        let extras = coxagent_presentation::HubExtras {
+            auth: Some(auth),
+            hub_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let audit: Arc<dyn coxagent_application::ports::outbound::AuditPort> =
+            Arc::new(MemoryAuditSink::default());
+        tokio::spawn(coxagent_presentation::serve_full(vec![], port, audit, extras));
+
+        let client = reqwest::Client::new();
+        let health_url = format!("http://127.0.0.1:{port}/api/health");
+        for _ in 0..50 {
+            if client.get(&health_url).send().await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        (port, be_token, viewer_token, dir)
+    }
+
+    /// Minimal JSON-RPC `tools/list` — needs no project, so it isolates the
+    /// auth gate from any project-lookup behavior.
+    fn tools_list_body() -> serde_json::Value {
+        serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" })
+    }
+
+    // These three tests share one hub instance on a fixed port (real TCP
+    // bind), so they run as one #[tokio::test] rather than three parallel
+    // ones that would race on the same port.
+    #[tokio::test]
+    async fn api_mcp_auth_gate_matches_can_write_not_viewer() {
+        let (port, be_token, viewer_token, _dir) = boot_hub_with_tokens().await;
+        let url = format!("http://127.0.0.1:{port}/api/mcp");
+        let client = reqwest::Client::new();
+
+        // No credential at all: /api/mcp isn't in auth_mw's public-path
+        // allowlist, so this must be rejected, not silently allowed.
+        let resp = client.post(&url).json(&tools_list_body()).send().await.expect("request");
+        assert_eq!(
+            resp.status(),
+            401,
+            "unauthenticated /api/mcp should be rejected"
+        );
+
+        // Be (member tier, can_write() == true): must be allowed through,
+        // including this read-only tools/list call.
+        let resp = client
+            .post(&url)
+            .bearer_auth(&be_token)
+            .json(&tools_list_body())
+            .send()
+            .await
+            .expect("request");
+        assert_eq!(
+            resp.status(),
+            200,
+            "a can_write() role must reach mcp_ep, even for a read-only tool"
+        );
+        let body: serde_json::Value = resp.json().await.expect("json body");
+        assert!(
+            body["result"]["tools"].is_array(),
+            "expected a tools/list result, got: {body}"
+        );
+
+        // Viewer (can_write() == false): this is the exact bug caught in
+        // review — assert it stays blocked by the write gate, so if someone
+        // "fixes" the internal token back to Viewer, this test fails.
+        let resp = client
+            .post(&url)
+            .bearer_auth(&viewer_token)
+            .json(&tools_list_body())
+            .send()
+            .await
+            .expect("request");
+        assert_eq!(
+            resp.status(),
+            403,
+            "Viewer can't write, so auth_mw blocks POST /api/mcp — this is \
+             WHY ensure_internal_mcp_token must not use AuthRole::Viewer"
+        );
+    }
+}
+
+/// The one thing no fake-binary test can prove: that the REAL `claude` CLI,
+/// given a real `--mcp-config` file, actually calls the tool instead of
+/// ignoring it. `#[ignore]`d — costs a real API call and needs `claude`
+/// logged in — run explicitly with `cargo test -- --ignored
+/// live_claude_actually_calls_mcp_search_symbols`.
+///
+/// Scoped deliberately narrow: this indexes THIS repo (already built via
+/// `coxagent codegraph build`) as a project and asks a read-only question —
+/// it does not run a real DEV cycle, so there's nothing here that edits or
+/// commits to the repo the model is looking at.
+#[cfg(test)]
+mod live_claude_mcp_test {
+    use coxagent_infrastructure::engine::{ClaudeEngine, McpAccess};
+    use coxagent_infrastructure::MemoryAuditSink;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[tokio::test]
+    #[ignore]
+    async fn live_claude_actually_calls_mcp_search_symbols() {
+        use coxagent_application::ports::outbound::{AgentEnginePort, AgentRequest};
+        use coxagent_domain::Role;
+
+        let repo_root = std::path::PathBuf::from("/Users/steverogers/Projects/CoXAgent");
+        let state_dir = std::env::temp_dir().join(format!("live-mcp-state-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&state_dir);
+        std::fs::create_dir_all(&state_dir).expect("mkdir");
+
+        let project = super::build_project("cxc", &state_dir, repo_root, None)
+            .await
+            .expect("build_project against this repo");
+        let port = 47_655;
+        let audit: Arc<dyn coxagent_application::ports::outbound::AuditPort> =
+            Arc::new(MemoryAuditSink::default());
+        let extras = coxagent_presentation::HubExtras::default(); // open mode, no token needed
+        tokio::spawn(coxagent_presentation::serve_full(
+            vec![project],
+            port,
+            audit,
+            extras,
+        ));
+        let client = reqwest::Client::new();
+        let health_url = format!("http://127.0.0.1:{port}/api/health");
+        for _ in 0..50 {
+            if client.get(&health_url).send().await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        let engine = ClaudeEngine::new("sonnet").with_mcp(Some(McpAccess {
+            url: format!("http://127.0.0.1:{port}/api/mcp"),
+            token: None,
+            project: "cxc".to_owned(),
+        }));
+
+        let outcome = engine
+            .run(AgentRequest {
+                role: Role::DevFeature,
+                system_prompt: "You are a careful, minimal-tool-call code assistant.".to_owned(),
+                task_prompt: "Use the search_symbols MCP tool (project=\"cxc\") to find the \
+                    symbol `ensure_internal_mcp_token`. Report back which file and line it's \
+                    defined in, in one sentence. Do NOT read, write, or edit any files, and do \
+                    NOT run any shell commands — only use the MCP tool, then answer from its \
+                    result."
+                    .to_owned(),
+                work_dir: std::path::PathBuf::from("/Users/steverogers/Projects/CoXAgent"),
+                timeout: Duration::from_secs(120),
+            })
+            .await
+            .expect("claude run");
+
+        println!("--- stdout ---\n{}", outcome.stdout);
+        println!("--- trace ---\n{}", outcome.trace);
+        assert!(outcome.succeeded(), "stderr: {}", outcome.stderr);
+        assert!(
+            outcome.trace.contains("search_symbols"),
+            "expected a search_symbols MCP tool call in the trace, got:\n{}",
+            outcome.trace
+        );
+    }
 }

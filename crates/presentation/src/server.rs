@@ -7691,7 +7691,16 @@ async fn list_tokens_ep(
     if !is_admin {
         return (StatusCode::FORBIDDEN, "admin role required").into_response();
     }
-    Json(auth.list_tokens().await).into_response()
+    // internal:mcp:* tokens are plumbing minted for an operator's spawned
+    // agent CLIs to call this hub's own /api/mcp (see app::ensure_internal_mcp_token)
+    // — not a human-managed credential, so keep them out of the admin list.
+    let tokens: Vec<_> = auth
+        .list_tokens()
+        .await
+        .into_iter()
+        .filter(|t| !t.label.starts_with("internal:mcp:"))
+        .collect();
+    Json(tokens).into_response()
 }
 
 /// Prefix that namespaces a user's personal (self-service) tokens. Personal
