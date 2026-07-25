@@ -40,6 +40,7 @@ impl<E: AgentEnginePort> AgentEnginePort for MeteringEngine<E> {
                 m.output_tokens += u.output_tokens;
                 m.runs += 1;
                 *m.by_role.entry(role.clone()).or_default() += u.cost_usd;
+                *m.metered_cost_by_role.entry(role.clone()).or_default() += u.cost_usd;
                 *m.runs_by_role.entry(role).or_default() += 1;
             }
         }
@@ -64,6 +65,9 @@ impl<E: AgentEnginePort> AgentEnginePort for MeteringEngine<E> {
                 m.output_tokens += u.output_tokens;
                 m.runs += 1;
                 *m.by_role.entry("resume".to_owned()).or_default() += u.cost_usd;
+                *m.metered_cost_by_role
+                    .entry("resume".to_owned())
+                    .or_default() += u.cost_usd;
                 *m.runs_by_role.entry("resume".to_owned()).or_default() += 1;
             }
         }

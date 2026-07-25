@@ -63,11 +63,21 @@ pub fn agent_evals(state: &ProjectState) -> AgentEvals {
         .iter()
         .map(|(role, cost)| {
             let runs = state.spend.runs_by_role.get(role).copied().unwrap_or(0);
+            let metered = state
+                .spend
+                .metered_cost_by_role
+                .get(role)
+                .copied()
+                .unwrap_or(0.0);
             RoleEval {
                 role: role.clone(),
                 runs,
                 cost_usd: *cost,
-                avg_cost_usd: if runs == 0 { 0.0 } else { *cost / runs as f64 },
+                avg_cost_usd: if runs == 0 {
+                    0.0
+                } else {
+                    metered / runs as f64
+                },
             }
         })
         .collect();
@@ -392,6 +402,9 @@ mod tests {
     fn agent_evals_math() {
         let mut st = crate::state::ProjectState::default();
         st.spend.by_role.insert("dev_feature".into(), 2.0);
+        st.spend
+            .metered_cost_by_role
+            .insert("dev_feature".into(), 2.0);
         st.spend.runs_by_role.insert("dev_feature".into(), 4);
         st.spend.total_cost_usd = 2.0;
         st.ticket_fail_attempts.insert("A-1".into(), 3);

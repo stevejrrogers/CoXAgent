@@ -320,6 +320,11 @@ pub struct Spend {
     /// the basis of the pre-claim cost estimate for the approval gate.
     #[serde(default)]
     pub runs_by_role: std::collections::BTreeMap<String, u64>,
+    /// Cost metered over the SAME window as `runs_by_role` (both started
+    /// together) — `by_role` holds all-time totals from before run counting
+    /// existed, so dividing THAT by runs inflates the estimate wildly.
+    #[serde(default)]
+    pub metered_cost_by_role: std::collections::BTreeMap<String, f64>,
     /// Usage attributed per operator (`account@host`) — the SaaS per-user view,
     /// so each user's token spend is measurable even though they share a project.
     #[serde(default)]
@@ -336,7 +341,13 @@ impl Spend {
             return None;
         }
         #[allow(clippy::cast_precision_loss)]
-        Some(self.by_role.get(role_key).copied().unwrap_or(0.0) / runs as f64)
+        Some(
+            self.metered_cost_by_role
+                .get(role_key)
+                .copied()
+                .unwrap_or(0.0)
+                / runs as f64,
+        )
     }
 }
 
@@ -1514,7 +1525,8 @@ mod alias_tests {
     fn avg_role_cost_divides_by_runs() {
         let mut sp = super::Spend::default();
         assert!(sp.avg_role_cost("dev_feature").is_none());
-        sp.by_role.insert("dev_feature".into(), 3.0);
+        sp.by_role.insert("dev_feature".into(), 99.0); // historical total — ignored
+        sp.metered_cost_by_role.insert("dev_feature".into(), 3.0);
         sp.runs_by_role.insert("dev_feature".into(), 4);
         let avg = sp.avg_role_cost("dev_feature").unwrap();
         assert!((avg - 0.75).abs() < 1e-9);

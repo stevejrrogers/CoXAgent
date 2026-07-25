@@ -3529,6 +3529,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 for (role, n) in std::mem::take(&mut m.runs_by_role) {
                     *state.spend.runs_by_role.entry(role).or_default() += n;
                 }
+                for (role, cost) in std::mem::take(&mut m.metered_cost_by_role) {
+                    *state.spend.metered_cost_by_role.entry(role).or_default() += cost;
+                }
                 // Attribute this cycle's spend to the operator that ran it, so
                 // each user's token usage is measurable in a shared project.
                 if !self.worker.is_empty() {
