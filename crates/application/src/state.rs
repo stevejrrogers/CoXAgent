@@ -520,6 +520,10 @@ pub struct ProjectState {
     /// dashboard. All deterministic; SM announces every change.
     #[serde(default, skip_serializing_if = "Tuning::is_default")]
     pub tuning: Tuning,
+    /// Definition-of-Done evidence per ticket (bounded per ticket) — a ticket
+    /// only reaches Verified with context-appropriate proof attached.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub ticket_evidence: std::collections::BTreeMap<String, Vec<Evidence>>,
     /// True while the team is in merge-queue RECOVERY: the open-PR count blew
     /// past twice the WIP limit, so cycles do merge/conflict work only until
     /// the queue is back under the limit.
@@ -613,6 +617,7 @@ impl Default for ProjectState {
             cost_holds: std::collections::BTreeMap::new(),
             cost_approved: std::collections::BTreeSet::new(),
             tuning: Tuning::default(),
+            ticket_evidence: std::collections::BTreeMap::new(),
             drain_notice_sprint: 0,
             ticket_fail_attempts: std::collections::BTreeMap::new(),
             ticket_journal: std::collections::BTreeMap::new(),
@@ -621,6 +626,19 @@ impl Default for ProjectState {
             spend_day: String::new(),
         }
     }
+}
+
+/// One piece of Definition-of-Done evidence attached to a ticket: proof the
+/// change actually works in its own context (UI → a real screenshot; API → a
+/// real request/response; or an explicit waiver when the host can't collect).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Evidence {
+    /// `screenshot` | `api` | `test` | `waived`
+    pub kind: String,
+    pub label: String,
+    /// Screenshot: repo-relative path. API: capped request/response text.
+    pub detail: String,
+    pub at: String,
 }
 
 /// Orchestrator self-tuning state, derived from the evals each day.
@@ -658,6 +676,23 @@ impl ProjectState {
         let overflow = self.activity.len().saturating_sub(MAX_ACTIVITY);
         if overflow > 0 {
             self.activity.drain(0..overflow);
+        }
+    }
+
+    /// Attach a piece of DoD evidence to a ticket (bounded: 6 per ticket,
+    /// detail capped) — dashboards render these; TEST requires them.
+    pub fn add_evidence(&mut self, ticket: &str, kind: &str, label: &str, detail: &str) {
+        let ev = Evidence {
+            kind: kind.to_owned(),
+            label: label.chars().take(120).collect(),
+            detail: detail.chars().take(1200).collect(),
+            at: now_rfc3339(),
+        };
+        let list = self.ticket_evidence.entry(ticket.to_owned()).or_default();
+        list.push(ev);
+        let overflow = list.len().saturating_sub(6);
+        if overflow > 0 {
+            list.drain(0..overflow);
         }
     }
 
@@ -1483,5 +1518,17 @@ mod alias_tests {
         sp.runs_by_role.insert("dev_feature".into(), 4);
         let avg = sp.avg_role_cost("dev_feature").unwrap();
         assert!((avg - 0.75).abs() < 1e-9);
+    }
+
+    #[test]
+    fn evidence_bounded_and_capped() {
+        let mut st = super::ProjectState::default();
+        for i in 0..8 {
+            st.add_evidence("T-1", "api", &format!("proof {i}"), &"x".repeat(2000));
+        }
+        let ev = &st.ticket_evidence["T-1"];
+        assert_eq!(ev.len(), 6, "keeps last 6");
+        assert!(ev[0].label.contains("proof 2"), "oldest dropped");
+        assert!(ev.iter().all(|e| e.detail.chars().count() <= 1200));
     }
 }

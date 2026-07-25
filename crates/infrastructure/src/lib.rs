@@ -13,6 +13,7 @@ pub mod forge;
 pub mod git;
 pub mod kv_doc;
 pub mod notifier;
+pub mod probe;
 pub mod proc;
 pub mod screenshot;
 pub mod sql_auth;

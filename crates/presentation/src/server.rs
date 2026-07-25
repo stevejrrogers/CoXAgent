@@ -3145,6 +3145,12 @@ async fn ticket_detail_ep(
                     if let Some(est) = state.cost_holds.get(&id) {
                         obj.insert("cost_hold".into(), serde_json::json!(est));
                     }
+                    if let Some(ev) = state.ticket_evidence.get(&id) {
+                        obj.insert(
+                            "evidence".into(),
+                            serde_json::to_value(ev).unwrap_or_default(),
+                        );
+                    }
                     if state.cost_approved.contains(&id) {
                         obj.insert("cost_approved".into(), serde_json::json!(true));
                     }

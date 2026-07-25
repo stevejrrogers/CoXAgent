@@ -44,6 +44,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
     ///
     /// # Errors
     /// [`AppError`] on engine failure or unparseable output.
+    #[allow(clippy::too_many_lines)] // linear QA pass; splitting hurts readability
     pub async fn execute(&self) -> Result<Vec<TicketId>, AppError> {
         let _choice = self.config.engine.resolve(Role::Test);
         let (memory, shipped) = self.store.load().await.map_or_else(
@@ -135,7 +136,20 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
             .map(|t| t.id().clone())
             .collect();
         let mut promoted = false;
+        let gate_on = self.config.deploy.host_port.is_some();
         for id in passed {
+            // Evidence gate: with a deployed app to prove against, "pass"
+            // requires context-appropriate proof attached to the ticket
+            // (screenshot / API request-response / an explicit waiver). The
+            // cycle keeps re-collecting, so this only defers, never deadlocks.
+            if gate_on && !state.ticket_evidence.contains_key(&id.to_string()) {
+                let note = format!(
+                    "⏳ {id}: regression passed but Verified is DEFERRED — no DoD \
+                     evidence attached yet (screenshot/API proof); collector will retry."
+                );
+                state.post_comment("TEST", &note, Some(id.to_string()));
+                continue;
+            }
             if let Some(t) = state.ticket_mut(&id) {
                 if t.transition_to(Role::Test, coxagent_domain::Status::Verified)
                     .is_ok()

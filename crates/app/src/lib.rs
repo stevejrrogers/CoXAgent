@@ -574,6 +574,18 @@ async fn build_project(
         .with_shot(Some(Arc::new(
             coxagent_infrastructure::screenshot::ChromeScreenshot,
         )))
+        .with_probe(Some(Arc::new(coxagent_infrastructure::probe::HttpProbe)))
+        // Evidence blobs go where the hub serves media from: S3/MinIO when
+        // configured, else the default hub's local blob dir (~/CoXAgent/blobs).
+        .with_storage(Some(build_storage().await.unwrap_or_else(|| {
+            Arc::new(coxagent_infrastructure::storage::LocalStorage::new(
+                std::env::var_os("HOME")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_default()
+                    .join("CoXAgent")
+                    .join("blobs"),
+            ))
+        })))
         .with_git(Arc::new(coxagent_infrastructure::SystemGit::new()));
         let leader = if let Some(ref f) = forge {
             leader.with_forge(Arc::clone(f))
@@ -604,6 +616,18 @@ async fn build_project(
         .with_shot(Some(Arc::new(
             coxagent_infrastructure::screenshot::ChromeScreenshot,
         )))
+        .with_probe(Some(Arc::new(coxagent_infrastructure::probe::HttpProbe)))
+        // Evidence blobs go where the hub serves media from: S3/MinIO when
+        // configured, else the default hub's local blob dir (~/CoXAgent/blobs).
+        .with_storage(Some(build_storage().await.unwrap_or_else(|| {
+            Arc::new(coxagent_infrastructure::storage::LocalStorage::new(
+                std::env::var_os("HOME")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_default()
+                    .join("CoXAgent")
+                    .join("blobs"),
+            ))
+        })))
         .with_git(Arc::new(coxagent_infrastructure::SystemGit::new()));
         let worker = if let Some(ref f) = forge {
             worker.with_forge(Arc::clone(f))

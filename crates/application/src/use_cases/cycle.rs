@@ -97,6 +97,8 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     context: String,
     meter: Option<Arc<Mutex<Spend>>>,
     shot: Option<Arc<dyn crate::ports::outbound::ScreenshotPort>>,
+    probe: Option<Arc<dyn crate::ports::outbound::ApiProbePort>>,
+    storage: Option<Arc<dyn crate::ports::outbound::StoragePort>>,
     deploy: Option<Arc<dyn DeployPort>>,
     notifier: Option<Arc<dyn crate::ports::outbound::NotifierPort>>,
     /// Live, runtime-adjustable spend caps (overrides the config caps when set).
@@ -130,6 +132,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             context,
             meter: None,
             shot: None,
+            probe: None,
+            storage: None,
             deploy: None,
             notifier: None,
             budget: None,
@@ -275,6 +279,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// when `auto_pr` — open a PR into the default branch for a human to review.
     /// Best-effort at every step: any failure is logged and never stalls the
     /// cycle. `kind` is `feat`/`fix`.
+    #[allow(clippy::too_many_lines)] // linear best-effort git/PR pipeline
     async fn commit_for_ticket(&self, id: &TicketId, kind: &str) {
         if !self.config.git.enabled {
             return;
@@ -1182,6 +1187,27 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         self
     }
 
+    /// Attach an HTTP probe for API evidence capture.
+    #[must_use]
+    pub fn with_probe(
+        mut self,
+        probe: Option<Arc<dyn crate::ports::outbound::ApiProbePort>>,
+    ) -> Self {
+        self.probe = probe;
+        self
+    }
+
+    /// Attach blob storage so evidence files (screenshots) live with the rest
+    /// of the project media (local disk or MinIO/S3).
+    #[must_use]
+    pub fn with_storage(
+        mut self,
+        storage: Option<Arc<dyn crate::ports::outbound::StoragePort>>,
+    ) -> Self {
+        self.storage = storage;
+        self
+    }
+
     /// Attach a spend meter (drained into state each cycle for FinOps tracking).
     #[must_use]
     pub fn with_meter(mut self, meter: Arc<Mutex<Spend>>) -> Self {
@@ -1439,9 +1465,22 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                             // Visual QA: someone finally LOOKS at the shipped
                             // UI. Only when this cycle shipped a UI feature.
                             if r.success {
+                                for id in [report.feature_done.clone(), report.bug_fixed.clone()]
+                                    .into_iter()
+                                    .flatten()
+                                {
+                                    self.collect_evidence(&id).await;
+                                }
                                 if let Some(id) = report.feature_done.clone() {
                                     self.visual_qa(&id, &mut report).await;
                                 }
+                            }
+                            // Retry: shipped tickets still missing DoD
+                            // evidence (earlier capture failed) get another
+                            // attempt each cycle, so the TEST gate can't
+                            // deadlock on a transient failure.
+                            if r.success {
+                                self.collect_missing_evidence().await;
                             }
                             // A failed deploy must become work, or nothing fixes
                             // it: file it as a high-priority bug (deduped).
@@ -1592,6 +1631,171 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             })
             .await
             .ok()
+    }
+
+    /// Collect context-appropriate Definition-of-Done evidence for a shipped
+    /// ticket and POST IT ON THE TICKET'S COMMENT THREAD: a UI ticket gets a
+    /// real screenshot of the deployed app (stored as project media — local
+    /// disk or MinIO/S3); a non-UI ticket gets a captured request/response.
+    /// When the host cannot collect (no browser / no probe / app down), a
+    /// `waived` record explains why so the TEST gate stays honest but
+    /// unblocked.
+    async fn collect_evidence(&self, ticket: &TicketId) {
+        let Some(port) = self.config.deploy.host_port else {
+            return; // nothing deployed to prove against — gate is off
+        };
+        let key = ticket.to_string();
+        let (has_ui, already) = match self.store.load().await {
+            Ok(s) => (
+                s.ticket(ticket)
+                    .is_some_and(coxagent_domain::Ticket::has_ui),
+                s.ticket_evidence.contains_key(&key),
+            ),
+            Err(_) => return,
+        };
+        if already {
+            return;
+        }
+        if has_ui {
+            self.collect_ui_evidence(ticket, port).await;
+        } else {
+            self.collect_api_evidence(ticket, port).await;
+        }
+    }
+
+    async fn collect_ui_evidence(&self, ticket: &TicketId, port: u16) {
+        let key = ticket.to_string();
+        let tmp = self.work_dir.join(".coxagent").join("evidence-shot.png");
+        let captured = match &self.shot {
+            Some(shot) => {
+                shot.capture(&format!("http://127.0.0.1:{port}/"), &tmp)
+                    .await
+            }
+            None => false,
+        };
+        let uploaded = if captured {
+            match (std::fs::read(&tmp), &self.storage) {
+                (Ok(bytes), Some(storage)) => {
+                    let pid = self.config_project_label();
+                    let file = format!("evidence-{key}.png");
+                    match storage
+                        .put(&format!("proj/{pid}/{file}"), &bytes, "image/png")
+                        .await
+                    {
+                        Ok(()) => Some((
+                            format!("/api/projects/{pid}/media/{file}"),
+                            bytes.len() as u64,
+                        )),
+                        Err(_) => None,
+                    }
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let _ = std::fs::remove_file(&tmp);
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+            match &uploaded {
+                Some((url, size)) => {
+                    s.add_evidence(&key, "screenshot", "deployed UI screenshot", url);
+                    s.post_comment_att(
+                        "TEST",
+                        &format!("📸 DoD evidence for {key}: screenshot of the deployed UI."),
+                        Some(key.clone()),
+                        vec![crate::state::Attachment {
+                            name: format!("evidence-{key}.png"),
+                            url: url.clone(),
+                            mime: "image/png".to_owned(),
+                            size: *size,
+                        }],
+                    );
+                }
+                None => {
+                    s.add_evidence(
+                        &key,
+                        "waived",
+                        "screenshot unavailable",
+                        "no headless browser/storage on this host, or the app did not render",
+                    );
+                }
+            }
+            Ok(())
+        })
+        .await;
+    }
+
+    async fn collect_api_evidence(&self, ticket: &TicketId, port: u16) {
+        let key = ticket.to_string();
+        let Some(probe) = &self.probe else {
+            let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+                s.add_evidence(
+                    &key,
+                    "waived",
+                    "probe unavailable",
+                    "no HTTP probe on this host",
+                );
+                Ok(())
+            })
+            .await;
+            return;
+        };
+        // Health first (universal), then root — first answer wins.
+        let mut proof = None;
+        for path in ["/api/health", "/"] {
+            let url = format!("http://127.0.0.1:{port}{path}");
+            if let Some(p) = probe.get(&url).await {
+                proof = Some((url, p));
+                break;
+            }
+        }
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+            match &proof {
+                Some((url, p)) => {
+                    let detail = format!("GET {url}\nHTTP {}\n{}", p.status, p.body_snippet.trim());
+                    s.add_evidence(&key, "api", "live request/response", &detail);
+                    s.post_comment(
+                        "TEST",
+                        &format!("🧾 DoD evidence for {key} — live API proof:\n```\n{detail}\n```"),
+                        Some(key.clone()),
+                    );
+                }
+                None => {
+                    s.add_evidence(
+                        &key,
+                        "waived",
+                        "app did not answer",
+                        "probe got no response on health or root",
+                    );
+                }
+            }
+            Ok(())
+        })
+        .await;
+    }
+
+    /// Retry pass: shipped tickets still missing evidence, capped 2/cycle.
+    async fn collect_missing_evidence(&self) {
+        use coxagent_domain::ticket::Status;
+        let Ok(state) = self.store.load().await else {
+            return;
+        };
+        let missing: Vec<TicketId> = state
+            .tickets
+            .iter()
+            .filter(|t| {
+                matches!(
+                    t.status(),
+                    Status::Done | Status::Fixed | Status::Documented
+                ) && !state.ticket_evidence.contains_key(&t.id().to_string())
+            })
+            .map(|t| t.id().clone())
+            .take(2)
+            .collect();
+        drop(state);
+        for id in missing {
+            self.collect_evidence(&id).await;
+        }
     }
 
     /// Post-deploy visual QA on a UI feature: screenshot the running app,
