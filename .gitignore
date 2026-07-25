@@ -21,3 +21,7 @@ desktop/build/
 node_modules/
 /data/registry.json
 /data/coordination.json
+
+# generated per-machine by the code-knowledge indexer
+.coxagent/
+test-results/

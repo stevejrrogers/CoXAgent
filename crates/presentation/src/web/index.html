@@ -888,6 +888,11 @@
   .pf-avbig{width:64px;height:64px;border-radius:14px;display:grid;place-items:center;font-size:22px;font-weight:800}
   img.pf-avbig{object-fit:cover}
   .ustatus{font-size:13px;margin-left:2px;cursor:default}
+  .pf-btn{height:38px;display:inline-flex;align-items:center;gap:6px;padding:0 16px;border-radius:9px;box-sizing:border-box;font-size:13px}
+  /* Mini formatting toolbar shared by inline edit + thread composer */
+  .minibar{display:flex;gap:2px;margin-bottom:6px}
+  .minibar button{background:transparent;border:1px solid var(--border2);color:var(--muted);width:28px;height:26px;border-radius:6px;cursor:pointer;display:grid;place-items:center;font-size:13px}
+  .minibar button:hover{background:var(--card2);color:var(--text)}
   .dmitem .ustatus{margin-left:auto;padding-right:2px}
   /* Slack-style chat rows: avatar gutter, hover highlight + action toolbar */
   .smsg{position:relative;display:flex;gap:10px;padding:3px 14px;align-items:flex-start}
@@ -1833,7 +1838,18 @@ textarea.np-in{resize:vertical;line-height:1.5}
   <div class="threadside" id="thread-side">
     <div class="thread-hd"><span id="thread-title">Thread</span><button onclick="closeThread()" class="gc-btn"><i class="ti ti-x"></i></button></div>
     <div id="thread-msgs" class="thread-msgs"></div>
-    <div class="thread-cmp"><input id="thread-input" placeholder="Reply to thread…" onkeydown="if(event.key==='Enter'){event.preventDefault();sendThreadReply();}"><button class="pri" onclick="event.preventDefault();sendThreadReply()"><i class="ti ti-send"></i></button></div>
+    <div class="thread-cmp" style="flex-direction:column;align-items:stretch;gap:6px">
+      <div style="display:flex;align-items:center;gap:2px" class="minibar" onmousedown="event.preventDefault()">
+        <button title="Bold" onclick="wrapField(document.getElementById('thread-input'),'**')"><i class="ti ti-bold"></i></button>
+        <button title="Italic" onclick="wrapField(document.getElementById('thread-input'),'*')"><i class="ti ti-italic"></i></button>
+        <button title="Code" onclick="wrapField(document.getElementById('thread-input'),'`')"><i class="ti ti-code"></i></button>
+        <button title="Emoji" onclick="openEmoji(this,e=>insertAtCaret(document.getElementById('thread-input'),e))"><i class="ti ti-mood-smile"></i></button>
+      </div>
+      <div style="display:flex;gap:8px">
+        <input id="thread-input" placeholder="Reply to thread…  (**bold** *italic* `code`)" onkeydown="if(event.key==='Enter'){event.preventDefault();sendThreadReply();}">
+        <button class="pri" onclick="event.preventDefault();sendThreadReply()"><i class="ti ti-send"></i></button>
+      </div>
+    </div>
   </div>
 
   <!-- Chat overlays live at body level so they show in Chat mode too (the
@@ -1932,8 +1948,8 @@ textarea.np-in{resize:vertical;line-height:1.5}
     </div>
     <div id="pf-presets" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px"></div>
     <div style="display:flex;gap:8px;justify-content:flex-end">
-      <button class="btn-ghost" onclick="saveProfile(true)">Clear status</button>
-      <button class="save" onclick="saveProfile(false)"><i class="ti ti-device-floppy"></i> Save</button>
+      <button class="btn-ghost pf-btn" onclick="saveStatus(true)">Clear status</button>
+      <button class="save pf-btn" onclick="saveStatus(false)"><i class="ti ti-device-floppy"></i> Save</button>
     </div>
   </div></div>
   <div class="ov" id="ov-meetring"><div class="modal incbox" style="max-width:340px;text-align:center">
@@ -4239,6 +4255,8 @@ function openReactPicker(ev,id){ev.stopPropagation();openEmoji(ev.currentTarget,
 function toggleReact(id,emoji){
   fetch("/api/chat/react",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id,emoji})}).catch(()=>{});
 }
+// Both names are used across the message renderers (channel, thread, pins).
+const reactTo=toggleReact;
 // Apply a reaction event from the socket to the in-memory list + re-render.
 function applyReaction(ev){
   const m=CHAT.find(x=>x.id===ev.id);if(m){m.reactions=ev.reactions||[];if(isChatMode()&&ev.channel===CURCHAN)renderChatList(true);}
@@ -4488,7 +4506,8 @@ async function uploadAvatar(input){const f=input.files[0];input.value="";if(!f)r
     if(r.ok){await loadProfiles();openProfile();toasty("Avatar updated","ok");renderChatList(true);}
     else toasty(await r.text()||"Upload failed","err");
   }catch(e){toasty("Network error","err");}}
-async function saveProfile(clear){
+// NOTE: named saveStatus — `saveProfile` is taken by the account-settings form.
+async function saveStatus(clear){
   const emoji=clear?"":document.getElementById("pf-emoji").textContent.trim();
   const text=clear?"":document.getElementById("pf-text").value.trim();
   try{const r=await fetch("/api/profile",{method:"POST",headers:{"Content-Type":"application/json"},
@@ -6707,13 +6726,34 @@ function renderSlackMsg(m){
       ${body}${attHtml(m.attachments)}${reacts}${thread}
     </div>${acts}</div>`;
 }
+// Wrap the selection of any input/textarea in a markdown marker (**,*,`).
+function wrapField(el,mk){if(!el)return;
+  const a=el.selectionStart||0,b=el.selectionEnd||0,v=el.value;const sel=v.slice(a,b)||"text";
+  el.value=v.slice(0,a)+mk+sel+mk+v.slice(b);el.focus();
+  el.setSelectionRange(a+mk.length,a+mk.length+sel.length);}
+// Insert text (e.g. a picked emoji) at the caret of any input/textarea.
+function insertAtCaret(el,text){if(!el)return;
+  const a=el.selectionStart||el.value.length,b=el.selectionEnd||a,v=el.value;
+  el.value=v.slice(0,a)+text+v.slice(b);el.focus();
+  el.setSelectionRange(a+text.length,a+text.length);}
+// The same B / I / code / emoji controls as the main composer, for any field.
+function minibarHtml(fieldId){return `<div class="minibar">
+    <button title="Bold" onclick="wrapField(document.getElementById('${fieldId}'),'**')"><i class="ti ti-bold"></i></button>
+    <button title="Italic" onclick="wrapField(document.getElementById('${fieldId}'),'*')"><i class="ti ti-italic"></i></button>
+    <button title="Code" onclick="wrapField(document.getElementById('${fieldId}'),'\\u0060')"><i class="ti ti-code"></i></button>
+    <button title="Emoji" onclick="openEmoji(this,e=>insertAtCaret(document.getElementById('${fieldId}'),e))"><i class="ti ti-mood-smile"></i></button>
+  </div>`;}
 function startEditMsg(id,body){
   const el=document.getElementById("msg-"+id);if(!el)return;
-  const bub=el.querySelector(".tcbub");if(!bub)return;
+  const bub=el.querySelector(".tcbub")||el.querySelector(".smsg-body");if(!bub)return;
   const original=bub.innerHTML;
-  const text=decodeURIComponent(body||bub.textContent||"");
-  bub.innerHTML=`<textarea class="edit-inline" id="edit-${id}" rows="1">${esc(text)}</textarea>
-    <div class="edit-hint">esc to cancel · enter to save</div>`;
+  const m=CHAT.find(x=>x.id===id);
+  const text=decodeURIComponent(body||(m&&m.body)||bub.textContent||"");
+  bub.innerHTML=`${minibarHtml("edit-"+id)}
+    <textarea class="edit-inline" id="edit-${id}" rows="2">${esc(text)}</textarea>
+    <div class="edit-hint">esc to cancel · enter to save ·
+      <a style="cursor:pointer;color:var(--accent2)" onclick="saveEditInline('${id}',null)">save</a> ·
+      <a style="cursor:pointer" onclick="renderChatList(true)">cancel</a></div>`;
   const ta=document.getElementById("edit-"+id);
   ta.focus();ta.setSelectionRange(ta.value.length,ta.value.length);
   ta.onkeydown=e=>{
@@ -6722,8 +6762,10 @@ function startEditMsg(id,body){
   };
 }
 function cancelEditInline(id,original){
+  if(original==null){renderChatList(true);return;}
   const el=document.getElementById("msg-"+id);if(!el)return;
-  const bub=el.querySelector(".tcbub");if(bub)bub.innerHTML=original;
+  const bub=el.querySelector(".tcbub")||el.querySelector(".smsg-body");
+  if(bub)bub.innerHTML=original;
 }
 async function saveEditInline(id,original){
   const ta=document.getElementById("edit-"+id);if(!ta)return;
