@@ -25,3 +25,6 @@ node_modules/
 # generated per-machine by the code-knowledge indexer
 .coxagent/
 test-results/
+
+# SwiftPM build dir (companion)
+.build/
