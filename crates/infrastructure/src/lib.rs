@@ -13,6 +13,7 @@ pub mod forge;
 pub mod git;
 pub mod kv_doc;
 pub mod notifier;
+pub mod proc;
 pub mod sql_auth;
 pub mod state;
 pub mod storage;

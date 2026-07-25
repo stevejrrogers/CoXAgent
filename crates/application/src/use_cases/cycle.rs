@@ -1184,7 +1184,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     pub async fn run_cycle(&self, cycle: u64) -> CycleReport {
         // Kill orphaned test-driver processes from prior cycles (TL, Rust, Go, etc.)
         // that may have leaked due to timeouts, panics, or broken builds.
-        crate::cleanup::kill_orphaned_drivers().await;
+        crate::cleanup::kill_orphaned_drivers(&self.work_dir);
 
         let mut report = CycleReport {
             cycle,

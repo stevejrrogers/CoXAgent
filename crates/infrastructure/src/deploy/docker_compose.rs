@@ -47,6 +47,47 @@ async fn compose_project_on_port(port: &str) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
+/// Clamp every container of this compose project to a CPU/memory budget via
+/// `docker update`, regardless of what the agent-authored compose file says —
+/// a runaway service (busy loop, leak) can then never take the whole host.
+/// Defaults: 2 CPUs, 1g memory. Override with `COXAGENT_DEPLOY_CPUS` /
+/// `COXAGENT_DEPLOY_MEM`; set either to `off` to skip. Best-effort.
+async fn apply_resource_limits(proj: &str) {
+    let cpus = std::env::var("COXAGENT_DEPLOY_CPUS").unwrap_or_else(|_| "2".to_owned());
+    let mem = std::env::var("COXAGENT_DEPLOY_MEM").unwrap_or_else(|_| "1g".to_owned());
+    if cpus.eq_ignore_ascii_case("off") || mem.eq_ignore_ascii_case("off") {
+        return;
+    }
+    let Ok(out) = Command::new("docker")
+        .args(["compose", "-p", proj, "ps", "-q"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+    else {
+        return;
+    };
+    for id in String::from_utf8_lossy(&out.stdout).lines() {
+        let id = id.trim();
+        if id.is_empty() {
+            continue;
+        }
+        let _ = Command::new("docker")
+            .args([
+                "update",
+                "--cpus",
+                &cpus,
+                "--memory",
+                &mem,
+                "--memory-swap",
+                &mem,
+                id,
+            ])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .await;
+    }
+}
+
 /// The id of ANY container publishing `port` (compose-labelled or not).
 async fn container_on_port(port: &str) -> Option<String> {
     let out = Command::new("docker")
@@ -164,9 +205,13 @@ impl DeployPort for DockerComposeDeploy {
                 summary: "no recognised test runner".to_owned(),
             });
         };
+        // Host-wide gate + nice: at most COXAGENT_MAX_PARALLEL_HEAVY test
+        // suites run at once across ALL projects, and each runs at background
+        // priority — N projects can no longer freeze the machine together.
+        let _slot = crate::proc::heavy_slot().await;
         let output = tokio::time::timeout(
             Duration::from_secs(900),
-            Command::new(cmd)
+            crate::proc::low_priority(cmd)
                 .args(&args)
                 .current_dir(work_dir)
                 .stdin(std::process::Stdio::null())
@@ -278,6 +323,8 @@ impl DeployPort for DockerComposeDeploy {
             .output()
             .await;
 
+        // Compose builds are as heavy as test suites — same host-wide gate.
+        let _slot = crate::proc::heavy_slot().await;
         let mut cmd = Command::new("docker");
         cmd.arg("compose")
             .args(["-p", &proj])
@@ -347,6 +394,9 @@ impl DeployPort for DockerComposeDeploy {
         }
 
         let success = output.status.success();
+        if success {
+            apply_resource_limits(&proj).await;
+        }
         let summary = if success {
             let note = evicted
                 .map(|p| format!(" (evicted stale {p} off the port)"))

@@ -147,7 +147,9 @@ impl AgentEnginePort for ClaudeEngine {
     }
 
     async fn run(&self, request: AgentRequest) -> Result<AgentOutcome, PortError> {
-        let mut cmd = Command::new(&self.binary);
+        // nice(+10): the agent CLI and every build/test child it spawns stay
+        // background priority, keeping the host responsive.
+        let mut cmd = crate::proc::low_priority(&self.binary);
         // The role/system text goes through --append-system-prompt, NOT folded
         // into -p: it joins the CLI's cached system block, so the stable prefix
         // (base + standards + role) gets prompt-cache READ hits across
@@ -208,7 +210,9 @@ impl AgentEnginePort for ClaudeEngine {
         work_dir: &std::path::Path,
         timeout: std::time::Duration,
     ) -> Result<AgentOutcome, PortError> {
-        let mut cmd = Command::new(&self.binary);
+        // nice(+10): the agent CLI and every build/test child it spawns stay
+        // background priority, keeping the host responsive.
+        let mut cmd = crate::proc::low_priority(&self.binary);
         cmd.arg("-p")
             .arg(follow_up)
             .arg("--resume")

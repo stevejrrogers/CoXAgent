@@ -203,7 +203,9 @@ impl AgentEnginePort for OpencodeEngine {
             let _ = std::fs::write(p, format!("# {role} — live @ run start\n"));
         }
 
-        let mut cmd = Command::new(&self.binary);
+        // nice(+10): the agent CLI and every build/test child it spawns stay
+        // background priority, keeping the host responsive.
+        let mut cmd = crate::proc::low_priority(&self.binary);
         cmd.arg("run")
             .arg("--model")
             .arg(&self.model)
@@ -237,7 +239,9 @@ impl AgentEnginePort for OpencodeEngine {
         timeout: std::time::Duration,
     ) -> Result<AgentOutcome, PortError> {
         let live = live_path(work_dir, "resume");
-        let mut cmd = Command::new(&self.binary);
+        // nice(+10): the agent CLI and every build/test child it spawns stay
+        // background priority, keeping the host responsive.
+        let mut cmd = crate::proc::low_priority(&self.binary);
         cmd.arg("run")
             .arg("--model")
             .arg(&self.model)
