@@ -882,6 +882,31 @@
   .sprintpct{text-align:right;flex:none}
   .sprintpct .v{font-size:26px;font-weight:800;color:var(--accent2);line-height:1}
   .sprintpct .k{font-size:10.5px;color:var(--dim);margin-top:2px}
+  /* Slack-style chat rows: avatar gutter, hover highlight + action toolbar */
+  .smsg{position:relative;display:flex;gap:10px;padding:3px 14px;align-items:flex-start}
+  .smsg:not(.grouped){margin-top:10px}
+  .smsg:hover{background:var(--card2)}
+  .sgut{width:36px;flex:none;display:flex;justify-content:center}
+  .sav{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;font-size:12.5px;font-weight:800;user-select:none}
+  .sgt{font-size:10px;color:var(--dim);opacity:0;padding-top:4px;white-space:nowrap}
+  .smsg:hover .sgt{opacity:1}
+  .smain{flex:1;min-width:0}
+  .shdr{display:flex;align-items:baseline;gap:8px;margin-bottom:1px}
+  .snm{font-weight:700;font-size:13.5px}
+  .stm{font-size:11px;color:var(--dim)}
+  .smsg-body{font-size:13.5px;line-height:1.55;color:var(--text);word-wrap:break-word;overflow-wrap:anywhere}
+  .smsg-body.deleted{color:var(--dim)}
+  .smsg-body code{background:var(--card2);border:1px solid var(--border2);border-radius:5px;padding:1px 5px;font-size:12px}
+  .sacts{position:absolute;top:-14px;right:14px;display:none;gap:2px;background:var(--panel);border:1px solid var(--border2);border-radius:9px;padding:3px;box-shadow:0 6px 18px rgba(0,0,0,.35);z-index:5}
+  .smsg:hover .sacts{display:flex}
+  .sacts button{background:transparent;border:none;color:var(--muted);width:28px;height:26px;border-radius:6px;cursor:pointer;display:grid;place-items:center;font-size:14px}
+  .sacts button:hover{background:var(--card2);color:var(--text)}
+  .sthread{display:inline-flex;align-items:center;gap:6px;margin-top:5px;padding:4px 10px;border:1px solid var(--border2);border-radius:8px;font-size:12px;color:var(--accent2);cursor:pointer;font-weight:600}
+  .sthread:hover{background:var(--accentbg);border-color:var(--accent2)}
+  .sthread-go{color:var(--dim);font-weight:400;opacity:0;transition:opacity .12s}
+  .sthread:hover .sthread-go{opacity:1}
+  .chatday{display:flex;align-items:center;gap:12px;margin:16px 8px 4px;color:var(--dim);font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em}
+  .chatday::before,.chatday::after{content:"";flex:1;height:1px;background:var(--border2)}
   /* Meetings: sidebar list, meeting room grid */
   .meet-item{display:flex;align-items:center;gap:8px;padding:6px 9px;border-radius:8px;cursor:pointer;font-size:12.5px;color:var(--muted)}
   .meet-item:hover{background:var(--card2);color:var(--text)}
@@ -4396,18 +4421,25 @@ function renderChatList(force){
   box.dataset.sig=msgs.length;
   if(!msgs.length){box.innerHTML='<div class="chatempty"><i class="ti ti-message-circle-2"></i><div>No messages yet</div><span>Say hello to your teammates.</span></div>';return;}
   let lastDay="",html="";
-  msgs.forEach((m,i)=>{
+  let prev=null;
+  msgs.forEach(m=>{
     if(m.deleted&&!force)return; // skip deleted unless forced refresh
+    if(m.thread_id)return; // thread replies live in the thread panel, not the channel
     const t=m.at||"";const day=t.slice(0,10);
-    if(day&&day!==lastDay){lastDay=day;html+=`<div class="chatday"><span>${esc(day)}</span></div>`;}
+    if(day&&day!==lastDay){lastDay=day;html+=`<div class="chatday"><span>${esc(dayLabel(day))}</span></div>`;prev=null;}
     // Group consecutive messages from same user within 5 min
-    m.grouped=i>0&&msgs[i-1].user===m.user&&(new Date(m.at)-new Date(msgs[i-1].at))<300000;
-    html+=renderOneMsg(m,"chat");
+    m.grouped=!!prev&&prev.user===m.user&&(new Date(m.at)-new Date(prev.at))<300000;
+    html+=renderOneMsg(m,"chat");prev=m;
   });
   box.innerHTML=html;
   if(atBottom)box.scrollTop=box.scrollHeight;
   loadPins();renderTyping();
 }
+// "Today" / "Yesterday" / a friendly local date for the channel day divider.
+function dayLabel(day){const d=new Date(day+"T12:00:00");const now=new Date();
+  const today=now.toISOString().slice(0,10),y=new Date(now-86400000).toISOString().slice(0,10);
+  if(day===today)return "Today"; if(day===y)return "Yesterday";
+  return d.toLocaleDateString([],{weekday:"long",month:"long",day:"numeric"});}
 // Deterministic per-user accent so each teammate keeps a stable bubble color.
 function userColor(u){const pal=["#38bdf8","#a78bfa","#f472b6","#34d399","#fbbf24","#fb7185","#60a5fa","#c084fc"];
   let h=0;for(let i=0;i<(u||"").length;i++)h=(h*31+u.charCodeAt(i))>>>0;return pal[h%pal.length];}
@@ -6561,6 +6593,7 @@ async function sendThreadReply(){
   }catch(e){console.warn("sendThreadReply: network error", e);}
 }
 function renderOneMsg(m,ctx){
+  if(ctx==="chat")return renderSlackMsg(m);
   const time=m.at?new Date(m.at).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}):"";
   const isMe=m.user===ME?.username;
   const deleted=m.deleted;
@@ -6575,6 +6608,36 @@ function renderOneMsg(m,ctx){
   return `<div class="tcmsg${isMe?' me':''}${deleted?' deleted':''}" id="msg-${esc(m.id)}">
     ${ctx!=="thread"&&!m.grouped?`<div class="tchdr"><span class="tcu">${esc(memberName(m.user))}</span><span class="tct">${time}</span></div>`:''}
     ${bodyH}${atts}${reacts}${acts}</div>`;
+}
+// Slack-style flat row: avatar gutter + bold name/time header, hover-reveal
+// action toolbar, full-width body (no bubbles, no right-aligned "me").
+function renderSlackMsg(m){
+  const time=m.at?new Date(m.at).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}):"";
+  const me=ME?.username,isMe=m.user===me,deleted=m.deleted,hasId=m.id&&m.id.length>5;
+  const col=userColor(m.user);
+  const body=deleted?'<div class="smsg-body deleted"><i>This message was deleted</i></div>'
+    :`<div class="smsg-body">${formatMsg(m.body)}${m.edited?' <span class="tcedit">(edited)</span>':''}</div>`;
+  const reacts=(!deleted&&m.reactions&&m.reactions.length)?'<div class="tcr">'+m.reactions.map(r=>`<span class="tcre${r.users.includes(me)?' me':''}" onclick="reactTo('${esc(m.id)}','${esc(r.emoji)}')" title="${r.users.map(memberName).join(', ')}">${esc(r.emoji)} ${r.users.length}</span>`).join("")+`<span class="tcre add" onclick="openEmoji(document.getElementById('tcr-${esc(m.id)}'),e=>reactTo('${esc(m.id)}',e))" id="tcr-${esc(m.id)}"><i class="ti ti-mood-plus"></i></span></div>`:'';
+  // Slack's signature: a clickable "N replies" bar under threaded parents.
+  const thread=(!deleted&&m.reply_count>0)?`<div class="sthread" onclick="openThread('${esc(m.id)}')"><i class="ti ti-message-2"></i> ${m.reply_count} ${m.reply_count>1?'replies':'reply'} <span class="sthread-go">View thread ›</span></div>`:'';
+  const own=isMe&&!deleted&&hasId;
+  const acts=(!deleted&&hasId)?`<div class="sacts">
+      <button onclick="openEmoji(this,e=>reactTo('${esc(m.id)}',e))" title="React"><i class="ti ti-mood-plus"></i></button>
+      <button onclick="openThread('${esc(m.id)}')" title="Reply in thread"><i class="ti ti-message-2"></i></button>
+      ${own?`<button onclick="startEditMsg('${esc(m.id)}')" title="Edit"><i class="ti ti-pencil"></i></button>
+      <button onclick="deleteMsg('${esc(m.id)}')" title="Delete"><i class="ti ti-trash"></i></button>`:''}
+      <button onclick="togglePin('${esc(m.id)}')" title="Pin"><i class="ti ti-pinned"></i></button>
+      <button onclick="copyMsgLink('${esc(m.id)}')" title="Copy link"><i class="ti ti-link"></i></button>
+    </div>`:'';
+  const gutter=m.grouped
+    ?`<span class="sgt">${time}</span>`
+    :`<div class="sav" style="background:${col}26;color:${col}">${esc((memberName(m.user)||"?").slice(0,2).toUpperCase())}</div>`;
+  return `<div class="smsg${m.grouped?' grouped':''}" id="msg-${esc(m.id)}">
+    <div class="sgut">${gutter}</div>
+    <div class="smain">
+      ${m.grouped?'':`<div class="shdr"><span class="snm" style="color:${col}">${esc(memberName(m.user))}</span><span class="stm">${time}</span></div>`}
+      ${body}${attHtml(m.attachments)}${reacts}${thread}
+    </div>${acts}</div>`;
 }
 function startEditMsg(id,body){
   const el=document.getElementById("msg-"+id);if(!el)return;
