@@ -1014,6 +1014,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             s.post_comment("SM", &format!("🎓 Retro lesson: {lesson}"), None);
             let _ = self.store.save(&s).await;
         }
+        // Cross-project: the same lesson benefits every other project on this hub.
+        crate::prompts::record_hub_lesson(&lesson);
     }
 
     /// Sprint Review + Retrospective, posted to the team channel: what shipped

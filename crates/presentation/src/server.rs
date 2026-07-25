@@ -2157,6 +2157,7 @@ pub async fn serve_full(
         )
         .route("/api/projects/:pid/state", get(state_ep))
         .route("/api/projects/:pid/metrics", get(metrics_ep))
+        .route("/api/projects/:pid/agent-evals", get(agent_evals_ep))
         .route("/api/projects/:pid/runner", get(runner_ep))
         .route("/api/projects/:pid/workers", get(workers_ep))
         .route("/api/token-saver", get(token_saver_ep))
@@ -3163,6 +3164,20 @@ async fn metrics_ep(
     };
     match p.store.load().await {
         Ok(state) => Json(metrics::compute(&state)).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Deterministic per-role performance + team quality stats for the Agents view.
+async fn agent_evals_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    match p.store.load().await {
+        Ok(state) => Json(metrics::agent_evals(&state)).into_response(),
         Err(e) => internal_error(&e.to_string()),
     }
 }

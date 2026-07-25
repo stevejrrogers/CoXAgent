@@ -1607,6 +1607,8 @@ textarea.np-in{resize:vertical;line-height:1.5}
         <div id="team-sessions"></div>
         <div class="sec">Agents <span style="font-size:11px;color:var(--dim);font-weight:400">· your autonomous workers — click one to see its live log</span></div>
         <div class="agents" id="agents"></div>
+        <div class="sec" style="margin-top:22px">Performance &amp; quality <span style="font-size:11px;color:var(--dim);font-weight:400">· deterministic evals from state — no tokens spent</span></div>
+        <div class="kpis" id="team-evals"><div class="empty">loading…</div></div>
         <div class="sec admin-only" style="margin-top:22px">People on this project <span style="font-size:11px;color:var(--dim);font-weight:400">· humans who oversee & collaborate</span></div>
         <div class="acard admin-only" id="team-people"><div class="empty">loading…</div></div>
       </div>
@@ -2193,7 +2195,7 @@ function nav(v){
   document.getElementById("pg-title").textContent=TITLES[v][0];
   document.getElementById("pg-sub").textContent=TITLES[v][1];
   try{updateSegments();}catch(e){}
-   if(v==="settings")loadSettings(); else if(v==="calendar"){if(!Array.isArray(MEETINGS))MEETINGS=[];loadMeetings().then(renderCalendar).catch(()=>{MEETINGS=[];renderCalendar();});} else if(v==="discuss"){loadComments();} else if(v==="docs"){loadDocs();} else if(v==="people"){renderPeople();} else if(v==="audit"){renderAudit();} else if(v==="access"){renderAccess();} else if(v==="roadmap"){renderRoadmap();} else if(v==="review"){renderReview();} else if(v==="codemap"){renderCodeMap();} else if(v==="terminal"){openTerminal();} else renderActive();
+   if(v==="settings")loadSettings(); else if(v==="calendar"){if(!Array.isArray(MEETINGS))MEETINGS=[];loadMeetings().then(renderCalendar).catch(()=>{MEETINGS=[];renderCalendar();});} else if(v==="discuss"){loadComments();} else if(v==="docs"){loadDocs();} else if(v==="people"){renderPeople();} else if(v==="audit"){renderAudit();} else if(v==="access"){renderAccess();} else if(v==="roadmap"){renderRoadmap();} else if(v==="review"){renderReview();} else if(v==="codemap"){renderCodeMap();} else if(v==="team"){loadAgentEvals();renderActive();} else if(v==="terminal"){openTerminal();} else renderActive();
    setTimeout(centerContent,50);}
 function initials(r){return r.replace("DEV-","").slice(0,2);}
 function metricsFrom(s){const t=s.tickets||[],h=s.history||[],isF=x=>x.type!=="bug";
@@ -6430,6 +6432,22 @@ async function renderSessions(){
         </div>
       </div>
     </div>`;
+}
+async function loadAgentEvals(){
+  const el=document.getElementById("team-evals");if(!el)return;
+  try{
+    const d=await(await fetch(api("/agent-evals"))).json();
+    const kpi=(label,val,icon,color)=>`<div class="kpi"><div class="kv" style="color:${color||'var(--text)'}">${val}</div><div class="kl"><i class="ti ti-${icon}"></i> ${label}</div></div>`;
+    const churn=+d.churn_per_ship;
+    el.innerHTML=
+      kpi("shipped total",d.shipped_total,"rocket")+
+      kpi("shipped · 7d",d.shipped_7d,"calendar-week")+
+      kpi("cost / ship",d.cost_per_ship_usd>0?"$"+(+d.cost_per_ship_usd).toFixed(2):"—","coin")+
+      kpi("retry churn / ship",churn.toFixed(2),"refresh-alert",churn>1.5?"var(--red)":churn>0.5?"var(--amber)":"var(--green)")+
+      kpi("parked tickets",d.parked,"hand-stop",d.parked>0?"var(--amber)":"var(--green)")+
+      kpi("PRs stuck",d.prs_stuck,"git-pull-request",d.prs_stuck>0?"var(--red)":"var(--green)")+
+      (d.per_role||[]).filter(r=>r.runs>0).map(r=>kpi(r.role+" avg/run","$"+(+r.avg_cost_usd).toFixed(2),"robot")).join("");
+  }catch(e){el.innerHTML='<div class="empty">evals unavailable</div>';}
 }
 async function renderTeamPeople(){
   const el=document.getElementById("team-people");if(!el)return;

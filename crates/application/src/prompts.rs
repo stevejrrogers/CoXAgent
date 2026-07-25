@@ -373,6 +373,75 @@ pub fn focus_block(work_dir: &std::path::Path, query: &str) -> String {
     out.chars().take(1800).collect()
 }
 
+/// Where cross-project ("hub") lessons live: one markdown bullet per lesson,
+/// shared by EVERY project this user's hub runs — so what one team learns
+/// ("rust:1.79 base image breaks edition2024") benefits the next project too.
+/// Override with `COXAGENT_HUB_LESSONS_PATH`.
+#[must_use]
+pub fn hub_lessons_path() -> std::path::PathBuf {
+    if let Some(p) = std::env::var_os("COXAGENT_HUB_LESSONS_PATH") {
+        return std::path::PathBuf::from(p);
+    }
+    std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default()
+        .join("CoXAgent")
+        .join("hub_lessons.md")
+}
+
+/// Record a lesson into the hub-wide store (dedup, newest last, capped at 30
+/// so the block stays prompt-sized). Best-effort: IO errors are swallowed —
+/// a lesson lost beats a crashed retro.
+pub fn record_hub_lesson(lesson: &str) {
+    let lesson = lesson.trim();
+    if lesson.is_empty() {
+        return;
+    }
+    let path = hub_lessons_path();
+    let mut lines: Vec<String> = std::fs::read_to_string(&path)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    let entry = format!("- {lesson}");
+    if lines.iter().any(|l| l == &entry) {
+        return;
+    }
+    lines.push(entry);
+    let overflow = lines.len().saturating_sub(30);
+    if overflow > 0 {
+        lines.drain(0..overflow);
+    }
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&path, lines.join("\n") + "\n");
+}
+
+/// Prompt block with the most recent hub-wide lessons (max 8). Empty when the
+/// store is empty/absent.
+#[must_use]
+pub fn hub_lessons_block() -> String {
+    let text = std::fs::read_to_string(hub_lessons_path()).unwrap_or_default();
+    let recent: Vec<&str> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .rev()
+        .take(8)
+        .collect();
+    if recent.is_empty() {
+        return String::new();
+    }
+    let mut out =
+        String::from("\n\n## Lessons from OTHER projects on this hub (hard-won — honour them):\n");
+    for l in recent.iter().rev() {
+        out.push_str(l);
+        out.push('\n');
+    }
+    out
+}
+
 /// Fold the team's durable memory — decisions/conventions plus retro lessons —
 /// into a prompt block so every agent stays consistent with what's been decided
 /// and learned, instead of re-deriving (and contradicting) each call. Empty when
@@ -475,5 +544,27 @@ mod tests {
         assert!(out.contains("cyan #0891B2"));
         assert!(out.contains("Inter"));
         assert!(out.contains("8px radius"));
+    }
+
+    #[test]
+    fn hub_lessons_record_dedup_cap_and_block() {
+        let dir = std::env::temp_dir().join(format!("cox-hub-lessons-{}", std::process::id()));
+        let file = dir.join("hub_lessons.md");
+        std::env::set_var("COXAGENT_HUB_LESSONS_PATH", &file);
+        let _ = std::fs::remove_file(&file);
+        for i in 0..35 {
+            super::record_hub_lesson(&format!("lesson {i}"));
+        }
+        super::record_hub_lesson("lesson 34"); // duplicate — ignored
+        let text = std::fs::read_to_string(&file).expect("written");
+        let n = text.lines().count();
+        assert_eq!(n, 30, "capped at 30");
+        assert!(!text.contains("lesson 0"), "oldest evicted");
+        let block = super::hub_lessons_block();
+        assert!(block.contains("OTHER projects"));
+        assert!(block.contains("lesson 34"));
+        assert_eq!(block.matches("- lesson").count(), 8, "block caps at 8");
+        std::env::remove_var("COXAGENT_HUB_LESSONS_PATH");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -435,7 +435,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             // exists only for UI tickets) belongs in the task prompt below.
             system_prompt: prompts::system_prompt(prompts::DEV),
             task_prompt: format!(
-                "Ticket {id}: {title}\n{}\nImplement it now.{stack}{deploy}{design}{context_block}{}{}{}{journal}",
+                "Ticket {id}: {title}\n{}\nImplement it now.{stack}{deploy}{design}{context_block}{}{}{}{}{journal}",
                 ticket_brief(ticket),
                 prompts::focus_block(
                     &self.work_dir,
@@ -448,6 +448,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 ),
                 prompts::repo_map_block(&self.work_dir, self.config.workflow.token_saver),
                 prompts::team_memory_block(&state.decisions, &state.lessons),
+                prompts::hub_lessons_block(),
             ),
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(3600),
