@@ -2119,6 +2119,25 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             }
             s.tuning = next.clone();
             s.tuning.last_eval_day.clone_from(&today);
+            // Mirror the hub-wide lessons into this project's Wiki (daily),
+            // so cross-project knowledge is readable where people read —
+            // not only injected into prompts.
+            let hub =
+                std::fs::read_to_string(crate::prompts::hub_lessons_path()).unwrap_or_default();
+            if !hub.trim().is_empty() {
+                s.ensure_standard_folders();
+                s.upsert_doc(
+                    "hub-lessons",
+                    "Team",
+                    crate::state::doc_category_of("Team"),
+                    "Hub lessons (all projects)",
+                    &format!(
+                        "Lessons learned across EVERY project on this hub — auto-synced \
+                         daily; agents also receive the most recent ones in their prompts.\n\n{hub}"
+                    ),
+                    "SM",
+                );
+            }
             for a in announce {
                 let msg = format!("🎛️ Self-tuning: {a}");
                 s.post_comment("SM", &msg, None);
