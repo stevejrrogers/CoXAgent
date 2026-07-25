@@ -26,9 +26,11 @@ pub struct RunChatReplyUseCase<S: StateStorePort + ?Sized, E: AgentEnginePort + 
     forge: Option<(Arc<dyn crate::ports::outbound::ForgePort>, String)>,
     context: Option<String>,
     /// Callback: create a new project from scratch. Returns a human-readable status message.
-    new_project_fn: Option<Arc<dyn Fn(String, Option<String>) -> Result<String, String> + Send + Sync>>,
+    new_project_fn:
+        Option<Arc<dyn Fn(String, Option<String>) -> Result<String, String> + Send + Sync>>,
     /// Callback: import an existing codebase. Returns a human-readable status message.
-    import_project_fn: Option<Arc<dyn Fn(String, String, Option<String>) -> Result<String, String> + Send + Sync>>,
+    import_project_fn:
+        Option<Arc<dyn Fn(String, String, Option<String>) -> Result<String, String> + Send + Sync>>,
 }
 
 /// Common docker-compose filenames we treat as "already has a deploy setup".
@@ -285,7 +287,14 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         let brief = super::run_dev::ticket_brief(Some(_ticket));
         let fp = crate::prompts::focus_block(
             &self.work_dir,
-            &format!("{title} {}", _ticket.design().technical.as_ref().map_or("", |d| d.approach.as_str())),
+            &format!(
+                "{title} {}",
+                _ticket
+                    .design()
+                    .technical
+                    .as_ref()
+                    .map_or("", |d| d.approach.as_str())
+            ),
         );
         let rp = crate::prompts::repo_map_block(&self.work_dir, self.token_saver);
 
@@ -303,19 +312,32 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
                 // Mark the ticket as done if possible
                 let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
                     if let Some(t) = s.ticket_mut(&tid) {
-                        let _ = t.transition_to(coxagent_domain::Role::DevFeature, coxagent_domain::Status::Done);
+                        let _ = t.transition_to(
+                            coxagent_domain::Role::DevFeature,
+                            coxagent_domain::Status::Done,
+                        );
                     }
                     Ok(())
-                }).await;
+                })
+                .await;
                 let done = if self.lang.is_vi() {
-                    format!("✅ Đã code xong ticket {tid}! DEV đã implement. Build & tests: {}", outcome.stdout.lines().last().unwrap_or("done"))
+                    format!(
+                        "✅ Đã code xong ticket {tid}! DEV đã implement. Build & tests: {}",
+                        outcome.stdout.lines().last().unwrap_or("done")
+                    )
                 } else {
-                    format!("✅ Ticket {tid} implemented! DEV coded it. {}", outcome.stdout.lines().last().unwrap_or("done"))
+                    format!(
+                        "✅ Ticket {tid} implemented! DEV coded it. {}",
+                        outcome.stdout.lines().last().unwrap_or("done")
+                    )
                 };
                 self.post("DEV-FEATURE", &done).await;
             }
             Ok(outcome) => {
-                let msg = format!("❌ DEV failed on {tid}: {}", outcome.stderr.lines().last().unwrap_or("unknown error"));
+                let msg = format!(
+                    "❌ DEV failed on {tid}: {}",
+                    outcome.stderr.lines().last().unwrap_or("unknown error")
+                );
                 self.post("DEV-BUG", &msg).await;
             }
             Err(e) => {
@@ -330,9 +352,17 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         use coxagent_domain::TicketId;
         let Ok(tid) = TicketId::new(rest) else { return };
         let state = self.store.load().await.ok();
-        let title = state.as_ref().and_then(|s| s.ticket(&tid).map(|t| t.title().to_owned())).unwrap_or_default();
-        let _has_design = state.as_ref().and_then(|s| s.ticket(&tid)).is_some_and(|t| t.design().technical.is_some());
-        let memory = state.as_ref().map_or(String::new(), |s| crate::prompts::team_memory_block(&s.decisions, &s.lessons));
+        let title = state
+            .as_ref()
+            .and_then(|s| s.ticket(&tid).map(|t| t.title().to_owned()))
+            .unwrap_or_default();
+        let _has_design = state
+            .as_ref()
+            .and_then(|s| s.ticket(&tid))
+            .is_some_and(|t| t.design().technical.is_some());
+        let memory = state.as_ref().map_or(String::new(), |s| {
+            crate::prompts::team_memory_block(&s.decisions, &s.lessons)
+        });
         let announce = if self.lang.is_vi() {
             format!("🎨 SA đang design ticket {tid}: {title}...")
         } else {
@@ -355,28 +385,58 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
                 if let Some(ref _s) = state {
                     if let Ok(design) = serde_json::from_str::<serde_json::Value>(&o.stdout) {
                         let td = coxagent_domain::TechnicalDesign {
-                            approach: design.get("approach").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
-                            files: design.get("files").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default(),
-                            api_contract: design.get("api_contract").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
-                            data_changes: design.get("data_changes").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
-                            test_plan: design.get("test_plan").and_then(|v| v.as_str()).unwrap_or("").to_owned(),
+                            approach: design
+                                .get("approach")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_owned(),
+                            files: design
+                                .get("files")
+                                .and_then(|v| v.as_array())
+                                .map(|a| {
+                                    a.iter()
+                                        .filter_map(|v| v.as_str().map(String::from))
+                                        .collect()
+                                })
+                                .unwrap_or_default(),
+                            api_contract: design
+                                .get("api_contract")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_owned(),
+                            data_changes: design
+                                .get("data_changes")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_owned(),
+                            test_plan: design
+                                .get("test_plan")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_owned(),
                         };
                         let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
                             if let Some(t) = s.ticket_mut(&tid) {
-                                let _ = t.set_technical_design(coxagent_domain::Role::Sa, td.clone());
+                                let _ =
+                                    t.set_technical_design(coxagent_domain::Role::Sa, td.clone());
                             }
                             Ok(())
-                        }).await;
+                        })
+                        .await;
                     }
                 }
                 let done = if self.lang.is_vi() {
                     format!("✅ SA đã design xong ticket {tid}. Có thể dùng `ACTION: implement: {tid}` để code.")
                 } else {
-                    format!("✅ SA designed ticket {tid}. Use `ACTION: implement: {tid}` to code it.")
+                    format!(
+                        "✅ SA designed ticket {tid}. Use `ACTION: implement: {tid}` to code it."
+                    )
                 };
                 self.post("SA", &done).await;
             }
-            _ => { self.post("SA", &format!("❌ SA failed on {tid}")).await; }
+            _ => {
+                self.post("SA", &format!("❌ SA failed on {tid}")).await;
+            }
         }
     }
 
@@ -384,10 +444,15 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
     async fn test_ticket(&self, rest: &str) {
         use coxagent_domain::TicketId;
         let Ok(tid) = TicketId::new(rest) else { return };
-        self.post("TEST", &format!("🧪 QA testing ticket {tid}...")).await;
+        self.post("TEST", &format!("🧪 QA testing ticket {tid}..."))
+            .await;
         let state = self.store.load().await.ok();
-        let shipped = state.as_ref().map_or(String::new(), |s| crate::use_cases::run_test::shipped_block(s));
-        let memory = state.as_ref().map_or(String::new(), |s| crate::prompts::team_memory_block(&s.decisions, &s.lessons));
+        let shipped = state.as_ref().map_or(String::new(), |s| {
+            crate::use_cases::run_test::shipped_block(s)
+        });
+        let memory = state.as_ref().map_or(String::new(), |s| {
+            crate::prompts::team_memory_block(&s.decisions, &s.lessons)
+        });
         let request = crate::ports::outbound::AgentRequest {
             role: coxagent_domain::Role::Test,
             system_prompt: crate::prompts::system_prompt(crate::prompts::TEST),
@@ -405,22 +470,34 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
                     for b in bugs {
                         let title = b.get("title").and_then(|v| v.as_str()).unwrap_or("");
                         let desc = b.get("description").and_then(|v| v.as_str()).unwrap_or("");
-                        let prio_str = b.get("priority").and_then(|v| v.as_str()).unwrap_or("medium");
-                        let cx_str = b.get("complexity").and_then(|v| v.as_str()).unwrap_or("small");
-                        if title.is_empty() { continue; }
-                        let _ = adder.execute(crate::use_cases::AddTicketInput {
-                            ticket_type: coxagent_domain::TicketType::Bug,
-                            title: title.to_owned(),
-                            description: desc.to_owned(),
-                            priority: parse_priority(prio_str).unwrap_or(coxagent_domain::Priority::Medium),
-                            complexity: match cx_str {
-                                "large" => coxagent_domain::Complexity::Large,
-                                "medium" => coxagent_domain::Complexity::Medium,
-                                _ => coxagent_domain::Complexity::Small,
-                            },
-                            has_ui: b.get("has_ui").and_then(|v| v.as_bool()).unwrap_or(false),
-                            acceptance_criteria: vec![],
-                        }).await.ok();
+                        let prio_str = b
+                            .get("priority")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("medium");
+                        let cx_str = b
+                            .get("complexity")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("small");
+                        if title.is_empty() {
+                            continue;
+                        }
+                        let _ = adder
+                            .execute(crate::use_cases::AddTicketInput {
+                                ticket_type: coxagent_domain::TicketType::Bug,
+                                title: title.to_owned(),
+                                description: desc.to_owned(),
+                                priority: parse_priority(prio_str)
+                                    .unwrap_or(coxagent_domain::Priority::Medium),
+                                complexity: match cx_str {
+                                    "large" => coxagent_domain::Complexity::Large,
+                                    "medium" => coxagent_domain::Complexity::Medium,
+                                    _ => coxagent_domain::Complexity::Small,
+                                },
+                                has_ui: b.get("has_ui").and_then(|v| v.as_bool()).unwrap_or(false),
+                                acceptance_criteria: vec![],
+                            })
+                            .await
+                            .ok();
                         filed += 1;
                     }
                     let done = if filed > 0 {
@@ -431,7 +508,9 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
                     self.post("TEST", &done).await;
                 }
             }
-            _ => { self.post("TEST", &format!("❌ TEST failed on {tid}")).await; }
+            _ => {
+                self.post("TEST", &format!("❌ TEST failed on {tid}")).await;
+            }
         }
     }
 
@@ -439,19 +518,28 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
     async fn new_project(&self, rest: &str) {
         let parts: Vec<&str> = rest.splitn(2, "::").map(|s| s.trim()).collect();
         let name = parts.first().unwrap_or(&"").to_string();
-        let alias = parts.get(1).map(|s| s.to_string()).filter(|s| !s.is_empty());
+        let alias = parts
+            .get(1)
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty());
         if name.is_empty() {
-            self.post("SM", "Usage: new_project: Project Name :: ALIAS").await;
+            self.post("SM", "Usage: new_project: Project Name :: ALIAS")
+                .await;
             return;
         }
-        self.post("SM", &format!("🆕 Creating project '{}'...", name)).await;
+        self.post("SM", &format!("🆕 Creating project '{}'...", name))
+            .await;
         let result = match &self.new_project_fn {
             Some(f) => f(name, alias),
             None => Err("Project creation not wired (run coxagent hub directly)".into()),
         };
         match result {
-            Ok(msg) => { self.post("SM", &msg).await; }
-            Err(e) => { self.post("SM", &format!("❌ Failed: {e}")).await; }
+            Ok(msg) => {
+                self.post("SM", &msg).await;
+            }
+            Err(e) => {
+                self.post("SM", &format!("❌ Failed: {e}")).await;
+            }
         }
     }
 
@@ -459,19 +547,31 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         let parts: Vec<&str> = rest.splitn(3, "::").map(|s| s.trim()).collect();
         let path = parts.first().unwrap_or(&"").to_string();
         let name = parts.get(1).unwrap_or(&"").to_string();
-        let alias = parts.get(2).map(|s| s.to_string()).filter(|s| !s.is_empty());
+        let alias = parts
+            .get(2)
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty());
         if path.is_empty() || name.is_empty() {
-            self.post("SM", "Usage: import: /path/to/codebase :: Project Name :: ALIAS").await;
+            self.post(
+                "SM",
+                "Usage: import: /path/to/codebase :: Project Name :: ALIAS",
+            )
+            .await;
             return;
         }
-        self.post("SM", &format!("📂 Importing '{}' from {path}...", name)).await;
+        self.post("SM", &format!("📂 Importing '{}' from {path}...", name))
+            .await;
         let result = match &self.import_project_fn {
             Some(f) => f(path, name, alias),
             None => Err("Project import not wired (run coxagent hub directly)".into()),
         };
         match result {
-            Ok(msg) => { self.post("SM", &msg).await; }
-            Err(e) => { self.post("SM", &format!("❌ Failed: {e}")).await; }
+            Ok(msg) => {
+                self.post("SM", &msg).await;
+            }
+            Err(e) => {
+                self.post("SM", &format!("❌ Failed: {e}")).await;
+            }
         }
     }
 
@@ -715,7 +815,14 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         if !pending.is_empty() {
             out.push_str("Open tickets (don't file duplicates):\n");
             for t in pending {
-                let _ = writeln!(out, "- {} [{:?}] {} ({:?})", t.id(), t.ticket_type(), t.title(), t.priority());
+                let _ = writeln!(
+                    out,
+                    "- {} [{:?}] {} ({:?})",
+                    t.id(),
+                    t.ticket_type(),
+                    t.title(),
+                    t.priority()
+                );
             }
         }
         if !s.decisions.is_empty() {
@@ -838,6 +945,6 @@ fn split_action(raw: &str) -> (String, String) {
             let body: Vec<&str> = raw.lines().take(i).collect();
             return (body.join("\n"), rest.trim().to_owned());
         }
-     }
+    }
     (raw.to_owned(), String::new())
 }

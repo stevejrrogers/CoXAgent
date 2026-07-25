@@ -114,8 +114,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
                 format!("\n\n## Project context (goal, stack — doc within this framing):\n{c}\n")
             })
             .unwrap_or_default();
-        let repo_map =
-            prompts::repo_map_block(&self.work_dir, self.config.workflow.token_saver);
+        let repo_map = prompts::repo_map_block(&self.work_dir, self.config.workflow.token_saver);
         let outcome = self
             .engine
             .run(AgentRequest {

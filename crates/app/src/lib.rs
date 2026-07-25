@@ -574,7 +574,11 @@ async fn build_project(
         tokio::spawn(async move { run_forever(wh, leader, sleep).await });
     }
 
-    tracing::info!("[{id}] spawning {} worker runner(s) (total {} runners)", concurrency.saturating_sub(1), concurrency);
+    tracing::info!(
+        "[{id}] spawning {} worker runner(s) (total {} runners)",
+        concurrency.saturating_sub(1),
+        concurrency
+    );
     for _ in 1..concurrency {
         let worker = RunCycleUseCase::new(
             Arc::clone(&store),
@@ -808,7 +812,10 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
         let mut free = false;
         for _ in 0..50 {
             match std::net::TcpListener::bind(("127.0.0.1", port)) {
-                Ok(_) => { free = true; break; }
+                Ok(_) => {
+                    free = true;
+                    break;
+                }
                 Err(_) => port += 1,
             }
         }
@@ -872,28 +879,30 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
 
     // A hub-level engine for cross-project drafting (e.g. project goals), built
     // from opencode which supports any provider.
-    let analyzer = build_engine(&Config {
-        engine: coxagent_application::config::EngineMapping {
-            default: coxagent_application::config::EngineChoice {
-                engine: coxagent_application::config::EngineKind::Opencode,
-                model: "bizbrain/DeepSeek-V4-Pro".to_owned(),
+    let analyzer = build_engine(
+        &Config {
+            engine: coxagent_application::config::EngineMapping {
+                default: coxagent_application::config::EngineChoice {
+                    engine: coxagent_application::config::EngineKind::Opencode,
+                    model: "bizbrain/DeepSeek-V4-Pro".to_owned(),
+                },
+                per_role: std::collections::HashMap::new(),
+                fallbacks: Vec::new(),
+                auto_fallback: true,
             },
-            per_role: std::collections::HashMap::new(),
-            fallbacks: Vec::new(),
-            auto_fallback: true,
+            git: Default::default(),
+            workflow: Default::default(),
+            architecture: Vec::new(),
+            deploy: Default::default(),
+            policy: Default::default(),
         },
-        git: Default::default(),
-        workflow: Default::default(),
-        architecture: Vec::new(),
-        deploy: Default::default(),
-        policy: Default::default(),
-    },
-    logs_dir(&base))
-        .ok()
-        .map(|(e, _)| {
-            let engine: Arc<dyn coxagent_application::ports::outbound::AgentEnginePort> = e;
-            (engine, base.clone())
-        });
+        logs_dir(&base),
+    )
+    .ok()
+    .map(|(e, _)| {
+        let engine: Arc<dyn coxagent_application::ports::outbound::AgentEnginePort> = e;
+        (engine, base.clone())
+    });
 
     let auth = build_auth(registry.parent().unwrap_or_else(|| Path::new("."))).await?;
     let audit = build_audit().await;
@@ -920,8 +929,11 @@ fn remove_from_registry(registry_path: &Path, id: &str) -> Result<(), String> {
     let text = std::fs::read_to_string(registry_path).map_err(|e| e.to_string())?;
     let mut arr: Vec<serde_json::Value> = serde_json::from_str(&text).map_err(|e| e.to_string())?;
     arr.retain(|e| e.get("id").and_then(|v| v.as_str()) != Some(id));
-    std::fs::write(&tmp, serde_json::to_string_pretty(&arr).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
+    std::fs::write(
+        &tmp,
+        serde_json::to_string_pretty(&arr).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, registry_path).map_err(|e| e.to_string())
 }
 
@@ -1083,8 +1095,8 @@ fn assign_host_port(
         }
     }
     let _ = base; // reserved for future host-wide allocation policy
-    // Also exclude ports published by Docker containers so a new project never
-    // picks a port already serving another app.
+                  // Also exclude ports published by Docker containers so a new project never
+                  // picks a port already serving another app.
     if let Ok(out) = std::process::Command::new("docker")
         .args(["ps", "--format", "{{.Ports}}"])
         .output()
@@ -1188,8 +1200,13 @@ fn effective_fallbacks(config: &Config) -> Vec<coxagent_application::config::Eng
         EngineKind::Claude if config.engine.default.model != "haiku" => {
             push(EngineKind::Claude, "haiku".to_owned());
         }
-        EngineKind::Opencode if config.engine.default.model != "bizbrain/Qwen3.6-35B-A3B-thinking" => {
-            push(EngineKind::Opencode, "bizbrain/Qwen3.6-35B-A3B-thinking".to_owned());
+        EngineKind::Opencode
+            if config.engine.default.model != "bizbrain/Qwen3.6-35B-A3B-thinking" =>
+        {
+            push(
+                EngineKind::Opencode,
+                "bizbrain/Qwen3.6-35B-A3B-thinking".to_owned(),
+            );
         }
         _ => {}
     }

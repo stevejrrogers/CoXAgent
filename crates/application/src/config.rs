@@ -59,10 +59,9 @@ impl EngineChoice {
     /// Sanity-check the model string against a simple allowlist pattern to
     /// prevent accidental CLI argument injection through the config file.
     pub fn is_model_valid(&self) -> bool {
-        self.model
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '/' || c == '-' || c == ':')
-            && !self.model.is_empty()
+        self.model.chars().all(|c| {
+            c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '/' || c == '-' || c == ':'
+        }) && !self.model.is_empty()
     }
 }
 

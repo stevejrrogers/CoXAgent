@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use coxagent_application::ports::outbound::engine::{AgentEnginePort, AgentOutcome, AgentRequest, Usage};
+use coxagent_application::ports::outbound::engine::{
+    AgentEnginePort, AgentOutcome, AgentRequest, Usage,
+};
 use coxagent_application::PortError;
 
 /// Adapter over the `hermes` binary for one model selection.
@@ -50,7 +52,9 @@ impl AgentEnginePort for HermesEngine {
         .map_err(|e| PortError::Backend(format!("spawn hermes: {e}")))?;
 
         let estimate = |len: usize| -> u64 {
-            if len == 0 { return 0; }
+            if len == 0 {
+                return 0;
+            }
             (len as f64 / 3.8).ceil() as u64
         };
 

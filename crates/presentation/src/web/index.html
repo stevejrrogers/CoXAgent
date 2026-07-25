@@ -882,6 +882,13 @@
   .sprintpct{text-align:right;flex:none}
   .sprintpct .v{font-size:26px;font-weight:800;color:var(--accent2);line-height:1}
   .sprintpct .k{font-size:10.5px;color:var(--dim);margin-top:2px}
+  /* Profiles: avatar images + status chips */
+  img.avimg{object-fit:cover;border-radius:9px}
+  img.sav{width:34px;height:34px}
+  .pf-avbig{width:64px;height:64px;border-radius:14px;display:grid;place-items:center;font-size:22px;font-weight:800}
+  img.pf-avbig{object-fit:cover}
+  .ustatus{font-size:13px;margin-left:2px;cursor:default}
+  .dmitem .ustatus{margin-left:auto;padding-right:2px}
   /* Slack-style chat rows: avatar gutter, hover highlight + action toolbar */
   .smsg{position:relative;display:flex;gap:10px;padding:3px 14px;align-items:flex-start}
   .smsg:not(.grouped){margin-top:10px}
@@ -1909,6 +1916,24 @@ textarea.np-in{resize:vertical;line-height:1.5}
       <button id="md-ring" class="btn-ghost" onclick="mtRingAll()" style="display:none"><i class="ti ti-bell-ringing"></i> Ring all</button>
       <button id="md-start" class="pri" onclick="mtJoinFromDetail()" style="display:none;padding:8px 20px;font-size:13px"><i class="ti ti-video"></i> Start call</button>
       <button id="md-join" class="pri" onclick="mtJoinFromDetail()" style="display:none;padding:8px 20px;font-size:13px"><i class="ti ti-video"></i> Join now</button>
+    </div>
+  </div></div>
+  <div class="ov" id="ov-profile" onclick="if(event.target===this)close_('ov-profile')"><div class="modal" style="max-width:380px">
+    <h3 style="margin:0 0 3px">Your profile</h3>
+    <div class="msub" style="margin-bottom:14px">Avatar and status are visible to the whole workspace.</div>
+    <div style="display:flex;align-items:center;gap:14px;margin-bottom:16px">
+      <span id="pf-av"></span>
+      <label class="btn-ghost" style="cursor:pointer"><i class="ti ti-camera"></i> Change photo
+        <input type="file" accept="image/*" hidden onchange="uploadAvatar(this)"></label>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+      <button id="pf-emoji" class="rt-ringbtn" style="font-size:18px;padding:6px 10px" onclick="openEmoji(this,e=>{document.getElementById('pf-emoji').textContent=e;})">😊</button>
+      <input id="pf-text" placeholder="What's your status?" maxlength="80" style="flex:1;background:var(--card);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 12px;font-size:13px"/>
+    </div>
+    <div id="pf-presets" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn-ghost" onclick="saveProfile(true)">Clear status</button>
+      <button class="save" onclick="saveProfile(false)"><i class="ti ti-device-floppy"></i> Save</button>
     </div>
   </div></div>
   <div class="ov" id="ov-meetring"><div class="modal incbox" style="max-width:340px;text-align:center">
@@ -3270,6 +3295,7 @@ let CHANNELS=[], CURCHAN="general";
 async function openChat(){
   applyMode();
   loadMembers();
+  loadProfiles();
   loadMeetings();
   await loadChannels();
   selectChannel(CURCHAN);
@@ -3492,9 +3518,11 @@ function renderDMList(){
   users.sort((a,b)=>(online.has(b.username)-online.has(a.username))||(a.name||a.username).localeCompare(b.name||b.username));
   box.innerHTML=users.length?users.map(u=>{
     const on=online.has(u.username);const active=curOther===u.username;
-    return `<div class="chanitem dmitem${active?' on':''}" onclick="openDM('${esc(u.username)}')" title="@${esc(u.username)}">
-      <span class="dmav" style="background:${userColor(u.username)}">${esc((u.name||u.username).slice(0,2).toUpperCase())}<span class="dmpres${on?' on':''}"></span></span>
-      <span class="channm">${esc(u.name||u.username)}</span></div>`;
+    const p=PROFILES[u.username]||{};
+    const av=p.avatar?`<span class="dmav" style="padding:0;overflow:hidden"><img src="${esc(p.avatar)}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit"><span class="dmpres${on?' on':''}"></span></span>`
+      :`<span class="dmav" style="background:${userColor(u.username)}">${esc((u.name||u.username).slice(0,2).toUpperCase())}<span class="dmpres${on?' on':''}"></span></span>`;
+    return `<div class="chanitem dmitem${active?' on':''}" onclick="openDM('${esc(u.username)}')" title="@${esc(u.username)}${p.status_text?' · '+esc(p.status_text):''}">
+      ${av}<span class="channm">${esc(u.name||u.username)}</span>${statusChip(u.username)}</div>`;
   }).join(""):'<div class="dm-empty">No teammates yet</div>';
 }
 // ── @mention autocomplete ───────────────────────────────────────────────────
@@ -4435,6 +4463,39 @@ function renderChatList(force){
   if(atBottom)box.scrollTop=box.scrollHeight;
   loadPins();renderTyping();
 }
+// ── Profiles: avatars + Slack-style status ──────────────────────────────────
+let PROFILES={};
+async function loadProfiles(){try{PROFILES=await(await fetch("/api/profiles")).json();}catch(e){}
+  renderDMList();try{renderMe();}catch(e){}}
+function avat(u,cls){const p=PROFILES[u]||{};const col=userColor(u);
+  if(p.avatar)return `<img class="${cls} avimg" src="${esc(p.avatar)}" alt="">`;
+  return `<div class="${cls}" style="background:${col}26;color:${col}">${esc((memberName(u)||"?").slice(0,2).toUpperCase())}</div>`;}
+function statusChip(u){const p=PROFILES[u]||{};
+  return p.status_emoji?`<span class="ustatus" title="${esc(p.status_text||"")}">${esc(p.status_emoji)}</span>`:"";}
+const STATUS_PRESETS=[["🎯","Focusing"],["🍜","Lunch"],["🏠","WFH"],["📅","In a meeting"],["🌴","Vacation"],["🤒","Sick"]];
+setInterval(loadProfiles,60000); // teammates' avatar/status refresh
+function openProfile(){const me=(ME&&ME.username)||"";const p=PROFILES[me]||{};
+  document.getElementById("pf-av").innerHTML=avat(me,"pf-avbig");
+  document.getElementById("pf-emoji").textContent=p.status_emoji||"😊";
+  document.getElementById("pf-text").value=p.status_text||"";
+  document.getElementById("pf-presets").innerHTML=STATUS_PRESETS.map(([e,t])=>
+    `<button class="rt-ringbtn" onclick="document.getElementById('pf-emoji').textContent='${e}';document.getElementById('pf-text').value='${t}'">${e} ${t}</button>`).join("");
+  document.getElementById("ov-profile").classList.add("open");}
+async function uploadAvatar(input){const f=input.files[0];input.value="";if(!f)return;
+  if(f.size>2*1024*1024){toasty("Ảnh tối đa 2MB","err");return;}
+  const fd=new FormData();fd.append("file",f);
+  try{const r=await fetch("/api/profile/avatar",{method:"POST",body:fd});
+    if(r.ok){await loadProfiles();openProfile();toasty("Avatar updated","ok");renderChatList(true);}
+    else toasty(await r.text()||"Upload failed","err");
+  }catch(e){toasty("Network error","err");}}
+async function saveProfile(clear){
+  const emoji=clear?"":document.getElementById("pf-emoji").textContent.trim();
+  const text=clear?"":document.getElementById("pf-text").value.trim();
+  try{const r=await fetch("/api/profile",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({status_emoji:emoji==="😊"&&!text?"":emoji,status_text:text})});
+    if(r.ok){await loadProfiles();close_("ov-profile");toasty(clear?"Status cleared":"Status saved","ok");}
+    else toasty(await r.text()||"Could not save","err");
+  }catch(e){toasty("Network error","err");}}
 // "Today" / "Yesterday" / a friendly local date for the channel day divider.
 function dayLabel(day){const d=new Date(day+"T12:00:00");const now=new Date();
   const today=now.toISOString().slice(0,10),y=new Date(now-86400000).toISOString().slice(0,10);
@@ -5705,10 +5766,19 @@ function applyRole(){
   if(btn)btn.style.display=canCreateChannel()?"inline-flex":"none";
   const badge=document.getElementById("user-badge");
   if(ME&&ME.auth){badge.style.display="flex";
-    document.getElementById("ub-initials").textContent=(ME.username||"?").slice(0,2).toUpperCase();
     document.getElementById("ub-name").textContent=ME.username;
-    const rc=document.getElementById("ub-role");rc.textContent=roleLabel(ME.role);rc.className="urole "+(ME.role==="admin"?"admin":"viewer");}
+    const rc=document.getElementById("ub-role");rc.textContent=roleLabel(ME.role);rc.className="urole "+(ME.role==="admin"?"admin":"viewer");
+    renderMe();}
   else{badge.style.display="none";}
+}
+// Own badge: avatar (or initials) + status emoji; click opens the profile modal.
+function renderMe(){const box=document.querySelector("#user-badge .uavatar");if(!box||!ME)return;
+  const me=ME.username||"?";const p=PROFILES[me]||{};
+  box.style.cursor="pointer";box.title="Edit your profile & status";box.onclick=openProfile;
+  box.innerHTML=p.avatar?`<img src="${esc(p.avatar)}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit">`
+    :`<span id="ub-initials">${esc(me.slice(0,2).toUpperCase())}</span>`;
+  const nm=document.getElementById("ub-name");
+  if(nm)nm.innerHTML=esc(me)+(p.status_emoji?` <span class="ustatus" title="${esc(p.status_text||"")}">${esc(p.status_emoji)}</span>`:"");
 }
 // Build <option>s for a role <select> (excludes legacy reviewer/viewer).
 function roleOptions(sel){
@@ -6629,13 +6699,11 @@ function renderSlackMsg(m){
       <button onclick="togglePin('${esc(m.id)}')" title="Pin"><i class="ti ti-pinned"></i></button>
       <button onclick="copyMsgLink('${esc(m.id)}')" title="Copy link"><i class="ti ti-link"></i></button>
     </div>`:'';
-  const gutter=m.grouped
-    ?`<span class="sgt">${time}</span>`
-    :`<div class="sav" style="background:${col}26;color:${col}">${esc((memberName(m.user)||"?").slice(0,2).toUpperCase())}</div>`;
+  const gutter=m.grouped?`<span class="sgt">${time}</span>`:avat(m.user,"sav");
   return `<div class="smsg${m.grouped?' grouped':''}" id="msg-${esc(m.id)}">
     <div class="sgut">${gutter}</div>
     <div class="smain">
-      ${m.grouped?'':`<div class="shdr"><span class="snm" style="color:${col}">${esc(memberName(m.user))}</span><span class="stm">${time}</span></div>`}
+      ${m.grouped?'':`<div class="shdr"><span class="snm" style="color:${col}">${esc(memberName(m.user))}</span>${statusChip(m.user)}<span class="stm">${time}</span></div>`}
       ${body}${attHtml(m.attachments)}${reacts}${thread}
     </div>${acts}</div>`;
 }

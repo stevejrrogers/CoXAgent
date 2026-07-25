@@ -211,10 +211,7 @@ fn parse_json_stream(raw: &str) -> (String, coxagent_application::ports::outboun
         saw_json = true;
         match v.get("type").and_then(serde_json::Value::as_str) {
             Some("text") => {
-                if let Some(t) = v
-                    .pointer("/part/text")
-                    .and_then(serde_json::Value::as_str)
-                {
+                if let Some(t) = v.pointer("/part/text").and_then(serde_json::Value::as_str) {
                     text_parts.push(t.to_owned());
                 }
             }
@@ -233,10 +230,7 @@ fn parse_json_stream(raw: &str) -> (String, coxagent_application::ports::outboun
                             .unwrap_or(0),
                     );
                 }
-                if let Some(c) = v
-                    .pointer("/part/cost")
-                    .and_then(serde_json::Value::as_f64)
-                {
+                if let Some(c) = v.pointer("/part/cost").and_then(serde_json::Value::as_f64) {
                     cost_usd += c;
                 }
             }
@@ -266,7 +260,9 @@ fn parse_json_stream(raw: &str) -> (String, coxagent_application::ports::outboun
 
 /// Rough token estimate (~3.8 chars per token).
 fn estimate_tokens_raw(len: usize) -> u64 {
-    if len == 0 { return 0; }
+    if len == 0 {
+        return 0;
+    }
     (len as f64 / 3.8).ceil() as u64
 }
 

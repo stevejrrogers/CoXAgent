@@ -168,7 +168,12 @@ struct DockerAnalysis {
 }
 
 fn analyze_docker(codebase: &Path) -> DockerAnalysis {
-    let compose_patterns = ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"];
+    let compose_patterns = [
+        "docker-compose.yml",
+        "docker-compose.yaml",
+        "compose.yml",
+        "compose.yaml",
+    ];
     let mut composable: Vec<ParsedCompose> = Vec::new();
 
     for pat in &compose_patterns {
@@ -270,7 +275,9 @@ fn smart_comprehension_context(
 
     if !docker.clashes.is_empty() {
         extra.push_str("## ⚠️ Port clashes detected\n");
-        extra.push_str("The compose file declares services that conflict with running containers:\n\n");
+        extra.push_str(
+            "The compose file declares services that conflict with running containers:\n\n",
+        );
         for c in &docker.clashes {
             extra.push_str(&format!("- {c}\n"));
         }
@@ -384,9 +391,10 @@ async fn seed_smart_tickets<S: StateStorePort + 'static>(
             .execute(AddTicketInput {
                 ticket_type: TicketType::Chore,
                 title: "Add Dockerfile for build".to_owned(),
-                description: "docker-compose exists but no Dockerfile — the TEST/deploy build step \
+                description:
+                    "docker-compose exists but no Dockerfile — the TEST/deploy build step \
                               needs a Dockerfile to build the app image."
-                    .to_owned(),
+                        .to_owned(),
                 priority: Priority::Medium,
                 complexity: Complexity::Small,
                 has_ui: false,
@@ -505,10 +513,12 @@ pub async fn brownfield<S: StateStorePort + 'static>(
     let root = state_dir.parent().unwrap_or(state_dir);
     let codebase_sym = root.join("codebase");
     if !codebase_sym.exists() {
-        #[cfg(unix)] {
+        #[cfg(unix)]
+        {
             let _ = std::os::unix::fs::symlink(codebase, &codebase_sym);
         }
-        #[cfg(not(unix))] {
+        #[cfg(not(unix))]
+        {
             let _ = std::fs::create_dir(&codebase_sym);
         }
     }
@@ -559,7 +569,12 @@ pub async fn brownfield<S: StateStorePort + 'static>(
     let docker_note = if !docker.reusable.is_empty() {
         format!(
             "Running infra (reuse): {}",
-            docker.reusable.iter().map(|(s, p)| format!("{s}:{p}")).collect::<Vec<_>>().join(", ")
+            docker
+                .reusable
+                .iter()
+                .map(|(s, p)| format!("{s}:{p}"))
+                .collect::<Vec<_>>()
+                .join(", ")
         )
     } else {
         "Running infra: none detected".to_owned()
@@ -771,7 +786,10 @@ networks:
         assert_eq!(db.name, "db");
         assert_eq!(db.ports, vec![(5432, 5432)]);
         assert_eq!(db.image.as_deref(), Some("postgres:16"));
-        assert_eq!(db.env.get("POSTGRES_USER").map(|s| s.as_str()), Some("test"));
+        assert_eq!(
+            db.env.get("POSTGRES_USER").map(|s| s.as_str()),
+            Some("test")
+        );
 
         let redis = &parsed.services[2];
         assert_eq!(redis.name, "redis");
@@ -850,7 +868,12 @@ services:
             has_dockerfile: true,
         };
 
-        let ctx = smart_comprehension_context("TestApp", "2 files, 10 symbols", &["- root — JavaScript (package.json)".into()], &docker);
+        let ctx = smart_comprehension_context(
+            "TestApp",
+            "2 files, 10 symbols",
+            &["- root — JavaScript (package.json)".into()],
+            &docker,
+        );
 
         assert!(ctx.contains("Infrastructure (reusable"));
         assert!(ctx.contains("postgres"));

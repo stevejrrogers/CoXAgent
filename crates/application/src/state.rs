@@ -1037,7 +1037,7 @@ fn agents_channel_record() -> Channel {
         inviters: Vec::new(),
         created_at: String::new(),
         kind: "general".to_owned(),
-            topic: String::new(),
+        topic: String::new(),
         project: String::new(),
     }
 }
@@ -1051,7 +1051,7 @@ fn general_channel_record() -> Channel {
         inviters: Vec::new(),
         created_at: String::new(),
         kind: "general".to_owned(),
-            topic: String::new(),
+        topic: String::new(),
         project: String::new(),
     }
 }

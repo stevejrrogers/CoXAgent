@@ -464,6 +464,152 @@ impl Mt {
     }
 }
 
+/// A user's public profile bits: avatar + Slack-style status (emoji + text).
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
+struct Profile {
+    #[serde(default)]
+    avatar: String,
+    #[serde(default)]
+    status_emoji: String,
+    #[serde(default)]
+    status_text: String,
+    #[serde(default)]
+    at: String,
+}
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct ProfilesDoc {
+    profiles: std::collections::HashMap<String, Profile>,
+}
+
+/// Profile store: shared KV (`app_kv` key `profiles`) when configured, else a
+/// local `profiles.json` under the hub dir — same shape as [`Ws`]/[`Mt`].
+#[derive(Clone)]
+struct Pf {
+    inner: Arc<tokio::sync::Mutex<ProfilesDoc>>,
+    path: PathBuf,
+    store: Option<Arc<dyn coxagent_application::ports::outbound::KvDocPort>>,
+}
+
+impl Pf {
+    async fn load(
+        dir: &std::path::Path,
+        store: Option<Arc<dyn coxagent_application::ports::outbound::KvDocPort>>,
+    ) -> Self {
+        let path = dir.join("profiles.json");
+        let text = if let Some(s) = &store {
+            s.load("profiles").await.ok().flatten()
+        } else {
+            std::fs::read_to_string(&path).ok()
+        };
+        let inner = text
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        Self {
+            inner: Arc::new(tokio::sync::Mutex::new(inner)),
+            path,
+            store,
+        }
+    }
+
+    async fn save(&self) {
+        let json = { serde_json::to_string(&*self.inner.lock().await).unwrap_or_default() };
+        if let Some(s) = &self.store {
+            if let Err(e) = s.save("profiles", &json).await {
+                tracing::warn!("profiles save failed: {e}");
+            }
+            return;
+        }
+        let _ = std::fs::write(&self.path, json);
+    }
+}
+
+/// All profiles — any signed-in user (needed to render avatars/status).
+async fn profiles_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    if principal_name(&app, &headers).await.is_none() {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    }
+    let doc = app.profiles.inner.lock().await;
+    Json(&doc.profiles).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct ProfileReq {
+    #[serde(default)]
+    status_emoji: String,
+    #[serde(default)]
+    status_text: String,
+}
+
+/// Update the caller's OWN status (emoji + text). Empty strings clear it.
+async fn profile_set_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<ProfileReq>,
+) -> axum::response::Response {
+    let Some(user) = principal_name(&app, &headers).await else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let emoji: String = req.status_emoji.chars().take(8).collect();
+    let text: String = req.status_text.trim().chars().take(80).collect();
+    {
+        let mut doc = app.profiles.inner.lock().await;
+        let p = doc.profiles.entry(user.clone()).or_default();
+        p.status_emoji = emoji;
+        p.status_text = text;
+        p.at = now_rfc3339();
+    }
+    app.profiles.save().await;
+    audit_push(&app.audit, &user, "profile status updated".to_owned(), 200).await;
+    Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+/// Upload the caller's OWN avatar (image, ≤ 2 MB). Served via chat media.
+async fn profile_avatar_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+    mut multipart: axum::extract::Multipart,
+) -> axum::response::Response {
+    let Some(user) = principal_name(&app, &headers).await else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let Ok(Some(field)) = multipart.next_field().await else {
+        return (StatusCode::BAD_REQUEST, "no file").into_response();
+    };
+    let mime = field.content_type().unwrap_or("").to_owned();
+    if !mime.starts_with("image/") {
+        return (StatusCode::BAD_REQUEST, "avatar must be an image").into_response();
+    }
+    let data = match field.bytes().await {
+        Ok(b) if b.len() <= 2 * 1024 * 1024 => b,
+        Ok(_) => return (StatusCode::PAYLOAD_TOO_LARGE, "max 2MB").into_response(),
+        Err(_) => return (StatusCode::BAD_REQUEST, "read failed").into_response(),
+    };
+    let ext = mime.strip_prefix("image/").unwrap_or("png");
+    let stored = format!("{}-avatar.{}", mint_media_token(), sanitize_name(ext));
+    if app
+        .storage
+        .put(&format!("chat/{stored}"), &data, &mime)
+        .await
+        .is_err()
+    {
+        return internal_error("write failed");
+    }
+    let url = format!("/api/chat/media/{stored}");
+    {
+        let mut doc = app.profiles.inner.lock().await;
+        let p = doc.profiles.entry(user.clone()).or_default();
+        p.avatar.clone_from(&url);
+        p.at = now_rfc3339();
+    }
+    app.profiles.save().await;
+    audit_push(&app.audit, &user, "avatar updated".to_owned(), 200).await;
+    Json(serde_json::json!({ "ok": true, "url": url })).into_response()
+}
+
 /// One meeting-event frame, delivered over the system-chat WebSocket to a
 /// single user (`to`-filtered by the socket loop, like call signaling).
 fn meeting_frame(kind: &str, to: &str, m: &Meeting) -> String {
@@ -887,6 +1033,8 @@ struct AppState {
     spaces: Sp,
     /// Booked meetings (calendar) — reminders/rings driven by a watchdog.
     meetings: Mt,
+    /// User avatars + Slack-style statuses (self-service).
+    profiles: Pf,
     /// Blob storage for uploaded files (local disk by default, or S3/MinIO).
     storage: Arc<dyn coxagent_application::ports::outbound::StoragePort>,
     /// Server-side documentation store (MongoDB) when configured; `None` falls
@@ -1806,10 +1954,13 @@ async fn build_state(
     let kv = extras.syschat_store.clone();
     let kv2 = extras.syschat_store.clone();
     let kv3 = extras.syschat_store.clone();
+    let kv3_pf = extras.syschat_store.clone();
     let syschat = SysChat::load(&hub_dir, extras.syschat_store).await;
     let workspace = Ws::load(&hub_dir, kv).await;
     let spaces = Sp::load(&hub_dir, kv2).await;
+    let kv4 = kv3_pf.clone();
     let meetings = Mt::load(&hub_dir, kv3).await;
+    let profiles = Pf::load(&hub_dir, kv4).await;
     AppState {
         projects: Arc::new(RwLock::new(map)),
         chat_bus: Arc::new(RwLock::new(HashMap::new())),
@@ -1828,6 +1979,7 @@ async fn build_state(
         workspace,
         spaces,
         meetings,
+        profiles,
         storage: extras.storage.unwrap_or_else(|| {
             Arc::new(DiskStorage {
                 root: hub_dir.join("blobs"),
@@ -1922,6 +2074,9 @@ pub async fn serve_full(
         .route("/api/meetings/:id", axum::routing::patch(meeting_patch_ep))
         .route("/api/meetings/:id/join", post(meeting_join_ep))
         .route("/api/meetings/:id/ring", post(meeting_ring_ep))
+        .route("/api/profiles", get(profiles_ep))
+        .route("/api/profile", post(profile_set_ep))
+        .route("/api/profile/avatar", post(profile_avatar_ep))
         .route(
             "/api/auth/my/tokens/:label",
             axum::routing::delete(revoke_my_token_ep),
@@ -1956,15 +2111,24 @@ pub async fn serve_full(
             get(syschat_channels_ep).post(syschat_create_ep),
         )
         .route("/api/chat/channels/:cid/invite", post(syschat_invite_ep))
-        .route("/api/chat/channel/:cid/topic", axum::routing::patch(syschat_topic_ep).get(syschat_topic_get_ep))
-        .route("/api/chat/channels/:cid/topic", axum::routing::patch(syschat_topic_ep).get(syschat_topic_get_ep))
+        .route(
+            "/api/chat/channel/:cid/topic",
+            axum::routing::patch(syschat_topic_ep).get(syschat_topic_get_ep),
+        )
+        .route(
+            "/api/chat/channels/:cid/topic",
+            axum::routing::patch(syschat_topic_ep).get(syschat_topic_get_ep),
+        )
         .route("/api/chat/messages", get(syschat_messages_ep))
         .route("/api/chat/members", get(syschat_members_ep))
         .route("/api/chat/dm", post(syschat_dm_ep))
         .route("/api/chat/react", post(syschat_react_ep))
         .route("/api/chat/messages/:mid/reply", post(syschat_reply_ep))
         .route("/api/chat/messages/:mid/thread", get(syschat_thread_ep))
-        .route("/api/chat/messages/:mid", axum::routing::patch(syschat_edit_ep).delete(syschat_delete_ep))
+        .route(
+            "/api/chat/messages/:mid",
+            axum::routing::patch(syschat_edit_ep).delete(syschat_delete_ep),
+        )
         .route("/api/chat/search", get(syschat_search_ep))
         .route("/api/chat/messages/:mid/pin", post(syschat_pin_ep))
         .route("/api/chat/pins", get(syschat_pins_ep))
@@ -2365,10 +2529,13 @@ async fn opencode_models_ep() -> impl IntoResponse {
     let mut models = Vec::new();
     for line in stdout.lines() {
         let line = line.trim();
-        if line.is_empty() || line.contains("No models") || line.contains("Error") { continue; }
+        if line.is_empty() || line.contains("No models") || line.contains("Error") {
+            continue;
+        }
         let parts: Vec<&str> = line.splitn(2, '/').collect();
         if parts.len() == 2 {
-            models.push(serde_json::json!({ "provider": parts[0], "model": parts[1], "full": line }));
+            models
+                .push(serde_json::json!({ "provider": parts[0], "model": parts[1], "full": line }));
         }
     }
     Json(models).into_response()
@@ -2680,11 +2847,24 @@ async fn create_project(
                 let path_str = real.to_string_lossy();
                 // Block if path equals a blocked directory, or if it starts with
                 // a blocked directory plus '/', to catch `/private/etc/foo` etc.
-                let blocked_prefixes = ["/etc", "/private/etc", "/root",
-                    "/var/run", "/var/log", "/usr/lib", "/usr/sbin",
-                    "/bin", "/sbin", "/dev", "/proc", "/sys"];
+                let blocked_prefixes = [
+                    "/etc",
+                    "/private/etc",
+                    "/root",
+                    "/var/run",
+                    "/var/log",
+                    "/usr/lib",
+                    "/usr/sbin",
+                    "/bin",
+                    "/sbin",
+                    "/dev",
+                    "/proc",
+                    "/sys",
+                ];
                 let blocked = blocked_prefixes.iter().any(|pfx| {
-                    path_str == *pfx || path_str.starts_with(pfx) && path_str.as_bytes().get(pfx.len()).copied() == Some(b'/')
+                    path_str == *pfx
+                        || path_str.starts_with(pfx)
+                            && path_str.as_bytes().get(pfx.len()).copied() == Some(b'/')
                 });
                 if blocked {
                     return (StatusCode::FORBIDDEN, "cannot import from this path").into_response();
@@ -5102,19 +5282,32 @@ async fn syschat_reply_ep(
     Json(body): Json<PostChatReq>,
 ) -> axum::response::Response {
     let user = resolve_username(&app, &headers).await;
-    if user.is_empty() { return (StatusCode::UNAUTHORIZED, "sign in").into_response(); }
+    if user.is_empty() {
+        return (StatusCode::UNAUTHORIZED, "sign in").into_response();
+    }
     let body = body.body.trim().to_owned();
-    if body.is_empty() { return (StatusCode::BAD_REQUEST, "empty message").into_response(); }
-    if body.len() > CHAT_MAX_CHARS { return (StatusCode::PAYLOAD_TOO_LARGE, "too long").into_response(); }
+    if body.is_empty() {
+        return (StatusCode::BAD_REQUEST, "empty message").into_response();
+    }
+    if body.len() > CHAT_MAX_CHARS {
+        return (StatusCode::PAYLOAD_TOO_LARGE, "too long").into_response();
+    }
     let mid_clone = mid.clone();
     let mut sc = app.syschat.inner.lock().await;
-    let channel = match sc.chat.iter().find(|m| m.id == mid_clone).map(|p| p.channel.clone()) {
+    let channel = match sc
+        .chat
+        .iter()
+        .find(|m| m.id == mid_clone)
+        .map(|p| p.channel.clone())
+    {
         Some(ch) => ch,
         None => return (StatusCode::NOT_FOUND, "parent not found").into_response(),
     };
     let msg = ChatMsg::reply(&user, &body, &channel, &mid_clone);
     sc.chat.push(msg.clone());
-    if let Some(p) = sc.chat.iter_mut().find(|m| m.id == mid_clone) { p.reply_count = p.reply_count.saturating_add(1); }
+    if let Some(p) = sc.chat.iter_mut().find(|m| m.id == mid_clone) {
+        p.reply_count = p.reply_count.saturating_add(1);
+    }
 
     drop(sc);
     app.syschat.save().await;
@@ -5128,8 +5321,16 @@ async fn syschat_thread_ep(
 ) -> axum::response::Response {
     let sc = app.syschat.inner.lock().await;
     let parent = sc.chat.iter().find(|m| m.id == mid);
-    let _channel = match parent { Some(p) => p.channel.clone(), None => return (StatusCode::NOT_FOUND, "not found").into_response() };
-    let replies: Vec<ChatMsg> = sc.chat.iter().filter(|m| m.thread_id.as_deref() == Some(&mid)).cloned().collect();
+    let _channel = match parent {
+        Some(p) => p.channel.clone(),
+        None => return (StatusCode::NOT_FOUND, "not found").into_response(),
+    };
+    let replies: Vec<ChatMsg> = sc
+        .chat
+        .iter()
+        .filter(|m| m.thread_id.as_deref() == Some(&mid))
+        .cloned()
+        .collect();
     Json(serde_json::json!({ "parent": parent, "replies": replies })).into_response()
 }
 
@@ -5141,12 +5342,20 @@ async fn syschat_edit_ep(
     Json(body): Json<PostChatReq>,
 ) -> axum::response::Response {
     let user = resolve_username(&app, &headers).await;
-    if user.is_empty() { return (StatusCode::UNAUTHORIZED, "sign in").into_response(); }
+    if user.is_empty() {
+        return (StatusCode::UNAUTHORIZED, "sign in").into_response();
+    }
     let new_body = body.body.trim().to_owned();
-    if new_body.is_empty() { return (StatusCode::BAD_REQUEST, "empty").into_response(); }
+    if new_body.is_empty() {
+        return (StatusCode::BAD_REQUEST, "empty").into_response();
+    }
     let mut sc = app.syschat.inner.lock().await;
-    let Some(msg) = sc.chat.iter_mut().find(|m| m.id == mid) else { return (StatusCode::NOT_FOUND, "not found").into_response(); };
-    if msg.user != user { return (StatusCode::FORBIDDEN, "not yours").into_response(); }
+    let Some(msg) = sc.chat.iter_mut().find(|m| m.id == mid) else {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    };
+    if msg.user != user {
+        return (StatusCode::FORBIDDEN, "not yours").into_response();
+    }
     msg.body = new_body;
     msg.edited = Some(now_rfc3339());
     let edited = msg.clone();
@@ -5162,10 +5371,16 @@ async fn syschat_delete_ep(
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
     let user = resolve_username(&app, &headers).await;
-    if user.is_empty() { return (StatusCode::UNAUTHORIZED, "sign in").into_response(); }
+    if user.is_empty() {
+        return (StatusCode::UNAUTHORIZED, "sign in").into_response();
+    }
     let mut sc = app.syschat.inner.lock().await;
-    let Some(msg) = sc.chat.iter_mut().find(|m| m.id == mid) else { return (StatusCode::NOT_FOUND, "not found").into_response(); };
-    if msg.user != user { return (StatusCode::FORBIDDEN, "not yours").into_response(); }
+    let Some(msg) = sc.chat.iter_mut().find(|m| m.id == mid) else {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    };
+    if msg.user != user {
+        return (StatusCode::FORBIDDEN, "not yours").into_response();
+    }
     msg.deleted = true;
     msg.body = String::new();
     drop(sc);
@@ -5184,12 +5399,22 @@ async fn syschat_search_ep(
     let user = resolve_username(&app, &headers).await;
     let ctx = app.chat_context().await;
     let term = q.get("q").map(|s| s.to_lowercase()).unwrap_or_default();
-    if term.is_empty() { return Json(Vec::<ChatMsg>::new()).into_response(); }
+    if term.is_empty() {
+        return Json(Vec::<ChatMsg>::new()).into_response();
+    }
     let sc = app.syschat.inner.lock().await;
-    let results: Vec<ChatMsg> = sc.chat.iter().filter(|m| {
-        !m.deleted && sc.can_view(&m.channel, &user, &ctx) &&
-        (m.body.to_lowercase().contains(&term) || m.user.to_lowercase().contains(&term))
-    }).rev().take(50).cloned().collect();
+    let results: Vec<ChatMsg> = sc
+        .chat
+        .iter()
+        .filter(|m| {
+            !m.deleted
+                && sc.can_view(&m.channel, &user, &ctx)
+                && (m.body.to_lowercase().contains(&term) || m.user.to_lowercase().contains(&term))
+        })
+        .rev()
+        .take(50)
+        .cloned()
+        .collect();
     Json(results).into_response()
 }
 
@@ -5200,10 +5425,17 @@ async fn syschat_pin_ep(
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
     let user = resolve_username(&app, &headers).await;
-    if user.is_empty() { return (StatusCode::UNAUTHORIZED, "sign in").into_response(); }
+    if user.is_empty() {
+        return (StatusCode::UNAUTHORIZED, "sign in").into_response();
+    }
     let mid_clone = mid.clone();
     let mut sc = app.syschat.inner.lock().await;
-    let channel = match sc.chat.iter().find(|m| m.id == mid_clone).map(|m| m.channel.clone()) {
+    let channel = match sc
+        .chat
+        .iter()
+        .find(|m| m.id == mid_clone)
+        .map(|m| m.channel.clone())
+    {
         Some(ch) => ch,
         None => return (StatusCode::NOT_FOUND, "not found").into_response(),
     };
@@ -5217,7 +5449,10 @@ async fn syschat_pin_ep(
     let pins_clone = pins.clone();
     drop(sc);
     app.syschat.save().await;
-    let _ = app.syschat.tx.send(json!({ "op": "pin", "channel": channel, "pins": pins_clone }).to_string());
+    let _ = app
+        .syschat
+        .tx
+        .send(json!({ "op": "pin", "channel": channel, "pins": pins_clone }).to_string());
     Json(serde_json::json!({ "ok": true, "pinned": pinned })).into_response()
 }
 async fn syschat_pins_ep(
@@ -5227,13 +5462,23 @@ async fn syschat_pins_ep(
     let ch = q.get("channel").cloned().unwrap_or_default();
     let sc = app.syschat.inner.lock().await;
     let pins = sc.pins.get(&ch).cloned().unwrap_or_default();
-    let msgs: Vec<ChatMsg> = pins.iter().filter_map(|id| sc.chat.iter().find(|m| m.id == *id && !m.deleted && m.channel == ch)).cloned().collect();
+    let msgs: Vec<ChatMsg> = pins
+        .iter()
+        .filter_map(|id| {
+            sc.chat
+                .iter()
+                .find(|m| m.id == *id && !m.deleted && m.channel == ch)
+        })
+        .cloned()
+        .collect();
     Json(msgs).into_response()
 }
 
 // ── Topic ──────────────────────────────────────────────────────────────────
 #[derive(serde::Deserialize)]
-struct TopicReq { topic: String }
+struct TopicReq {
+    topic: String,
+}
 async fn syschat_topic_ep(
     State(app): State<AppState>,
     Path(cid): Path<String>,
@@ -7316,6 +7561,7 @@ async fn auth_mw(
         && !path.starts_with("/api/auth/2fa/") // self-service, any signed-in user
         && !path.starts_with("/api/auth/my/") // personal MCP tokens: self-service
         && !path.starts_with("/api/meetings") // booking meetings: any signed-in user
+        && !path.starts_with("/api/profile") // own avatar/status: self-service
         && !path.ends_with("/chat") // team chat is open to any signed-in user
         && path != "/api/chat/send" // system chat send: any signed-in user
         && path != "/api/chat/dm" // open a DM: any signed-in user

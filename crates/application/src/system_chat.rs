@@ -305,7 +305,9 @@ impl SystemChat {
     /// Get channel topic
     pub fn get_topic(&self, channel_id: &str) -> String {
         if let Some(ch) = self.channels.iter().find(|c| c.id == channel_id) {
-            if !ch.topic.is_empty() { return ch.topic.clone(); }
+            if !ch.topic.is_empty() {
+                return ch.topic.clone();
+            }
         }
         self.topics.get(channel_id).cloned().unwrap_or_default()
     }

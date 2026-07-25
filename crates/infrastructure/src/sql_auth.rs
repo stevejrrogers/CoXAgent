@@ -387,7 +387,11 @@ impl SqlAuthService {
             Ok(Some(r)) => {
                 let json: serde_json::Value = r.get(0);
                 json.as_array()
-                    .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_owned))
+                            .collect()
+                    })
                     .unwrap_or_default()
             }
             _ => Vec::new(),

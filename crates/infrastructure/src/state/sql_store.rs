@@ -342,13 +342,20 @@ impl StateStorePort for SqlStateStore {
             return r.set_desired(operator, running).await;
         }
         // Postgres-only fallback: persist to project_coord table with kind='desired'.
-        let client = self.client().await.map_err(|e| PortError::Backend(e.to_string()))?;
+        let client = self
+            .client()
+            .await
+            .map_err(|e| PortError::Backend(e.to_string()))?;
         client
             .execute(
                 "INSERT INTO project_coord (project_id, kind, coord_key, worker, at)
                  VALUES ($1, 'desired', $2, $3, NOW())
                  ON CONFLICT (project_id, kind, coord_key) DO UPDATE SET worker = $3, at = NOW()",
-                &[&self.project_id, &format!("op:{operator}"), &running.to_string()],
+                &[
+                    &self.project_id,
+                    &format!("op:{operator}"),
+                    &running.to_string(),
+                ],
             )
             .await
             .map_err(|e| PortError::Backend(e.to_string()))?;
@@ -360,7 +367,10 @@ impl StateStorePort for SqlStateStore {
             return r.get_desired(operator).await;
         }
         // Postgres-only fallback.
-        let client = self.client().await.map_err(|e| PortError::Backend(e.to_string()))?;
+        let client = self
+            .client()
+            .await
+            .map_err(|e| PortError::Backend(e.to_string()))?;
         let row = client
             .query_opt(
                 "SELECT worker FROM project_coord WHERE project_id = $1 AND kind = 'desired' AND coord_key = $2",
