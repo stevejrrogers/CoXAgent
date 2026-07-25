@@ -192,12 +192,56 @@ impl AgentEnginePort for ClaudeEngine {
             None => None,
         };
         crate::engine::apply_shim_path(&mut cmd);
+        let role = crate::engine::role_key(request.role);
+        // _mcp_config_file must outlive the child process (deleted on drop).
+        let outcome = self
+            .exec(cmd, &role, &request.work_dir, request.timeout)
+            .await;
+        drop(_mcp_config_file);
+        outcome
+    }
 
+    async fn resume_run(
+        &self,
+        session_id: &str,
+        follow_up: &str,
+        work_dir: &std::path::Path,
+        timeout: std::time::Duration,
+    ) -> Result<AgentOutcome, PortError> {
+        let mut cmd = Command::new(&self.binary);
+        cmd.arg("-p")
+            .arg(follow_up)
+            .arg("--resume")
+            .arg(session_id)
+            .arg("--model")
+            .arg(&self.model)
+            .arg("--output-format")
+            .arg("stream-json")
+            .arg("--verbose")
+            .arg("--dangerously-skip-permissions")
+            .current_dir(work_dir)
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true);
+        crate::engine::apply_shim_path(&mut cmd);
+        self.exec(cmd, "resume", work_dir, timeout).await
+    }
+}
+
+impl ClaudeEngine {
+    /// Spawn `cmd`, stream its NDJSON stdout into the live log, and parse the
+    /// final outcome (including the conversation `session_id`, so callers can
+    /// continue this run later). Shared by `run` and `resume_run`.
+    async fn exec(
+        &self,
+        mut cmd: Command,
+        role: &str,
+        work_dir: &std::path::Path,
+        timeout: std::time::Duration,
+    ) -> Result<AgentOutcome, PortError> {
         // Stream stdout line-by-line: render each event to the live log as it
         // arrives (so the UI can tail it), while accumulating the raw NDJSON for
         // the final parse. Reset the live file at the start of the run.
-        let role = crate::engine::role_key(request.role);
-        let live = live_path(&request.work_dir, &role);
+        let live = live_path(work_dir, role);
         if let Some(p) = &live {
             let _ = std::fs::write(p, format!("# {role} — live @ run start\n"));
         }
@@ -244,7 +288,7 @@ impl AgentEnginePort for ClaudeEngine {
                 .map_err(|e| PortError::Backend(format!("claude wait: {e}")))?;
             Ok::<_, PortError>((raw, status))
         };
-        let (raw, status) = tokio::time::timeout(request.timeout, read)
+        let (raw, status) = tokio::time::timeout(timeout, read)
             .await
             .map_err(|_| PortError::Backend("claude timed out".to_owned()))??;
         let stderr = err_task.await.unwrap_or_default();
@@ -266,8 +310,21 @@ impl AgentEnginePort for ClaudeEngine {
             exit_code: status.code(),
             usage,
             trace,
+            session_id: extract_session(&raw),
         })
     }
+}
+
+/// First `session_id` seen in the NDJSON stream (the init event carries it) —
+/// the handle for `--resume`.
+fn extract_session(raw: &str) -> Option<String> {
+    raw.lines().find_map(|l| {
+        serde_json::from_str::<serde_json::Value>(l.trim())
+            .ok()?
+            .get("session_id")?
+            .as_str()
+            .map(str::to_owned)
+    })
 }
 
 /// Render one stream event (assistant text / tool_use / tool_result) into a
@@ -426,9 +483,13 @@ mod tests {
             token: Some("secret123".to_owned()),
             project: "cxc".to_owned(),
         };
-        let v: serde_json::Value = serde_json::from_str(&mcp_config_json(&mcp)).expect("valid json");
+        let v: serde_json::Value =
+            serde_json::from_str(&mcp_config_json(&mcp)).expect("valid json");
         assert_eq!(v["mcpServers"]["coxagent"]["type"], "http");
-        assert_eq!(v["mcpServers"]["coxagent"]["url"], "http://127.0.0.1:4000/api/mcp");
+        assert_eq!(
+            v["mcpServers"]["coxagent"]["url"],
+            "http://127.0.0.1:4000/api/mcp"
+        );
         assert_eq!(
             v["mcpServers"]["coxagent"]["headers"]["Authorization"],
             "Bearer secret123"
@@ -442,7 +503,8 @@ mod tests {
             token: None,
             project: "cxc".to_owned(),
         };
-        let v: serde_json::Value = serde_json::from_str(&mcp_config_json(&mcp)).expect("valid json");
+        let v: serde_json::Value =
+            serde_json::from_str(&mcp_config_json(&mcp)).expect("valid json");
         assert!(v["mcpServers"]["coxagent"].get("headers").is_none());
     }
 
@@ -517,7 +579,10 @@ mod tests {
             !argv.contains("tok") && !argv.contains("Bearer"),
             "token/header leaked into argv:\n{argv}"
         );
-        assert!(argv.contains("cxc"), "system prompt hint should carry the project id");
+        assert!(
+            argv.contains("cxc"),
+            "system prompt hint should carry the project id"
+        );
 
         let mcp_config: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(&mcp_config_capture).expect("--mcp-config file was readable"),
@@ -554,7 +619,10 @@ mod tests {
             path
             // `f` drops here
         };
-        assert!(!path.exists(), "config file must be removed once the engine is done with it");
+        assert!(
+            !path.exists(),
+            "config file must be removed once the engine is done with it"
+        );
     }
 
     #[test]
@@ -567,5 +635,15 @@ mod tests {
         let hint = mcp_prompt_hint(&mcp);
         assert!(hint.contains("cxc"));
         assert!(hint.contains("search_symbols"));
+    }
+
+    #[test]
+    fn extracts_session_id_from_stream() {
+        let raw = concat!(
+            "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"abc-123\"}\n",
+            "{\"type\":\"result\",\"session_id\":\"abc-123\"}\n",
+        );
+        assert_eq!(super::extract_session(raw).as_deref(), Some("abc-123"));
+        assert_eq!(super::extract_session("not json\n{}"), None);
     }
 }

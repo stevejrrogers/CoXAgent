@@ -44,6 +44,29 @@ impl<E: AgentEnginePort> AgentEnginePort for MeteringEngine<E> {
         }
         Ok(outcome)
     }
+
+    async fn resume_run(
+        &self,
+        session_id: &str,
+        follow_up: &str,
+        work_dir: &std::path::Path,
+        timeout: std::time::Duration,
+    ) -> Result<AgentOutcome, PortError> {
+        let outcome = self
+            .inner
+            .resume_run(session_id, follow_up, work_dir, timeout)
+            .await?;
+        if let Some(u) = outcome.usage {
+            if let Ok(mut m) = self.meter.lock() {
+                m.total_cost_usd += u.cost_usd;
+                m.input_tokens += u.input_tokens;
+                m.output_tokens += u.output_tokens;
+                m.runs += 1;
+                *m.by_role.entry("resume".to_owned()).or_default() += u.cost_usd;
+            }
+        }
+        Ok(outcome)
+    }
 }
 
 fn role_key(role: coxagent_domain::Role) -> String {
@@ -79,6 +102,7 @@ mod tests {
                     cost_usd: self.0,
                 }),
                 trace: String::new(),
+                session_id: None,
             })
         }
     }

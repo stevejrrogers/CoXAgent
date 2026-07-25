@@ -40,6 +40,10 @@ pub struct AgentOutcome {
     /// Empty when the engine only returns a final result.
     #[doc(hidden)]
     pub trace: String,
+    /// Engine-native conversation id, when the engine exposes one. Lets a
+    /// follow-up run continue this conversation (see
+    /// [`AgentEnginePort::resume_run`]) instead of starting cold.
+    pub session_id: Option<String>,
 }
 
 impl AgentOutcome {
@@ -60,4 +64,26 @@ pub trait AgentEnginePort: Send + Sync {
     /// # Errors
     /// [`PortError::Backend`] on spawn failure or timeout.
     async fn run(&self, request: AgentRequest) -> Result<AgentOutcome, PortError>;
+
+    /// Continue a previous run's conversation (identified by the
+    /// `session_id` that run returned) with a follow-up prompt — the agent
+    /// keeps everything it just read and did in context instead of starting
+    /// cold. Engines without session support keep this default.
+    ///
+    /// # Errors
+    /// [`PortError::Backend`] when the engine has no session support, on
+    /// spawn failure, or on timeout.
+    async fn resume_run(
+        &self,
+        session_id: &str,
+        follow_up: &str,
+        work_dir: &std::path::Path,
+        timeout: Duration,
+    ) -> Result<AgentOutcome, PortError> {
+        let _ = (session_id, follow_up, work_dir, timeout);
+        Err(PortError::Backend(format!(
+            "engine {} does not support session resume",
+            self.id()
+        )))
+    }
 }

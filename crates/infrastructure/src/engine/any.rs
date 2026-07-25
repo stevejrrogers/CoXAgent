@@ -62,4 +62,19 @@ impl AgentEnginePort for AnyEngine {
             AnyEngine::Scripted(e) => e.run(request).await,
         }
     }
+
+    async fn resume_run(
+        &self,
+        session_id: &str,
+        follow_up: &str,
+        work_dir: &std::path::Path,
+        timeout: std::time::Duration,
+    ) -> Result<AgentOutcome, PortError> {
+        match self {
+            AnyEngine::Opencode(e) => e.resume_run(session_id, follow_up, work_dir, timeout).await,
+            AnyEngine::Claude(e) => e.resume_run(session_id, follow_up, work_dir, timeout).await,
+            AnyEngine::Hermes(e) => e.resume_run(session_id, follow_up, work_dir, timeout).await,
+            AnyEngine::Scripted(e) => e.resume_run(session_id, follow_up, work_dir, timeout).await,
+        }
+    }
 }

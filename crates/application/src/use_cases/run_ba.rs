@@ -222,6 +222,7 @@ mod tests {
                 exit_code: Some(self.code),
                 usage: None,
                 trace: String::new(),
+                session_id: None,
             })
         }
     }

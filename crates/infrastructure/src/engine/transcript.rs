@@ -35,6 +35,28 @@ impl<E: AgentEnginePort> AgentEnginePort for TranscriptEngine<E> {
         }
         outcome
     }
+
+    async fn resume_run(
+        &self,
+        session_id: &str,
+        follow_up: &str,
+        work_dir: &std::path::Path,
+        timeout: std::time::Duration,
+    ) -> Result<AgentOutcome, PortError> {
+        let outcome = self
+            .inner
+            .resume_run(session_id, follow_up, work_dir, timeout)
+            .await;
+        if let Ok(o) = &outcome {
+            self.write(
+                "resume",
+                &format!("(resumed session {session_id})"),
+                follow_up,
+                o,
+            );
+        }
+        outcome
+    }
 }
 
 impl<E: AgentEnginePort> TranscriptEngine<E> {

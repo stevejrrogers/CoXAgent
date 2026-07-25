@@ -75,7 +75,10 @@ fn ensure_opencode_mcp_config(work_dir: &std::path::Path, mcp: &crate::engine::M
         .expect("checked is_object above")
         .entry("mcp")
         .or_insert_with(|| serde_json::json!({}));
-    if let Some(mcp_obj) = doc.get_mut("mcp").and_then(serde_json::Value::as_object_mut) {
+    if let Some(mcp_obj) = doc
+        .get_mut("mcp")
+        .and_then(serde_json::Value::as_object_mut)
+    {
         mcp_obj.insert("coxagent".to_owned(), entry);
     }
     let Ok(text) = serde_json::to_string_pretty(&doc) else {
@@ -188,7 +191,10 @@ impl AgentEnginePort for OpencodeEngine {
                     request.task_prompt
                 )
             }
-            None => format!("{}\n\n---\n\n{}", request.system_prompt, request.task_prompt),
+            None => format!(
+                "{}\n\n---\n\n{}",
+                request.system_prompt, request.task_prompt
+            ),
         };
 
         let role = crate::engine::role_key(request.role);
@@ -220,6 +226,50 @@ impl AgentEnginePort for OpencodeEngine {
         cmd.env_remove("OPENCODE_PID");
         crate::engine::apply_shim_path(&mut cmd);
 
+        self.exec(cmd, live, request.timeout).await
+    }
+
+    async fn resume_run(
+        &self,
+        session_id: &str,
+        follow_up: &str,
+        work_dir: &std::path::Path,
+        timeout: std::time::Duration,
+    ) -> Result<AgentOutcome, PortError> {
+        let live = live_path(work_dir, "resume");
+        let mut cmd = Command::new(&self.binary);
+        cmd.arg("run")
+            .arg("--model")
+            .arg(&self.model)
+            .arg("--dangerously-skip-permissions")
+            .arg("--dir")
+            .arg(work_dir)
+            .arg("--format")
+            .arg("json")
+            .arg("--session")
+            .arg(session_id)
+            .arg(follow_up)
+            .current_dir(work_dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        cmd.env_remove("OPENCODE");
+        cmd.env_remove("OPENCODE_PID");
+        crate::engine::apply_shim_path(&mut cmd);
+        self.exec(cmd, live, timeout).await
+    }
+}
+
+impl OpencodeEngine {
+    /// Spawn `cmd`, stream NDJSON stdout to the live log, parse the outcome.
+    async fn exec(
+        &self,
+        cmd: Command,
+        live: Option<std::path::PathBuf>,
+        timeout: std::time::Duration,
+    ) -> Result<AgentOutcome, PortError> {
+        let mut cmd = cmd;
         let mut child = cmd
             .spawn()
             .map_err(|e| PortError::Backend(format!("spawn opencode: {e}")))?;
@@ -264,7 +314,7 @@ impl AgentEnginePort for OpencodeEngine {
             Ok::<_, PortError>((raw, status))
         };
 
-        let (raw, status) = tokio::time::timeout(request.timeout, read)
+        let (raw, status) = tokio::time::timeout(timeout, read)
             .await
             .map_err(|_| PortError::Backend("opencode timed out".to_owned()))??;
         let stderr = err_task.await.unwrap_or_default();
@@ -281,8 +331,23 @@ impl AgentEnginePort for OpencodeEngine {
             exit_code: status.code(),
             usage: Some(usage),
             trace: String::new(),
+            session_id: extract_session(&raw),
         })
     }
+}
+
+/// First session id seen in the NDJSON stream (`sessionID` on opencode
+/// events) — the handle for `run --session`.
+fn extract_session(raw: &str) -> Option<String> {
+    raw.lines().find_map(|l| {
+        let v = serde_json::from_str::<serde_json::Value>(l.trim()).ok()?;
+        ["sessionID", "session_id"].iter().find_map(|k| {
+            v.get(k)
+                .or_else(|| v.pointer(&format!("/part/{k}")))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+    })
 }
 
 /// Render one NDJSON event into a readable line for the live log.
@@ -431,9 +496,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
         ensure_opencode_mcp_config(&dir, &mcp(Some("tok")));
-        let doc: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(dir.join("opencode.json")).expect("read"))
-                .expect("valid json");
+        let doc: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("opencode.json")).expect("read"),
+        )
+        .expect("valid json");
         assert_eq!(doc["mcp"]["coxagent"]["type"], "remote");
         assert_eq!(
             doc["mcp"]["coxagent"]["headers"]["Authorization"],
@@ -453,11 +519,15 @@ mod tests {
         )
         .expect("write");
         ensure_opencode_mcp_config(&dir, &mcp(None));
-        let doc: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(dir.join("opencode.json")).expect("read"))
-                .expect("valid json");
+        let doc: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("opencode.json")).expect("read"),
+        )
+        .expect("valid json");
         assert_eq!(doc["theme"], "dark", "unrelated top-level key preserved");
-        assert_eq!(doc["mcp"]["other"]["type"], "local", "other server preserved");
+        assert_eq!(
+            doc["mcp"]["other"]["type"], "local",
+            "other server preserved"
+        );
         assert_eq!(doc["mcp"]["coxagent"]["type"], "remote");
         assert!(doc["mcp"]["coxagent"].get("headers").is_none());
         let _ = std::fs::remove_dir_all(&dir);
@@ -508,11 +578,15 @@ mod tests {
             .expect("fake binary run succeeds");
         assert!(outcome.succeeded());
 
-        let doc: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(dir.join("opencode.json")).expect("config written"))
-                .expect("valid json");
+        let doc: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("opencode.json")).expect("config written"),
+        )
+        .expect("valid json");
         assert_eq!(doc["mcp"]["coxagent"]["type"], "remote");
-        assert_eq!(doc["mcp"]["coxagent"]["url"], "http://127.0.0.1:4000/api/mcp");
+        assert_eq!(
+            doc["mcp"]["coxagent"]["url"],
+            "http://127.0.0.1:4000/api/mcp"
+        );
         assert_eq!(
             doc["mcp"]["coxagent"]["headers"]["Authorization"],
             "Bearer tok"
@@ -593,7 +667,19 @@ mod tests {
             1,
             ".gitignore was:\n{text}"
         );
-        assert!(text.lines().any(|l| l.trim() == "node_modules"), "existing entry preserved");
+        assert!(
+            text.lines().any(|l| l.trim() == "node_modules"),
+            "existing entry preserved"
+        );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extracts_session_id_from_events() {
+        let raw = "{\"type\":\"text\",\"sessionID\":\"ses_9\",\"part\":{\"text\":\"hi\"}}\n";
+        assert_eq!(super::extract_session(raw).as_deref(), Some("ses_9"));
+        let nested = "{\"type\":\"text\",\"part\":{\"sessionID\":\"ses_n\"}}\n";
+        assert_eq!(super::extract_session(nested).as_deref(), Some("ses_n"));
+        assert_eq!(super::extract_session("{}"), None);
     }
 }

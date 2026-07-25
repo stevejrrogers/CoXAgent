@@ -333,6 +333,31 @@ pub fn focus_block(work_dir: &std::path::Path, query: &str) -> String {
     for (f, syms) in files.iter().take(6) {
         let _ = writeln!(out, "- {f}: {}", syms.join(", "));
     }
+    // Signatures of the top hits — often enough to orient without opening the
+    // file at all. One read per file, capped hard.
+    let mut file_cache: Vec<(String, Vec<String>)> = Vec::new();
+    let mut sigs = String::new();
+    for s in hits.iter().take(8) {
+        let idx = file_cache
+            .iter()
+            .position(|(f, _)| *f == s.file)
+            .unwrap_or_else(|| {
+                let content = std::fs::read_to_string(work_dir.join(&s.file)).unwrap_or_default();
+                file_cache.push((s.file.clone(), content.lines().map(str::to_owned).collect()));
+                file_cache.len() - 1
+            });
+        let lines = &file_cache[idx].1;
+        if let Some(line) = s.line.checked_sub(1).and_then(|i| lines.get(i)) {
+            let sig: String = line.trim().chars().take(110).collect();
+            if !sig.is_empty() {
+                let _ = writeln!(sigs, "- {} ({}:{}): {sig}", s.name, s.file, s.line);
+            }
+        }
+    }
+    if !sigs.is_empty() {
+        out.push_str("Signatures:\n");
+        out.push_str(&sigs);
+    }
     // Blast radius: callers of the top two hits.
     for s in hits.iter().take(2) {
         let callers = g.callers(&s.name);

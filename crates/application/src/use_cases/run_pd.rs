@@ -239,6 +239,7 @@ mod tests {
                 exit_code: Some(0),
                 usage: None,
                 trace: String::new(),
+                session_id: None,
             })
         }
     }

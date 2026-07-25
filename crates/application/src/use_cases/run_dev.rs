@@ -133,7 +133,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             {
                 Ok(Ok(r)) if r.success => {}
                 Ok(Ok(r)) => {
-                    tracing::warn!("DEV pre-check: cargo test failed — {}", &r.summary[..r.summary.len().min(200)]);
+                    tracing::warn!(
+                        "DEV pre-check: cargo test failed — {}",
+                        &r.summary[..r.summary.len().min(200)]
+                    );
                     return Ok(None);
                 }
                 Ok(Err(e)) => {
@@ -190,8 +193,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         // release the claim so the ticket returns to the queue instead of being
         // stranded In-Progress forever (which piled up 100+ orphaned tickets and
         // kept burning tokens re-claiming fresh ones).
-        match self.engine.run(self.build_request(&state, &id)).await {
-            Ok(o) if o.succeeded() => {}
+        // Keep the engine's conversation id: the repair pass (below) resumes
+        // this session so the agent keeps everything it just read and wrote
+        // in context instead of rediscovering its own change cold.
+        let session = match self.engine.run(self.build_request(&state, &id)).await {
+            Ok(o) if o.succeeded() => o.session_id.clone(),
             Ok(o) => {
                 self.record_failure(&id, o.stderr.trim()).await;
                 self.release_claim(&id).await;
@@ -207,7 +213,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 self.release_claim(&id).await;
                 return Err(e.into());
             }
-        }
+        };
 
         // Mechanical Definition of Done: the suite must be GREEN after the
         // change. Red → one bounded repair pass fed the failure output; still
@@ -228,17 +234,32 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                     .chars()
                     .rev()
                     .collect();
-                let repair = AgentRequest {
-                    role: self.mode.role(),
-                    system_prompt: prompts::system_prompt(prompts::DEV),
-                    task_prompt: format!(
-                        "Your change for ticket {id} left the test suite FAILING. Fix ONLY \
-                         these failures now (do not start new work):\n{tail}"
-                    ),
-                    work_dir: self.work_dir.clone(),
-                    timeout: Duration::from_secs(1800),
+                let follow_up = format!(
+                    "Your change for ticket {id} left the test suite FAILING. Fix ONLY \
+                     these failures now (do not start new work):\n{tail}"
+                );
+                // Resume the same conversation when the engine supports it —
+                // the agent still has its own change in context, so the fix is
+                // faster and far cheaper than a cold re-read. Fall back to a
+                // fresh run otherwise.
+                let resumed = match &session {
+                    Some(sid) => self
+                        .engine
+                        .resume_run(sid, &follow_up, &self.work_dir, Duration::from_secs(1800))
+                        .await
+                        .is_ok(),
+                    None => false,
                 };
-                let _ = self.engine.run(repair).await;
+                if !resumed {
+                    let repair = AgentRequest {
+                        role: self.mode.role(),
+                        system_prompt: prompts::system_prompt(prompts::DEV),
+                        task_prompt: follow_up,
+                        work_dir: self.work_dir.clone(),
+                        timeout: Duration::from_secs(1800),
+                    };
+                    let _ = self.engine.run(repair).await;
+                }
                 red = match deploy.run_tests(&self.work_dir).await {
                     Ok(r) if failed(&r) => Some(r.summary),
                     _ => None,
@@ -268,6 +289,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         crate::ports::outbound::mutate_state(self.store.as_ref(), |state| {
             transition(state, &id_c, role, status)
                 .map_err(|e| PortError::Corrupt(e.to_string()))?;
+            // Done — the work journal served its purpose.
+            state.ticket_journal.remove(&id_c.to_string());
             let version = state.current_version.bumped(bump);
             state.current_version = version.clone();
             let title = state
@@ -294,9 +317,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         let key = id.to_string();
         let short: String = why.chars().take(300).collect();
         let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
-            let n = s.ticket_fail_attempts.entry(key.clone()).or_insert(0);
-            *n += 1;
-            if *n == 3 {
+            let n = {
+                let c = s.ticket_fail_attempts.entry(key.clone()).or_insert(0);
+                *c += 1;
+                *c
+            };
+            // Brief the NEXT attempt on what this one hit, so a retry builds
+            // on prior findings instead of rediscovering them.
+            s.journal_note(&key, &format!("attempt {n} failed: {short}"));
+            if n == 3 {
                 s.post_comment(
                     "DEV-BUG",
                     &format!(
@@ -348,14 +377,28 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             .filter(|c| !c.trim().is_empty())
             .map(|c| format!("\n\n## Project context (goal, stack, scope, constraints):\n{c}\n"))
             .unwrap_or_default();
+        // Prior attempts' findings on this ticket (empty first time).
+        let journal = state
+            .ticket_journal
+            .get(&id.to_string())
+            .filter(|notes| !notes.is_empty())
+            .map(|notes| {
+                format!(
+                    "\n\nPREVIOUS ATTEMPTS on this ticket — build on these, do not repeat them:\n- {}",
+                    notes.join("\n- ")
+                )
+            })
+            .unwrap_or_default();
         AgentRequest {
             role: self.mode.role(),
-            system_prompt: format!(
-                "{}{stack}{deploy}{design}",
-                prompts::system_prompt(prompts::DEV)
-            ),
+            // The system prompt stays BYTE-IDENTICAL across every DEV run of a
+            // project: engines put it in the provider prompt cache, so a stable
+            // prefix means cache READ pricing on back-to-back runs. Anything
+            // per-ticket (stack/deploy/design blocks included — the design one
+            // exists only for UI tickets) belongs in the task prompt below.
+            system_prompt: prompts::system_prompt(prompts::DEV),
             task_prompt: format!(
-                "Ticket {id}: {title}\n{}\nImplement it now.{context_block}{}{}{}",
+                "Ticket {id}: {title}\n{}\nImplement it now.{stack}{deploy}{design}{context_block}{}{}{}{journal}",
                 ticket_brief(ticket),
                 prompts::focus_block(
                     &self.work_dir,
@@ -483,6 +526,7 @@ mod tests {
                 exit_code: Some(0),
                 usage: None,
                 trace: String::new(),
+                session_id: None,
             })
         }
     }

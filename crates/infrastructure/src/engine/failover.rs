@@ -120,6 +120,22 @@ impl<E: AgentEnginePort> AgentEnginePort for FailoverEngine<E> {
         }
         Err(PortError::Backend(format!("{ALL_EXHAUSTED}: {last_err}")))
     }
+
+    /// A session id belongs to the engine that minted it, so resume goes to
+    /// the primary only — never failed over to an engine that has no such
+    /// session. Callers fall back to a full fresh run on error.
+    async fn resume_run(
+        &self,
+        session_id: &str,
+        follow_up: &str,
+        work_dir: &std::path::Path,
+        timeout: std::time::Duration,
+    ) -> Result<AgentOutcome, PortError> {
+        match self.engines.first() {
+            Some(e) => e.resume_run(session_id, follow_up, work_dir, timeout).await,
+            None => Err(PortError::Backend("failover: no engines".to_owned())),
+        }
+    }
 }
 
 #[cfg(test)]

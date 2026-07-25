@@ -519,6 +519,12 @@ pub struct ProjectState {
     /// forever. Cleared when a human edits the ticket.
     #[serde(default)]
     pub ticket_fail_attempts: std::collections::BTreeMap<String, u32>,
+    /// Per-ticket work journal: what past attempts tried and where they got
+    /// stuck, fed into the next attempt's prompt so a retried ticket resumes
+    /// from prior findings instead of rediscovering them (bounded per ticket;
+    /// entry removed when the ticket completes).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub ticket_journal: std::collections::BTreeMap<String, Vec<String>>,
     /// Whether the Ops/SRE monitor currently sees the deployed app as down —
     /// tracked so it files exactly one bug per outage and can announce recovery.
     #[serde(default)]
@@ -569,6 +575,7 @@ impl Default for ProjectState {
             pr_fix_attempts: std::collections::BTreeMap::new(),
             drain_notice_sprint: 0,
             ticket_fail_attempts: std::collections::BTreeMap::new(),
+            ticket_journal: std::collections::BTreeMap::new(),
             ops_down: false,
             spend_today_usd: 0.0,
             spend_day: String::new(),
@@ -588,6 +595,22 @@ impl ProjectState {
         let overflow = self.activity.len().saturating_sub(MAX_ACTIVITY);
         if overflow > 0 {
             self.activity.drain(0..overflow);
+        }
+    }
+
+    /// Append a work-journal note for a ticket (what an attempt tried / where
+    /// it got stuck). Bounded: 4 notes per ticket, 500 chars per note — the
+    /// journal is a briefing for the next attempt, not a log.
+    pub fn journal_note(&mut self, ticket: &str, note: &str) {
+        let entry: String = note.trim().chars().take(500).collect();
+        if entry.is_empty() {
+            return;
+        }
+        let notes = self.ticket_journal.entry(ticket.to_owned()).or_default();
+        notes.push(entry);
+        let overflow = notes.len().saturating_sub(4);
+        if overflow > 0 {
+            notes.drain(0..overflow);
         }
     }
 
@@ -1370,5 +1393,22 @@ mod alias_tests {
     fn falls_back_to_first_letters() {
         assert_eq!(derive_alias("quotes"), "QUO");
         assert_eq!(derive_alias("my app"), "MYA");
+    }
+
+    #[test]
+    fn journal_note_bounded_and_capped() {
+        let mut st = super::ProjectState::default();
+        for i in 0..6 {
+            st.journal_note("T-1", &format!("note {i} {}", "x".repeat(600)));
+        }
+        let notes = &st.ticket_journal["T-1"];
+        assert_eq!(notes.len(), 4, "keeps only the last 4");
+        assert!(notes[0].starts_with("note 2"), "oldest dropped");
+        assert!(
+            notes.iter().all(|n| n.chars().count() <= 500),
+            "entries capped"
+        );
+        st.journal_note("T-1", "   ");
+        assert_eq!(st.ticket_journal["T-1"].len(), 4, "blank notes ignored");
     }
 }

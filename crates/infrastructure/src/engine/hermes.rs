@@ -68,6 +68,7 @@ impl AgentEnginePort for HermesEngine {
                 cost_usd: 0.0,
             }),
             trace: String::new(),
+            session_id: None,
         })
     }
 }
