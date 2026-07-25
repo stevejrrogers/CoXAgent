@@ -442,6 +442,58 @@ pub fn hub_lessons_block() -> String {
     out
 }
 
+/// Relevance-ranked team memory: score each decision/lesson by word overlap
+/// with the current task (title + technical approach) and keep only the most
+/// relevant — at scale, 100 stored lessons must not become 100 lines of prompt
+/// noise. Recency breaks ties; falls back to recent items when nothing scores.
+#[must_use]
+pub fn team_memory_block_relevant(decisions: &[String], lessons: &[String], query: &str) -> String {
+    let rank = |items: &[String], keep: usize| -> Vec<String> {
+        let qwords: Vec<String> = query
+            .to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.len() > 3)
+            .map(str::to_owned)
+            .collect();
+        let mut scored: Vec<(usize, usize, &String)> = items
+            .iter()
+            .enumerate()
+            .map(|(i, item)| {
+                let low = item.to_lowercase();
+                let hits = qwords.iter().filter(|w| low.contains(w.as_str())).count();
+                (hits, i, item)
+            })
+            .collect();
+        // Highest score first; among equals, most recent (highest index) first.
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+        scored
+            .into_iter()
+            .take(keep)
+            .map(|(_, _, item)| item.clone())
+            .collect()
+    };
+    let decisions_kept = rank(decisions, 8);
+    let lessons_kept = rank(lessons, 6);
+    if decisions_kept.is_empty() && lessons_kept.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "\n\n## Team memory — honour these (decisions the team already made + \
+         lessons learned):\n",
+    );
+    for d in &decisions_kept {
+        out.push_str("- [decision] ");
+        out.push_str(d);
+        out.push('\n');
+    }
+    for l in &lessons_kept {
+        out.push_str("- [lesson] ");
+        out.push_str(l);
+        out.push('\n');
+    }
+    out
+}
+
 /// Fold the team's durable memory — decisions/conventions plus retro lessons —
 /// into a prompt block so every agent stays consistent with what's been decided
 /// and learned, instead of re-deriving (and contradicting) each call. Empty when
@@ -566,5 +618,25 @@ mod tests {
         assert_eq!(block.matches("- lesson").count(), 8, "block caps at 8");
         std::env::remove_var("COXAGENT_HUB_LESSONS_PATH");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn relevant_memory_ranks_by_overlap() {
+        let lessons = vec![
+            "always pin the docker base image version".to_owned(),
+            "webhooks need a 5s timeout".to_owned(),
+            "keep dashboard charts theme-aware".to_owned(),
+        ];
+        let block = super::team_memory_block_relevant(&[], &lessons, "fix docker image build");
+        let first = block.lines().find(|l| l.starts_with("- [lesson]")).unwrap();
+        assert!(
+            first.contains("docker base image"),
+            "best match first: {first}"
+        );
+    }
+
+    #[test]
+    fn relevant_memory_empty_when_no_memory() {
+        assert!(super::team_memory_block_relevant(&[], &[], "anything").is_empty());
     }
 }

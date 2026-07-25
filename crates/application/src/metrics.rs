@@ -111,6 +111,33 @@ pub fn agent_evals(state: &ProjectState) -> AgentEvals {
     }
 }
 
+/// Pure self-tuning policy: given the current evals and backlog size, decide
+/// the brakes. Hysteresis (on at a high bar, off at a lower one) prevents
+/// flapping.
+#[must_use]
+pub fn decide_tuning(
+    evals: &AgentEvals,
+    backlog: usize,
+    current: &crate::state::Tuning,
+) -> crate::state::Tuning {
+    let mut next = current.clone();
+    // Quality brake: churn hot → bugs first; recovered → resume features.
+    if evals.shipped_total >= 3 {
+        if evals.churn_per_ship > 1.5 {
+            next.bugs_first = true;
+        } else if evals.churn_per_ship < 0.8 {
+            next.bugs_first = false;
+        }
+    }
+    // Intake brake: backlog far beyond throughput → stop proposing; drained → resume.
+    if backlog > 25 {
+        next.skip_ba = true;
+    } else if backlog < 12 {
+        next.skip_ba = false;
+    }
+    next
+}
+
 /// `YYYY-MM-DD` minus `n` days (lexicographic-comparable). Falls back to the
 /// input on parse trouble — fine for a dashboard stat.
 #[allow(clippy::many_single_char_names)] // civil-calendar math keeps the canonical y/m/d notation
@@ -392,5 +419,31 @@ mod tests {
     fn days_back_handles_month_and_year_edges() {
         assert_eq!(super::days_back("2026-01-03", 7), "2025-12-27");
         assert_eq!(super::days_back("2026-03-02", 7), "2026-02-23");
+    }
+
+    #[test]
+    fn tuning_hysteresis() {
+        let mut e = super::AgentEvals {
+            per_role: vec![],
+            shipped_total: 10,
+            shipped_7d: 2,
+            parked: 0,
+            failed_attempts: 20,
+            churn_per_ship: 2.0,
+            prs_stuck: 0,
+            cost_per_ship_usd: 1.0,
+        };
+        let t0 = crate::state::Tuning::default();
+        let t1 = super::decide_tuning(&e, 30, &t0);
+        assert!(t1.bugs_first, "hot churn trips the quality brake");
+        assert!(t1.skip_ba, "fat backlog trips the intake brake");
+        // Mid-band: nothing flips (hysteresis).
+        e.churn_per_ship = 1.0;
+        let t2 = super::decide_tuning(&e, 18, &t1);
+        assert!(t2.bugs_first && t2.skip_ba, "mid-band holds state");
+        // Recovered: both release.
+        e.churn_per_ship = 0.5;
+        let t3 = super::decide_tuning(&e, 5, &t2);
+        assert!(!t3.bugs_first && !t3.skip_ba);
     }
 }

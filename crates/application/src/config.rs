@@ -184,6 +184,11 @@ pub struct WorkflowConfig {
     /// until a human approves it from the dashboard. `None` = no gate.
     #[serde(default)]
     pub approve_over_usd: Option<f64>,
+    /// TDD gate (default on): before DEV implements a feature that has
+    /// acceptance criteria, a TEST-role call writes FAILING tests from those
+    /// criteria first — "done" becomes machine-checkable before any code.
+    #[serde(default = "default_true")]
+    pub tdd: bool,
     /// Sandbox agent CLIs: confine their file WRITES to the project workspace
     /// + tool caches (macOS Seatbelt today; other platforms run unsandboxed
     /// with a warning). Off by default — turn on for untrusted codebases.
@@ -232,6 +237,7 @@ impl Default for WorkflowConfig {
             token_saver: true,
             language: Language::En,
             approve_over_usd: None,
+            tdd: true,
             sandbox: false,
         }
     }

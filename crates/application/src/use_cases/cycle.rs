@@ -96,6 +96,7 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     work_dir: PathBuf,
     context: String,
     meter: Option<Arc<Mutex<Spend>>>,
+    shot: Option<Arc<dyn crate::ports::outbound::ScreenshotPort>>,
     deploy: Option<Arc<dyn DeployPort>>,
     notifier: Option<Arc<dyn crate::ports::outbound::NotifierPort>>,
     /// Live, runtime-adjustable spend caps (overrides the config caps when set).
@@ -128,6 +129,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             work_dir,
             context,
             meter: None,
+            shot: None,
             deploy: None,
             notifier: None,
             budget: None,
@@ -1170,6 +1172,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             )
     }
 
+    /// Attach a screenshot capability for post-deploy visual QA.
+    #[must_use]
+    pub fn with_shot(
+        mut self,
+        shot: Option<Arc<dyn crate::ports::outbound::ScreenshotPort>>,
+    ) -> Self {
+        self.shot = shot;
+        self
+    }
+
     /// Attach a spend meter (drained into state each cycle for FinOps tracking).
     #[must_use]
     pub fn with_meter(mut self, meter: Arc<Mutex<Spend>>) -> Self {
@@ -1250,6 +1262,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // Self-correcting memory: audit the engine's per-machine notes
             // against the current process law once a day.
             self.memory_hygiene().await;
+            // Self-tuning: react to our own evals (daily) — quality/intake brakes.
+            self.self_tune().await;
 
             // SM dispatch FIRST (agents resolve), then report what remains.
             self.sm_unpark_tickets().await;
@@ -1284,7 +1298,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // BA runs on the first cycle of each period. `(cycle-1) % n == 0` is
             // correct for every n including 1 (unlike `cycle % n == 1`).
             let ba_every = self.config.workflow.ba_every_n_cycles;
-            if !refactoring && ba_every > 0 && (cycle - 1) % ba_every == 0 {
+            let ba_paused = self.store.load().await.is_ok_and(|s| s.tuning.skip_ba);
+            if ba_paused && ba_every > 0 && (cycle - 1) % ba_every == 0 {
+                report
+                    .errors
+                    .push("BA: paused by self-tuning — backlog outgrew throughput".to_owned());
+            }
+            if !ba_paused && !refactoring && ba_every > 0 && (cycle - 1) % ba_every == 0 {
                 if recovery {
                     report
                         .errors
@@ -1362,7 +1382,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 Err(e) => report.errors.push(format!("DEV-BUG: {e}")),
             }
         }
-        if self.config.workflow.feature_dev_enabled && !queue_full {
+        let bugs_first = self.store.load().await.is_ok_and(|s| s.tuning.bugs_first);
+        if bugs_first {
+            report
+                .errors
+                .push("DEV-FEATURE: paused by self-tuning — burning down bugs first".to_owned());
+        }
+        if self.config.workflow.feature_dev_enabled && !queue_full && !bugs_first {
             // Before building, make sure the next feature has a clear definition
             // of done — DEV raises unclear tickets and the BA fills them in.
             self.clarify_next_feature().await;
@@ -1410,6 +1436,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                                 "deploy_failed"
                             };
                             self.notify(kind, r.summary.clone()).await;
+                            // Visual QA: someone finally LOOKS at the shipped
+                            // UI. Only when this cycle shipped a UI feature.
+                            if r.success {
+                                if let Some(id) = report.feature_done.clone() {
+                                    self.visual_qa(&id, &mut report).await;
+                                }
+                            }
                             // A failed deploy must become work, or nothing fixes
                             // it: file it as a high-priority bug (deduped).
                             if !r.success {
@@ -1559,6 +1592,86 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             })
             .await
             .ok()
+    }
+
+    /// Post-deploy visual QA on a UI feature: screenshot the running app,
+    /// have PD review the ACTUAL pixels against the design system, and file
+    /// at most 2 concrete UI bugs. Every step best-effort — no browser, no
+    /// port, or an unparseable review just skips the pass.
+    async fn visual_qa(&self, ticket: &TicketId, report: &mut CycleReport) {
+        let (Some(shot), Some(port)) = (&self.shot, self.config.deploy.host_port) else {
+            return;
+        };
+        let is_ui = self
+            .store
+            .load()
+            .await
+            .ok()
+            .and_then(|s| s.ticket(ticket).map(coxagent_domain::Ticket::has_ui))
+            .unwrap_or(false);
+        if !is_ui {
+            return;
+        }
+        let out = self.work_dir.join(".coxagent").join("ui-shot.png");
+        if !shot
+            .capture(&format!("http://127.0.0.1:{port}/"), &out)
+            .await
+        {
+            return;
+        }
+        self.report("PD", "visual QA on the deployed UI");
+        let request = crate::ports::outbound::AgentRequest {
+            role: coxagent_domain::Role::Pd,
+            system_prompt: crate::prompts::system_prompt(crate::prompts::PD),
+            task_prompt: format!(
+                "Visual QA. A screenshot of the app as ACTUALLY deployed (after \
+                 shipping ticket {ticket}) is at `.coxagent/ui-shot.png` — open and \
+                 LOOK at it with your file tools. Judge it against the project's \
+                 design system and basic UI craft (alignment, contrast, spacing, \
+                 broken layout, placeholder junk). Output ONLY a JSON array of at \
+                 most 2 CONCRETE, visible defects: \
+                 [{{\"title\": string, \"description\": string}}] — or [] if it looks right.",
+            ),
+            work_dir: self.work_dir.clone(),
+            timeout: std::time::Duration::from_secs(600),
+            escalation_level: 0,
+        };
+        let Ok(o) = self.engine.run(request).await else {
+            return;
+        };
+        if !o.succeeded() {
+            return;
+        }
+        let raw = &o.stdout;
+        let (Some(a), Some(b)) = (raw.find('['), raw.rfind(']')) else {
+            return;
+        };
+        let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(&raw[a..=b]) else {
+            return;
+        };
+        for item in parsed.iter().take(2) {
+            let (Some(title), Some(desc)) = (
+                item.get("title").and_then(serde_json::Value::as_str),
+                item.get("description").and_then(serde_json::Value::as_str),
+            ) else {
+                continue;
+            };
+            let adder = crate::use_cases::AddTicketUseCase::new(Arc::clone(&self.store));
+            if let Ok(id) = adder
+                .execute(crate::use_cases::AddTicketInput {
+                    ticket_type: coxagent_domain::ticket::TicketType::Bug,
+                    title: format!("UI: {title}"),
+                    description: format!("{desc}\n\n(Found by PD visual QA after {ticket}; screenshot: .coxagent/ui-shot.png)"),
+                    priority: coxagent_domain::ticket::Priority::Medium,
+                    complexity: coxagent_domain::ticket::Complexity::Small,
+                    has_ui: true,
+                    acceptance_criteria: Vec::new(),
+                })
+                .await
+            {
+                report.bugs_filed.push(id);
+            }
+        }
     }
 
     async fn file_deploy_bug(&self, summary: &str) -> Option<TicketId> {
@@ -1754,6 +1867,64 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// #agents so humans can see what the team un-learned.
     // One linear pass: day-claim → list → judge → apply → report.
     #[allow(clippy::too_many_lines)]
+    /// Daily self-tuning pass: recompute the evals and set/clear the quality
+    /// and intake brakes (see `metrics::decide_tuning`). SM announces changes.
+    async fn self_tune(&self) {
+        let today = crate::state::now_rfc3339()[..10].to_owned();
+        let Ok(state) = self.store.load().await else {
+            return;
+        };
+        if state.tuning.last_eval_day == today {
+            return;
+        }
+        let evals = crate::metrics::agent_evals(&state);
+        let backlog = state
+            .tickets
+            .iter()
+            .filter(|t| {
+                use coxagent_domain::ticket::Status;
+                matches!(t.status(), Status::Pending | Status::Ready | Status::Open)
+            })
+            .count();
+        let next = crate::metrics::decide_tuning(&evals, backlog, &state.tuning);
+        let was = state.tuning.clone();
+        drop(state);
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+            if s.tuning.last_eval_day == today {
+                return Ok(());
+            }
+            let mut announce: Vec<String> = Vec::new();
+            if next.bugs_first != was.bugs_first {
+                announce.push(if next.bugs_first {
+                    format!(
+                        "quality brake ON — retry churn {:.2}/ship; features pause, bugs first",
+                        evals.churn_per_ship
+                    )
+                } else {
+                    "quality brake OFF — churn recovered, features resume".to_owned()
+                });
+            }
+            if next.skip_ba != was.skip_ba {
+                announce.push(if next.skip_ba {
+                    format!(
+                        "intake brake ON — backlog {backlog} tickets; BA pauses until it drains"
+                    )
+                } else {
+                    "intake brake OFF — backlog drained, BA resumes".to_owned()
+                });
+            }
+            s.tuning = next.clone();
+            s.tuning.last_eval_day.clone_from(&today);
+            for a in announce {
+                let msg = format!("🎛️ Self-tuning: {a}");
+                s.post_comment("SM", &msg, None);
+                s.post_chat_in("SM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+            }
+            Ok(())
+        })
+        .await;
+    }
+
     async fn memory_hygiene(&self) {
         let today = crate::state::now_rfc3339()[..10].to_owned();
         {

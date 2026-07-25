@@ -219,6 +219,11 @@ impl Ticket {
     }
 
     #[must_use]
+    pub fn complexity(&self) -> Complexity {
+        self.complexity
+    }
+
+    #[must_use]
     pub fn design(&self) -> &Design {
         &self.design
     }

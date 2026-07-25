@@ -9,13 +9,13 @@ use crate::ports::outbound::{AgentEnginePort, AgentRequest, StateStorePort};
 use crate::prompts;
 use crate::selection::design_candidates;
 use coxagent_domain::{Role, Status, TechnicalDesign, TicketId};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 /// The SA's JSON output: the technical design. UX is authored separately by PD.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct DesignOutput {
     approach: String,
     #[serde(default)]
@@ -146,6 +146,18 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             }
         };
 
+        // Critic pass on LARGE tickets only: a second opinion is cheap here
+        // and architecture mistakes are cheapest before DEV burns hours on
+        // them. One round: critique → (if must-fix) one revision.
+        let design = if state
+            .ticket(&id)
+            .is_some_and(|t| t.complexity() == coxagent_domain::ticket::Complexity::Large)
+        {
+            self.critic_pass(&id, &title, design).await
+        } else {
+            design
+        };
+
         // Atomic read-modify-write with retry, so a concurrent operator can't
         // clobber this SA design or lose the transition (parallel-safe).
         let td = technical_of(&design);
@@ -172,6 +184,52 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             p(None);
         }
         Ok(Some(id))
+    }
+
+    /// One critique round for a large ticket's design: a reviewer call judges
+    /// it (APPROVED / must-fix list); on must-fix, ONE revision call amends
+    /// the design. Any failure keeps the original design — the pass can only
+    /// help, never block.
+    async fn critic_pass(&self, id: &TicketId, title: &str, design: DesignOutput) -> DesignOutput {
+        let design_json = serde_json::to_string(&design).unwrap_or_default();
+        let critique_req = AgentRequest {
+            role: coxagent_domain::Role::Sa,
+            system_prompt: crate::prompts::system_prompt(
+                "You are a principal engineer REVIEWING another architect's design. \
+                 Judge only architecture-level risk: wrong decomposition, missing \
+                 failure modes, scaling traps, security gaps. If sound, reply exactly \
+                 APPROVED. Otherwise list ONLY must-fix items, one per line, no praise.",
+            ),
+            task_prompt: format!(
+                "Ticket {id}: {title} (complexity: large)\nProposed design JSON:\n{design_json}"
+            ),
+            work_dir: self.work_dir.clone(),
+            timeout: std::time::Duration::from_secs(300),
+            escalation_level: 1, // the critic runs on the stronger ladder model
+        };
+        let critique = match self.engine.run(critique_req).await {
+            Ok(o) if o.succeeded() => o.stdout.trim().to_owned(),
+            _ => return design,
+        };
+        if critique.is_empty() || critique.to_uppercase().starts_with("APPROVED") {
+            return design;
+        }
+        let revise_req = AgentRequest {
+            role: coxagent_domain::Role::Sa,
+            system_prompt: crate::prompts::system_prompt(crate::prompts::SA),
+            task_prompt: format!(
+                "Your design for ticket {id} ({title}) got review feedback. Address \
+                 EVERY must-fix item and output the FULL corrected design JSON only.\n\
+                 Your design:\n{design_json}\nMust-fix feedback:\n{critique}"
+            ),
+            work_dir: self.work_dir.clone(),
+            timeout: std::time::Duration::from_secs(600),
+            escalation_level: 0,
+        };
+        match self.engine.run(revise_req).await {
+            Ok(o) if o.succeeded() => parse_design(&o.stdout).unwrap_or(design),
+            _ => design,
+        }
     }
 
     fn build_request(&self, id: &TicketId, title: &str, memory: &str) -> AgentRequest {

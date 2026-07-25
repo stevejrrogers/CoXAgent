@@ -223,6 +223,37 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         }
 
         let state = self.store.load().await?;
+        // TDD gate: on a feature with acceptance criteria, a TEST-role call
+        // writes FAILING tests from those criteria FIRST — the definition of
+        // done becomes machine-checkable before implementation starts. DEV
+        // then codes until the suite (including these) is green; the DoD
+        // check below enforces it mechanically. Best-effort: a failed TDD
+        // call never blocks the ticket.
+        if self.config.workflow.tdd && self.mode == DevMode::Feature {
+            let criteria: Vec<String> = state
+                .ticket(&id)
+                .map(|t| t.acceptance_criteria().to_vec())
+                .unwrap_or_default();
+            if !criteria.is_empty() {
+                let title = state.ticket(&id).map_or("", |t| t.title());
+                let tdd_req = AgentRequest {
+                    role: Role::Test,
+                    system_prompt: prompts::system_prompt(prompts::TEST),
+                    task_prompt: format!(
+                        "TDD: ticket {id} ({title}) is about to be implemented. Write \
+                         FAILING tests that encode EXACTLY these acceptance criteria — \
+                         nothing else, no implementation, no fixing existing tests:\n- {}\n\
+                         Put them where this project keeps tests, compiling but failing \
+                         for the right reason. Commit nothing.",
+                        criteria.join("\n- ")
+                    ),
+                    work_dir: self.work_dir.clone(),
+                    timeout: Duration::from_secs(900),
+                    escalation_level: 0,
+                };
+                let _ = self.engine.run(tdd_req).await;
+            }
+        }
         // On ANY engine failure (error or non-zero exit — e.g. a quota wall),
         // release the claim so the ticket returns to the queue instead of being
         // stranded In-Progress forever (which piled up 100+ orphaned tickets and
@@ -414,6 +445,27 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             .filter(|c| !c.trim().is_empty())
             .map(|c| format!("\n\n## Project context (goal, stack, scope, constraints):\n{c}\n"))
             .unwrap_or_default();
+        // Human steering: recent USER comments on this ticket become explicit
+        // instructions — commenting on an in-progress ticket steers the agent
+        // on its next run instead of shouting into the void.
+        let steering = {
+            let notes: Vec<String> = state
+                .comments
+                .iter()
+                .filter(|c| c.author == "USER" && c.ticket.as_deref() == Some(id.as_str()))
+                .rev()
+                .take(3)
+                .map(|c| c.body.chars().take(400).collect::<String>())
+                .collect();
+            if notes.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "\n\nHUMAN STEERING on this ticket (newest first — follow it):\n- {}",
+                    notes.join("\n- ")
+                )
+            }
+        };
         // Prior attempts' findings on this ticket (empty first time).
         let journal = state
             .ticket_journal
@@ -435,7 +487,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             // exists only for UI tickets) belongs in the task prompt below.
             system_prompt: prompts::system_prompt(prompts::DEV),
             task_prompt: format!(
-                "Ticket {id}: {title}\n{}\nImplement it now.{stack}{deploy}{design}{context_block}{}{}{}{}{journal}",
+                "Ticket {id}: {title}\n{}\nImplement it now.{stack}{deploy}{design}{context_block}{}{}{}{}{steering}{journal}",
                 ticket_brief(ticket),
                 prompts::focus_block(
                     &self.work_dir,
@@ -447,7 +499,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                     ),
                 ),
                 prompts::repo_map_block(&self.work_dir, self.config.workflow.token_saver),
-                prompts::team_memory_block(&state.decisions, &state.lessons),
+                prompts::team_memory_block_relevant(
+                    &state.decisions,
+                    &state.lessons,
+                    &format!(
+                        "{title} {}",
+                        ticket
+                            .and_then(|t| t.design().technical.as_ref())
+                            .map_or("", |d| d.approach.as_str())
+                    ),
+                ),
                 prompts::hub_lessons_block(),
             ),
             work_dir: self.work_dir.clone(),

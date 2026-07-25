@@ -571,6 +571,9 @@ async fn build_project(
         .with_meter(meter.clone())
         .with_live_budget(Arc::clone(&live_budget))
         .with_deploy(Arc::new(DockerComposeDeploy::new()))
+        .with_shot(Some(Arc::new(
+            coxagent_infrastructure::screenshot::ChromeScreenshot,
+        )))
         .with_git(Arc::new(coxagent_infrastructure::SystemGit::new()));
         let leader = if let Some(ref f) = forge {
             leader.with_forge(Arc::clone(f))
@@ -598,6 +601,9 @@ async fn build_project(
         .with_meter(meter.clone())
         .with_live_budget(Arc::clone(&live_budget))
         .with_deploy(Arc::new(DockerComposeDeploy::new()))
+        .with_shot(Some(Arc::new(
+            coxagent_infrastructure::screenshot::ChromeScreenshot,
+        )))
         .with_git(Arc::new(coxagent_infrastructure::SystemGit::new()));
         let worker = if let Some(ref f) = forge {
             worker.with_forge(Arc::clone(f))

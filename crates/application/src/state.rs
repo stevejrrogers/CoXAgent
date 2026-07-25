@@ -515,6 +515,11 @@ pub struct ProjectState {
     /// Tickets a human approved to run despite the cost estimate.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub cost_approved: std::collections::BTreeSet<String>,
+    /// Self-tuning knobs the orchestrator sets FROM the evals — the loop
+    /// reacts to its own health instead of waiting for a human to read a
+    /// dashboard. All deterministic; SM announces every change.
+    #[serde(default, skip_serializing_if = "Tuning::is_default")]
+    pub tuning: Tuning,
     /// True while the team is in merge-queue RECOVERY: the open-PR count blew
     /// past twice the WIP limit, so cycles do merge/conflict work only until
     /// the queue is back under the limit.
@@ -607,6 +612,7 @@ impl Default for ProjectState {
             pr_sessions: std::collections::BTreeMap::new(),
             cost_holds: std::collections::BTreeMap::new(),
             cost_approved: std::collections::BTreeSet::new(),
+            tuning: Tuning::default(),
             drain_notice_sprint: 0,
             ticket_fail_attempts: std::collections::BTreeMap::new(),
             ticket_journal: std::collections::BTreeMap::new(),
@@ -614,6 +620,29 @@ impl Default for ProjectState {
             spend_today_usd: 0.0,
             spend_day: String::new(),
         }
+    }
+}
+
+/// Orchestrator self-tuning state, derived from the evals each day.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tuning {
+    /// Quality brake: retry churn per shipped ticket ran hot, so DEV-FEATURE
+    /// pauses and the team burns down bugs until churn recovers.
+    #[serde(default)]
+    pub bugs_first: bool,
+    /// Intake brake: the backlog outgrew throughput, so BA proposals pause
+    /// until the queue drains.
+    #[serde(default)]
+    pub skip_ba: bool,
+    /// The day (`YYYY-MM-DD`) tuning was last evaluated.
+    #[serde(default)]
+    pub last_eval_day: String,
+}
+
+impl Tuning {
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        !self.bugs_first && !self.skip_ba && self.last_eval_day.is_empty()
     }
 }
 

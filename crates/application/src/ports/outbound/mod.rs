@@ -8,6 +8,7 @@ pub mod forge;
 pub mod git;
 pub mod kv_doc;
 pub mod notify;
+pub mod screenshot;
 pub mod state_store;
 pub mod storage;
 
@@ -19,5 +20,6 @@ pub use forge::{ForgePort, PrFeedback, PullRequest};
 pub use git::{GitAuthor, GitPort, SyncBase};
 pub use kv_doc::KvDocPort;
 pub use notify::{ChatNotifier, FanoutNotifier, NotifierPort, NotifyEvent, NullNotifier};
+pub use screenshot::ScreenshotPort;
 pub use state_store::{mutate_state, StateStorePort, WorkerEntry};
 pub use storage::StoragePort;
