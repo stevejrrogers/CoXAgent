@@ -17,19 +17,29 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Test cross-platform shell
+        run: cargo test --manifest-path desktop/coxagent-desktop/Cargo.toml
       - name: Build .app + .dmg (Swift shell)
         run: bash scripts/build-macos-app.sh
+      - name: Test + build menu-bar companion (SwiftUI)
+        run: bash scripts/build-companion.sh
       - name: Rename
-        run: cp desktop/build/CoXAgent.dmg CoXAgent-macos.dmg
+        run: |
+          cp desktop/build/CoXAgent.dmg CoXAgent-macos.dmg
+          ditto -c -k --keepParent "desktop/build/CoXAgent Companion.app" CoXAgentCompanion-macos.zip
       - uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
-          files: CoXAgent-macos.dmg
+          files: |
+            CoXAgent-macos.dmg
+            CoXAgentCompanion-macos.zip
           generate_release_notes: true
       - uses: actions/upload-artifact@v4
         with:
           name: CoXAgent-macos
-          path: CoXAgent-macos.dmg
+          path: |
+            CoXAgent-macos.dmg
+            CoXAgentCompanion-macos.zip
 
   windows:
     runs-on: windows-latest
@@ -39,6 +49,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build hub
         run: cargo build --release --locked -p coxagent-app
+      - name: Test desktop shell
+        run: cargo test --manifest-path desktop/coxagent-desktop/Cargo.toml
       - name: Build desktop shell
         run: cargo build --release --manifest-path desktop/coxagent-desktop/Cargo.toml
       - name: Package
@@ -73,6 +85,8 @@ jobs:
             libayatana-appindicator3-dev librsvg2-dev
       - name: Build hub
         run: cargo build --release --locked -p coxagent-app
+      - name: Test desktop shell
+        run: cargo test --manifest-path desktop/coxagent-desktop/Cargo.toml
       - name: Build desktop shell
         run: cargo build --release --manifest-path desktop/coxagent-desktop/Cargo.toml
       - name: Package

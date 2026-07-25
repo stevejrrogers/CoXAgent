@@ -143,6 +143,17 @@ interactive tickets, login + role-aware UI.
 
 ## Quickstart
 
+### Desktop apps (no browser, no manual server)
+
+- **CoXAgent.app / CoXAgent.exe / CoXAgent (Linux)** — native window that boots
+  the bundled hub and hosts the dashboard in the system webview
+  (`desktop/coxagent-desktop`, tao + wry; macOS ships the Swift shell). Reuses an
+  already-running hub instead of double-spawning; hub output goes to
+  `~/CoXAgent/logs/hub.log`; port override via `COXAGENT_DESKTOP_PORT`.
+- **CoXAgent Companion** (macOS menu bar) — hub health at a glance + quick
+  actions (open dashboard / launch app / open log). Build:
+  `scripts/build-companion.sh`. All three: `scripts/build-desktop.sh` → `dist/`.
+
 ### Single project (local)
 
 ```sh

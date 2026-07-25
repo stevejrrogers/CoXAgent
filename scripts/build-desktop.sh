@@ -14,9 +14,11 @@ DIST="$ROOT/dist"
 REPO="${REPO:-stevejrrogers/CoXAgent}"
 mkdir -p "$DIST"
 
-echo "==> [1/3] macOS (.dmg) — native"
+echo "==> [1/3] macOS (.dmg + companion) — native"
 bash "$ROOT/scripts/build-macos-app.sh"
 cp "$ROOT/desktop/build/CoXAgent.dmg" "$DIST/CoXAgent-macos.dmg"
+bash "$ROOT/scripts/build-companion.sh"
+ditto -c -k --keepParent "$ROOT/desktop/build/CoXAgent Companion.app" "$DIST/CoXAgentCompanion-macos.zip"
 
 echo "==> [2/3] Linux (.tar.gz) — Docker (WebKitGTK)"
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
