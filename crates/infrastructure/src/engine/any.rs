@@ -27,7 +27,7 @@ impl AnyEngine {
     /// # Errors
     /// [`PortError::Backend`] when the chosen engine is not yet implemented.
     pub fn from_choice(choice: &EngineChoice, mcp: Option<McpAccess>) -> Result<Self, PortError> {
-        Self::from_choice_with_escalation(choice, mcp, &[])
+        Self::from_choice_with_escalation(choice, mcp, &[], false)
     }
 
     /// Like [`Self::from_choice`], threading the configured retry escalation
@@ -40,17 +40,20 @@ impl AnyEngine {
         choice: &EngineChoice,
         mcp: Option<McpAccess>,
         escalation: &[String],
+        sandbox: bool,
     ) -> Result<Self, PortError> {
         match choice.engine {
             EngineKind::Opencode => Ok(Self::Opencode(
                 OpencodeEngine::new(choice.model.clone())
                     .with_mcp(mcp)
-                    .with_escalation(escalation.to_vec()),
+                    .with_escalation(escalation.to_vec())
+                    .with_sandbox(sandbox),
             )),
             EngineKind::Claude => Ok(Self::Claude(
                 ClaudeEngine::new(choice.model.clone())
                     .with_mcp(mcp)
-                    .with_escalation(escalation.to_vec()),
+                    .with_escalation(escalation.to_vec())
+                    .with_sandbox(sandbox),
             )),
             EngineKind::Hermes => Ok(Self::Hermes(HermesEngine::new(choice.model.clone()))),
             EngineKind::Scripted => Ok(Self::Scripted(ScriptedEngine::new())),

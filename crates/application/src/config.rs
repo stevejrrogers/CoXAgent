@@ -184,6 +184,11 @@ pub struct WorkflowConfig {
     /// until a human approves it from the dashboard. `None` = no gate.
     #[serde(default)]
     pub approve_over_usd: Option<f64>,
+    /// Sandbox agent CLIs: confine their file WRITES to the project workspace
+    /// + tool caches (macOS Seatbelt today; other platforms run unsandboxed
+    /// with a warning). Off by default — turn on for untrusted codebases.
+    #[serde(default)]
+    pub sandbox: bool,
 }
 
 fn default_max_open_prs() -> u32 {
@@ -227,6 +232,7 @@ impl Default for WorkflowConfig {
             token_saver: true,
             language: Language::En,
             approve_over_usd: None,
+            sandbox: false,
         }
     }
 }

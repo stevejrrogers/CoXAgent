@@ -1254,11 +1254,13 @@ fn build_failover(
     fallbacks: &[coxagent_application::config::EngineChoice],
     mcp: Option<&coxagent_infrastructure::engine::McpAccess>,
     escalation: &[String],
+    sandbox: bool,
 ) -> Result<FailoverEngine<AnyEngine>, Box<dyn std::error::Error>> {
     let mut engines = vec![AnyEngine::from_choice_with_escalation(
         choice,
         mcp.cloned(),
         escalation,
+        sandbox,
     )?];
     for fb in fallbacks {
         match AnyEngine::from_choice(fb, mcp.cloned()) {
@@ -1328,16 +1330,28 @@ fn build_engine(
     logs_dir: PathBuf,
     mcp: Option<coxagent_infrastructure::engine::McpAccess>,
 ) -> Result<BuiltEngine, Box<dyn std::error::Error>> {
+    if config.workflow.sandbox && !cfg!(target_os = "macos") {
+        tracing::warn!(
+            "workflow.sandbox is on but this platform has no sandbox backend yet — agents run unsandboxed"
+        );
+    }
     let fallbacks = effective_fallbacks(config);
     let default = build_failover(
         &config.engine.default,
         &fallbacks,
         mcp.as_ref(),
         &config.engine.escalation,
+        config.workflow.sandbox,
     )?;
     let mut per_role = std::collections::HashMap::new();
     for (role, choice) in &config.engine.per_role {
-        match build_failover(choice, &fallbacks, mcp.as_ref(), &config.engine.escalation) {
+        match build_failover(
+            choice,
+            &fallbacks,
+            mcp.as_ref(),
+            &config.engine.escalation,
+            config.workflow.sandbox,
+        ) {
             Ok(e) => {
                 tracing::info!(
                     "role {role:?} routed to {:?}({})",

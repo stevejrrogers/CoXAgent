@@ -51,6 +51,8 @@ pub struct ClaudeEngine {
     binary: String,
     /// This project's CoXAgent MCP endpoint, when reachable — see [`crate::engine::McpAccess`].
     mcp: Option<crate::engine::McpAccess>,
+    /// Confine file writes to the project workspace (see `proc::agent_command`).
+    sandbox: bool,
     /// Retry escalation ladder: models for `escalation_level` 1, 2, … (last
     /// entry repeats). Default `["opus"]` — a failed attempt retries on the
     /// strongest Claude tier.
@@ -65,7 +67,15 @@ impl ClaudeEngine {
             binary: "claude".to_owned(),
             mcp: None,
             escalation: vec!["opus".to_owned()],
+            sandbox: false,
         }
+    }
+
+    /// Confine agent file writes to the workspace + tool caches (macOS).
+    #[must_use]
+    pub fn with_sandbox(mut self, sandbox: bool) -> Self {
+        self.sandbox = sandbox;
+        self
     }
 
     /// Override the retry escalation ladder (empty keeps the default).
@@ -234,9 +244,7 @@ impl AgentEnginePort for ClaudeEngine {
         work_dir: &std::path::Path,
         timeout: std::time::Duration,
     ) -> Result<AgentOutcome, PortError> {
-        // nice(+10): the agent CLI and every build/test child it spawns stay
-        // background priority, keeping the host responsive.
-        let mut cmd = crate::proc::low_priority(&self.binary);
+        let mut cmd = crate::proc::agent_command(&self.binary, work_dir, self.sandbox);
         cmd.arg("-p")
             .arg(follow_up)
             .arg("--resume")
