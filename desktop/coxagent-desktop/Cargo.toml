@@ -17,6 +17,9 @@ tao = "0.30"
 wry = "0.46"
 dirs = "5"
 
+[dev-dependencies]
+tempfile = "3"
+
 [profile.release]
 strip = true
 opt-level = "z"
