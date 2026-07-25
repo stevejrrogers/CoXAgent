@@ -1,0 +1,730 @@
+{
+  "channels": [
+    {
+      "id": "dm-root-steve",
+      "name": "steve · root",
+      "owner": "",
+      "members": [
+        "steve",
+        "root"
+      ],
+      "inviters": [],
+      "created_at": "2026-07-15T06:54:41.290482Z",
+      "kind": "dm"
+    },
+    {
+      "id": "dm-alice-steve",
+      "name": "steve · alice",
+      "owner": "",
+      "members": [
+        "steve",
+        "alice"
+      ],
+      "inviters": [],
+      "created_at": "2026-07-15T06:54:42.798297Z",
+      "kind": "dm"
+    },
+    {
+      "id": "dm-alice-root",
+      "name": "root · alice",
+      "owner": "",
+      "members": [
+        "root",
+        "alice"
+      ],
+      "inviters": [],
+      "created_at": "2026-07-15T12:43:29.651656Z",
+      "kind": "dm"
+    },
+    {
+      "id": "dm-alice-chopper",
+      "name": "chopper · alice",
+      "owner": "",
+      "members": [
+        "chopper",
+        "alice"
+      ],
+      "inviters": [],
+      "created_at": "2026-07-16T12:09:38.818219Z",
+      "kind": "dm"
+    },
+    {
+      "id": "dm-chopper-luffy",
+      "name": "chopper · luffy",
+      "owner": "",
+      "members": [
+        "chopper",
+        "luffy"
+      ],
+      "inviters": [],
+      "created_at": "2026-07-16T12:09:40.255842Z",
+      "kind": "dm"
+    },
+    {
+      "id": "dm-chopper-steve",
+      "name": "chopper · steve",
+      "owner": "",
+      "members": [
+        "chopper",
+        "steve"
+      ],
+      "inviters": [],
+      "created_at": "2026-07-16T12:10:00.368812Z",
+      "kind": "dm"
+    },
+    {
+      "id": "dm-alice-luffy",
+      "name": "luffy · alice",
+      "owner": "",
+      "members": [
+        "luffy",
+        "alice"
+      ],
+      "inviters": [],
+      "created_at": "2026-07-16T20:46:02.241364Z",
+      "kind": "dm"
+    },
+    {
+      "id": "dm-luffy-steve",
+      "name": "luffy · steve",
+      "owner": "",
+      "members": [
+        "luffy",
+        "steve"
+      ],
+      "inviters": [],
+      "created_at": "2026-07-16T20:46:02.957799Z",
+      "kind": "dm"
+    },
+    {
+      "id": "dm-chopper-root",
+      "name": "root · chopper",
+      "owner": "",
+      "members": [
+        "root",
+        "chopper"
+      ],
+      "inviters": [],
+      "created_at": "2026-07-18T07:46:19.421901Z",
+      "kind": "dm"
+    },
+    {
+      "id": "dm-luffy-root",
+      "name": "root · luffy",
+      "owner": "",
+      "members": [
+        "root",
+        "luffy"
+      ],
+      "inviters": [],
+      "created_at": "2026-07-18T07:46:20.638965Z",
+      "kind": "dm"
+    }
+  ],
+  "chat": [
+    {
+      "id": "18c25e6e167df6280",
+      "at": "2026-07-15T05:10:29.308962Z",
+      "user": "steve",
+      "body": "ngon",
+      "channel": "general"
+    },
+    {
+      "id": "18c26f4db15da9000",
+      "at": "2026-07-15T10:19:41.871016Z",
+      "user": "root",
+      "body": "ok",
+      "channel": "general"
+    },
+    {
+      "id": "18c26f90b185f9f81",
+      "at": "2026-07-15T10:24:29.636461Z",
+      "user": "root",
+      "body": "hi",
+      "channel": "general"
+    },
+    {
+      "id": "18c27175374b03682",
+      "at": "2026-07-15T10:59:10.644924Z",
+      "user": "root",
+      "body": "hello",
+      "channel": "general"
+    },
+    {
+      "id": "18c27aa5af1b9a400",
+      "at": "2026-07-15T13:47:34.418155Z",
+      "user": "steve",
+      "body": "**Alo **",
+      "channel": "dm-root-steve"
+    },
+    {
+      "id": "18c27aa939f440601",
+      "at": "2026-07-15T13:47:49.632511Z",
+      "user": "steve",
+      "body": "tình hình sao rồi",
+      "channel": "dm-root-steve"
+    },
+    {
+      "id": "18c27ab2ebcdc4602",
+      "at": "2026-07-15T13:48:31.271038Z",
+      "user": "root",
+      "body": "hi",
+      "channel": "dm-alice-steve"
+    },
+    {
+      "id": "18c27ab46bcf6a783",
+      "at": "2026-07-15T13:48:37.713597Z",
+      "user": "steve",
+      "body": "uhm",
+      "channel": "dm-alice-steve"
+    },
+    {
+      "id": "18c27ab5324182684",
+      "at": "2026-07-15T13:48:41.042962Z",
+      "user": "steve",
+      "body": "sao",
+      "channel": "dm-root-steve"
+    },
+    {
+      "id": "18c27ab7704a1d985",
+      "at": "2026-07-15T13:48:50.67365Z",
+      "user": "root",
+      "body": "ai biết",
+      "channel": "dm-root-steve"
+    },
+    {
+      "id": "18c27aba1d2aa3286",
+      "at": "2026-07-15T13:49:02.163978Z",
+      "user": "root",
+      "body": "sao",
+      "channel": "dm-alice-steve"
+    },
+    {
+      "id": "18c27b6f0115fbf07",
+      "at": "2026-07-15T14:01:59.081944Z",
+      "user": "steve",
+      "body": "?",
+      "channel": "dm-alice-root"
+    },
+    {
+      "id": "18c294b8eb8643e00",
+      "at": "2026-07-15T21:45:24.33854Z",
+      "user": "chopper",
+      "body": "e",
+      "channel": "general"
+    },
+    {
+      "id": "18c3b7f98bea0d800",
+      "at": "2026-07-19T14:42:39.79096Z",
+      "user": "root",
+      "body": "thread reply",
+      "channel": "general"
+    },
+    {
+      "id": "18c3b7fc400991f81",
+      "at": "2026-07-19T14:42:51.40286Z",
+      "user": "root",
+      "body": "my test msg",
+      "channel": "general"
+    },
+    {
+      "id": "18c3b8613599fc980",
+      "at": "2026-07-19T14:50:05.019472Z",
+      "user": "root",
+      "body": "test 1784472605016",
+      "channel": "general"
+    },
+    {
+      "id": "18c3b8c8607562600",
+      "at": "2026-07-19T14:57:28.120125Z",
+      "user": "root",
+      "body": "{\"op\":\"typing\",\"channel\":\"general\"}",
+      "channel": "general"
+    },
+    {
+      "id": "18c3b8c860a2e6b81",
+      "at": "2026-07-19T14:57:28.123108Z",
+      "user": "root",
+      "body": "{\"op\":\"status\",\"status\":\"away\"}",
+      "channel": "general"
+    },
+    {
+      "id": "18c3b8c87eaefe802",
+      "at": "2026-07-19T14:57:28.627217Z",
+      "user": "root",
+      "body": "{\"op\":\"status\",\"status\":\"online\"}",
+      "channel": "general"
+    },
+    {
+      "id": "18c3b8c89cf750403",
+      "at": "2026-07-19T14:57:29.135273Z",
+      "user": "root",
+      "body": "/me is testing *is testing*",
+      "channel": "general"
+    },
+    {
+      "id": "18c3b8e45acdcb380",
+      "at": "2026-07-19T14:59:28.28434Z",
+      "user": "root",
+      "body": "{\"op\":\"typing\",\"channel\":\"general\"}",
+      "channel": "general"
+    },
+    {
+      "id": "18c3b8e45af135a01",
+      "at": "2026-07-19T14:59:28.28666Z",
+      "user": "root",
+      "body": "/me is testing *is testing*",
+      "channel": "general"
+    },
+    {
+      "id": "18c3b8e4b52776882",
+      "at": "2026-07-19T14:59:29.800166Z",
+      "user": "root",
+      "body": "{\"op\":\"status\",\"status\":\"away\"}",
+      "channel": "general"
+    },
+    {
+      "id": "18c3b8e4c75a89303",
+      "at": "2026-07-19T14:59:30.105503Z",
+      "user": "root",
+      "body": "{\"op\":\"status\",\"status\":\"online\"}",
+      "channel": "general"
+    },
+    {
+      "id": "18c3b8e4d97996d84",
+      "at": "2026-07-19T14:59:30.409528Z",
+      "user": "root",
+      "body": "{\"op\":\"typing\",\"channel\":\"general\"}",
+      "channel": "general"
+    },
+    {
+      "id": "18c3b8e4d9a4d9105",
+      "at": "2026-07-19T14:59:30.412363Z",
+      "user": "root",
+      "body": "{\"op\":\"status\",\"status\":\"busy\"}",
+      "channel": "general"
+    },
+    {
+      "id": "18c3b8e4ebc907386",
+      "at": "2026-07-19T14:59:30.716724Z",
+      "user": "root",
+      "body": "/shrug ¯\\_(ツ)_/¯",
+      "channel": "general"
+    },
+    {
+      "id": "18c3b8e4fe130ce07",
+      "at": "2026-07-19T14:59:31.023565Z",
+      "user": "root",
+      "body": "/tableflip (╯°□°)╯︵ ┻━┻",
+      "channel": "general"
+    },
+    {
+      "id": "18c3b8f3bd6dc5e00",
+      "at": "2026-07-19T15:00:34.363502Z",
+      "user": "root",
+      "body": "{\"op\":\"typing\",\"channel\":\"general\"}",
+      "channel": "general"
+    },
+    {
+      "id": "18c3b8f3bd9d13401",
+      "at": "2026-07-19T15:00:34.3666Z",
+      "user": "root",
+      "body": "_is testing_",
+      "channel": "general"
+    },
+    {
+      "id": "18c3b8f417c66f602",
+      "at": "2026-07-19T15:00:35.879261Z",
+      "user": "root",
+      "body": "{\"op\":\"status\",\"status\":\"away\"}",
+      "channel": "general"
+    },
+    {
+      "id": "18c3b8f42a0ae7283",
+      "at": "2026-07-19T15:00:36.185738Z",
+      "user": "root",
+      "body": "{\"op\":\"status\",\"status\":\"online\"}",
+      "channel": "general"
+    },
+    {
+      "id": "18c3b8f43c5a63404",
+      "at": "2026-07-19T15:00:36.492938Z",
+      "user": "root",
+      "body": "{\"op\":\"typing\",\"channel\":\"general\"}",
+      "channel": "general"
+    },
+    {
+      "id": "18c3b8f43cb31a305",
+      "at": "2026-07-19T15:00:36.498751Z",
+      "user": "root",
+      "body": "{\"op\":\"status\",\"status\":\"busy\"}",
+      "channel": "general"
+    },
+    {
+      "id": "18c3b8f44ea2f5d06",
+      "at": "2026-07-19T15:00:36.799683Z",
+      "user": "root",
+      "body": "¯\\_(ツ)_/¯",
+      "channel": "general"
+    },
+    {
+      "id": "18c3b8f460f1f4e87",
+      "at": "2026-07-19T15:00:37.10685Z",
+      "user": "root",
+      "body": "(╯°□°)╯︵ ┻━┻",
+      "channel": "general"
+    },
+    {
+      "id": "18c3b9036ffa08900",
+      "at": "2026-07-19T15:01:41.783548Z",
+      "user": "root",
+      "body": "{\"op\":\"typing\",\"channel\":\"general\"}",
+      "channel": "general"
+    },
+    {
+      "id": "18c3b903702e05281",
+      "at": "2026-07-19T15:01:41.786954Z",
+      "user": "root",
+      "body": "_is testing_",
+      "channel": "general"
+    },
+    {
+      "id": "18c3b903ca4faca02",
+      "at": "2026-07-19T15:01:43.29911Z",
+      "user": "root",
+      "body": "{\"op\":\"status\",\"status\":\"away\"}",
+      "channel": "general"
+    },
+    {
+      "id": "18c3b903dc8315383",
+      "at": "2026-07-19T15:01:43.604468Z",
+      "user": "root",
+      "body": "{\"op\":\"status\",\"status\":\"online\"}",
+      "channel": "general"
+    },
+    {
+      "id": "18c3b903eec9abf84",
+      "at": "2026-07-19T15:01:43.911085Z",
+      "user": "root",
+      "body": "{\"op\":\"typing\",\"channel\":\"general\"}",
+      "channel": "general"
+    },
+    {
+      "id": "18c3b903ef4393005",
+      "at": "2026-07-19T15:01:43.919073Z",
+      "user": "root",
+      "body": "{\"op\":\"status\",\"status\":\"busy\"}",
+      "channel": "general"
+    },
+    {
+      "id": "18c3b904011509606",
+      "at": "2026-07-19T15:01:44.218013Z",
+      "user": "root",
+      "body": "¯\\_(ツ)_/¯",
+      "channel": "general"
+    },
+    {
+      "id": "18c3b904136aa7c87",
+      "at": "2026-07-19T15:01:44.525615Z",
+      "user": "root",
+      "body": "(╯°□°)╯︵ ┻━┻",
+      "channel": "general"
+    },
+    {
+      "id": "18c3b909d21c4e388",
+      "at": "2026-07-19T15:02:09.199764Z",
+      "user": "root",
+      "body": "{\"op\":\"typing\",\"channel\":\"general\"}",
+      "channel": "general"
+    },
+    {
+      "id": "18c3b909d2405cb09",
+      "at": "2026-07-19T15:02:09.202127Z",
+      "user": "root",
+      "body": "{\"op\":\"status\",\"status\":\"away\"}",
+      "channel": "general"
+    },
+    {
+      "id": "18c3b909e49a2d50a",
+      "at": "2026-07-19T15:02:09.510003Z",
+      "user": "root",
+      "body": "{\"op\":\"status\",\"status\":\"online\"}",
+      "channel": "general"
+    },
+    {
+      "id": "18c3b909f6dcf768b",
+      "at": "2026-07-19T15:02:09.81637Z",
+      "user": "root",
+      "body": "{\"op\":\"status\",\"status\":\"busy\"}",
+      "channel": "general"
+    },
+    {
+      "id": "18c3b90a09357c00c",
+      "at": "2026-07-19T15:02:10.124161Z",
+      "user": "root",
+      "body": "_is amazing_",
+      "channel": "general"
+    },
+    {
+      "id": "18c3b90a80cc3b00d",
+      "at": "2026-07-19T15:02:12.130528Z",
+      "user": "root",
+      "body": "",
+      "channel": "general"
+    },
+    {
+      "id": "18c3ba35af4637c0e",
+      "at": "2026-07-19T15:23:37.105502Z",
+      "user": "root",
+      "body": "{\"op\":\"typing\",\"channel\":\"general\"}",
+      "channel": "general"
+    },
+    {
+      "id": "18c3ba35c91aacd0f",
+      "at": "2026-07-19T15:23:37.538852Z",
+      "user": "root",
+      "body": "gi",
+      "channel": "general"
+    },
+    {
+      "id": "18c3ba3773d503e010",
+      "at": "2026-07-19T15:23:44.698158Z",
+      "user": "root",
+      "body": "{\"op\":\"typing\",\"channel\":\"general\"}",
+      "channel": "general"
+    },
+    {
+      "id": "18c3ba5d86123b3811",
+      "at": "2026-07-19T15:26:28.212916Z",
+      "user": "root",
+      "body": "{\"op\":\"typing\",\"channel\":\"general\"}",
+      "channel": "general"
+    },
+    {
+      "id": "18c3ba5d8656ed2812",
+      "at": "2026-07-19T15:26:28.217417Z",
+      "user": "root",
+      "body": "{\"op\":\"status\",\"status\":\"away\"}",
+      "channel": "general"
+    },
+    {
+      "id": "18c3ba5d9e75327013",
+      "at": "2026-07-19T15:26:28.622055Z",
+      "user": "root",
+      "body": "{\"op\":\"status\",\"status\":\"online\"}",
+      "channel": "general"
+    },
+    {
+      "id": "18c3ba5db69be3f814",
+      "at": "2026-07-19T15:26:29.027244Z",
+      "user": "root",
+      "body": "{\"op\":\"status\",\"status\":\"busy\"}",
+      "channel": "general"
+    },
+    {
+      "id": "18c3ba5dcee4c38015",
+      "at": "2026-07-19T15:26:29.434673Z",
+      "user": "root",
+      "body": "",
+      "channel": "general"
+    },
+    {
+      "id": "18c3ba5e4645b8f816",
+      "at": "2026-07-19T15:26:31.437516Z",
+      "user": "root",
+      "body": "{\"op\":\"typing\",\"channel\":\"general\"}",
+      "channel": "general"
+    },
+    {
+      "id": "18c3ba8a26ba6f700",
+      "at": "2026-07-19T15:29:39.886856Z",
+      "user": "root",
+      "body": "{\"op\":\"typing\",\"channel\":\"general\"}",
+      "channel": "general"
+    },
+    {
+      "id": "18c3ba8a2715aed01",
+      "at": "2026-07-19T15:29:39.892834Z",
+      "user": "root",
+      "body": "hover test 1784474979879",
+      "channel": "general"
+    },
+    {
+      "id": "18c3ba976af0f6482",
+      "at": "2026-07-19T15:30:36.865855Z",
+      "user": "root",
+      "body": "{\"op\":\"typing\",\"channel\":\"general\"}",
+      "channel": "general"
+    },
+    {
+      "id": "18c3ba976b60ea703",
+      "at": "2026-07-19T15:30:36.873192Z",
+      "user": "root",
+      "body": "fresh 1784475036858",
+      "channel": "general"
+    },
+    {
+      "id": "18c3ba9e886824b04",
+      "at": "2026-07-19T15:31:07.424975Z",
+      "user": "root",
+      "body": "{\"op\":\"typing\",\"channel\":\"general\"}",
+      "channel": "general"
+    },
+    {
+      "id": "18c3ba9e88b54ab05",
+      "at": "2026-07-19T15:31:07.43003Z",
+      "user": "root",
+      "body": "actions-test-1784475067419",
+      "channel": "general"
+    },
+    {
+      "id": "18c3baacc1be3de00",
+      "at": "2026-07-19T15:32:08.516461Z",
+      "user": "root",
+      "body": "{\"op\":\"typing\",\"channel\":\"general\"}",
+      "channel": "general"
+    },
+    {
+      "id": "18c3baacc1f6ed981",
+      "at": "2026-07-19T15:32:08.520175Z",
+      "user": "root",
+      "body": "actions-test-1784475128511",
+      "channel": "general"
+    },
+    {
+      "id": "18c3bb01d9ecbec82",
+      "at": "2026-07-19T15:38:13.994385Z",
+      "user": "root",
+      "body": "",
+      "channel": "general"
+    },
+    {
+      "id": "18c3bb0b5bd3e8683",
+      "at": "2026-07-19T15:38:54.828498Z",
+      "user": "root",
+      "body": "{\"op\":\"typing\",\"channel\":\"general\"}",
+      "channel": "general"
+    },
+    {
+      "id": "18c3bb0b869290b84",
+      "at": "2026-07-19T15:38:55.545638Z",
+      "user": "root",
+      "body": "sao",
+      "channel": "general"
+    },
+    {
+      "id": "18c3bb469041b6f80",
+      "at": "2026-07-19T15:43:09.11118Z",
+      "user": "root",
+      "body": "test reply",
+      "channel": "general"
+    },
+    {
+      "id": "18c3bbd3ffcb08700",
+      "at": "2026-07-19T15:53:16.572839Z",
+      "user": "root",
+      "body": "{\"op\":\"typing\",\"channel\":\"general\"}",
+      "channel": "general"
+    },
+    {
+      "id": "18c3bbd400286e981",
+      "at": "2026-07-19T15:53:16.578959Z",
+      "user": "root",
+      "body": "btntest-1784476396566",
+      "channel": "general"
+    },
+    {
+      "id": "18c3bbdac4032b182",
+      "at": "2026-07-19T15:53:45.634656Z",
+      "user": "root",
+      "body": "",
+      "channel": "general"
+    },
+    {
+      "id": "18c3bbdb1e019ed83",
+      "at": "2026-07-19T15:53:47.144504Z",
+      "user": "root",
+      "body": "reply",
+      "channel": "general"
+    },
+    {
+      "id": "18c3bc23746ca5b80",
+      "at": "2026-07-19T15:58:57.832016Z",
+      "user": "root",
+      "body": "test reply 1784476737831",
+      "channel": "general",
+      "reactions": [
+        {
+          "emoji": "😘",
+          "users": [
+            "steve"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "18c3bc28f2f8f0f81",
+      "at": "2026-07-19T15:59:21.429965Z",
+      "user": "root",
+      "body": "click test 1784476761412",
+      "channel": "general"
+    },
+    {
+      "id": "18c3bc294cd5e6802",
+      "at": "2026-07-19T15:59:22.937618Z",
+      "user": "root",
+      "body": "",
+      "channel": "general"
+    },
+    {
+      "id": "18c3bc9d91d539b00",
+      "at": "2026-07-19T16:07:42.311419Z",
+      "user": "root",
+      "body": "enter-test 1784477262305",
+      "channel": "general"
+    },
+    {
+      "id": "18c3bc9e0a607a701",
+      "at": "2026-07-19T16:07:44.333799Z",
+      "user": "root",
+      "body": "click-test 1784477264314",
+      "channel": "general"
+    },
+    {
+      "id": "18c3bccb24f95f500",
+      "at": "2026-07-19T16:10:58.053572Z",
+      "user": "root",
+      "body": "reply-ok 1784477458045",
+      "channel": "general"
+    },
+    {
+      "id": "18c3d30cd06441a01",
+      "at": "2026-07-19T22:58:49.358156Z",
+      "user": "root",
+      "body": "ngon",
+      "channel": "general"
+    },
+    {
+      "id": "18c3d30e8f6c90602",
+      "at": "2026-07-19T22:58:56.85811Z",
+      "user": "root",
+      "body": "ổn áp",
+      "channel": "general"
+    },
+    {
+      "id": "18c3d350870ecd380",
+      "at": "2026-07-19T23:03:40.185602Z",
+      "user": "root",
+      "body": "{\"op\":\"typing\",\"channel\":\"general\"}",
+      "channel": "general"
+    },
+    {
+      "id": "18c3d35087678bf81",
+      "at": "2026-07-19T23:03:40.191404Z",
+      "user": "root",
+      "body": "edited inline!",
+      "channel": "general"
+    }
+  ],
+  "webhooks": []
+}

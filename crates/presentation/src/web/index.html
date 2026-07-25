@@ -305,6 +305,12 @@
   .tcmsg{display:flex;gap:9px;align-items:flex-start;max-width:74%}
   .tcmsg.grp{margin-top:0}
   .tcmsg:not(.grp){margin-top:11px}
+  /* Date separator — uses .chatday defined below */
+  /* Scroll-to-bottom FAB */
+  .chat-scroll-down{position:absolute;bottom:70px;right:18px;z-index:10;width:36px;height:36px;border-radius:50%;background:var(--accent);border:none;color:#fff;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.3);display:none;align-items:center;justify-content:center;font-size:18px;transition:transform .15s,opacity .15s}
+  .chat-scroll-down:hover{transform:scale(1.08)}
+  .chat-scroll-down.show{display:flex}
+  .chat-scroll-down .badge{position:absolute;top:-4px;right:-4px;min-width:18px;height:18px;border-radius:9px;background:var(--red);color:#fff;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;padding:0 5px}
   .tcmsg.mine{align-self:flex-end;flex-direction:row-reverse}
   .tcav,.tcav-sp{flex:none;width:30px}
   .tcav{height:30px;border-radius:9px;display:grid;place-items:center;font-size:11px;font-weight:700}
@@ -312,6 +318,9 @@
   .tchead{display:flex;align-items:baseline;gap:8px;font-size:12px}
   .tcmsg.mine .tchead{flex-direction:row-reverse}
   .tchead b{font-weight:600;color:var(--text)}
+  .tchdr{display:flex;align-items:center;gap:8px;margin-bottom:4px;font-size:12px}
+  .tcu{font-weight:600;color:var(--text)}
+  .tct{font-size:10.5px;color:var(--dim);margin-left:6px}
   .tctime{font-size:10.5px;color:var(--dim)}
   .tcbub{background:var(--card2);border:1px solid var(--border);border-radius:4px 12px 12px 12px;padding:8px 12px;font-size:13.5px;line-height:1.5;color:var(--text);white-space:pre-wrap;word-break:break-word}
   .tcmsg.grp .tcbub{border-radius:12px}
@@ -1815,7 +1824,8 @@ textarea.np-in{resize:vertical;line-height:1.5}
             <div id="search-results" style="position:absolute;top:100%;left:0;right:0;background:var(--card);border:1px solid var(--border);border-radius:0 0 10px 10px;max-height:300px;overflow-y:auto;z-index:20;display:none"></div>
           </div>
           <div id="pins-bar" style="display:none;padding:4px 10px;border-bottom:1px solid var(--border);background:var(--card2);gap:6px;align-items:center;overflow-x:auto;font-size:11px"></div>
-          <div id="chat-msgs" class="chatbody chatmsgs" ondragover="event.preventDefault();this.classList.add('dropping')" ondragleave="this.classList.remove('dropping')" ondrop="dropFiles('chat',event)"></div>
+          <button class="chat-scroll-down" id="chat-scroll-btn" onclick="scrollChatToBottom()" title="Scroll to bottom"><i class="ti ti-chevron-down"></i></button>
+          <div id="chat-msgs" class="chatbody chatmsgs" ondragover="event.preventDefault();this.classList.add('dropping')" ondragleave="this.classList.remove('dropping')" ondrop="dropFiles('chat',event)" onscroll="chatScrollSpy()"></div>
           <div id="typing-bar" style="display:none;padding:2px 14px;font-size:11px;color:var(--dim)"></div>
           <div class="composewrap">
             <div class="att-strip" id="chat-att"></div>
@@ -4537,7 +4547,10 @@ function sendChat(){const inp=document.getElementById("chat-input");const body=i
   // isn't open — SSE-independent, still persisted server-side.
   const channel=CURCHAN;
   if(CHATWS&&CHATWS.readyState===1){CHATWS.send(JSON.stringify({body,channel,attachments}));}
-  else{fetch("/api/chat/send",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({body,channel,attachments})}).then(loadChatHistory).catch(()=>{});}}
+  else{fetch("/api/chat/send",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({body,channel,attachments})}).then(loadChatHistory).catch(()=>{});}
+  setTimeout(scrollChatToBottom, 100);}
+function scrollChatToBottom(){const box=document.getElementById("chat-msgs");if(box){box.scrollTop=box.scrollHeight;updateScrollBtn();}}
+function chatScrollSpy(){const box=document.getElementById("chat-msgs");if(!box)return;const btn=document.getElementById("chat-scroll-btn");const dist=box.scrollHeight-box.scrollTop-box.clientHeight;btn.classList.toggle("show",dist>120);}
 // ── Shared attachment upload + rendering (chat + discussion) ────────────────
 let ATT={chat:[],disc:[]};
 async function uploadOne(file,surface){const fd=new FormData();fd.append("file",file);

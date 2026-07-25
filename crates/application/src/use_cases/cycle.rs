@@ -1182,6 +1182,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// report so the outer loop keeps going.
     #[allow(clippy::too_many_lines)] // a linear sequence of agent phases; splitting hurts readability
     pub async fn run_cycle(&self, cycle: u64) -> CycleReport {
+        // Kill orphaned test-driver processes from prior cycles (TL, Rust, Go, etc.)
+        // that may have leaked due to timeouts, panics, or broken builds.
+        crate::cleanup::kill_orphaned_drivers().await;
+
         let mut report = CycleReport {
             cycle,
             ..CycleReport::default()

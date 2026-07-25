@@ -123,6 +123,29 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
     /// [`AppError`] on engine failure or an unexpected state transition error.
     #[allow(clippy::too_many_lines)] // one linear pass; splitting hurts readability
     pub async fn execute(&self) -> Result<Option<TicketId>, AppError> {
+        // Guard: verify the codebase builds before doing any work.
+        if let Some(deploy) = &self.verify {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(300),
+                deploy.run_tests(&self.work_dir),
+            )
+            .await
+            {
+                Ok(Ok(r)) if r.success => {}
+                Ok(Ok(r)) => {
+                    tracing::warn!("DEV pre-check: cargo test failed — {}", &r.summary[..r.summary.len().min(200)]);
+                    return Ok(None);
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!("DEV pre-check: cargo test error — {e}");
+                    return Ok(None);
+                }
+                Err(_timeout) => {
+                    tracing::warn!("DEV pre-check: cargo test timed out after 5 min");
+                    return Ok(None);
+                }
+            }
+        }
         let state = self.store.load().await?;
         // Walk the work queue best-first and atomically claim the first ticket no
         // other runner holds (cross-process lock). A second runner thus grabs a

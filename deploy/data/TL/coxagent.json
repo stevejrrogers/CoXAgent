@@ -1,0 +1,56 @@
+{
+  "engine": {
+    "default": {
+      "engine": "opencode",
+      "model": "bizbrain/DeepSeek-V4-Pro"
+    },
+    "per_role": {},
+    "fallbacks": [],
+    "auto_fallback": false
+  },
+  "git": {
+    "enabled": false,
+    "provider": "github",
+    "base_url": "",
+    "repo": "",
+    "default_branch": "main",
+    "target_branch": "",
+    "branch_prefix": "feat/",
+    "commit_email": "",
+    "auto_pr": false,
+    "auto_review": true,
+    "auto_merge": false,
+    "max_open_prs": 4
+  },
+  "workflow": {
+    "ba_every_n_cycles": 4,
+    "feature_dev_enabled": true,
+    "sleep_seconds": 30,
+    "concurrency": 1,
+    "budget_usd": null,
+    "mode": "kanban",
+    "sprint_length_cycles": 10,
+    "ops_monitor": true,
+    "webhook_url": null,
+    "token_saver": true,
+    "language": "en"
+  },
+  "architecture": [
+    {
+      "area": "",
+      "language": "Rust",
+      "require_any": [
+        "Cargo.toml"
+      ],
+      "forbid_ext": []
+    }
+  ],
+  "policy": {
+    "model_allowlist": [],
+    "forbidden_paths": [],
+    "daily_budget_usd": null
+  },
+  "deploy": {
+    "host_port": null
+  }
+}

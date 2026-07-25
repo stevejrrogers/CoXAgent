@@ -1,0 +1,47 @@
+{
+  "spaces": [
+    {
+      "id": "coxspace",
+      "name": "CoXSpace",
+      "tagline": "CoX Products",
+      "admins": [
+        "chopper",
+        "luffy",
+        "root",
+        "steve"
+      ],
+      "projects": [
+        "cxc",
+        "oneteam",
+        "tia",
+        "tes-3"
+      ],
+      "members": [],
+      "budget_usd": 0.0,
+      "created_by": "root",
+      "created_at": "2026-07-18T08:42:50.947618Z"
+    },
+    {
+      "id": "tony",
+      "name": "Tony",
+      "tagline": "",
+      "admins": [
+        "chopper",
+        "luffy",
+        "root",
+        "steve"
+      ],
+      "projects": [
+        "tl",
+        "tl-2",
+        "tl-3",
+        "lynx",
+        "tnl"
+      ],
+      "members": [],
+      "budget_usd": 0.0,
+      "created_by": "root",
+      "created_at": "2026-07-18T09:14:28.209139Z"
+    }
+  ]
+}

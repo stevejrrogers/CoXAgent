@@ -1,0 +1,16 @@
+{
+  "name": "",
+  "tagline": "",
+  "accent": "",
+  "conventions": "",
+  "invites": [],
+  "downloads": {
+    "releases_repo": "stevejrrogers/CoXAgent",
+    "latest_version": "0.94.0",
+    "macos": "https://github.com/stevejrrogers/CoXAgent/releases/download/v0.94.0/CoXAgent-macos.dmg",
+    "windows": "https://github.com/stevejrrogers/CoXAgent/releases/download/v0.94.0/CoXAgent-windows-x64.zip",
+    "linux": "https://github.com/stevejrrogers/CoXAgent/releases/download/v0.94.0/CoXAgent-linux-x64.tar.gz",
+    "ios": "",
+    "notes": ""
+  }
+}

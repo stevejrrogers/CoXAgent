@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "alias": "TL",
+  "display_name": "Tony Language",
+  "current_version": "0.0.0",
+  "tickets": [
+    {
+      "id": "TL-C001",
+      "type": "chore",
+      "title": "Dockerize for deploy",
+      "description": "Add a Dockerfile and docker-compose.yml so the app builds and runs for the TEST/deploy step.",
+      "priority": "high",
+      "complexity": "medium",
+      "status": "pending",
+      "has_ui": false,
+      "design": {
+        "technical": null,
+        "ux": null
+      },
+      "parent_id": null,
+      "depends_on": [],
+      "acceptance_criteria": []
+    }
+  ],
+  "history": [],
+  "activity": [],
+  "spend": {
+    "total_cost_usd": 0.0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "runs": 0,
+    "by_role": {},
+    "by_operator": {}
+  },
+  "sprint": null,
+  "sprints": [],
+  "deploy": null,
+  "comments": [],
+  "sprint_cycle": 0,
+  "sprint_goal": "",
+  "last_digest_day": "",
+  "pr_fix_attempts": {},
+  "queue_recovery": false,
+  "last_memory_hygiene_day": "",
+  "jobs": [],
+  "last_impediment_day": "",
+  "pr_rescues": {},
+  "ticket_redesigns": {},
+  "drain_notice_sprint": 0,
+  "ticket_fail_attempts": {},
+  "ops_down": false,
+  "spend_today_usd": 0.0,
+  "spend_day": ""
+}
