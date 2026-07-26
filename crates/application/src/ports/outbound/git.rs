@@ -66,6 +66,69 @@ pub trait GitPort: Send + Sync {
     /// # Errors
     /// [`PortError::Backend`] on a git failure.
     async fn abort_merge(&self, work_dir: &Path) -> Result<(), PortError>;
+
+    /// HEAD's full commit sha. Used to record exactly what a deploy attempt
+    /// built/ran, so a later rollback names an exact commit rather than
+    /// "whatever HEAD drifted to". Default: unsupported.
+    ///
+    /// # Errors
+    /// [`PortError::Backend`] if git cannot resolve HEAD.
+    async fn head_sha(&self, work_dir: &Path) -> Result<String, PortError> {
+        let _ = work_dir;
+        Err(PortError::Backend("head_sha: not supported".to_owned()))
+    }
+
+    /// Point a local, non-pushed ref (e.g. `refs/coxagent/last-good`) at `sha`.
+    /// Used to mark the last deploy that passed both `deploy()` and
+    /// `run_tests()` — a ref survives ticket-branch deletion after a
+    /// squash-merge, unlike tracking a branch tip. Default: unsupported.
+    ///
+    /// # Errors
+    /// [`PortError::Backend`] on a git failure.
+    async fn update_ref(&self, work_dir: &Path, refname: &str, sha: &str) -> Result<(), PortError> {
+        let _ = (work_dir, refname, sha);
+        Err(PortError::Backend("update_ref: not supported".to_owned()))
+    }
+
+    /// Create a detached secondary worktree at `path`, checked out at `sha`.
+    /// Rollback deploys run here so the live `work_dir` is never touched — no
+    /// race with the concurrent `checkout_branch` calls elsewhere in the
+    /// leader tail. Callers `worktree_remove` first so `path` is always
+    /// freshly created. Default: unsupported.
+    ///
+    /// # Errors
+    /// [`PortError::Backend`] on a git failure.
+    async fn worktree_add(&self, work_dir: &Path, path: &Path, sha: &str) -> Result<(), PortError> {
+        let _ = (work_dir, path, sha);
+        Err(PortError::Backend("worktree_add: not supported".to_owned()))
+    }
+
+    /// Remove a worktree created by [`GitPort::worktree_add`]. Best-effort:
+    /// callers ignore the error since `path` may not exist yet. Default: no-op.
+    ///
+    /// # Errors
+    /// [`PortError::Backend`] on a git failure.
+    async fn worktree_remove(&self, work_dir: &Path, path: &Path) -> Result<(), PortError> {
+        let _ = (work_dir, path);
+        Ok(())
+    }
+
+    /// Paths that differ between two commits — used to detect a migration
+    /// shipped since the last known-good deploy (rolling back the app code
+    /// without the DB schema could be unsafe). Default: no diff available, so
+    /// callers see no migration paths touched.
+    ///
+    /// # Errors
+    /// [`PortError::Backend`] on a git failure.
+    async fn changed_paths(
+        &self,
+        work_dir: &Path,
+        from_sha: &str,
+        to_sha: &str,
+    ) -> Result<Vec<String>, PortError> {
+        let _ = (work_dir, from_sha, to_sha);
+        Ok(Vec::new())
+    }
 }
 
 /// Outcome of [`GitPort::sync_base`].

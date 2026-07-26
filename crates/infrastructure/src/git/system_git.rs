@@ -147,6 +147,43 @@ impl GitPort for SystemGit {
     async fn abort_merge(&self, work_dir: &Path) -> Result<(), PortError> {
         git(work_dir, &["merge", "--abort"]).await.map(|_| ())
     }
+
+    async fn head_sha(&self, work_dir: &Path) -> Result<String, PortError> {
+        git(work_dir, &["rev-parse", "HEAD"]).await
+    }
+
+    async fn update_ref(&self, work_dir: &Path, refname: &str, sha: &str) -> Result<(), PortError> {
+        git(work_dir, &["update-ref", refname, sha])
+            .await
+            .map(|_| ())
+    }
+
+    async fn worktree_add(&self, work_dir: &Path, path: &Path, sha: &str) -> Result<(), PortError> {
+        let path = path.to_string_lossy();
+        git(work_dir, &["worktree", "add", "--detach", &path, sha])
+            .await
+            .map(|_| ())
+    }
+
+    async fn worktree_remove(&self, work_dir: &Path, path: &Path) -> Result<(), PortError> {
+        let path = path.to_string_lossy();
+        // Best-effort: `path` may not exist yet (first-ever rollback) or its
+        // registration may be stale (directory removed out-of-band) — either
+        // way, `prune` leaves the repo clean for the next `worktree_add`.
+        let _ = git(work_dir, &["worktree", "remove", "--force", &path]).await;
+        git(work_dir, &["worktree", "prune"]).await.map(|_| ())
+    }
+
+    async fn changed_paths(
+        &self,
+        work_dir: &Path,
+        from_sha: &str,
+        to_sha: &str,
+    ) -> Result<Vec<String>, PortError> {
+        let range = format!("{from_sha}..{to_sha}");
+        let out = git(work_dir, &["diff", "--name-only", &range]).await?;
+        Ok(out.lines().map(str::to_owned).collect())
+    }
 }
 
 #[cfg(test)]
@@ -214,5 +251,96 @@ mod tests {
         g.checkout_branch(tmp.path(), "feat/X-1").await.unwrap();
         g.checkout_branch(tmp.path(), "main").await.unwrap();
         assert_eq!(g.current_branch(tmp.path()).await.unwrap(), "main");
+    }
+
+    #[tokio::test]
+    async fn head_sha_and_update_ref_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let g = SystemGit::new();
+        init_repo(tmp.path()).await;
+        fs::write(tmp.path().join("a.txt"), "x").unwrap();
+        let sha = g
+            .commit_all(tmp.path(), "feat: base", &author())
+            .await
+            .unwrap()
+            .unwrap();
+
+        let head = g.head_sha(tmp.path()).await.unwrap();
+        assert!(head.starts_with(&sha), "head_sha should resolve to HEAD");
+
+        g.update_ref(tmp.path(), "refs/coxagent/last-good", &head)
+            .await
+            .unwrap();
+        let resolved = git(tmp.path(), &["rev-parse", "refs/coxagent/last-good"])
+            .await
+            .unwrap();
+        assert_eq!(resolved, head, "ref now points at the given sha");
+    }
+
+    #[tokio::test]
+    async fn worktree_add_checks_out_a_detached_copy_without_touching_the_live_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let g = SystemGit::new();
+        init_repo(tmp.path()).await;
+        fs::write(tmp.path().join("a.txt"), "v1").unwrap();
+        g.commit_all(tmp.path(), "feat: v1", &author())
+            .await
+            .unwrap();
+        let good_sha = g.head_sha(tmp.path()).await.unwrap();
+        fs::write(tmp.path().join("a.txt"), "v2 (broken)").unwrap();
+        g.commit_all(tmp.path(), "feat: v2", &author())
+            .await
+            .unwrap();
+
+        let rollback_dir = tmp.path().parent().unwrap().join(format!(
+            "{}-rollback",
+            tmp.path().file_name().unwrap().to_string_lossy()
+        ));
+        g.worktree_add(tmp.path(), &rollback_dir, &good_sha)
+            .await
+            .unwrap();
+
+        // The rollback worktree holds the OLD content...
+        assert_eq!(
+            fs::read_to_string(rollback_dir.join("a.txt")).unwrap(),
+            "v1"
+        );
+        // ...while the live tree is untouched (still on the new commit).
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("a.txt")).unwrap(),
+            "v2 (broken)"
+        );
+        assert_eq!(g.current_branch(tmp.path()).await.unwrap(), "main");
+
+        g.worktree_remove(tmp.path(), &rollback_dir).await.unwrap();
+        assert!(!rollback_dir.exists());
+        // Re-adding after remove (the "always freshly created" contract) works.
+        g.worktree_add(tmp.path(), &rollback_dir, &good_sha)
+            .await
+            .unwrap();
+        assert!(rollback_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn changed_paths_lists_files_that_differ_between_two_commits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let g = SystemGit::new();
+        init_repo(tmp.path()).await;
+        fs::write(tmp.path().join("a.txt"), "x").unwrap();
+        let from = g
+            .commit_all(tmp.path(), "feat: a", &author())
+            .await
+            .unwrap()
+            .unwrap();
+        fs::create_dir_all(tmp.path().join("migrations")).unwrap();
+        fs::write(tmp.path().join("migrations/001.sql"), "create table t").unwrap();
+        let to = g
+            .commit_all(tmp.path(), "feat: migration", &author())
+            .await
+            .unwrap()
+            .unwrap();
+
+        let paths = g.changed_paths(tmp.path(), &from, &to).await.unwrap();
+        assert_eq!(paths, vec!["migrations/001.sql".to_owned()]);
     }
 }
