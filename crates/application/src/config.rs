@@ -264,7 +264,7 @@ pub struct PolicyConfig {
 /// Deploy configuration. `host_port` is assigned per project at onboard so two
 /// projects deploying with `docker compose` on one host do not fight over the
 /// same published port — agents are told which port to bind.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeployConfig {
     /// The host port this project's app should publish (None = agent's choice).
     #[serde(default)]
@@ -275,6 +275,15 @@ pub struct DeployConfig {
     /// the live hub serves.
     #[serde(default = "default_true")]
     pub enabled: bool,
+}
+
+impl Default for DeployConfig {
+    fn default() -> Self {
+        Self {
+            host_port: None,
+            enabled: true,
+        }
+    }
 }
 
 /// Per-project version-control settings. Drives the git flow (branch + commit
