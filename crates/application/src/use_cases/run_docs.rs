@@ -273,7 +273,7 @@ fn sanitize_subfolder(raw: &str, existing: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ports::outbound::AgentOutcome;
+    use crate::ports::outbound::{AgentOutcome, SandboxStatus};
     use crate::state::ProjectState;
     use coxagent_domain::{Complexity, Priority, TechnicalDesign, Ticket, TicketType};
     use std::sync::Mutex;
@@ -308,6 +308,7 @@ mod tests {
                 usage: None,
                 trace: String::new(),
                 session_id: None,
+                sandbox: SandboxStatus::default(),
             })
         }
     }

@@ -3,7 +3,9 @@
 //! architecture concern kept out of the use cases.
 
 use async_trait::async_trait;
-use coxagent_application::ports::outbound::{AgentEnginePort, AgentOutcome, AgentRequest};
+use coxagent_application::ports::outbound::{
+    AgentEnginePort, AgentOutcome, AgentRequest, SandboxStatus,
+};
 use coxagent_application::PortError;
 use std::path::PathBuf;
 
@@ -23,6 +25,10 @@ impl<E: AgentEnginePort> TranscriptEngine<E> {
 impl<E: AgentEnginePort> AgentEnginePort for TranscriptEngine<E> {
     fn id(&self) -> &'static str {
         self.inner.id()
+    }
+
+    fn sandbox_status(&self) -> SandboxStatus {
+        self.inner.sandbox_status()
     }
 
     async fn run(&self, request: AgentRequest) -> Result<AgentOutcome, PortError> {

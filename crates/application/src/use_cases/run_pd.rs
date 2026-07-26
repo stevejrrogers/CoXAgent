@@ -205,7 +205,7 @@ fn ux_of(u: &UxOutput) -> UxDesign {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ports::outbound::{AgentOutcome, AgentRequest};
+    use crate::ports::outbound::{AgentOutcome, AgentRequest, SandboxStatus};
     use crate::state::ProjectState;
     use crate::use_cases::{AddTicketInput, AddTicketUseCase};
     use coxagent_domain::{Complexity, Priority, TechnicalDesign, TicketType};
@@ -241,6 +241,7 @@ mod tests {
                 usage: None,
                 trace: String::new(),
                 session_id: None,
+                sandbox: SandboxStatus::default(),
             })
         }
     }

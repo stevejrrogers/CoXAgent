@@ -138,6 +138,19 @@ pub fn discover_tooling() -> Tooling {
             }
         })
         .collect();
+    let mut tools: Vec<DetectedTool> = tools;
+    if os == "linux" {
+        let found = find_binary(&dirs, "bwrap");
+        tools.push(DetectedTool {
+            name: "bwrap",
+            purpose: "confines sandboxed agent writes to the workspace (workflow.sandbox)",
+            present: found.is_some(),
+            path: found.map(|p| p.display().to_string()).unwrap_or_default(),
+            install: "sudo apt-get install -y bubblewrap   # or see github.com/containers/bubblewrap"
+                .to_owned(),
+            needs_auth: false,
+        });
+    }
     Tooling {
         os,
         has_brew,
@@ -162,6 +175,26 @@ fn find_binary(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
 fn is_executable_file(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// AC-adjacent: `workflow.sandbox` on Linux needs `bwrap` — the dashboard
+    /// should be able to tell the operator whether it's installed, same as it
+    /// already does for git/gh/glab/docker.
+    #[test]
+    fn discover_tooling_lists_bwrap_on_linux() {
+        let t = discover_tooling();
+        let has_bwrap_entry = t.tools.iter().any(|d| d.name == "bwrap");
+        assert_eq!(
+            has_bwrap_entry,
+            t.os == "linux",
+            "bwrap should be listed on Linux only (os={})",
+            t.os
+        );
+    }
 }
 
 #[cfg(not(unix))]

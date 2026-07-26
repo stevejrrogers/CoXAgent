@@ -69,6 +69,7 @@ impl AgentEnginePort for HermesEngine {
             }),
             trace: String::new(),
             session_id: None,
+            sandbox: coxagent_application::ports::outbound::engine::SandboxStatus::NotRequested,
         })
     }
 }

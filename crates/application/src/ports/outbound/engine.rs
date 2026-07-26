@@ -31,6 +31,24 @@ pub struct Usage {
     pub cost_usd: f64,
 }
 
+/// Whether — and how — an engine confined the agent's file writes for one run.
+/// Owned by the application layer (this port) even though only infrastructure
+/// can determine it, because it rides on [`AgentOutcome`], a port type: infra
+/// constructs values of this enum, keeping the dependency direction inward.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SandboxStatus {
+    /// `workflow.sandbox` was off for this run — no confinement was attempted.
+    #[default]
+    NotRequested,
+    /// Writes were confined to the workspace/tool-cache allowlist by the named
+    /// mechanism (e.g. `"seatbelt"`, `"bwrap"`).
+    Confined(&'static str),
+    /// `workflow.sandbox` was on but this host has no supported confinement
+    /// mechanism — the run still executed unconfined. The payload is a short
+    /// human-readable reason.
+    Unavailable(&'static str),
+}
+
 /// The raw result of an engine run. Parsing into domain effects is the caller's
 /// job — the engine layer stays dumb.
 #[derive(Debug, Clone, Default)]
@@ -49,6 +67,8 @@ pub struct AgentOutcome {
     /// follow-up run continue this conversation (see
     /// [`AgentEnginePort::resume_run`]) instead of starting cold.
     pub session_id: Option<String>,
+    /// Write confinement actually applied to this run (see [`SandboxStatus`]).
+    pub sandbox: SandboxStatus,
 }
 
 impl AgentOutcome {
@@ -63,6 +83,16 @@ impl AgentOutcome {
 pub trait AgentEnginePort: Send + Sync {
     /// Stable identifier for logging/telemetry (e.g. `"opencode"`).
     fn id(&self) -> &'static str;
+
+    /// The write-confinement this engine would apply right now, independent of
+    /// any specific request — a function of its own `sandbox` setting and the
+    /// host platform's confinement support. Engines without sandboxing (or
+    /// decorators that forget to forward) keep the default `NotRequested`, so
+    /// this must be overridden by every real engine AND every decorator that
+    /// wraps one, or the platform-support warning silently never fires.
+    fn sandbox_status(&self) -> SandboxStatus {
+        SandboxStatus::NotRequested
+    }
 
     /// Run the request to completion (or timeout) and return its output.
     ///
