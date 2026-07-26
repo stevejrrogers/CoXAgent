@@ -455,42 +455,134 @@ mod tests {
             .map(|l| (*l).to_owned())
     }
 
-    /// COX-B006 regression: a helper that is only *called* from inside a
-    /// `#[cfg(target_os = ...)]` block must carry a matching gate itself.
-    /// Ungated, it is compiled — and unreferenced — on every other platform,
-    /// where the workspace's `warnings = "deny"` (Cargo.toml) promotes the
-    /// resulting `dead_code` warning to a hard compile error.
+    /// The `#[cfg(...)]` attributes enclosing each source line, innermost
+    /// last. A `#[cfg(...)]` applies to the next item or block, so the gate is
+    /// pushed when the following line opens a brace and popped when that brace
+    /// closes — enough structure to tell "called from the macOS branch" from
+    /// "called unconditionally" without pulling in a parser.
+    fn cfg_scopes(src: &str) -> Vec<Vec<String>> {
+        let mut out = Vec::new();
+        let mut depth: i32 = 0;
+        let mut pending: Option<String> = None;
+        let mut stack: Vec<(i32, String)> = Vec::new();
+        for line in src.lines() {
+            out.push(stack.iter().map(|(_, g)| g.clone()).collect());
+            let t = line.trim();
+            if t.starts_with("#[cfg(") {
+                pending = Some(t.to_owned());
+                continue;
+            }
+            // Other attributes and comments sit between the gate and its item.
+            if t.starts_with('#') || t.starts_with("//") || t.is_empty() {
+                continue;
+            }
+            let opens = i32::try_from(line.matches('{').count()).unwrap();
+            let closes = i32::try_from(line.matches('}').count()).unwrap();
+            if opens > closes {
+                if let Some(gate) = pending.take() {
+                    stack.push((depth, gate));
+                }
+            }
+            depth += opens - closes;
+            while stack.last().is_some_and(|(d, _)| depth <= *d) {
+                stack.pop();
+            }
+            pending = None;
+        }
+        out
+    }
+
+    /// The `target_os` values named by a `#[cfg(...)]` attribute, e.g.
+    /// `["macos", "linux"]` for `#[cfg(any(target_os = "macos", target_os =
+    /// "linux"))]`. Empty when the gate is not platform-specific.
+    fn targets_in(gate: &str) -> Vec<String> {
+        const KEY: &str = "target_os = \"";
+        gate.match_indices(KEY)
+            .filter_map(|(at, _)| {
+                let rest = &gate[at + KEY.len()..];
+                rest.find('"').map(|end| rest[..end].to_owned())
+            })
+            .collect()
+    }
+
+    /// COX-B006 regression: a private helper whose only non-test call sites
+    /// live inside a `#[cfg(target_os = ...)]` block must carry a matching
+    /// gate itself. Ungated, it is compiled — and unreferenced — on every
+    /// other platform, where the workspace's `warnings = "deny"`
+    /// (Cargo.toml) promotes the resulting `dead_code` warning to a hard
+    /// compile error.
     ///
     /// That failure is invisible to `cargo test` (the `test` cfg keeps the
     /// item alive) and to a macOS dev box, but it breaks `cargo build
     /// --release` inside the Linux Docker builder — this repo's only
     /// documented deploy path — so nothing ever answers on the published
-    /// port. Asserting on the source keeps the guard honest from any host.
+    /// port. Asserting on the source keeps the guard honest from any host,
+    /// and deriving the helper list from the source (rather than listing
+    /// today's four by hand) makes it catch the *next* ungated helper too.
     #[test]
-    fn platform_only_helpers_are_cfg_gated() {
+    fn single_platform_helpers_are_cfg_gated() {
         const SRC: &str = include_str!("proc.rs");
-        for (name, target) in [
-            ("seatbelt_profile", "macos"),
-            ("bwrap_args", "linux"),
-            ("bwrap_available", "linux"),
-            ("current_uid", "linux"),
-            // Gated for both platforms it supports.
-            ("confined_command", "macos"),
-            ("confined_command", "linux"),
-        ] {
+        let lines: Vec<&str> = SRC.lines().collect();
+        let scopes = cfg_scopes(SRC);
+        let mut checked = Vec::new();
+
+        for (at, def) in lines.iter().enumerate() {
+            // Private top-level definitions only: `pub` items are never
+            // dead code, and call sites are indented.
+            let Some(name) = def
+                .strip_prefix("fn ")
+                .and_then(|rest| rest.split(['(', '<']).next())
+            else {
+                continue;
+            };
+            let call = format!("{name}(");
+            // The platforms this helper is reachable on: for each non-test
+            // call site, the innermost enclosing platform gate.
+            let mut targets: Vec<String> = Vec::new();
+            let mut unconditional = false;
+            for (i, line) in lines.iter().enumerate() {
+                if i == at || !line.contains(&call) || line.trim_start().starts_with("//") {
+                    continue;
+                }
+                // A `cfg(test)` region keeps nothing alive in a release build.
+                if scopes[i].iter().any(|g| g.contains("test")) {
+                    continue;
+                }
+                match scopes[i].iter().rev().find(|g| !targets_in(g).is_empty()) {
+                    Some(gate) => targets.extend(targets_in(gate)),
+                    None => unconditional = true,
+                }
+            }
+            targets.sort_unstable();
+            targets.dedup();
+            // Reachable on every supported platform (or from unconditional
+            // code): compiled and used everywhere, so no gate is required.
+            if unconditional || targets.len() != 1 {
+                continue;
+            }
+            let target = &targets[0];
+
             let gate = cfg_gate_above(SRC, name).unwrap_or_else(|| {
                 panic!(
-                    "`fn {name}` is platform-specific but has no #[cfg(...)] gate: \
-                     it becomes dead code on other targets and `warnings = \"deny\"` \
-                     fails the Docker (Linux) release build"
+                    "`fn {name}` is only called from {target}-gated code but has no \
+                     #[cfg(...)] gate: it becomes dead code on other targets and \
+                     `warnings = \"deny\"` fails the Docker (Linux) release build"
                 )
             });
-            let want = format!("target_os = \"{target}\"");
             assert!(
-                gate.contains(&want),
-                "`fn {name}` must be gated on {want}, found: {gate}"
+                gate.contains(&format!("target_os = \"{target}\"")),
+                "`fn {name}` must be gated on target_os = \"{target}\", found: {gate}"
             );
+            checked.push(name.to_owned());
         }
+
+        // The scan must not quietly degrade into a no-op if the parsing
+        // heuristics drift: COX-B006's helper is the canary.
+        assert!(
+            checked.contains(&"seatbelt_profile".to_owned()),
+            "gate scan found no platform-only helpers (checked: {checked:?}) — \
+             the guard itself is broken"
+        );
     }
 
     /// The base allowlist (work_dir + tool caches) is a pure function of
