@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotifyEvent {
     /// Machine-readable kind, e.g. `deploy_ok`, `deploy_failed`,
-    /// `budget_reached`, `policy_blocked`.
+    /// `budget_reached`, `budget_warning`, `policy_blocked`. New kinds are
+    /// additive — consumers (including [`FanoutNotifier`]/webhooks) must treat
+    /// an unrecognized kind as forward-compatible rather than dropping it.
     pub kind: String,
     /// The project the event belongs to.
     pub project: String,
@@ -52,6 +54,7 @@ fn kind_icon(kind: &str) -> &'static str {
     match kind {
         k if k.contains("deploy_failed") || k.contains("fail") => "❌",
         k if k.contains("deploy") => "🚀",
+        k if k.contains("budget_warning") => "⚠️",
         k if k.contains("budget") => "💰",
         k if k.contains("quota") => "⛔",
         k if k.contains("pr") => "🔀",
@@ -82,5 +85,17 @@ impl NotifierPort for FanoutNotifier {
         for n in &self.0 {
             n.notify(event.clone()).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::kind_icon;
+
+    #[test]
+    fn budget_warning_gets_its_own_amber_icon_distinct_from_the_hard_stop() {
+        assert_eq!(kind_icon("budget_warning"), "⚠️");
+        assert_eq!(kind_icon("budget_reached"), "💰");
+        assert_ne!(kind_icon("budget_warning"), kind_icon("budget_reached"));
     }
 }

@@ -670,6 +670,18 @@ pub struct ProjectState {
     /// The UTC date (`YYYY-MM-DD`) `spend_today_usd` is counting.
     #[serde(default)]
     pub spend_day: String,
+    /// Whether the lifetime `budget_usd` early-warning (`budget_warning`,
+    /// [`crate::policy::approaching_cap`]) has already fired for the current
+    /// approach toward the cap. Cleared once spend is no longer approaching
+    /// it (cap raised, or spend passed it into the hard-stop range), so a
+    /// later crossing can warn again.
+    #[serde(default)]
+    pub budget_warned_lifetime: bool,
+    /// Same as `budget_warned_lifetime` but for the per-day `daily_budget_usd`
+    /// cap. Reset by [`ProjectState::add_daily_spend`] whenever the UTC day
+    /// rolls over, so the warning can re-fire each day.
+    #[serde(default)]
+    pub budget_warned_daily: bool,
     /// Ordinal of the last deploy that passed both `deploy()` and
     /// `run_tests()` — advances only on a known-good deploy, so
     /// `max_rollback_distance` can bound how far a rollback may reach.
@@ -738,6 +750,8 @@ impl Default for ProjectState {
             ops_down: false,
             spend_today_usd: 0.0,
             spend_day: String::new(),
+            budget_warned_lifetime: false,
+            budget_warned_daily: false,
             deploy_index: 0,
             in_rollback: false,
             last_good_deploy: None,
@@ -837,6 +851,9 @@ impl ProjectState {
         if self.spend_day != today {
             self.spend_day = today;
             self.spend_today_usd = 0.0;
+            // A new day resets the cap itself, so a stale "already warned"
+            // flag must not suppress a fresh warning today.
+            self.budget_warned_daily = false;
         }
         self.spend_today_usd += usd;
         self.spend_today_usd

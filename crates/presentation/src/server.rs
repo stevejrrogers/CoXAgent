@@ -1340,12 +1340,18 @@ pub struct HubExtras {
 /// cap is removed) — so topping up the budget lets a Start actually stick.
 async fn space_budget_watchdog(app: AppState) {
     let mut flagged: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut warned: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Matches the dashboard's own amber threshold (index.html renders the
+    // "nearly reached" alert at 80% of a project's cap) — same UX language,
+    // just at the space level and pushed as a chat heads-up.
+    const WARN_PCT: f64 = 0.8;
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(300)).await;
         let spaces = app.spaces.inner.lock().await.spaces.clone();
         for sp in spaces {
             if sp.budget_usd <= 0.0 {
                 flagged.remove(&sp.id);
+                warned.remove(&sp.id);
                 continue;
             }
             let handles: Vec<ProjectHandle> = {
@@ -1363,6 +1369,43 @@ async fn space_budget_watchdog(app: AppState) {
             }
             if spend < sp.budget_usd {
                 flagged.remove(&sp.id);
+            }
+            // Early warning ahead of the hard stop below: fires once per
+            // approach toward the cap, clears once spend drops back out of
+            // the warning band (cap raised, or the hard stop below already
+            // took over) so a later crossing can warn again.
+            if coxagent_application::policy::approaching_cap(spend, Some(sp.budget_usd), WARN_PCT)
+            {
+                if warned.insert(sp.id.clone()) {
+                    let msg = format!(
+                        "⚠️ BUDGET: space \"{}\" đã đốt ${spend:.2} / cap ${:.2} ({:.0}%) — sắp \
+                         chạm mức dừng tự động. Nâng budget (Manage → Edit space) nếu muốn team \
+                         tiếp tục chạy liên tục.",
+                        sp.name,
+                        sp.budget_usd,
+                        spend / sp.budget_usd * 100.0
+                    );
+                    for p in &handles {
+                        let _ = coxagent_application::ports::outbound::mutate_state(
+                            p.store.as_ref(),
+                            |s| {
+                                s.post_chat_in(
+                                    "COX",
+                                    &msg,
+                                    coxagent_application::state::AGENTS_CHANNEL,
+                                    Vec::new(),
+                                );
+                                s.log_activity("COX", "space budget approaching cap — warned", None);
+                                Ok(())
+                            },
+                        )
+                        .await;
+                    }
+                }
+            } else {
+                warned.remove(&sp.id);
+            }
+            if spend < sp.budget_usd {
                 continue;
             }
             if !flagged.insert(sp.id.clone()) {

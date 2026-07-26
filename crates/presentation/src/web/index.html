@@ -4925,6 +4925,8 @@ async function loadSettings(){
         <div class="fr"><span class="lbl">Budget — per day (USD)</span><input id="wf-dg" type="number" min="0" step="0.5" value="${pol.daily_budget_usd??''}" placeholder="unlimited" style="width:100px" ${pol.daily_budget_usd==null?'disabled':''}/>
           <label class="hint" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" id="wf-dg-unl" ${pol.daily_budget_usd==null?'checked':''} onchange="document.getElementById('wf-dg').disabled=this.checked;if(this.checked)document.getElementById('wf-dg').value='';"> unlimited</label>
           <span class="hint">resets at UTC midnight · <b style="color:var(--accent2)">applies live</b></span></div>
+        <div class="fr"><span class="lbl">Budget warn at (%)</span><input id="wf-bwp" type="number" min="1" max="100" step="5" value="${Math.round((pol.budget_warn_pct??0.8)*100)}" style="width:90px"/>
+          <span class="hint">posts a one-time ⚠️ heads-up in #agents at this % of whichever cap is closer — loop keeps running</span></div>
       </div>
       <div class="set-note">Budget caps apply <b style="color:var(--accent2)">immediately</b>; other settings on the next restart. The total cap is <b>cumulative</b> — to resume past a hit cap, set it above what's already spent (or tick unlimited).</div>
     </div>
@@ -5103,6 +5105,7 @@ async function saveSettings(){const cfg=window._cfg||{engine:{},workflow:{}};cfg
   const bg=val("wf-bg");cfg.workflow.budget_usd=bg?parseFloat(bg):null;
   cfg.policy=cfg.policy||{};
   const dg=val("wf-dg");cfg.policy.daily_budget_usd=dg?parseFloat(dg):null;
+  {const bwp=parseFloat(val("wf-bwp"));cfg.policy.budget_warn_pct=Number.isFinite(bwp)&&bwp>0?Math.min(bwp,100)/100:0.8;}
   cfg.git=Object.assign(cfg.git||{},{
     enabled:val("git-en")==="true",provider:val("git-pv"),repo:val("git-repo").trim(),
     base_url:val("git-url").trim(),default_branch:val("git-br").trim()||"main",
