@@ -28,7 +28,7 @@ Received:    0
       - generic [ref=e5]: 
       - generic [ref=e6]:
         - generic [ref=e7]: CoXAgent
-        - generic [ref=e8]: autonomous dev team · v0.95.0
+        - generic [ref=e8]: autonomous dev team · v2.9.0
     - generic [ref=e9]:
       - button "遼" [ref=e10] [cursor=pointer]:
         - generic [ref=e11]: 遼
@@ -42,217 +42,137 @@ Received:    0
         - generic [ref=e19]: Channels
         - button "" [ref=e21] [cursor=pointer]:
           - generic [ref=e22]: 
-      - generic [ref=e23]:
-        - generic [ref=e24] [cursor=pointer]:
-          - generic [ref=e25]: 
-          - generic [ref=e26]: general
-        - generic [ref=e27] [cursor=pointer]:
-          - generic [ref=e28]: 
-          - generic [ref=e29]: pw-public-1784749096395
-        - generic [ref=e30] [cursor=pointer]:
-          - generic [ref=e31]: 
-          - generic [ref=e32]: pw-private-1784749096398
-        - generic [ref=e33] [cursor=pointer]:
-          - generic [ref=e34]: 
-          - generic [ref=e35]: pw-public-1784749536083
-        - generic [ref=e36] [cursor=pointer]:
-          - generic [ref=e37]: 
-          - generic [ref=e38]: pw-private-1784749536087
-      - generic [ref=e40]: Direct messages
-      - generic [ref=e41]:
-        - generic [ref=e42]: 
-        - textbox "Find a teammate…" [ref=e43]
-      - generic [ref=e45]: No teammates yet
-      - generic [ref=e46]:
-        - generic [ref=e47]: Meetings
-        - button "" [ref=e49] [cursor=pointer]:
-          - generic [ref=e50]: 
-      - generic [ref=e51]:
-        - generic [ref=e52]:
-          - button "" [ref=e53] [cursor=pointer]:
-            - generic [ref=e54]: 
-          - generic [ref=e55]: July 2026
-          - button "" [ref=e56] [cursor=pointer]:
-            - generic [ref=e57]: 
-        - generic [ref=e58]:
-          - generic [ref=e59]: M
-          - generic [ref=e60]: T
-          - generic [ref=e61]: W
-          - generic [ref=e62]: T
-          - generic [ref=e63]: F
-          - generic [ref=e64]: S
-          - generic [ref=e65]: S
-          - generic [ref=e67]: "29"
-          - generic [ref=e69]: "30"
-          - generic [ref=e71] [cursor=pointer]: "1"
-          - generic [ref=e73] [cursor=pointer]: "2"
-          - generic [ref=e75] [cursor=pointer]: "3"
-          - generic [ref=e77] [cursor=pointer]: "4"
-          - generic [ref=e79] [cursor=pointer]: "5"
-          - generic [ref=e81] [cursor=pointer]: "6"
-          - generic [ref=e83] [cursor=pointer]: "7"
-          - generic [ref=e85] [cursor=pointer]: "8"
-          - generic [ref=e87] [cursor=pointer]: "9"
-          - generic [ref=e89] [cursor=pointer]: "10"
-          - generic [ref=e91] [cursor=pointer]: "11"
-          - generic [ref=e93] [cursor=pointer]: "12"
-          - generic [ref=e95] [cursor=pointer]: "13"
-          - generic [ref=e97] [cursor=pointer]: "14"
-          - generic [ref=e99] [cursor=pointer]: "15"
-          - generic [ref=e101] [cursor=pointer]: "16"
-          - generic [ref=e103] [cursor=pointer]: "17"
-          - generic [ref=e105] [cursor=pointer]: "18"
-          - generic [ref=e107] [cursor=pointer]: "19"
-          - generic [ref=e109] [cursor=pointer]: "20"
-          - generic [ref=e111] [cursor=pointer]: "21"
-          - generic [ref=e113] [cursor=pointer]: "22"
-          - generic [ref=e115] [cursor=pointer]: "23"
-          - generic [ref=e117] [cursor=pointer]: "24"
-          - generic [ref=e119] [cursor=pointer]: "25"
-          - generic [ref=e121] [cursor=pointer]: "26"
-          - generic [ref=e123] [cursor=pointer]: "27"
-          - generic [ref=e125] [cursor=pointer]: "28"
-          - generic [ref=e127] [cursor=pointer]: "29"
-          - generic [ref=e129] [cursor=pointer]: "30"
-          - generic [ref=e131] [cursor=pointer]: "31"
-          - generic [ref=e133]: "1"
-          - generic [ref=e135]: "2"
+      - generic [ref=e25]: Direct messages
+      - generic [ref=e26]:
+        - generic [ref=e27]: 
+        - textbox "Find a teammate…" [ref=e28]
+      - generic [ref=e30]: No teammates yet
+      - generic [ref=e31]:
+        - generic [ref=e32]: Meetings
+        - button "" [ref=e34] [cursor=pointer]:
+          - generic [ref=e35]: 
     - text:                倫     留
-    - generic [ref=e136]:
-      - generic [ref=e138]: RO
-      - generic [ref=e139]:
-        - generic [ref=e140]: root
-        - generic [ref=e141]: Super Admin
-      - button "" [ref=e142] [cursor=pointer]:
-        - generic [ref=e143]: 
-      - button "" [ref=e144] [cursor=pointer]:
-        - generic [ref=e145]: 
+    - generic [ref=e37]:
+      - generic "Edit your profile & status" [ref=e38] [cursor=pointer]:
+        - generic [ref=e39]: RO
+      - generic [ref=e40]:
+        - generic [ref=e41]: root
+        - generic [ref=e42]: Super Admin
+      - button "" [ref=e43] [cursor=pointer]:
+        - generic [ref=e44]: 
+      - button "" [ref=e45] [cursor=pointer]:
+        - generic [ref=e46]: 
   - text:  
-  - main [ref=e146]:
-    - text:          
-    - generic [ref=e147]:
-      - text:                     﨡                                        﨡        
-      - generic [ref=e149]:
-        - generic [ref=e150]:
-          - generic [ref=e153]:
-            - generic [ref=e154]: "# general"
-            - generic [ref=e155]: everyone in the workspace
-          - generic [ref=e156]:
+  - main [ref=e47]:
+    - text:       
+    - generic [ref=e48]:
+      - text:                                    﨡        
+      - generic [ref=e50]:
+        - generic [ref=e51]:
+          - generic [ref=e54]:
+            - generic [ref=e55]: "# general"
+            - generic [ref=e56]: everyone in the workspace
+          - generic [ref=e57]:
             - text:  
-            - button "" [ref=e157] [cursor=pointer]:
-              - generic [ref=e158]: 
-            - button "" [ref=e159] [cursor=pointer]:
-              - generic [ref=e160]: 
-            - button "" [ref=e161] [cursor=pointer]:
-              - generic [ref=e162]: 
-            - button " 1" [ref=e163] [cursor=pointer]:
-              - generic [ref=e164]: 
-              - generic [ref=e167]: "1"
+            - button "" [ref=e58] [cursor=pointer]:
+              - generic [ref=e59]: 
+            - button "" [ref=e60] [cursor=pointer]:
+              - generic [ref=e61]: 
+            - button "" [ref=e62] [cursor=pointer]:
+              - generic [ref=e63]: 
+            - button "" [ref=e64] [cursor=pointer]:
+              - generic [ref=e65]: 
             - text: 
-        - generic [ref=e169]:
-          - text:  
-          - generic [ref=e170]:
-            - generic [ref=e171]: 2026-07-22
-            - generic [ref=e172]:
-              - generic [ref=e173]:
-                - generic [ref=e174]: root
-                - generic [ref=e175]: 11:45 PM
-              - generic "root · 11:45 PM" [ref=e176]: "{\"op\":\"typing\",\"channel\":\"general\"}"
-              - text:     
-            - generic [ref=e177]:
-              - generic "root · 11:45 PM" [ref=e178]: pw-test-1784749531836
-              - text:     
-            - generic [ref=e179]: 2026-07-23
-            - generic [ref=e180]:
-              - generic [ref=e181]:
-                - generic [ref=e182]: root
-                - generic [ref=e183]: 12:22 AM
-              - generic "root · 12:22 AM" [ref=e184]: "{\"op\":\"typing\",\"channel\":\"general\"}"
-              - text:     
-            - generic [ref=e185]:
-              - generic "root · 12:22 AM" [ref=e186]: ngon
-              - text:     
-            - generic [ref=e187]:
-              - generic "root · 12:22 AM" [ref=e188]: "{\"op\":\"typing\",\"channel\":\"general\"}"
-              - text:     
-            - generic [ref=e189]:
-              - generic "root · 12:22 AM" [ref=e190]: "{\"op\":\"typing\",\"channel\":\"general\"}"
-              - text:     
-            - generic [ref=e191]:
-              - generic "root · 12:22 AM" [ref=e192]: df
-              - text:     
-            - generic [ref=e193]: 2026-07-24
-            - generic [ref=e194]:
-              - generic [ref=e195]:
-                - generic [ref=e196]: root
-                - generic [ref=e197]: 08:52 AM
-              - generic "root · 08:52 AM" [ref=e198]: "{\"op\":\"typing\",\"channel\":\"general\"}"
-              - text:     
-            - generic [ref=e199]:
-              - generic "root · 08:52 AM" [ref=e200]: "{\"op\":\"typing\",\"channel\":\"general\"}"
-              - text:     
-            - generic [ref=e201]:
-              - generic [ref=e202]:
-                - generic [ref=e203]: root
-                - generic [ref=e204]: 01:20 AM
-              - generic "root · 01:20 AM" [ref=e205]: sss
-              - text:     
-            - generic [ref=e206]:
-              - generic [ref=e207]:
-                - generic [ref=e208]: root
-                - generic [ref=e209]: 03:29 AM
-              - generic "root · 03:29 AM" [ref=e210]: test
-              - text:     
-            - generic [ref=e211]:
-              - generic "root · 03:29 AM" [ref=e212]: test msg 1
-              - text:     
-            - generic [ref=e213]:
-              - generic "root · 03:29 AM" [ref=e214]: test msg 2
-              - text:     
-            - generic [ref=e215]:
-              - generic "root · 03:29 AM" [ref=e216]: test msg 3
-              - text:     
-            - generic [ref=e217]:
-              - generic "root · 03:29 AM" [ref=e218]: test msg 4
-              - text:     
-            - generic [ref=e219]:
-              - generic "root · 03:29 AM" [ref=e220]: test msg 5
-              - text:     
-            - generic [ref=e221]:
-              - generic "root · 03:29 AM" [ref=e222]: test msg 6
-              - text:     
-            - generic [ref=e223]:
-              - generic [ref=e224]:
-                - generic [ref=e225]: root
-                - generic [ref=e226]: 03:42 AM
-              - generic "root · 03:42 AM" [ref=e227]: Hello team!
-              - text:     
-          - generic [ref=e229]:
-            - button "" [ref=e230] [cursor=pointer]:
-              - generic [ref=e231]: 
-            - button "" [ref=e232] [cursor=pointer]:
-              - generic [ref=e233]: 
-            - button "" [ref=e234] [cursor=pointer]:
-              - generic [ref=e235]: 
-            - button "" [ref=e236] [cursor=pointer]:
-              - generic [ref=e237]: 
-            - button "" [ref=e238] [cursor=pointer]:
-              - generic [ref=e239]: 
-            - 'textbox "Message your team… (Enter to send · @ to mention · **bold** *italic* \\`code\\`)" [ref=e240]':
+        - generic [ref=e67]:
+          - text: 
+          - generic [ref=e68]:
+            - 'generic "steve: ngon" [ref=e69] [cursor=pointer]': 📌 ngon
+            - generic [ref=e70]: 1 pinned
+          - text: 
+          - generic [ref=e71]:
+            - generic [ref=e73]: Wednesday, July 15
+            - generic [ref=e74]:
+              - generic [ref=e76]: ST
+              - generic [ref=e77]:
+                - generic [ref=e78]:
+                  - generic [ref=e79]: steve
+                  - generic [ref=e80]: 09:10 AM
+                - generic [ref=e81]: ngon
+              - text:    
+            - generic [ref=e82]:
+              - generic [ref=e84]: RO
+              - generic [ref=e85]:
+                - generic [ref=e86]:
+                  - generic [ref=e87]: root
+                  - generic [ref=e88]: 02:19 PM
+                - generic [ref=e89]: ok
+              - text:      
+            - generic [ref=e90]:
+              - generic [ref=e92]: 02:24 PM
+              - generic [ref=e94]: hi
+              - text:      
+            - generic [ref=e95]:
+              - generic [ref=e97]: RO
+              - generic [ref=e98]:
+                - generic [ref=e99]:
+                  - generic [ref=e100]: root
+                  - generic [ref=e101]: 02:59 PM
+                - generic [ref=e102]: hello
+              - text:      
+            - generic [ref=e103]:
+              - generic [ref=e105]: CH
+              - generic [ref=e106]:
+                - generic [ref=e107]:
+                  - generic [ref=e108]: chopper
+                  - generic [ref=e109]: 01:45 AM
+                - generic [ref=e110]: e
+              - text:    
+            - generic [ref=e112]: Yesterday
+            - generic [ref=e113]:
+              - generic [ref=e115]: RO
+              - generic [ref=e116]:
+                - generic [ref=e117]:
+                  - generic [ref=e118]: root
+                  - generic [ref=e119]: 03:46 PM
+                - generic [ref=e120]: "@luffy hey hey sao rồi (edited)"
+              - text:      
+          - generic [ref=e122]:
+            - button "" [ref=e123] [cursor=pointer]:
+              - generic [ref=e124]: 
+            - button "" [ref=e125] [cursor=pointer]:
+              - generic [ref=e126]: 
+            - button "" [ref=e127] [cursor=pointer]:
+              - generic [ref=e128]: 
+            - button "" [ref=e129] [cursor=pointer]:
+              - generic [ref=e130]: 
+            - button "" [ref=e131] [cursor=pointer]:
+              - generic [ref=e132]: 
+            - 'textbox "Message your team… (Enter to send · @ to mention · **bold** *italic* \\`code\\`)" [ref=e133]':
               - /placeholder: "Message your team…  (Enter to send · @ to mention · **bold** *italic* \\`code\\`)"
-            - button "" [ref=e241] [cursor=pointer]:
-              - generic [ref=e242]: 
-  - generic [ref=e243]:
-    - generic [ref=e244]:
-      - generic [ref=e245]: Thread
-      - button "" [ref=e246] [cursor=pointer]:
-        - generic [ref=e247]: 
-    - generic [ref=e249]:
-      - textbox "Reply to thread…" [ref=e250]
-      - button "" [ref=e251] [cursor=pointer]:
-        - generic [ref=e252]: 
-  - text:                               
-  - text:          A rough note is enough — click ✨ and the team will refine it.        裸  
+            - button "" [ref=e134] [cursor=pointer]:
+              - generic [ref=e135]: 
+  - generic [ref=e136]:
+    - generic [ref=e137]:
+      - generic [ref=e138]: Thread
+      - button "" [ref=e139] [cursor=pointer]:
+        - generic [ref=e140]: 
+    - generic [ref=e142]:
+      - generic [ref=e143]:
+        - button "" [ref=e144] [cursor=pointer]:
+          - generic [ref=e145]: 
+        - button "" [ref=e146] [cursor=pointer]:
+          - generic [ref=e147]: 
+        - button "" [ref=e148] [cursor=pointer]:
+          - generic [ref=e149]: 
+        - button "" [ref=e150] [cursor=pointer]:
+          - generic [ref=e151]: 
+      - generic [ref=e152]:
+        - 'textbox "Reply to thread… (**bold** *italic* `code`)" [ref=e153]':
+          - /placeholder: "Reply to thread…  (**bold** *italic* `code`)"
+        - button "" [ref=e154] [cursor=pointer]:
+          - generic [ref=e155]: 
+  - text:                                       
+  - text:          A rough note is enough — click ✨ and the team will refine it.        裸    
 ```
 
 # Test source

@@ -45,29 +45,20 @@ jobs:
 
   deploy-smoke:
     # COX-B008 regression guard for the OTHER half of the bug report: a green
-    # `cargo build` is not a running app. This job runs the exact command this
-    # repo's docker-compose.yml documents, then proves the hub actually answers
-    # on the published host port — so "compiles" can never again be mistaken
-    # for "comes up". Catches image build breakage, entrypoint/migration
-    # failures and port-binding mistakes in one step.
+    # `cargo build` is not a running app. The test brings the stack up with the
+    # exact command this repo's docker-compose.yml documents and proves the hub
+    # answers on the published host port — so "compiles" can never again be
+    # mistaken for "comes up". Catches image build breakage, entrypoint
+    # failures and port-binding mistakes in one step. Test rather than shell so
+    # a developer can run the same gate locally.
     name: docker compose smoke (app answers on 8101)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build and start the stack
-        run: COXAGENT_ADMIN_PASSWORD=ci-smoke docker compose up -d --build
-      - name: Wait for the hub to answer on the published port
-        run: |
-          for i in $(seq 1 40); do
-            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8101/ || true)
-            if [ "$code" = "200" ]; then
-              echo "hub answered 200 on 8101 after ${i} attempt(s)"
-              exit 0
-            fi
-            sleep 3
-          done
-          echo "hub never answered 200 on host port 8101 (last code: ${code:-none})"
-          exit 1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Bring the stack up and probe the published port
+        run: cargo test -p coxagent-app --test deploy_smoke -- --ignored --nocapture
       - name: Container logs on failure
         if: failure()
         run: docker compose logs --no-color
