@@ -539,6 +539,20 @@ pub async fn brownfield<S: StateStorePort + 'static>(
         cfg.engine.auto_fallback = false;
         // Save consumed ports so assign_host_port skips them
         cfg.deploy.host_port = None; // will be assigned below
+                                     // Pre-fill git config from a detected `origin` remote: an imported
+                                     // repo that can already push should work without manual wiring.
+        if let Some((provider, repo)) = std::process::Command::new("git")
+            .args(["remote", "get-url", "origin"])
+            .current_dir(codebase)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| parse_remote(&String::from_utf8_lossy(&o.stdout)))
+        {
+            cfg.git.enabled = true;
+            cfg.git.provider = provider;
+            cfg.git.repo = repo;
+        }
         std::fs::write(&config_path, serde_json::to_string_pretty(&cfg)?)?;
     }
     let context_path = state_dir.join("project_context.md");
@@ -703,7 +717,22 @@ fn comprehension_context(name: &str, repo_stats: &str, stack_lines: &[String]) -
 fn ensure_git_repo(dir: &Path) -> Result<String, Box<dyn std::error::Error>> {
     use std::process::Command;
     if dir.join(".git").exists() {
-        return Ok("Git: existing repository (left as-is).".to_owned());
+        // Detect an existing remote so the project's git config can be
+        // pre-filled — an imported repo that can already push should not
+        // need manual wiring.
+        let remote = Command::new("git")
+            .args(["remote", "get-url", "origin"])
+            .current_dir(dir)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+            .filter(|u| !u.is_empty());
+        return Ok(match remote {
+            Some(url) => format!("Git: existing repository, remote origin = {url}."),
+            None => "Git: existing repository, NO remote — connect one in Settings › Git                      before agents can push branches/PRs."
+                .to_owned(),
+        });
     }
     let run = |args: &[&str]| {
         Command::new("git")
@@ -718,7 +747,44 @@ fn ensure_git_repo(dir: &Path) -> Result<String, Box<dyn std::error::Error>> {
     run(&["add", "-A"]);
     // Commit may be a no-op on an empty dir; that is fine.
     run(&["commit", "-m", "baseline: adopt into CoXAgent"]);
-    Ok("Git: initialised repository + baseline commit.".to_owned())
+    Ok(
+        "Git: initialised repository + baseline commit (no remote yet — connect one in \
+         Settings › Git before agents can push branches/PRs)."
+            .to_owned(),
+    )
+}
+
+/// Parse a git remote URL into `(provider, owner/repo)` — supports
+/// `git@host:owner/repo.git` and `http(s)://host/owner/repo(.git)` for
+/// github.com and gitlab hosts. Public for the import flow to pre-fill config.
+#[must_use]
+pub fn parse_remote(url: &str) -> Option<(String, String)> {
+    let url = url.trim();
+    let (host, path) = if let Some(rest) = url.strip_prefix("git@") {
+        let (h, p) = rest.split_once(':')?;
+        (h.to_owned(), p.to_owned())
+    } else if let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+    {
+        let (h, p) = rest.split_once('/')?;
+        (h.to_owned(), p.to_owned())
+    } else {
+        return None;
+    };
+    let repo = path
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .to_owned();
+    if repo.split('/').count() < 2 {
+        return None;
+    }
+    let provider = if host.contains("gitlab") {
+        "gitlab"
+    } else {
+        "github"
+    };
+    Some((provider.to_owned(), repo))
 }
 
 /// Whether the codebase already has a docker-compose file.
@@ -879,5 +945,20 @@ services:
         assert!(ctx.contains("postgres"));
         assert!(ctx.contains("redis"));
         assert!(ctx.contains("Port clashes detected"));
+    }
+
+    #[test]
+    fn parse_remote_supports_ssh_and_https() {
+        use super::parse_remote;
+        assert_eq!(
+            parse_remote("git@github.com:me/app.git"),
+            Some(("github".into(), "me/app".into()))
+        );
+        assert_eq!(
+            parse_remote("https://gitlab.company.io/team/app/"),
+            Some(("gitlab".into(), "team/app".into()))
+        );
+        assert_eq!(parse_remote("not-a-url"), None);
+        assert_eq!(parse_remote("git@github.com:justname"), None);
     }
 }

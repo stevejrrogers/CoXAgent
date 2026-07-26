@@ -1518,7 +1518,7 @@ textarea.np-in{resize:vertical;line-height:1.5}
       <a data-v="mg-audit" onclick="nav('mg-audit')"><i class="ti ti-shield-search"></i> Audit</a>
     </nav>
     <div id="user-badge" class="userbox">
-      <div class="uavatar"><span id="ub-initials">U</span></div>
+      <div class="uavatar" onclick="openProfile('status')" style="cursor:pointer" title="Status & profile"><span id="ub-initials">U</span></div>
       <div class="uinfo"><div id="ub-name" class="uname"></div><span id="ub-role" class="urole"></span></div>
       <button id="getapp-btn" onclick="openGetApp()" title="Get the app" class="ulogout"><i id="getapp-ic" class="ti ti-download"></i><span id="getapp-ver" hidden style="font-size:11px;font-weight:700;margin-left:5px;letter-spacing:.01em"></span><span class="upd-dot" hidden></span></button>
       <button onclick="doLogout()" title="Sign out" class="ulogout"><i class="ti ti-logout"></i></button>
@@ -1963,22 +1963,44 @@ textarea.np-in{resize:vertical;line-height:1.5}
       <button id="md-join" class="pri" onclick="mtJoinFromDetail()" style="display:none;padding:8px 20px;font-size:13px"><i class="ti ti-video"></i> Join now</button>
     </div>
   </div></div>
-  <div class="ov" id="ov-profile" onclick="if(event.target===this)close_('ov-profile')"><div class="modal" style="max-width:380px">
-    <h3 style="margin:0 0 3px">Your profile</h3>
-    <div class="msub" style="margin-bottom:14px">Avatar and status are visible to the whole workspace.</div>
-    <div style="display:flex;align-items:center;gap:14px;margin-bottom:16px">
+  <div class="ov" id="ov-profile" onclick="if(event.target===this)close_('ov-profile')"><div class="modal" style="max-width:420px">
+    <span class="x" onclick="close_('ov-profile')"><i class="ti ti-x"></i></span>
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
       <span id="pf-av"></span>
-      <label class="btn-ghost" style="cursor:pointer"><i class="ti ti-camera"></i> Change photo
+      <div><div id="pf-name-hd" style="font-weight:800;font-size:15px"></div><div class="msub" id="pf-role-hd"></div></div>
+    </div>
+    <div class="seg" style="margin-bottom:14px">
+      <button id="pt-status" class="npmode on" onclick="profileTab('status')" style="padding:6px 14px">Status</button>
+      <button id="pt-profile" class="npmode" onclick="profileTab('profile')" style="padding:6px 14px">Profile</button>
+      <button id="pt-prefs" class="npmode" onclick="profileTab('prefs')" style="padding:6px 14px">Preferences</button>
+    </div>
+    <div id="pp-status">
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+        <button id="pf-emoji" class="rt-ringbtn" style="font-size:18px;padding:6px 10px" onclick="openEmoji(this,e=>{document.getElementById('pf-emoji').textContent=e;})">😊</button>
+        <input id="pf-text" placeholder="What's your status?" maxlength="80" style="flex:1;background:var(--card);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 12px;font-size:13px"/>
+      </div>
+      <div id="pf-presets" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn-ghost pf-btn" onclick="saveStatus(true)">Clear status</button>
+        <button class="save pf-btn" onclick="saveStatus(false)"><i class="ti ti-device-floppy"></i> Save</button>
+      </div>
+    </div>
+    <div id="pp-profile" hidden>
+      <label class="btn-ghost" style="cursor:pointer;display:inline-flex;margin-bottom:12px"><i class="ti ti-camera"></i> Change photo
         <input type="file" accept="image/*" hidden onchange="uploadAvatar(this)"></label>
+      <div class="fr"><span class="lbl">Display name</span><input id="pp-name" style="flex:1"></div>
+      <div class="fr"><span class="lbl">Email</span><input id="pp-email" type="email" style="flex:1"></div>
+      <div class="fr"><span class="lbl">New password</span><input id="pp-pw" type="password" placeholder="leave empty to keep" style="flex:1"></div>
+      <div id="pp-note" style="font-size:12px;margin:6px 0"></div>
+      <div style="display:flex;justify-content:flex-end"><button class="save pf-btn" onclick="savePopupProfile()"><i class="ti ti-device-floppy"></i> Save profile</button></div>
     </div>
-    <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
-      <button id="pf-emoji" class="rt-ringbtn" style="font-size:18px;padding:6px 10px" onclick="openEmoji(this,e=>{document.getElementById('pf-emoji').textContent=e;})">😊</button>
-      <input id="pf-text" placeholder="What's your status?" maxlength="80" style="flex:1;background:var(--card);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 12px;font-size:13px"/>
-    </div>
-    <div id="pf-presets" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px"></div>
-    <div style="display:flex;gap:8px;justify-content:flex-end">
-      <button class="btn-ghost pf-btn" onclick="saveStatus(true)">Clear status</button>
-      <button class="save pf-btn" onclick="saveStatus(false)"><i class="ti ti-device-floppy"></i> Save</button>
+    <div id="pp-prefs" hidden>
+      <div class="fr"><span class="lbl">Desktop notifications</span><select id="ppf-desktop"><option value="on">on</option><option value="off">off</option></select></div>
+      <div class="fr"><span class="lbl">Sound</span><select id="ppf-sound"><option value="on">on</option><option value="off">off</option></select></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px">
+        <button class="btn-ghost pf-btn" onclick="doLogout()" style="color:var(--red)"><i class="ti ti-logout"></i> Sign out</button>
+        <button class="save pf-btn" onclick="savePopupPrefs()"><i class="ti ti-device-floppy"></i> Save</button>
+      </div>
     </div>
   </div></div>
   <div class="ov" id="ov-meetring"><div class="modal incbox" style="max-width:340px;text-align:center">
@@ -4521,13 +4543,39 @@ function statusChip(u){const p=PROFILES[u]||{};
   return p.status_emoji?`<span class="ustatus" title="${esc(p.status_text||"")}">${esc(p.status_emoji)}</span>`:"";}
 const STATUS_PRESETS=[["🎯","Focusing"],["🍜","Lunch"],["🏠","WFH"],["📅","In a meeting"],["🌴","Vacation"],["🤒","Sick"]];
 setInterval(loadProfiles,60000); // teammates' avatar/status refresh
-function openProfile(){const me=(ME&&ME.username)||"";const p=PROFILES[me]||{};
+function profileTab(t){
+  for(const k of ["status","profile","prefs"]){
+    document.getElementById("pt-"+k).classList.toggle("on",k===t);
+    document.getElementById("pp-"+k).hidden=k!==t;
+  }
+}
+function openProfile(tab){const me=(ME&&ME.username)||"";const p=PROFILES[me]||{};
   document.getElementById("pf-av").innerHTML=avat(me,"pf-avbig");
+  document.getElementById("pf-name-hd").textContent=(ME&&(ME.name||ME.username))||me;
+  document.getElementById("pf-role-hd").textContent=(ME&&ME.role)||"";
   document.getElementById("pf-emoji").textContent=p.status_emoji||"😊";
   document.getElementById("pf-text").value=p.status_text||"";
   document.getElementById("pf-presets").innerHTML=STATUS_PRESETS.map(([e,t])=>
     `<button class="rt-ringbtn" onclick="document.getElementById('pf-emoji').textContent='${e}';document.getElementById('pf-text').value='${t}'">${e} ${t}</button>`).join("");
+  document.getElementById("pp-name").value=(ME&&ME.name)||"";
+  document.getElementById("pp-email").value=(ME&&ME.email)||"";
+  document.getElementById("pp-pw").value="";
+  document.getElementById("ppf-desktop").value=localStorage.getItem("cox_desktop")||"on";
+  document.getElementById("ppf-sound").value=localStorage.getItem("cox_sound")||"on";
+  profileTab(tab||"status");
   document.getElementById("ov-profile").classList.add("open");}
+async function savePopupProfile(){
+  const n=document.getElementById("pp-note");
+  const pw=document.getElementById("pp-pw").value;
+  try{const r=await fetch("/api/auth/profile",{method:"PATCH",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({name:document.getElementById("pp-name").value,email:document.getElementById("pp-email").value,password:pw||undefined})});
+    if(r.ok){n.innerHTML='<span style="color:var(--green)">Saved</span>';try{ME=await(await fetch("/api/auth/me")).json();renderUserBadge&&renderUserBadge();}catch(e){}}
+    else n.innerHTML=`<span style="color:var(--red)">${esc(await r.text())}</span>`;
+  }catch(e){n.innerHTML='<span style="color:var(--red)">Network error</span>';}}
+function savePopupPrefs(){
+  localStorage.setItem("cox_desktop",document.getElementById("ppf-desktop").value);
+  localStorage.setItem("cox_sound",document.getElementById("ppf-sound").value);
+  toasty("Preferences saved","ok");}
 async function uploadAvatar(input){const f=input.files[0];input.value="";if(!f)return;
   if(f.size>2*1024*1024){toasty("Ảnh tối đa 2MB","err");return;}
   const fd=new FormData();fd.append("file",f);
@@ -4750,7 +4798,8 @@ async function loadSettings(){
     <i class="ti ti-${ga.authenticated?'user-check':'user-x'}" style="color:${ga.authenticated?'var(--green)':'var(--amber)'};font-size:17px"></i>
     <div class="toolinfo"><div><b>${esc(ga.tool||gprov)} sign-in</b> <span class="tooldim">· ${ga.authenticated?('connected as '+esc(ga.account||'?')):'not signed in'}</span></div></div>
     ${ga.authenticated?'<span class="toolok">connected</span>':`<button class="gc-btn pri" onclick="openConnect('${gprov}')"><i class="ti ti-plug"></i> Connect</button>`}
-  </div>`:'';
+    <button class="gc-btn" onclick="testGitConnection(this)" title="repo → remote → reachable → push permission"><i class="ti ti-antenna-bars-5"></i> Test connection</button>
+  </div><div id="git-test-result"></div>`:'';
   const brewBanner=(td.os==="macos"&&!td.has_brew)
     ? `<div class="toolrow toolbrew"><i class="ti ti-alert-triangle" style="color:var(--amber);font-size:17px"></i>
         <div class="toolinfo"><div><b>Homebrew</b> <span class="tooldim">· the installer these commands use — not found</span></div>
@@ -4897,6 +4946,22 @@ async function loadSettings(){
   setSetTab(window._setTab==="workspace"?"engines":(window._setTab||"engines"));}
 function copyText(btn,text){navigator.clipboard&&navigator.clipboard.writeText(text);
   const old=btn.innerHTML;btn.innerHTML='<i class="ti ti-check"></i>';setTimeout(()=>{btn.innerHTML=old;},1200);}
+async function testGitConnection(btn){
+  const o=btn.innerHTML;btn.innerHTML='<i class="ti ti-loader-2 att-spin"></i> Testing…';btn.disabled=true;
+  const box=document.getElementById("git-test-result");
+  try{
+    const d=await(await fetch(api("/git/test"),{method:"POST"})).json();
+    const step=(ok,label,extra)=>`<span style="display:inline-flex;align-items:center;gap:5px;margin-right:14px"><i class="ti ti-${ok?'circle-check':'circle-x'}" style="color:${ok?'var(--green)':'var(--red)'}"></i>${label}${extra||''}</span>`;
+    box.innerHTML=`<div style="padding:9px 12px;font-size:12.5px;border:1px solid var(--border);border-radius:9px;margin-top:8px">
+      ${step(d.repo,'git repo')}
+      ${step(!!d.remote,'remote',d.remote?` <code style="font-size:11px">${esc(d.remote)}</code>`:' — none: agents cannot push; add one (git remote add origin …) or reconnect')}
+      ${step(d.reachable,'reachable')}
+      ${step(d.push_ok,'push permission')}
+      ${d.detail?`<div style="color:var(--dim);margin-top:5px">${esc(d.detail)}</div>`:''}
+    </div>`;
+  }catch(e){box.innerHTML='<div class="empty">test failed</div>';}
+  btn.innerHTML=o;btn.disabled=false;
+}
 function openConnect(provider){const gl=provider==="gitlab";
   const base=(window._cfg&&window._cfg.git&&window._cfg.git.base_url||"").replace(/\/+$/,"");
   const host=base||(gl?"https://gitlab.com":"https://github.com");

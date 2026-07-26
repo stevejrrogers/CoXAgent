@@ -2076,6 +2076,7 @@ pub async fn serve_full(
         .route("/api/meetings/:id/ring", post(meeting_ring_ep))
         .route("/api/profiles", get(profiles_ep))
         .route("/api/profile", post(profile_set_ep))
+        .route("/api/auth/profile", axum::routing::patch(self_profile_ep))
         .route("/api/profile/avatar", post(profile_avatar_ep))
         .route(
             "/api/auth/my/tokens/:label",
@@ -2264,6 +2265,7 @@ pub async fn serve_full(
         )
         .route("/api/projects/:pid/git/auth", get(git_auth_status_ep))
         .route("/api/projects/:pid/git/connect", post(git_connect_ep))
+        .route("/api/projects/:pid/git/test", post(git_test_ep))
         .route("/api/projects/:pid/prs", get(list_prs_ep))
         .route("/api/projects/:pid/prs/:num/diff", get(pr_diff_ep))
         .route("/api/projects/:pid/prs/:num/:action", post(pr_action_ep))
@@ -2626,6 +2628,100 @@ async fn project_provider(app: &AppState, pid: &str) -> Option<(String, String)>
 }
 
 /// Whether the project's git CLI is signed in, and as whom.
+/// End-to-end git connection test: repo? remote? CLI authed? server
+/// reachable? PUSH permitted? Each stage is a separate flag so the UI can say
+/// exactly what's missing (imported-without-git, no remote, bad token, ...).
+async fn git_test_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let wd = p.work_dir.clone();
+    let is_repo = wd.join(".git").exists();
+    let git = |args: &[&str]| {
+        let mut c = tokio::process::Command::new("git");
+        c.args(args)
+            .current_dir(&wd)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        c
+    };
+    let mut remote: Option<String> = None;
+    let mut reachable = false;
+    let mut push_ok = false;
+    let mut detail = String::new();
+    if is_repo {
+        if let Ok(out) = git(&["remote", "get-url", "origin"]).output().await {
+            if out.status.success() {
+                let url = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+                if !url.is_empty() {
+                    remote = Some(url);
+                }
+            }
+        }
+        if remote.is_some() {
+            if let Ok(Ok(out)) = tokio::time::timeout(
+                std::time::Duration::from_secs(12),
+                git(&["ls-remote", "--heads", "origin"]).output(),
+            )
+            .await
+            {
+                reachable = out.status.success();
+                if !reachable {
+                    detail = String::from_utf8_lossy(&out.stderr)
+                        .lines()
+                        .last()
+                        .unwrap_or("")
+                        .chars()
+                        .take(200)
+                        .collect();
+                }
+            } else {
+                detail = "ls-remote timed out".to_owned();
+            }
+        }
+        if reachable {
+            // Dry-run push: proves PUSH permission without writing anything.
+            if let Ok(Ok(out)) = tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                git(&[
+                    "push",
+                    "--dry-run",
+                    "origin",
+                    "HEAD:refs/heads/coxagent-connection-test",
+                ])
+                .output(),
+            )
+            .await
+            {
+                push_ok = out.status.success();
+                if !push_ok {
+                    detail = String::from_utf8_lossy(&out.stderr)
+                        .lines()
+                        .last()
+                        .unwrap_or("")
+                        .chars()
+                        .take(200)
+                        .collect();
+                }
+            } else {
+                detail = "push --dry-run timed out".to_owned();
+            }
+        }
+    }
+    Json(serde_json::json!({
+        "repo": is_repo,
+        "remote": remote,
+        "reachable": reachable,
+        "push_ok": push_ok,
+        "detail": detail,
+    }))
+    .into_response()
+}
+
 async fn git_auth_status_ep(
     State(app): State<AppState>,
     Path(pid): Path<String>,
@@ -7990,6 +8086,47 @@ async fn update_user_ep(
 }
 
 #[derive(serde::Deserialize)]
+struct SelfProfileReq {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    email: String,
+    #[serde(default)]
+    password: Option<String>,
+}
+
+/// Self-service account update: the signed-in user edits their OWN display
+/// name / email / password. Never role — that stays admin-only.
+async fn self_profile_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<SelfProfileReq>,
+) -> axum::response::Response {
+    let Some(user) = principal_name(&app, &headers).await else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let Some(auth) = app.auth.clone() else {
+        return (StatusCode::NOT_IMPLEMENTED, "auth not configured").into_response();
+    };
+    if !auth
+        .update_user(&user, req.name.trim(), req.email.trim(), None)
+        .await
+    {
+        return (StatusCode::NOT_FOUND, "no such user").into_response();
+    }
+    if let Some(pw) = req.password.as_deref().filter(|p| !p.is_empty()) {
+        if pw.len() < 8 {
+            return (StatusCode::BAD_REQUEST, "password too short (min 8)").into_response();
+        }
+        if !auth.set_password(&user, pw).await {
+            return (StatusCode::NOT_FOUND, "no such user").into_response();
+        }
+    }
+    audit_push(&app.audit, &user, "own profile updated".to_owned(), 200).await;
+    Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+#[derive(serde::Deserialize)]
 struct ResetPasswordReq {
     password: String,
 }
@@ -8451,6 +8588,7 @@ async fn me_ep(
             let twofa = auth.has_2fa(&u.username).await;
             Json(serde_json::json!({
                 "auth": true, "username": u.username,
+                "name": u.name, "email": u.email,
                 "role": u.role.as_str(),
                 "twofa": twofa,
             }))
