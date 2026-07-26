@@ -149,8 +149,8 @@ pub trait DeployPort: Send + Sync {
 /// this gate existed.
 ///
 /// # Errors
-/// Never returns an error — an unreachable/failing health check is reported
-/// as `false`, not propagated.
+/// Never returns an error — an unreachable/failing health check, and a probe
+/// that errors outright, are both reported as `false`, not propagated.
 pub async fn verify_deploy_health(deploy: &Arc<dyn DeployPort>, host_port: Option<u16>) -> bool {
     const ATTEMPTS: u32 = 15;
     const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
@@ -158,7 +158,11 @@ pub async fn verify_deploy_health(deploy: &Arc<dyn DeployPort>, host_port: Optio
         return true;
     };
     for attempt in 0..ATTEMPTS {
-        if deploy.health(port).await.unwrap_or(true) {
+        // A probe that can't run is NOT evidence the app is up: treat it as
+        // unhealthy, exactly like `DeployPort::health_check`'s own default.
+        // Erring the other way would hand every caller a way to skip the gate
+        // by failing the check itself.
+        if deploy.health(port).await.unwrap_or(false) {
             return true;
         }
         if attempt + 1 < ATTEMPTS {
@@ -174,6 +178,7 @@ mod tests {
     use crate::error::PortError;
     use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use std::time::Duration;
 
     /// Only `health()` is scripted — `wait_healthy` must work off the trait's
@@ -259,5 +264,86 @@ mod tests {
         assert!(result.passed);
         assert_eq!(result.http_status, None);
         assert!(result.response_time_ms.is_some());
+    }
+
+    // --- COX-B009: the shared gate every deploy call site runs through -----
+
+    /// An adapter whose probe cannot run at all.
+    struct ErroringDeploy;
+    #[async_trait::async_trait]
+    impl DeployPort for ErroringDeploy {
+        async fn deploy(&self, _work_dir: &Path) -> Result<DeployReport, PortError> {
+            unreachable!("the gate never deploys")
+        }
+        async fn health(&self, _port: u16) -> Result<bool, PortError> {
+            Err(PortError::Backend("probe could not run".to_owned()))
+        }
+    }
+
+    /// A probe that errors is not evidence the app bound its port — it must
+    /// fail the gate, not wave the deploy through. Otherwise a broken health
+    /// check is itself a way to skip a gate the team requires be unskippable.
+    #[tokio::test(start_paused = true)]
+    async fn a_probe_that_errors_fails_the_gate() {
+        let deploy: Arc<dyn DeployPort> = Arc::new(ErroringDeploy);
+
+        assert!(
+            !super::verify_deploy_health(&deploy, Some(8101)).await,
+            "an erroring health probe must fail the shared deploy gate"
+        );
+    }
+
+    /// The COX-B004 scenario the gate exists for: containers start, the app
+    /// inside never binds its port.
+    #[tokio::test(start_paused = true)]
+    async fn a_port_that_never_binds_fails_the_gate() {
+        let deploy: Arc<dyn DeployPort> = Arc::new(FakeDeploy {
+            healthy: false,
+            probes: AtomicUsize::new(0),
+        });
+
+        assert!(
+            !super::verify_deploy_health(&deploy, Some(8101)).await,
+            "a port that never accepts connections must fail the shared gate"
+        );
+    }
+
+    /// No configured `host_port` means there is nothing to probe — the gate
+    /// passes rather than failing every deploy of a port-less project.
+    #[tokio::test(start_paused = true)]
+    async fn no_configured_host_port_passes_without_probing() {
+        let probing = Arc::new(FakeDeploy {
+            healthy: false,
+            probes: AtomicUsize::new(0),
+        });
+        let deploy: Arc<dyn DeployPort> = Arc::clone(&probing) as Arc<dyn DeployPort>;
+
+        assert!(
+            super::verify_deploy_health(&deploy, None).await,
+            "a project with no published host_port has nothing to probe"
+        );
+        assert_eq!(
+            probing.probes.load(Ordering::SeqCst),
+            0,
+            "with no port configured the gate must not probe at all"
+        );
+    }
+
+    /// A healthy app passes the gate on the first probe — the gate is
+    /// mandatory, but must not delay deploys that are fine.
+    #[tokio::test(start_paused = true)]
+    async fn a_healthy_app_passes_the_gate_on_the_first_probe() {
+        let probing = Arc::new(FakeDeploy {
+            healthy: true,
+            probes: AtomicUsize::new(0),
+        });
+        let deploy: Arc<dyn DeployPort> = Arc::clone(&probing) as Arc<dyn DeployPort>;
+
+        assert!(super::verify_deploy_health(&deploy, Some(8101)).await);
+        assert_eq!(
+            probing.probes.load(Ordering::SeqCst),
+            1,
+            "a healthy app must not be re-polled"
+        );
     }
 }
