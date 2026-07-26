@@ -1702,32 +1702,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
     }
 
-    /// Mandatory post-deploy health probe (COX-B004): polls the project's
-    /// configured `host_port` for a bounded window so a container that starts
-    /// (`docker compose up` exit 0) but never binds its port — crashes right
-    /// after entrypoint, binds the wrong internal port — is not mistaken for
-    /// a working deploy. No `host_port` configured means nothing to probe
-    /// (matches `ops_monitor`'s own gate); a `deploy` port with no real check
-    /// (default `DeployPort::health` impl) reports healthy immediately, same
-    /// as before this gate existed.
+    /// Mandatory post-deploy health probe (COX-B004): see
+    /// [`crate::ports::outbound::verify_deploy_health`] for the shared gate
+    /// every deploy call site (cycle, chat, PR preview) runs through.
     async fn verify_health_after_deploy(&self) -> bool {
-        const ATTEMPTS: u32 = 15;
-        const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
         let Some(deploy) = &self.deploy else {
             return true;
         };
-        let Some(port) = self.config.deploy.host_port else {
-            return true;
-        };
-        for attempt in 0..ATTEMPTS {
-            if deploy.health(port).await.unwrap_or(true) {
-                return true;
-            }
-            if attempt + 1 < ATTEMPTS {
-                tokio::time::sleep(POLL_INTERVAL).await;
-            }
-        }
-        false
+        crate::ports::outbound::verify_deploy_health(deploy, self.config.deploy.host_port).await
     }
 
     /// Point [`LAST_GOOD_REF`] at this deploy and record it as auto-rollback's

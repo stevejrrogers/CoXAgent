@@ -27,20 +27,20 @@ Call log:
 
 ```yaml
 - complementary:
-  - text:  CoXAgent autonomous dev team · v0.95.0
+  - text:  CoXAgent autonomous dev team · v2.9.0
   - button "遼"
   - button ""
   - button " Chat"
   - text: Channels
   - button ""
-  - text:  general  pw-public-1784749096395  pw-private-1784749096398  pw-public-1784749536083  pw-private-1784749536087 Direct messages 
+  - text:  general Direct messages 
   - textbox "Find a teammate…"
-  - text: No teammates yet Meetings
+  - text: AL alice CH Chopper LU Luffy ST Steve Rogers Meetings
   - button ""
   - button ""
   - text: July 2026
   - button ""
-  - text: M T W T F S S 29 30 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 1 2 RO root Super Admin
+  - text: M T W T F S S 29 30 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 1 2 RO root 🎯 Super Admin
   - button ""
   - button ""
 - main:
@@ -49,7 +49,58 @@ Call log:
   - button ""
   - button ""
   - button " 1"
-  - text: "2026-07-22 root 11:45 PM {\"op\":\"typing\",\"channel\":\"general\"} pw-test-1784749531836 2026-07-23 root 12:22 AM {\"op\":\"typing\",\"channel\":\"general\"} ngon {\"op\":\"typing\",\"channel\":\"general\"} {\"op\":\"typing\",\"channel\":\"general\"} df 2026-07-24 root 08:52 AM {\"op\":\"typing\",\"channel\":\"general\"} {\"op\":\"typing\",\"channel\":\"general\"} root 01:20 AM sss root 03:29 AM test test msg 1 test msg 2 test msg 3 test msg 4 test msg 5 test msg 6 root 03:42 AM Hello team!"
+  - text: "📌 ngon 1 pinned Tuesday, July 14 ST Steve Rogers 🎯 04:35 PM Hello team 👋 kicking off the chat channel AL alice 04:36 PM Hi từ Alice, viewer đây ST Steve Rogers 🎯 04:50 PM Test qua WebSocket ⚡ realtime 04:51 PM Tin từ TAB 2 — bạn thấy ngay chứ? ST Steve Rogers 05:10 PM hi ST Steve Rogers 🎯 05:10 PM nhậu ko ST Steve Rogers 🎯 05:15 PM Tin nay toi qua SSE fallback (khong co WebSocket) 05:16 PM Kiem tra WS + SSE khong bi trung ST Steve Rogers 05:18 PM ngon ST Steve Rogers 🎯 05:18 PM sao 05:18 PM sao 05:18 PM hehe 05:18 PM hehe ST Steve Rogers 05:18 PM giờ nhậu chứ soa ST Steve Rogers 05:24 PM ngon ST Steve Rogers 🎯 05:24 PM quá đã 05:24 PM đã ST Steve Rogers 🎯 01:06 AM 🔔 Push test vào #cxc — Steve thấy banner chứ? 01:08 AM 🔔 trace test #cxc Wednesday, July 15 ST Steve Rogers 09:10 AM ngon ST Steve Rogers 🎯 02:19 PM ok 02:24 PM hi ST Steve Rogers 🎯 02:59 PM hello CH Chopper 01:45 AM e Friday, July 17 CO COX 12:26 AM ↩️ Preview of PR #109 stopped — main build restored. 12:26 AM 👁 Preview of PR #109 is LIVE at"
+  - link "http://localhost:8100":
+    - /url: http://localhost:8100
+  - text: "— the main build is paused; restore it from the Review tab when done. CO COX 01:22 AM 🔀 PR #110 (CXC-B127) is awaiting your review —"
+  - link "https://github.com/stevejrrogers/CoXChat/pull/110":
+    - /url: https://github.com/stevejrrogers/CoXChat/pull/110
+  - text: "CO COX 01:57 AM 🔀 PR #80 — review feedback addressed and pushed; ready for another look:"
+  - link "https://github.com/stevejrrogers/CoXChat/pull/80":
+    - /url: https://github.com/stevejrrogers/CoXChat/pull/80
+  - text: "CO COX 02:21 AM 🔀 PR #111 (CXC-B128) is awaiting your review —"
+  - link "https://github.com/stevejrrogers/CoXChat/pull/111":
+    - /url: https://github.com/stevejrrogers/CoXChat/pull/111
+  - text: "CO COX 02:55 AM 🔀 PR #81 — review feedback addressed and pushed; ready for another look:"
+  - link "https://github.com/stevejrrogers/CoXChat/pull/81":
+    - /url: https://github.com/stevejrrogers/CoXChat/pull/81
+  - text: "CO COX 03:11 AM 🔀 PR #112 (CXC-B129) is awaiting your review —"
+  - link "https://github.com/stevejrrogers/CoXChat/pull/112":
+    - /url: https://github.com/stevejrrogers/CoXChat/pull/112
+  - text: "CO COX 03:49 AM 🔀 PR #82 — review feedback addressed and pushed; ready for another look:"
+  - link "https://github.com/stevejrrogers/CoXChat/pull/82":
+    - /url: https://github.com/stevejrrogers/CoXChat/pull/82
+  - text: "Saturday, July 18 CO COX 04:07 AM 🔀 PR #113 (CXC-B130) is awaiting your review —"
+  - link "https://github.com/stevejrrogers/CoXChat/pull/113":
+    - /url: https://github.com/stevejrrogers/CoXChat/pull/113
+  - text: "CO COX 04:42 AM 🔀 PR #83 — review feedback addressed and pushed; ready for another look:"
+  - link "https://github.com/stevejrrogers/CoXChat/pull/83":
+    - /url: https://github.com/stevejrrogers/CoXChat/pull/83
+  - text: "04:43 AM 📰 Daily digest · 2026-07-18 - Shipped (24h): 39 - 0.76.1 CXC-B092 — Account recovery orphans sealed-envelope mailboxes for revoked devices (CXC-F093) - 0.77.0 CXC-C019 — Refactor: Replace the single global in-memory RwLock with a real persistence layer to enable horizontal scaling - 0.77.1 CXC-B094 — Sync cursor leaks a store-wide, cross-chat message counter (information disclosure) - 0.77.2 CXC-B106 — register_push_token / register_unidentified_access_key / clear_unidentified_access_key leak every sibling device's unidentified_access_key to anyone who knows one device_id - 0.78.0 CXC-C041 — Resolve merge conflict on PR #37 - 0.79.0 CXC-C042 — Resolve merge conflict on PR #38 - Sprint 20: 0/340 committed done — goal: Ship Metadata-minimized link previews, Cursor-based message sync for offline/multi-device clients, Privacy-Preserving Abuse & Spam Reporting - In flight: 0 · open bugs: 0 - Spend to date: $823.90 (3477 runs) CO COX 05:00 AM 🔀 PR #82 — review feedback addressed and pushed; ready for another look:"
+  - link "https://github.com/stevejrrogers/CoXChat/pull/82":
+    - /url: https://github.com/stevejrrogers/CoXChat/pull/82
+  - text: "CO COX 05:38 AM 🔀 PR #114 (CXC-B131) is awaiting your review —"
+  - link "https://github.com/stevejrrogers/CoXChat/pull/114":
+    - /url: https://github.com/stevejrrogers/CoXChat/pull/114
+  - text: "CO COX 06:03 AM 🔀 PR #84 — review feedback addressed and pushed; ready for another look:"
+  - link "https://github.com/stevejrrogers/CoXChat/pull/84":
+    - /url: https://github.com/stevejrrogers/CoXChat/pull/84
+  - text: "CO COX 07:10 AM 🔀 PR #85 — review feedback addressed and pushed; ready for another look:"
+  - link "https://github.com/stevejrrogers/CoXChat/pull/85":
+    - /url: https://github.com/stevejrrogers/CoXChat/pull/85
+  - text: "CO COX 07:29 AM 🔀 PR #115 (CXC-B133) is awaiting your review —"
+  - link "https://github.com/stevejrrogers/CoXChat/pull/115":
+    - /url: https://github.com/stevejrrogers/CoXChat/pull/115
+  - text: "CO COX 08:22 AM 🔀 PR #86 — review feedback addressed and pushed; ready for another look:"
+  - link "https://github.com/stevejrrogers/CoXChat/pull/86":
+    - /url: https://github.com/stevejrrogers/CoXChat/pull/86
+  - text: "CO COX 08:40 AM 🔀 PR #116 (CXC-B134) is awaiting your review —"
+  - link "https://github.com/stevejrrogers/CoXChat/pull/116":
+    - /url: https://github.com/stevejrrogers/CoXChat/pull/116
+  - text: "CO COX 08:51 AM ❌ docker compose failed: Error response from daemon: failed to set up container networking: driver failed programming external connectivity on endpoint codebase-server-1 (f8ae8d19371e2161e5f2fa5b7826209c476329be727010120322db2adb25cf40): Bind for 0.0.0.0:8100 failed: port is already allocated CO COX 08:58 AM 🔀 PR #85 — review feedback addressed and pushed; ready for another look:"
+  - link "https://github.com/stevejrrogers/CoXChat/pull/85":
+    - /url: https://github.com/stevejrrogers/CoXChat/pull/85
+  - text: "08:59 AM 🔀 Sprint 21 opened — goal: Refactor code Theo Clean architecture Yesterday ST Steve Rogers 🎯 03:46 PM @luffy hey hey sao rồi (edited)"
   - button ""
   - button ""
   - button ""
@@ -60,7 +111,12 @@ Call log:
   - button ""
 - text: Thread
 - button ""
-- textbox "Reply to thread…"
+- button ""
+- button ""
+- button ""
+- button ""
+- 'textbox "Reply to thread… (**bold** *italic* `code`)"':
+  - /placeholder: "Reply to thread…  (**bold** *italic* `code`)"
 - button ""
 ```
 

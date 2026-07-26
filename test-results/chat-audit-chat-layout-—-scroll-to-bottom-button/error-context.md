@@ -29,7 +29,6 @@ Call log:
        - element is not visible
      - retrying click action
        - waiting 500ms
-    - waiting for element to be visible, enabled and stable
 
 ```
 
@@ -43,7 +42,7 @@ Call log:
       - generic [ref=e5]: 
       - generic [ref=e6]:
         - generic [ref=e7]: CoXAgent
-        - generic [ref=e8]: autonomous dev team · v0.95.0
+        - generic [ref=e8]: autonomous dev team · v2.9.0
     - generic [ref=e9]:
       - button "遼" [ref=e10] [cursor=pointer]:
         - generic [ref=e11]: 遼
@@ -57,218 +56,530 @@ Call log:
         - generic [ref=e19]: Channels
         - button "" [ref=e21] [cursor=pointer]:
           - generic [ref=e22]: 
-      - generic [ref=e23]:
-        - generic [ref=e24] [cursor=pointer]:
-          - generic [ref=e25]: 
-          - generic [ref=e26]: general
-        - generic [ref=e27] [cursor=pointer]:
-          - generic [ref=e28]: 
-          - generic [ref=e29]: pw-public-1784749096395
-        - generic [ref=e30] [cursor=pointer]:
-          - generic [ref=e31]: 
-          - generic [ref=e32]: pw-private-1784749096398
-        - generic [ref=e33] [cursor=pointer]:
-          - generic [ref=e34]: 
-          - generic [ref=e35]: pw-public-1784749536083
-        - generic [ref=e36] [cursor=pointer]:
-          - generic [ref=e37]: 
-          - generic [ref=e38]: pw-private-1784749536087
-      - generic [ref=e40]: Direct messages
-      - generic [ref=e41]:
-        - generic [ref=e42]: 
-        - textbox "Find a teammate…" [ref=e43]
-      - generic [ref=e45]: No teammates yet
-      - generic [ref=e46]:
-        - generic [ref=e47]: Meetings
-        - button "" [ref=e49] [cursor=pointer]:
-          - generic [ref=e50]: 
-      - generic [ref=e51]:
-        - generic [ref=e52]:
-          - button "" [ref=e53] [cursor=pointer]:
-            - generic [ref=e54]: 
-          - generic [ref=e55]: July 2026
-          - button "" [ref=e56] [cursor=pointer]:
-            - generic [ref=e57]: 
-        - generic [ref=e58]:
-          - generic [ref=e59]: M
-          - generic [ref=e60]: T
-          - generic [ref=e61]: W
-          - generic [ref=e62]: T
-          - generic [ref=e63]: F
-          - generic [ref=e64]: S
-          - generic [ref=e65]: S
-          - generic [ref=e67]: "29"
-          - generic [ref=e69]: "30"
-          - generic [ref=e71] [cursor=pointer]: "1"
-          - generic [ref=e73] [cursor=pointer]: "2"
-          - generic [ref=e75] [cursor=pointer]: "3"
-          - generic [ref=e77] [cursor=pointer]: "4"
-          - generic [ref=e79] [cursor=pointer]: "5"
-          - generic [ref=e81] [cursor=pointer]: "6"
-          - generic [ref=e83] [cursor=pointer]: "7"
-          - generic [ref=e85] [cursor=pointer]: "8"
-          - generic [ref=e87] [cursor=pointer]: "9"
-          - generic [ref=e89] [cursor=pointer]: "10"
-          - generic [ref=e91] [cursor=pointer]: "11"
-          - generic [ref=e93] [cursor=pointer]: "12"
-          - generic [ref=e95] [cursor=pointer]: "13"
-          - generic [ref=e97] [cursor=pointer]: "14"
-          - generic [ref=e99] [cursor=pointer]: "15"
-          - generic [ref=e101] [cursor=pointer]: "16"
-          - generic [ref=e103] [cursor=pointer]: "17"
-          - generic [ref=e105] [cursor=pointer]: "18"
-          - generic [ref=e107] [cursor=pointer]: "19"
-          - generic [ref=e109] [cursor=pointer]: "20"
-          - generic [ref=e111] [cursor=pointer]: "21"
-          - generic [ref=e113] [cursor=pointer]: "22"
-          - generic [ref=e115] [cursor=pointer]: "23"
-          - generic [ref=e117] [cursor=pointer]: "24"
-          - generic [ref=e119] [cursor=pointer]: "25"
-          - generic [ref=e121] [cursor=pointer]: "26"
-          - generic [ref=e123] [cursor=pointer]: "27"
-          - generic [ref=e125] [cursor=pointer]: "28"
-          - generic [ref=e127] [cursor=pointer]: "29"
-          - generic [ref=e129] [cursor=pointer]: "30"
-          - generic [ref=e131] [cursor=pointer]: "31"
-          - generic [ref=e133]: "1"
-          - generic [ref=e135]: "2"
+      - generic [ref=e24] [cursor=pointer]:
+        - generic [ref=e25]: 
+        - generic [ref=e26]: general
+      - generic [ref=e28]: Direct messages
+      - generic [ref=e29]:
+        - generic [ref=e30]: 
+        - textbox "Find a teammate…" [ref=e31]
+      - generic [ref=e32]:
+        - generic "@alice" [ref=e33] [cursor=pointer]:
+          - generic [ref=e34]: AL
+          - generic [ref=e36]: alice
+        - generic "@chopper" [ref=e37] [cursor=pointer]:
+          - generic [ref=e38]: CH
+          - generic [ref=e40]: Chopper
+        - generic "@luffy" [ref=e41] [cursor=pointer]:
+          - generic [ref=e42]: LU
+          - generic [ref=e44]: Luffy
+        - generic "@steve" [ref=e45] [cursor=pointer]:
+          - generic [ref=e46]: ST
+          - generic [ref=e48]: Steve Rogers
+      - generic [ref=e49]:
+        - generic [ref=e50]: Meetings
+        - button "" [ref=e52] [cursor=pointer]:
+          - generic [ref=e53]: 
+      - generic [ref=e54]:
+        - generic [ref=e55]:
+          - button "" [ref=e56] [cursor=pointer]:
+            - generic [ref=e57]: 
+          - generic [ref=e58]: July 2026
+          - button "" [ref=e59] [cursor=pointer]:
+            - generic [ref=e60]: 
+        - generic [ref=e61]:
+          - generic [ref=e62]: M
+          - generic [ref=e63]: T
+          - generic [ref=e64]: W
+          - generic [ref=e65]: T
+          - generic [ref=e66]: F
+          - generic [ref=e67]: S
+          - generic [ref=e68]: S
+          - generic [ref=e70]: "29"
+          - generic [ref=e72]: "30"
+          - generic [ref=e74] [cursor=pointer]: "1"
+          - generic [ref=e76] [cursor=pointer]: "2"
+          - generic [ref=e78] [cursor=pointer]: "3"
+          - generic [ref=e80] [cursor=pointer]: "4"
+          - generic [ref=e82] [cursor=pointer]: "5"
+          - generic [ref=e84] [cursor=pointer]: "6"
+          - generic [ref=e86] [cursor=pointer]: "7"
+          - generic [ref=e88] [cursor=pointer]: "8"
+          - generic [ref=e90] [cursor=pointer]: "9"
+          - generic [ref=e92] [cursor=pointer]: "10"
+          - generic [ref=e94] [cursor=pointer]: "11"
+          - generic [ref=e96] [cursor=pointer]: "12"
+          - generic [ref=e98] [cursor=pointer]: "13"
+          - generic [ref=e100] [cursor=pointer]: "14"
+          - generic [ref=e102] [cursor=pointer]: "15"
+          - generic [ref=e104] [cursor=pointer]: "16"
+          - generic [ref=e106] [cursor=pointer]: "17"
+          - generic [ref=e108] [cursor=pointer]: "18"
+          - generic [ref=e110] [cursor=pointer]: "19"
+          - generic [ref=e112] [cursor=pointer]: "20"
+          - generic [ref=e114] [cursor=pointer]: "21"
+          - generic [ref=e116] [cursor=pointer]: "22"
+          - generic [ref=e118] [cursor=pointer]: "23"
+          - generic [ref=e120] [cursor=pointer]: "24"
+          - generic [ref=e122] [cursor=pointer]: "25"
+          - generic [ref=e124] [cursor=pointer]: "26"
+          - generic [ref=e126] [cursor=pointer]: "27"
+          - generic [ref=e128] [cursor=pointer]: "28"
+          - generic [ref=e130] [cursor=pointer]: "29"
+          - generic [ref=e132] [cursor=pointer]: "30"
+          - generic [ref=e134] [cursor=pointer]: "31"
+          - generic [ref=e136]: "1"
+          - generic [ref=e138]: "2"
     - text:                倫     留
-    - generic [ref=e136]:
-      - generic [ref=e138]: RO
-      - generic [ref=e139]:
-        - generic [ref=e140]: root
-        - generic [ref=e141]: Super Admin
-      - button "" [ref=e142] [cursor=pointer]:
-        - generic [ref=e143]: 
-      - button "" [ref=e144] [cursor=pointer]:
-        - generic [ref=e145]: 
+    - generic [ref=e139]:
+      - generic "Edit your profile & status" [ref=e140] [cursor=pointer]:
+        - generic [ref=e141]: RO
+      - generic [ref=e142]:
+        - generic [ref=e143]: root 🎯
+        - generic [ref=e144]: Super Admin
+      - button "" [ref=e145] [cursor=pointer]:
+        - generic [ref=e146]: 
+      - button "" [ref=e147] [cursor=pointer]:
+        - generic [ref=e148]: 
   - text:  
-  - main [ref=e146]:
-    - text:          
-    - generic [ref=e147]:
-      - text:                     﨡                                        﨡        
-      - generic [ref=e149]:
-        - generic [ref=e150]:
-          - generic [ref=e153]:
-            - generic [ref=e154]: "# general"
-            - generic [ref=e155]: everyone in the workspace
+  - main [ref=e149]:
+    - text:          
+    - generic [ref=e150]:
+      - text:                                                                 﨡        
+      - generic [ref=e152]:
+        - generic [ref=e153]:
           - generic [ref=e156]:
+            - generic [ref=e157]: "# general"
+            - generic [ref=e158]: everyone in the workspace
+          - generic [ref=e159]:
             - text:  
-            - button "" [ref=e157] [cursor=pointer]:
-              - generic [ref=e158]: 
-            - button "" [ref=e159] [cursor=pointer]:
-              - generic [ref=e160]: 
-            - button "" [ref=e161] [cursor=pointer]:
-              - generic [ref=e162]: 
-            - button " 1" [ref=e163] [cursor=pointer]:
-              - generic [ref=e164]: 
-              - generic [ref=e167]: "1"
+            - button "" [ref=e160] [cursor=pointer]:
+              - generic [ref=e161]: 
+            - button "" [ref=e162] [cursor=pointer]:
+              - generic [ref=e163]: 
+            - button "" [ref=e164] [cursor=pointer]:
+              - generic [ref=e165]: 
+            - button " 1" [ref=e166] [cursor=pointer]:
+              - generic [ref=e167]: 
+              - generic [ref=e170]: "1"
             - text: 
-        - generic [ref=e169]:
-          - text:  
-          - generic [ref=e170]:
-            - generic [ref=e171]: 2026-07-22
-            - generic [ref=e172]:
-              - generic [ref=e173]:
-                - generic [ref=e174]: root
-                - generic [ref=e175]: 11:45 PM
-              - generic "root · 11:45 PM" [ref=e176]: "{\"op\":\"typing\",\"channel\":\"general\"}"
-              - text:     
-            - generic [ref=e177]:
-              - generic "root · 11:45 PM" [ref=e178]: pw-test-1784749531836
-              - text:     
-            - generic [ref=e179]: 2026-07-23
-            - generic [ref=e180]:
-              - generic [ref=e181]:
-                - generic [ref=e182]: root
-                - generic [ref=e183]: 12:22 AM
-              - generic "root · 12:22 AM" [ref=e184]: "{\"op\":\"typing\",\"channel\":\"general\"}"
-              - text:     
-            - generic [ref=e185]:
-              - generic "root · 12:22 AM" [ref=e186]: ngon
-              - text:     
-            - generic [ref=e187]:
-              - generic "root · 12:22 AM" [ref=e188]: "{\"op\":\"typing\",\"channel\":\"general\"}"
-              - text:     
-            - generic [ref=e189]:
-              - generic "root · 12:22 AM" [ref=e190]: "{\"op\":\"typing\",\"channel\":\"general\"}"
-              - text:     
-            - generic [ref=e191]:
-              - generic "root · 12:22 AM" [ref=e192]: df
-              - text:     
-            - generic [ref=e193]: 2026-07-24
-            - generic [ref=e194]:
-              - generic [ref=e195]:
-                - generic [ref=e196]: root
-                - generic [ref=e197]: 08:52 AM
-              - generic "root · 08:52 AM" [ref=e198]: "{\"op\":\"typing\",\"channel\":\"general\"}"
-              - text:     
-            - generic [ref=e199]:
-              - generic "root · 08:52 AM" [ref=e200]: "{\"op\":\"typing\",\"channel\":\"general\"}"
-              - text:     
-            - generic [ref=e201]:
-              - generic [ref=e202]:
-                - generic [ref=e203]: root
-                - generic [ref=e204]: 01:20 AM
-              - generic "root · 01:20 AM" [ref=e205]: sss
-              - text:     
-            - generic [ref=e206]:
-              - generic [ref=e207]:
-                - generic [ref=e208]: root
-                - generic [ref=e209]: 03:29 AM
-              - generic "root · 03:29 AM" [ref=e210]: test
-              - text:     
-            - generic [ref=e211]:
-              - generic "root · 03:29 AM" [ref=e212]: test msg 1
-              - text:     
-            - generic [ref=e213]:
-              - generic "root · 03:29 AM" [ref=e214]: test msg 2
-              - text:     
-            - generic [ref=e215]:
-              - generic "root · 03:29 AM" [ref=e216]: test msg 3
-              - text:     
-            - generic [ref=e217]:
-              - generic "root · 03:29 AM" [ref=e218]: test msg 4
-              - text:     
-            - generic [ref=e219]:
-              - generic "root · 03:29 AM" [ref=e220]: test msg 5
-              - text:     
-            - generic [ref=e221]:
-              - generic "root · 03:29 AM" [ref=e222]: test msg 6
-              - text:     
-            - generic [ref=e223]:
-              - generic [ref=e224]:
-                - generic [ref=e225]: root
-                - generic [ref=e226]: 03:42 AM
-              - generic "root · 03:42 AM" [ref=e227]: Hello team!
-              - text:     
-          - generic [ref=e229]:
-            - button "" [ref=e230] [cursor=pointer]:
-              - generic [ref=e231]: 
-            - button "" [ref=e232] [cursor=pointer]:
-              - generic [ref=e233]: 
-            - button "" [ref=e234] [cursor=pointer]:
-              - generic [ref=e235]: 
-            - button "" [ref=e236] [cursor=pointer]:
-              - generic [ref=e237]: 
-            - button "" [ref=e238] [cursor=pointer]:
-              - generic [ref=e239]: 
-            - 'textbox "Message your team… (Enter to send · @ to mention · **bold** *italic* \\`code\\`)" [active] [ref=e240]':
+        - generic [ref=e172]:
+          - text: 
+          - generic [ref=e173]:
+            - 'generic "steve: ngon" [ref=e174] [cursor=pointer]': 📌 ngon
+            - generic [ref=e175]: 1 pinned
+          - text: 
+          - generic [ref=e176]:
+            - generic [ref=e178]: Tuesday, July 14
+            - generic [ref=e179]:
+              - generic [ref=e181]: ST
+              - generic [ref=e182]:
+                - generic [ref=e183]:
+                  - generic [ref=e184]: Steve Rogers
+                  - generic "Focusing" [ref=e185]: 🎯
+                  - generic [ref=e186]: 04:35 PM
+                - generic [ref=e187]: Hello team 👋 kicking off the chat channel
+            - generic [ref=e188]:
+              - generic [ref=e190]: AL
+              - generic [ref=e191]:
+                - generic [ref=e192]:
+                  - generic [ref=e193]: alice
+                  - generic [ref=e194]: 04:36 PM
+                - generic [ref=e195]: Hi từ Alice, viewer đây
+            - generic [ref=e196]:
+              - generic [ref=e198]: ST
+              - generic [ref=e199]:
+                - generic [ref=e200]:
+                  - generic [ref=e201]: Steve Rogers
+                  - generic "Focusing" [ref=e202]: 🎯
+                  - generic [ref=e203]: 04:50 PM
+                - generic [ref=e204]: Test qua WebSocket ⚡ realtime
+            - generic [ref=e205]:
+              - generic [ref=e207]: 04:51 PM
+              - generic [ref=e209]: Tin từ TAB 2 — bạn thấy ngay chứ?
+            - generic [ref=e210]:
+              - generic [ref=e212]: ST
+              - generic [ref=e213]:
+                - generic [ref=e214]:
+                  - generic [ref=e215]: Steve Rogers
+                  - generic [ref=e216]: 05:10 PM
+                - generic [ref=e217]: hi
+            - generic [ref=e218]:
+              - generic [ref=e220]: ST
+              - generic [ref=e221]:
+                - generic [ref=e222]:
+                  - generic [ref=e223]: Steve Rogers
+                  - generic "Focusing" [ref=e224]: 🎯
+                  - generic [ref=e225]: 05:10 PM
+                - generic [ref=e226]: nhậu ko
+            - generic [ref=e227]:
+              - generic [ref=e229]: ST
+              - generic [ref=e230]:
+                - generic [ref=e231]:
+                  - generic [ref=e232]: Steve Rogers
+                  - generic "Focusing" [ref=e233]: 🎯
+                  - generic [ref=e234]: 05:15 PM
+                - generic [ref=e235]: Tin nay toi qua SSE fallback (khong co WebSocket)
+            - generic [ref=e236]:
+              - generic [ref=e238]: 05:16 PM
+              - generic [ref=e240]: Kiem tra WS + SSE khong bi trung
+            - generic [ref=e241]:
+              - generic [ref=e243]: ST
+              - generic [ref=e244]:
+                - generic [ref=e245]:
+                  - generic [ref=e246]: Steve Rogers
+                  - generic [ref=e247]: 05:18 PM
+                - generic [ref=e248]: ngon
+            - generic [ref=e249]:
+              - generic [ref=e251]: ST
+              - generic [ref=e252]:
+                - generic [ref=e253]:
+                  - generic [ref=e254]: Steve Rogers
+                  - generic "Focusing" [ref=e255]: 🎯
+                  - generic [ref=e256]: 05:18 PM
+                - generic [ref=e257]: sao
+            - generic [ref=e258]:
+              - generic [ref=e260]: 05:18 PM
+              - generic [ref=e262]: sao
+            - generic [ref=e263]:
+              - generic [ref=e265]: 05:18 PM
+              - generic [ref=e267]: hehe
+            - generic [ref=e268]:
+              - generic [ref=e270]: 05:18 PM
+              - generic [ref=e272]: hehe
+            - generic [ref=e273]:
+              - generic [ref=e275]: ST
+              - generic [ref=e276]:
+                - generic [ref=e277]:
+                  - generic [ref=e278]: Steve Rogers
+                  - generic [ref=e279]: 05:18 PM
+                - generic [ref=e280]: giờ nhậu chứ soa
+            - generic [ref=e281]:
+              - generic [ref=e283]: ST
+              - generic [ref=e284]:
+                - generic [ref=e285]:
+                  - generic [ref=e286]: Steve Rogers
+                  - generic [ref=e287]: 05:24 PM
+                - generic [ref=e288]: ngon
+            - generic [ref=e289]:
+              - generic [ref=e291]: ST
+              - generic [ref=e292]:
+                - generic [ref=e293]:
+                  - generic [ref=e294]: Steve Rogers
+                  - generic "Focusing" [ref=e295]: 🎯
+                  - generic [ref=e296]: 05:24 PM
+                - generic [ref=e297]: quá đã
+            - generic [ref=e298]:
+              - generic [ref=e300]: 05:24 PM
+              - generic [ref=e302]: đã
+            - generic [ref=e303]:
+              - generic [ref=e305]: ST
+              - generic [ref=e306]:
+                - generic [ref=e307]:
+                  - generic [ref=e308]: Steve Rogers
+                  - generic "Focusing" [ref=e309]: 🎯
+                  - generic [ref=e310]: 01:06 AM
+                - generic [ref=e311]: "🔔 Push test vào #cxc — Steve thấy banner chứ?"
+            - generic [ref=e312]:
+              - generic [ref=e314]: 01:08 AM
+              - generic [ref=e316]: "🔔 trace test #cxc"
+            - generic [ref=e318]: Wednesday, July 15
+            - generic [ref=e319]:
+              - generic [ref=e321]: ST
+              - generic [ref=e322]:
+                - generic [ref=e323]:
+                  - generic [ref=e324]: Steve Rogers
+                  - generic [ref=e325]: 09:10 AM
+                - generic [ref=e326]: ngon
+              - text:    
+            - generic [ref=e327]:
+              - generic [ref=e329]: ST
+              - generic [ref=e330]:
+                - generic [ref=e331]:
+                  - generic [ref=e332]: Steve Rogers
+                  - generic "Focusing" [ref=e333]: 🎯
+                  - generic [ref=e334]: 02:19 PM
+                - generic [ref=e335]: ok
+              - text:      
+            - generic [ref=e336]:
+              - generic [ref=e338]: 02:24 PM
+              - generic [ref=e340]: hi
+              - text:      
+            - generic [ref=e341]:
+              - generic [ref=e343]: ST
+              - generic [ref=e344]:
+                - generic [ref=e345]:
+                  - generic [ref=e346]: Steve Rogers
+                  - generic "Focusing" [ref=e347]: 🎯
+                  - generic [ref=e348]: 02:59 PM
+                - generic [ref=e349]: hello
+              - text:      
+            - generic [ref=e350]:
+              - generic [ref=e352]: CH
+              - generic [ref=e353]:
+                - generic [ref=e354]:
+                  - generic [ref=e355]: Chopper
+                  - generic [ref=e356]: 01:45 AM
+                - generic [ref=e357]: e
+              - text:    
+            - generic [ref=e359]: Friday, July 17
+            - generic [ref=e360]:
+              - generic [ref=e362]: CO
+              - generic [ref=e363]:
+                - generic [ref=e364]:
+                  - generic [ref=e365]: COX
+                  - generic [ref=e366]: 12:26 AM
+                - generic [ref=e367]: "↩️ Preview of PR #109 stopped — main build restored."
+              - text:    
+            - generic [ref=e368]:
+              - generic [ref=e370]: 12:26 AM
+              - generic [ref=e372]:
+                - text: "👁 Preview of PR #109 is LIVE at"
+                - link "http://localhost:8100" [ref=e373] [cursor=pointer]:
+                  - /url: http://localhost:8100
+                - text: — the main build is paused; restore it from the Review tab when done.
+              - text:    
+            - generic [ref=e374]:
+              - generic [ref=e376]: CO
+              - generic [ref=e377]:
+                - generic [ref=e378]:
+                  - generic [ref=e379]: COX
+                  - generic [ref=e380]: 01:22 AM
+                - generic [ref=e381]:
+                  - text: "🔀 PR #110 (CXC-B127) is awaiting your review —"
+                  - link "https://github.com/stevejrrogers/CoXChat/pull/110" [ref=e382] [cursor=pointer]:
+                    - /url: https://github.com/stevejrrogers/CoXChat/pull/110
+              - text:    
+            - generic [ref=e383]:
+              - generic [ref=e385]: CO
+              - generic [ref=e386]:
+                - generic [ref=e387]:
+                  - generic [ref=e388]: COX
+                  - generic [ref=e389]: 01:57 AM
+                - generic [ref=e390]:
+                  - text: "🔀 PR #80 — review feedback addressed and pushed; ready for another look:"
+                  - link "https://github.com/stevejrrogers/CoXChat/pull/80" [ref=e391] [cursor=pointer]:
+                    - /url: https://github.com/stevejrrogers/CoXChat/pull/80
+              - text:    
+            - generic [ref=e392]:
+              - generic [ref=e394]: CO
+              - generic [ref=e395]:
+                - generic [ref=e396]:
+                  - generic [ref=e397]: COX
+                  - generic [ref=e398]: 02:21 AM
+                - generic [ref=e399]:
+                  - text: "🔀 PR #111 (CXC-B128) is awaiting your review —"
+                  - link "https://github.com/stevejrrogers/CoXChat/pull/111" [ref=e400] [cursor=pointer]:
+                    - /url: https://github.com/stevejrrogers/CoXChat/pull/111
+              - text:    
+            - generic [ref=e401]:
+              - generic [ref=e403]: CO
+              - generic [ref=e404]:
+                - generic [ref=e405]:
+                  - generic [ref=e406]: COX
+                  - generic [ref=e407]: 02:55 AM
+                - generic [ref=e408]:
+                  - text: "🔀 PR #81 — review feedback addressed and pushed; ready for another look:"
+                  - link "https://github.com/stevejrrogers/CoXChat/pull/81" [ref=e409] [cursor=pointer]:
+                    - /url: https://github.com/stevejrrogers/CoXChat/pull/81
+              - text:    
+            - generic [ref=e410]:
+              - generic [ref=e412]: CO
+              - generic [ref=e413]:
+                - generic [ref=e414]:
+                  - generic [ref=e415]: COX
+                  - generic [ref=e416]: 03:11 AM
+                - generic [ref=e417]:
+                  - text: "🔀 PR #112 (CXC-B129) is awaiting your review —"
+                  - link "https://github.com/stevejrrogers/CoXChat/pull/112" [ref=e418] [cursor=pointer]:
+                    - /url: https://github.com/stevejrrogers/CoXChat/pull/112
+              - text:    
+            - generic [ref=e419]:
+              - generic [ref=e421]: CO
+              - generic [ref=e422]:
+                - generic [ref=e423]:
+                  - generic [ref=e424]: COX
+                  - generic [ref=e425]: 03:49 AM
+                - generic [ref=e426]:
+                  - text: "🔀 PR #82 — review feedback addressed and pushed; ready for another look:"
+                  - link "https://github.com/stevejrrogers/CoXChat/pull/82" [ref=e427] [cursor=pointer]:
+                    - /url: https://github.com/stevejrrogers/CoXChat/pull/82
+              - text:    
+            - generic [ref=e429]: Saturday, July 18
+            - generic [ref=e430]:
+              - generic [ref=e432]: CO
+              - generic [ref=e433]:
+                - generic [ref=e434]:
+                  - generic [ref=e435]: COX
+                  - generic [ref=e436]: 04:07 AM
+                - generic [ref=e437]:
+                  - text: "🔀 PR #113 (CXC-B130) is awaiting your review —"
+                  - link "https://github.com/stevejrrogers/CoXChat/pull/113" [ref=e438] [cursor=pointer]:
+                    - /url: https://github.com/stevejrrogers/CoXChat/pull/113
+              - text:    
+            - generic [ref=e439]:
+              - generic [ref=e441]: CO
+              - generic [ref=e442]:
+                - generic [ref=e443]:
+                  - generic [ref=e444]: COX
+                  - generic [ref=e445]: 04:42 AM
+                - generic [ref=e446]:
+                  - text: "🔀 PR #83 — review feedback addressed and pushed; ready for another look:"
+                  - link "https://github.com/stevejrrogers/CoXChat/pull/83" [ref=e447] [cursor=pointer]:
+                    - /url: https://github.com/stevejrrogers/CoXChat/pull/83
+              - text:    
+            - generic [ref=e448]:
+              - generic [ref=e450]: 04:43 AM
+              - generic [ref=e452]: "📰 Daily digest · 2026-07-18 - Shipped (24h): 39 - 0.76.1 CXC-B092 — Account recovery orphans sealed-envelope mailboxes for revoked devices (CXC-F093) - 0.77.0 CXC-C019 — Refactor: Replace the single global in-memory RwLock with a real persistence layer to enable horizontal scaling - 0.77.1 CXC-B094 — Sync cursor leaks a store-wide, cross-chat message counter (information disclosure) - 0.77.2 CXC-B106 — register_push_token / register_unidentified_access_key / clear_unidentified_access_key leak every sibling device's unidentified_access_key to anyone who knows one device_id - 0.78.0 CXC-C041 — Resolve merge conflict on PR #37 - 0.79.0 CXC-C042 — Resolve merge conflict on PR #38 - Sprint 20: 0/340 committed done — goal: Ship Metadata-minimized link previews, Cursor-based message sync for offline/multi-device clients, Privacy-Preserving Abuse & Spam Reporting - In flight: 0 · open bugs: 0 - Spend to date: $823.90 (3477 runs)"
+              - text:    
+            - generic [ref=e453]:
+              - generic [ref=e455]: CO
+              - generic [ref=e456]:
+                - generic [ref=e457]:
+                  - generic [ref=e458]: COX
+                  - generic [ref=e459]: 05:00 AM
+                - generic [ref=e460]:
+                  - text: "🔀 PR #82 — review feedback addressed and pushed; ready for another look:"
+                  - link "https://github.com/stevejrrogers/CoXChat/pull/82" [ref=e461] [cursor=pointer]:
+                    - /url: https://github.com/stevejrrogers/CoXChat/pull/82
+              - text:    
+            - generic [ref=e462]:
+              - generic [ref=e464]: CO
+              - generic [ref=e465]:
+                - generic [ref=e466]:
+                  - generic [ref=e467]: COX
+                  - generic [ref=e468]: 05:38 AM
+                - generic [ref=e469]:
+                  - text: "🔀 PR #114 (CXC-B131) is awaiting your review —"
+                  - link "https://github.com/stevejrrogers/CoXChat/pull/114" [ref=e470] [cursor=pointer]:
+                    - /url: https://github.com/stevejrrogers/CoXChat/pull/114
+              - text:    
+            - generic [ref=e471]:
+              - generic [ref=e473]: CO
+              - generic [ref=e474]:
+                - generic [ref=e475]:
+                  - generic [ref=e476]: COX
+                  - generic [ref=e477]: 06:03 AM
+                - generic [ref=e478]:
+                  - text: "🔀 PR #84 — review feedback addressed and pushed; ready for another look:"
+                  - link "https://github.com/stevejrrogers/CoXChat/pull/84" [ref=e479] [cursor=pointer]:
+                    - /url: https://github.com/stevejrrogers/CoXChat/pull/84
+              - text:    
+            - generic [ref=e480]:
+              - generic [ref=e482]: CO
+              - generic [ref=e483]:
+                - generic [ref=e484]:
+                  - generic [ref=e485]: COX
+                  - generic [ref=e486]: 07:10 AM
+                - generic [ref=e487]:
+                  - text: "🔀 PR #85 — review feedback addressed and pushed; ready for another look:"
+                  - link "https://github.com/stevejrrogers/CoXChat/pull/85" [ref=e488] [cursor=pointer]:
+                    - /url: https://github.com/stevejrrogers/CoXChat/pull/85
+              - text:    
+            - generic [ref=e489]:
+              - generic [ref=e491]: CO
+              - generic [ref=e492]:
+                - generic [ref=e493]:
+                  - generic [ref=e494]: COX
+                  - generic [ref=e495]: 07:29 AM
+                - generic [ref=e496]:
+                  - text: "🔀 PR #115 (CXC-B133) is awaiting your review —"
+                  - link "https://github.com/stevejrrogers/CoXChat/pull/115" [ref=e497] [cursor=pointer]:
+                    - /url: https://github.com/stevejrrogers/CoXChat/pull/115
+              - text:    
+            - generic [ref=e498]:
+              - generic [ref=e500]: CO
+              - generic [ref=e501]:
+                - generic [ref=e502]:
+                  - generic [ref=e503]: COX
+                  - generic [ref=e504]: 08:22 AM
+                - generic [ref=e505]:
+                  - text: "🔀 PR #86 — review feedback addressed and pushed; ready for another look:"
+                  - link "https://github.com/stevejrrogers/CoXChat/pull/86" [ref=e506] [cursor=pointer]:
+                    - /url: https://github.com/stevejrrogers/CoXChat/pull/86
+              - text:    
+            - generic [ref=e507]:
+              - generic [ref=e509]: CO
+              - generic [ref=e510]:
+                - generic [ref=e511]:
+                  - generic [ref=e512]: COX
+                  - generic [ref=e513]: 08:40 AM
+                - generic [ref=e514]:
+                  - text: "🔀 PR #116 (CXC-B134) is awaiting your review —"
+                  - link "https://github.com/stevejrrogers/CoXChat/pull/116" [ref=e515] [cursor=pointer]:
+                    - /url: https://github.com/stevejrrogers/CoXChat/pull/116
+              - text:    
+            - generic [ref=e516]:
+              - generic [ref=e518]: CO
+              - generic [ref=e519]:
+                - generic [ref=e520]:
+                  - generic [ref=e521]: COX
+                  - generic [ref=e522]: 08:51 AM
+                - generic [ref=e523]: "❌ docker compose failed: Error response from daemon: failed to set up container networking: driver failed programming external connectivity on endpoint codebase-server-1 (f8ae8d19371e2161e5f2fa5b7826209c476329be727010120322db2adb25cf40): Bind for 0.0.0.0:8100 failed: port is already allocated"
+              - text:    
+            - generic [ref=e524]:
+              - generic [ref=e526]: CO
+              - generic [ref=e527]:
+                - generic [ref=e528]:
+                  - generic [ref=e529]: COX
+                  - generic [ref=e530]: 08:58 AM
+                - generic [ref=e531]:
+                  - text: "🔀 PR #85 — review feedback addressed and pushed; ready for another look:"
+                  - link "https://github.com/stevejrrogers/CoXChat/pull/85" [ref=e532] [cursor=pointer]:
+                    - /url: https://github.com/stevejrrogers/CoXChat/pull/85
+              - text:    
+            - generic [ref=e533]:
+              - generic [ref=e535]: 08:59 AM
+              - generic [ref=e537]: "🔀 Sprint 21 opened — goal: Refactor code Theo Clean architecture"
+              - text:    
+            - generic [ref=e539]: Yesterday
+            - generic [ref=e540]:
+              - generic [ref=e542]: ST
+              - generic [ref=e543]:
+                - generic [ref=e544]:
+                  - generic [ref=e545]: Steve Rogers
+                  - generic "Focusing" [ref=e546]: 🎯
+                  - generic [ref=e547]: 03:46 PM
+                - generic [ref=e548]: "@luffy hey hey sao rồi (edited)"
+              - text:      
+          - generic [ref=e550]:
+            - button "" [ref=e551] [cursor=pointer]:
+              - generic [ref=e552]: 
+            - button "" [ref=e553] [cursor=pointer]:
+              - generic [ref=e554]: 
+            - button "" [ref=e555] [cursor=pointer]:
+              - generic [ref=e556]: 
+            - button "" [ref=e557] [cursor=pointer]:
+              - generic [ref=e558]: 
+            - button "" [ref=e559] [cursor=pointer]:
+              - generic [ref=e560]: 
+            - 'textbox "Message your team… (Enter to send · @ to mention · **bold** *italic* \\`code\\`)" [active] [ref=e561]':
               - /placeholder: "Message your team…  (Enter to send · @ to mention · **bold** *italic* \\`code\\`)"
               - text: Scroll test message number 1
-            - button "" [ref=e241] [cursor=pointer]:
-              - generic [ref=e242]: 
-  - generic [ref=e243]:
-    - generic [ref=e244]:
-      - generic [ref=e245]: Thread
-      - button "" [ref=e246] [cursor=pointer]:
-        - generic [ref=e247]: 
-    - generic [ref=e249]:
-      - textbox "Reply to thread…" [ref=e250]
-      - button "" [ref=e251] [cursor=pointer]:
-        - generic [ref=e252]: 
-  - text:                               
-  - text:          A rough note is enough — click ✨ and the team will refine it.        裸  
+            - button "" [ref=e562] [cursor=pointer]:
+              - generic [ref=e563]: 
+  - generic [ref=e564]:
+    - generic [ref=e565]:
+      - generic [ref=e566]: Thread
+      - button "" [ref=e567] [cursor=pointer]:
+        - generic [ref=e568]: 
+    - generic [ref=e570]:
+      - generic [ref=e571]:
+        - button "" [ref=e572] [cursor=pointer]:
+          - generic [ref=e573]: 
+        - button "" [ref=e574] [cursor=pointer]:
+          - generic [ref=e575]: 
+        - button "" [ref=e576] [cursor=pointer]:
+          - generic [ref=e577]: 
+        - button "" [ref=e578] [cursor=pointer]:
+          - generic [ref=e579]: 
+      - generic [ref=e580]:
+        - 'textbox "Reply to thread… (**bold** *italic* `code`)" [ref=e581]':
+          - /placeholder: "Reply to thread…  (**bold** *italic* `code`)"
+        - button "" [ref=e582] [cursor=pointer]:
+          - generic [ref=e583]: 
+  - text:                                       
+  - text:          A rough note is enough — click ✨ and the team will refine it.        裸    
 ```
 
 # Test source

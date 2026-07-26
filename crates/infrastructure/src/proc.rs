@@ -130,6 +130,11 @@ fn sandbox_writable(work_dir: &Path) -> Vec<PathBuf> {
 
 /// A macOS Seatbelt profile: allow everything EXCEPT file writes outside the
 /// allow-list. Pure so it is unit-testable.
+///
+/// The gate is load-bearing (COX-B006): the only call site is macOS-only, so
+/// without it this is dead code on Linux and `warnings = "deny"` fails the
+/// Docker release build. `test` keeps it available to the unit test on every
+/// host. Guarded repo-wide by `crates/app/tests/platform_gates.rs`.
 #[cfg(any(test, target_os = "macos"))]
 fn seatbelt_profile(writable: &[PathBuf]) -> String {
     let subpaths: String = writable

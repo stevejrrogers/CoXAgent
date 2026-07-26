@@ -5,6 +5,7 @@
 use crate::error::PortError;
 use async_trait::async_trait;
 use std::path::Path;
+use std::sync::Arc;
 
 /// Outcome of a deploy attempt.
 #[derive(Debug, Clone)]
@@ -79,4 +80,36 @@ pub trait DeployPort: Send + Sync {
             summary: "no test runner".to_owned(),
         })
     }
+}
+
+/// Mandatory post-deploy health probe (COX-B004/COX-B009): a `docker compose
+/// up` exit 0 only proves the containers started — it says nothing about
+/// whether the app inside actually bound its configured port. This polls
+/// [`DeployPort::health`] for a bounded window so every call site that reports
+/// a deploy as a success — the autonomous cycle, chat's "deploy" command, and
+/// the PR-preview endpoint alike — is gated the same way and none of them can
+/// downgrade a dead-on-arrival container into "success" by skipping the
+/// check. No `host_port` configured means nothing to probe (matches
+/// `ops_monitor`'s own gate); a `deploy` port with no real check (default
+/// `DeployPort::health` impl) reports healthy immediately, same as before
+/// this gate existed.
+///
+/// # Errors
+/// Never returns an error — an unreachable/failing health check is reported
+/// as `false`, not propagated.
+pub async fn verify_deploy_health(deploy: &Arc<dyn DeployPort>, host_port: Option<u16>) -> bool {
+    const ATTEMPTS: u32 = 15;
+    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+    let Some(port) = host_port else {
+        return true;
+    };
+    for attempt in 0..ATTEMPTS {
+        if deploy.health(port).await.unwrap_or(true) {
+            return true;
+        }
+        if attempt + 1 < ATTEMPTS {
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+    }
+    false
 }

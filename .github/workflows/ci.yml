@@ -25,3 +25,43 @@ jobs:
         run: cargo clippy --all-targets --all-features
       - name: Test
         run: cargo test --all-features
+
+  deploy-build:
+    # COX-B006 regression guard: reproduce the Docker builder's compile — the
+    # release binary for Linux, no `test` cfg — which is what turned an ungated
+    # macOS-only helper into `error: function ... is never used` under the
+    # workspace's `warnings = "deny"`, so no image could ever be built.
+    # Deliberately separate from `check`: this job runs plain rustc lints only,
+    # so it stays a trustworthy deploy gate while the clippy pedantic baseline
+    # in `crates/application` keeps `check` red.
+    name: release build (linux, as the Docker builder sees it)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the deploy binary
+        run: cargo build --release --bin coxagent
+
+  deploy-smoke:
+    # COX-B008 regression guard for the OTHER half of the bug report: a green
+    # `cargo build` is not a running app. The test brings the stack up with the
+    # exact command this repo's docker-compose.yml documents and proves the hub
+    # answers on the published host port — so "compiles" can never again be
+    # mistaken for "comes up". Catches image build breakage, entrypoint
+    # failures and port-binding mistakes in one step. Test rather than shell so
+    # a developer can run the same gate locally.
+    name: docker compose smoke (app answers on 8101)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Bring the stack up and probe the published port
+        run: cargo test -p coxagent-app --test deploy_smoke -- --ignored --nocapture
+      - name: Container logs on failure
+        if: failure()
+        run: docker compose logs --no-color
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

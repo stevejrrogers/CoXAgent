@@ -5041,7 +5041,12 @@ async fn pr_preview(
         // Swap: stop the current app, run the PR branch on the app port.
         let _ = deploy.down(&p.work_dir).await;
         match deploy.deploy(&prev_dir).await {
-            Ok(r) if r.success => {
+            // Mandatory health gate (COX-B004/COX-B009): a compose exit-0
+            // only proves the containers started, not that the app inside
+            // bound its port — probe before telling the human it's LIVE.
+            Ok(r) if r.success
+                && coxagent_application::ports::outbound::verify_deploy_health(deploy, port.map(|pt| pt as u16)).await =>
+            {
                 let url = port.map(|pt| format!("http://localhost:{pt}"));
                 chat(format!(
                     "👁 Preview of PR #{num} is LIVE{} — the main build is paused; restore it from the Review tab when done.",
@@ -5051,19 +5056,33 @@ async fn pr_preview(
                 Json(serde_json::json!({ "ok": true, "url": url, "summary": r.summary }))
                     .into_response()
             }
+            Ok(r) if r.success => internal_error(&format!(
+                "preview deploy failed: {} (containers started but the app never bound its port \
+                 — health check failed)",
+                r.summary
+            )),
             Ok(r) => internal_error(&format!("preview deploy failed: {}", r.summary)),
             Err(e) => internal_error(&e.to_string()),
         }
     } else {
         let _ = deploy.down(&prev_dir).await;
         match deploy.deploy(&p.work_dir).await {
-            Ok(_) => {
+            // Same gate on restore: a "restore" that never comes back up on
+            // the port must not be reported as a clean restore.
+            Ok(r) if r.success
+                && coxagent_application::ports::outbound::verify_deploy_health(deploy, port.map(|pt| pt as u16)).await =>
+            {
                 chat(format!(
                     "↩️ Preview of PR #{num} stopped — main build restored."
                 ))
                 .await;
                 Json(serde_json::json!({ "ok": true })).into_response()
             }
+            Ok(r) => internal_error(&format!(
+                "restore failed: {} (containers started but the app never bound its port — \
+                 health check failed)",
+                r.summary
+            )),
             Err(e) => internal_error(&e.to_string()),
         }
     }
@@ -8629,4 +8648,163 @@ fn internal_error(msg: &str) -> axum::response::Response {
         Json(serde_json::json!({ "error": msg })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod pr_preview_tests {
+    use super::*;
+    use coxagent_application::config::BudgetCaps;
+    use coxagent_application::ports::outbound::{
+        AgentOutcome, AgentRequest, DeployPort, DeployReport, ForgePort, PullRequest,
+    };
+    use coxagent_application::state::ProjectState;
+    use coxagent_application::PortError;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct MemStore {
+        state: Mutex<ProjectState>,
+    }
+    #[async_trait::async_trait]
+    impl StateStorePort for MemStore {
+        async fn load(&self) -> Result<ProjectState, PortError> {
+            Ok(self.state.lock().expect("lock").clone())
+        }
+        async fn save(&self, s: &ProjectState) -> Result<(), PortError> {
+            *self.state.lock().expect("lock") = s.clone();
+            Ok(())
+        }
+    }
+
+    /// Never invoked by the restore (`start=false`) path under test.
+    struct UnusedEngine;
+    #[async_trait::async_trait]
+    impl coxagent_application::ports::outbound::AgentEnginePort for UnusedEngine {
+        fn id(&self) -> &'static str {
+            "unused"
+        }
+        async fn run(&self, _request: AgentRequest) -> Result<AgentOutcome, PortError> {
+            unreachable!("not called by pr_preview's restore path")
+        }
+    }
+
+    /// Never invoked by the restore (`start=false`) path under test — it does
+    /// no PR/git lookups, only `deploy.down` + `deploy.deploy`.
+    struct UnusedForge;
+    #[async_trait::async_trait]
+    impl ForgePort for UnusedForge {
+        async fn open_pr(
+            &self,
+            _head: &str,
+            _base: &str,
+            _title: &str,
+            _body: &str,
+        ) -> Result<PullRequest, PortError> {
+            unreachable!("not called by pr_preview's restore path")
+        }
+        async fn list_open_prs(&self) -> Result<Vec<PullRequest>, PortError> {
+            unreachable!("not called by pr_preview's restore path")
+        }
+        async fn pr_diff(&self, _number: u64) -> Result<String, PortError> {
+            unreachable!("not called by pr_preview's restore path")
+        }
+        async fn merge_pr(&self, _number: u64) -> Result<(), PortError> {
+            unreachable!("not called by pr_preview's restore path")
+        }
+        async fn request_changes(&self, _number: u64, _comment: &str) -> Result<(), PortError> {
+            unreachable!("not called by pr_preview's restore path")
+        }
+        async fn close_pr(&self, _number: u64) -> Result<(), PortError> {
+            unreachable!("not called by pr_preview's restore path")
+        }
+    }
+
+    /// `docker compose up` exits 0 (container started) but the app inside
+    /// never answers on its configured port — the COX-B004/COX-B009 scenario.
+    struct DeployWithDeadPort;
+    #[async_trait::async_trait]
+    impl DeployPort for DeployWithDeadPort {
+        async fn deploy(&self, _work_dir: &std::path::Path) -> Result<DeployReport, PortError> {
+            Ok(DeployReport {
+                success: true,
+                deployed: true,
+                summary: "docker compose up -d --build succeeded".to_owned(),
+            })
+        }
+        async fn health(&self, _port: u16) -> Result<bool, PortError> {
+            Ok(false)
+        }
+    }
+
+    struct HealthyDeploy;
+    #[async_trait::async_trait]
+    impl DeployPort for HealthyDeploy {
+        async fn deploy(&self, _work_dir: &std::path::Path) -> Result<DeployReport, PortError> {
+            Ok(DeployReport {
+                success: true,
+                deployed: true,
+                summary: "docker compose up -d --build succeeded".to_owned(),
+            })
+        }
+        async fn health(&self, _port: u16) -> Result<bool, PortError> {
+            Ok(true)
+        }
+    }
+
+    /// A project workspace with a `coxagent.json` naming the published
+    /// `deploy.host_port` `pr_preview` reads to probe health.
+    fn project_handle(deploy: Arc<dyn DeployPort>) -> (tempfile::TempDir, ProjectHandle) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("coxagent.json");
+        std::fs::write(&config_path, r#"{"deploy":{"host_port":8101}}"#).expect("write config");
+        let handle = ProjectHandle {
+            id: "proj".to_owned(),
+            name: "proj".to_owned(),
+            alias: "proj".to_owned(),
+            store: Arc::new(MemStore::default()) as Arc<dyn StateStorePort>,
+            runner: Arc::new(RunnerHandle::default()),
+            config_path,
+            engine: Arc::new(UnusedEngine),
+            work_dir: dir.path().to_path_buf(),
+            budget: Arc::new(Mutex::new(BudgetCaps::default())),
+            context_path: dir.path().join("project_context.md"),
+            forge: None,
+            deploy: Some(deploy),
+        };
+        (dir, handle)
+    }
+
+    /// AC (COX-B009): restoring the main build after a PR preview must run
+    /// through the same mandatory health gate as the autonomous cycle
+    /// (COX-B004) and chat's "deploy" command — a compose exit-0 that never
+    /// binds the app's port must NOT be reported as a successful restore.
+    #[tokio::test(start_paused = true)]
+    async fn restore_reports_failure_when_the_app_never_binds_its_port() {
+        let (_dir, handle) = project_handle(Arc::new(DeployWithDeadPort));
+        let forge: Arc<dyn ForgePort> = Arc::new(UnusedForge);
+
+        let resp = pr_preview(&handle, &forge, 1, false).await;
+
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            text.contains("health check failed"),
+            "expected the health-gate failure reason in the response: {text}"
+        );
+    }
+
+    /// Control: a restore that actually answers on its port still reports OK
+    /// — the gate must not fail a genuinely healthy restore.
+    #[tokio::test(start_paused = true)]
+    async fn restore_reports_ok_when_the_app_is_healthy() {
+        let (_dir, handle) = project_handle(Arc::new(HealthyDeploy));
+        let forge: Arc<dyn ForgePort> = Arc::new(UnusedForge);
+
+        let resp = pr_preview(&handle, &forge, 1, false).await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
 }
