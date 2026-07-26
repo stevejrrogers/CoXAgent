@@ -20,6 +20,12 @@ use std::sync::{Arc, Mutex};
 /// How often (in sprints) the SA runs a whole-system architecture review.
 const ARCH_REVIEW_EVERY_SPRINTS: u32 = 8;
 
+/// Local, non-pushed ref updated after every deploy that passes both
+/// `deploy()` and `run_tests()` — auto-rollback's source of truth for "last
+/// known good". A ref (not a branch tip) survives ticket-branch deletion
+/// after a squash-merge.
+const LAST_GOOD_REF: &str = "refs/coxagent/last-good";
+
 /// The SA reviewer's JSON verdict on a pull request.
 #[derive(serde::Deserialize)]
 struct ReviewVerdict {
@@ -1440,21 +1446,37 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // ALSO retry when the last deploy failed, even with no new code:
             // transient causes (a port squatter that's since gone, docker
             // hiccups) must self-resolve, not sit red until a human clicks.
-            let last_deploy_failed = self
-                .store
-                .load()
-                .await
-                .ok()
-                .and_then(|s| s.deploy)
+            let pre_deploy_state = self.store.load().await.ok();
+            let last_deploy_failed = pre_deploy_state
+                .as_ref()
+                .and_then(|s| s.deploy.as_ref())
                 .is_some_and(|d| !d.ok);
-            if (report.feature_done.is_some() || report.bug_fixed.is_some() || last_deploy_failed)
+            // Once a rollback is live, keep retrying a forward deploy every
+            // leader cycle (self-healing) even with no new ticket work —
+            // otherwise the team only finds out the fix landed the next time
+            // a feature/bug ships, which could be a long time.
+            let was_in_rollback = pre_deploy_state.as_ref().is_some_and(|s| s.in_rollback);
+            if (report.feature_done.is_some()
+                || report.bug_fixed.is_some()
+                || last_deploy_failed
+                || was_in_rollback)
                 && self.deploy.is_some()
                 && self.config.deploy.enabled
             {
                 if let Some(deploy) = &self.deploy {
+                    // Captured now, before the attempt — names exactly what
+                    // this deploy builds/runs, so a rollback trigger below
+                    // (or a later known-good record) points at a real commit.
+                    let attempt_sha = match &self.git {
+                        Some(git) => git.head_sha(&self.work_dir).await.ok(),
+                        None => None,
+                    };
+                    let mut deploy_bad = false;
+                    let mut deploy_ran_ok = false;
                     match deploy.deploy(&self.work_dir).await {
                         Ok(r) if r.deployed => {
-                            self.record_deploy(r.success, &r.summary).await;
+                            self.record_deploy(r.success, &r.summary, attempt_sha.clone())
+                                .await;
                             let kind = if r.success {
                                 "deploy_ok"
                             } else {
@@ -1464,6 +1486,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                             // Visual QA: someone finally LOOKS at the shipped
                             // UI. Only when this cycle shipped a UI feature.
                             if r.success {
+                                deploy_ran_ok = true;
                                 for id in [report.feature_done.clone(), report.bug_fixed.clone()]
                                     .into_iter()
                                     .flatten()
@@ -1484,6 +1507,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                             // A failed deploy must become work, or nothing fixes
                             // it: file it as a high-priority bug (deduped).
                             if !r.success {
+                                deploy_bad = true;
                                 if let Some(id) = self.file_deploy_bug(&r.summary).await {
                                     report.bugs_filed.push(id);
                                 }
@@ -1495,14 +1519,28 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     // Hard DoD gate: run the real test suite. A red suite becomes a
                     // high-priority bug (deduped) — deterministic quality, not just
                     // the LLM TEST agent's judgement.
+                    let mut tests_bad = false;
                     match deploy.run_tests(&self.work_dir).await {
                         Ok(r) if r.deployed && !r.success => {
+                            tests_bad = true;
                             if let Some(id) = self.file_test_failure(&r.summary).await {
                                 report.bugs_filed.push(id);
                             }
                         }
                         Ok(_) => {}
                         Err(e) => report.errors.push(format!("TESTS: {e}")),
+                    }
+                    if deploy_bad || tests_bad {
+                        let reason = if deploy_bad {
+                            "deploy failed"
+                        } else {
+                            "tests failed"
+                        };
+                        self.attempt_rollback(reason, attempt_sha, &mut report)
+                            .await;
+                    } else if deploy_ran_ok {
+                        self.record_known_good(attempt_sha, "deploy + tests passed")
+                            .await;
                     }
                 }
             }
@@ -1584,7 +1622,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     }
 
     /// Record a deploy outcome (activity + dashboard status). Best-effort.
-    async fn record_deploy(&self, ok: bool, summary: &str) {
+    async fn record_deploy(&self, ok: bool, summary: &str, commit_sha: Option<String>) {
         if let Ok(mut state) = self.store.load().await {
             let at = crate::state::now_rfc3339();
             state.log_activity("DEPLOY", summary, None);
@@ -1594,9 +1632,277 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 at,
                 ok,
                 summary: summary.to_owned(),
+                commit_sha,
             });
             let _ = self.store.save(&state).await;
         }
+    }
+
+    /// Point [`LAST_GOOD_REF`] at this deploy and record it as auto-rollback's
+    /// new target — called only after a deploy passed both `deploy()` and
+    /// `run_tests()`. Also clears `in_rollback`: forward progress recovered.
+    async fn record_known_good(&self, sha: Option<String>, summary: &str) {
+        let Some(sha) = sha else { return };
+        if let Some(git) = &self.git {
+            let _ = git.update_ref(&self.work_dir, LAST_GOOD_REF, &sha).await;
+        }
+        let at = crate::state::now_rfc3339();
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+            s.deploy_index += 1;
+            s.in_rollback = false;
+            s.last_good_deploy = Some(crate::state::KnownGoodDeploy {
+                sha: sha.clone(),
+                at: at.clone(),
+                deploy_index: s.deploy_index,
+                summary: summary.to_owned(),
+            });
+            Ok(())
+        })
+        .await;
+    }
+
+    /// Path to the dedicated secondary worktree rollback deploys into — never
+    /// the live `work_dir`, so DEV/worker concurrency and the leader tail's
+    /// own `checkout_branch` calls never race against it.
+    fn rollback_worktree_path(&self) -> std::path::PathBuf {
+        let name = self.work_dir.file_name().map_or_else(
+            || "project".to_owned(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        let dirname = format!("{name}-rollback");
+        self.work_dir
+            .parent()
+            .map_or_else(|| std::path::PathBuf::from(&dirname), |p| p.join(&dirname))
+    }
+
+    /// Auto-rollback: on a deploy or post-deploy test failure, redeploy the
+    /// last version that passed both gates, in a dedicated secondary
+    /// worktree so the LIVE `work_dir` is never touched — the shared
+    /// environment stays trustworthy while the root cause works through the
+    /// backlog like any other bug. Opt-in (`config.deploy.auto_rollback`,
+    /// default off). Caps at one retry — a second failure escalates via the
+    /// bug+notify path instead of looping. Best-effort throughout.
+    async fn attempt_rollback(
+        &self,
+        reason: &str,
+        failed_sha: Option<String>,
+        report: &mut CycleReport,
+    ) {
+        if !self.config.deploy.auto_rollback {
+            return;
+        }
+        let (Some(deploy), Some(git)) = (&self.deploy, &self.git) else {
+            return;
+        };
+        let Ok(state) = self.store.load().await else {
+            return;
+        };
+        // Edge case: first-ever deploy has nothing to roll back to — keep
+        // today's bug-only behavior.
+        let Some(good) = state.last_good_deploy.clone() else {
+            return;
+        };
+        // Already ON the known-good version — nothing a rollback would
+        // change. Guards against a redundant second rollback when deploy AND
+        // tests both fail the same cycle.
+        if failed_sha.as_deref() == Some(good.sha.as_str()) {
+            return;
+        }
+
+        let too_old = match seconds_since(&good.at) {
+            Some(age) => age > self.config.deploy.max_rollback_age_secs,
+            None => true, // unparseable timestamp — don't guess, treat as stale
+        };
+        if too_old {
+            self.record_rollback_skipped(
+                reason,
+                &good.sha,
+                "known-good deploy is stale",
+                true,
+                false,
+            )
+            .await;
+            return;
+        }
+
+        // Migration safety: rolling the app back without the DB schema it
+        // expects can corrupt data — skip rather than guess.
+        if let Some(sha) = &failed_sha {
+            if self.migration_shipped_since(git, &good.sha, sha).await {
+                self.record_rollback_skipped(
+                    reason,
+                    &good.sha,
+                    "a migration shipped since the known-good deploy — rolling back the app code \
+                     alone would be unsafe",
+                    false,
+                    true,
+                )
+                .await;
+                return;
+            }
+        }
+
+        // The rollback IS the one retry of the failed forward deploy: attempt
+        // it exactly once — worktree always freshly created (remove + add) —
+        // and if it also fails, stop here and escalate rather than loop.
+        let path = self.rollback_worktree_path();
+        let _ = git.worktree_remove(&self.work_dir, &path).await;
+        let (ok, summary) = match git.worktree_add(&self.work_dir, &path, &good.sha).await {
+            Err(e) => (false, format!("rollback worktree failed: {e}")),
+            Ok(()) => match deploy.deploy(&path).await {
+                Ok(r) => (r.success, r.summary),
+                Err(e) => (false, format!("rollback deploy failed: {e}")),
+            },
+        };
+
+        self.finish_rollback(reason, &good.sha, ok, summary, report)
+            .await;
+    }
+
+    /// Whether any file under `config.deploy.migration_detection_paths`
+    /// changed between the known-good sha and the failing one.
+    async fn migration_shipped_since(
+        &self,
+        git: &Arc<dyn GitPort>,
+        good_sha: &str,
+        failed_sha: &str,
+    ) -> bool {
+        let changed = git
+            .changed_paths(&self.work_dir, good_sha, failed_sha)
+            .await
+            .unwrap_or_default();
+        changed.iter().any(|p| {
+            self.config
+                .deploy
+                .migration_detection_paths
+                .iter()
+                .any(|prefix| p.starts_with(prefix.as_str()))
+        })
+    }
+
+    /// Record the outcome of a rollback attempt (activity + dashboard status,
+    /// distinct from a plain deploy) and, on failure, escalate via the
+    /// existing bug+notify path — the mirror of what a normal deploy failure
+    /// already does, so a broken rollback mechanism can't fail silently.
+    async fn finish_rollback(
+        &self,
+        reason: &str,
+        good_sha: &str,
+        ok: bool,
+        summary: String,
+        report: &mut CycleReport,
+    ) {
+        let at = crate::state::now_rfc3339();
+        let short = short_sha(good_sha);
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+            s.log_activity("ROLLBACK", &summary, None);
+            s.post_comment(
+                "SM",
+                &format!("🔙 auto-rollback ({reason}) to {short}: {summary}"),
+                None,
+            );
+            s.last_rollback = Some(crate::state::RollbackStatus {
+                at: at.clone(),
+                reason: reason.to_owned(),
+                to_sha: good_sha.to_owned(),
+                ok,
+                summary: summary.clone(),
+                stale: false,
+                migration_blocked: false,
+            });
+            if ok {
+                s.in_rollback = true;
+                s.deploy = Some(crate::state::DeployStatus {
+                    at: at.clone(),
+                    ok: true,
+                    summary: format!("rolled back to {short}: {summary}"),
+                    commit_sha: Some(good_sha.to_owned()),
+                });
+            }
+            Ok(())
+        })
+        .await;
+
+        self.notify(
+            if ok { "rollback_ok" } else { "rollback_failed" },
+            format!("auto-rollback ({reason}) to {short}: {summary}"),
+        )
+        .await;
+
+        if !ok {
+            if let Some(id) = self.file_rollback_failed_bug(&summary).await {
+                report.bugs_filed.push(id);
+            }
+        }
+    }
+
+    /// Record a rollback that was deliberately NOT attempted (stale target or
+    /// a migration in the way) — distinct from an attempt that failed.
+    async fn record_rollback_skipped(
+        &self,
+        reason: &str,
+        to_sha: &str,
+        summary: &str,
+        stale: bool,
+        migration_blocked: bool,
+    ) {
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+            s.last_rollback = Some(crate::state::RollbackStatus {
+                at: crate::state::now_rfc3339(),
+                reason: reason.to_owned(),
+                to_sha: to_sha.to_owned(),
+                ok: false,
+                summary: summary.to_owned(),
+                stale,
+                migration_blocked,
+            });
+            Ok(())
+        })
+        .await;
+        self.notify(
+            "rollback_blocked",
+            format!("Rollback skipped for `{reason}`: {summary}"),
+        )
+        .await;
+    }
+
+    /// File a High bug when a rollback attempt itself fails (deduped on an
+    /// open one) — the root-cause failure already filed its own bug via
+    /// `file_deploy_bug`/`file_test_failure`; this one is about the ops
+    /// mechanism (e.g. the Docker daemon is down), separate work.
+    async fn file_rollback_failed_bug(&self, summary: &str) -> Option<TicketId> {
+        use coxagent_domain::ticket::{Priority, Status, TicketType};
+        const MARKER: &str = "Rollback failed";
+        let Ok(state) = self.store.load().await else {
+            return None;
+        };
+        if state.tickets.iter().any(|t| {
+            t.ticket_type() == TicketType::Bug
+                && t.status() == Status::Open
+                && t.title().starts_with(MARKER)
+        }) {
+            return None;
+        }
+        let adder = crate::use_cases::AddTicketUseCase::new(Arc::clone(&self.store));
+        adder
+            .execute(crate::use_cases::AddTicketInput {
+                ticket_type: TicketType::Bug,
+                title: format!("{MARKER}: {summary}"),
+                description: format!(
+                    "Auto-rollback to the last known-good deploy failed after one retry — the \
+                     environment may still be on a broken build. Investigate the deploy \
+                     tooling (e.g. is the Docker daemon up?) and restore service by hand if \
+                     needed.\n\nRollback output: {summary}"
+                ),
+                priority: Priority::High,
+                complexity: coxagent_domain::ticket::Complexity::Medium,
+                has_ui: false,
+                acceptance_criteria: vec![
+                    "The app is reachable and serving a known-good build".to_owned()
+                ],
+            })
+            .await
+            .ok()
     }
 
     /// File a High bug when the test-suite DoD gate goes red (deduped on an open
@@ -3695,6 +4001,20 @@ fn prune_memory_index(dir: &std::path::Path, deleted: &str) {
     }
 }
 
+/// First 7 chars of a commit sha, for compact activity/notification text.
+fn short_sha(sha: &str) -> &str {
+    &sha[..sha.len().min(7)]
+}
+
+/// Seconds elapsed since an RFC3339 timestamp, or `None` if it can't be
+/// parsed — the caller then treats the value conservatively (as unknown-age).
+fn seconds_since(at: &str) -> Option<u64> {
+    let then =
+        time::OffsetDateTime::parse(at, &time::format_description::well_known::Rfc3339).ok()?;
+    let secs = (time::OffsetDateTime::now_utc() - then).whole_seconds();
+    u64::try_from(secs).ok()
+}
+
 /// Committed git conflict markers in a PR diff — the tell-tale of a botched
 /// "resolution". Only added (`+`) and context (` `) lines count; removed
 /// (`-`) marker lines are the fix, not the disease.
@@ -4110,5 +4430,417 @@ mod tests {
             .await;
         assert!(forge.merged.lock().expect("lock").is_empty());
         assert_eq!(*forge.changes.lock().expect("lock"), vec![7]);
+    }
+
+    // ---- COX-F001: auto-rollback to last known-good deploy on failure ----
+    //
+    // These encode the acceptance criteria only. No production rollback logic
+    // exists yet — several of these are expected to be RED until it's built.
+
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A `DeployPort` that returns a scripted sequence of `deploy()` results
+    /// (one per call, in order) and always reports tests passing. Once the
+    /// script is exhausted, extra calls return a report clearly marked as
+    /// unexpected, so an over-eager retry loop shows up in assertions instead
+    /// of silently blending in.
+    struct ScriptedDeploy {
+        script: Mutex<VecDeque<crate::ports::outbound::DeployReport>>,
+        deploy_calls: AtomicUsize,
+    }
+    impl ScriptedDeploy {
+        fn new(script: Vec<crate::ports::outbound::DeployReport>) -> Self {
+            Self {
+                script: Mutex::new(script.into_iter().collect()),
+                deploy_calls: AtomicUsize::new(0),
+            }
+        }
+        fn calls(&self) -> usize {
+            self.deploy_calls.load(Ordering::SeqCst)
+        }
+    }
+    #[async_trait::async_trait]
+    impl crate::ports::outbound::DeployPort for ScriptedDeploy {
+        async fn deploy(
+            &self,
+            _work_dir: &std::path::Path,
+        ) -> Result<crate::ports::outbound::DeployReport, PortError> {
+            self.deploy_calls.fetch_add(1, Ordering::SeqCst);
+            let next = self.script.lock().expect("lock").pop_front();
+            Ok(next.unwrap_or(crate::ports::outbound::DeployReport {
+                success: true,
+                deployed: true,
+                summary: "UNSCRIPTED EXTRA DEPLOY CALL".to_owned(),
+            }))
+        }
+        async fn run_tests(
+            &self,
+            _work_dir: &std::path::Path,
+        ) -> Result<crate::ports::outbound::DeployReport, PortError> {
+            Ok(crate::ports::outbound::DeployReport {
+                success: true,
+                deployed: true,
+                summary: "tests ok".to_owned(),
+            })
+        }
+    }
+
+    /// Records every event handed to the notifier, so tests can assert a
+    /// rollback notification is distinguishable from a plain deploy one.
+    #[derive(Default)]
+    struct SpyNotifier {
+        events: Mutex<Vec<crate::ports::outbound::NotifyEvent>>,
+    }
+    #[async_trait::async_trait]
+    impl crate::ports::outbound::NotifierPort for SpyNotifier {
+        async fn notify(&self, event: crate::ports::outbound::NotifyEvent) {
+            self.events.lock().expect("lock").push(event);
+        }
+    }
+
+    /// Fixed sha this fake reports as HEAD — deliberately different from
+    /// [`GOOD_SHA`] so a seeded "prior good" deploy is a real rollback target,
+    /// not a no-op.
+    const HEAD_SHA: &str = "deadbeef";
+    /// Fixed sha seeded as the last known-good deploy in rollback tests.
+    const GOOD_SHA: &str = "cafef00d";
+
+    /// A `GitPort` double for rollback tests: reports a fixed HEAD, records
+    /// every worktree op so a test can assert rollback NEVER touches the live
+    /// `work_dir` (only the dedicated rollback path), and reports no changed
+    /// paths (no migration in the way) unless a test overrides it.
+    #[derive(Default)]
+    struct FakeGit {
+        worktree_adds: Mutex<Vec<(std::path::PathBuf, String)>>,
+        migration_paths: Vec<String>,
+    }
+    #[async_trait::async_trait]
+    impl GitPort for FakeGit {
+        async fn is_repo(&self, _: &std::path::Path) -> bool {
+            true
+        }
+        async fn current_branch(&self, _: &std::path::Path) -> Result<String, PortError> {
+            Ok("main".to_owned())
+        }
+        async fn checkout_branch(&self, _: &std::path::Path, _: &str) -> Result<(), PortError> {
+            Ok(())
+        }
+        async fn commit_all(
+            &self,
+            _: &std::path::Path,
+            _: &str,
+            _: &GitAuthor,
+        ) -> Result<Option<String>, PortError> {
+            Ok(None)
+        }
+        async fn push(&self, _: &std::path::Path, _: &str) -> Result<(), PortError> {
+            Ok(())
+        }
+        async fn sync_base(
+            &self,
+            _: &std::path::Path,
+            _: &str,
+        ) -> Result<crate::ports::outbound::SyncBase, PortError> {
+            Ok(crate::ports::outbound::SyncBase::UpToDate)
+        }
+        async fn abort_merge(&self, _: &std::path::Path) -> Result<(), PortError> {
+            Ok(())
+        }
+        async fn head_sha(&self, _: &std::path::Path) -> Result<String, PortError> {
+            Ok(HEAD_SHA.to_owned())
+        }
+        async fn update_ref(&self, _: &std::path::Path, _: &str, _: &str) -> Result<(), PortError> {
+            Ok(())
+        }
+        async fn worktree_add(
+            &self,
+            _work_dir: &std::path::Path,
+            path: &std::path::Path,
+            sha: &str,
+        ) -> Result<(), PortError> {
+            self.worktree_adds
+                .lock()
+                .expect("lock")
+                .push((path.to_path_buf(), sha.to_owned()));
+            Ok(())
+        }
+        async fn worktree_remove(
+            &self,
+            _: &std::path::Path,
+            _: &std::path::Path,
+        ) -> Result<(), PortError> {
+            Ok(())
+        }
+        async fn changed_paths(
+            &self,
+            _: &std::path::Path,
+            _: &str,
+            _: &str,
+        ) -> Result<Vec<String>, PortError> {
+            Ok(self.migration_paths.clone())
+        }
+    }
+
+    /// A cycle that will complete a fresh feature (so the deploy step runs),
+    /// with `state.last_good_deploy` pre-seeded to reflect whether a prior
+    /// deploy+tests pass exists. `auto_rollback` is on (opt-in in production,
+    /// but these tests exist to exercise it).
+    fn rollback_uc(
+        prior_good: bool,
+        deploy: &Arc<ScriptedDeploy>,
+        notifier: &Arc<SpyNotifier>,
+    ) -> (
+        Arc<MemStore>,
+        Arc<FakeGit>,
+        RunCycleUseCase<MemStore, RoleAwareEngine>,
+    ) {
+        let mut initial = ProjectState::default();
+        if prior_good {
+            initial.last_good_deploy = Some(crate::state::KnownGoodDeploy {
+                sha: GOOD_SHA.to_owned(),
+                at: crate::state::now_rfc3339(),
+                deploy_index: 1,
+                summary: "prior deploy + tests passed".to_owned(),
+            });
+        }
+        let store = Arc::new(MemStore {
+            state: Mutex::new(initial),
+        });
+        let git = Arc::new(FakeGit::default());
+        let mut cfg = Config::default();
+        cfg.deploy.auto_rollback = true;
+        let uc = RunCycleUseCase::new(
+            Arc::clone(&store),
+            Arc::new(RoleAwareEngine),
+            cfg,
+            PathBuf::from("/tmp/proj"),
+            "goal".to_owned(),
+        )
+        .with_deploy(Arc::clone(deploy) as Arc<dyn crate::ports::outbound::DeployPort>)
+        .with_git(Arc::clone(&git) as Arc<dyn GitPort>)
+        .with_notifier(Arc::clone(notifier) as Arc<dyn crate::ports::outbound::NotifierPort>);
+        (store, git, uc)
+    }
+
+    fn deploy_bug_tickets(state: &ProjectState) -> Vec<&coxagent_domain::Ticket> {
+        use coxagent_domain::ticket::{Priority, TicketType};
+        state
+            .tickets
+            .iter()
+            .filter(|t| {
+                t.ticket_type() == TicketType::Bug
+                    && t.title().starts_with("Deploy failing")
+                    && t.priority() == Priority::High
+            })
+            .collect()
+    }
+
+    /// AC1: a failed deploy (or a failed post-deploy `run_tests()`) must
+    /// automatically redeploy the last version that previously passed both
+    /// deploy and tests — with no human intervention.
+    #[tokio::test]
+    async fn deploy_failure_auto_rolls_back_to_last_known_good() {
+        let deploy = Arc::new(ScriptedDeploy::new(vec![
+            crate::ports::outbound::DeployReport {
+                success: false,
+                deployed: true,
+                summary: "deploy failed: container exited 1".to_owned(),
+            },
+            crate::ports::outbound::DeployReport {
+                success: true,
+                deployed: true,
+                summary: "rollback redeploy ok".to_owned(),
+            },
+        ]));
+        let notifier = Arc::new(SpyNotifier::default());
+        let (store, git, uc) = rollback_uc(true, &deploy, &notifier);
+
+        uc.run_cycle(1).await;
+
+        assert_eq!(
+            deploy.calls(),
+            2,
+            "the failed deploy must be followed by exactly one automatic \
+             redeploy of the last known-good version, with no human involved"
+        );
+        let state = store.load().await.expect("load");
+        assert!(
+            state.deploy.as_ref().is_some_and(|d| d.ok),
+            "after a successful rollback the recorded deploy status must be healthy again"
+        );
+        // Regression (#1/#2): rollback must target ONLY the dedicated
+        // secondary worktree, never the live `work_dir` — so DEV/worker
+        // concurrency and the leader tail's own `checkout_branch` calls can
+        // never race against it.
+        let adds = git.worktree_adds.lock().expect("lock");
+        assert_eq!(
+            adds.len(),
+            1,
+            "exactly one worktree created for the rollback"
+        );
+        assert_ne!(
+            adds[0].0,
+            PathBuf::from("/tmp/proj"),
+            "rollback must never check out into the live work_dir"
+        );
+        assert_eq!(
+            adds[0].1, GOOD_SHA,
+            "rollback checks out the known-good sha"
+        );
+    }
+
+    /// AC2: a rollback event is logged to the activity feed and sent via the
+    /// existing `NotifierPort` (same channel as deploy_ok/deploy_failed), and
+    /// is distinguishable from a normal deploy notification.
+    #[tokio::test]
+    async fn rollback_is_logged_and_notified_distinctly_from_a_normal_deploy() {
+        let deploy = Arc::new(ScriptedDeploy::new(vec![
+            crate::ports::outbound::DeployReport {
+                success: false,
+                deployed: true,
+                summary: "deploy failed: container exited 1".to_owned(),
+            },
+            crate::ports::outbound::DeployReport {
+                success: true,
+                deployed: true,
+                summary: "rollback redeploy ok".to_owned(),
+            },
+        ]));
+        let notifier = Arc::new(SpyNotifier::default());
+        let (store, _git, uc) = rollback_uc(true, &deploy, &notifier);
+
+        uc.run_cycle(1).await;
+
+        let state = store.load().await.expect("load");
+        assert!(
+            state
+                .activity
+                .iter()
+                .any(|a| a.action.to_lowercase().contains("rollback")),
+            "a rollback activity entry must be logged: {:?}",
+            state.activity
+        );
+        let events = notifier.events.lock().expect("lock");
+        assert!(
+            events
+                .iter()
+                .any(|e| e.kind.to_lowercase().contains("rollback")
+                    || e.message.to_lowercase().contains("rollback")),
+            "a rollback notification must be sent via NotifierPort: {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| e.kind != "deploy_ok"
+                && (e.kind.to_lowercase().contains("rollback")
+                    || e.message.to_lowercase().contains("rollback"))),
+            "the rollback notification must be distinguishable from a plain deploy_ok: {events:?}"
+        );
+    }
+
+    /// AC3: the failure that triggered the rollback still files exactly one
+    /// deduped High-priority bug (existing behavior preserved) — root cause
+    /// stays tracked work even though the app is back up via rollback.
+    #[tokio::test]
+    async fn triggering_failure_still_files_exactly_one_deduped_high_bug() {
+        let deploy = Arc::new(ScriptedDeploy::new(vec![
+            crate::ports::outbound::DeployReport {
+                success: false,
+                deployed: true,
+                summary: "deploy failed: container exited 1".to_owned(),
+            },
+            crate::ports::outbound::DeployReport {
+                success: true,
+                deployed: true,
+                summary: "rollback redeploy ok".to_owned(),
+            },
+        ]));
+        let notifier = Arc::new(SpyNotifier::default());
+        let (store, _git, uc) = rollback_uc(true, &deploy, &notifier);
+
+        uc.run_cycle(1).await;
+
+        let state = store.load().await.expect("load");
+        assert_eq!(
+            deploy_bug_tickets(&state).len(),
+            1,
+            "exactly one deduped High bug for the root cause, rollback or not"
+        );
+    }
+
+    /// AC4: with no prior successful deploy, the system must not attempt a
+    /// rollback and falls back to today's bug-filing behavior.
+    #[tokio::test]
+    async fn no_rollback_without_a_prior_successful_deploy() {
+        let deploy = Arc::new(ScriptedDeploy::new(vec![
+            crate::ports::outbound::DeployReport {
+                success: false,
+                deployed: true,
+                summary: "deploy failed: container exited 1".to_owned(),
+            },
+        ]));
+        let notifier = Arc::new(SpyNotifier::default());
+        let (store, _git, uc) = rollback_uc(false, &deploy, &notifier);
+
+        uc.run_cycle(1).await;
+
+        assert_eq!(
+            deploy.calls(),
+            1,
+            "no prior successful deploy exists, so no rollback attempt is made"
+        );
+        let state = store.load().await.expect("load");
+        assert_eq!(
+            deploy_bug_tickets(&state).len(),
+            1,
+            "falls back to the existing deduped High-bug-filing behavior"
+        );
+        let events = notifier.events.lock().expect("lock");
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.kind.to_lowercase().contains("rollback")
+                    || e.message.to_lowercase().contains("rollback")),
+            "no rollback notification should fire when there is nothing to roll back to: {events:?}"
+        );
+    }
+
+    /// AC5: if the rollback attempt itself fails, the system does not retry
+    /// indefinitely — it stops after one retry and escalates via the existing
+    /// bug+notify path.
+    #[tokio::test]
+    async fn rollback_failure_stops_after_one_retry_and_escalates() {
+        let deploy = Arc::new(ScriptedDeploy::new(vec![
+            crate::ports::outbound::DeployReport {
+                success: false,
+                deployed: true,
+                summary: "deploy failed: container exited 1".to_owned(),
+            },
+            crate::ports::outbound::DeployReport {
+                success: false,
+                deployed: true,
+                summary: "rollback redeploy ALSO failed".to_owned(),
+            },
+        ]));
+        let notifier = Arc::new(SpyNotifier::default());
+        let (store, _git, uc) = rollback_uc(true, &deploy, &notifier);
+
+        uc.run_cycle(1).await;
+
+        assert_eq!(
+            deploy.calls(),
+            2,
+            "exactly one rollback retry — the original failed attempt plus one \
+             rollback attempt, never an unbounded retry loop"
+        );
+        let state = store.load().await.expect("load");
+        assert_eq!(
+            deploy_bug_tickets(&state).len(),
+            1,
+            "the failure still escalates via the existing deduped High-bug path"
+        );
+        assert!(
+            !notifier.events.lock().expect("lock").is_empty(),
+            "a failed rollback must still escalate via the existing NotifierPort path"
+        );
     }
 }

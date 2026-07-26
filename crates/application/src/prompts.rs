@@ -570,12 +570,14 @@ mod tests {
     fn deploy_constraint_names_the_assigned_port() {
         assert!(deploy_constraints(&DeployConfig {
             host_port: None,
-            enabled: true
+            enabled: true,
+            ..DeployConfig::default()
         })
         .is_empty());
         let out = deploy_constraints(&DeployConfig {
             host_port: Some(8123),
             enabled: true,
+            ..DeployConfig::default()
         });
         assert!(out.contains("8123"));
         assert!(out.contains("docker-compose"));

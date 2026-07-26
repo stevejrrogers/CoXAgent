@@ -366,6 +366,46 @@ pub struct DeployStatus {
     pub at: String,
     pub ok: bool,
     pub summary: String,
+    /// The commit sha this deploy attempt built/ran (absent when git isn't
+    /// wired up), so "what's currently live" is provable rather than assumed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_sha: Option<String>,
+}
+
+/// The most recent deploy that passed both `deploy()` and `run_tests()` —
+/// auto-rollback's target. Backed by the durable `refs/coxagent/last-good`
+/// git ref, which survives ticket-branch deletion after a squash-merge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnownGoodDeploy {
+    pub sha: String,
+    /// RFC3339 timestamp.
+    pub at: String,
+    /// Ordinal of this success — the Nth deploy to pass both gates.
+    pub deploy_index: u64,
+    pub summary: String,
+}
+
+/// Outcome of the most recent auto-rollback attempt, surfaced on the
+/// dashboard distinctly from a normal deploy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RollbackStatus {
+    /// RFC3339 timestamp.
+    pub at: String,
+    /// What triggered it, e.g. `"deploy failed"` / `"tests failed"`.
+    pub reason: String,
+    /// The commit sha rolled back to.
+    pub to_sha: String,
+    pub ok: bool,
+    pub summary: String,
+    /// The known-good deploy was older than `max_rollback_age_secs` — rollback
+    /// was skipped (not attempted), not just unlucky.
+    #[serde(default)]
+    pub stale: bool,
+    /// Code touching `migration_detection_paths` shipped since the known-good
+    /// deploy — rolling the app back without the DB schema could be unsafe,
+    /// so rollback was skipped (not attempted).
+    #[serde(default)]
+    pub migration_blocked: bool,
 }
 
 /// One queued execution job (control plane → runner). The hub NEVER executes
@@ -427,6 +467,7 @@ pub struct Milestone {
 
 /// The whole state of one managed project.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)] // a persisted data aggregate, not a state machine
 pub struct ProjectState {
     pub schema_version: u32,
     /// Short project alias prefixed onto every ticket id (e.g. `CXC`). Empty for
@@ -587,6 +628,23 @@ pub struct ProjectState {
     /// The UTC date (`YYYY-MM-DD`) `spend_today_usd` is counting.
     #[serde(default)]
     pub spend_day: String,
+    /// Ordinal of the last deploy that passed both `deploy()` and
+    /// `run_tests()` — advances only on a known-good deploy, so
+    /// `max_rollback_distance` can bound how far a rollback may reach.
+    #[serde(default)]
+    pub deploy_index: u64,
+    /// True while the currently-live deploy is a rollback, not the tip of
+    /// `work_dir` — forces the leader tail to keep retrying a forward deploy
+    /// each cycle (self-healing) instead of waiting for new ticket work.
+    #[serde(default)]
+    pub in_rollback: bool,
+    /// The last deploy that passed both `deploy()` and `run_tests()` —
+    /// auto-rollback's target. `None` until the first one ever succeeds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_good_deploy: Option<KnownGoodDeploy>,
+    /// Outcome of the most recent auto-rollback attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_rollback: Option<RollbackStatus>,
 }
 
 impl Default for ProjectState {
@@ -635,6 +693,10 @@ impl Default for ProjectState {
             ops_down: false,
             spend_today_usd: 0.0,
             spend_day: String::new(),
+            deploy_index: 0,
+            in_rollback: false,
+            last_good_deploy: None,
+            last_rollback: None,
         }
     }
 }

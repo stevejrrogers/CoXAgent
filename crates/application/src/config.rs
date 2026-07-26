@@ -275,6 +275,31 @@ pub struct DeployConfig {
     /// the live hub serves.
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Auto-redeploy the last known-good version when `deploy()` or a
+    /// post-deploy `run_tests()` fails, so the shared environment self-heals
+    /// instead of staying broken until a DEV agent picks up the bug ticket.
+    /// Opt-in (default off) — an existing project's behavior never changes
+    /// until an operator turns this on.
+    #[serde(default)]
+    pub auto_rollback: bool,
+    /// A known-good deploy older than this is considered too stale to roll
+    /// back to (the environment may have drifted too far) — rollback is
+    /// skipped, not attempted, and the failure just files its bug as before.
+    #[serde(default = "default_max_rollback_age_secs")]
+    pub max_rollback_age_secs: u64,
+    /// Repo-relative path prefixes that mark a database migration. If any
+    /// file under one of these changed since the known-good deploy, rollback
+    /// is skipped — the app would run against a DB schema ahead of it.
+    #[serde(default = "default_migration_detection_paths")]
+    pub migration_detection_paths: Vec<String>,
+}
+
+fn default_max_rollback_age_secs() -> u64 {
+    3600
+}
+
+fn default_migration_detection_paths() -> Vec<String> {
+    vec!["migrations".to_owned()]
 }
 
 impl Default for DeployConfig {
@@ -282,6 +307,9 @@ impl Default for DeployConfig {
         Self {
             host_port: None,
             enabled: true,
+            auto_rollback: false,
+            max_rollback_age_secs: default_max_rollback_age_secs(),
+            migration_detection_paths: default_migration_detection_paths(),
         }
     }
 }
