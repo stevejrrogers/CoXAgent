@@ -269,6 +269,12 @@ pub struct DeployConfig {
     /// The host port this project's app should publish (None = agent's choice).
     #[serde(default)]
     pub host_port: Option<u16>,
+    /// Whether the cycle deploys at all (default on). Turn OFF for projects
+    /// whose compose stack would collide with live infrastructure — e.g.
+    /// CoXAgent developing itself, where the compose file binds the very port
+    /// the live hub serves.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
 
 /// Per-project version-control settings. Drives the git flow (branch + commit

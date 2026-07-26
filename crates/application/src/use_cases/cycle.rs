@@ -1449,6 +1449,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 .is_some_and(|d| !d.ok);
             if (report.feature_done.is_some() || report.bug_fixed.is_some() || last_deploy_failed)
                 && self.deploy.is_some()
+                && self.config.deploy.enabled
             {
                 if let Some(deploy) = &self.deploy {
                     match deploy.deploy(&self.work_dir).await {
