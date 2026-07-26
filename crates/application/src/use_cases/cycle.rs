@@ -1508,17 +1508,36 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     let mut deploy_ran_ok = false;
                     match deploy.deploy(&self.work_dir).await {
                         Ok(r) if r.deployed => {
-                            self.record_deploy(r.success, &r.summary, attempt_sha.clone())
-                                .await;
-                            let kind = if r.success {
-                                "deploy_ok"
+                            // Mandatory health gate (COX-B004): `docker compose
+                            // up` exiting 0 only proves the containers
+                            // started — it says nothing about whether the app
+                            // inside actually bound its configured port. A
+                            // "successful" exit that never answers on the
+                            // port is downgraded to a deploy failure here, so
+                            // it can never become the auto-rollback target
+                            // and always drives rollback/bug-filing below
+                            // like any other deploy failure. Can't be skipped
+                            // — runs whenever the compose command reported
+                            // success.
+                            let health_ok =
+                                !r.success || self.verify_health_after_deploy().await;
+                            let success = r.success && health_ok;
+                            let summary = if r.success && !health_ok {
+                                format!(
+                                    "{} (containers started but the app never bound its port — \
+                                     health check failed)",
+                                    r.summary
+                                )
                             } else {
-                                "deploy_failed"
+                                r.summary.clone()
                             };
-                            self.notify(kind, r.summary.clone()).await;
+                            self.record_deploy(success, &summary, attempt_sha.clone())
+                                .await;
+                            let kind = if success { "deploy_ok" } else { "deploy_failed" };
+                            self.notify(kind, summary.clone()).await;
                             // Visual QA: someone finally LOOKS at the shipped
                             // UI. Only when this cycle shipped a UI feature.
-                            if r.success {
+                            if success {
                                 deploy_ran_ok = true;
                                 for id in [report.feature_done.clone(), report.bug_fixed.clone()]
                                     .into_iter()
@@ -1534,14 +1553,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                             // evidence (earlier capture failed) get another
                             // attempt each cycle, so the TEST gate can't
                             // deadlock on a transient failure.
-                            if r.success {
+                            if success {
                                 self.collect_missing_evidence().await;
                             }
                             // A failed deploy must become work, or nothing fixes
                             // it: file it as a high-priority bug (deduped).
-                            if !r.success {
+                            if !success {
                                 deploy_bad = true;
-                                if let Some(id) = self.file_deploy_bug(&r.summary).await {
+                                if let Some(id) = self.file_deploy_bug(&summary).await {
                                     report.bugs_filed.push(id);
                                 }
                             }
@@ -1671,6 +1690,34 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
     }
 
+    /// Mandatory post-deploy health probe (COX-B004): polls the project's
+    /// configured `host_port` for a bounded window so a container that starts
+    /// (`docker compose up` exit 0) but never binds its port — crashes right
+    /// after entrypoint, binds the wrong internal port — is not mistaken for
+    /// a working deploy. No `host_port` configured means nothing to probe
+    /// (matches `ops_monitor`'s own gate); a `deploy` port with no real check
+    /// (default `DeployPort::health` impl) reports healthy immediately, same
+    /// as before this gate existed.
+    async fn verify_health_after_deploy(&self) -> bool {
+        const ATTEMPTS: u32 = 15;
+        const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+        let Some(deploy) = &self.deploy else {
+            return true;
+        };
+        let Some(port) = self.config.deploy.host_port else {
+            return true;
+        };
+        for attempt in 0..ATTEMPTS {
+            if deploy.health(port).await.unwrap_or(true) {
+                return true;
+            }
+            if attempt + 1 < ATTEMPTS {
+                tokio::time::sleep(POLL_INTERVAL).await;
+            }
+        }
+        false
+    }
+
     /// Point [`LAST_GOOD_REF`] at this deploy and record it as auto-rollback's
     /// new target — called only after a deploy passed both `deploy()` and
     /// `run_tests()`. Also clears `in_rollback`: forward progress recovered.
@@ -1783,7 +1830,24 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let (ok, summary) = match git.worktree_add(&self.work_dir, &path, &good.sha).await {
             Err(e) => (false, format!("rollback worktree failed: {e}")),
             Ok(()) => match deploy.deploy(&path).await {
-                Ok(r) => (r.success, r.summary),
+                // Same mandatory health gate as a forward deploy: a rollback
+                // that starts a container but never binds the port must not
+                // be reported as a successful recovery.
+                Ok(r) if r.success => {
+                    if self.verify_health_after_deploy().await {
+                        (true, r.summary)
+                    } else {
+                        (
+                            false,
+                            format!(
+                                "{} (containers started but the app never bound its port — \
+                                 health check failed)",
+                                r.summary
+                            ),
+                        )
+                    }
+                }
+                Ok(r) => (false, r.summary),
                 Err(e) => (false, format!("rollback deploy failed: {e}")),
             },
         };
@@ -4905,6 +4969,201 @@ mod tests {
         assert!(
             !notifier.events.lock().expect("lock").is_empty(),
             "a failed rollback must still escalate via the existing NotifierPort path"
+        );
+    }
+
+    // --- COX-B004: deploy success gate must verify the app bound its port -
+
+    /// `docker compose up -d --build` exits 0 (container started) but the app
+    /// inside never answers on the configured port — e.g. it panics right
+    /// after entrypoint, or binds the wrong internal port. `health()` reports
+    /// down for every probe.
+    struct DeployWithDeadPort {
+        deploy_calls: AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl crate::ports::outbound::DeployPort for DeployWithDeadPort {
+        async fn deploy(
+            &self,
+            _work_dir: &std::path::Path,
+        ) -> Result<crate::ports::outbound::DeployReport, PortError> {
+            self.deploy_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(crate::ports::outbound::DeployReport {
+                success: true,
+                deployed: true,
+                summary: "docker compose up -d --build succeeded".to_owned(),
+            })
+        }
+        async fn run_tests(
+            &self,
+            _work_dir: &std::path::Path,
+        ) -> Result<crate::ports::outbound::DeployReport, PortError> {
+            Ok(crate::ports::outbound::DeployReport {
+                success: true,
+                deployed: true,
+                summary: "tests ok".to_owned(),
+            })
+        }
+        async fn health(&self, _port: u16) -> Result<bool, PortError> {
+            Ok(false)
+        }
+    }
+
+    /// AC (COX-B004): a `docker compose up` exit-0 that never binds the
+    /// configured port must be treated as a deploy FAILURE — not recorded as
+    /// known-good, and filed as a bug like any other deploy failure.
+    #[tokio::test(start_paused = true)]
+    async fn deploy_that_never_binds_its_port_is_treated_as_a_failure() {
+        let store = Arc::new(MemStore::default());
+        let deploy = Arc::new(DeployWithDeadPort {
+            deploy_calls: AtomicUsize::new(0),
+        });
+        let mut cfg = Config::default();
+        cfg.deploy.host_port = Some(8101);
+        let notifier = Arc::new(SpyNotifier::default());
+        let uc = RunCycleUseCase::new(
+            Arc::clone(&store),
+            Arc::new(RoleAwareEngine),
+            cfg,
+            PathBuf::from("/tmp"),
+            "goal".to_owned(),
+        )
+        .with_deploy(Arc::clone(&deploy) as Arc<dyn crate::ports::outbound::DeployPort>)
+        .with_notifier(Arc::clone(&notifier) as Arc<dyn crate::ports::outbound::NotifierPort>);
+
+        uc.run_cycle(1).await;
+
+        let state = store.load().await.expect("load");
+        assert!(
+            state.deploy.as_ref().is_some_and(|d| !d.ok),
+            "exit 0 from `docker compose up` must not be enough on its own — \
+             the app never bound its port: {:?}",
+            state.deploy
+        );
+        assert!(
+            state.last_good_deploy.is_none(),
+            "a deploy that never bound its port must never become the auto-rollback target"
+        );
+        assert_eq!(
+            deploy_bug_tickets(&state).len(),
+            1,
+            "a deploy that never binds its port must file a bug like any other deploy failure"
+        );
+        let events = notifier.events.lock().expect("lock");
+        assert!(
+            events.iter().any(|e| e.kind == "deploy_failed"),
+            "the notified event must be deploy_failed, not deploy_ok: {events:?}"
+        );
+    }
+
+    /// Scripted deploy where only the 2nd `deploy()` call (the rollback
+    /// redeploy) actually binds the port — models the forward deploy starting
+    /// a container that never listens, followed by a rollback that does.
+    struct HealthOnSecondDeployOnly {
+        deploy_script: Mutex<VecDeque<crate::ports::outbound::DeployReport>>,
+        deploy_calls: AtomicUsize,
+    }
+    impl HealthOnSecondDeployOnly {
+        fn new(deploy_script: Vec<crate::ports::outbound::DeployReport>) -> Self {
+            Self {
+                deploy_script: Mutex::new(deploy_script.into_iter().collect()),
+                deploy_calls: AtomicUsize::new(0),
+            }
+        }
+        fn calls(&self) -> usize {
+            self.deploy_calls.load(Ordering::SeqCst)
+        }
+    }
+    #[async_trait::async_trait]
+    impl crate::ports::outbound::DeployPort for HealthOnSecondDeployOnly {
+        async fn deploy(
+            &self,
+            _work_dir: &std::path::Path,
+        ) -> Result<crate::ports::outbound::DeployReport, PortError> {
+            self.deploy_calls.fetch_add(1, Ordering::SeqCst);
+            let next = self.deploy_script.lock().expect("lock").pop_front();
+            Ok(next.unwrap_or(crate::ports::outbound::DeployReport {
+                success: true,
+                deployed: true,
+                summary: "UNSCRIPTED EXTRA DEPLOY CALL".to_owned(),
+            }))
+        }
+        async fn run_tests(
+            &self,
+            _work_dir: &std::path::Path,
+        ) -> Result<crate::ports::outbound::DeployReport, PortError> {
+            Ok(crate::ports::outbound::DeployReport {
+                success: true,
+                deployed: true,
+                summary: "tests ok".to_owned(),
+            })
+        }
+        async fn health(&self, _port: u16) -> Result<bool, PortError> {
+            Ok(self.calls() >= 2)
+        }
+    }
+
+    /// AC (COX-B004): a deploy whose containers start but never bind the
+    /// port must drive the SAME auto-rollback path as a hard deploy failure
+    /// (docker exit != 0) — the health gate cannot be skipped just because
+    /// the compose command itself reported success.
+    #[tokio::test(start_paused = true)]
+    async fn health_check_failure_triggers_rollback_like_any_other_deploy_failure() {
+        let deploy = Arc::new(HealthOnSecondDeployOnly::new(vec![
+            crate::ports::outbound::DeployReport {
+                success: true,
+                deployed: true,
+                summary: "docker compose up -d --build succeeded".to_owned(),
+            },
+            crate::ports::outbound::DeployReport {
+                success: true,
+                deployed: true,
+                summary: "rollback redeploy ok".to_owned(),
+            },
+        ]));
+        let mut initial = ProjectState::default();
+        initial.last_good_deploy = Some(crate::state::KnownGoodDeploy {
+            sha: GOOD_SHA.to_owned(),
+            at: crate::state::now_rfc3339(),
+            deploy_index: 1,
+            summary: "prior deploy + tests passed".to_owned(),
+        });
+        let store = Arc::new(MemStore {
+            state: Mutex::new(initial),
+        });
+        let git = Arc::new(FakeGit::default());
+        let mut cfg = Config::default();
+        cfg.deploy.auto_rollback = true;
+        cfg.deploy.host_port = Some(8101);
+        let uc = RunCycleUseCase::new(
+            Arc::clone(&store),
+            Arc::new(RoleAwareEngine),
+            cfg,
+            PathBuf::from("/tmp/proj"),
+            "goal".to_owned(),
+        )
+        .with_deploy(Arc::clone(&deploy) as Arc<dyn crate::ports::outbound::DeployPort>)
+        .with_git(Arc::clone(&git) as Arc<dyn GitPort>);
+
+        uc.run_cycle(1).await;
+
+        assert_eq!(
+            deploy.calls(),
+            2,
+            "a deploy that never binds its port must trigger exactly one automatic \
+             rollback redeploy"
+        );
+        let state = store.load().await.expect("load");
+        assert!(
+            state.deploy.as_ref().is_some_and(|d| d.ok),
+            "once the rollback redeploy actually binds the port, the recorded deploy \
+             status must be healthy again: {:?}",
+            state.deploy
+        );
+        assert!(
+            state.last_rollback.as_ref().is_some_and(|r| r.ok),
+            "the rollback must be recorded as successful: {:?}",
+            state.last_rollback
         );
     }
 
