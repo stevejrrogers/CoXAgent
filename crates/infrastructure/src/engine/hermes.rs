@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use coxagent_application::ports::outbound::engine::{
-    AgentEnginePort, AgentOutcome, AgentRequest, Usage,
+    AgentEnginePort, AgentOutcome, AgentRequest, SandboxStatus, Usage,
 };
 use coxagent_application::PortError;
 
@@ -8,6 +8,8 @@ use coxagent_application::PortError;
 pub struct HermesEngine {
     model: String,
     binary: String,
+    /// Confine file writes to the project workspace (see `proc::agent_command`).
+    sandbox: bool,
 }
 
 impl HermesEngine {
@@ -16,7 +18,15 @@ impl HermesEngine {
         Self {
             model: model.into(),
             binary: "hermes".to_owned(),
+            sandbox: false,
         }
+    }
+
+    /// Confine agent file writes to the workspace + tool caches (macOS/Linux).
+    #[must_use]
+    pub fn with_sandbox(mut self, sandbox: bool) -> Self {
+        self.sandbox = sandbox;
+        self
     }
 }
 
@@ -26,6 +36,10 @@ impl AgentEnginePort for HermesEngine {
         "hermes"
     }
 
+    fn sandbox_status(&self) -> SandboxStatus {
+        crate::proc::sandbox_status(self.sandbox)
+    }
+
     async fn run(&self, request: AgentRequest) -> Result<AgentOutcome, PortError> {
         let prompt = format!(
             "{}\n\n---\n\n{}",
@@ -33,23 +47,22 @@ impl AgentEnginePort for HermesEngine {
         );
 
         let prompt_len = prompt.len();
-        let binary = self.binary.clone();
-        let model = self.model.clone();
-        let work_dir = request.work_dir.clone();
 
-        let output = tokio::task::spawn_blocking(move || {
-            std::process::Command::new(&binary)
-                .arg("--model")
-                .arg(&model)
-                .arg("--prompt")
-                .arg(prompt)
-                .current_dir(&work_dir)
-                .stdin(std::process::Stdio::null())
-                .output()
-        })
-        .await
-        .map_err(|e| PortError::Backend(format!("hermes join error: {e}")))?
-        .map_err(|e| PortError::Backend(format!("spawn hermes: {e}")))?;
+        // nice(+10) + optional write-confinement (see proc::agent_command) —
+        // same mechanism claude/opencode use, so a sandboxed run of hermes is
+        // actually confined instead of spawning raw and unconfined.
+        let (mut cmd, sandbox) =
+            crate::proc::agent_command(&self.binary, &request.work_dir, self.sandbox);
+        let output = cmd
+            .arg("--model")
+            .arg(&self.model)
+            .arg("--prompt")
+            .arg(prompt)
+            .current_dir(&request.work_dir)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .await
+            .map_err(|e| PortError::Backend(format!("spawn hermes: {e}")))?;
 
         let estimate = |len: usize| -> u64 {
             if len == 0 {
@@ -69,7 +82,24 @@ impl AgentEnginePort for HermesEngine {
             }),
             trace: String::new(),
             session_id: None,
-            sandbox: coxagent_application::ports::outbound::engine::SandboxStatus::NotRequested,
+            sandbox,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sandbox_status_defaults_to_not_requested() {
+        let engine = HermesEngine::new("hermes-3-llama-3.2-3b");
+        assert_eq!(engine.sandbox_status(), SandboxStatus::NotRequested);
+    }
+
+    #[test]
+    fn with_sandbox_reports_confinement_or_unavailable_never_not_requested() {
+        let engine = HermesEngine::new("hermes-3-llama-3.2-3b").with_sandbox(true);
+        assert_ne!(engine.sandbox_status(), SandboxStatus::NotRequested);
     }
 }
