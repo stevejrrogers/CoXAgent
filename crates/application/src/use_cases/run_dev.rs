@@ -630,6 +630,29 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
     async fn record_failure(&self, id: &TicketId, why: &str) {
         let key = id.to_string();
         let short: String = why.chars().take(300).collect();
+        // Infrastructure faults (revoked auth, quota walls, rate limits) are
+        // NOT the ticket's fault — counting them parked 3 innocent tickets
+        // during a 401 outage. Log, don't punish.
+        let low = why.to_lowercase();
+        let infra = why.trim().is_empty()
+            || low.contains("401")
+            || low.contains("authenticate")
+            || low.contains("revoked")
+            || low.contains("quota")
+            || low.contains("rate limit")
+            || low.contains("overloaded");
+        if infra {
+            let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+                s.log_activity(
+                    "SYSTEM",
+                    "engine infrastructure fault — attempt not counted",
+                    Some(key.clone()),
+                );
+                Ok(())
+            })
+            .await;
+            return;
+        }
         let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
             let n = {
                 let c = s.ticket_fail_attempts.entry(key.clone()).or_insert(0);
