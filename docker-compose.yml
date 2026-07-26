@@ -1,7 +1,10 @@
 # Self-host CoXAgent: the hub + dashboard, backed by Postgres for multi-tenant
 # state, audit, and audit retention. Bring up with:
 #   COXAGENT_ADMIN_PASSWORD=yourpw docker compose up -d --build
-# then open http://localhost:4000 and log in as root.
+# then open http://localhost:8101 and log in as root.
+#
+# Host port is fixed at 8101 (this project's assigned deploy.host_port) so it
+# never collides with a live hub bound to 4000 on the same docker host.
 #
 # Note: real LLM agents need a CLI (claude/opencode) on PATH inside the
 # container; the base image ships scripted/mock (offline). Install a CLI in a
@@ -31,7 +34,7 @@ services:
       COXAGENT_ADMIN_PASSWORD: ${COXAGENT_ADMIN_PASSWORD:-changeme}
       COXAGENT_AUDIT_RETENTION_DAYS: "90"
     ports:
-      - "4000:4000"
+      - "8101:4000"
     volumes:
       - workspace:/workspace
 
