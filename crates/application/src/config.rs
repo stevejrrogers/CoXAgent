@@ -292,10 +292,19 @@ pub struct DeployConfig {
     /// is skipped — the app would run against a DB schema ahead of it.
     #[serde(default = "default_migration_detection_paths")]
     pub migration_detection_paths: Vec<String>,
+    /// How long the mandatory post-deploy health check (COX-F005) waits for
+    /// the app's health endpoint to answer before the deploy is marked
+    /// failed and auto-rollback is triggered.
+    #[serde(default = "default_health_check_timeout_secs")]
+    pub health_check_timeout_secs: u64,
 }
 
 fn default_max_rollback_age_secs() -> u64 {
     3600
+}
+
+fn default_health_check_timeout_secs() -> u64 {
+    60
 }
 
 fn default_migration_detection_paths() -> Vec<String> {
@@ -310,6 +319,7 @@ impl Default for DeployConfig {
             auto_rollback: false,
             max_rollback_age_secs: default_max_rollback_age_secs(),
             migration_detection_paths: default_migration_detection_paths(),
+            health_check_timeout_secs: default_health_check_timeout_secs(),
         }
     }
 }

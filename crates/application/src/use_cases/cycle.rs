@@ -1528,18 +1528,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                             // like any other deploy failure. Can't be skipped
                             // — runs whenever the compose command reported
                             // success.
-                            let health_ok = !r.success || self.verify_health_after_deploy().await;
-                            let success = r.success && health_ok;
-                            let summary = if r.success && !health_ok {
-                                format!(
-                                    "{} (containers started but the app never bound its port — \
-                                     health check failed)",
-                                    r.summary
-                                )
+                            let (health_ok, health_check) = if r.success {
+                                self.run_health_check().await
                             } else {
-                                r.summary.clone()
+                                (true, None)
                             };
-                            self.record_deploy(success, &summary, attempt_sha.clone())
+                            let success = r.success && health_ok;
+                            let summary = match &health_check {
+                                Some(h) if !health_ok => {
+                                    format!("{} {}", r.summary, describe_health_failure(h))
+                                }
+                                _ => r.summary.clone(),
+                            };
+                            self.record_deploy(success, &summary, attempt_sha.clone(), health_check)
                                 .await;
                             let kind = if success {
                                 "deploy_ok"
@@ -1693,7 +1694,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     }
 
     /// Record a deploy outcome (activity + dashboard status). Best-effort.
-    async fn record_deploy(&self, ok: bool, summary: &str, commit_sha: Option<String>) {
+    async fn record_deploy(
+        &self,
+        ok: bool,
+        summary: &str,
+        commit_sha: Option<String>,
+        health_check: Option<crate::state::HealthCheckResult>,
+    ) {
         if let Ok(mut state) = self.store.load().await {
             let at = crate::state::now_rfc3339();
             state.log_activity("DEPLOY", summary, None);
@@ -1704,6 +1711,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 ok,
                 summary: summary.to_owned(),
                 commit_sha,
+                health_check,
             });
             let _ = self.store.save(&state).await;
         }
@@ -1712,11 +1720,48 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// Mandatory post-deploy health probe (COX-B004): see
     /// [`crate::ports::outbound::verify_deploy_health`] for the shared gate
     /// every deploy call site (cycle, chat, PR preview) runs through.
+    ///
+    /// Kept alongside the richer COX-F005 gate because the rollback path only
+    /// needs the yes/no answer, not a result worth recording.
     async fn verify_health_after_deploy(&self) -> bool {
         let Some(deploy) = &self.deploy else {
             return true;
         };
         crate::ports::outbound::verify_deploy_health(deploy, self.config.deploy.host_port).await
+    }
+
+    /// Detailed post-deploy health check (COX-F005): poll the app's health
+    /// endpoint via [`crate::ports::outbound::DeployPort::wait_healthy`] for
+    /// up to `config.deploy.health_check_timeout_secs`, returning whether it
+    /// passed plus the probe detail (HTTP status, response time) to record in
+    /// deploy history. `None` host_port means nothing to probe (mirrors the
+    /// COX-B004 gate): reports healthy with no recorded detail.
+    async fn run_health_check(&self) -> (bool, Option<crate::state::HealthCheckResult>) {
+        /// Slack on top of the configured bound before the cycle gives up on
+        /// the gate itself. `wait_healthy` owns the real deadline and returns
+        /// the failing probe's detail; this only catches an adapter whose own
+        /// `health_check` wedges, and firing it first would cost us that
+        /// detail — hence the slack rather than an exact-fit timeout.
+        const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(10);
+
+        let Some(deploy) = &self.deploy else {
+            return (true, None);
+        };
+        let Some(port) = self.config.deploy.host_port else {
+            return (true, None);
+        };
+        let bound = std::time::Duration::from_secs(self.config.deploy.health_check_timeout_secs);
+        let result = match tokio::time::timeout(bound + HANG_GUARD, deploy.wait_healthy(port, bound))
+            .await
+        {
+            Ok(result) => result,
+            Err(_) => crate::state::HealthCheckResult {
+                passed: false,
+                http_status: None,
+                response_time_ms: None,
+            },
+        };
+        (result.passed, Some(result))
     }
 
     /// Point [`LAST_GOOD_REF`] at this deploy and record it as auto-rollback's
@@ -1910,11 +1955,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             });
             if ok {
                 s.in_rollback = true;
+                // COX-F005: the failing forward attempt's health-check result
+                // is the diagnostic reason this rollback fired — preserve it
+                // rather than dropping it under the rollback's own
+                // (unchecked-in-detail) DeployStatus overwrite.
+                let health_check = s.deploy.as_ref().and_then(|d| d.health_check.clone());
                 s.deploy = Some(crate::state::DeployStatus {
                     at: at.clone(),
                     ok: true,
                     summary: format!("rolled back to {short}: {summary}"),
                     commit_sha: Some(good_sha.to_owned()),
+                    health_check,
                 });
             }
             Ok(())
@@ -4334,6 +4385,23 @@ fn prune_memory_index(dir: &std::path::Path, deleted: &str) {
     }
 }
 
+/// Activity-log tail for a deploy that failed its health gate (COX-F005), so
+/// the log line and notification carry the probe's HTTP status and response
+/// time — not just "deploy failed" — and whoever reads the history can tell a
+/// port that never opened from an app that answered 503.
+fn describe_health_failure(result: &crate::state::HealthCheckResult) -> String {
+    let status = result
+        .http_status
+        .map_or_else(|| "no response".to_owned(), |code| format!("HTTP {code}"));
+    let timing = result
+        .response_time_ms
+        .map_or_else(String::new, |ms| format!(" after {ms}ms"));
+    format!(
+        "(containers started but the app never answered healthily on its port — \
+         health check failed: {status}{timing})"
+    )
+}
+
 /// First 7 chars of a commit sha, for compact activity/notification text.
 fn short_sha(sha: &str) -> &str {
     &sha[..sha.len().min(7)]
@@ -5402,6 +5470,325 @@ mod tests {
             state.last_rollback.as_ref().is_some_and(|r| r.ok),
             "the rollback must be recorded as successful: {:?}",
             state.last_rollback
+        );
+    }
+
+    // --- COX-F005: mandatory pre-deploy health-endpoint check ------------
+    //
+    // After a deploy attempt, the app's health endpoint on the configured
+    // port must be checked within a bounded timeout (~30s) before the
+    // deploy is marked successful. A failing/timed-out check marks the
+    // deploy failed and triggers the existing COX-F001 auto-rollback; a
+    // passing check marks it successful with no rollback. Either way, the
+    // check's pass/fail, HTTP status, and response time are recorded in the
+    // deploy history for that attempt. An unreachable endpoint (connection
+    // refused, DNS failure) must be treated as a failed check, never left
+    // hanging.
+
+    /// Deploy that always starts cleanly; the detailed health-endpoint probe
+    /// is scripted so tests can model pass/fail scenarios independently of the
+    /// legacy `health()` TCP gate (COX-B004), which this mock leaves at its
+    /// default `Ok(true)` so it never masks the new gate under test.
+    ///
+    /// The script is keyed on how many deploys have run — not on how many
+    /// probes have — so a scenario stays stable however many times the gate
+    /// polls: "the forward deploy is unhealthy, the rollback redeploy is
+    /// healthy" is `deploy_calls <= 1`, regardless of poll count.
+    struct ScriptedHealthCheckDeploy {
+        deploy_calls: AtomicUsize,
+        health_check_calls: AtomicUsize,
+        health_check_script: fn(usize) -> crate::state::HealthCheckResult,
+        /// Models an adapter whose own probe wedges (a half-open connection
+        /// that never completes) rather than returning a failure.
+        health_check_hangs: bool,
+    }
+    #[async_trait::async_trait]
+    impl crate::ports::outbound::DeployPort for ScriptedHealthCheckDeploy {
+        async fn deploy(
+            &self,
+            _work_dir: &std::path::Path,
+        ) -> Result<crate::ports::outbound::DeployReport, PortError> {
+            self.deploy_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(crate::ports::outbound::DeployReport {
+                success: true,
+                deployed: true,
+                summary: "docker compose up -d --build succeeded".to_owned(),
+            })
+        }
+        async fn run_tests(
+            &self,
+            _work_dir: &std::path::Path,
+        ) -> Result<crate::ports::outbound::DeployReport, PortError> {
+            Ok(crate::ports::outbound::DeployReport {
+                success: true,
+                deployed: true,
+                summary: "tests ok".to_owned(),
+            })
+        }
+        async fn health_check(&self, _port: u16) -> crate::state::HealthCheckResult {
+            self.health_check_calls.fetch_add(1, Ordering::SeqCst);
+            if self.health_check_hangs {
+                // Far longer than any bound under test: the caller's guard, not
+                // this probe, has to be what ends the wait.
+                tokio::time::sleep(std::time::Duration::from_secs(86_400)).await;
+            }
+            (self.health_check_script)(self.deploy_calls.load(Ordering::SeqCst))
+        }
+    }
+
+    /// AC (COX-F005): a health check that passes marks the deploy successful,
+    /// triggers no rollback, and records pass/status/timing in deploy
+    /// history for that attempt.
+    #[tokio::test(start_paused = true)]
+    async fn health_check_pass_marks_deploy_successful_with_no_rollback() {
+        let deploy = Arc::new(ScriptedHealthCheckDeploy {
+            deploy_calls: AtomicUsize::new(0),
+            health_check_calls: AtomicUsize::new(0),
+            health_check_script: |_deploys| crate::state::HealthCheckResult {
+                passed: true,
+                http_status: Some(200),
+                response_time_ms: Some(45),
+            },
+            health_check_hangs: false,
+        });
+        let store = Arc::new(MemStore::default());
+        let mut cfg = Config::default();
+        cfg.deploy.auto_rollback = true;
+        cfg.deploy.host_port = Some(8101);
+        let uc = RunCycleUseCase::new(
+            Arc::clone(&store),
+            Arc::new(RoleAwareEngine),
+            cfg,
+            PathBuf::from("/tmp/proj"),
+            "goal".to_owned(),
+        )
+        .with_deploy(Arc::clone(&deploy) as Arc<dyn crate::ports::outbound::DeployPort>);
+
+        uc.run_cycle(1).await;
+
+        assert_eq!(
+            deploy.deploy_calls.load(Ordering::SeqCst),
+            1,
+            "a passing health check must not trigger a rollback redeploy"
+        );
+        let state = store.load().await.expect("load");
+        assert!(
+            state.last_rollback.is_none(),
+            "no rollback may be attempted when the health check passes: {:?}",
+            state.last_rollback
+        );
+        assert_eq!(
+            state.deploy.as_ref().and_then(|d| d.health_check.clone()),
+            Some(crate::state::HealthCheckResult {
+                passed: true,
+                http_status: Some(200),
+                response_time_ms: Some(45),
+            }),
+            "the health check's pass/status/response-time must be recorded in deploy \
+             history for this attempt: {:?}",
+            state.deploy
+        );
+    }
+
+    /// AC (COX-F005): a failing health check marks the deploy failed,
+    /// automatically triggers the existing COX-F001 auto-rollback, and
+    /// records the failing status/timing in deploy history for that
+    /// attempt.
+    #[tokio::test(start_paused = true)]
+    async fn health_check_failure_marks_deploy_failed_and_triggers_rollback() {
+        let deploy = Arc::new(ScriptedHealthCheckDeploy {
+            deploy_calls: AtomicUsize::new(0),
+            health_check_calls: AtomicUsize::new(0),
+            // The forward deploy stays unhealthy for the whole bounded wait —
+            // every poll fails, so the gate can only resolve by timing out.
+            // The rollback redeploy (deploy #2) is healthy.
+            health_check_script: |deploys| {
+                if deploys <= 1 {
+                    crate::state::HealthCheckResult {
+                        passed: false,
+                        http_status: Some(503),
+                        response_time_ms: Some(120),
+                    }
+                } else {
+                    crate::state::HealthCheckResult {
+                        passed: true,
+                        http_status: Some(200),
+                        response_time_ms: Some(50),
+                    }
+                }
+            },
+            health_check_hangs: false,
+        });
+        let initial = ProjectState {
+            last_good_deploy: Some(crate::state::KnownGoodDeploy {
+                sha: GOOD_SHA.to_owned(),
+                at: crate::state::now_rfc3339(),
+                deploy_index: 1,
+                summary: "prior deploy + tests passed".to_owned(),
+            }),
+            ..Default::default()
+        };
+        let store = Arc::new(MemStore {
+            state: Mutex::new(initial),
+        });
+        let git = Arc::new(FakeGit::default());
+        let mut cfg = Config::default();
+        cfg.deploy.auto_rollback = true;
+        cfg.deploy.host_port = Some(8101);
+        let uc = RunCycleUseCase::new(
+            Arc::clone(&store),
+            Arc::new(RoleAwareEngine),
+            cfg,
+            PathBuf::from("/tmp/proj"),
+            "goal".to_owned(),
+        )
+        .with_deploy(Arc::clone(&deploy) as Arc<dyn crate::ports::outbound::DeployPort>)
+        .with_git(Arc::clone(&git) as Arc<dyn GitPort>);
+
+        uc.run_cycle(1).await;
+
+        assert_eq!(
+            deploy.deploy_calls.load(Ordering::SeqCst),
+            2,
+            "a failing health check must trigger exactly one automatic rollback redeploy"
+        );
+        let state = store.load().await.expect("load");
+        assert!(
+            state.last_rollback.as_ref().is_some_and(|r| r.ok),
+            "the auto-rollback (COX-F001) must fire and succeed: {:?}",
+            state.last_rollback
+        );
+        assert_eq!(
+            state.deploy.as_ref().and_then(|d| d.health_check.clone()),
+            Some(crate::state::HealthCheckResult {
+                passed: false,
+                http_status: Some(503),
+                response_time_ms: Some(120),
+            }),
+            "the FAILING attempt's health-check result (status/timing) must be recorded \
+             in deploy history, not silently dropped when the rollback overwrites the \
+             live deploy status: {:?}",
+            state.deploy
+        );
+        assert!(
+            state
+                .activity
+                .iter()
+                .any(|a| a.action.contains("health check failed: HTTP 503 after 120ms")),
+            "the health outcome must reach the activity log too, so the history reads \
+             as more than a bare 'deploy failed'"
+        );
+    }
+
+    /// AC (COX-F005): a health endpoint that never answers must be bounded and
+    /// reported as a failed check, never left hanging indefinitely — even when
+    /// it is the adapter's own probe that wedges rather than the poll loop.
+    #[tokio::test(start_paused = true)]
+    async fn health_endpoint_that_never_answers_is_bounded_and_fails_the_deploy() {
+        let deploy = Arc::new(ScriptedHealthCheckDeploy {
+            deploy_calls: AtomicUsize::new(0),
+            health_check_calls: AtomicUsize::new(0),
+            health_check_script: |_deploys| unreachable!("the hanging probe never returns"),
+            health_check_hangs: true,
+        });
+        let store = Arc::new(MemStore::default());
+        let mut cfg = Config::default();
+        cfg.deploy.host_port = Some(8101);
+        // Small bound so the assertion below names a concrete window; virtual
+        // time makes the wait itself instant.
+        cfg.deploy.health_check_timeout_secs = 6;
+        let uc = RunCycleUseCase::new(
+            Arc::clone(&store),
+            Arc::new(RoleAwareEngine),
+            cfg,
+            PathBuf::from("/tmp/proj"),
+            "goal".to_owned(),
+        )
+        .with_deploy(Arc::clone(&deploy) as Arc<dyn crate::ports::outbound::DeployPort>);
+
+        let started = tokio::time::Instant::now();
+        uc.run_cycle(1).await;
+        let waited = started.elapsed();
+
+        assert!(
+            waited < std::time::Duration::from_secs(60),
+            "a wedged health probe must be abandoned near its bound, not awaited \
+             forever; waited {waited:?}"
+        );
+        let state = store.load().await.expect("load");
+        let status = state.deploy.as_ref().expect("a deploy status was recorded");
+        assert!(
+            !status.ok,
+            "a health endpoint that never answers must fail the deploy: {status:?}"
+        );
+        assert_eq!(
+            status.health_check.as_ref().map(|h| h.passed),
+            Some(false),
+            "the failed check must still be recorded in deploy history: {status:?}"
+        );
+    }
+
+    /// AC (COX-F005): the gate polls rather than probing once — an app that
+    /// needs a few seconds after `docker compose up` to bind its port is
+    /// healthy, not a rollback trigger.
+    #[tokio::test(start_paused = true)]
+    async fn health_check_polls_until_a_slow_starting_app_binds_its_port() {
+        // Unhealthy until the fourth poll — well past a single immediate probe.
+        static POLLS: AtomicUsize = AtomicUsize::new(0);
+        let deploy = Arc::new(ScriptedHealthCheckDeploy {
+            deploy_calls: AtomicUsize::new(0),
+            health_check_calls: AtomicUsize::new(0),
+            health_check_script: |_deploys| {
+                if POLLS.fetch_add(1, Ordering::SeqCst) < 3 {
+                    crate::state::HealthCheckResult {
+                        passed: false,
+                        http_status: None,
+                        response_time_ms: Some(1),
+                    }
+                } else {
+                    crate::state::HealthCheckResult {
+                        passed: true,
+                        http_status: Some(200),
+                        response_time_ms: Some(12),
+                    }
+                }
+            },
+            health_check_hangs: false,
+        });
+        let store = Arc::new(MemStore::default());
+        let mut cfg = Config::default();
+        cfg.deploy.auto_rollback = true;
+        cfg.deploy.host_port = Some(8101);
+        let uc = RunCycleUseCase::new(
+            Arc::clone(&store),
+            Arc::new(RoleAwareEngine),
+            cfg,
+            PathBuf::from("/tmp/proj"),
+            "goal".to_owned(),
+        )
+        .with_deploy(Arc::clone(&deploy) as Arc<dyn crate::ports::outbound::DeployPort>);
+
+        uc.run_cycle(1).await;
+
+        assert!(
+            deploy.health_check_calls.load(Ordering::SeqCst) >= 4,
+            "the gate must keep polling within its bound, not give up after one probe"
+        );
+        assert_eq!(
+            deploy.deploy_calls.load(Ordering::SeqCst),
+            1,
+            "an app that binds its port a few seconds late must not be rolled back"
+        );
+        let state = store.load().await.expect("load");
+        assert_eq!(
+            state.deploy.as_ref().and_then(|d| d.health_check.clone()),
+            Some(crate::state::HealthCheckResult {
+                passed: true,
+                http_status: Some(200),
+                response_time_ms: Some(12),
+            }),
+            "the passing poll's detail is what belongs in deploy history: {:?}",
+            state.deploy
         );
     }
 

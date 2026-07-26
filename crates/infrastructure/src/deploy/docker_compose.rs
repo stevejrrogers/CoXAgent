@@ -302,6 +302,53 @@ impl DeployPort for DockerComposeDeploy {
         Ok(ok)
     }
 
+    /// COX-F005: an HTTP GET against the app's root, unlike [`Self::health`]
+    /// this captures the HTTP status and response time so a deploy attempt's
+    /// health outcome can be recorded in full, not just as a bool. Bounded by
+    /// a fixed per-probe timeout — connection refused, DNS failure, and a
+    /// wedged connection are all reported as `passed: false`, never left
+    /// hanging.
+    async fn health_check(&self, port: u16) -> coxagent_application::state::HealthCheckResult {
+        let url = format!("http://127.0.0.1:{port}/");
+        let start = std::time::Instant::now();
+        let client = match reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => {
+                return coxagent_application::state::HealthCheckResult {
+                    passed: false,
+                    http_status: None,
+                    response_time_ms: None,
+                }
+            }
+        };
+        match client.get(&url).send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                // Any answer that isn't a 5xx means the app bound the port and
+                // is serving — which is exactly what this gate exists to prove
+                // (COX-B001: compose exits 0 while the app inside never
+                // listens). Deployed projects are arbitrary, so demanding a 2xx
+                // at `/` would roll back every app that simply has no root
+                // route; a 5xx, by contrast, is a genuinely broken app.
+                coxagent_application::state::HealthCheckResult {
+                    passed: !status.is_server_error(),
+                    http_status: Some(status.as_u16()),
+                    response_time_ms: Some(
+                        u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    ),
+                }
+            }
+            Err(_) => coxagent_application::state::HealthCheckResult {
+                passed: false,
+                http_status: None,
+                response_time_ms: Some(u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)),
+            },
+        }
+    }
+
     async fn ensure_daemon(&self) -> Result<bool, PortError> {
         if daemon_up().await {
             return Ok(true);
@@ -463,5 +510,35 @@ impl DeployPort for DockerComposeDeploy {
             deployed: true,
             summary,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// AC (COX-F005): a health endpoint that's unreachable (nothing
+    /// listening — connection refused) must be treated as a failed check,
+    /// bounded by a timeout, never left hanging indefinitely.
+    #[tokio::test]
+    async fn unreachable_health_endpoint_is_a_bounded_failure_not_a_hang() {
+        // No listener is ever bound to this port by this test.
+        let unreachable_port = 65_533;
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(35),
+            DockerComposeDeploy.health_check(unreachable_port),
+        )
+        .await
+        .expect(
+            "a connection-refused health endpoint must not hang past the ~30s bound \
+             (COX-F005)",
+        );
+
+        assert!(
+            !outcome.passed,
+            "connection refused must be reported as a failed health check, not a pass: \
+             {outcome:?}"
+        );
     }
 }

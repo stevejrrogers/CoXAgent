@@ -382,6 +382,23 @@ pub struct DeployStatus {
     /// wired up), so "what's currently live" is provable rather than assumed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit_sha: Option<String>,
+    /// Result of the post-deploy health-endpoint probe for this attempt
+    /// (COX-F005). `None` until the health check runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health_check: Option<HealthCheckResult>,
+}
+
+/// Outcome of a single health-endpoint probe (COX-F005): the app's health
+/// endpoint on the deployed port, checked with a bounded timeout before a
+/// deploy can be marked successful.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HealthCheckResult {
+    /// Whether the endpoint answered healthy within the bound.
+    pub passed: bool,
+    /// HTTP status code returned, if the endpoint was reachable at all.
+    pub http_status: Option<u16>,
+    /// Round-trip time of the probe, in milliseconds.
+    pub response_time_ms: Option<u64>,
 }
 
 /// The most recent deploy that passed both `deploy()` and `run_tests()` —
