@@ -57,6 +57,60 @@ pub trait DeployPort: Send + Sync {
         Ok(true)
     }
 
+    /// Detailed health-endpoint probe (COX-F005): a check against the app's
+    /// health endpoint on `port`, bounded by a timeout, capturing pass/fail,
+    /// HTTP status, and response time — unlike [`Self::health`], which only
+    /// reports TCP liveness as a bare bool. An unreachable endpoint
+    /// (connection refused, DNS failure) or a probe that exceeds the bound
+    /// must be reported as `passed: false`, never left hanging and never
+    /// propagated as an error.
+    ///
+    /// The default wraps [`Self::health`] so adapters that don't override
+    /// this (e.g. test doubles, `ScriptedDeploy`-style fakes) get a
+    /// zero-behavior-change result: no HTTP status (the TCP check can't see
+    /// one), timing from the wrapped call.
+    async fn health_check(&self, port: u16) -> crate::state::HealthCheckResult {
+        let start = std::time::Instant::now();
+        let passed = self.health(port).await.unwrap_or(false);
+        crate::state::HealthCheckResult {
+            passed,
+            http_status: None,
+            response_time_ms: Some(u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)),
+        }
+    }
+
+    /// The mandatory post-deploy gate (COX-F005): poll [`Self::health_check`]
+    /// every 2s until it passes or `timeout` elapses, returning the result of
+    /// the poll that decided the outcome.
+    ///
+    /// Polling — not a single probe — is what makes this a usable gate: `docker
+    /// compose up` returns as soon as the containers *start*, seconds before
+    /// the app inside binds its port, so one immediate probe would fail
+    /// perfectly healthy deploys. `timeout` bounds the wait, so an endpoint
+    /// that never answers resolves to `passed: false` rather than hanging, and
+    /// the last failing probe's HTTP status and timing survive for the deploy
+    /// history.
+    async fn wait_healthy(
+        &self,
+        port: u16,
+        timeout: std::time::Duration,
+    ) -> crate::state::HealthCheckResult {
+        const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let result = self.health_check(port).await;
+            if result.passed {
+                return result;
+            }
+            // Stop when another poll couldn't finish inside the bound; the
+            // caller gets this probe's detail rather than a bare timeout.
+            if tokio::time::Instant::now() + POLL_INTERVAL >= deadline {
+                return result;
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+    }
+
     /// Run the project's test suite as a hard Definition-of-Done gate — detect
     /// the toolchain and run its tests. `deployed=false` means no toolchain was
     /// recognised (skipped). The default skips.
@@ -112,4 +166,98 @@ pub async fn verify_deploy_health(deploy: &Arc<dyn DeployPort>, host_port: Optio
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DeployPort, DeployReport};
+    use crate::error::PortError;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    /// Only `health()` is scripted — `wait_healthy` must work off the trait's
+    /// own default `health_check`, which is what every adapter that hasn't
+    /// been taught a richer probe still gets.
+    struct FakeDeploy {
+        healthy: bool,
+        probes: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl DeployPort for FakeDeploy {
+        async fn deploy(&self, _work_dir: &Path) -> Result<DeployReport, PortError> {
+            unreachable!("wait_healthy never deploys")
+        }
+        async fn health(&self, _port: u16) -> Result<bool, PortError> {
+            self.probes.fetch_add(1, Ordering::SeqCst);
+            Ok(self.healthy)
+        }
+    }
+
+    /// An endpoint that never comes up must resolve to a failed check once the
+    /// bound elapses — not hang, and not give up after a single probe.
+    #[tokio::test(start_paused = true)]
+    async fn never_healthy_resolves_false_within_the_bound() {
+        let deploy = FakeDeploy {
+            healthy: false,
+            probes: AtomicUsize::new(0),
+        };
+        let started = tokio::time::Instant::now();
+
+        let result = deploy.wait_healthy(8101, Duration::from_secs(9)).await;
+
+        assert!(!result.passed, "a never-healthy endpoint must fail the gate");
+        assert!(
+            started.elapsed() <= Duration::from_secs(9),
+            "the gate must not overrun its bound; took {:?}",
+            started.elapsed()
+        );
+        assert!(
+            deploy.probes.load(Ordering::SeqCst) > 1,
+            "the gate must poll across the bound, not probe once and quit"
+        );
+    }
+
+    /// A healthy endpoint costs exactly one probe and no waiting — the gate is
+    /// mandatory, but it must not slow down deploys that are fine.
+    #[tokio::test(start_paused = true)]
+    async fn already_healthy_resolves_immediately_on_the_first_probe() {
+        let deploy = FakeDeploy {
+            healthy: true,
+            probes: AtomicUsize::new(0),
+        };
+        let started = tokio::time::Instant::now();
+
+        let result = deploy.wait_healthy(8101, Duration::from_secs(60)).await;
+
+        assert!(result.passed, "a healthy endpoint must pass the gate");
+        assert_eq!(
+            deploy.probes.load(Ordering::SeqCst),
+            1,
+            "a healthy endpoint must not be re-polled"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "a healthy endpoint must not cost a poll interval; took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The default `health_check` has no HTTP status to report (it wraps a TCP
+    /// liveness bool) but must still carry timing, so deploy history records
+    /// something for adapters that haven't overridden it.
+    #[tokio::test(start_paused = true)]
+    async fn default_health_check_reports_timing_without_a_status() {
+        let deploy = FakeDeploy {
+            healthy: true,
+            probes: AtomicUsize::new(0),
+        };
+
+        let result = deploy.health_check(8101).await;
+
+        assert!(result.passed);
+        assert_eq!(result.http_status, None);
+        assert!(result.response_time_ms.is_some());
+    }
 }
