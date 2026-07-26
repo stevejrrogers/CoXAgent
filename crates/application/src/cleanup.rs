@@ -18,8 +18,9 @@ pub fn kill_orphaned_drivers(work_dir: &Path) {
     let Some(scope) = work_dir.to_str().filter(|s| !s.trim().is_empty()) else {
         return; // no scope, no kills — never fall back to machine-wide
     };
+    let my_pid = std::process::id().to_string();
     for pattern in ORPHAN_PATTERNS {
-        let _ = kill_by_pattern(pattern, scope);
+        let _ = kill_by_pattern(pattern, scope, &my_pid);
     }
 }
 
@@ -27,13 +28,21 @@ pub fn kill_orphaned_drivers(work_dir: &Path) {
 /// `scope` (the project workspace path). `pgrep -fl` prints `pid cmdline` per
 /// line; the scope filter is what keeps this from ever reaping a human's own
 /// test run elsewhere on the machine.
-fn kill_by_pattern(pattern: &str, scope: &str) -> Result<(), std::io::Error> {
+fn kill_by_pattern(pattern: &str, scope: &str, my_pid: &str) -> Result<(), std::io::Error> {
     let output = Command::new("pgrep").arg("-fl").arg(pattern).output()?;
     if !output.status.success() {
         return Ok(());
     }
     for pid in select_pids(&String::from_utf8_lossy(&output.stdout), scope) {
-        let _ = Command::new("kill").arg(pid).output();
+        if pid == my_pid {
+            continue;
+        }
+        if let Ok(pid_num) = pid.parse::<i32>() {
+            if pid_num < 100 {
+                continue; // never kill system processes
+            }
+            let _ = Command::new("kill").arg(pid).output();
+        }
     }
     Ok(())
 }
