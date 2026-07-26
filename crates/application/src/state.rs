@@ -581,6 +581,10 @@ pub struct ProjectState {
     /// measured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clippy_baseline: Option<u64>,
+    /// Merged PR numbers already synced into ticket state (human merges on
+    /// the forge must reflect back exactly once).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub seen_merged_prs: std::collections::BTreeSet<u64>,
     /// Closed-without-merge PR numbers already processed into lessons, so a
     /// human rejection is learned from exactly once.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
@@ -706,6 +710,7 @@ impl Default for ProjectState {
             pr_sessions: std::collections::BTreeMap::new(),
             cost_holds: std::collections::BTreeMap::new(),
             clippy_baseline: None,
+            seen_merged_prs: std::collections::BTreeSet::new(),
             seen_closed_prs: std::collections::BTreeSet::new(),
             cost_approved: std::collections::BTreeSet::new(),
             tuning: Tuning::default(),

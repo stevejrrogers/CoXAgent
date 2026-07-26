@@ -657,7 +657,10 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             // Mandatory health gate (COX-B004/COX-B009): a compose exit-0 only
             // proves the containers started, not that the app inside bound
             // its port — probe before telling the human it's up.
-            Ok(r) if r.success && crate::ports::outbound::verify_deploy_health(deploy, self.host_port).await =>
+            Ok(r)
+                if r.success
+                    && crate::ports::outbound::verify_deploy_health(deploy, self.host_port)
+                        .await =>
             {
                 if self.lang.is_vi() {
                     format!("✅ Deploy xong — {}", r.summary)

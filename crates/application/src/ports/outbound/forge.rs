@@ -79,6 +79,13 @@ pub trait ForgePort: Send + Sync {
     ///
     /// # Errors
     /// [`PortError::Backend`] on an API/CLI failure.
+    /// PR numbers recently MERGED, with their head branch — so tickets merged
+    /// by a HUMAN on the forge (auto_merge off) still sync back to state.
+    /// Default: none.
+    async fn recently_merged(&self) -> Result<Vec<(u64, String)>, PortError> {
+        Ok(Vec::new())
+    }
+
     /// PR numbers recently closed WITHOUT merging, with their head branch —
     /// a human rejecting work is the most expensive teaching signal there is.
     /// Default: none (forges without the query).

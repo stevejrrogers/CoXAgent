@@ -233,6 +233,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
             })
             .collect();
         if rejected.is_empty() {
+            let n = proposals.len();
+            let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |st| {
+                st.log_activity("PO", &format!("goal gate: {n}/{n} proposals aligned"), None);
+                Ok(())
+            })
+            .await;
             return proposals;
         }
         let notes: Vec<String> = rejected

@@ -93,6 +93,20 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
         } else {
             self.worker.clone()
         };
+        // Design-WIP limit: designing far ahead of DEV throughput just piles
+        // up a stale ready-queue (run 2 hit 18). Six ready tickets is plenty
+        // of runway; past that the SA stands down this cycle.
+        {
+            use coxagent_domain::Status;
+            let ready = state
+                .tickets
+                .iter()
+                .filter(|t| t.status() == Status::Ready)
+                .count();
+            if ready >= 6 {
+                return Ok(None);
+            }
+        }
         let now = crate::state::now_rfc3339();
         let mut chosen = None;
         for cand in design_candidates(&state) {

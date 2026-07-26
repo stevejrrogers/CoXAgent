@@ -5044,8 +5044,13 @@ async fn pr_preview(
             // Mandatory health gate (COX-B004/COX-B009): a compose exit-0
             // only proves the containers started, not that the app inside
             // bound its port — probe before telling the human it's LIVE.
-            Ok(r) if r.success
-                && coxagent_application::ports::outbound::verify_deploy_health(deploy, port.map(|pt| pt as u16)).await =>
+            Ok(r)
+                if r.success
+                    && coxagent_application::ports::outbound::verify_deploy_health(
+                        deploy,
+                        port.map(|pt| pt as u16),
+                    )
+                    .await =>
             {
                 let url = port.map(|pt| format!("http://localhost:{pt}"));
                 chat(format!(
@@ -5069,8 +5074,13 @@ async fn pr_preview(
         match deploy.deploy(&p.work_dir).await {
             // Same gate on restore: a "restore" that never comes back up on
             // the port must not be reported as a clean restore.
-            Ok(r) if r.success
-                && coxagent_application::ports::outbound::verify_deploy_health(deploy, port.map(|pt| pt as u16)).await =>
+            Ok(r)
+                if r.success
+                    && coxagent_application::ports::outbound::verify_deploy_health(
+                        deploy,
+                        port.map(|pt| pt as u16),
+                    )
+                    .await =>
             {
                 chat(format!(
                     "↩️ Preview of PR #{num} stopped — main build restored."

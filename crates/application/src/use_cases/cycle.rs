@@ -1622,6 +1622,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 report
                     .errors
                     .push("TEST: paused — merge-queue recovery".to_owned());
+            } else if !self.test_has_work(&report).await {
+                // Nothing shipped since last TEST and no fixes await
+                // verification — an idle TEST pass only burns tokens
+                // re-confirming what it confirmed last cycle.
+                report
+                    .errors
+                    .push("TEST: skipped — nothing new to verify".to_owned());
             } else {
                 self.report("TEST", &verifying);
                 match self.test().execute().await {
@@ -2467,6 +2474,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// #agents so humans can see what the team un-learned.
     // One linear pass: day-claim → list → judge → apply → report.
     #[allow(clippy::too_many_lines)]
+    /// Whether TEST has anything NEW to verify this cycle: work completed in
+    /// this cycle, or Fixed tickets awaiting regression verification.
+    async fn test_has_work(&self, report: &CycleReport) -> bool {
+        if report.feature_done.is_some() || report.bug_fixed.is_some() {
+            return true;
+        }
+        self.store.load().await.is_ok_and(|s| {
+            s.tickets
+                .iter()
+                .any(|t| t.status() == coxagent_domain::Status::Fixed)
+        })
+    }
+
     /// File the periodic tech-debt chore (deduped by title prefix).
     async fn file_debt_sweep(&self, cycle: u64) {
         use coxagent_domain::ticket::Status;
@@ -2609,6 +2629,48 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                         }
                     }
                 }
+            }
+        }
+        // 2b. Sync HUMAN-merged PRs back into ticket state (processed once):
+        // the fix landed, so the ticket must stop being open/parked — run 2
+        // left COX-B006 parked while its merged fix sat on main.
+        if let Ok(merged) = forge.recently_merged().await {
+            for (number, head) in merged {
+                let ticket = head.rsplit('/').next().unwrap_or(&head).to_owned();
+                let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+                    if !s.seen_merged_prs.insert(number) {
+                        return Ok(());
+                    }
+                    s.ticket_fail_attempts.remove(&ticket);
+                    s.ticket_journal.remove(&ticket);
+                    let mut note = None;
+                    let Ok(tid) = coxagent_domain::TicketId::new(&ticket) else {
+                        return Ok(());
+                    };
+                    if let Some(t) = s.ticket_mut(&tid) {
+                        use coxagent_domain::Status;
+                        let moved = match t.status() {
+                            Status::Open | Status::InProgress => t
+                                .transition_to(coxagent_domain::Role::System, Status::Fixed)
+                                .is_ok(),
+                            Status::Pending | Status::Ready => t
+                                .transition_to(coxagent_domain::Role::System, Status::Done)
+                                .is_ok(),
+                            _ => false,
+                        };
+                        if moved {
+                            note = Some(format!(
+                                "✅ PR #{number} was merged by a human — {ticket} closed and \
+                                 un-parked to match."
+                            ));
+                        }
+                    }
+                    if let Some(n) = note {
+                        s.post_comment("SM", &n, Some(ticket.clone()));
+                    }
+                    Ok(())
+                })
+                .await;
             }
         }
         // 2. Learn from human-closed PRs (processed once each).
