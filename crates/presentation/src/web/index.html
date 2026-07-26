@@ -240,6 +240,10 @@
   .pfpane .fr .lbl{width:118px;flex:none;font-size:12.5px;color:var(--muted)}
   .pfpane .fr input,.pfpane .fr select{background:var(--card);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:8px 11px;font-size:13px;font-family:inherit;outline:none;min-width:0}
   .pfpane .fr input:focus,.pfpane .fr select:focus{border-color:var(--accent)}
+  .pf-signout-row{margin-top:18px;padding-top:14px;border-top:1px solid var(--border)}
+  .pf-signout{display:flex;align-items:center;gap:9px;width:100%;background:transparent;border:1px solid var(--border2);border-radius:9px;color:var(--muted);font-family:inherit;font-size:13px;font-weight:600;padding:10px 12px;cursor:pointer;transition:color .15s,border-color .15s,background .15s}
+  .pf-signout:hover{color:var(--red);border-color:color-mix(in srgb,var(--red) 45%,transparent);background:color-mix(in srgb,var(--red) 7%,transparent)}
+  .pf-signout i{font-size:16px}
   .pf-preset{display:inline-flex;align-items:center;gap:6px;background:var(--card);border:1px solid var(--border2);border-radius:18px;padding:6px 12px;color:var(--muted);font-family:inherit;font-size:12.5px;cursor:pointer}
   .pf-preset:hover{border-color:var(--accent);color:var(--text)}
   .settabs{display:flex;gap:2px;margin-bottom:18px;border-bottom:1px solid var(--border)}
@@ -2014,12 +2018,10 @@ textarea.np-in{resize:vertical;line-height:1.5}
           <div style="display:flex;justify-content:flex-end"><button class="save pf-btn" onclick="savePopupProfile()"><i class="ti ti-device-floppy"></i> Save profile</button></div>
         </div>
         <div id="pp-prefs" hidden>
-          <div class="fr"><span class="lbl">Desktop notifications</span><select id="ppf-desktop"><option value="on">on</option><option value="off">off</option></select></div>
-          <div class="fr"><span class="lbl">Sound</span><select id="ppf-sound"><option value="on">on</option><option value="off">off</option></select></div>
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px">
-            <button class="btn-ghost pf-btn" onclick="doLogout()" style="color:var(--red)"><i class="ti ti-logout"></i> Sign out</button>
-            <button class="save pf-btn" onclick="savePopupPrefs()"><i class="ti ti-device-floppy"></i> Save</button>
-          </div>
+          <div class="fr"><span class="lbl">Desktop notifications</span><select id="ppf-desktop" onchange="savePopupPrefs()"><option value="on">on</option><option value="off">off</option></select></div>
+          <div class="fr"><span class="lbl">Sound</span><select id="ppf-sound" onchange="savePopupPrefs()"><option value="on">on</option><option value="off">off</option></select></div>
+          <div class="msub" style="margin:4px 0 0">Changes save automatically.</div>
+          <div class="pf-signout-row"><button class="pf-signout" onclick="doLogout()"><i class="ti ti-logout"></i> Sign out of CoXAgent</button></div>
         </div>
       </div>
     </div>
