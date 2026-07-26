@@ -8586,9 +8586,18 @@ async fn me_ep(
     match resolve_principal(&auth, &headers).await {
         Some(u) => {
             let twofa = auth.has_2fa(&u.username).await;
+            // Session principals are login-time snapshots; read the CURRENT
+            // record so a just-saved display name/email shows immediately.
+            let fresh = auth
+                .list_users()
+                .await
+                .into_iter()
+                .find(|x| x.username == u.username);
+            let (name, email) =
+                fresh.map_or((u.name.clone(), u.email.clone()), |f| (f.name, f.email));
             Json(serde_json::json!({
                 "auth": true, "username": u.username,
-                "name": u.name, "email": u.email,
+                "name": name, "email": email,
                 "role": u.role.as_str(),
                 "twofa": twofa,
             }))

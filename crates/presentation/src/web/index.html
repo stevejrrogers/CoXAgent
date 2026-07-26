@@ -226,6 +226,22 @@
   .rev-empty span{font-size:12.5px;display:block;margin-top:5px}
   .rev-empty a{color:var(--accent2);cursor:pointer}
   /* Settings: sub-tabs + collapsible + sticky save */
+  /* Profile popup (Slack-style): header + vertical tab rail + pane */
+  .pfpop{max-width:560px;padding:0;overflow:hidden}
+  .pfhead{display:flex;align-items:center;gap:12px;padding:16px 20px;border-bottom:1px solid var(--border)}
+  .pfwrap{display:flex;min-height:300px}
+  .pfnav{width:158px;flex:none;display:flex;flex-direction:column;gap:2px;padding:12px 8px;border-right:1px solid var(--border);background:var(--card2)}
+  .pfnav button{display:flex;align-items:center;gap:9px;background:transparent;border:none;color:var(--muted);font-family:inherit;font-size:13px;font-weight:600;padding:9px 11px;border-radius:8px;cursor:pointer;text-align:left;transition:background .15s,color .15s}
+  .pfnav button:hover{color:var(--text);background:color-mix(in srgb,var(--text) 6%,transparent)}
+  .pfnav button.on{background:var(--accent);color:#fff}
+  .pfnav button i{font-size:16px}
+  .pfpane{flex:1;padding:16px 20px;min-width:0}
+  .pfpane .fr{display:flex;align-items:center;gap:10px;padding:7px 0;border:none}
+  .pfpane .fr .lbl{width:118px;flex:none;font-size:12.5px;color:var(--muted)}
+  .pfpane .fr input,.pfpane .fr select{background:var(--card);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:8px 11px;font-size:13px;font-family:inherit;outline:none;min-width:0}
+  .pfpane .fr input:focus,.pfpane .fr select:focus{border-color:var(--accent)}
+  .pf-preset{display:inline-flex;align-items:center;gap:6px;background:var(--card);border:1px solid var(--border2);border-radius:18px;padding:6px 12px;color:var(--muted);font-family:inherit;font-size:12.5px;cursor:pointer}
+  .pf-preset:hover{border-color:var(--accent);color:var(--text)}
   .settabs{display:flex;gap:2px;margin-bottom:18px;border-bottom:1px solid var(--border)}
   .settab-btn{display:inline-flex;align-items:center;gap:7px;background:transparent;border:none;border-bottom:2px solid transparent;color:var(--muted);font-family:inherit;font-size:13px;font-weight:600;padding:10px 15px;cursor:pointer;margin-bottom:-1px}
   .settab-btn:hover{color:var(--text)}
@@ -1963,46 +1979,53 @@ textarea.np-in{resize:vertical;line-height:1.5}
       <button id="md-join" class="pri" onclick="mtJoinFromDetail()" style="display:none;padding:8px 20px;font-size:13px"><i class="ti ti-video"></i> Join now</button>
     </div>
   </div></div>
-  <div class="ov" id="ov-profile" onclick="if(event.target===this)close_('ov-profile')"><div class="modal" style="max-width:420px">
-    <span class="x" onclick="close_('ov-profile')"><i class="ti ti-x"></i></span>
-    <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+  <div class="ov" id="ov-profile" onclick="if(event.target===this)close_('ov-profile')"><div class="modal pfpop">
+    <span class="x" onclick="close_('ov-profile')" style="top:14px;right:14px"><i class="ti ti-x"></i></span>
+    <div class="pfhead">
       <span id="pf-av"></span>
-      <div><div id="pf-name-hd" style="font-weight:800;font-size:15px"></div><div class="msub" id="pf-role-hd"></div></div>
+      <div><div id="pf-name-hd" style="font-weight:800;font-size:15px"></div><div class="msub" id="pf-role-hd" style="margin:0"></div></div>
     </div>
-    <div class="seg" style="margin-bottom:14px">
-      <button id="pt-status" class="npmode on" onclick="profileTab('status')" style="padding:6px 14px">Status</button>
-      <button id="pt-profile" class="npmode" onclick="profileTab('profile')" style="padding:6px 14px">Profile</button>
-      <button id="pt-prefs" class="npmode" onclick="profileTab('prefs')" style="padding:6px 14px">Preferences</button>
-    </div>
-    <div id="pp-status">
-      <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
-        <button id="pf-emoji" class="rt-ringbtn" style="font-size:18px;padding:6px 10px" onclick="openEmoji(this,e=>{document.getElementById('pf-emoji').textContent=e;})">😊</button>
-        <input id="pf-text" placeholder="What's your status?" maxlength="80" style="flex:1;background:var(--card);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 12px;font-size:13px"/>
+    <div class="pfwrap">
+      <div class="pfnav">
+        <button id="pt-status" class="on" onclick="profileTab('status')"><i class="ti ti-mood-smile"></i> Status</button>
+        <button id="pt-profile" onclick="profileTab('profile')"><i class="ti ti-user"></i> Profile</button>
+        <button id="pt-prefs" onclick="profileTab('prefs')"><i class="ti ti-adjustments"></i> Preferences</button>
       </div>
-      <div id="pf-presets" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px"></div>
-      <div style="display:flex;gap:8px;justify-content:flex-end">
-        <button class="btn-ghost pf-btn" onclick="saveStatus(true)">Clear status</button>
-        <button class="save pf-btn" onclick="saveStatus(false)"><i class="ti ti-device-floppy"></i> Save</button>
-      </div>
-    </div>
-    <div id="pp-profile" hidden>
-      <label class="btn-ghost" style="cursor:pointer;display:inline-flex;margin-bottom:12px"><i class="ti ti-camera"></i> Change photo
-        <input type="file" accept="image/*" hidden onchange="uploadAvatar(this)"></label>
-      <div class="fr"><span class="lbl">Display name</span><input id="pp-name" style="flex:1"></div>
-      <div class="fr"><span class="lbl">Email</span><input id="pp-email" type="email" style="flex:1"></div>
-      <div class="fr"><span class="lbl">New password</span><input id="pp-pw" type="password" placeholder="leave empty to keep" style="flex:1"></div>
-      <div id="pp-note" style="font-size:12px;margin:6px 0"></div>
-      <div style="display:flex;justify-content:flex-end"><button class="save pf-btn" onclick="savePopupProfile()"><i class="ti ti-device-floppy"></i> Save profile</button></div>
-    </div>
-    <div id="pp-prefs" hidden>
-      <div class="fr"><span class="lbl">Desktop notifications</span><select id="ppf-desktop"><option value="on">on</option><option value="off">off</option></select></div>
-      <div class="fr"><span class="lbl">Sound</span><select id="ppf-sound"><option value="on">on</option><option value="off">off</option></select></div>
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px">
-        <button class="btn-ghost pf-btn" onclick="doLogout()" style="color:var(--red)"><i class="ti ti-logout"></i> Sign out</button>
-        <button class="save pf-btn" onclick="savePopupPrefs()"><i class="ti ti-device-floppy"></i> Save</button>
+      <div class="pfpane">
+        <div id="pp-status">
+          <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
+            <button id="pf-emoji" class="rt-ringbtn" style="font-size:18px;padding:6px 10px" onclick="openEmoji(this,e=>{document.getElementById('pf-emoji').textContent=e;})">😊</button>
+            <input id="pf-text" placeholder="What's your status?" maxlength="80" style="flex:1;background:var(--card);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:9px 12px;font-size:13px"/>
+          </div>
+          <div style="font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--dim);margin-bottom:7px">Quick picks — tap to set</div>
+          <div id="pf-presets" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px"></div>
+          <div style="display:flex;gap:8px;justify-content:flex-end">
+            <button class="btn-ghost pf-btn" onclick="saveStatus(true)">Clear status</button>
+            <button class="save pf-btn" onclick="saveStatus(false)"><i class="ti ti-device-floppy"></i> Save</button>
+          </div>
+        </div>
+        <div id="pp-profile" hidden>
+          <label class="btn-ghost" style="cursor:pointer;display:inline-flex;margin-bottom:12px"><i class="ti ti-camera"></i> Change photo
+            <input type="file" accept="image/*" hidden onchange="uploadAvatar(this)"></label>
+          <div class="fr"><span class="lbl">Display name</span><input id="pp-name" style="flex:1"></div>
+          <div class="fr"><span class="lbl">Email</span><input id="pp-email" type="email" style="flex:1"></div>
+          <div class="fr"><span class="lbl">New password</span><input id="pp-pw" type="password" placeholder="leave empty to keep" style="flex:1"></div>
+          <div id="pp-note" style="font-size:12px;margin:6px 0"></div>
+          <div style="display:flex;justify-content:flex-end"><button class="save pf-btn" onclick="savePopupProfile()"><i class="ti ti-device-floppy"></i> Save profile</button></div>
+        </div>
+        <div id="pp-prefs" hidden>
+          <div class="fr"><span class="lbl">Desktop notifications</span><select id="ppf-desktop"><option value="on">on</option><option value="off">off</option></select></div>
+          <div class="fr"><span class="lbl">Sound</span><select id="ppf-sound"><option value="on">on</option><option value="off">off</option></select></div>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px">
+            <button class="btn-ghost pf-btn" onclick="doLogout()" style="color:var(--red)"><i class="ti ti-logout"></i> Sign out</button>
+            <button class="save pf-btn" onclick="savePopupPrefs()"><i class="ti ti-device-floppy"></i> Save</button>
+          </div>
+        </div>
       </div>
     </div>
   </div></div>
+    </div>
+    
   <div class="ov" id="ov-meetring"><div class="modal incbox" style="max-width:340px;text-align:center">
     <div class="inc-av" style="background:var(--accent2)22;color:var(--accent2)"><i class="ti ti-calendar-event"></i></div>
     <h3 id="mr-title" style="margin:12px 0 2px">—</h3>
@@ -4556,7 +4579,7 @@ function openProfile(tab){const me=(ME&&ME.username)||"";const p=PROFILES[me]||{
   document.getElementById("pf-emoji").textContent=p.status_emoji||"😊";
   document.getElementById("pf-text").value=p.status_text||"";
   document.getElementById("pf-presets").innerHTML=STATUS_PRESETS.map(([e,t])=>
-    `<button class="rt-ringbtn" onclick="document.getElementById('pf-emoji').textContent='${e}';document.getElementById('pf-text').value='${t}'">${e} ${t}</button>`).join("");
+    `<button class="pf-preset" onclick="pickPreset('${e}','${t}')">${e} ${t}</button>`).join("");
   document.getElementById("pp-name").value=(ME&&ME.name)||"";
   document.getElementById("pp-email").value=(ME&&ME.email)||"";
   document.getElementById("pp-pw").value="";
@@ -4564,6 +4587,12 @@ function openProfile(tab){const me=(ME&&ME.username)||"";const p=PROFILES[me]||{
   document.getElementById("ppf-sound").value=localStorage.getItem("cox_sound")||"on";
   profileTab(tab||"status");
   document.getElementById("ov-profile").classList.add("open");}
+// Slack behaviour: tapping a preset SETS the status immediately.
+async function pickPreset(emoji,text){
+  document.getElementById("pf-emoji").textContent=emoji;
+  document.getElementById("pf-text").value=text;
+  await saveStatus(false);
+}
 async function savePopupProfile(){
   const n=document.getElementById("pp-note");
   const pw=document.getElementById("pp-pw").value;
