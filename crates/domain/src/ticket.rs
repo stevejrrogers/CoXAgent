@@ -79,6 +79,10 @@ pub struct TechnicalDesign {
     pub api_contract: String,
     pub data_changes: String,
     pub test_plan: String,
+    /// Alternatives considered and why they were rejected — the difference
+    /// between a design and the first idea that compiled.
+    #[serde(default)]
+    pub alternatives: String,
 }
 
 /// UX design authored by PD. Mandatory when `has_ui` is true.

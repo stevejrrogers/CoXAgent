@@ -388,7 +388,10 @@ mod tests {
             assert_eq!(status, SandboxStatus::Confined("bwrap"));
         } else {
             assert_eq!(c.as_std().get_program(), "nice");
-            assert_eq!(status, SandboxStatus::Unavailable("bwrap not found on PATH"));
+            assert_eq!(
+                status,
+                SandboxStatus::Unavailable("bwrap not found on PATH")
+            );
         }
         let (c, status) = agent_command("echo", std::path::Path::new("/srv/p"), false);
         assert_eq!(c.as_std().get_program(), "nice");

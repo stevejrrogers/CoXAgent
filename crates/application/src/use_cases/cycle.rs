@@ -1327,6 +1327,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             self.memory_hygiene().await;
             // Self-tuning: react to our own evals (daily) — quality/intake brakes.
             self.self_tune().await;
+            // Forge hygiene: rebase open PRs onto the moving base + learn
+            // from PRs a human closed without merging.
+            self.forge_hygiene().await;
+            // Debt sweep cadence: every 10th cycle files ONE tech-debt chore
+            // (lint baseline, dead code, missing docs) if none is open — the
+            // discipline of paying debt down on a schedule instead of never.
+            if cycle % 10 == 0 {
+                self.file_debt_sweep(cycle).await;
+            }
 
             // SM dispatch FIRST (agents resolve), then report what remains.
             self.sm_unpark_tickets().await;
@@ -1519,8 +1528,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                             // like any other deploy failure. Can't be skipped
                             // — runs whenever the compose command reported
                             // success.
-                            let health_ok =
-                                !r.success || self.verify_health_after_deploy().await;
+                            let health_ok = !r.success || self.verify_health_after_deploy().await;
                             let success = r.success && health_ok;
                             let summary = if r.success && !health_ok {
                                 format!(
@@ -1533,7 +1541,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                             };
                             self.record_deploy(success, &summary, attempt_sha.clone())
                                 .await;
-                            let kind = if success { "deploy_ok" } else { "deploy_failed" };
+                            let kind = if success {
+                                "deploy_ok"
+                            } else {
+                                "deploy_failed"
+                            };
                             self.notify(kind, summary.clone()).await;
                             // Visual QA: someone finally LOOKS at the shipped
                             // UI. Only when this cycle shipped a UI feature.
@@ -2473,6 +2485,185 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// #agents so humans can see what the team un-learned.
     // One linear pass: day-claim → list → judge → apply → report.
     #[allow(clippy::too_many_lines)]
+    /// File the periodic tech-debt chore (deduped by title prefix).
+    async fn file_debt_sweep(&self, cycle: u64) {
+        use coxagent_domain::ticket::Status;
+        let Ok(state) = self.store.load().await else {
+            return;
+        };
+        let open_exists = state.tickets.iter().any(|t| {
+            t.title().starts_with("Debt sweep")
+                && !matches!(
+                    t.status(),
+                    Status::Done | Status::Documented | Status::Verified | Status::Rejected
+                )
+        });
+        if open_exists {
+            return;
+        }
+        let lint_note = match &self.deploy {
+            Some(d) => match d.lint(&self.work_dir).await {
+                Ok(Some(n)) if n > 0 => format!(" Current clippy baseline: {n} errors."),
+                _ => String::new(),
+            },
+            None => String::new(),
+        };
+        let adder = crate::use_cases::AddTicketUseCase::new(Arc::clone(&self.store));
+        if let Ok(id) = adder
+            .execute(crate::use_cases::AddTicketInput {
+                ticket_type: coxagent_domain::TicketType::Chore,
+                title: format!("Debt sweep (cycle {cycle})"),
+                description: format!(
+                    "Scheduled tech-debt pass — no new features. Pick the highest-leverage \
+                     debt and pay it down: reduce the lint/clippy baseline, delete dead code, \
+                     fill missing module docs, strengthen the weakest test area.{lint_note}"
+                ),
+                priority: coxagent_domain::ticket::Priority::Medium,
+                complexity: coxagent_domain::ticket::Complexity::Medium,
+                has_ui: false,
+                acceptance_criteria: vec![
+                    "The clippy/lint baseline is LOWER than before this ticket".to_owned(),
+                    "No behavior change: full test suite still green".to_owned(),
+                ],
+            })
+            .await
+        {
+            let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+                s.log_activity("SM", "filed scheduled debt sweep", Some(id.to_string()));
+                Ok(())
+            })
+            .await;
+        }
+    }
+
+    /// Forge hygiene, once per cycle, zero tokens:
+    /// 1. AUTO-REBASE: merge the latest base into every open PR branch that
+    ///    can take it cleanly — after any squash-merge, sibling PRs otherwise
+    ///    rot into conflicts one by one (the stacked-PR tax). Conflicted
+    ///    branches are left for the existing fix flow.
+    /// 2. HUMAN REJECTION: a PR closed WITHOUT merge is the costliest review
+    ///    signal — record a lesson (state + hub) and brief the ticket's next
+    ///    attempt via its journal + a comment.
+    /// 3. Review comments starting with `LESSON:` become team lessons.
+    #[allow(clippy::too_many_lines)] // three linear hygiene passes; splitting hurts readability
+    async fn forge_hygiene(&self) {
+        let Some(forge) = &self.forge else {
+            return;
+        };
+        let target = self.flow_base().to_owned();
+        // 1. Rebase open PRs onto the moving base.
+        if let Ok(prs) = forge.list_open_prs().await {
+            let mut rebased: Vec<u64> = Vec::new();
+            for pr in prs.iter().filter(|p| p.base == target).take(8) {
+                let git = |args: &[&str]| {
+                    let mut c = std::process::Command::new("git");
+                    c.args(args).current_dir(&self.work_dir);
+                    c.output().is_ok_and(|o| o.status.success())
+                };
+                if !git(&["fetch", "origin", &pr.head, &target]) {
+                    continue;
+                }
+                let local = format!("refs/remotes/origin/{}", pr.head);
+                let base_ref = format!("origin/{target}");
+                // Already contains base? skip cheaply.
+                let up_to_date = std::process::Command::new("git")
+                    .args(["merge-base", "--is-ancestor", &base_ref, &local])
+                    .current_dir(&self.work_dir)
+                    .status()
+                    .is_ok_and(|s| s.success());
+                if up_to_date {
+                    continue;
+                }
+                if git(&["checkout", "-B", &pr.head, &local])
+                    && git(&["merge", &base_ref, "--no-edit"])
+                {
+                    if git(&["push", "origin", &pr.head]) {
+                        rebased.push(pr.number);
+                    }
+                } else {
+                    let _ = git(&["merge", "--abort"]);
+                }
+                let _ = git(&["checkout", &target]);
+            }
+            if !rebased.is_empty() {
+                let list = rebased
+                    .iter()
+                    .map(|n| format!("#{n}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+                    s.post_chat_in(
+                        "SA",
+                        &format!("🔁 Rebased open PRs onto the latest base: {list}"),
+                        crate::state::AGENTS_CHANNEL,
+                        Vec::new(),
+                    );
+                    Ok(())
+                })
+                .await;
+            }
+            // 3. LESSON: comments from reviewers become team knowledge.
+            for pr in prs.iter().take(8) {
+                let Ok(feedback) = forge.pr_feedback(pr.number).await else {
+                    continue;
+                };
+                for f in feedback {
+                    for line in f.body.lines() {
+                        if let Some(lesson) = line.trim().strip_prefix("LESSON:") {
+                            let lesson = lesson.trim().to_owned();
+                            if lesson.is_empty() {
+                                continue;
+                            }
+                            crate::prompts::record_hub_lesson(&lesson);
+                            let l2 = lesson.clone();
+                            let _ = crate::ports::outbound::mutate_state(
+                                self.store.as_ref(),
+                                move |s| {
+                                    s.add_lesson(&l2);
+                                    Ok(())
+                                },
+                            )
+                            .await;
+                        }
+                    }
+                }
+            }
+        }
+        // 2. Learn from human-closed PRs (processed once each).
+        if let Ok(closed) = forge.closed_unmerged().await {
+            for (number, head) in closed {
+                let fresh = self
+                    .store
+                    .load()
+                    .await
+                    .is_ok_and(|s| !s.seen_closed_prs.contains(&number));
+                if !fresh {
+                    continue;
+                }
+                // feat/COX-F012 → COX-F012
+                let ticket = head.rsplit('/').next().unwrap_or(&head).to_owned();
+                let lesson = format!(
+                    "PR #{number} ({ticket}) was closed by a human WITHOUT merging — the approach                      was rejected, not the details. Re-read the ticket and redesign before recoding."
+                );
+                crate::prompts::record_hub_lesson(&lesson);
+                let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+                    s.seen_closed_prs.insert(number);
+                    s.add_lesson(&lesson);
+                    s.journal_note(&ticket, &format!("human closed PR #{number} unmerged — redesign, don't recode"));
+                    s.post_comment(
+                        "SM",
+                        &format!(
+                            "🚫 PR #{number} closed by a human without merge — treating it as a                              redesign signal for {ticket}."
+                        ),
+                        Some(ticket.clone()),
+                    );
+                    Ok(())
+                })
+                .await;
+            }
+        }
+    }
+
     /// Daily self-tuning pass: recompute the evals and set/clear the quality
     /// and intake brakes (see `metrics::decide_tuning`). SM announces changes.
     async fn self_tune(&self) {
@@ -3128,9 +3319,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     .ok(),
                 None => None,
             };
-            let outcome = match resumed {
-                Some(o) => Ok(o),
-                None => {
+            let outcome = if let Some(o) = resumed {
+                Ok(o)
+            } else {
+                {
                     let request = crate::ports::outbound::AgentRequest {
                         role: coxagent_domain::Role::DevBug,
                         system_prompt: crate::prompts::system_prompt(crate::prompts::DEV),

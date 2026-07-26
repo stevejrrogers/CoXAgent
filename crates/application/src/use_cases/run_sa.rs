@@ -19,6 +19,8 @@ use std::time::Duration;
 struct DesignOutput {
     approach: String,
     #[serde(default)]
+    alternatives: String,
+    #[serde(default)]
     files: Vec<String>,
     #[serde(default)]
     api_contract: String,
@@ -146,9 +148,37 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             }
         };
 
-        // Critic pass on LARGE tickets only: a second opinion is cheap here
-        // and architecture mistakes are cheapest before DEV burns hours on
-        // them. One round: critique → (if must-fix) one revision.
+        // LARGE ticket: experts ship SMALL PRs. Split it into ≤3 focused
+        // sub-tickets instead of designing a thousand-line change; the parent
+        // is rejected with a pointer to its children. Falls back to the
+        // critic-reviewed single design when the split call fails.
+        if state
+            .ticket(&id)
+            .is_some_and(|t| t.complexity() == coxagent_domain::ticket::Complexity::Large)
+        {
+            if let Some(children) = self.decompose_large(&id, &title).await {
+                let worker2 = worker.clone();
+                let id2 = id.clone();
+                let kids = children.join(", ");
+                let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |st| {
+                    if let Some(t) = st.ticket_mut(&id2) {
+                        let _ = t.transition_to(Role::Po, coxagent_domain::Status::Rejected);
+                    }
+                    st.post_comment(
+                        "SA",
+                        &format!("✂️ {id2} was LARGE — split into {kids}; parent closed."),
+                        Some(id2.to_string()),
+                    );
+                    Ok(())
+                })
+                .await;
+                self.store.release_stage(&id, "sa", &worker2).await.ok();
+                return Ok(Some(id));
+            }
+        }
+        // Critic pass on LARGE tickets only (when a split wasn't possible): a
+        // second opinion is cheap here and architecture mistakes are cheapest
+        // before DEV burns hours on them.
         let design = if state
             .ticket(&id)
             .is_some_and(|t| t.complexity() == coxagent_domain::ticket::Complexity::Large)
@@ -186,6 +216,77 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
         Ok(Some(id))
     }
 
+    /// Ask the SA to split a large ticket into ≤3 small/medium sub-tickets.
+    /// Returns the created ids, or `None` when the call failed/was unusable
+    /// (caller falls back to a single reviewed design).
+    async fn decompose_large(&self, id: &TicketId, title: &str) -> Option<Vec<String>> {
+        let request = AgentRequest {
+            role: Role::Sa,
+            system_prompt: crate::prompts::system_prompt(crate::prompts::SA),
+            task_prompt: format!(
+                "Ticket {id} ('{title}') is LARGE. Split it into 2-3 INDEPENDENT, \
+                 individually shippable sub-tickets (small or medium each) that together \
+                 deliver it. Output ONLY a JSON array: [{{\"title\": string, \
+                 \"description\": string, \"complexity\": \"small\"|\"medium\", \
+                 \"has_ui\": boolean, \"acceptance_criteria\": [string]}}]"
+            ),
+            work_dir: self.work_dir.clone(),
+            timeout: std::time::Duration::from_secs(600),
+            escalation_level: 1,
+        };
+        let out = self.engine.run(request).await.ok()?;
+        if !out.succeeded() {
+            return None;
+        }
+        let raw = &out.stdout;
+        let (start, end) = (raw.find('[')?, raw.rfind(']')?);
+        let items: Vec<serde_json::Value> = serde_json::from_str(&raw[start..=end]).ok()?;
+        if items.is_empty() || items.len() > 3 {
+            return None;
+        }
+        let adder = crate::use_cases::AddTicketUseCase::new(Arc::clone(&self.store));
+        let mut created = Vec::new();
+        for it in items.iter().take(3) {
+            let title = it.get("title")?.as_str()?.to_owned();
+            let desc = it
+                .get("description")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            let cx = match it.get("complexity").and_then(serde_json::Value::as_str) {
+                Some("medium") => coxagent_domain::ticket::Complexity::Medium,
+                _ => coxagent_domain::ticket::Complexity::Small,
+            };
+            let ui = it
+                .get("has_ui")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let ac: Vec<String> = it
+                .get("acceptance_criteria")
+                .and_then(serde_json::Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let nid = adder
+                .execute(crate::use_cases::AddTicketInput {
+                    ticket_type: coxagent_domain::TicketType::Feature,
+                    title: format!("{title} (from {id})"),
+                    description: desc,
+                    priority: coxagent_domain::ticket::Priority::Medium,
+                    complexity: cx,
+                    has_ui: ui,
+                    acceptance_criteria: ac,
+                })
+                .await
+                .ok()?;
+            created.push(nid.to_string());
+        }
+        Some(created)
+    }
+
     /// One critique round for a large ticket's design: a reviewer call judges
     /// it (APPROVED / must-fix list); on must-fix, ONE revision call amends
     /// the design. Any failure keeps the original design — the pass can only
@@ -197,7 +298,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             system_prompt: crate::prompts::system_prompt(
                 "You are a principal engineer REVIEWING another architect's design. \
                  Judge only architecture-level risk: wrong decomposition, missing \
-                 failure modes, scaling traps, security gaps. If sound, reply exactly \
+                 failure modes, scaling traps, security gaps — and REJECT any design \
+                 whose `alternatives` field is empty or hand-wavy: no alternatives \
+                 considered means no design happened. If sound, reply exactly \
                  APPROVED. Otherwise list ONLY must-fix items, one per line, no praise.",
             ),
             task_prompt: format!(
@@ -272,6 +375,7 @@ fn parse_design(raw: &str) -> Result<DesignOutput, String> {
 fn technical_of(d: &DesignOutput) -> TechnicalDesign {
     TechnicalDesign {
         approach: d.approach.clone(),
+        alternatives: d.alternatives.clone(),
         files: d.files.clone(),
         api_contract: d.api_contract.clone(),
         data_changes: d.data_changes.clone(),

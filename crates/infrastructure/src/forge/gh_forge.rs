@@ -191,6 +191,35 @@ impl ForgePort for GhForge {
         Ok(raws.into_iter().map(Into::into).collect())
     }
 
+    async fn closed_unmerged(&self) -> Result<Vec<(u64, String)>, PortError> {
+        let json = self
+            .gh(&[
+                "pr",
+                "list",
+                "--repo",
+                &self.repo,
+                "--state",
+                "closed",
+                "--limit",
+                "50",
+                "--json",
+                "number,mergedAt,headRefName",
+            ])
+            .await?;
+        let raws: Vec<serde_json::Value> = serde_json::from_str(&json)
+            .map_err(|e| PortError::Backend(format!("gh closed list parse: {e}")))?;
+        Ok(raws
+            .into_iter()
+            .filter(|v| v.get("mergedAt").map_or(true, serde_json::Value::is_null))
+            .filter_map(|v| {
+                Some((
+                    v.get("number")?.as_u64()?,
+                    v.get("headRefName")?.as_str()?.to_owned(),
+                ))
+            })
+            .collect())
+    }
+
     async fn pr_diff(&self, number: u64) -> Result<String, PortError> {
         let n = number.to_string();
         self.gh(&["pr", "diff", &n, "--repo", &self.repo]).await

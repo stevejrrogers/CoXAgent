@@ -105,7 +105,10 @@ benefits, what changes for them) inside the description, plus edge cases, \
 dependencies, and any risk/open question. FEWER, better-specified features \
 beat more: if only one thing is truly worth building, propose one. Never \
 duplicate or trivially vary something already in the backlog, and never \
-propose work whose real blocker is an unmerged fix.\n\n\
+propose work whose real blocker is an unmerged fix. Every proposal MUST \
+directly advance the stated product goal — name (inside the description) which \
+goal line it serves; anything only 'generally useful' will be rejected by the \
+PO's goal gate.\n\n\
 Respond with ONLY a JSON array, no prose, each item exactly:\n\
 {\"title\": string, \"description\": string, \"priority\": \"low\"|\"medium\"|\"high\", \
 \"complexity\": \"small\"|\"medium\"|\"large\", \"has_ui\": boolean, \
@@ -147,7 +150,7 @@ dependency direction, module/context boundaries, the key patterns, the \
 non-functional decisions, and any service-split decision with its rationale — \
 then the concrete plan.\n\n\
 Respond with ONLY a JSON object, no prose, exactly:\n\
-{\"approach\": string, \"files\": [string], \"api_contract\": string, \
+{\"approach\": string, \"alternatives\": string (2-3 alternatives you CONSIDERED and WHY each was rejected — required), \"files\": [string], \"api_contract\": string, \
 \"data_changes\": string, \"test_plan\": string}";
 
 /// Product Designer — authors the UX design for one UI feature that already has

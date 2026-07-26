@@ -146,8 +146,9 @@ pub fn discover_tooling() -> Tooling {
             purpose: "confines sandboxed agent writes to the workspace (workflow.sandbox)",
             present: found.is_some(),
             path: found.map(|p| p.display().to_string()).unwrap_or_default(),
-            install: "sudo apt-get install -y bubblewrap   # or see github.com/containers/bubblewrap"
-                .to_owned(),
+            install:
+                "sudo apt-get install -y bubblewrap   # or see github.com/containers/bubblewrap"
+                    .to_owned(),
             needs_auth: false,
         });
     }

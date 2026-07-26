@@ -387,6 +387,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
                 if let Some(ref _s) = state {
                     if let Ok(design) = serde_json::from_str::<serde_json::Value>(&o.stdout) {
                         let td = coxagent_domain::TechnicalDesign {
+                            alternatives: String::new(),
                             approach: design
                                 .get("approach")
                                 .and_then(|v| v.as_str())

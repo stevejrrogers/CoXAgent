@@ -258,11 +258,71 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         // release the claim so the ticket returns to the queue instead of being
         // stranded In-Progress forever (which piled up 100+ orphaned tickets and
         // kept burning tokens re-claiming fresh ones).
-        // Keep the engine's conversation id: the repair pass (below) resumes
-        // this session so the agent keeps everything it just read and wrote
-        // in context instead of rediscovering its own change cold.
-        let session = match self.engine.run(self.build_request(&state, &id)).await {
-            Ok(o) if o.succeeded() => o.session_id.clone(),
+        // Two-phase expert flow: PLAN first (read the code, commit to steps,
+        // name the risks — no code yet), then EXECUTE the plan in the SAME
+        // conversation. Thinking is cheap; unplanned code is not. Falls back
+        // to single-shot on engines without session resume.
+        let mut request = self.build_request(&state, &id);
+        let plan_first = request.escalation_level == 0; // retries already carry a journal
+        if plan_first {
+            request.task_prompt = format!(
+                "{}\n\nFIRST: do NOT write code yet. Explore the relevant code (use the repo \
+                 map / code-graph tools), then output a concise implementation PLAN: the exact \
+                 steps, the files you will touch, the tests you will add, and the biggest risk. \
+                 Wait for the follow-up before implementing.",
+                request.task_prompt
+            );
+        }
+        // Keep the engine's conversation id: the execute pass and the repair
+        // pass (below) resume this session so the agent keeps everything it
+        // just read and wrote in context instead of rediscovering it cold.
+        let session = match self.engine.run(request).await {
+            Ok(o) if o.succeeded() => {
+                let sid = o.session_id.clone();
+                match (&sid, plan_first) {
+                    (Some(sid_v), true) => {
+                        // Phase 2: execute the plan it just committed to.
+                        let exec = self
+                            .engine
+                            .resume_run(
+                                sid_v,
+                                "Plan accepted. Now IMPLEMENT it exactly: follow your steps, \
+                                 write the tests you named, and flag (don't silently absorb) \
+                                 anything that forces a deviation from the plan.",
+                                &self.work_dir,
+                                Duration::from_secs(3600),
+                            )
+                            .await;
+                        match exec {
+                            Ok(e) if e.succeeded() => sid,
+                            _ => {
+                                // Resume unsupported/failed: run single-shot fresh
+                                // with the plan folded in as a normal task.
+                                let fresh = self.build_request(&state, &id);
+                                match self.engine.run(fresh).await {
+                                    Ok(f) if f.succeeded() => f.session_id.clone(),
+                                    Ok(f) => {
+                                        self.record_failure(&id, f.stderr.trim()).await;
+                                        self.release_claim(&id).await;
+                                        return Err(PortError::Backend(format!(
+                                            "{:?} engine failed on {id}: {}",
+                                            self.mode,
+                                            f.stderr.trim()
+                                        ))
+                                        .into());
+                                    }
+                                    Err(e) => {
+                                        self.record_failure(&id, &e.to_string()).await;
+                                        self.release_claim(&id).await;
+                                        return Err(e.into());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => sid,
+                }
+            }
             Ok(o) => {
                 self.record_failure(&id, o.stderr.trim()).await;
                 self.release_claim(&id).await;
@@ -279,6 +339,24 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 return Err(e.into());
             }
         };
+
+        // Expert habit: review your OWN diff before anyone else sees it.
+        // Same conversation (context intact) = one cheap pass that catches
+        // nits, dead code and missed edge cases. Best-effort.
+        if let Some(sid) = &session {
+            let _ = self
+                .engine
+                .resume_run(
+                    sid,
+                    "Before handing off: run `git diff` and review YOUR OWN change like a \
+                     principal engineer reviewing a stranger's PR. Fix what you find — dead \
+                     code, debug leftovers, missed edge cases, naming, missing tests for new \
+                     logic. Do NOT start new work or commit.",
+                    &self.work_dir,
+                    Duration::from_secs(900),
+                )
+                .await;
+        }
 
         // Mechanical Definition of Done: the suite must be GREEN after the
         // change. Red → one bounded repair pass fed the failure output; still
@@ -340,6 +418,134 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 ))
                 .into());
             }
+
+            // Lint gate: a change may never ADD clippy errors. Baseline is
+            // learned on first measure and ratchets DOWN when improved.
+            if let Ok(Some(count)) = deploy.lint(&self.work_dir).await {
+                let prior = self.store.load().await.ok().and_then(|s| s.clippy_baseline);
+                match prior {
+                    None => {
+                        let _ =
+                            crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+                                s.clippy_baseline = Some(count);
+                                Ok(())
+                            })
+                            .await;
+                    }
+                    Some(base) if count > base => {
+                        // One bounded repair pass for the NEW lint errors only.
+                        let fixup = format!(
+                            "Your change introduced NEW `cargo clippy` errors (was {base}, now \
+                             {count}). Run `cargo clippy --workspace --all-targets`, fix ONLY \
+                             errors caused by your change, and do not start new work."
+                        );
+                        if let Some(sid) = &session {
+                            let _ = self
+                                .engine
+                                .resume_run(sid, &fixup, &self.work_dir, Duration::from_secs(900))
+                                .await;
+                        } else {
+                            let repair = AgentRequest {
+                                role: self.mode.role(),
+                                system_prompt: prompts::system_prompt(prompts::DEV),
+                                task_prompt: fixup,
+                                work_dir: self.work_dir.clone(),
+                                timeout: Duration::from_secs(900),
+                                escalation_level: 0,
+                            };
+                            let _ = self.engine.run(repair).await;
+                        }
+                        let after = deploy
+                            .lint(&self.work_dir)
+                            .await
+                            .ok()
+                            .flatten()
+                            .unwrap_or(count);
+                        if after > base {
+                            self.record_failure(
+                                &id,
+                                &format!("added clippy errors ({base} -> {after})"),
+                            )
+                            .await;
+                            self.release_claim(&id).await;
+                            return Err(PortError::Backend(format!(
+                                "{:?} added lint errors on {id} — ticket returned to the queue",
+                                self.mode
+                            ))
+                            .into());
+                        }
+                        if after < base {
+                            let _ = crate::ports::outbound::mutate_state(
+                                self.store.as_ref(),
+                                move |s| {
+                                    s.clippy_baseline = Some(after);
+                                    Ok(())
+                                },
+                            )
+                            .await;
+                        }
+                    }
+                    Some(base) if count < base => {
+                        let _ =
+                            crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+                                s.clippy_baseline = Some(count);
+                                Ok(())
+                            })
+                            .await;
+                    }
+                    Some(_) => {}
+                }
+            }
+
+            // Regression-test gate: a BUG fix that touches no test is a fix
+            // on faith. Mechanical check over the working diff; one bounded
+            // repair pass to add the missing test.
+            if self.mode == DevMode::Bug && !self.diff_touches_tests() {
+                let fixup = format!(
+                    "Your fix for {id} ships with NO regression test. Add a test that FAILS \
+                     without your fix and passes with it — that is the only proof the bug is \
+                     dead. Do not start new work or commit."
+                );
+                if let Some(sid) = &session {
+                    let _ = self
+                        .engine
+                        .resume_run(sid, &fixup, &self.work_dir, Duration::from_secs(900))
+                        .await;
+                } else {
+                    let repair = AgentRequest {
+                        role: self.mode.role(),
+                        system_prompt: prompts::system_prompt(prompts::DEV),
+                        task_prompt: fixup,
+                        work_dir: self.work_dir.clone(),
+                        timeout: Duration::from_secs(900),
+                        escalation_level: 0,
+                    };
+                    let _ = self.engine.run(repair).await;
+                }
+                if !self.diff_touches_tests() {
+                    self.record_failure(&id, "bug fix shipped without a regression test")
+                        .await;
+                    self.release_claim(&id).await;
+                    return Err(PortError::Backend(format!(
+                        "{:?} fix for {id} has no regression test — returned to the queue",
+                        self.mode
+                    ))
+                    .into());
+                }
+                // Suite must STILL be green with the new test in place.
+                if let Ok(r) = deploy.run_tests(&self.work_dir).await {
+                    if !r.success {
+                        self.record_failure(&id, "regression test added but suite is red")
+                            .await;
+                        self.release_claim(&id).await;
+                        return Err(PortError::Backend(format!(
+                            "{:?} regression test left suite red on {id}",
+                            self.mode
+                        ))
+                        .into());
+                    }
+                }
+            }
         }
 
         // Complete under an atomic read-modify-write with retry: move to the
@@ -377,6 +583,46 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             p(None);
         }
         Ok(Some(id))
+    }
+
+    /// Whether the current working diff (staged/unstaged + untracked) touches
+    /// tests: a test-ish path, or added lines containing test markers.
+    fn diff_touches_tests(&self) -> bool {
+        let run = |args: &[&str]| -> String {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&self.work_dir)
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default()
+        };
+        let names = format!(
+            "{}\n{}",
+            run(&["diff", "HEAD", "--name-only"]),
+            run(&["ls-files", "--others", "--exclude-standard"])
+        );
+        if names.lines().any(|f| {
+            let f = f.trim().to_lowercase();
+            !f.is_empty()
+                && (f.contains("/tests/")
+                    || f.starts_with("tests/")
+                    || f.ends_with("_test.rs")
+                    || f.ends_with("_test.go")
+                    || f.ends_with(".test.ts")
+                    || f.ends_with(".test.js")
+                    || f.contains("test_"))
+        }) {
+            return true;
+        }
+        let diff = run(&["diff", "HEAD"]);
+        diff.lines().any(|l| {
+            l.starts_with('+')
+                && (l.contains("#[test]")
+                    || l.contains("#[tokio::test]")
+                    || l.contains("def test_")
+                    || l.contains("it(")
+                    || l.contains("func Test"))
+        })
     }
 
     /// Count a failed attempt on `id`; at the 3rd, park it with a visible note
@@ -513,18 +759,21 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             ),
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(3600),
-            // Retry = escalate: each prior failed attempt bumps the level, so
-            // the engine runs a stronger model from its ladder (see
-            // EngineMapping.escalation) instead of failing identically again.
-            escalation_level: u8::try_from(
-                state
+            // Escalation: retries climb the ladder — and a LARGE ticket starts
+            // on rung 1 outright. Experts don't try the cheap model first on
+            // the hard problem and hope.
+            escalation_level: {
+                let attempts = state
                     .ticket_fail_attempts
                     .get(&id.to_string())
                     .copied()
                     .unwrap_or(0)
-                    .min(3),
-            )
-            .unwrap_or(3),
+                    .min(3);
+                let floor = u32::from(ticket.is_some_and(|t| {
+                    t.complexity() == coxagent_domain::ticket::Complexity::Large
+                }));
+                u8::try_from(attempts.max(floor)).unwrap_or(3)
+            },
         }
     }
 }
@@ -695,5 +944,46 @@ mod tests {
             DevMode::Feature,
         );
         assert!(uc.execute().await.expect("run").is_none());
+    }
+
+    #[tokio::test]
+    async fn diff_touches_tests_detects_markers_and_paths() {
+        let dir = std::env::temp_dir().join(format!("cox-dtt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .unwrap()
+        };
+        git(&["init", "-q"]);
+        git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "--allow-empty",
+            "-q",
+            "-m",
+            "base",
+        ]);
+        let uc = RunDevUseCase::new(
+            Arc::new(MemStore {
+                state: Mutex::new(ProjectState::default()),
+            }),
+            Arc::new(OkEngine),
+            Config::default(),
+            dir.clone(),
+            DevMode::Bug,
+        );
+        assert!(!uc.diff_touches_tests(), "clean tree touches nothing");
+        std::fs::write(dir.join("lib.rs"), "fn f() {}\n").unwrap();
+        assert!(!uc.diff_touches_tests(), "non-test change is not a test");
+        std::fs::write(dir.join("lib.rs"), "fn f() {}\n#[test]\nfn t() {}\n").unwrap();
+        git(&["add", "-A"]);
+        assert!(uc.diff_touches_tests(), "added #[test] counts");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -79,6 +79,13 @@ pub trait ForgePort: Send + Sync {
     ///
     /// # Errors
     /// [`PortError::Backend`] on an API/CLI failure.
+    /// PR numbers recently closed WITHOUT merging, with their head branch —
+    /// a human rejecting work is the most expensive teaching signal there is.
+    /// Default: none (forges without the query).
+    async fn closed_unmerged(&self) -> Result<Vec<(u64, String)>, PortError> {
+        Ok(Vec::new())
+    }
+
     async fn pr_feedback(&self, _number: u64) -> Result<Vec<PrFeedback>, PortError> {
         Ok(Vec::new())
     }

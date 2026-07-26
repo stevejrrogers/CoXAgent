@@ -197,6 +197,37 @@ fn test_command(work_dir: &Path) -> Option<(&'static str, Vec<&'static str>)> {
 
 #[async_trait]
 impl DeployPort for DockerComposeDeploy {
+    async fn lint(&self, work_dir: &Path) -> Result<Option<u64>, PortError> {
+        // Rust-only for now: clippy's error count is the lint currency the
+        // DoD gate compares against the project baseline.
+        if !work_dir.join("Cargo.toml").exists() {
+            return Ok(None);
+        }
+        let _slot = crate::proc::heavy_slot().await;
+        let out = tokio::time::timeout(
+            Duration::from_secs(600),
+            crate::proc::low_priority("cargo")
+                .args(["clippy", "--workspace", "--all-targets", "--quiet"])
+                .current_dir(work_dir)
+                .stdin(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .map_err(|_| PortError::Backend("clippy timed out".to_owned()))?
+        .map_err(|e| PortError::Backend(format!("spawn clippy: {e}")))?;
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let count = text
+            .lines()
+            .filter(|l| l.trim_start().starts_with("error"))
+            .count() as u64;
+        Ok(Some(count))
+    }
+
     async fn run_tests(&self, work_dir: &Path) -> Result<DeployReport, PortError> {
         let Some((cmd, args)) = test_command(work_dir) else {
             return Ok(DeployReport {

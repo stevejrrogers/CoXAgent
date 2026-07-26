@@ -62,6 +62,15 @@ pub trait DeployPort: Send + Sync {
     ///
     /// # Errors
     /// [`PortError::Backend`] if the test tool can't be launched.
+    /// Count lint errors (e.g. `cargo clippy`) for the workspace. `None` =
+    /// linting not supported for this project type. Default: unsupported.
+    ///
+    /// # Errors
+    /// [`PortError`] on spawn failure.
+    async fn lint(&self, _work_dir: &Path) -> Result<Option<u64>, PortError> {
+        Ok(None)
+    }
+
     async fn run_tests(&self, work_dir: &Path) -> Result<DeployReport, PortError> {
         let _ = work_dir;
         Ok(DeployReport {

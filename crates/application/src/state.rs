@@ -576,6 +576,15 @@ pub struct ProjectState {
     /// `workflow.approve_over_usd`. Value = the estimate shown to the human.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub cost_holds: std::collections::BTreeMap<String, f64>,
+    /// Lint (clippy) error baseline: a DEV change may never ADD errors; an
+    /// improvement lowers the bar for everyone after. `None` until first
+    /// measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clippy_baseline: Option<u64>,
+    /// Closed-without-merge PR numbers already processed into lessons, so a
+    /// human rejection is learned from exactly once.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub seen_closed_prs: std::collections::BTreeSet<u64>,
     /// Tickets a human approved to run despite the cost estimate.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub cost_approved: std::collections::BTreeSet<String>,
@@ -696,6 +705,8 @@ impl Default for ProjectState {
             pr_fix_attempts: std::collections::BTreeMap::new(),
             pr_sessions: std::collections::BTreeMap::new(),
             cost_holds: std::collections::BTreeMap::new(),
+            clippy_baseline: None,
+            seen_closed_prs: std::collections::BTreeSet::new(),
             cost_approved: std::collections::BTreeSet::new(),
             tuning: Tuning::default(),
             ticket_evidence: std::collections::BTreeMap::new(),

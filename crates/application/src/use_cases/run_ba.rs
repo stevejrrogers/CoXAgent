@@ -139,6 +139,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
             }
         };
 
+        // PO goal gate: every proposal is judged against the PRODUCT GOAL in
+        // one cheap call before any ticket exists. Off-goal work dies at the
+        // door with a written reason instead of consuming SA/DEV budget.
+        let proposals = self.po_goal_gate(proposals).await;
+
         let adder = AddTicketUseCase::new(Arc::clone(&self.store));
         let mut created = Vec::with_capacity(proposals.len());
         let mut seen = taken;
@@ -163,6 +168,92 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
             created.push(id);
         }
         Ok(created)
+    }
+
+    /// One PO call judges all proposals against the product goal; returns the
+    /// survivors. Any failure (engine down, unparseable) keeps ALL proposals —
+    /// the gate can starve bad work, never good work.
+    async fn po_goal_gate(
+        &self,
+        proposals: Vec<crate::parsing::ProposedItem>,
+    ) -> Vec<crate::parsing::ProposedItem> {
+        let goal = self.context.trim();
+        if goal.is_empty() || proposals.is_empty() {
+            return proposals;
+        }
+        let listing = proposals
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                format!(
+                    "{i}. {} — {}",
+                    p.title,
+                    p.description.chars().take(200).collect::<String>()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let request = AgentRequest {
+            role: Role::Po,
+            system_prompt: prompts::system_prompt(prompts::PO),
+            task_prompt: format!(
+                "GOAL GATE. The product goal/direction is:\n{goal}\n\nProposed tickets:\n{listing}\n\n\
+                 For each index, does it DIRECTLY serve the stated goal (not merely 'generally \
+                 useful')? Reply with ONLY a JSON array: \
+                 [{{\"index\": number, \"verdict\": \"YES\"|\"NO\", \"reason\": string}}]"
+            ),
+            work_dir: self.work_dir.clone(),
+            timeout: Duration::from_secs(180),
+            escalation_level: 0,
+        };
+        let Ok(o) = self.engine.run(request).await else {
+            return proposals;
+        };
+        if !o.succeeded() {
+            return proposals;
+        }
+        let raw = &o.stdout;
+        let (Some(a), Some(b)) = (raw.find('['), raw.rfind(']')) else {
+            return proposals;
+        };
+        let Ok(verdicts) = serde_json::from_str::<Vec<serde_json::Value>>(&raw[a..=b]) else {
+            return proposals;
+        };
+        let rejected: Vec<(usize, String)> = verdicts
+            .iter()
+            .filter(|v| v.get("verdict").and_then(serde_json::Value::as_str) == Some("NO"))
+            .filter_map(|v| {
+                Some((
+                    usize::try_from(v.get("index")?.as_u64()?).ok()?,
+                    v.get("reason")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("off-goal")
+                        .to_owned(),
+                ))
+            })
+            .collect();
+        if rejected.is_empty() {
+            return proposals;
+        }
+        let notes: Vec<String> = rejected
+            .iter()
+            .filter_map(|(i, r)| proposals.get(*i).map(|p| format!("'{}' — {}", p.title, r)))
+            .collect();
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |st| {
+            for n in &notes {
+                st.post_comment("PO", &format!("🚫 Goal gate rejected: {n}"), None);
+            }
+            Ok(())
+        })
+        .await;
+        let dead: std::collections::BTreeSet<usize> =
+            rejected.into_iter().map(|(i, _)| i).collect();
+        proposals
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| !dead.contains(i))
+            .map(|(_, p)| p)
+            .collect()
     }
 }
 
