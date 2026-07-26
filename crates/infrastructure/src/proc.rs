@@ -130,6 +130,7 @@ fn sandbox_writable(work_dir: &Path) -> Vec<PathBuf> {
 
 /// A macOS Seatbelt profile: allow everything EXCEPT file writes outside the
 /// allow-list. Pure so it is unit-testable.
+#[cfg(any(test, target_os = "macos"))]
 fn seatbelt_profile(writable: &[PathBuf]) -> String {
     let subpaths: String = writable
         .iter()
@@ -432,6 +433,64 @@ mod tests {
             "outside write must be denied under bwrap, same guarantee as Seatbelt"
         );
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// The `#[cfg(...)]` gate attached to the top-level definition of `name`,
+    /// or `None` when that definition carries no gate. Reads this module's own
+    /// source, so it sees the gates as written — including the ones the `test`
+    /// cfg would otherwise hide from a running test binary.
+    fn cfg_gate_above(src: &str, name: &str) -> Option<String> {
+        let lines: Vec<&str> = src.lines().collect();
+        let def = format!("fn {name}(");
+        // Top-level definitions start at column 0; call sites are indented.
+        let at = lines.iter().position(|l| l.starts_with(&def))?;
+        lines[..at]
+            .iter()
+            .rev()
+            .take_while(|l| {
+                let t = l.trim_start();
+                t.starts_with("#[") || t.starts_with("//") || t.is_empty()
+            })
+            .find(|l| l.trim_start().starts_with("#[cfg("))
+            .map(|l| (*l).to_owned())
+    }
+
+    /// COX-B006 regression: a helper that is only *called* from inside a
+    /// `#[cfg(target_os = ...)]` block must carry a matching gate itself.
+    /// Ungated, it is compiled — and unreferenced — on every other platform,
+    /// where the workspace's `warnings = "deny"` (Cargo.toml) promotes the
+    /// resulting `dead_code` warning to a hard compile error.
+    ///
+    /// That failure is invisible to `cargo test` (the `test` cfg keeps the
+    /// item alive) and to a macOS dev box, but it breaks `cargo build
+    /// --release` inside the Linux Docker builder — this repo's only
+    /// documented deploy path — so nothing ever answers on the published
+    /// port. Asserting on the source keeps the guard honest from any host.
+    #[test]
+    fn platform_only_helpers_are_cfg_gated() {
+        const SRC: &str = include_str!("proc.rs");
+        for (name, target) in [
+            ("seatbelt_profile", "macos"),
+            ("bwrap_args", "linux"),
+            ("bwrap_available", "linux"),
+            ("current_uid", "linux"),
+            // Gated for both platforms it supports.
+            ("confined_command", "macos"),
+            ("confined_command", "linux"),
+        ] {
+            let gate = cfg_gate_above(SRC, name).unwrap_or_else(|| {
+                panic!(
+                    "`fn {name}` is platform-specific but has no #[cfg(...)] gate: \
+                     it becomes dead code on other targets and `warnings = \"deny\"` \
+                     fails the Docker (Linux) release build"
+                )
+            });
+            let want = format!("target_os = \"{target}\"");
+            assert!(
+                gate.contains(&want),
+                "`fn {name}` must be gated on {want}, found: {gate}"
+            );
+        }
     }
 
     /// The base allowlist (work_dir + tool caches) is a pure function of
