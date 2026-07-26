@@ -654,11 +654,30 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         self.post("DEV-BUG", starting).await;
         let result = deploy.deploy(&self.work_dir).await;
         let body = match result {
-            Ok(r) if r.success => {
+            // Mandatory health gate (COX-B004/COX-B009): a compose exit-0 only
+            // proves the containers started, not that the app inside bound
+            // its port — probe before telling the human it's up.
+            Ok(r) if r.success && crate::ports::outbound::verify_deploy_health(deploy, self.host_port).await =>
+            {
                 if self.lang.is_vi() {
                     format!("✅ Deploy xong — {}", r.summary)
                 } else {
                     format!("✅ Deploy OK — {}", r.summary)
+                }
+            }
+            Ok(r) if r.success => {
+                if self.lang.is_vi() {
+                    format!(
+                        "❌ Deploy fail — {} (container chạy nhưng app không mở port — health \
+                         check fail). Mình sẽ tạo bug để xử lý nếu bạn muốn.",
+                        r.summary
+                    )
+                } else {
+                    format!(
+                        "❌ Deploy failed — {} (containers started but the app never bound its \
+                         port — health check failed). I can file a bug to fix it if you want.",
+                        r.summary
+                    )
                 }
             }
             Ok(r) => {
@@ -953,4 +972,145 @@ fn split_action(raw: &str) -> (String, String) {
         }
     }
     (raw.to_owned(), String::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ports::outbound::{AgentOutcome, AgentRequest, DeployReport};
+    use crate::state::ProjectState;
+    use crate::PortError;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct MemStore {
+        state: Mutex<ProjectState>,
+    }
+    #[async_trait::async_trait]
+    impl StateStorePort for MemStore {
+        async fn load(&self) -> Result<ProjectState, PortError> {
+            Ok(self.state.lock().expect("lock").clone())
+        }
+        async fn save(&self, s: &ProjectState) -> Result<(), PortError> {
+            *self.state.lock().expect("lock") = s.clone();
+            Ok(())
+        }
+    }
+
+    /// Never invoked by `deploy_now` — only needed to satisfy `E: AgentEnginePort`.
+    struct UnusedEngine;
+    #[async_trait::async_trait]
+    impl AgentEnginePort for UnusedEngine {
+        fn id(&self) -> &'static str {
+            "unused"
+        }
+        async fn run(&self, _request: AgentRequest) -> Result<AgentOutcome, PortError> {
+            unreachable!("deploy_now never calls the engine")
+        }
+    }
+
+    /// `docker compose up` exits 0 (container started) but the app inside
+    /// never answers on its configured port — `health()` reports down for
+    /// every probe, same dead-on-arrival scenario as COX-B004.
+    struct DeployWithDeadPort;
+    #[async_trait::async_trait]
+    impl DeployPort for DeployWithDeadPort {
+        async fn deploy(&self, _work_dir: &std::path::Path) -> Result<DeployReport, PortError> {
+            Ok(DeployReport {
+                success: true,
+                deployed: true,
+                summary: "docker compose up -d --build succeeded".to_owned(),
+            })
+        }
+        async fn health(&self, _port: u16) -> Result<bool, PortError> {
+            Ok(false)
+        }
+    }
+
+    struct HealthyDeploy;
+    #[async_trait::async_trait]
+    impl DeployPort for HealthyDeploy {
+        async fn deploy(&self, _work_dir: &std::path::Path) -> Result<DeployReport, PortError> {
+            Ok(DeployReport {
+                success: true,
+                deployed: true,
+                summary: "docker compose up -d --build succeeded".to_owned(),
+            })
+        }
+        async fn health(&self, _port: u16) -> Result<bool, PortError> {
+            Ok(true)
+        }
+    }
+
+    fn last_comment(store: &Arc<MemStore>) -> String {
+        store
+            .state
+            .lock()
+            .expect("lock")
+            .comments
+            .last()
+            .expect("a comment was posted")
+            .body
+            .clone()
+    }
+
+    /// Already has a compose file, so `deploy_now` skips the scaffold path
+    /// (which would otherwise call the engine — not needed by these tests).
+    fn work_dir_with_compose() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("docker-compose.yml"), "services: {}").expect("write");
+        dir
+    }
+
+    /// AC (COX-B009): the chat "deploy" command must run through the same
+    /// mandatory health gate as the autonomous cycle (COX-B004) — a compose
+    /// exit-0 that never binds the app's port must NOT be reported as "Deploy
+    /// OK" to the human.
+    #[tokio::test(start_paused = true)]
+    async fn chat_deploy_reports_failure_when_the_app_never_binds_its_port() {
+        let store = Arc::new(MemStore::default());
+        let dir = work_dir_with_compose();
+        let uc = RunChatReplyUseCase::new(
+            Arc::clone(&store),
+            Arc::new(UnusedEngine),
+            dir.path().to_path_buf(),
+            false,
+            Language::En,
+        )
+        .with_deploy(Arc::new(DeployWithDeadPort) as Arc<dyn DeployPort>)
+        .with_host_port(Some(8101));
+
+        uc.deploy_now().await;
+
+        let body = last_comment(&store);
+        assert!(
+            !body.contains("Deploy OK"),
+            "a deploy that never binds its port must not be reported as OK: {body}"
+        );
+        assert!(
+            body.contains("health check failed"),
+            "expected the health-gate failure reason in the reply: {body}"
+        );
+    }
+
+    /// Control: a deploy that actually answers on its port still reports OK —
+    /// the gate must not fail a genuinely healthy deploy.
+    #[tokio::test(start_paused = true)]
+    async fn chat_deploy_reports_ok_when_the_app_is_healthy() {
+        let store = Arc::new(MemStore::default());
+        let dir = work_dir_with_compose();
+        let uc = RunChatReplyUseCase::new(
+            Arc::clone(&store),
+            Arc::new(UnusedEngine),
+            dir.path().to_path_buf(),
+            false,
+            Language::En,
+        )
+        .with_deploy(Arc::new(HealthyDeploy) as Arc<dyn DeployPort>)
+        .with_host_port(Some(8101));
+
+        uc.deploy_now().await;
+
+        assert!(last_comment(&store).contains("Deploy OK"));
+    }
 }
