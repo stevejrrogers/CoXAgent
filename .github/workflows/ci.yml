@@ -25,3 +25,20 @@ jobs:
         run: cargo clippy --all-targets --all-features
       - name: Test
         run: cargo test --all-features
+
+  deploy-build:
+    # COX-B006 regression guard: reproduce the Docker builder's compile — the
+    # release binary for Linux, no `test` cfg — which is what turned an ungated
+    # macOS-only helper into `error: function ... is never used` under the
+    # workspace's `warnings = "deny"`, so no image could ever be built.
+    # Deliberately separate from `check`: this job runs plain rustc lints only,
+    # so it stays a trustworthy deploy gate while the clippy pedantic baseline
+    # in `crates/application` keeps `check` red.
+    name: release build (linux, as the Docker builder sees it)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the deploy binary
+        run: cargo build --release --bin coxagent
