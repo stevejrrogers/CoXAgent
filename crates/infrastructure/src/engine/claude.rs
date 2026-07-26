@@ -6,7 +6,9 @@
 //! with the working directory set to the managed codebase.
 
 use async_trait::async_trait;
-use coxagent_application::ports::outbound::{AgentEnginePort, AgentOutcome, AgentRequest, Usage};
+use coxagent_application::ports::outbound::{
+    AgentEnginePort, AgentOutcome, AgentRequest, SandboxStatus, Usage,
+};
 use coxagent_application::PortError;
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
@@ -180,10 +182,16 @@ impl AgentEnginePort for ClaudeEngine {
         "claude"
     }
 
+    fn sandbox_status(&self) -> SandboxStatus {
+        crate::proc::sandbox_status(self.sandbox)
+    }
+
     async fn run(&self, request: AgentRequest) -> Result<AgentOutcome, PortError> {
-        // nice(+10): the agent CLI and every build/test child it spawns stay
-        // background priority, keeping the host responsive.
-        let mut cmd = crate::proc::low_priority(&self.binary);
+        // nice(+10) + optional write-confinement (see proc::agent_command) —
+        // same as resume_run, so a sandboxed run is actually sandboxed on its
+        // FIRST call, not just on follow-ups.
+        let (mut cmd, sandbox) =
+            crate::proc::agent_command(&self.binary, &request.work_dir, self.sandbox);
         // The role/system text goes through --append-system-prompt, NOT folded
         // into -p: it joins the CLI's cached system block, so the stable prefix
         // (base + standards + role) gets prompt-cache READ hits across
@@ -231,7 +239,7 @@ impl AgentEnginePort for ClaudeEngine {
         let role = crate::engine::role_key(request.role);
         // _mcp_config_file must outlive the child process (deleted on drop).
         let outcome = self
-            .exec(cmd, &role, &request.work_dir, request.timeout)
+            .exec(cmd, &role, &request.work_dir, request.timeout, sandbox)
             .await;
         drop(_mcp_config_file);
         outcome
@@ -244,7 +252,7 @@ impl AgentEnginePort for ClaudeEngine {
         work_dir: &std::path::Path,
         timeout: std::time::Duration,
     ) -> Result<AgentOutcome, PortError> {
-        let mut cmd = crate::proc::agent_command(&self.binary, work_dir, self.sandbox);
+        let (mut cmd, sandbox) = crate::proc::agent_command(&self.binary, work_dir, self.sandbox);
         cmd.arg("-p")
             .arg(follow_up)
             .arg("--resume")
@@ -259,7 +267,7 @@ impl AgentEnginePort for ClaudeEngine {
             .stdin(std::process::Stdio::null())
             .kill_on_drop(true);
         crate::engine::apply_shim_path(&mut cmd);
-        self.exec(cmd, "resume", work_dir, timeout).await
+        self.exec(cmd, "resume", work_dir, timeout, sandbox).await
     }
 }
 
@@ -273,6 +281,7 @@ impl ClaudeEngine {
         role: &str,
         work_dir: &std::path::Path,
         timeout: std::time::Duration,
+        sandbox: SandboxStatus,
     ) -> Result<AgentOutcome, PortError> {
         // Stream stdout line-by-line: render each event to the live log as it
         // arrives (so the UI can tail it), while accumulating the raw NDJSON for
@@ -347,6 +356,7 @@ impl ClaudeEngine {
             usage,
             trace,
             session_id: extract_session(&raw),
+            sandbox,
         })
     }
 }

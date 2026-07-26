@@ -6,7 +6,9 @@
 //! in real-time. Aggregates `tokens` and `cost` from `step_finish` events.
 
 use async_trait::async_trait;
-use coxagent_application::ports::outbound::{AgentEnginePort, AgentOutcome, AgentRequest};
+use coxagent_application::ports::outbound::{
+    AgentEnginePort, AgentOutcome, AgentRequest, SandboxStatus,
+};
 use coxagent_application::PortError;
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
@@ -220,6 +222,10 @@ impl AgentEnginePort for OpencodeEngine {
         "opencode"
     }
 
+    fn sandbox_status(&self) -> SandboxStatus {
+        crate::proc::sandbox_status(self.sandbox)
+    }
+
     async fn run(&self, request: AgentRequest) -> Result<AgentOutcome, PortError> {
         let prompt = match &self.mcp {
             Some(mcp) => {
@@ -243,8 +249,9 @@ impl AgentEnginePort for OpencodeEngine {
             let _ = std::fs::write(p, format!("# {role} — live @ run start\n"));
         }
 
-        // nice(+10) + optional Seatbelt write-confinement (see proc::agent_command).
-        let mut cmd = crate::proc::agent_command(&self.binary, &request.work_dir, self.sandbox);
+        // nice(+10) + optional write-confinement (see proc::agent_command).
+        let (mut cmd, sandbox) =
+            crate::proc::agent_command(&self.binary, &request.work_dir, self.sandbox);
         cmd.arg("run")
             .arg("--model")
             .arg(self.model_for(request.escalation_level, &request.work_dir))
@@ -267,7 +274,7 @@ impl AgentEnginePort for OpencodeEngine {
         cmd.env_remove("OPENCODE_PID");
         crate::engine::apply_shim_path(&mut cmd);
 
-        self.exec(cmd, live, request.timeout).await
+        self.exec(cmd, live, request.timeout, sandbox).await
     }
 
     async fn resume_run(
@@ -278,7 +285,7 @@ impl AgentEnginePort for OpencodeEngine {
         timeout: std::time::Duration,
     ) -> Result<AgentOutcome, PortError> {
         let live = live_path(work_dir, "resume");
-        let mut cmd = crate::proc::agent_command(&self.binary, work_dir, self.sandbox);
+        let (mut cmd, sandbox) = crate::proc::agent_command(&self.binary, work_dir, self.sandbox);
         cmd.arg("run")
             .arg("--model")
             .arg(&self.model)
@@ -298,7 +305,7 @@ impl AgentEnginePort for OpencodeEngine {
         cmd.env_remove("OPENCODE");
         cmd.env_remove("OPENCODE_PID");
         crate::engine::apply_shim_path(&mut cmd);
-        self.exec(cmd, live, timeout).await
+        self.exec(cmd, live, timeout, sandbox).await
     }
 }
 
@@ -309,6 +316,7 @@ impl OpencodeEngine {
         cmd: Command,
         live: Option<std::path::PathBuf>,
         timeout: std::time::Duration,
+        sandbox: SandboxStatus,
     ) -> Result<AgentOutcome, PortError> {
         let mut cmd = cmd;
         let mut child = cmd
@@ -373,6 +381,7 @@ impl OpencodeEngine {
             usage: Some(usage),
             trace: String::new(),
             session_id: extract_session(&raw),
+            sandbox,
         })
     }
 }

@@ -603,7 +603,7 @@ fn transition(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ports::outbound::AgentOutcome;
+    use crate::ports::outbound::{AgentOutcome, SandboxStatus};
     use crate::selection::next_ready_feature;
     use coxagent_domain::{Complexity, Priority, TechnicalDesign, Ticket, TicketType};
     use std::sync::Mutex;
@@ -638,6 +638,7 @@ mod tests {
                 usage: None,
                 trace: String::new(),
                 session_id: None,
+                sandbox: SandboxStatus::default(),
             })
         }
     }

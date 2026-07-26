@@ -5,7 +5,9 @@
 use crate::engine::{ClaudeEngine, HermesEngine, McpAccess, OpencodeEngine, ScriptedEngine};
 use async_trait::async_trait;
 use coxagent_application::config::{EngineChoice, EngineKind};
-use coxagent_application::ports::outbound::{AgentEnginePort, AgentOutcome, AgentRequest};
+use coxagent_application::ports::outbound::{
+    AgentEnginePort, AgentOutcome, AgentRequest, SandboxStatus,
+};
 use coxagent_application::PortError;
 
 /// One of the supported engines, selected at startup.
@@ -72,6 +74,15 @@ impl AgentEnginePort for AnyEngine {
             AnyEngine::Claude(e) => e.id(),
             AnyEngine::Hermes(e) => e.id(),
             AnyEngine::Scripted(e) => e.id(),
+        }
+    }
+
+    fn sandbox_status(&self) -> SandboxStatus {
+        match self {
+            AnyEngine::Opencode(e) => e.sandbox_status(),
+            AnyEngine::Claude(e) => e.sandbox_status(),
+            AnyEngine::Hermes(e) => e.sandbox_status(),
+            AnyEngine::Scripted(e) => e.sandbox_status(),
         }
     }
 

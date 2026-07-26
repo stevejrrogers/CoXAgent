@@ -200,7 +200,7 @@ pub fn shipped_block(state: &crate::state::ProjectState) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ports::outbound::AgentOutcome;
+    use crate::ports::outbound::{AgentOutcome, SandboxStatus};
     use crate::state::ProjectState;
     use crate::PortError;
     use coxagent_domain::Status;
@@ -236,6 +236,7 @@ mod tests {
                 usage: None,
                 trace: String::new(),
                 session_id: None,
+                sandbox: SandboxStatus::default(),
             })
         }
     }

@@ -4,7 +4,9 @@
 //! so no use case knows or cares about it.
 
 use async_trait::async_trait;
-use coxagent_application::ports::outbound::{AgentEnginePort, AgentOutcome, AgentRequest};
+use coxagent_application::ports::outbound::{
+    AgentEnginePort, AgentOutcome, AgentRequest, SandboxStatus,
+};
 use coxagent_application::state::Spend;
 use coxagent_application::PortError;
 use std::sync::{Arc, Mutex};
@@ -30,6 +32,10 @@ impl<E: AgentEnginePort> AgentEnginePort for MeteringEngine<E> {
         self.inner.id()
     }
 
+    fn sandbox_status(&self) -> SandboxStatus {
+        self.inner.sandbox_status()
+    }
+
     async fn run(&self, request: AgentRequest) -> Result<AgentOutcome, PortError> {
         let role = role_key(request.role);
         let outcome = self.inner.run(request).await?;
@@ -44,6 +50,7 @@ impl<E: AgentEnginePort> AgentEnginePort for MeteringEngine<E> {
                 *m.runs_by_role.entry(role).or_default() += 1;
             }
         }
+        self.record_sandbox(outcome.sandbox);
         Ok(outcome)
     }
 
@@ -71,7 +78,30 @@ impl<E: AgentEnginePort> AgentEnginePort for MeteringEngine<E> {
                 *m.runs_by_role.entry("resume".to_owned()).or_default() += 1;
             }
         }
+        self.record_sandbox(outcome.sandbox);
         Ok(outcome)
+    }
+}
+
+impl<E: AgentEnginePort> MeteringEngine<E> {
+    /// Roll one run's write-confinement into the shared `Spend` counters, so
+    /// the dashboard can show how many runs were actually confined vs. run
+    /// unconfined because `workflow.sandbox` was on but unsupported here.
+    fn record_sandbox(&self, sandbox: SandboxStatus) {
+        let Ok(mut m) = self.meter.lock() else {
+            return;
+        };
+        match sandbox {
+            SandboxStatus::NotRequested => {}
+            SandboxStatus::Confined(via) => {
+                m.confined_runs += 1;
+                m.last_sandbox_status = format!("confined via {via}");
+            }
+            SandboxStatus::Unavailable(reason) => {
+                m.unconfined_requested_runs += 1;
+                m.last_sandbox_status = format!("unavailable: {reason}");
+            }
+        }
     }
 }
 
@@ -109,6 +139,7 @@ mod tests {
                 }),
                 trace: String::new(),
                 session_id: None,
+                sandbox: SandboxStatus::NotRequested,
             })
         }
     }

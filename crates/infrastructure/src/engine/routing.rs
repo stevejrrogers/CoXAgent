@@ -11,7 +11,9 @@
 //! through to the default stack.
 
 use async_trait::async_trait;
-use coxagent_application::ports::outbound::{AgentEnginePort, AgentOutcome, AgentRequest};
+use coxagent_application::ports::outbound::{
+    AgentEnginePort, AgentOutcome, AgentRequest, SandboxStatus,
+};
 use coxagent_application::PortError;
 use coxagent_domain::Role;
 use std::collections::HashMap;
@@ -34,6 +36,12 @@ impl<E: AgentEnginePort> RoutingEngine<E> {
 impl<E: AgentEnginePort> AgentEnginePort for RoutingEngine<E> {
     fn id(&self) -> &'static str {
         self.default.id()
+    }
+
+    /// The default stack's confinement — sandboxing is a host-wide property,
+    /// not per-role, so every route shares the same status in practice.
+    fn sandbox_status(&self) -> SandboxStatus {
+        self.default.sandbox_status()
     }
 
     async fn run(&self, request: AgentRequest) -> Result<AgentOutcome, PortError> {

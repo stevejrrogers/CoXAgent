@@ -4,7 +4,9 @@
 //! resets. Non-quota failures are returned as-is (another engine would fail too).
 
 use async_trait::async_trait;
-use coxagent_application::ports::outbound::{AgentEnginePort, AgentOutcome, AgentRequest};
+use coxagent_application::ports::outbound::{
+    AgentEnginePort, AgentOutcome, AgentRequest, SandboxStatus,
+};
 use coxagent_application::PortError;
 
 /// Marker prefix on the returned error/outcome when every engine is quota-blocked
@@ -80,6 +82,12 @@ impl<E: AgentEnginePort> FailoverEngine<E> {
 impl<E: AgentEnginePort> AgentEnginePort for FailoverEngine<E> {
     fn id(&self) -> &'static str {
         self.engines.first().map_or("failover", AgentEnginePort::id)
+    }
+
+    fn sandbox_status(&self) -> SandboxStatus {
+        self.engines
+            .first()
+            .map_or(SandboxStatus::NotRequested, AgentEnginePort::sandbox_status)
     }
 
     async fn run(&self, request: AgentRequest) -> Result<AgentOutcome, PortError> {

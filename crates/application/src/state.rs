@@ -329,6 +329,18 @@ pub struct Spend {
     /// so each user's token spend is measurable even though they share a project.
     #[serde(default)]
     pub by_operator: std::collections::BTreeMap<String, OperatorSpend>,
+    /// Runs whose file writes were actually confined (Seatbelt/bwrap).
+    #[serde(default)]
+    pub confined_runs: u64,
+    /// Runs where `workflow.sandbox` was on but confinement was unavailable on
+    /// this host, so the run executed unconfined.
+    #[serde(default)]
+    pub unconfined_requested_runs: u64,
+    /// Human-readable status of the most recent run's confinement (e.g.
+    /// `"confined via bwrap"`, `"unavailable: bwrap not found on PATH"`),
+    /// surfaced on the dashboard.
+    #[serde(default)]
+    pub last_sandbox_status: String,
 }
 
 impl Spend {

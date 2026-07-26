@@ -4,7 +4,8 @@
 
 use crate::config::Config;
 use crate::ports::outbound::{
-    AgentEnginePort, AgentRequest, DeployPort, ForgePort, GitAuthor, GitPort, StateStorePort,
+    AgentEnginePort, AgentRequest, DeployPort, ForgePort, GitAuthor, GitPort, SandboxStatus,
+    StateStorePort,
 };
 use crate::state::Spend;
 use crate::use_cases::run_dev::DevMode;
@@ -15,6 +16,7 @@ use crate::use_cases::{
 use coxagent_domain::TicketId;
 use std::fmt::Write as _;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// How often (in sprints) the SA runs a whole-system architecture review.
@@ -120,6 +122,9 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     worker: String,
     /// Last scrum discussion topic — skip duplicate discussions.
     last_discussion_topic: Mutex<String>,
+    /// Whether the `sandbox_unsupported` warning has already fired — posted
+    /// once per project per process lifetime, never once per cycle.
+    sandbox_warned: AtomicBool,
 }
 
 impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
@@ -148,6 +153,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             phase: None,
             worker: String::new(),
             last_discussion_topic: Mutex::new(String::new()),
+            sandbox_warned: AtomicBool::new(false),
         }
     }
 
@@ -1173,6 +1179,32 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
     }
 
+    /// When `workflow.sandbox` is on but this host has no supported
+    /// confinement mechanism, warn once (never hard-fail — the run still
+    /// executes unconfined). Deduplicated per project per process lifetime via
+    /// `sandbox_warned`, so a long-running loop doesn't spam the channel every
+    /// cycle.
+    async fn warn_if_sandbox_unsupported(&self) {
+        if !self.config.workflow.sandbox {
+            return;
+        }
+        let SandboxStatus::Unavailable(reason) = self.engine.sandbox_status() else {
+            return;
+        };
+        if self.sandbox_warned.swap(true, Ordering::SeqCst) {
+            return; // already warned this process lifetime.
+        }
+        self.notify(
+            "sandbox_unsupported",
+            format!(
+                "workflow.sandbox is on but this host has no supported confinement \
+                 mechanism ({reason}) — agent file writes are NOT confined to the \
+                 workspace."
+            ),
+        )
+        .await;
+    }
+
     fn config_project_label(&self) -> String {
         self.work_dir
             .parent()
@@ -1233,6 +1265,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     #[allow(clippy::too_many_lines)] // a linear sequence of agent phases; splitting hurts readability
     pub async fn run_cycle(&self, cycle: u64) -> CycleReport {
         crate::cleanup::kill_orphaned_drivers(&self.work_dir);
+        self.warn_if_sandbox_unsupported().await;
 
         let mut report = CycleReport {
             cycle,
@@ -4082,6 +4115,35 @@ mod tests {
         fn id(&self) -> &'static str {
             "role-aware"
         }
+
+        /// Simulates what a REAL engine on this host would report — the same
+        /// bwrap-presence probe the platform tests below use — so tests that
+        /// enable `workflow.sandbox` exercise the actual unsupported-platform
+        /// path instead of a hardcoded stub value.
+        fn sandbox_status(&self) -> crate::ports::outbound::SandboxStatus {
+            use crate::ports::outbound::SandboxStatus;
+            #[cfg(target_os = "macos")]
+            {
+                SandboxStatus::Confined("seatbelt")
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let has_bwrap = std::process::Command::new("bwrap")
+                    .arg("--version")
+                    .output()
+                    .is_ok();
+                if has_bwrap {
+                    SandboxStatus::Confined("bwrap")
+                } else {
+                    SandboxStatus::Unavailable("bwrap not found on PATH")
+                }
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            {
+                SandboxStatus::Unavailable("sandboxing not supported on this platform")
+            }
+        }
+
         async fn run(&self, r: AgentRequest) -> Result<AgentOutcome, PortError> {
             let stdout = if r.system_prompt.contains("Business Analyst") {
                 r#"[{"title":"Feature A","priority":"high","complexity":"small","has_ui":false}]"#
@@ -4103,6 +4165,7 @@ mod tests {
                 usage: None,
                 trace: String::new(),
                 session_id: None,
+                sandbox: SandboxStatus::default(),
             })
         }
     }
@@ -4328,6 +4391,7 @@ mod tests {
                 usage: None,
                 trace: String::new(),
                 session_id: None,
+                sandbox: SandboxStatus::default(),
             })
         }
     }
@@ -4841,6 +4905,68 @@ mod tests {
         assert!(
             !notifier.events.lock().expect("lock").is_empty(),
             "a failed rollback must still escalate via the existing NotifierPort path"
+        );
+    }
+
+    // --- COX-F003: unsupported-platform sandbox warning -------------------
+    //
+    // When `workflow.sandbox` is on but the platform has no supported
+    // confinement mechanism (no macOS Seatbelt, and on Linux no `bwrap` on
+    // PATH — or Windows), the run must NOT hard-fail: the cycle still
+    // executes. It must instead raise exactly one `sandbox_unsupported`
+    // NotifierPort event per project per process lifetime — visible in the
+    // #agents channel/dashboard, not just a log line — and must NOT re-post
+    // it on every cycle.
+
+    /// AC: on a platform with no supported sandbox backend, a cycle with
+    /// `sandbox: true` still completes and posts exactly one
+    /// `sandbox_unsupported` NotifierPort event across multiple cycles (not
+    /// one per cycle).
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn sandbox_unsupported_warning_fires_once_not_every_cycle() {
+        // This AC only bites where there is truly no confinement backend. If
+        // this machine happens to have bwrap installed, Linux sandboxing IS
+        // supported and no warning is expected — skip rather than false-fail.
+        if cfg!(target_os = "linux")
+            && std::process::Command::new("bwrap")
+                .arg("--version")
+                .output()
+                .is_ok()
+        {
+            return;
+        }
+        let notifier = Arc::new(SpyNotifier::default());
+        let store = Arc::new(MemStore {
+            state: Mutex::new(ProjectState::default()),
+        });
+        let mut cfg = Config::default();
+        cfg.workflow.sandbox = true;
+        let uc = RunCycleUseCase::new(
+            Arc::clone(&store),
+            Arc::new(RoleAwareEngine),
+            cfg,
+            PathBuf::from("/tmp/proj-sandbox-warn"),
+            "goal".to_owned(),
+        )
+        .with_notifier(Arc::clone(&notifier) as Arc<dyn crate::ports::outbound::NotifierPort>);
+
+        uc.run_cycle(1).await;
+        uc.run_cycle(2).await;
+
+        let events: Vec<_> = notifier
+            .events
+            .lock()
+            .expect("lock")
+            .iter()
+            .filter(|e| e.kind == "sandbox_unsupported")
+            .cloned()
+            .collect();
+        assert_eq!(
+            events.len(),
+            1,
+            "must warn about missing sandbox support exactly once per project \
+             per process lifetime, not on every cycle (got {events:?})"
         );
     }
 }
