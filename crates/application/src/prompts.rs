@@ -582,6 +582,7 @@ mod tests {
             enabled: true,
             ..DeployConfig::default()
         });
+        });
         assert!(out.contains("8123"));
         assert!(out.contains("docker-compose"));
     }
