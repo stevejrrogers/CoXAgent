@@ -57,7 +57,9 @@ impl AnyEngine {
                     .with_escalation(escalation.to_vec())
                     .with_sandbox(sandbox),
             )),
-            EngineKind::Hermes => Ok(Self::Hermes(HermesEngine::new(choice.model.clone()))),
+            EngineKind::Hermes => Ok(Self::Hermes(
+                HermesEngine::new(choice.model.clone()).with_sandbox(sandbox),
+            )),
             EngineKind::Scripted => Ok(Self::Scripted(ScriptedEngine::new())),
             other => Err(PortError::Backend(format!(
                 "no adapter for engine {other:?} yet"
