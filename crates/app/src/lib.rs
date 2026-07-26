@@ -1141,9 +1141,44 @@ async fn onboard_project(
         .await
         .map_err(|e| e.to_string())?;
 
+    // Git-URL import: clone into the workspace first, then adopt it exactly
+    // like a local brownfield import (remote detection pre-fills git config).
+    let cloned: Option<std::path::PathBuf> = match req
+        .git_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+    {
+        Some(url) => {
+            if !(url.starts_with("git@")
+                || url.starts_with("https://")
+                || url.starts_with("http://"))
+            {
+                return Err("git URL must start with git@, https:// or http://".to_owned());
+            }
+            let wd = proj_dir.join("codebase");
+            let out = tokio::process::Command::new("git")
+                .args(["clone", url])
+                .arg(&wd)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .await
+                .map_err(|e| format!("spawn git clone: {e}"))?;
+            if !out.status.success() {
+                let err = String::from_utf8_lossy(&out.stderr);
+                return Err(format!(
+                    "git clone failed: {}",
+                    err.lines().last().unwrap_or("unknown error")
+                ));
+            }
+            Some(wd)
+        }
+        None => None,
+    };
+
     // Brownfield import: adopt the given codebase in place. Greenfield: scaffold
     // a fresh `codebase/` under the workspace.
-    let work_dir = if let Some(path) = &req.existing {
+    let work_dir = if let Some(path) = cloned.as_ref().or(req.existing.as_ref()) {
         onboard::brownfield(&store, &state_dir, name, req.alias.clone(), path)
             .await
             .map_err(|e| e.to_string())?;

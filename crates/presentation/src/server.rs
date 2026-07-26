@@ -81,6 +81,10 @@ pub struct NewProjectReq {
     pub name: String,
     pub alias: Option<String>,
     pub existing: Option<PathBuf>,
+    /// Import straight from a git URL: the factory clones it into the
+    /// project workspace, then adopts it like any existing codebase (remote
+    /// auto-detected, config pre-filled).
+    pub git_url: Option<String>,
     pub goal: Option<String>,
 }
 
@@ -2888,6 +2892,9 @@ struct CreateProjectReq {
     /// Adopt an existing codebase at this path (brownfield import).
     #[serde(default)]
     existing: Option<String>,
+    /// Clone this git URL and adopt it (brownfield import from remote).
+    #[serde(default)]
+    git_url: Option<String>,
     /// Confirmed project goal/context to seed (from AI-assisted drafting).
     #[serde(default)]
     goal: Option<String>,
@@ -2980,6 +2987,7 @@ async fn create_project(
             .existing
             .filter(|s| !s.trim().is_empty())
             .map(PathBuf::from),
+        git_url: req.git_url.filter(|s| !s.trim().is_empty()),
         goal: req.goal.filter(|s| !s.trim().is_empty()),
     })
     .await

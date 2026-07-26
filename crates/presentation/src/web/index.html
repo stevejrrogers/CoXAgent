@@ -2127,10 +2127,21 @@ textarea.np-in{resize:vertical;line-height:1.5}
         <input id="np-alias" class="np-in" placeholder="CXC" maxlength="5" style="text-transform:uppercase;font-family:ui-monospace,monospace;text-align:center">
       </div>
     </div>
+    <div id="np-src-row" style="display:none;margin-bottom:12px">
+      <div style="display:flex;gap:4px;background:var(--card2);border:1px solid var(--border2);border-radius:10px;padding:3px;max-width:280px">
+        <button id="nps-folder" class="npmode on" onclick="setImportSrc('folder')" style="padding:7px 12px"><i class="ti ti-folder"></i> Local folder</button>
+        <button id="nps-git" class="npmode" onclick="setImportSrc('git')" style="padding:7px 12px"><i class="ti ti-brand-git"></i> Git URL</button>
+      </div>
+    </div>
     <div class="np-field" id="np-path-row" style="display:none">
       <span class="lbl">Existing codebase path</span>
       <input id="np-path" class="np-in" placeholder="/Users/you/Projects/my-app" style="font-family:ui-monospace,monospace">
-      <span class="hint">git-inits it if needed; seeds a dockerize chore if no compose file</span>
+      <span class="hint">git repo detected automatically (remote pre-fills the git config); git-inits if needed</span>
+    </div>
+    <div class="np-field" id="np-git-row" style="display:none">
+      <span class="lbl">Repository URL</span>
+      <input id="np-git" class="np-in" placeholder="git@github.com:you/app.git — or https://…" style="font-family:ui-monospace,monospace">
+      <span class="hint">clones with your local git credentials; remote pre-fills the git config so agents can push/PR immediately</span>
     </div>
     <div class="np-field" id="np-goal-row">
       <div style="display:flex;align-items:center;gap:8px"><span class="lbl">Project goal <span style="text-transform:none;font-weight:500;color:var(--dim)">optional</span></span><div style="flex:1"></div>
@@ -5735,10 +5746,17 @@ async function saveTicket(startFlow){
   }catch(e){err.textContent="Network error.";}
 }
 let PROJ_MODE="new";
+let IMPORT_SRC="folder";
+function setImportSrc(sc){IMPORT_SRC=sc;
+  document.getElementById("nps-folder").classList.toggle("on",sc==="folder");
+  document.getElementById("nps-git").classList.toggle("on",sc==="git");
+  document.getElementById("np-path-row").style.display=(PROJ_MODE==="import"&&sc==="folder")?"flex":"none";
+  document.getElementById("np-git-row").style.display=(PROJ_MODE==="import"&&sc==="git")?"flex":"none";}
 function setProjMode(m){PROJ_MODE=m;
   document.getElementById("npm-new").classList.toggle("on",m==="new");
   document.getElementById("npm-import").classList.toggle("on",m==="import");
-  document.getElementById("np-path-row").style.display=m==="import"?"flex":"none";
+  document.getElementById("np-src-row").style.display=m==="import"?"":"none";
+  setImportSrc(IMPORT_SRC);
   // Goal (+ AI drafting) applies to both modes — an imported codebase needs a
   // brief just as much; it merges into the auto-detected comprehension context.
   document.getElementById("np-goal").placeholder=m==="import"
@@ -5780,8 +5798,11 @@ async function createProject(){
   if(!name){err.textContent="Project name is required.";return;}
   const body={name,alias:alias||null};
   const sp=document.getElementById("np-space");if(sp&&sp.value)body.space=sp.value;
-  if(PROJ_MODE==="import"){const p=document.getElementById("np-path").value.trim();
-    if(!p){err.textContent="Enter the codebase path to import.";return;}body.existing=p;}
+  if(PROJ_MODE==="import"){
+    if(IMPORT_SRC==="git"){const u=document.getElementById("np-git").value.trim();
+      if(!u){err.textContent="Enter the repository URL to import.";return;}body.git_url=u;}
+    else{const p=document.getElementById("np-path").value.trim();
+      if(!p){err.textContent="Enter the codebase path to import.";return;}body.existing=p;}}
   const g=document.getElementById("np-goal").value.trim();if(g)body.goal=g;
   err.style.color="var(--red)";err.textContent=PROJ_MODE==="import"?"Importing…":"Creating…";
   try{
