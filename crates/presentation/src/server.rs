@@ -2239,6 +2239,7 @@ pub async fn serve_full(
             "/api/projects/:pid/ticket/:id/approve-cost",
             post(approve_cost),
         )
+        .route("/api/projects/:pid/ticket/:id/unpark", post(unpark_ticket))
         .route("/api/projects/:pid/ticket/:id/edit", post(edit_ticket))
         .route(
             "/api/projects/:pid/comments",
@@ -3598,6 +3599,35 @@ async fn create_ticket(
             }
             Json(serde_json::json!({ "ok": true, "id": id.to_string() })).into_response()
         }
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Un-park a ticket: clear its fail-attempt counter and journal so agents
+/// pick it up again — the human's "this deserves another shot" button.
+async fn unpark_ticket(
+    State(app): State<AppState>,
+    Path((pid, id)): Path<(String, String)>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Ok(mut state) = p.store.load().await else {
+        return internal_error("load failed");
+    };
+    let had = state.ticket_fail_attempts.remove(&id).is_some();
+    state.ticket_journal.remove(&id);
+    if !had && !state.tickets.iter().any(|t| t.id().as_str() == id) {
+        return (axum::http::StatusCode::NOT_FOUND, "no such ticket").into_response();
+    }
+    state.log_activity("USER", "un-parked ticket", Some(id.clone()));
+    state.post_comment(
+        "SM",
+        &format!("▶️ {id} un-parked by a human — agents may retry it."),
+        Some(id),
+    );
+    match p.store.save(&state).await {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => internal_error(&e.to_string()),
     }
 }

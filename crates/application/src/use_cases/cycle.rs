@@ -4589,10 +4589,12 @@ mod tests {
         let spy = Arc::new(SpyDeploy {
             calls: std::sync::atomic::AtomicUsize::new(0),
         });
+        let mut cfg = Config::default();
+        cfg.deploy.enabled = true;
         let uc = RunCycleUseCase::new(
             Arc::clone(&store),
             Arc::new(RoleAwareEngine),
-            Config::default(),
+            cfg,
             PathBuf::from("/tmp"),
             "goal".to_owned(),
         )
