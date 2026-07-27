@@ -138,10 +138,76 @@ fn install_shim(cmd: &str, tag: &str) -> PathBuf {
     path
 }
 
+/// A stand-in `git` that writes a warning to stderr and file content to
+/// stdout, the way `git diff` does when it skips inexact rename detection.
+/// Returns the directory to put on `PATH` ahead of the real binary.
+///
+/// A fake is the only way to pin this down: whether the real `git` warns
+/// depends on the repository, so a test built on it would pass by luck.
+fn install_fake_git(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("coxagent-fake-git-{}-{tag}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("git");
+    std::fs::write(
+        &path,
+        format!(
+            "#!/usr/bin/env bash\n\
+             echo \"{FAKE_GIT_WARNING}\" >&2\n\
+             i=1\n\
+             while [ $i -le {FAKE_GIT_LINES} ]; do echo \"line $i of tracked file content\"; \
+             i=$((i+1)); done\n"
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    dir
+}
+
+/// What the fake `git` writes to stderr, and how many lines of content it
+/// writes to stdout — enough that the compressor would clip the middle.
+const FAKE_GIT_WARNING: &str = "warning: inexact rename detection was skipped";
+const FAKE_GIT_LINES: u32 = 400;
+
+/// Exactly what the fake `git` puts on stdout, and nothing else.
+fn fake_git_content() -> Vec<u8> {
+    (1..=FAKE_GIT_LINES)
+        .map(|i| format!("line {i} of tracked file content\n"))
+        .collect::<String>()
+        .into_bytes()
+}
+
 /// Run an installed shim exactly as an agent would: non-tty stdout, compression
 /// enabled, the shim dir first on `PATH` (so a shim that failed to skip itself
 /// would recurse instead of quietly passing the test).
 fn run_shim(shim: &Path, root: &Path, args: &[&str]) -> Vec<u8> {
+    let out = shim_output(shim, root, args, None);
+    assert!(
+        out.status.success(),
+        // The shim folds stderr into the compressed stream, so a diagnosis
+        // needs both streams.
+        "shim `{} {}` failed ({}):\n{}{}",
+        shim.display(),
+        args.join(" "),
+        out.status,
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout),
+    );
+    out.stdout
+}
+
+/// The same, but keeping both streams apart — the only way to see whether
+/// stderr leaked into the content — and with an optional directory spliced in
+/// front of the real binary on `PATH`.
+fn shim_output(
+    shim: &Path,
+    root: &Path,
+    args: &[&str],
+    ahead_of_real: Option<&Path>,
+) -> std::process::Output {
     let dir = shim.parent().unwrap().display().to_string();
     // Any *other* shim dir inherited from the developer's environment has to
     // go: this shim only skips its own directory, so a second one on `PATH`
@@ -156,25 +222,17 @@ fn run_shim(shim: &Path, root: &Path, args: &[&str]) -> Vec<u8> {
         })
         .collect::<Vec<_>>()
         .join(":");
-    let out = Command::new(shim)
+    let path = match ahead_of_real {
+        Some(p) => format!("{dir}:{}:{clean}", p.display()),
+        None => format!("{dir}:{clean}"),
+    };
+    Command::new(shim)
         .args(args)
         .current_dir(root)
-        .env("PATH", format!("{dir}:{clean}"))
+        .env("PATH", path)
         .env("COX_COMPRESS", "1")
         .output()
-        .unwrap_or_else(|e| panic!("shim {} failed to spawn: {e}", shim.display()));
-    assert!(
-        out.status.success(),
-        // The shim folds stderr into the compressed stream, so a diagnosis
-        // needs both streams.
-        "shim `{} {}` failed ({}):\n{}{}",
-        shim.display(),
-        args.join(" "),
-        out.status,
-        String::from_utf8_lossy(&out.stderr),
-        String::from_utf8_lossy(&out.stdout),
-    );
-    out.stdout
+        .unwrap_or_else(|e| panic!("shim {} failed to spawn: {e}", shim.display()))
 }
 
 #[test]
@@ -223,6 +281,79 @@ fn the_installed_git_shim_still_compresses_non_content_subcommands() {
         shimmed.len()
     );
     let _ = std::fs::remove_dir_all(shim.parent().unwrap());
+}
+
+#[test]
+fn the_exactness_check_answers_from_the_argv_alone() {
+    // The shim asks *before* the wrapped command runs, so `--check` has to
+    // answer without touching stdin — reading it there would hang every call.
+    let check = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_coxagent"))
+            .arg("compress")
+            .args(["--check", "--cmd", "git", "--"])
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .expect("failed to spawn the coxagent binary");
+        assert!(out.status.success(), "`compress --check` failed: {out:?}");
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    };
+    assert_eq!(check(&["show", "HEAD:src/lib.rs"]), "exact");
+    assert_eq!(check(&["-C", "/repo", "diff", "HEAD"]), "exact");
+    assert_eq!(check(&["status"]), "compress");
+}
+
+#[test]
+fn a_warning_on_stderr_stays_out_of_byte_exact_content() {
+    // COX-B015, second corruption path: exempting content retrieval from the
+    // compressor is not enough while the shim still pipes `2>&1`. The merge
+    // splices whatever git wrote to stderr into the file content — and empties
+    // stderr, so the caller sees no sign of it. Content retrieval has to skip
+    // the pipe altogether.
+    let root = repo_root();
+    let shim = install_shim("git", "stderr-exact");
+    let fake = install_fake_git("exact");
+
+    let out = shim_output(&shim, &root, &["show", "HEAD:big.rs"], Some(&fake));
+
+    assert!(out.status.success(), "shim `git show` failed: {out:?}");
+    assert_byte_exact(
+        "git show (warning on stderr)",
+        &fake_git_content(),
+        &out.stdout,
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains(FAKE_GIT_WARNING),
+        "the warning was swallowed instead of reaching stderr: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = std::fs::remove_dir_all(shim.parent().unwrap());
+    let _ = std::fs::remove_dir_all(&fake);
+}
+
+#[test]
+fn a_porcelain_subcommand_keeps_its_stderr_merged_and_compressed() {
+    // The other side of that fix: everything except content retrieval must
+    // still go through the pipe, where folding stderr in is the point — build
+    // and test tools put most of their output there.
+    let root = repo_root();
+    let shim = install_shim("git", "stderr-compressed");
+    let fake = install_fake_git("compressed");
+
+    let out = shim_output(&shim, &root, &["status"], Some(&fake));
+
+    assert!(out.status.success(), "shim `git status` failed: {out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("output compressed"),
+        "`git status` lost its compression: {stdout}"
+    );
+    assert!(
+        stdout.contains(FAKE_GIT_WARNING) && out.stderr.is_empty(),
+        "`git status` stderr is no longer folded into the compressed stream"
+    );
+    let _ = std::fs::remove_dir_all(shim.parent().unwrap());
+    let _ = std::fs::remove_dir_all(&fake);
 }
 
 #[test]
