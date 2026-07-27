@@ -97,7 +97,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
         };
         let Ok(out) = run(task).await else { return };
         let mut raw = out.stdout;
-        if let Some(missing) = docs_gate_failures(&raw) {
+        if let Some(missing) = docs_gate_failures(&raw, &self.work_dir) {
             // Same deal the ticket path gets: one bounded repair naming exactly
             // what was missing.
             let fixup = format!(
@@ -108,11 +108,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
                 page.title
             );
             match run(fixup).await {
-                Ok(o) if o.succeeded() && docs_gate_failures(&o.stdout).is_none() => raw = o.stdout,
+                Ok(o)
+                    if o.succeeded() && docs_gate_failures(&o.stdout, &self.work_dir).is_none() =>
+                {
+                    raw = o.stdout;
+                }
                 _ => {}
             }
         }
-        if let Some(missing) = docs_gate_failures(&raw) {
+        if let Some(missing) = docs_gate_failures(&raw, &self.work_dir) {
             // Refusing a bad rewrite matters more here than anywhere: this page
             // already exists and a failed refresh would replace it with less.
             // Say so — a silent skip is indistinguishable from "nothing stale".
@@ -244,7 +248,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
         // next agent and unsearchable for people. One bounded repair pass, the
         // same deal the code gates give a developer.
         let mut raw = outcome.stdout.clone();
-        if let Some(missing) = docs_gate_failures(&raw) {
+        if let Some(missing) = docs_gate_failures(&raw, &self.work_dir) {
             let fixup = format!(
                 "Your page for {id} is missing required parts: {missing}.\n\nOutput the COMPLETE \
                  page again with the full skeleton — same `FOLDER:` first line, every required \
@@ -263,12 +267,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
                 })
                 .await;
             if let Ok(o) = repair {
-                if o.succeeded() && docs_gate_failures(&o.stdout).is_none() {
+                if o.succeeded() && docs_gate_failures(&o.stdout, &self.work_dir).is_none() {
                     raw = o.stdout;
                 }
             }
         }
-        if let Some(missing) = docs_gate_failures(&raw) {
+        if let Some(missing) = docs_gate_failures(&raw, &self.work_dir) {
             // Publishing a page that fails the gate teaches the wiki's readers
             // that the skeleton is optional. Leave the ticket for the next
             // cycle instead, and say why.
@@ -331,7 +335,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
 /// What the page is missing, or `None` when it satisfies the skeleton every
 /// page is expected to share. Kept mechanical on purpose: an LLM judging its
 /// own prose is not a gate.
-fn docs_gate_failures(raw: &str) -> Option<String> {
+fn docs_gate_failures(raw: &str, work_dir: &std::path::Path) -> Option<String> {
     let body = parse_folder_hint(raw).1;
     let text = body.trim();
     let mut missing: Vec<&str> = Vec::new();
@@ -356,13 +360,31 @@ fn docs_gate_failures(raw: &str) -> Option<String> {
     if !text.to_lowercase().contains("**keywords:**") {
         problems.push("no `**Keywords:**` line (nothing to search on)".to_owned());
     }
-    // A Code map with no path is decoration; require something that looks like
-    // one so an agent can actually jump to the code.
-    let has_path = text
+    // A Code map with no path is decoration; a Code map with a path that does
+    // not exist is worse — it sends the next agent somewhere that isn't there.
+    // Both are caught here, and the repair pass is told exactly which path.
+    let cited: Vec<&str> = text
         .lines()
-        .any(|l| l.trim_start().starts_with('-') && l.contains('/') && l.contains('.'));
-    if !has_path {
+        .filter_map(|l| {
+            let l = l.trim_start().trim_start_matches(['-', '*', ' ']);
+            let token = l.split_whitespace().next()?.trim_matches(['`', ',']);
+            (token.contains('/') && token.contains('.')).then_some(token)
+        })
+        .collect();
+    if cited.is_empty() {
         problems.push("`## Code map` lists no real file paths".to_owned());
+    } else {
+        let missing: Vec<&str> = cited
+            .iter()
+            .filter(|p| !work_dir.join(p).exists())
+            .copied()
+            .collect();
+        if !missing.is_empty() {
+            problems.push(format!(
+                "`## Code map` cites files that do not exist: {}",
+                missing.join(", ")
+            ));
+        }
     }
     if text.chars().count() < 700 {
         problems.push(format!("too thin at {} characters", text.chars().count()));
@@ -380,7 +402,7 @@ fn stalest_page<'a>(
     let broken = state
         .docs
         .iter()
-        .find(|p| docs_gate_failures(&p.body).is_some());
+        .find(|p| docs_gate_failures(&p.body, work_dir).is_some());
     if broken.is_some() {
         return broken;
     }
@@ -679,6 +701,16 @@ mod tests {
 
     #[tokio::test]
     async fn documents_done_feature() {
+        // The gate checks the page's Code map against the real tree, so the
+        // fixture needs the file it cites.
+        let dir = std::env::temp_dir().join(format!("docsrun-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("crates/application/src/use_cases")).expect("mkdir");
+        std::fs::write(
+            dir.join("crates/application/src/use_cases/run_chat_reply.rs"),
+            "// reply loop\n",
+        )
+        .expect("write");
         let store = Arc::new(MemStore {
             state: Mutex::new(ProjectState {
                 tickets: vec![done_feature("F001")],
@@ -689,7 +721,7 @@ mod tests {
             Arc::clone(&store),
             Arc::new(OkEngine),
             Config::default(),
-            PathBuf::from("/tmp"),
+            dir.clone(),
         );
         let id = uc.execute().await.expect("run");
         assert_eq!(id.expect("some").as_str(), "F001");
@@ -697,6 +729,7 @@ mod tests {
             store.load().await.expect("load").tickets[0].status(),
             Status::Documented
         );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -716,6 +749,19 @@ mod tests {
 mod docs_gate_tests {
     use super::docs_gate_failures;
 
+    /// A workspace containing exactly the file the fixture page cites.
+    fn fixture_repo(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("docsgate-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("crates/application/src/ports/outbound")).expect("mkdir");
+        std::fs::write(
+            dir.join("crates/application/src/ports/outbound/deploy.rs"),
+            "// the gate\n",
+        )
+        .expect("write");
+        dir
+    }
+
     fn full_page() -> String {
         format!(
             "FOLDER: Deploys\n# Deploy health gate\n**Keywords:** deploy, health, gate, port\n\
@@ -731,13 +777,31 @@ mod docs_gate_tests {
 
     #[test]
     fn a_complete_page_passes() {
-        assert_eq!(docs_gate_failures(&full_page()), None);
+        let dir = fixture_repo("ok");
+        assert_eq!(docs_gate_failures(&full_page(), &dir), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_code_map_pointing_at_a_file_that_does_not_exist_is_rejected() {
+        // Sending the next agent to a path that isn't there is worse than
+        // saying nothing — this is the failure the first live refresh shipped.
+        let dir = fixture_repo("ghost");
+        let page = full_page().replace(
+            "crates/application/src/ports/outbound/deploy.rs",
+            "crates/app/tests/health_gate.rs",
+        );
+        let why = docs_gate_failures(&page, &dir).expect("must be rejected");
+        assert!(why.contains("do not exist"), "{why}");
+        assert!(why.contains("crates/app/tests/health_gate.rs"), "{why}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_summary_paragraph_is_rejected_with_reasons() {
         let thin = "FOLDER: -\nDocumentation for the health check. See the code for details.\n";
-        let why = docs_gate_failures(thin).expect("must be rejected");
+        let dir = fixture_repo("thin");
+        let why = docs_gate_failures(thin, &dir).expect("must be rejected");
         assert!(why.contains("missing headings"), "{why}");
         assert!(why.contains("Keywords"), "{why}");
         assert!(why.contains("too thin"), "{why}");
@@ -751,8 +815,10 @@ mod docs_gate_tests {
             "- crates/application/src/ports/outbound/deploy.rs — the gate itself",
             "- the deploy port module",
         );
-        let why = docs_gate_failures(&page).expect("must be rejected");
+        let dir = fixture_repo("nopath");
+        let why = docs_gate_failures(&page, &dir).expect("must be rejected");
         assert!(why.contains("no real file paths"), "{why}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -776,12 +842,14 @@ mod refresh_tests {
     #[test]
     fn a_page_that_fails_todays_gate_is_picked_first() {
         // Pages written before the skeleton existed are the wiki's real debt.
-        let mut s = ProjectState::default();
-        s.docs = vec![page(
-            "legacy",
-            "Documentation for the thing. See the code.",
-            "2026-01-01T00:00:00Z",
-        )];
+        let s = ProjectState {
+            docs: vec![page(
+                "legacy",
+                "Documentation for the thing. See the code.",
+                "2026-01-01T00:00:00Z",
+            )],
+            ..ProjectState::default()
+        };
         assert_eq!(
             stalest_page(&s, std::path::Path::new("/nonexistent")).map(|p| p.id.as_str()),
             Some("legacy")
