@@ -57,6 +57,84 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
         self
     }
 
+    /// Revise ONE page that no longer holds up: it fails today's structure gate
+    /// (written before the skeleton existed) or its documented files have
+    /// commits newer than the page. Bounded to a single page per cycle so the
+    /// wiki converges without the bill growing with it.
+    async fn refresh_stale_page(&self, state: &crate::state::ProjectState) {
+        let Some(page) = stalest_page(state, &self.work_dir) else {
+            return;
+        };
+        if let Some(p) = &self.phase {
+            p(Some((
+                "DOCS".to_owned(),
+                format!("refreshing {}", page.title),
+            )));
+        }
+        let excerpt: String = page.body.chars().take(6000).collect();
+        let task = format!(
+            "This Wiki page has fallen behind the code. Read the implementation, then output the \
+             COMPLETE revised page: keep what is still true, correct what changed, delete what is \
+             now wrong.\n\nOn the FIRST line output exactly `FOLDER: -` to keep its current \
+             home. Then the full page in Markdown following the required skeleton — including a \
+             `**Keywords:**` line and a `## Code map` with the real file paths.\n\n\
+             === PAGE: {} ===\n{excerpt}",
+            page.title
+        );
+        // Rewriting a long page in full is not a job for the cheapest model:
+        // the first attempt at a 12k-character page came back missing two
+        // required sections.
+        let level = u8::from(page.body.chars().count() > 4000);
+        let run = |task: String| {
+            self.engine.run(AgentRequest {
+                role: Role::Docs,
+                system_prompt: prompts::system_prompt(prompts::DOCS),
+                task_prompt: task,
+                work_dir: self.work_dir.clone(),
+                timeout: Duration::from_secs(900),
+                escalation_level: level,
+            })
+        };
+        let Ok(out) = run(task).await else { return };
+        let mut raw = out.stdout;
+        if let Some(missing) = docs_gate_failures(&raw) {
+            // Same deal the ticket path gets: one bounded repair naming exactly
+            // what was missing.
+            let fixup = format!(
+                "Your revision of \"{}\" is missing: {missing}.\n\nOutput the COMPLETE page \
+                 again — `FOLDER: -` first line, then every required heading verbatim, the \
+                 `**Keywords:**` line, and a `## Code map` with real file paths. Keep everything \
+                 you already wrote.",
+                page.title
+            );
+            match run(fixup).await {
+                Ok(o) if o.succeeded() && docs_gate_failures(&o.stdout).is_none() => raw = o.stdout,
+                _ => {}
+            }
+        }
+        if let Some(missing) = docs_gate_failures(&raw) {
+            // Refusing a bad rewrite matters more here than anywhere: this page
+            // already exists and a failed refresh would replace it with less.
+            // Say so — a silent skip is indistinguishable from "nothing stale".
+            tracing::warn!(
+                "DOCS refresh of \"{}\" rejected by the structure gate: {missing}",
+                page.title
+            );
+            return;
+        }
+        let (_, body) = parse_folder_hint(&raw);
+        let (id, folder, title) = (page.id.clone(), page.folder.clone(), page.title.clone());
+        let category = crate::state::doc_category_of(&folder);
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+            s.upsert_doc(&id, &folder, category, &title, body.trim(), "DOCS");
+            Ok(())
+        })
+        .await;
+        if let Some(p) = &self.phase {
+            p(None);
+        }
+    }
+
     /// Document the next `Done` feature. Returns its id, or `None` when there's
     /// nothing to document.
     ///
@@ -79,6 +157,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
             }
         }
         let Some(id) = chosen else {
+            // Idle cycle: spend it keeping the wiki true instead of doing
+            // nothing. A page written before today's skeleton — or one whose
+            // code has moved on since it was last touched — is the highest
+            // value work available, and it costs one call at most.
+            self.refresh_stale_page(&state).await;
             return Ok(None);
         };
         if let Some(p) = &self.phase {
@@ -287,6 +370,60 @@ fn docs_gate_failures(raw: &str) -> Option<String> {
     (!problems.is_empty()).then(|| problems.join("; "))
 }
 
+/// The page most worth rewriting right now, or `None` when the wiki holds up.
+/// Structural failures come first — a page the gate would reject is unusable
+/// to the next agent — then pages whose documented files have newer commits.
+fn stalest_page<'a>(
+    state: &'a crate::state::ProjectState,
+    work_dir: &std::path::Path,
+) -> Option<&'a crate::state::DocPage> {
+    let broken = state
+        .docs
+        .iter()
+        .find(|p| docs_gate_failures(&p.body).is_some());
+    if broken.is_some() {
+        return broken;
+    }
+    state.docs.iter().find(|p| page_is_behind_code(p, work_dir))
+}
+
+/// Whether any file the page's Code map cites has been committed since the
+/// page was last written. Git answers this exactly, so no heuristic decides
+/// that perfectly current documentation is stale.
+fn page_is_behind_code(page: &crate::state::DocPage, work_dir: &std::path::Path) -> bool {
+    if page.updated_at.trim().is_empty() {
+        return false;
+    }
+    let paths: Vec<&str> = page
+        .body
+        .lines()
+        .filter_map(|l| {
+            let l = l.trim_start().trim_start_matches(['-', '*', ' ']);
+            let token = l.split_whitespace().next()?.trim_matches('`');
+            (token.contains('/') && token.contains('.') && work_dir.join(token).exists())
+                .then_some(token)
+        })
+        .take(8)
+        .collect();
+    if paths.is_empty() {
+        return false;
+    }
+    let mut args: Vec<String> = [
+        "log".to_owned(),
+        "-1".to_owned(),
+        "--format=%cI".to_owned(),
+        format!("--since={}", page.updated_at),
+        "--".to_owned(),
+    ]
+    .to_vec();
+    args.extend(paths.iter().map(|p| (*p).to_owned()));
+    std::process::Command::new("git")
+        .args(&args)
+        .current_dir(work_dir)
+        .output()
+        .is_ok_and(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+}
+
 /// The page that already documents this ticket's area, if the team wrote one.
 /// Matched on distinctive title/body terms within the same space, with a floor
 /// so a passing word never hijacks an unrelated page.
@@ -317,7 +454,8 @@ fn existing_page_for<'a>(
         }
         // The title carries the area; the body is corroboration only.
         let s = score(&p.title) * 3 + score(&p.body).min(6);
-        if s >= 6 && best.is_none_or(|(b, _)| s > b) {
+        // MSRV 1.80 predates Option::is_none_or.
+        if s >= 6 && best.map_or(true, |(b, _)| s > b) {
             best = Some((s, p));
         }
     }
@@ -615,5 +753,90 @@ mod docs_gate_tests {
         );
         let why = docs_gate_failures(&page).expect("must be rejected");
         assert!(why.contains("no real file paths"), "{why}");
+    }
+}
+
+#[cfg(test)]
+mod refresh_tests {
+    use super::{page_is_behind_code, stalest_page};
+    use crate::state::{DocPage, ProjectState};
+
+    fn page(id: &str, body: &str, updated_at: &str) -> DocPage {
+        DocPage {
+            id: id.to_owned(),
+            folder: "Engineering".to_owned(),
+            category: "technical".to_owned(),
+            title: id.to_owned(),
+            body: body.to_owned(),
+            updated_at: updated_at.to_owned(),
+            updated_by: "DOCS".to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_page_that_fails_todays_gate_is_picked_first() {
+        // Pages written before the skeleton existed are the wiki's real debt.
+        let mut s = ProjectState::default();
+        s.docs = vec![page(
+            "legacy",
+            "Documentation for the thing. See the code.",
+            "2026-01-01T00:00:00Z",
+        )];
+        assert_eq!(
+            stalest_page(&s, std::path::Path::new("/nonexistent")).map(|p| p.id.as_str()),
+            Some("legacy")
+        );
+    }
+
+    #[test]
+    fn a_page_with_no_timestamp_or_no_paths_is_never_called_stale() {
+        let dir = std::env::temp_dir().join(format!("docstale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        // No Code map paths: nothing to compare against, so no claim either way.
+        let p = page("x", "## Code map\n- the module\n", "2026-01-01T00:00:00Z");
+        assert!(!page_is_behind_code(&p, &dir));
+        // No timestamp: we cannot know what "since" means.
+        let p2 = page("y", "## Code map\n- src/a.rs — flow\n", "");
+        assert!(!page_is_behind_code(&p2, &dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_commit_after_the_page_marks_it_behind() {
+        let dir = std::env::temp_dir().join(format!("docstale-git-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("mkdir");
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .expect("git");
+        };
+        git(&["init", "-q"]);
+        std::fs::write(dir.join("src/a.rs"), "fn a() {}\n").expect("write");
+        git(&["add", "-A"]);
+        git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "change a",
+        ]);
+        let body = "## Code map\n- src/a.rs — the flow\n";
+        // Page predates the commit → behind. Page written after it → current.
+        assert!(page_is_behind_code(
+            &page("old", body, "2000-01-01T00:00:00Z"),
+            &dir
+        ));
+        assert!(!page_is_behind_code(
+            &page("new", body, "2099-01-01T00:00:00Z"),
+            &dir
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
