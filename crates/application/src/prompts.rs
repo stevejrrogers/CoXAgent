@@ -412,6 +412,109 @@ fn query_terms(query: &str) -> Vec<String> {
     t
 }
 
+/// What a tester would open first: the suites that already exist and the API
+/// surface they cover. Without it the TEST role re-invents coverage that is
+/// already there, or reports "bugs" against endpoints it guessed at.
+///
+/// A bounded walk of the repo — no LLM call, and `target/`, `node_modules/`
+/// and friends are skipped, so the cost is a directory read.
+#[must_use]
+pub fn test_surface_block(work_dir: &std::path::Path) -> String {
+    use std::fmt::Write as _;
+    const SKIP: &[&str] = &[
+        "target",
+        "node_modules",
+        ".git",
+        "dist",
+        "build",
+        "vendor",
+        ".venv",
+    ];
+    let mut tests: Vec<(String, usize)> = Vec::new();
+    let mut routes: Vec<String> = Vec::new();
+    let mut stack: Vec<std::path::PathBuf> = vec![work_dir.to_path_buf()];
+    let mut files_read = 0_usize;
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if path.is_dir() {
+                if !name.starts_with('.') && !SKIP.contains(&name.as_str()) && stack.len() < 200 {
+                    stack.push(path);
+                }
+                continue;
+            }
+            // Budget the walk: a big repo must not turn one prompt into a
+            // full-text scan.
+            if files_read >= 400 {
+                continue;
+            }
+            let is_source = [".rs", ".ts", ".tsx", ".js", ".go", ".py"]
+                .iter()
+                .any(|e| name.ends_with(e));
+            if !is_source {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            files_read += 1;
+            let rel = path
+                .strip_prefix(work_dir)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .into_owned();
+            let count = text.matches("#[test]").count()
+                + text.matches("#[tokio::test]").count()
+                + text.matches("def test_").count()
+                + text.matches("func Test").count()
+                + text.matches("it(").count();
+            if count > 0 {
+                tests.push((rel.clone(), count));
+            }
+            if routes.len() < 24 {
+                for line in text.lines() {
+                    let t = line.trim();
+                    if t.starts_with(".route(") || t.starts_with("@app.route") {
+                        let entry: String = t.chars().take(100).collect();
+                        routes.push(entry);
+                        if routes.len() >= 24 {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if tests.is_empty() && routes.is_empty() {
+        return String::new();
+    }
+    tests.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    let mut out = String::new();
+    if !tests.is_empty() {
+        let total: usize = tests.iter().map(|(_, n)| n).sum();
+        let _ = writeln!(
+            out,
+            "\n\nEXISTING TESTS ({total} across {} files) — cover what these do NOT, and do not \
+             duplicate them:",
+            tests.len()
+        );
+        for (f, n) in tests.iter().take(8) {
+            let _ = writeln!(out, "- {f} ({n})");
+        }
+    }
+    if !routes.is_empty() {
+        out.push_str("\nAPI SURFACE actually registered in the code — test these, not guesses:\n");
+        for r in routes.iter().take(12) {
+            let _ = writeln!(out, "- {r}");
+        }
+    }
+    out.chars().take(1600).collect()
+}
+
 /// Everything the organisation has already written down about a subject: the
 /// team's own wiki, the repo's docs, and closed tickets with the same symptom.
 ///
@@ -460,6 +563,11 @@ pub fn wiki_block(docs: &[crate::state::DocPage], query: &str) -> String {
         .filter(|(s, _)| *s > 0)
         .collect();
     scored.sort_by_key(|(score, ..)| std::cmp::Reverse(*score));
+    // A long ticket shares a word or two with almost every page; keeping those
+    // spends 400 characters of the brief on a page nobody needed. Demand a real
+    // hit AND a score in the same league as the best one.
+    let floor = scored.first().map_or(0, |(s, _)| (*s / 3).max(2));
+    scored.retain(|(s, _)| *s >= floor);
     if scored.is_empty() {
         return String::new();
     }
@@ -1001,6 +1109,28 @@ mod knowledge_block_tests {
     }
 
     #[test]
+    fn a_weak_wiki_match_is_not_worth_the_room_it_takes() {
+        // Real data: a long ticket overlaps a word or two with nearly every
+        // page, so "scored above zero" is not the same as "worth reading".
+        let docs = vec![
+            page(
+                "Deploy health gate",
+                "The gate polls the deploy health endpoint until the port binds on deploy.",
+            ),
+            page(
+                "Chat theming",
+                "Deploy notes are irrelevant here; colors only.",
+            ),
+        ];
+        let out = wiki_block(&docs, "deploy health gate port binds during deploy");
+        assert!(out.contains("Deploy health gate"));
+        assert!(
+            !out.contains("Chat theming"),
+            "a page that shares one incidental word must not buy prompt space"
+        );
+    }
+
+    #[test]
     fn the_wiki_answers_only_when_it_has_something_to_say() {
         let docs = vec![
             page(
@@ -1098,6 +1228,48 @@ mod knowledge_block_tests {
         assert!(out.contains("README.md"), "the matching section wins");
         assert!(!out.contains("style.md"));
         assert!(repo_docs_block(&dir, "unrelated subject matter").is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod test_surface_tests {
+    use super::test_surface_block;
+
+    #[test]
+    fn reports_existing_suites_and_registered_routes() {
+        let dir = std::env::temp_dir().join(format!("surface-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("mkdir");
+        std::fs::create_dir_all(dir.join("target/debug")).expect("mkdir");
+        std::fs::write(
+            dir.join("src/auth.rs"),
+            "#[test]\nfn a() {}\n#[tokio::test]\nasync fn b() {}\n",
+        )
+        .expect("write");
+        std::fs::write(
+            dir.join("src/server.rs"),
+            "fn routes() {\n    .route(\"/api/health\", get(health))\n}\n",
+        )
+        .expect("write");
+        // Build output must not be walked: it is enormous and tells a tester
+        // nothing.
+        std::fs::write(dir.join("target/debug/junk.rs"), "#[test]\nfn nope() {}\n").expect("write");
+
+        let out = test_surface_block(&dir);
+        assert!(out.contains("src/auth.rs (2)"), "counts both test macros");
+        assert!(out.contains("/api/health"), "registered route surfaces");
+        assert!(!out.contains("junk.rs"), "target/ is skipped");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_project_with_neither_says_nothing() {
+        let dir = std::env::temp_dir().join(format!("surface-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(dir.join("main.rs"), "fn main() {}\n").expect("write");
+        assert!(test_surface_block(&dir).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
