@@ -123,7 +123,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
     /// [`AppError`] on engine failure or an unexpected state transition error.
     #[allow(clippy::too_many_lines)] // one linear pass; splitting hurts readability
     pub async fn execute(&self) -> Result<Option<TicketId>, AppError> {
-        // Guard: verify the codebase builds before doing any work.
+        // Self-healing boot: if the project doesn't compile, fix that BEFORE
+        // touching any tickets. Otherwise every ticket will fail anyway.
         if let Some(deploy) = &self.verify {
             match tokio::time::timeout(
                 std::time::Duration::from_secs(300),
@@ -134,18 +135,18 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 Ok(Ok(r)) if r.success => {}
                 Ok(Ok(r)) => {
                     tracing::warn!(
-                        "DEV pre-check: cargo test failed — {}",
+                        "DEV boot check: cargo test failed — self-healing. {}",
                         &r.summary[..r.summary.len().min(200)]
                     );
-                    return Ok(None);
+                    return self.self_heal_compile(&r.summary).await;
                 }
                 Ok(Err(e)) => {
-                    tracing::warn!("DEV pre-check: cargo test error — {e}");
-                    return Ok(None);
+                    tracing::warn!("DEV boot check: cargo test spawn error — {e}");
+                    return self.self_heal_compile(&e.to_string()).await;
                 }
                 Err(_timeout) => {
-                    tracing::warn!("DEV pre-check: cargo test timed out after 5 min");
-                    return Ok(None);
+                    tracing::warn!("DEV boot check: cargo test timed out — entering self-heal mode");
+                    return self.self_heal_compile("timed out after 5 min").await;
                 }
             }
         }
@@ -623,6 +624,93 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                     || l.contains("it(")
                     || l.contains("func Test"))
         })
+    }
+
+    /// When pre-check fails, ask the LLM to fix ALL compile/test errors until
+    /// the codebase is green or we hit the retry cap. This runs BEFORE any
+    /// tickets are touched — infrastructure repair, not feature work.
+    async fn self_heal_compile(&self, error_summary: &str) -> Result<Option<TicketId>, AppError> {
+        use crate::prompts;
+
+        let Some(deploy) = &self.verify else {
+            return Ok(None);
+        };
+
+        let mut last_error = error_summary.to_owned();
+        for attempt in 1..=3 {
+            let task = if attempt == 1 {
+                format!(
+                    "The project does NOT compile. Fix ALL errors:\n\n\
+                     ```\n{last_error}\n```\n\n\
+                     Run `cargo check`, fix every error, then `cargo test` to verify."
+                )
+            } else {
+                format!(
+                    "Still not compiling. Last test output:\n\n\
+                     ```\n{last_error}\n```\n\n\
+                     Fix the remaining errors. Check what you missed."
+                )
+            };
+
+            let req = AgentRequest {
+                role: Role::DevBug,
+                system_prompt: prompts::DEV_HEAL.to_owned(),
+                task_prompt: task,
+                work_dir: self.work_dir.clone(),
+                timeout: std::time::Duration::from_secs(600),
+                escalation_level: (attempt - 1) as u8,
+            };
+
+            match self.engine.run(req).await {
+                Ok(o) if o.succeeded() => {
+                    tracing::info!("DEV self-heal attempt {attempt}: LLM OK, verifying…");
+                }
+                Ok(o) => {
+                    tracing::warn!(
+                        "DEV self-heal attempt {attempt}: LLM failed — {}",
+                        o.stderr.chars().take(200).collect::<String>()
+                    );
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!("DEV self-heal attempt {attempt}: engine error — {e}");
+                    break;
+                }
+            }
+
+            // Verify: is the codebase green now?
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(300),
+                deploy.run_tests(&self.work_dir),
+            )
+            .await
+            {
+                Ok(Ok(r)) if r.success => {
+                    tracing::info!(
+                        "DEV self-heal: codebase GREEN after {attempt} attempt(s)!"
+                    );
+                    return Ok(None);
+                }
+                Ok(Ok(r)) => {
+                    last_error = r.summary;
+                    tracing::warn!(
+                        "DEV self-heal attempt {attempt}: still red — {}",
+                        &last_error[..last_error.len().min(150)]
+                    );
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!("DEV self-heal verify error: {e}");
+                    break;
+                }
+                Err(_) => {
+                    tracing::warn!("DEV self-heal verify timed out");
+                    break;
+                }
+            }
+        }
+
+        tracing::warn!("DEV self-heal: gave up after max retries");
+        Ok(None)
     }
 
     /// Count a failed attempt on `id`; at the 3rd, park it with a visible note
