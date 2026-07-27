@@ -248,7 +248,9 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
         // Stamp the live operator identity so ticket claims are owned by whoever
         // resumed this runner, on this host.
         cycle_uc.set_worker(handle.worker_id());
-        let report = cycle_uc.run_cycle(cycle).await;
+        // One cycle drives every role; boxing keeps that 16KB future off the
+        // loop's own stack frame.
+        let report = Box::pin(cycle_uc.run_cycle(cycle)).await;
         handle.update(cycle, report.summary());
         handle.clear_active();
         for e in &report.errors {

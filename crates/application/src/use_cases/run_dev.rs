@@ -489,14 +489,34 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                             r.files.is_empty() || self.lints_touch_changed_files(&r.files)
                         });
                         if after > base && mine {
+                            // Keep the files the lints named: the next attempt
+                            // is told where to look, not just that it failed.
+                            let lint_files = after_report
+                                .as_ref()
+                                .map(|r| {
+                                    let mut f: Vec<String> = r
+                                        .files
+                                        .iter()
+                                        .filter(|f| !f.trim().is_empty())
+                                        .cloned()
+                                        .collect();
+                                    f.sort();
+                                    f.dedup();
+                                    f.truncate(5);
+                                    f
+                                })
+                                .unwrap_or_default();
                             let sample = after_report
                                 .filter(|r| !r.sample.is_empty())
                                 .map_or_else(String::new, |r| {
                                     format!("; e.g. {}", r.sample.lines().next().unwrap_or(""))
                                 });
-                            self.record_failure(
+                            self.record_failure_at(
                                 &id,
                                 &format!("added clippy errors ({base} -> {after}{sample})"),
+                                crate::state::FailureLayer::Gate,
+                                "clippy",
+                                lint_files,
                             )
                             .await;
                             self.release_claim(&id).await;
@@ -574,8 +594,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                     let _ = self.engine.run(repair).await;
                 }
                 if !self.diff_touches_tests() {
-                    self.record_failure(&id, "bug fix shipped without a regression test")
-                        .await;
+                    self.record_failure_at(
+                        &id,
+                        "bug fix shipped without a regression test",
+                        crate::state::FailureLayer::Gate,
+                        "regression-test",
+                        Vec::new(),
+                    )
+                    .await;
                     self.release_claim(&id).await;
                     return Err(PortError::Backend(format!(
                         "{:?} fix for {id} has no regression test — returned to the queue",
@@ -586,8 +612,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 // Suite must STILL be green with the new test in place.
                 if let Ok(r) = deploy.run_tests(&self.work_dir).await {
                     if !r.success {
-                        self.record_failure(&id, "regression test added but suite is red")
-                            .await;
+                        self.record_failure_at(
+                            &id,
+                            "regression test added but suite is red",
+                            crate::state::FailureLayer::Gate,
+                            "tests",
+                            Vec::new(),
+                        )
+                        .await;
                         self.release_claim(&id).await;
                         return Err(PortError::Backend(format!(
                             "{:?} regression test left suite red on {id}",
@@ -846,11 +878,33 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
     /// Count a failed attempt on `id`; at the 3rd, park it with a visible note
     /// so a human decides instead of the team burning tokens forever.
     async fn record_failure(&self, id: &TicketId, why: &str) {
+        self.record_failure_at(
+            id,
+            why,
+            crate::state::FailureLayer::Design,
+            "engine",
+            Vec::new(),
+        )
+        .await;
+    }
+
+    /// As [`Self::record_failure`], but the caller names the layer and gate it
+    /// rejected the work at, so the next agent reads data instead of guessing
+    /// from a sentence.
+    async fn record_failure_at(
+        &self,
+        id: &TicketId,
+        why: &str,
+        layer: crate::state::FailureLayer,
+        gate: &str,
+        files: Vec<String>,
+    ) {
         let key = id.to_string();
         let short: String = why.chars().take(300).collect();
         // Infrastructure faults are NOT the ticket's fault — shared predicate
         // with the runner's circuit breaker (see crate::faults).
         let infra = crate::faults::is_infra_fault(why);
+        let _ = layer;
         if infra {
             let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
                 s.log_activity(
@@ -872,6 +926,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             // Brief the NEXT attempt on what this one hit, so a retry builds
             // on prior findings instead of rediscovering them.
             s.journal_note(&key, &format!("attempt {n} failed: {short}"));
+            s.record_attempt_failure(
+                &key,
+                crate::state::AttemptFailure {
+                    attempt: n,
+                    layer,
+                    gate: gate.to_owned(),
+                    detail: short.clone(),
+                    files: files.clone(),
+                },
+            );
             if n == 3 {
                 s.post_comment(
                     "DEV-BUG",
@@ -904,6 +968,46 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             DevMode::Bug => open_bug_candidates(state),
             DevMode::Feature => ready_feature_candidates(state),
         }
+    }
+
+    /// How previous attempts are briefed to the next one. Structured records
+    /// name the gate and the files; a ticket that failed before that log
+    /// existed falls back to its prose journal.
+    fn attempts_brief(state: &ProjectState, id: &TicketId) -> String {
+        let failures = state.attempt_failures(&id.to_string());
+        if failures.is_empty() {
+            return state
+                .ticket_journal
+                .get(&id.to_string())
+                .filter(|notes| !notes.is_empty())
+                .map(|notes| {
+                    format!(
+                        "\n\nPREVIOUS ATTEMPTS on this ticket — build on these, do not repeat \
+                         them:\n- {}",
+                        notes.join("\n- ")
+                    )
+                })
+                .unwrap_or_default();
+        }
+        let lines: Vec<String> = failures
+            .iter()
+            .map(|f| {
+                let where_ = if f.files.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [in {}]", f.files.join(", "))
+                };
+                format!(
+                    "attempt {} — rejected by {} ({:?}): {}{where_}",
+                    f.attempt, f.gate, f.layer, f.detail
+                )
+            })
+            .collect();
+        format!(
+            "\n\nPREVIOUS ATTEMPTS on this ticket — each was rejected by a specific gate. \
+             Clear THAT, do not start over:\n- {}",
+            lines.join("\n- ")
+        )
     }
 
     fn build_request(&self, state: &ProjectState, id: &TicketId) -> AgentRequest {
@@ -945,18 +1049,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 )
             }
         };
-        // Prior attempts' findings on this ticket (empty first time).
-        let journal = state
-            .ticket_journal
-            .get(&id.to_string())
-            .filter(|notes| !notes.is_empty())
-            .map(|notes| {
-                format!(
-                    "\n\nPREVIOUS ATTEMPTS on this ticket — build on these, do not repeat them:\n- {}",
-                    notes.join("\n- ")
-                )
-            })
-            .unwrap_or_default();
+        let journal = Self::attempts_brief(state, id);
         AgentRequest {
             role: self.mode.role(),
             // The system prompt stays BYTE-IDENTICAL across every DEV run of a
