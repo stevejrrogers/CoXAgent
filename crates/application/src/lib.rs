@@ -9,6 +9,7 @@ pub mod codegraph;
 pub mod config;
 pub mod conformance;
 pub mod error;
+pub mod faults;
 pub mod metrics;
 pub mod parsing;
 pub mod policy;

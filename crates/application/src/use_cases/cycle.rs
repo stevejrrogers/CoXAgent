@@ -2663,6 +2663,88 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 })
                 .await;
             }
+            // 2a. Orphan branches: pushed but never got a PR (a mid-cycle
+            // restart can interrupt between push and PR creation — observed
+            // with COX-B022). Open the missing PR so the work isn't stranded.
+            {
+                let with_pr: std::collections::BTreeSet<String> =
+                    prs.iter().map(|p| p.head.clone()).collect();
+                let ls = std::process::Command::new("git")
+                    .args(["ls-remote", "--heads", "origin"])
+                    .current_dir(&self.work_dir)
+                    .output()
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                    .unwrap_or_default();
+                let orphans: Vec<String> = ls
+                    .lines()
+                    .filter_map(|l| l.split('\t').nth(1))
+                    .filter_map(|r| r.strip_prefix("refs/heads/"))
+                    .filter(|b| {
+                        (b.starts_with("feat/") || b.starts_with("fix/"))
+                            && *b != target
+                            && !with_pr.contains(*b)
+                    })
+                    .map(str::to_owned)
+                    .take(2)
+                    .collect();
+                for branch in orphans {
+                    // Only when the branch actually carries commits over base.
+                    let ahead = std::process::Command::new("git")
+                        .args([
+                            "rev-list",
+                            "--count",
+                            &format!("origin/{target}..origin/{branch}"),
+                        ])
+                        .current_dir(&self.work_dir)
+                        .output()
+                        .ok()
+                        .filter(|o| o.status.success())
+                        .and_then(|o| {
+                            String::from_utf8_lossy(&o.stdout)
+                                .trim()
+                                .parse::<u64>()
+                                .ok()
+                        })
+                        .unwrap_or(0);
+                    if ahead == 0 {
+                        continue;
+                    }
+                    let title = std::process::Command::new("git")
+                        .args(["log", "-1", "--format=%s", &format!("origin/{branch}")])
+                        .current_dir(&self.work_dir)
+                        .output()
+                        .ok()
+                        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+                        .filter(|t| !t.is_empty())
+                        .unwrap_or_else(|| branch.clone());
+                    if let Ok(pr) = forge
+                        .open_pr(
+                            &branch,
+                            &target,
+                            &title,
+                            "Opened by forge hygiene: this branch was pushed but its PR was \
+                             never created (interrupted cycle).",
+                        )
+                        .await
+                    {
+                        let n = pr.number;
+                        let b2 = branch.clone();
+                        let _ =
+                            crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+                                s.post_chat_in(
+                                    "SA",
+                                    &format!("🧷 Opened missing PR #{n} for orphan branch `{b2}`."),
+                                    crate::state::AGENTS_CHANNEL,
+                                    Vec::new(),
+                                );
+                                Ok(())
+                            })
+                            .await;
+                    }
+                }
+            }
             // 3. LESSON: comments from reviewers become team knowledge.
             for pr in prs.iter().take(8) {
                 let Ok(feedback) = forge.pr_feedback(pr.number).await else {

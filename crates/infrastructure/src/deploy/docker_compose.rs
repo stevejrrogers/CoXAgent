@@ -204,18 +204,26 @@ impl DeployPort for DockerComposeDeploy {
             return Ok(None);
         }
         let _slot = crate::proc::heavy_slot().await;
-        let out = tokio::time::timeout(
-            Duration::from_secs(600),
-            crate::proc::low_priority("cargo")
-                .args(["clippy", "--workspace", "--all-targets", "--quiet"])
-                .current_dir(work_dir)
-                .stdin(std::process::Stdio::null())
-                .kill_on_drop(true)
-                .output(),
-        )
-        .await
-        .map_err(|_| PortError::Backend("clippy timed out".to_owned()))?
-        .map_err(|e| PortError::Backend(format!("spawn clippy: {e}")))?;
+        let child = crate::proc::low_priority("cargo")
+            .args(["clippy", "--workspace", "--all-targets", "--quiet"])
+            .current_dir(work_dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| PortError::Backend(format!("spawn clippy: {e}")))?;
+        let leader = child.id();
+        let out =
+            match tokio::time::timeout(Duration::from_secs(600), child.wait_with_output()).await {
+                Ok(out) => out.map_err(|e| PortError::Backend(format!("clippy wait: {e}")))?,
+                Err(_) => {
+                    if let Some(pid) = leader {
+                        crate::proc::kill_group(pid);
+                    }
+                    return Err(PortError::Backend("clippy timed out".to_owned()));
+                }
+            };
         let text = format!(
             "{}{}",
             String::from_utf8_lossy(&out.stdout),
@@ -240,18 +248,27 @@ impl DeployPort for DockerComposeDeploy {
         // suites run at once across ALL projects, and each runs at background
         // priority — N projects can no longer freeze the machine together.
         let _slot = crate::proc::heavy_slot().await;
-        let output = tokio::time::timeout(
-            Duration::from_secs(900),
-            crate::proc::low_priority(cmd)
-                .args(&args)
-                .current_dir(work_dir)
-                .stdin(std::process::Stdio::null())
-                .kill_on_drop(true)
-                .output(),
-        )
-        .await
-        .map_err(|_| PortError::Backend("test run timed out".to_owned()))?
-        .map_err(|e| PortError::Backend(format!("spawn {cmd}: {e}")))?;
+        let child = crate::proc::low_priority(cmd)
+            .args(&args)
+            .current_dir(work_dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| PortError::Backend(format!("spawn {cmd}: {e}")))?;
+        let leader = child.id();
+        let output =
+            match tokio::time::timeout(Duration::from_secs(900), child.wait_with_output()).await {
+                Ok(out) => out.map_err(|e| PortError::Backend(format!("{cmd} wait: {e}")))?,
+                Err(_) => {
+                    // Kill the whole test-runner tree, not just `nice`.
+                    if let Some(pid) = leader {
+                        crate::proc::kill_group(pid);
+                    }
+                    return Err(PortError::Backend("test run timed out".to_owned()));
+                }
+            };
         let success = output.status.success();
         let tail = |b: &[u8]| -> String {
             String::from_utf8_lossy(b)
