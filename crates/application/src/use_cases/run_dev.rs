@@ -1050,6 +1050,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             }
         };
         let journal = Self::attempts_brief(state, id);
+        // What was already done to this code. A human opens the file's history
+        // before editing it; nothing in the ticket text carries that.
+        let history = prompts::history_block(
+            &self.work_dir,
+            &format!(
+                "{title} {}",
+                ticket
+                    .and_then(|t| t.design().technical.as_ref())
+                    .map_or("", |d| d.approach.as_str())
+            ),
+        );
         AgentRequest {
             role: self.mode.role(),
             // The system prompt stays BYTE-IDENTICAL across every DEV run of a
@@ -1059,7 +1070,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             // exists only for UI tickets) belongs in the task prompt below.
             system_prompt: prompts::system_prompt(prompts::DEV),
             task_prompt: format!(
-                "Ticket {id}: {title}\n{}\nImplement it now.{stack}{deploy}{design}{context_block}{}{}{}{}{steering}{journal}",
+                "Ticket {id}: {title}\n{}\nImplement it now.{stack}{deploy}{design}{context_block}{}{history}{}{}{}{steering}{journal}",
                 ticket_brief(ticket),
                 prompts::focus_block(
                     &self.work_dir,
