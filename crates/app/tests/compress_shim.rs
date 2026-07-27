@@ -235,6 +235,157 @@ fn shim_output(
         .unwrap_or_else(|e| panic!("shim {} failed to spawn: {e}", shim.display()))
 }
 
+/// Lines in the file the repro test commits. The ticket's own figure — well
+/// past `clip_middle`'s 6000-char budget and past the 64 KiB pipe buffer.
+const REPRO_LINES: u32 = 3_000;
+
+/// The generated file's content: distinct lines, so nothing here passes by
+/// being deduped away, and wide enough that the middle is what gets elided.
+fn repro_file() -> String {
+    (0..REPRO_LINES / 4)
+        .map(|i| {
+            format!(
+                "fn generated_{i}() -> usize {{\n\
+                 \x20   // padding line {i} — keeps the blob over the compression threshold\n\
+                 \x20   {i}\n\
+                 }}\n"
+            )
+        })
+        .collect()
+}
+
+/// Run a `git` fixture command, failing loudly. Isolated from the developer's
+/// global/system config: a signing key or a commit template there would break
+/// the fixture for reasons unrelated to this guard.
+fn fixture_git(dir: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("COX_COMPRESS", "0")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_AUTHOR_NAME", "COX-B015")
+        .env("GIT_AUTHOR_EMAIL", "b015@example.invalid")
+        .env("GIT_COMMITTER_NAME", "COX-B015")
+        .env("GIT_COMMITTER_EMAIL", "b015@example.invalid")
+        .output()
+        .unwrap_or_else(|e| panic!("fixture `git {}` failed to spawn: {e}", args.join(" ")));
+    assert!(
+        out.status.success(),
+        "fixture `git {}` failed ({}):\n{}",
+        args.join(" "),
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Steps 1–2 of the ticket's repro: a throwaway repository whose HEAD holds a
+/// ~3000-line file, plus a parent commit so `git diff HEAD~1 HEAD` is the whole
+/// file as a patch. Generated rather than picked out of this tree, so the guard
+/// cannot quietly stop exercising the threshold if the tree shrinks.
+fn build_repro_repo(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("coxagent-b015-repo-{}-{tag}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    fixture_git(&dir, &["init", "-q"]);
+    std::fs::write(dir.join("README.md"), "COX-B015 repro\n").unwrap();
+    fixture_git(&dir, &["add", "."]);
+    fixture_git(&dir, &["commit", "-qm", "base"]);
+    std::fs::write(dir.join("src/big.rs"), repro_file()).unwrap();
+    fixture_git(&dir, &["add", "."]);
+    fixture_git(&dir, &["commit", "-qm", "add the large file"]);
+    dir
+}
+
+#[test]
+fn the_ticket_repro_reads_a_freshly_committed_file_back_byte_exact() {
+    // COX-B015 steps 1–4, end to end and self-contained: commit a ~3000-line
+    // file, read it back through the installed shim, diff against the unshimmed
+    // command. Pre-fix this fails on the first subcommand with the middle of the
+    // file replaced by `… [N chars elided] …`.
+    let repo = build_repro_repo("exact");
+    let shim = install_shim("git", "repro");
+
+    for args in [
+        vec!["show", "HEAD:src/big.rs"],
+        vec!["cat-file", "-p", "HEAD:src/big.rs"],
+        vec!["diff", "--no-color", "HEAD~1", "HEAD"],
+    ] {
+        let label = format!("git {}", args.join(" "));
+        let real = git(&repo, &args);
+        assert!(
+            real.len() > 6_000,
+            "`{label}` produced only {} bytes — too small to exercise clipping",
+            real.len()
+        );
+
+        let out = shim_output(&shim, &repo, &args, None);
+
+        assert!(
+            out.status.success(),
+            "shim `{label}` failed ({}):\n{}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_byte_exact(&label, &real, &out.stdout);
+        // Byte-exactness already implies this, but the ticket asks for it by
+        // name: no elision marker, no compression footer, ever.
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            !text.contains("elided") && !text.contains("output compressed"),
+            "`{label}` carries a compression marker"
+        );
+        assert!(
+            out.stderr.is_empty(),
+            "`{label}` wrote to stderr: {:?}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let _ = std::fs::remove_dir_all(shim.parent().unwrap());
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
+#[test]
+fn a_failing_content_retrieval_passes_its_exit_code_and_stderr_through() {
+    // The third acceptance criterion: the unpiped path must not swallow the
+    // failure. `exec`ing the real binary keeps both, where the piped path would
+    // report the *compressor's* status and fold stderr into stdout.
+    let repo = build_repro_repo("failure");
+    let shim = install_shim("git", "repro-failure");
+    let args = ["show", "HEAD:src/does-not-exist.rs"];
+
+    let real = Command::new("git")
+        .args(args)
+        .current_dir(&repo)
+        .env("COX_COMPRESS", "0")
+        .output()
+        .expect("`git show` failed to spawn");
+    assert!(
+        !real.status.success(),
+        "the fixture path unexpectedly exists"
+    );
+
+    let shimmed = shim_output(&shim, &repo, &args, None);
+
+    assert_eq!(
+        real.status.code(),
+        shimmed.status.code(),
+        "the shim rewrote the exit code"
+    );
+    assert_byte_exact(
+        "git show (missing path) stdout",
+        &real.stdout,
+        &shimmed.stdout,
+    );
+    assert_byte_exact(
+        "git show (missing path) stderr",
+        &real.stderr,
+        &shimmed.stderr,
+    );
+    let _ = std::fs::remove_dir_all(shim.parent().unwrap());
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
 #[test]
 fn the_installed_git_shim_keeps_content_retrieval_byte_exact() {
     // The end-to-end repro from COX-B015: `git show HEAD:<path>` resolved
