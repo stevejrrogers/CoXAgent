@@ -96,32 +96,25 @@ impl OpencodeEngine {
 /// overwriting the project's own config, and no-ops if the desired entry is
 /// already present so it doesn't dirty the managed repo's git status on every
 /// run. Best-effort — a write failure just means this run has no live MCP.
+/// Our own config file inside the workspace. Named with a `cox-` prefix so it
+/// can NEVER collide with the project's real `opencode.json` — we previously
+/// wrote into that file directly, which fought the user's own opencode setup.
+/// The engine points opencode at this file via the `OPENCODE_CONFIG` env var.
+pub const COX_OPENCODE_CONFIG: &str = "cox-opencode.json";
+
 fn ensure_opencode_mcp_config(work_dir: &std::path::Path, mcp: &crate::engine::McpAccess) {
-    let path = work_dir.join("opencode.json");
-    let existed_before = path.exists();
-    let mut doc: serde_json::Value = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-    if !doc.is_object() {
-        return; // don't clobber a malformed/non-object config
-    }
+    migrate_legacy_opencode_config(work_dir);
+    let path = work_dir.join(COX_OPENCODE_CONFIG);
     let mut entry = serde_json::json!({ "type": "remote", "url": mcp.url });
     if let Some(token) = &mcp.token {
         entry["headers"] = serde_json::json!({ "Authorization": format!("Bearer {token}") });
     }
-    if doc.pointer("/mcp/coxagent") == Some(&entry) {
+    let doc = serde_json::json!({ "mcp": { "coxagent": entry } });
+    let existing: Option<serde_json::Value> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok());
+    if existing.as_ref() == Some(&doc) {
         return; // already up to date
-    }
-    doc.as_object_mut()
-        .expect("checked is_object above")
-        .entry("mcp")
-        .or_insert_with(|| serde_json::json!({}));
-    if let Some(mcp_obj) = doc
-        .get_mut("mcp")
-        .and_then(serde_json::Value::as_object_mut)
-    {
-        mcp_obj.insert("coxagent".to_owned(), entry);
     }
     let Ok(text) = serde_json::to_string_pretty(&doc) else {
         return;
@@ -136,14 +129,74 @@ fn ensure_opencode_mcp_config(work_dir: &std::path::Path, mcp: &crate::engine::M
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
     }
-    // We're the one creating this file (it didn't exist before this call),
-    // so it's ours to keep out of git — a bare `git add -A` in this project
-    // must never pick up a live token. If the project already had its own
-    // opencode.json (existed_before), leave .gitignore alone: it may have
-    // other, intentionally-tracked settings we don't own an opinion on.
-    if !existed_before {
-        ensure_gitignored(work_dir, "opencode.json");
+    // Always ours, always token-bearing — never let `git add -A` pick it up.
+    ensure_gitignored(work_dir, COX_OPENCODE_CONFIG);
+}
+
+/// One-time cleanup of the OLD behaviour, which wrote into the project's own
+/// `opencode.json`:
+/// - a file that is PURELY our injection (only `mcp.coxagent`) is renamed to
+///   the new `cox-opencode.json`;
+/// - a MIXED file (user settings + our injected `mcp.coxagent`) gets ONLY our
+///   key surgically removed, restoring the user's config;
+/// - either way the exact `opencode.json` .gitignore line we used to add is
+///   dropped, so the user's real config doesn't stay silently git-ignored.
+/// Files without our marker are untouched — they were never ours.
+fn migrate_legacy_opencode_config(work_dir: &std::path::Path) {
+    let legacy = work_dir.join("opencode.json");
+    let Ok(text) = std::fs::read_to_string(&legacy) else {
+        return;
+    };
+    let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return;
+    };
+    if doc.pointer("/mcp/coxagent").is_none() {
+        return; // not our injection — hands off
     }
+    let purely_ours = doc.as_object().is_some_and(|o| {
+        o.len() == 1
+            && o.get("mcp")
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|m| m.len() == 1 && m.contains_key("coxagent"))
+    });
+    if purely_ours {
+        let _ = std::fs::rename(&legacy, work_dir.join(COX_OPENCODE_CONFIG));
+    } else {
+        // Surgical: remove only our key (and an mcp object left empty by it).
+        if let Some(m) = doc
+            .get_mut("mcp")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            m.remove("coxagent");
+        }
+        if doc
+            .get("mcp")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(serde_json::Map::is_empty)
+        {
+            if let Some(o) = doc.as_object_mut() {
+                o.remove("mcp");
+            }
+        }
+        if let Ok(clean) = serde_json::to_string_pretty(&doc) {
+            let _ = std::fs::write(&legacy, clean);
+        }
+    }
+    remove_gitignore_line(work_dir, "opencode.json");
+}
+
+/// Drop an EXACT line from `.gitignore` (best-effort). Only used to undo the
+/// line this codebase itself used to add.
+fn remove_gitignore_line(work_dir: &std::path::Path, entry: &str) {
+    let path = work_dir.join(".gitignore");
+    let Ok(existing) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    if !existing.lines().any(|l| l.trim() == entry) {
+        return;
+    }
+    let kept: Vec<&str> = existing.lines().filter(|l| l.trim() != entry).collect();
+    let _ = std::fs::write(&path, kept.join("\n") + "\n");
 }
 
 /// Append `entry` to `<work_dir>/.gitignore` if no existing line already
@@ -272,6 +325,14 @@ impl AgentEnginePort for OpencodeEngine {
         // parent instead of starting fresh and fails with "Not logged in".
         cmd.env_remove("OPENCODE");
         cmd.env_remove("OPENCODE_PID");
+        if self.mcp.is_some() {
+            // Our MCP wiring lives in cox-opencode.json (never the project's
+            // own opencode.json); point opencode at it explicitly.
+            cmd.env(
+                "OPENCODE_CONFIG",
+                request.work_dir.join(COX_OPENCODE_CONFIG),
+            );
+        }
         crate::engine::apply_shim_path(&mut cmd);
 
         self.exec(cmd, live, request.timeout, sandbox).await
@@ -304,6 +365,9 @@ impl AgentEnginePort for OpencodeEngine {
             .kill_on_drop(true);
         cmd.env_remove("OPENCODE");
         cmd.env_remove("OPENCODE_PID");
+        if self.mcp.is_some() {
+            cmd.env("OPENCODE_CONFIG", work_dir.join(COX_OPENCODE_CONFIG));
+        }
         crate::engine::apply_shim_path(&mut cmd);
         self.exec(cmd, live, timeout, sandbox).await
     }
@@ -628,165 +692,123 @@ mod tests {
     }
 
     #[test]
-    fn ensure_opencode_mcp_config_creates_file_when_absent() {
-        let dir = std::env::temp_dir().join(format!("oc-mcp-new-{}", std::process::id()));
+    fn writes_cox_config_never_touching_the_projects_opencode_json() {
+        let dir = std::env::temp_dir().join(format!("oc-cox-new-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(dir.join("opencode.json"), r#"{"theme":"dark"}"#).expect("user cfg");
         ensure_opencode_mcp_config(&dir, &mcp(Some("tok")));
         let doc: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(dir.join("opencode.json")).expect("read"),
+            &std::fs::read_to_string(dir.join(COX_OPENCODE_CONFIG)).expect("cox cfg"),
         )
-        .expect("valid json");
-        assert_eq!(doc["mcp"]["coxagent"]["type"], "remote");
+        .expect("json");
         assert_eq!(
-            doc["mcp"]["coxagent"]["headers"]["Authorization"],
-            "Bearer tok"
+            doc.pointer("/mcp/coxagent/headers/Authorization")
+                .and_then(|v| v.as_str()),
+            Some("Bearer tok")
         );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("opencode.json")).expect("user cfg"),
+            r#"{"theme":"dark"}"#,
+            "the user's own opencode.json must be untouched"
+        );
+        let gi = std::fs::read_to_string(dir.join(".gitignore")).unwrap_or_default();
+        assert!(gi.lines().any(|l| l.trim() == COX_OPENCODE_CONFIG));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn ensure_opencode_mcp_config_preserves_existing_keys() {
-        let dir = std::env::temp_dir().join(format!("oc-mcp-merge-{}", std::process::id()));
+    fn cox_config_is_idempotent_and_owner_only() {
+        let dir = std::env::temp_dir().join(format!("oc-cox-idem-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        ensure_opencode_mcp_config(&dir, &mcp(Some("tok")));
+        let first = std::fs::read_to_string(dir.join(COX_OPENCODE_CONFIG)).expect("read");
+        ensure_opencode_mcp_config(&dir, &mcp(Some("tok")));
+        let second = std::fs::read_to_string(dir.join(COX_OPENCODE_CONFIG)).expect("read");
+        assert_eq!(first, second);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.join(COX_OPENCODE_CONFIG))
+                .expect("meta")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "token-bearing file must be 0600");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migrates_a_purely_ours_legacy_file_by_rename() {
+        let dir = std::env::temp_dir().join(format!("oc-mig-ours-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
         std::fs::write(
             dir.join("opencode.json"),
-            r#"{"theme":"dark","mcp":{"other":{"type":"local","command":["x"]}}}"#,
+            r#"{"mcp":{"coxagent":{"type":"remote","url":"http://x"}}}"#,
         )
-        .expect("write");
+        .expect("legacy");
+        std::fs::write(
+            dir.join(".gitignore"),
+            "opencode.json
+",
+        )
+        .expect("gi");
         ensure_opencode_mcp_config(&dir, &mcp(None));
-        let doc: serde_json::Value = serde_json::from_str(
+        assert!(
+            !dir.join("opencode.json").exists(),
+            "purely-ours legacy file is renamed away"
+        );
+        assert!(dir.join(COX_OPENCODE_CONFIG).exists());
+        let gi = std::fs::read_to_string(dir.join(".gitignore")).expect("gi");
+        assert!(
+            !gi.lines().any(|l| l.trim() == "opencode.json"),
+            "our old ignore line must go, or the user's future config is silently ignored"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migrates_a_mixed_legacy_file_by_surgical_removal() {
+        let dir = std::env::temp_dir().join(format!("oc-mig-mixed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(
+            dir.join("opencode.json"),
+            r#"{"theme":"dark","mcp":{"coxagent":{"type":"remote","url":"http://x"},"other":{"type":"local"}}}"#,
+        )
+        .expect("legacy");
+        ensure_opencode_mcp_config(&dir, &mcp(None));
+        let user: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(dir.join("opencode.json")).expect("read"),
         )
-        .expect("valid json");
-        assert_eq!(doc["theme"], "dark", "unrelated top-level key preserved");
+        .expect("json");
         assert_eq!(
-            doc["mcp"]["other"]["type"], "local",
-            "other server preserved"
+            user.pointer("/theme").and_then(|v| v.as_str()),
+            Some("dark")
         );
-        assert_eq!(doc["mcp"]["coxagent"]["type"], "remote");
-        assert!(doc["mcp"]["coxagent"].get("headers").is_none());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// End-to-end through the real `AgentEnginePort::run()` — not just the
-    /// leaf `ensure_opencode_mcp_config` helper — using a fake `opencode`
-    /// binary (a shell script) so no real LLM call happens. Proves the config
-    /// file actually gets written by the real spawn path, not just when
-    /// called directly.
-    #[tokio::test]
-    async fn run_writes_opencode_json_before_spawning() {
-        use coxagent_application::ports::outbound::{AgentEnginePort, AgentRequest};
-        use coxagent_domain::Role;
-
-        let dir = std::env::temp_dir().join(format!("oc-mcp-e2e-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("mkdir");
-
-        // A fake `opencode` that ignores its args and prints one valid event.
-        let fake_bin = dir.join("fake-opencode.sh");
-        std::fs::write(
-            &fake_bin,
-            "#!/bin/sh\necho '{\"type\":\"text\",\"part\":{\"text\":\"ok\"}}'\n",
-        )
-        .expect("write fake bin");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&fake_bin).expect("meta").permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&fake_bin, perms).expect("chmod");
-        }
-
-        let engine = OpencodeEngine::new("test/model")
-            .with_binary(fake_bin.to_string_lossy())
-            .with_mcp(Some(mcp(Some("tok"))));
-
-        let outcome = engine
-            .run(AgentRequest {
-                role: Role::DevFeature,
-                system_prompt: "sys".to_owned(),
-                task_prompt: "task".to_owned(),
-                work_dir: dir.clone(),
-                timeout: std::time::Duration::from_secs(10),
-                escalation_level: 0,
-            })
-            .await
-            .expect("fake binary run succeeds");
-        assert!(outcome.succeeded());
-
-        let doc: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(dir.join("opencode.json")).expect("config written"),
-        )
-        .expect("valid json");
-        assert_eq!(doc["mcp"]["coxagent"]["type"], "remote");
-        assert_eq!(
-            doc["mcp"]["coxagent"]["url"],
-            "http://127.0.0.1:4000/api/mcp"
-        );
-        assert_eq!(
-            doc["mcp"]["coxagent"]["headers"]["Authorization"],
-            "Bearer tok"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn ensure_opencode_mcp_config_is_idempotent() {
-        let dir = std::env::temp_dir().join(format!("oc-mcp-idem-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        ensure_opencode_mcp_config(&dir, &mcp(Some("tok")));
-        let first = std::fs::read_to_string(dir.join("opencode.json")).expect("read");
-        ensure_opencode_mcp_config(&dir, &mcp(Some("tok")));
-        let second = std::fs::read_to_string(dir.join("opencode.json")).expect("read");
-        assert_eq!(first, second, "second call is a no-op byte-for-byte");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn ensure_opencode_mcp_config_is_owner_only() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("oc-mcp-perm-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        ensure_opencode_mcp_config(&dir, &mcp(Some("tok")));
-        let mode = std::fs::metadata(dir.join("opencode.json"))
-            .expect("meta")
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o600, "opencode.json holds a live token — owner-only");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn ensure_opencode_mcp_config_gitignores_the_file_it_creates() {
-        let dir = std::env::temp_dir().join(format!("oc-mcp-gi-new-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        ensure_opencode_mcp_config(&dir, &mcp(Some("tok")));
-        let gitignore = std::fs::read_to_string(dir.join(".gitignore")).expect("read");
+        assert!(user.pointer("/mcp/coxagent").is_none(), "our key removed");
         assert!(
-            gitignore.lines().any(|l| l.trim() == "opencode.json"),
-            ".gitignore was:\n{gitignore}"
+            user.pointer("/mcp/other").is_some(),
+            "the user's own mcp entry survives"
         );
+        assert!(dir.join(COX_OPENCODE_CONFIG).exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn ensure_opencode_mcp_config_leaves_gitignore_alone_for_a_pre_existing_file() {
-        let dir = std::env::temp_dir().join(format!("oc-mcp-gi-old-{}", std::process::id()));
+    fn untouched_when_legacy_file_is_not_ours() {
+        let dir = std::env::temp_dir().join(format!("oc-mig-foreign-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
-        // The project already tracks its own opencode.json before we ever touch it.
-        std::fs::write(dir.join("opencode.json"), r#"{"theme":"dark"}"#).expect("write");
-        ensure_opencode_mcp_config(&dir, &mcp(Some("tok")));
-        assert!(
-            !dir.join(".gitignore").exists(),
-            "must not silently change tracking for a file we didn't create"
+        let original = r#"{"theme":"dark","mcp":{"other":{"type":"local"}}}"#;
+        std::fs::write(dir.join("opencode.json"), original).expect("cfg");
+        ensure_opencode_mcp_config(&dir, &mcp(None));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("opencode.json")).expect("read"),
+            original,
+            "a config without our marker is never modified"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -843,5 +865,61 @@ mod tests {
     #[test]
     fn escalation_empty_when_no_config() {
         assert!(super::escalation_from_configs(&[], "x/y").is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_writes_cox_config_and_exports_opencode_config_env() {
+        use coxagent_application::ports::outbound::{AgentEnginePort, AgentRequest};
+        use coxagent_domain::Role;
+
+        let dir = std::env::temp_dir().join(format!("oc-cox-e2e-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+
+        // Fake `opencode` echoes the env var back as a text event, so the test
+        // observes what the REAL child process would see.
+        let fake_bin = dir.join("fake-opencode.sh");
+        std::fs::write(
+            &fake_bin,
+            "#!/bin/sh\nprintf '{\"type\":\"text\",\"part\":{\"text\":\"cfg=%s\"}}\\n' \"$OPENCODE_CONFIG\"\n",
+        )
+        .expect("write fake bin");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&fake_bin).expect("meta").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&fake_bin, perms).expect("chmod");
+        }
+
+        let engine = OpencodeEngine::new("test/model")
+            .with_binary(fake_bin.to_string_lossy())
+            .with_mcp(Some(mcp(Some("tok"))));
+        let outcome = engine
+            .run(AgentRequest {
+                role: Role::DevFeature,
+                system_prompt: "s".into(),
+                task_prompt: "t".into(),
+                work_dir: dir.clone(),
+                timeout: std::time::Duration::from_secs(20),
+                escalation_level: 0,
+            })
+            .await
+            .expect("run");
+        assert!(outcome.succeeded(), "stderr: {}", outcome.stderr);
+        assert!(
+            dir.join(COX_OPENCODE_CONFIG).exists(),
+            "cox config written before spawn"
+        );
+        let expected = dir.join(COX_OPENCODE_CONFIG);
+        assert!(
+            outcome
+                .stdout
+                .contains(&format!("cfg={}", expected.display())),
+            "child saw OPENCODE_CONFIG={}; stdout: {}",
+            expected.display(),
+            outcome.stdout
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
