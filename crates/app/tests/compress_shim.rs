@@ -116,6 +116,115 @@ fn assert_byte_exact(label: &str, real: &[u8], shimmed: &[u8]) {
     );
 }
 
+/// Install the real generated wrapper for `cmd` in its own temp dir and return
+/// the path to it. This is the artifact `setup_command_shims` drops on an
+/// agent's `PATH`, byte for byte — the tests below run the ticket's repro
+/// through it instead of trusting the script's text.
+fn install_shim(cmd: &str, tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("coxagent-shim-test-{}-{tag}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let script = coxagent_app::shim_script(
+        cmd,
+        &dir.display().to_string(),
+        env!("CARGO_BIN_EXE_coxagent"),
+    );
+    let path = dir.join(cmd);
+    std::fs::write(&path, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    path
+}
+
+/// Run an installed shim exactly as an agent would: non-tty stdout, compression
+/// enabled, the shim dir first on `PATH` (so a shim that failed to skip itself
+/// would recurse instead of quietly passing the test).
+fn run_shim(shim: &Path, root: &Path, args: &[&str]) -> Vec<u8> {
+    let dir = shim.parent().unwrap().display().to_string();
+    // Any *other* shim dir inherited from the developer's environment has to
+    // go: this shim only skips its own directory, so a second one on `PATH`
+    // would make the two wrappers exec each other until `fork` gives up.
+    let inherited = std::env::var("PATH").unwrap_or_default();
+    let clean = inherited
+        .split(':')
+        .filter(|p| {
+            !Path::new(p)
+                .file_name()
+                .is_some_and(|n| n == "coxagent-shims")
+        })
+        .collect::<Vec<_>>()
+        .join(":");
+    let out = Command::new(shim)
+        .args(args)
+        .current_dir(root)
+        .env("PATH", format!("{dir}:{clean}"))
+        .env("COX_COMPRESS", "1")
+        .output()
+        .unwrap_or_else(|e| panic!("shim {} failed to spawn: {e}", shim.display()));
+    assert!(
+        out.status.success(),
+        // The shim folds stderr into the compressed stream, so a diagnosis
+        // needs both streams.
+        "shim `{} {}` failed ({}):\n{}{}",
+        shim.display(),
+        args.join(" "),
+        out.status,
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout),
+    );
+    out.stdout
+}
+
+#[test]
+fn the_installed_git_shim_keeps_content_retrieval_byte_exact() {
+    // The end-to-end repro from COX-B015: `git show HEAD:<path>` resolved
+    // through the shim on `PATH`. The unit tests cover `coxagent compress` and
+    // the script's text separately; only this one proves the two agree, which
+    // is what an agent shelling out to `git` actually depends on.
+    let root = repo_root();
+    let shim = install_shim("git", "exact");
+    let path = large_tracked_file(&root);
+    let rev = format!("HEAD:{path}");
+
+    let real = git(&root, &["show", &rev]);
+    assert!(
+        real.len() > 6_000,
+        "`git show {rev}` is only {} bytes — too small to exercise clipping",
+        real.len()
+    );
+    let shimmed = run_shim(&shim, &root, &["show", &rev]);
+
+    assert_byte_exact(&format!("shim git show {rev}"), &real, &shimmed);
+    let _ = std::fs::remove_dir_all(shim.parent().unwrap());
+}
+
+#[test]
+fn the_installed_git_shim_still_compresses_non_content_subcommands() {
+    // The other half: the bypass must be scoped to content retrieval, or the
+    // fix would silently switch the token-saver off for `git` entirely.
+    let root = repo_root();
+    let shim = install_shim("git", "compressed");
+
+    let real = git(&root, &["ls-tree", "-r", "HEAD"]);
+    assert!(
+        real.len() > 2_500,
+        "`git ls-tree -r HEAD` is only {} bytes — below the passthrough threshold",
+        real.len()
+    );
+    let shimmed = run_shim(&shim, &root, &["ls-tree", "-r", "HEAD"]);
+
+    assert!(
+        shimmed.len() < real.len()
+            && String::from_utf8_lossy(&shimmed).contains("output compressed"),
+        "`git ls-tree` lost its compression: {} bytes in, {} bytes out",
+        real.len(),
+        shimmed.len()
+    );
+    let _ = std::fs::remove_dir_all(shim.parent().unwrap());
+}
+
 #[test]
 fn git_show_through_the_shim_returns_the_file_byte_exact() {
     let root = repo_root();

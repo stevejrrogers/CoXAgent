@@ -259,7 +259,12 @@ const SHIM_CMDS: &[&str] = &[
 /// `{exe} compress`, forwarding the wrapped argv so content-retrieval
 /// subcommands can be recognised and left byte-exact. Pure — the caller writes
 /// it, so the shape can be tested without touching the shared shim directory.
-fn shim_script(cmd: &str, shim_dir: &str, exe: &str) -> String {
+///
+/// Public for the COX-B015 regression guard, which installs the real script in
+/// a temp dir and runs `git show` through it: asserting the script *text* is
+/// not enough, only executing it proves the deployed shim is byte-exact.
+#[must_use]
+pub fn shim_script(cmd: &str, shim_dir: &str, exe: &str) -> String {
     format!(
         "#!/usr/bin/env bash\n\
          cmd=\"{cmd}\"\n\
