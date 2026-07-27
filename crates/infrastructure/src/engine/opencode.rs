@@ -319,8 +319,8 @@ impl OpencodeEngine {
         sandbox: SandboxStatus,
     ) -> Result<AgentOutcome, PortError> {
         let mut cmd = cmd;
-        let mut child = cmd
-            .spawn()
+        let mut child = crate::proc::spawn_confined(&mut cmd, sandbox)
+            .await
             .map_err(|e| PortError::Backend(format!("spawn opencode: {e}")))?;
         let out = child
             .stdout

@@ -292,8 +292,8 @@ impl ClaudeEngine {
         }
         cmd.stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        let mut child = cmd
-            .spawn()
+        let mut child = crate::proc::spawn_confined(&mut cmd, sandbox)
+            .await
             .map_err(|e| PortError::Backend(format!("spawn claude: {e}")))?;
         let out = child
             .stdout

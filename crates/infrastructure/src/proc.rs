@@ -277,6 +277,81 @@ pub fn agent_command(
     (low_priority(program), status)
 }
 
+/// How many times a macOS Seatbelt spawn is retried after `sandbox-exec`
+/// itself fails to even start the confined program (see
+/// [`is_transient_seatbelt_apply_failure`]).
+const SEATBELT_APPLY_RETRIES: u32 = 3;
+
+/// True when `code` is `sandbox-exec`'s own exit status for failing to apply
+/// its Seatbelt profile — NOT the target program's exit status (COX-B013).
+///
+/// `sandbox-exec` applies the compiled profile via `sandbox_apply()`, a
+/// private, undocumented Apple call, from inside the already-spawned
+/// `sandbox-exec` process before it execs the target program. That call can
+/// return `EPERM` with no allow-list or environment difference from a call
+/// that just succeeded — a known OS-level reliability gap in Seatbelt
+/// itself (it's `DEPRECATED` per `man sandbox-exec`), not a misconfigured
+/// allow-list. It fires before the target program ever runs, so it always
+/// exits with `sandbox-exec`'s own `EX_OSERR` (71) and empty stdout — a real
+/// target program exiting 71 with nothing written is not a case this
+/// codebase's engines (`claude`, `opencode`, `hermes`) produce, so the
+/// signature is safe to treat as unambiguous.
+fn is_transient_seatbelt_apply_failure(sandbox: SandboxStatus, code: Option<i32>) -> bool {
+    sandbox == SandboxStatus::Confined("seatbelt") && code == Some(71)
+}
+
+/// Run `cmd` to completion via [`Command::output`], retrying when macOS
+/// Seatbelt failed to even start the confined program (COX-B013). Safe to
+/// retry unconditionally on that signature: nothing has run yet when it
+/// fires, so a fresh spawn has no prior attempt's side effects to undo.
+///
+/// This recovers a genuinely transient failure (`sandbox_apply()` denied
+/// this one call but would accept the next). It does NOT recover a failure
+/// that turns out to be tied to the calling process itself rather than the
+/// individual call — observed in this repo's own CI/dev sandboxing, where
+/// *every* `sandbox-exec` call made by an already-confined parent process
+/// fails the same way for that process's whole lifetime, no matter how many
+/// times or how far apart it's retried (nested Seatbelt confinement is
+/// itself unreliable, separately from this bug). A caller that is itself
+/// unconfined — the normal case for the `cox` hub — doesn't hit that case.
+pub async fn output_confined(
+    cmd: &mut Command,
+    sandbox: SandboxStatus,
+) -> std::io::Result<std::process::Output> {
+    let mut out = cmd.output().await?;
+    for _ in 1..SEATBELT_APPLY_RETRIES {
+        if !is_transient_seatbelt_apply_failure(sandbox, out.status.code()) {
+            break;
+        }
+        out = cmd.output().await?;
+    }
+    Ok(out)
+}
+
+/// Spawn `cmd` for streaming (live-tailed stdout), retrying the same
+/// transient Seatbelt failure `output_confined` retries (COX-B013). A real
+/// agent CLI run never completes within `GRACE` (it's a network call to an
+/// LLM), so briefly waiting to see whether the child already exited with
+/// `sandbox-exec`'s own failure signature costs nothing on the success path
+/// and does not touch the child's stdout/stderr — those stay untouched for
+/// the caller to stream exactly as if this were a plain first-try spawn.
+pub async fn spawn_confined(
+    cmd: &mut Command,
+    sandbox: SandboxStatus,
+) -> std::io::Result<tokio::process::Child> {
+    const GRACE: std::time::Duration = std::time::Duration::from_millis(300);
+    for _ in 1..SEATBELT_APPLY_RETRIES {
+        let mut child = cmd.spawn()?;
+        if let Ok(Ok(exit_status)) = tokio::time::timeout(GRACE, child.wait()).await {
+            if is_transient_seatbelt_apply_failure(sandbox, exit_status.code()) {
+                continue;
+            }
+        }
+        return Ok(child);
+    }
+    cmd.spawn()
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -336,8 +411,10 @@ mod tests {
         std::fs::create_dir_all(&ws).unwrap();
         let outside = std::env::var("HOME").unwrap() + "/cox-sbx-should-never-exist";
         let script = format!("echo ok > {}/in.txt; echo x > {outside}", ws.display());
-        let (mut c, _status) = agent_command("/bin/sh", &ws, true);
-        let out = c.arg("-c").arg(&script).output().await.unwrap();
+        let (mut c, status) = agent_command("/bin/sh", &ws, true);
+        let out = output_confined(c.arg("-c").arg(&script), status)
+            .await
+            .unwrap();
         drop(out);
         assert!(ws.join("in.txt").exists(), "workspace write allowed");
         assert!(
@@ -345,6 +422,85 @@ mod tests {
             "outside write must be denied"
         );
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    // --- COX-B013: retry-on-transient-sandbox_apply-failure --------------
+    //
+    // `sandboxed_command_blocks_writes_outside_workspace` above exercises the
+    // real `sandbox-exec` binary end to end, which is exactly what makes it
+    // flaky (COX-B013): whether the OS's `sandbox_apply()` cooperates isn't
+    // under this repo's control. These tests instead pin down the retry
+    // *policy* `output_confined` owns — deterministically, without invoking
+    // Seatbelt at all — so the loop itself has a regression test independent
+    // of host sandbox behavior.
+
+    #[tokio::test]
+    async fn output_confined_retries_the_seatbelt_apply_signature_until_it_succeeds() {
+        // A script that fails with `sandbox-exec`'s own exit code the first
+        // `SEATBELT_APPLY_RETRIES - 1` times it's run, then succeeds — the
+        // same shape a genuinely transient `sandbox_apply()` denial has.
+        let counter = std::env::temp_dir().join(format!("cox-retry-{}", std::process::id()));
+        std::fs::write(&counter, "0").unwrap();
+        let script = format!(
+            "n=$(cat {0}); n=$((n+1)); echo $n > {0}; [ $n -ge {1} ] && exit 0; exit 71",
+            counter.display(),
+            SEATBELT_APPLY_RETRIES
+        );
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg(&script);
+        let out = output_confined(&mut cmd, SandboxStatus::Confined("seatbelt"))
+            .await
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "must keep retrying up to the cap and return the eventual success"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&counter).unwrap().trim(),
+            SEATBELT_APPLY_RETRIES.to_string(),
+            "must have spawned exactly up to the retry cap, not more"
+        );
+        let _ = std::fs::remove_file(&counter);
+    }
+
+    #[tokio::test]
+    async fn output_confined_gives_up_and_returns_the_failure_past_the_retry_cap() {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg("exit 71");
+        let out = output_confined(&mut cmd, SandboxStatus::Confined("seatbelt"))
+            .await
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(71),
+            "exhausted retries must surface the failure, not hang or fabricate success"
+        );
+    }
+
+    #[tokio::test]
+    async fn output_confined_does_not_retry_when_not_seatbelt_confined() {
+        // An exit-71 command that's unrelated to Seatbelt (sandbox wasn't
+        // requested, or confinement uses bwrap) must be treated as the
+        // target program's own exit code, not retried as a spurious
+        // `sandbox_apply()` failure.
+        let counter = std::env::temp_dir().join(format!("cox-retry-gate-{}", std::process::id()));
+        std::fs::write(&counter, "0").unwrap();
+        let script = format!(
+            "n=$(cat {0}); n=$((n+1)); echo $n > {0}; exit 71",
+            counter.display()
+        );
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg(&script);
+        let out = output_confined(&mut cmd, SandboxStatus::NotRequested)
+            .await
+            .unwrap();
+        assert_eq!(out.status.code(), Some(71));
+        assert_eq!(
+            std::fs::read_to_string(&counter).unwrap().trim(),
+            "1",
+            "must not retry a plain command failure"
+        );
+        let _ = std::fs::remove_file(&counter);
     }
 
     // --- COX-F003: Linux workspace sandboxing (Bubblewrap) ---------------
