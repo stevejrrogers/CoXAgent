@@ -105,9 +105,24 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
             .to_owned();
 
         let memory = prompts::team_memory_block(&state.decisions, &state.lessons);
+        // The product's existing look and its earlier UX decisions live in the
+        // team's own pages; designing without them is how a second design
+        // language gets born.
+        let knowledge = prompts::knowledge_block(
+            &state.docs,
+            &state.tickets,
+            &self.work_dir,
+            &format!(
+                "{title} {}",
+                state
+                    .ticket(&id)
+                    .map_or("", coxagent_domain::Ticket::description)
+            ),
+            &id.to_string(),
+        );
         let outcome = self
             .engine
-            .run(self.build_request(&id, &title, &memory))
+            .run(self.build_request(&id, &title, &memory, &knowledge))
             .await?;
         if !outcome.succeeded() {
             self.store.release_stage(&id, "pd", &worker).await.ok();
@@ -159,7 +174,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
         Ok(Some(id))
     }
 
-    fn build_request(&self, id: &TicketId, title: &str, memory: &str) -> AgentRequest {
+    fn build_request(
+        &self,
+        id: &TicketId,
+        title: &str,
+        memory: &str,
+        knowledge: &str,
+    ) -> AgentRequest {
         let _choice = self.config.engine.resolve(Role::Pd);
         let context_block = self
             .context
@@ -173,7 +194,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
             role: Role::Pd,
             system_prompt: prompts::system_prompt(prompts::PD),
             task_prompt: format!(
-                "Design the UX for feature {id}: {title}{context_block}{memory}{}{}",
+                "Design the UX for feature {id}: {title}{context_block}{knowledge}{memory}{}{}",
                 prompts::focus_block(&self.work_dir, title),
                 prompts::repo_map_block(&self.work_dir, self.config.workflow.token_saver),
             ),

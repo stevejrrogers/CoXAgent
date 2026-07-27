@@ -485,7 +485,7 @@ pub fn references(root: &Path, name: &str, limit: usize) -> Vec<Reference> {
 /// Lowercase word tokens from an identifier or path, splitting on non-alnum,
 /// camelCase, and snake_case boundaries (`authenticateUser` → `authenticate`,
 /// `user`). Drops 1-char tokens.
-fn tokenize(s: &str) -> Vec<String> {
+pub(crate) fn tokenize(s: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut prev_lower = false;

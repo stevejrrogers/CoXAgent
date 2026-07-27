@@ -970,6 +970,39 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         }
     }
 
+    /// Everything already written down about this ticket's subject: the team's
+    /// own wiki, the project's docs, and closed tickets with the same symptom.
+    /// A person walking into unfamiliar code reads these before typing; an
+    /// agent only reads what the brief hands it.
+    fn knowledge_brief(
+        state: &ProjectState,
+        id: &TicketId,
+        ticket: Option<&coxagent_domain::Ticket>,
+        work_dir: &std::path::Path,
+    ) -> String {
+        let query = ticket.map_or_else(String::new, |t| {
+            format!(
+                "{} {} {}",
+                t.title(),
+                t.description(),
+                t.design()
+                    .technical
+                    .as_ref()
+                    .map_or("", |d| d.approach.as_str())
+            )
+        });
+        if query.trim().is_empty() {
+            return String::new();
+        }
+        prompts::knowledge_block(
+            &state.docs,
+            &state.tickets,
+            work_dir,
+            &query,
+            &id.to_string(),
+        )
+    }
+
     /// How previous attempts are briefed to the next one. Structured records
     /// name the gate and the files; a ticket that failed before that log
     /// existed falls back to its prose journal.
@@ -1052,6 +1085,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         let journal = Self::attempts_brief(state, id);
         // What was already done to this code. A human opens the file's history
         // before editing it; nothing in the ticket text carries that.
+        let knowledge = Self::knowledge_brief(state, id, ticket, &self.work_dir);
         let history = prompts::history_block(
             &self.work_dir,
             &format!(
@@ -1070,7 +1104,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             // exists only for UI tickets) belongs in the task prompt below.
             system_prompt: prompts::system_prompt(prompts::DEV),
             task_prompt: format!(
-                "Ticket {id}: {title}\n{}\nImplement it now.{stack}{deploy}{design}{context_block}{}{history}{}{}{}{steering}{journal}",
+                "Ticket {id}: {title}\n{}\nImplement it now.{stack}{deploy}{design}{context_block}{}{history}{knowledge}{}{}{}{steering}{journal}",
                 ticket_brief(ticket),
                 prompts::focus_block(
                     &self.work_dir,

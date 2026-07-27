@@ -392,6 +392,208 @@ pub fn focus_block(work_dir: &std::path::Path, query: &str) -> String {
     out.chars().take(1800).collect()
 }
 
+/// Distinctive terms shared by `query` and `text`, as a crude relevance score.
+/// Short words carry no signal and are dropped, so "the fix" doesn't match
+/// everything in the repo.
+fn overlap_score(query_terms: &[String], text: &str) -> usize {
+    let terms = crate::codegraph::tokenize(text);
+    query_terms
+        .iter()
+        .filter(|q| q.len() > 3 && terms.iter().any(|t| t == *q))
+        .count()
+}
+
+/// Query terms worth matching on.
+fn query_terms(query: &str) -> Vec<String> {
+    let mut t = crate::codegraph::tokenize(query);
+    t.retain(|w| w.len() > 3);
+    t.sort();
+    t.dedup();
+    t
+}
+
+/// Everything the organisation has already written down about a subject: the
+/// team's own wiki, the repo's docs, and closed tickets with the same symptom.
+///
+/// Every role needs this, not just the developer. The SA is supposed to be the
+/// encyclopedia — it cannot arbitrate a design it has no memory of — and the
+/// BA, PO and PD cannot write a sound requirement without knowing what the
+/// product already does. `exclude` keeps a ticket from being offered its own
+/// history; pass an empty string when there is no ticket in hand.
+#[must_use]
+pub fn knowledge_block(
+    docs: &[crate::state::DocPage],
+    tickets: &[coxagent_domain::Ticket],
+    work_dir: &std::path::Path,
+    query: &str,
+    exclude: &str,
+) -> String {
+    if query.trim().is_empty() {
+        return String::new();
+    }
+    format!(
+        "{}{}{}",
+        wiki_block(docs, query),
+        repo_docs_block(work_dir, query),
+        prior_fix_block(tickets, query, exclude),
+    )
+}
+
+/// The team's OWN wiki, matched to this ticket. The DOCS agent writes a page
+/// after every feature and, until now, nobody ever read one back: the team
+/// documented itself and then re-derived the same knowledge from scratch on
+/// the next ticket. This is the shelf those pages sit on.
+#[must_use]
+pub fn wiki_block(docs: &[crate::state::DocPage], query: &str) -> String {
+    use std::fmt::Write as _;
+    let terms = query_terms(query);
+    if terms.is_empty() || docs.is_empty() {
+        return String::new();
+    }
+    let mut scored: Vec<(usize, &crate::state::DocPage)> = docs
+        .iter()
+        .map(|d| {
+            // A title hit is worth more than a body mention.
+            let score = overlap_score(&terms, &d.title) * 3 + overlap_score(&terms, &d.body);
+            (score, d)
+        })
+        .filter(|(s, _)| *s > 0)
+        .collect();
+    scored.sort_by_key(|(score, ..)| std::cmp::Reverse(*score));
+    if scored.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "\n\nTEAM WIKI — pages this team already wrote about this area. Read them before \
+         re-deriving anything:\n",
+    );
+    for (_, d) in scored.iter().take(3) {
+        let where_ = if d.folder.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", d.folder)
+        };
+        let body: String = d
+            .body
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .take(6)
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(400)
+            .collect();
+        let _ = writeln!(out, "- {}{where_}: {body}", d.title);
+    }
+    out.chars().take(1500).collect()
+}
+
+/// Tickets already solved that look like this one. A bug whose symptom matches
+/// something the team fixed three sprints ago should start from that fix, not
+/// from a blank page — the way a person would say "we've seen this before".
+#[must_use]
+pub fn prior_fix_block(tickets: &[coxagent_domain::Ticket], query: &str, exclude: &str) -> String {
+    use std::fmt::Write as _;
+    let terms = query_terms(query);
+    if terms.is_empty() {
+        return String::new();
+    }
+    let mut scored: Vec<(usize, &coxagent_domain::Ticket)> = tickets
+        .iter()
+        .filter(|t| {
+            t.id().to_string() != exclude
+                && matches!(
+                    t.status(),
+                    coxagent_domain::Status::Fixed
+                        | coxagent_domain::Status::Done
+                        | coxagent_domain::Status::Documented
+                        | coxagent_domain::Status::Verified
+                )
+        })
+        .map(|t| {
+            let score =
+                overlap_score(&terms, t.title()) * 3 + overlap_score(&terms, t.description());
+            (score, t)
+        })
+        // Two shared distinctive terms before we claim a resemblance.
+        .filter(|(s, _)| *s >= 2)
+        .collect();
+    scored.sort_by_key(|(score, ..)| std::cmp::Reverse(*score));
+    if scored.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "\n\nALREADY SOLVED — closed tickets with the same symptom. Check what was done there \
+         first; if this is a regression of one, say so:\n",
+    );
+    for (_, t) in scored.iter().take(3) {
+        let desc: String = t.description().chars().take(200).collect();
+        let _ = writeln!(out, "- {} [{:?}] {}: {desc}", t.id(), t.status(), t.title());
+    }
+    out.chars().take(1200).collect()
+}
+
+/// The repo's own written word — README, CLAUDE.md/AGENTS.md, `docs/*.md` —
+/// narrowed to what this ticket is about. The rules a project writes down for
+/// its contributors apply to the agent contributor too.
+#[must_use]
+pub fn repo_docs_block(work_dir: &std::path::Path, query: &str) -> String {
+    use std::fmt::Write as _;
+    let terms = query_terms(query);
+    if terms.is_empty() {
+        return String::new();
+    }
+    let mut files: Vec<std::path::PathBuf> = ["README.md", "CLAUDE.md", "AGENTS.md", "docs"]
+        .iter()
+        .map(|n| work_dir.join(n))
+        .collect();
+    // One level of docs/ is enough; deep trees are the code graph's job.
+    if let Ok(rd) = std::fs::read_dir(work_dir.join("docs")) {
+        for e in rd.flatten().take(40) {
+            let p = e.path();
+            if p.extension().is_some_and(|x| x == "md") {
+                files.push(p);
+            }
+        }
+    }
+    let mut scored: Vec<(usize, String, String)> = Vec::new();
+    for f in files.iter().filter(|f| f.is_file()) {
+        let Ok(text) = std::fs::read_to_string(f) else {
+            continue;
+        };
+        let name = f
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        // Score per section so a huge README doesn't win on volume alone.
+        for section in text.split("\n## ") {
+            let score = overlap_score(&terms, section);
+            if score >= 2 {
+                let body: String = section
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .take(8)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .chars()
+                    .take(400)
+                    .collect();
+                scored.push((score, name.clone(), body));
+            }
+        }
+    }
+    scored.sort_by_key(|(score, ..)| std::cmp::Reverse(*score));
+    if scored.is_empty() {
+        return String::new();
+    }
+    let mut out =
+        String::from("\n\nPROJECT DOCS that cover this area — they are the rules here:\n");
+    for (_, name, body) in scored.iter().take(3) {
+        let _ = writeln!(out, "- {name}: {body}");
+    }
+    out.chars().take(1500).collect()
+}
+
 /// What has already been done to the code this ticket is about — the reflex a
 /// human brings to unfamiliar code and an agent has to be handed: before
 /// touching a file, look at its recent history. A previous attempt at the same
@@ -776,6 +978,126 @@ mod history_block_tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
         assert!(history_block(&dir, "anything").is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod knowledge_block_tests {
+    use super::{prior_fix_block, repo_docs_block, wiki_block};
+    use crate::state::DocPage;
+    use coxagent_domain::{Complexity, Priority, Role, Status, Ticket, TicketId, TicketType};
+
+    fn page(title: &str, body: &str) -> DocPage {
+        DocPage {
+            id: title.to_owned(),
+            folder: "Technical".to_owned(),
+            category: "technical".to_owned(),
+            title: title.to_owned(),
+            body: body.to_owned(),
+            updated_at: String::new(),
+            updated_by: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_wiki_answers_only_when_it_has_something_to_say() {
+        let docs = vec![
+            page(
+                "Deploy health gate",
+                "The gate polls the health endpoint until the port binds.",
+            ),
+            page("Chat theming", "Colors and spacing for the chat pane."),
+        ];
+        let out = wiki_block(&docs, "health gate never binds the port on deploy");
+        assert!(out.contains("Deploy health gate"), "matching page surfaces");
+        assert!(!out.contains("Chat theming"), "unrelated page stays out");
+        assert!(
+            wiki_block(&docs, "quantum teleportation").is_empty(),
+            "no match must produce no section, not an empty heading"
+        );
+        assert!(wiki_block(&[], "health gate").is_empty());
+    }
+
+    fn ticket(id: &str, title: &str, desc: &str, status: Status) -> Ticket {
+        let mut t = Ticket::new(
+            TicketId::new(id).expect("id"),
+            TicketType::Bug,
+            title,
+            desc,
+            Priority::High,
+            Complexity::Medium,
+            false,
+        )
+        .expect("ticket");
+        // Walk to the requested terminal status the way the workflow would.
+        if status != Status::Open {
+            let _ = t.claim(Role::System, "w", "now");
+            let _ = t.transition_to(Role::DevBug, Status::Fixed);
+        }
+        t
+    }
+
+    #[test]
+    fn a_closed_ticket_with_the_same_symptom_is_offered_back() {
+        let tickets = vec![
+            ticket(
+                "COX-B001",
+                "Deploy health gate passes a dead container",
+                "Deploy reported success while the container never bound its port.",
+                Status::Fixed,
+            ),
+            ticket(
+                "COX-B050",
+                "Chat input loses focus on send",
+                "Pressing enter moves focus to the message list.",
+                Status::Fixed,
+            ),
+            ticket(
+                "COX-B099",
+                "Deploy health gate passes a dead container",
+                "Deploy reported success while the container never bound its port.",
+                Status::Open,
+            ),
+        ];
+        let out = prior_fix_block(
+            &tickets,
+            "deploy health gate reports success but the container is dead",
+            "COX-B077",
+        );
+        assert!(out.contains("COX-B001"), "the solved twin is offered");
+        assert!(!out.contains("COX-B050"), "unrelated work stays out");
+        assert!(
+            !out.contains("COX-B099"),
+            "still-open tickets are not answers"
+        );
+        assert!(
+            prior_fix_block(&tickets, "deploy health gate", "COX-B001").is_empty()
+                || !prior_fix_block(&tickets, "deploy health gate", "COX-B001")
+                    .contains("COX-B001"),
+            "a ticket is never offered its own history"
+        );
+    }
+
+    #[test]
+    fn project_docs_are_matched_by_section_not_by_file_size() {
+        let dir = std::env::temp_dir().join(format!("repodocs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("docs")).expect("mkdir");
+        std::fs::write(
+            dir.join("README.md"),
+            "# Project\nSome prose.\n## Deploying\nThe deploy health gate polls the port.\n",
+        )
+        .expect("write");
+        std::fs::write(
+            dir.join("docs/style.md"),
+            "## Style\nTabs versus spaces, and other opinions.\n",
+        )
+        .expect("write");
+        let out = repo_docs_block(&dir, "deploy health gate port polling");
+        assert!(out.contains("README.md"), "the matching section wins");
+        assert!(!out.contains("style.md"));
+        assert!(repo_docs_block(&dir, "unrelated subject matter").is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
