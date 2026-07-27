@@ -77,6 +77,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunMilestonesUseCase<S, E> {
             .map(|t| format!("- {}", t.title()))
             .collect();
         let current = state.current_version.to_string();
+        let backlog_text = backlog.join("\n");
+        // A roadmap written without knowing what already shipped re-promises it.
+        let knowledge = crate::prompts::knowledge_block(
+            &state.docs,
+            &state.tickets,
+            &self.work_dir,
+            &format!("{} {}", self.context, backlog_text),
+            "",
+        );
+        let backlog_block = format!("{backlog_text}{knowledge}");
         let task_prompt = if extending {
             let shipped: Vec<String> = state
                 .milestones
@@ -92,7 +102,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunMilestonesUseCase<S, E> {
                  with strictly increasing target_version, every one GREATER than {current}.",
                 self.context,
                 shipped.join("\n"),
-                backlog.join("\n")
+                backlog_block
             )
         } else {
             format!(
@@ -102,7 +112,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunMilestonesUseCase<S, E> {
                  exactly: {{\"name\": string, \"goal\": string, \"target_version\": \"MAJOR.MINOR.0\"}} \
                  with strictly increasing target_version (e.g. 0.2.0, 0.5.0, 1.0.0).",
                 self.context,
-                backlog.join("\n")
+                backlog_block
             )
         };
         let request = AgentRequest {
