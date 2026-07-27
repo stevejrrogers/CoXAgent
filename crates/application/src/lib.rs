@@ -21,6 +21,7 @@ pub mod system_chat;
 pub mod tokens;
 pub mod ts;
 pub mod use_cases;
+pub mod verify_cache;
 
 pub use auth::{AuthPort, AuthRole, AuthUser, LoginResult, TokenInfo};
 pub use config::{

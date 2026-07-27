@@ -2734,7 +2734,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     // terminal state (or no longer exists) — a failed sync
                     // must retry next cycle, not be forgotten forever.
                     let done = note.is_some()
-                        || s.ticket(&tid).is_none_or(|t| {
+                        || s.ticket(&tid).map_or(true, |t| {
                             use coxagent_domain::Status;
                             matches!(
                                 t.status(),
