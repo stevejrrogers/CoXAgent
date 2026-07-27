@@ -3223,11 +3223,20 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
     }
 
-    /// SM → SA re-design for tickets PARKED after 3 red builds: the failure is
-    /// treated as a spec/design problem, not a typing problem — the SA revises
-    /// the technical approach (simplify, split, change direction) and the
-    /// ticket re-enters the flow with fresh attempts. One redesign per ticket;
-    /// parking again after that is a human decision.
+    /// SM escalation for tickets PARKED after 3 red builds — the stand-in for
+    /// what a real team does when a dev is stuck: someone senior picks it up,
+    /// and WHICH someone depends on why it kept failing.
+    ///
+    /// The three attempts' failure reasons are read from the ticket journal and
+    /// routed: a ticket that never had a workable spec goes to the BA to be
+    /// made answerable; one blocked on a mechanical gate (lints, a missing
+    /// regression test) goes to the SA as a repair brief, because redesigning
+    /// an approach that was never the problem just burns another three
+    /// attempts; anything else is a genuine design dead end and gets the SA's
+    /// revised approach. Every brief now carries the actual failures — the SA
+    /// used to be told only that the ticket was parked. One escalation per
+    /// ticket; parking again after that is a human decision.
+    #[allow(clippy::too_many_lines)] // one escalation, three routes, read top to bottom
     async fn sm_unpark_tickets(&self) {
         let candidates: Vec<(String, String)> = {
             let Ok(state) = self.store.load().await else {
@@ -3248,6 +3257,26 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 .collect()
         };
         for (id, title) in candidates {
+            // What actually went wrong, in the words the gates recorded.
+            let (history, spec_gap) = {
+                let Ok(state) = self.store.load().await else {
+                    return;
+                };
+                let hist = state
+                    .ticket_journal
+                    .get(&id)
+                    .map(|v| v.join("\n"))
+                    .unwrap_or_default();
+                let thin = state
+                    .tickets
+                    .iter()
+                    .find(|t| t.id().to_string() == id)
+                    .is_some_and(|t| {
+                        t.acceptance_criteria().is_empty() || t.description().trim().len() < 80
+                    });
+                (hist, thin)
+            };
+            let route = escalation_route(&history, spec_gap);
             let claimed = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
                 if s.ticket_redesigns.contains_key(&id) {
                     return Err(crate::PortError::Conflict("already redesigned".into()));
@@ -3259,20 +3288,63 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             if claimed.is_err() {
                 continue;
             }
-            self.report("SA", &format!("re-designing parked {id}"));
-            let request = crate::ports::outbound::AgentRequest {
-                role: coxagent_domain::Role::Sa,
-                system_prompt: crate::prompts::system_prompt(crate::prompts::SA),
-                task_prompt: format!(
-                    "Ticket {id} (\"{title}\") was PARKED after THREE failed build/verify \
-                     attempts — the current technical approach is not working. Study the repo \
-                     and the ticket's history, then reply with a REVISED approach in under 900 \
-                     characters: simplify the scope, change the technique, or split out what's \
-                     achievable. Plain text, imperative, concrete files/modules.",
+            let failures = if history.trim().is_empty() {
+                "(no failure detail was recorded)".to_owned()
+            } else {
+                history.clone()
+            };
+            let (who, persona, brief) = match route {
+                EscalationRoute::Spec => (
+                    "BA",
+                    crate::prompts::BA,
+                    format!(
+                        "Ticket {id} (\"{title}\") failed THREE times and the developers never \
+                         had a spec they could build against. Here is what each attempt \
+                         reported:\n{failures}\n\nRewrite the requirement so it is answerable: \
+                         state the exact problem, the steps to reproduce it if it is a bug, and \
+                         numbered acceptance criteria a developer can verify mechanically. Under \
+                         900 characters, plain text, no approach or file names — that is the \
+                         SA's job."
+                    ),
                 ),
+                EscalationRoute::Mechanical => (
+                    "SA",
+                    crate::prompts::SA,
+                    format!(
+                        "Ticket {id} (\"{title}\") failed THREE times, every time on a mechanical \
+                         quality gate rather than on the design:\n{failures}\n\nThe approach is \
+                         probably fine — the developer could not get past the gate. Study the \
+                         repo and reply with a concrete plan under 900 characters to clear THAT \
+                         blocker: which lint or missing test, in which file, and what the fix \
+                         is. Do not redesign the feature. Plain text, imperative."
+                    ),
+                ),
+                EscalationRoute::Design => (
+                    "SA",
+                    crate::prompts::SA,
+                    format!(
+                        "Ticket {id} (\"{title}\") was PARKED after THREE failed build/verify \
+                         attempts — the current technical approach is not working. Each attempt \
+                         reported:\n{failures}\n\nStudy the repo and reply with a REVISED \
+                         approach in under 900 characters: simplify the scope, change the \
+                         technique, or split out what's achievable. Plain text, imperative, \
+                         concrete files/modules."
+                    ),
+                ),
+            };
+            self.report(who, &format!("rescuing parked {id}"));
+            let request = crate::ports::outbound::AgentRequest {
+                role: if who == "BA" {
+                    coxagent_domain::Role::Ba
+                } else {
+                    coxagent_domain::Role::Sa
+                },
+                system_prompt: crate::prompts::system_prompt(persona),
+                task_prompt: brief,
                 work_dir: self.work_dir.clone(),
                 timeout: std::time::Duration::from_secs(900),
-                escalation_level: 0,
+                // A ticket three attempts deep has earned the stronger model.
+                escalation_level: 1,
             };
             let out = match self.engine.run(request).await {
                 Ok(o) if o.succeeded() => o.stdout.trim().chars().take(1200).collect::<String>(),
@@ -3283,17 +3355,39 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             }
             let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
                 if let Some(t) = s.tickets.iter_mut().find(|t| t.id().to_string() == id) {
-                    let design = coxagent_domain::TechnicalDesign {
-                        approach: out.clone(),
-                        ..Default::default()
-                    };
-                    let _ = t.set_technical_design(coxagent_domain::Role::Sa, design);
+                    match route {
+                        // A clarified requirement belongs in the ticket the DEV
+                        // reads, not in a design field.
+                        EscalationRoute::Spec => {
+                            let _ = t.clarify(coxagent_domain::Role::Ba, &out);
+                        }
+                        EscalationRoute::Mechanical | EscalationRoute::Design => {
+                            let design = coxagent_domain::TechnicalDesign {
+                                approach: out.clone(),
+                                ..Default::default()
+                            };
+                            let _ = t.set_technical_design(coxagent_domain::Role::Sa, design);
+                        }
+                    }
                 }
                 s.ticket_fail_attempts.remove(&id);
-                let msg = format!(
-                    "🧯 SM→SA: {id} được RE-DESIGN sau 3 build đỏ — DEV thử lại với hướng mới. \
-                     Đỏ tiếp là chuyển người quyết."
-                );
+                // The next DEV run reads the journal, so the rescue lands where
+                // the work happens instead of only in a chat message.
+                s.journal_note(&id, &format!("{who} rescue: {out}"));
+                let msg = match route {
+                    EscalationRoute::Spec => format!(
+                        "🧯 SM→BA: {id} bị 3 lần đỏ vì spec chưa rõ — BA đã viết lại yêu cầu, \
+                         DEV làm lại. Đỏ tiếp là chuyển người quyết."
+                    ),
+                    EscalationRoute::Mechanical => format!(
+                        "🧯 SM→SA: {id} bị 3 lần đỏ ở cổng chất lượng (lint/test) chứ không phải \
+                         thiết kế — SA đưa cách gỡ đúng chỗ đó. Đỏ tiếp là chuyển người quyết."
+                    ),
+                    EscalationRoute::Design => format!(
+                        "🧯 SM→SA: {id} được RE-DESIGN sau 3 build đỏ — DEV thử lại với hướng mới. \
+                         Đỏ tiếp là chuyển người quyết."
+                    ),
+                };
                 s.post_comment("SM", &msg, Some(id.clone()));
                 s.post_chat_in("SM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
                 Ok(())
@@ -6507,5 +6601,92 @@ mod tests {
             notifier_hits, 1,
             "the once-per-day gate must prevent a duplicate external notifier event: {events:?}"
         );
+    }
+}
+
+/// Which senior picks up a ticket the developers could not land, mirroring who
+/// you would actually walk over to: the BA when there was never a spec worth
+/// building against, the SA when the design is a dead end — or, when every
+/// attempt died on a mechanical gate, the SA with a repair brief rather than a
+/// redesign of something that was never wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EscalationRoute {
+    /// The requirement itself is unbuildable — hand it to the BA.
+    Spec,
+    /// A quality gate blocked it (lints, missing regression test, red suite).
+    Mechanical,
+    /// A genuine technical dead end — the SA revises the approach.
+    Design,
+}
+
+/// Classify three failed attempts from what the gates recorded. `spec_gap` is
+/// the deterministic signal that the ticket never carried a usable requirement.
+#[must_use]
+pub fn escalation_route(history: &str, spec_gap: bool) -> EscalationRoute {
+    let low = history.to_lowercase();
+    let unclear = [
+        "unclear",
+        "ambiguous",
+        "no acceptance",
+        "missing acceptance",
+        "cannot reproduce",
+        "could not reproduce",
+        "no repro",
+        "not enough context",
+    ]
+    .iter()
+    .any(|k| low.contains(k));
+    if unclear || (spec_gap && !low.is_empty()) {
+        return EscalationRoute::Spec;
+    }
+    let gates = [
+        "clippy",
+        "regression test",
+        "suite is red",
+        "left tests red",
+        "rustfmt",
+        "cargo fmt",
+        "lint",
+    ];
+    let lines: Vec<&str> = low.lines().filter(|l| !l.trim().is_empty()).collect();
+    // Only when EVERY recorded failure is a gate — one design failure mixed in
+    // means the approach is still suspect.
+    if !lines.is_empty() && lines.iter().all(|l| gates.iter().any(|g| l.contains(g))) {
+        return EscalationRoute::Mechanical;
+    }
+    EscalationRoute::Design
+}
+
+#[cfg(test)]
+mod escalation_route_tests {
+    use super::{escalation_route, EscalationRoute};
+
+    #[test]
+    fn every_attempt_dying_on_a_gate_is_a_repair_job_not_a_redesign() {
+        let h = "attempt 1 failed: added clippy errors (37 -> 38)\n\
+                 attempt 2 failed: added clippy errors (37 -> 38)\n\
+                 attempt 3 failed: bug fix shipped without a regression test";
+        assert_eq!(escalation_route(h, false), EscalationRoute::Mechanical);
+    }
+
+    #[test]
+    fn a_missing_spec_goes_to_the_ba() {
+        assert_eq!(
+            escalation_route("attempt 1 failed: requirements unclear", false),
+            EscalationRoute::Spec
+        );
+        // A thin ticket with any failure history is a spec problem too.
+        assert_eq!(
+            escalation_route("attempt 1 failed: engine failed", true),
+            EscalationRoute::Spec
+        );
+    }
+
+    #[test]
+    fn a_real_build_failure_still_gets_the_sas_redesign() {
+        let h = "attempt 1 failed: left tests red on COX-B009\n\
+                 attempt 2 failed: error[E0308]: mismatched types";
+        assert_eq!(escalation_route(h, false), EscalationRoute::Design);
+        assert_eq!(escalation_route("", false), EscalationRoute::Design);
     }
 }

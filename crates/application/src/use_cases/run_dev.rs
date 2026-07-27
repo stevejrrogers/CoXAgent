@@ -480,7 +480,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                         }
                         let after_report = deploy.lint_report(&self.work_dir).await.ok().flatten();
                         let after = after_report.as_ref().map_or(count, |r| r.errors);
-                        if after > base {
+                        // Blame only what this change touched. The workspace
+                        // carries pre-existing lints, and a rebase can import
+                        // someone else's — failing the holder of the ticket for
+                        // those parks perfectly good fixes after three tries.
+                        // MSRV 1.80 predates Option::is_none_or.
+                        let mine = after_report.as_ref().map_or(true, |r| {
+                            r.files.is_empty() || self.lints_touch_changed_files(&r.files)
+                        });
+                        if after > base && mine {
                             let sample = after_report
                                 .filter(|r| !r.sample.is_empty())
                                 .map_or_else(String::new, |r| {
@@ -497,6 +505,22 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                                 self.mode
                             ))
                             .into());
+                        }
+                        if after > base {
+                            // Not ours: record the new reality so the next
+                            // change isn't measured against a stale baseline.
+                            tracing::warn!(
+                                "lint count rose {base} -> {after} but no new lint sits in a \
+                                 file {id} touched — not attributing it to this ticket"
+                            );
+                            let _ = crate::ports::outbound::mutate_state(
+                                self.store.as_ref(),
+                                move |s| {
+                                    s.clippy_baseline = Some(after);
+                                    Ok(())
+                                },
+                            )
+                            .await;
                         }
                         if after < base {
                             let _ = crate::ports::outbound::mutate_state(
@@ -616,6 +640,45 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             p(None);
         }
         Ok(Some(id))
+    }
+
+    /// Whether any lint location sits in a file this working diff touches.
+    /// Paths are compared by suffix so a repo-relative lint path still matches
+    /// a git path listed from the same root.
+    fn lints_touch_changed_files(&self, lint_files: &[String]) -> bool {
+        let changed = self.changed_files();
+        if changed.is_empty() {
+            // Nothing changed on disk — nothing here is attributable.
+            return false;
+        }
+        lint_files.iter().any(|lint| {
+            let lint = lint.trim();
+            !lint.is_empty()
+                && changed
+                    .iter()
+                    .any(|c| lint.ends_with(c.as_str()) || c.ends_with(lint))
+        })
+    }
+
+    /// Paths in the working diff: tracked modifications plus untracked files.
+    fn changed_files(&self) -> Vec<String> {
+        let run = |args: &[&str]| -> String {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&self.work_dir)
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default()
+        };
+        format!(
+            "{}\n{}",
+            run(&["diff", "HEAD", "--name-only"]),
+            run(&["ls-files", "--others", "--exclude-standard"])
+        )
+        .lines()
+        .map(|l| l.trim().to_owned())
+        .filter(|l| !l.is_empty())
+        .collect()
     }
 
     /// Whether the working diff is documentation/assets only — README fixes,
@@ -1154,6 +1217,55 @@ mod tests {
         std::fs::write(dir.join("lib.rs"), "fn f() {}\n#[test]\nfn t() {}\n").unwrap();
         git(&["add", "-A"]);
         assert!(uc.diff_touches_tests(), "added #[test] counts");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn lint_regressions_are_blamed_only_on_files_the_change_touched() {
+        let dir = std::env::temp_dir().join(format!("lintblame-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("crates/app/src")).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .unwrap();
+        };
+        git(&["init", "-q"]);
+        git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "--allow-empty",
+            "-q",
+            "-m",
+            "base",
+        ]);
+        let uc = RunDevUseCase::new(
+            Arc::new(MemStore {
+                state: Mutex::new(ProjectState::default()),
+            }),
+            Arc::new(OkEngine),
+            Config::default(),
+            dir.clone(),
+            DevMode::Bug,
+        );
+        assert!(
+            !uc.lints_touch_changed_files(&["crates/app/src/lib.rs".to_owned()]),
+            "a clean tree can't have caused any lint"
+        );
+        std::fs::write(dir.join("crates/app/src/lib.rs"), "fn f() {}\n").unwrap();
+        assert!(
+            uc.lints_touch_changed_files(&["crates/app/src/lib.rs".to_owned()]),
+            "a lint in the file we edited is ours"
+        );
+        assert!(
+            !uc.lints_touch_changed_files(&["crates/domain/src/ticket.rs".to_owned()]),
+            "a lint somewhere else — e.g. pulled in by a rebase — is not ours"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
