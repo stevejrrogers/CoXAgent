@@ -816,9 +816,6 @@
   .gm-lbl span{font-size:10.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .gm-track{flex:1;position:relative;height:26px}
   .gm-bar{position:absolute;top:4px;height:18px;border-radius:5px;display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;min-width:6px;z-index:2}
-  .gq{position:absolute;top:0;bottom:0;width:1px;background:var(--border2);opacity:.7}
-  .gwk{position:absolute;top:0;bottom:0;width:1px;background:var(--border);opacity:.4}
-  .gqlab{position:absolute;top:0;transform:translateX(3px);font-size:9.5px;color:var(--dim);white-space:nowrap}
   .gm-now{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--accent2);opacity:.6;z-index:3}
   .gm-nowlab{position:absolute;transform:translateX(-50%);font-size:9px;color:var(--accent2)}
   .gm-marktrack{height:34px}
@@ -2340,15 +2337,11 @@ function roadmapGantt(s){
     const start=Math.min(prev,end);prev=end;
     let st="planned";if(reached)st="reached";else if(firstActive){st="active";firstActive=false;}
     return {name:m.name,goal:m.goal,ver:m.target_version,start,end,st};});
-  const min=Math.min(t0,...rows.map(r=>r.start)),max=Math.max(now,...rows.map(r=>r.end));
-  const span=Math.max(DAY,max-min),pct=t=>((t-min)/span*100);
-  const shortSpan=span<=140*DAY; // show week gridlines only when zoomed-in enough
-  // Quarter gridlines + labels.
-  let grid="",labels="";const d=new Date(min);d.setDate(1);d.setMonth(Math.floor(d.getMonth()/3)*3);
-  for(let q=new Date(d);q.getTime()<max;q.setMonth(q.getMonth()+3)){const x=pct(q.getTime());if(x>=0&&x<=100){
-    grid+=`<div class="gq" style="left:${x}%"></div>`;labels+=`<div class="gqlab" style="left:${x}%">Q${Math.floor(q.getMonth()/3)+1} ${q.getFullYear()}</div>`;}}
-  // Week gridlines (light) when the horizon is short.
-  if(shortSpan){const w=new Date(min);w.setDate(w.getDate()-w.getDay());for(let x=new Date(w);x.getTime()<max;x.setDate(x.getDate()+7)){const p=pct(x.getTime());if(p>=0&&p<=100)grid+=`<div class="gwk" style="left:${p}%"></div>`;}}
+  // NOTE: this is an ordered stepper, not a time-positioned chart. Milestones
+  // routinely land days apart (all five of cox's did), and placing them on a
+  // real date axis stacks them into one illegible clump — so each card carries
+  // its own delivery date instead. Don't reintroduce gridlines here without
+  // solving that collision first.
   const fmt=t=>new Date(t).toLocaleDateString([],{month:"short",day:"numeric",year:"numeric"});
   const quarter=t=>{const d=new Date(t);return "Q"+(Math.floor(d.getMonth()/3)+1)+" "+d.getFullYear();};
   const n=rows.length;
@@ -2369,8 +2362,8 @@ function roadmapGantt(s){
         <div class="msq"><i class="ti ti-calendar-event" style="font-size:12px"></i> ${quarter(r.end)} · ${fmt(r.end)}</div>
         <div class="msprog"><div style="width:${prog}%;background:${col}"></div></div>
         <div class="msgoaltxt" title="${esc(r.goal)}">${esc(r.goal)}</div></div></div>`;}).join("");
-  return `<div class="sec" style="margin-top:22px">Milestone roadmap <span style="font-size:11px;color:var(--dim);font-weight:400">· ${esc(proj)} — shippable targets, when each delivers (by quarter)</span></div>
-    <div class="panel" style="overflow-x:auto;margin-bottom:26px"><div class="mstepper">${cols}</div></div>`;
+  return `<div class="sec" style="margin-top:22px">Milestone roadmap <span style="font-size:11px;color:var(--dim);font-weight:400">· ${esc(proj)} — shippable targets in delivery order, each with the date it lands</span></div>
+    <div class="panel" style="overflow-x:auto;margin-bottom:26px" data-keepscroll="rm-milestones"><div class="mstepper">${cols}</div></div>`;
 }
 // Milestone roadmap — each is a shippable target (a version), spanning several
 // sprints. Status derived from the shipped version.
