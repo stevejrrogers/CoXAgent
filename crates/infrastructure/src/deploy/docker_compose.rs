@@ -344,7 +344,9 @@ impl DeployPort for DockerComposeDeploy {
             Err(_) => coxagent_application::state::HealthCheckResult {
                 passed: false,
                 http_status: None,
-                response_time_ms: Some(u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)),
+                response_time_ms: Some(
+                    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
+                ),
             },
         }
     }

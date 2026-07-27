@@ -1540,8 +1540,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                                 }
                                 _ => r.summary.clone(),
                             };
-                            self.record_deploy(success, &summary, attempt_sha.clone(), health_check)
-                                .await;
+                            self.record_deploy(
+                                success,
+                                &summary,
+                                attempt_sha.clone(),
+                                health_check,
+                            )
+                            .await;
                             let kind = if success {
                                 "deploy_ok"
                             } else {
@@ -1751,8 +1756,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             return (true, None);
         };
         let bound = std::time::Duration::from_secs(self.config.deploy.health_check_timeout_secs);
-        let result = match tokio::time::timeout(bound + HANG_GUARD, deploy.wait_healthy(port, bound))
-            .await
+        let result = match tokio::time::timeout(
+            bound + HANG_GUARD,
+            deploy.wait_healthy(port, bound),
+        )
+        .await
         {
             Ok(result) => result,
             Err(_) => crate::state::HealthCheckResult {
@@ -2699,14 +2707,20 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                         return Ok(());
                     };
                     if let Some(t) = s.ticket_mut(&tid) {
-                        use coxagent_domain::Status;
+                        use coxagent_domain::{Role as R, Status};
+                        // Walk the LEGAL transition path with the proper
+                        // actors — Open→Fixed directly does not exist, which
+                        // silently stranded merged tickets Open (night bug).
                         let moved = match t.status() {
-                            Status::Open | Status::InProgress => t
-                                .transition_to(coxagent_domain::Role::System, Status::Fixed)
-                                .is_ok(),
-                            Status::Pending | Status::Ready => t
-                                .transition_to(coxagent_domain::Role::System, Status::Done)
-                                .is_ok(),
+                            Status::Open => {
+                                t.transition_to(R::DevBug, Status::InProgress).is_ok()
+                                    && t.transition_to(R::DevBug, Status::Fixed).is_ok()
+                            }
+                            Status::InProgress => t.transition_to(R::DevBug, Status::Fixed).is_ok(),
+                            Status::Ready => {
+                                t.transition_to(R::DevFeature, Status::InProgress).is_ok()
+                                    && t.transition_to(R::DevFeature, Status::Done).is_ok()
+                            }
                             _ => false,
                         };
                         if moved {
@@ -5762,10 +5776,9 @@ mod tests {
             state.deploy
         );
         assert!(
-            state
-                .activity
-                .iter()
-                .any(|a| a.action.contains("health check failed: HTTP 503 after 120ms")),
+            state.activity.iter().any(|a| a
+                .action
+                .contains("health check failed: HTTP 503 after 120ms")),
             "the health outcome must reach the activity log too, so the history reads \
              as more than a bare 'deploy failed'"
         );
@@ -5956,9 +5969,7 @@ mod tests {
     // 80%. With no budget cap configured, no warning is ever sent, and a
     // warning alone must never pause the loop.
 
-    fn budget_warning_events(
-        notifier: &SpyNotifier,
-    ) -> Vec<crate::ports::outbound::NotifyEvent> {
+    fn budget_warning_events(notifier: &SpyNotifier) -> Vec<crate::ports::outbound::NotifyEvent> {
         notifier
             .events
             .lock()

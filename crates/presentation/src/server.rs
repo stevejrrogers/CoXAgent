@@ -1374,8 +1374,7 @@ async fn space_budget_watchdog(app: AppState) {
             // approach toward the cap, clears once spend drops back out of
             // the warning band (cap raised, or the hard stop below already
             // took over) so a later crossing can warn again.
-            if coxagent_application::policy::approaching_cap(spend, Some(sp.budget_usd), WARN_PCT)
-            {
+            if coxagent_application::policy::approaching_cap(spend, Some(sp.budget_usd), WARN_PCT) {
                 if warned.insert(sp.id.clone()) {
                     let msg = format!(
                         "⚠️ BUDGET: space \"{}\" đã đốt ${spend:.2} / cap ${:.2} ({:.0}%) — sắp \
@@ -1395,7 +1394,11 @@ async fn space_budget_watchdog(app: AppState) {
                                     coxagent_application::state::AGENTS_CHANNEL,
                                     Vec::new(),
                                 );
-                                s.log_activity("COX", "space budget approaching cap — warned", None);
+                                s.log_activity(
+                                    "COX",
+                                    "space budget approaching cap — warned",
+                                    None,
+                                );
                                 Ok(())
                             },
                         )
@@ -8955,9 +8958,7 @@ mod pr_preview_tests {
             .await
             .expect("git config name");
         std::fs::write(seed.path().join("README.md"), "seed").expect("write");
-        git_pv(seed.path(), &["add", "."])
-            .await
-            .expect("git add");
+        git_pv(seed.path(), &["add", "."]).await.expect("git add");
         git_pv(seed.path(), &["commit", "-q", "-m", "seed"])
             .await
             .expect("git commit");

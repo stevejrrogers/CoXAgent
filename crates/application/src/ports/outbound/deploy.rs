@@ -212,7 +212,10 @@ mod tests {
 
         let result = deploy.wait_healthy(8101, Duration::from_secs(9)).await;
 
-        assert!(!result.passed, "a never-healthy endpoint must fail the gate");
+        assert!(
+            !result.passed,
+            "a never-healthy endpoint must fail the gate"
+        );
         assert!(
             started.elapsed() <= Duration::from_secs(9),
             "the gate must not overrun its bound; took {:?}",
