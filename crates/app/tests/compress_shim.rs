@@ -78,8 +78,18 @@ fn compress(cmd: &str, args: &[&str], input: &[u8]) -> Vec<u8> {
         .stderr(Stdio::piped())
         .spawn()
         .expect("failed to spawn the coxagent binary");
-    child.stdin.take().unwrap().write_all(input).unwrap();
+    // Feed stdin from its own thread. A payload larger than the pipe buffer
+    // (64 KiB on Linux/macOS) deadlocks otherwise: the child blocks writing
+    // stdout while the parent blocks writing stdin. The real shim has the same
+    // shape, so a single-threaded helper would only ever test small inputs.
+    let mut sink = child.stdin.take().unwrap();
+    let payload = input.to_vec();
+    let writer = std::thread::spawn(move || {
+        sink.write_all(&payload).unwrap();
+        drop(sink);
+    });
     let out = child.wait_with_output().unwrap();
+    writer.join().unwrap();
     assert!(out.status.success(), "`coxagent compress` failed: {out:?}");
     out.stdout
 }
@@ -137,6 +147,53 @@ fn git_diff_and_log_p_are_byte_exact_too() {
         let shimmed = compress("git", &args, &real);
         assert_byte_exact(&format!("git {}", args.join(" ")), &real, &shimmed);
     }
+}
+
+#[test]
+fn binary_blob_content_survives_the_shim_intact() {
+    // `git show HEAD:logo.png`, `git cat-file -p <blob>` and `git archive` all
+    // emit bytes that are not valid UTF-8. Reading stdin as a `String` rejected
+    // them outright and produced an empty result — corruption worse than the
+    // clipping this ticket is about, on the very subcommands the fix claims to
+    // keep byte-exact.
+    let blob: Vec<u8> = (0..=255u8).cycle().take(40_000).collect();
+    assert!(std::str::from_utf8(&blob).is_err(), "payload must be binary");
+
+    for args in [
+        vec!["show", "HEAD:assets/logo.png"],
+        vec!["cat-file", "-p", "f7f19a4"],
+        vec!["archive", "HEAD"],
+    ] {
+        let out = compress("git", &args, &blob);
+        assert_byte_exact(&format!("git {}", args.join(" ")), &blob, &out);
+    }
+}
+
+#[test]
+fn binary_output_from_other_commands_is_not_mangled_either() {
+    // Compression is line/char based, so it cannot round-trip bytes at all —
+    // a non-UTF-8 payload must pass through whatever command produced it.
+    let blob: Vec<u8> = (0..=255u8).cycle().take(40_000).collect();
+    let out = compress("docker", &["save", "img"], &blob);
+    assert_byte_exact("docker save img", &blob, &out);
+}
+
+#[test]
+fn exact_output_larger_than_the_pipe_buffer_is_not_truncated() {
+    // The shim streams through two pipes with a 64 KiB buffer each. A file
+    // bigger than that is where a naive read-then-write loses the tail, and it
+    // is the realistic size for the `git log -p` / `git archive` calls agents
+    // make. 4 MiB clears the buffer by two orders of magnitude.
+    let root = repo_root();
+    let unit = git(&root, &["show", &format!("HEAD:{}", large_tracked_file(&root))]);
+    let mut real = Vec::with_capacity(4 << 20);
+    while real.len() < (4 << 20) {
+        real.extend_from_slice(&unit);
+    }
+
+    let shimmed = compress("git", &["show", "HEAD:big.rs"], &real);
+
+    assert_byte_exact("git show (4 MiB)", &real, &shimmed);
 }
 
 #[test]

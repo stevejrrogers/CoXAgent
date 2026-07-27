@@ -206,23 +206,35 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
         }
         Command::Codegraph { query, work_dir } => codegraph_query(&work_dir, &query),
         Command::Compress { cmd, args } => {
-            use std::io::Read as _;
-            let mut input = String::new();
-            std::io::stdin().read_to_string(&mut input).ok();
+            use std::io::{Read as _, Write as _};
+            // Bytes, not a String: the wrapped command's output is whatever it
+            // emitted. `read_to_string` rejects non-UTF-8 wholesale and leaves
+            // the buffer empty, which turned `git show HEAD:logo.png` and
+            // `git archive` into silent zero-byte results.
+            let mut input = Vec::new();
+            std::io::stdin().read_to_end(&mut input).ok();
             // git content-retrieval subcommands (show/diff/log/cat-file/...)
             // can emit raw file content — dedupe/clip would silently mutate
             // it, so pass those through byte-exact instead of compressing.
             let needs_exact = cmd.as_deref() == Some("git")
                 && coxagent_application::tokens::git_needs_exact_output(&args);
-            let out = if needs_exact {
-                input.clone()
-            } else {
-                coxagent_application::tokens::proxy_compress(&input)
+            // Non-UTF-8 output is passed through for the same reason: the
+            // compressor works on lines and chars and cannot round-trip bytes.
+            let out = match std::str::from_utf8(&input) {
+                Ok(text) if !needs_exact => std::borrow::Cow::Owned(
+                    coxagent_application::tokens::proxy_compress(text).into_bytes(),
+                ),
+                _ => std::borrow::Cow::Borrowed(input.as_slice()),
             };
             // Record the saving so the dashboard can show how effective the
             // token-saver is (appends "before after" to the shim dir's log).
             record_compression(input.len(), out.len());
-            Ok(out)
+            // Written here rather than returned: the payload is arbitrary bytes
+            // and `cli_main` prints a `String`.
+            let mut stdout = std::io::stdout().lock();
+            stdout.write_all(&out)?;
+            stdout.flush()?;
+            Ok(String::new())
         }
     }
 }
