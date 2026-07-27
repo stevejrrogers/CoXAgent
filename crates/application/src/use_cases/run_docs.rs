@@ -81,24 +81,48 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
              === PAGE: {} ===\n{excerpt}",
             page.title
         );
-        let outcome = self
-            .engine
-            .run(AgentRequest {
+        // Rewriting a long page in full is not a job for the cheapest model:
+        // the first attempt at a 12k-character page came back missing two
+        // required sections.
+        let level = u8::from(page.body.chars().count() > 4000);
+        let run = |task: String| {
+            self.engine.run(AgentRequest {
                 role: Role::Docs,
                 system_prompt: prompts::system_prompt(prompts::DOCS),
                 task_prompt: task,
                 work_dir: self.work_dir.clone(),
                 timeout: Duration::from_secs(900),
-                escalation_level: 0,
+                escalation_level: level,
             })
-            .await;
-        let Ok(out) = outcome else { return };
-        if !out.succeeded() || docs_gate_failures(&out.stdout).is_some() {
+        };
+        let Ok(out) = run(task).await else { return };
+        let mut raw = out.stdout;
+        if let Some(missing) = docs_gate_failures(&raw) {
+            // Same deal the ticket path gets: one bounded repair naming exactly
+            // what was missing.
+            let fixup = format!(
+                "Your revision of \"{}\" is missing: {missing}.\n\nOutput the COMPLETE page \
+                 again — `FOLDER: -` first line, then every required heading verbatim, the \
+                 `**Keywords:**` line, and a `## Code map` with real file paths. Keep everything \
+                 you already wrote.",
+                page.title
+            );
+            match run(fixup).await {
+                Ok(o) if o.succeeded() && docs_gate_failures(&o.stdout).is_none() => raw = o.stdout,
+                _ => {}
+            }
+        }
+        if let Some(missing) = docs_gate_failures(&raw) {
             // Refusing a bad rewrite matters more here than anywhere: this page
             // already exists and a failed refresh would replace it with less.
+            // Say so — a silent skip is indistinguishable from "nothing stale".
+            tracing::warn!(
+                "DOCS refresh of \"{}\" rejected by the structure gate: {missing}",
+                page.title
+            );
             return;
         }
-        let (_, body) = parse_folder_hint(&out.stdout);
+        let (_, body) = parse_folder_hint(&raw);
         let (id, folder, title) = (page.id.clone(), page.folder.clone(), page.title.clone());
         let category = crate::state::doc_category_of(&folder);
         let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
