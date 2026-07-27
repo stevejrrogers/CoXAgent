@@ -203,7 +203,7 @@ published port is reachable.
 
 ```sh
 COXAGENT_ADMIN_PASSWORD=yourpw docker compose up -d --build
-# → http://localhost:4000, log in as root / yourpw
+# → http://localhost:8101, log in as root / yourpw
 ```
 
 Real LLM agents need a CLI (`claude`/`opencode`) on PATH inside the container;

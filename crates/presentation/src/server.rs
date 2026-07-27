@@ -8890,4 +8890,144 @@ mod pr_preview_tests {
 
         assert_eq!(resp.status(), StatusCode::OK);
     }
+
+    /// A `ForgePort` stub reporting a single open PR whose head branch is
+    /// fetchable from the fixture's `origin` remote.
+    struct ForgeWithOpenPr(String);
+    #[async_trait::async_trait]
+    impl ForgePort for ForgeWithOpenPr {
+        async fn open_pr(
+            &self,
+            _head: &str,
+            _base: &str,
+            _title: &str,
+            _body: &str,
+        ) -> Result<PullRequest, PortError> {
+            unreachable!("not called by pr_preview's start path")
+        }
+        async fn list_open_prs(&self) -> Result<Vec<PullRequest>, PortError> {
+            Ok(vec![PullRequest {
+                number: 1,
+                title: "test".to_owned(),
+                head: self.0.clone(),
+                base: "main".to_owned(),
+                url: String::new(),
+                author: "tester".to_owned(),
+                ci: "none".to_owned(),
+                mergeable: true,
+                created: "2026-01-01T00:00:00Z".to_owned(),
+            }])
+        }
+        async fn pr_diff(&self, _number: u64) -> Result<String, PortError> {
+            unreachable!("not called by pr_preview's start path")
+        }
+        async fn merge_pr(&self, _number: u64) -> Result<(), PortError> {
+            unreachable!("not called by pr_preview's start path")
+        }
+        async fn request_changes(&self, _number: u64, _comment: &str) -> Result<(), PortError> {
+            unreachable!("not called by pr_preview's start path")
+        }
+        async fn close_pr(&self, _number: u64) -> Result<(), PortError> {
+            unreachable!("not called by pr_preview's start path")
+        }
+    }
+
+    /// A bare `origin` repo with a `feat/preview` branch, plus a working
+    /// clone wired as the project's `work_dir` — real git, since the start
+    /// path shells out to `git fetch`/`git worktree add`.
+    async fn git_preview_fixture(
+        deploy: Arc<dyn DeployPort>,
+    ) -> (tempfile::TempDir, tempfile::TempDir, ProjectHandle) {
+        let bare = tempfile::tempdir().expect("tempdir");
+        git_pv(bare.path(), &["init", "--bare", "-q"])
+            .await
+            .expect("git init --bare");
+        let bare_url = bare.path().to_string_lossy().into_owned();
+
+        let seed = tempfile::tempdir().expect("tempdir");
+        git_pv(seed.path(), &["init", "-q", "-b", "main"])
+            .await
+            .expect("git init seed");
+        git_pv(seed.path(), &["config", "user.email", "test@test"])
+            .await
+            .expect("git config email");
+        git_pv(seed.path(), &["config", "user.name", "test"])
+            .await
+            .expect("git config name");
+        std::fs::write(seed.path().join("README.md"), "seed").expect("write");
+        git_pv(seed.path(), &["add", "."])
+            .await
+            .expect("git add");
+        git_pv(seed.path(), &["commit", "-q", "-m", "seed"])
+            .await
+            .expect("git commit");
+        git_pv(seed.path(), &["checkout", "-q", "-b", "feat/preview"])
+            .await
+            .expect("git checkout -b");
+        std::fs::write(seed.path().join("README.md"), "preview").expect("write");
+        git_pv(seed.path(), &["commit", "-q", "-am", "preview change"])
+            .await
+            .expect("git commit");
+        git_pv(seed.path(), &["remote", "add", "origin", &bare_url])
+            .await
+            .expect("remote add");
+        git_pv(seed.path(), &["push", "-q", "origin", "--all"])
+            .await
+            .expect("git push");
+
+        let work = tempfile::tempdir().expect("tempdir");
+        git_pv(work.path(), &["clone", "-q", &bare_url, "."])
+            .await
+            .expect("git clone");
+        let config_path = work.path().join("coxagent.json");
+        std::fs::write(&config_path, r#"{"deploy":{"host_port":8101}}"#).expect("write config");
+        let handle = ProjectHandle {
+            id: "proj".to_owned(),
+            name: "proj".to_owned(),
+            alias: "proj".to_owned(),
+            store: Arc::new(MemStore::default()) as Arc<dyn StateStorePort>,
+            runner: Arc::new(RunnerHandle::default()),
+            config_path,
+            engine: Arc::new(UnusedEngine),
+            work_dir: work.path().to_path_buf(),
+            budget: Arc::new(Mutex::new(BudgetCaps::default())),
+            context_path: work.path().join("project_context.md"),
+            forge: None,
+            deploy: Some(deploy),
+        };
+        (bare, work, handle)
+    }
+
+    /// AC (COX-B009): starting a PR preview must run through the same
+    /// mandatory health gate as restore/chat/cycle — a compose exit-0 that
+    /// never binds the app's port must NOT be reported as a LIVE preview.
+    #[tokio::test(start_paused = true)]
+    async fn preview_start_reports_failure_when_the_app_never_binds_its_port() {
+        let (_bare, _work, handle) = git_preview_fixture(Arc::new(DeployWithDeadPort)).await;
+        let forge: Arc<dyn ForgePort> = Arc::new(ForgeWithOpenPr("feat/preview".to_owned()));
+
+        let resp = pr_preview(&handle, &forge, 1, true).await;
+
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            text.contains("health check failed"),
+            "expected the health-gate failure reason in the response: {text}"
+        );
+    }
+
+    /// Control: a preview that actually answers on its port reports LIVE —
+    /// the gate must not fail a genuinely healthy preview.
+    #[tokio::test(start_paused = true)]
+    async fn preview_start_reports_ok_when_the_app_is_healthy() {
+        let (_bare, _work, handle) = git_preview_fixture(Arc::new(HealthyDeploy)).await;
+        let forge: Arc<dyn ForgePort> = Arc::new(ForgeWithOpenPr("feat/preview".to_owned()));
+
+        let resp = pr_preview(&handle, &forge, 1, true).await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
 }

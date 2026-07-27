@@ -59,6 +59,7 @@ fn kind_icon(kind: &str) -> &'static str {
         k if k.contains("quota") => "⛔",
         k if k.contains("pr") => "🔀",
         k if k.contains("sprint") => "🏁",
+        k if k.contains("impediment") => "🚧",
         k if k.contains("digest") => "📰",
         _ => "🔔",
     }
@@ -97,5 +98,11 @@ mod tests {
         assert_eq!(kind_icon("budget_warning"), "⚠️");
         assert_eq!(kind_icon("budget_reached"), "💰");
         assert_ne!(kind_icon("budget_warning"), kind_icon("budget_reached"));
+    }
+
+    #[test]
+    fn impediment_digest_gets_the_construction_icon_not_the_generic_digest_one() {
+        assert_eq!(kind_icon("impediment_digest"), "🚧");
+        assert_ne!(kind_icon("impediment_digest"), "📰");
     }
 }

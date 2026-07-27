@@ -3245,21 +3245,43 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .await;
             return;
         }
+        // No embedded 🚧 prefix here — the icon is the notifier adapter's job
+        // (`ChatNotifier`'s `kind_icon`), same as every other notify()-routed
+        // event (pr_stuck, sprint_rolled, deploy_*).
         let msg = format!(
-            "🚧 Impediment watch ({} mục) — SM theo sát tới khi sạch:\n- {}",
+            "Impediment watch ({} mục) — SM theo sát tới khi sạch:\n- {}",
             items.len(),
             items.join("\n- ")
         );
-        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+        // `build_notifier` always wires a `ChatNotifier`, so in production the
+        // in-app post arrives via the fanout (alongside the external webhook).
+        // Only when NO notifier is attached at all do we keep the direct chat
+        // write, so the digest is never silently lost.
+        let has_notifier = self.notifier.is_some();
+        let mut claimed = false;
+        let wrote = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
             if s.last_impediment_day == today {
-                return Ok(());
+                return Ok(()); // another operator beat us to it today
             }
             s.last_impediment_day.clone_from(&today);
             s.post_comment("SM", &msg, None);
-            s.post_chat_in("SM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+            if !has_notifier {
+                s.post_chat_in(
+                    "SM",
+                    &format!("🚧 {msg}"),
+                    crate::state::AGENTS_CHANNEL,
+                    Vec::new(),
+                );
+            }
+            claimed = true;
             Ok(())
         })
         .await;
+        // Notify only once the day-stamp is durably persisted: otherwise a
+        // failed write would re-fire the digest on the next cycle.
+        if wrote.is_ok() && claimed {
+            self.notify("impediment_digest", msg).await;
+        }
     }
 
     async fn post_daily_digest(&self) {
@@ -6139,6 +6161,207 @@ mod tests {
         assert!(
             warning_at < reached_at,
             "the warning must be emitted before the hard pause, got order {events:?}"
+        );
+    }
+
+    // --- COX-F007: route the SM impediment digest through the external notifier ---
+
+    /// AC1: with one or more impediment items AND an external webhook
+    /// configured (a `NotifierPort` attached), the digest must be delivered
+    /// through that notifier — not just posted to the in-app `AGENTS_CHANNEL`.
+    #[tokio::test]
+    async fn impediment_digest_is_delivered_via_the_external_notifier_when_configured() {
+        let store = Arc::new(MemStore {
+            // one deterministic impediment item
+            state: Mutex::new(ProjectState {
+                queue_recovery: true,
+                ..ProjectState::default()
+            }),
+        });
+        let notifier = Arc::new(SpyNotifier::default());
+        let uc = RunCycleUseCase::new(
+            Arc::clone(&store),
+            Arc::new(RoleAwareEngine),
+            Config::default(),
+            PathBuf::from("/tmp/proj-imp-webhook"),
+            "goal".to_owned(),
+        )
+        .with_notifier(Arc::clone(&notifier) as Arc<dyn crate::ports::outbound::NotifierPort>);
+
+        uc.run_cycle(1).await;
+
+        // The ticket comment trail must still receive its post_comment write.
+        let state = store.load().await.expect("load");
+        // Clone out of the guard so nothing is held across the await above.
+        let (all, digest) = {
+            let events = notifier.events.lock().expect("lock");
+            let digest: Vec<_> = events
+                .iter()
+                .filter(|e| e.kind == "impediment_digest")
+                .cloned()
+                .collect();
+            (events.clone(), digest)
+        };
+        assert_eq!(
+            digest.len(),
+            1,
+            "the impediment digest must be delivered exactly once through the external \
+             NotifierPort when one is configured: {all:?}"
+        );
+        assert!(
+            digest[0].message.contains("Impediment watch")
+                && digest[0].message.contains("RECOVERY"),
+            "the notified message must carry the digest body: {:?}",
+            digest[0].message
+        );
+        assert!(
+            !digest[0].message.starts_with('🚧'),
+            "the icon belongs to the notifier adapter, not the message body: {:?}",
+            digest[0].message
+        );
+        assert!(
+            state
+                .comments
+                .iter()
+                .any(|c| c.body.contains("Impediment watch")),
+            "the digest must still be written to the comment trail: {:?}",
+            state.comments
+        );
+    }
+
+    /// AC2: with no external webhook configured (no `NotifierPort` attached),
+    /// behavior is unchanged from today — the digest still posts to the
+    /// in-app `AGENTS_CHANNEL` only.
+    #[tokio::test]
+    async fn impediment_digest_still_posts_to_chat_only_when_no_webhook_is_configured() {
+        let store = Arc::new(MemStore {
+            state: Mutex::new(ProjectState {
+                queue_recovery: true,
+                ..ProjectState::default()
+            }),
+        });
+        let uc = RunCycleUseCase::new(
+            Arc::clone(&store),
+            Arc::new(RoleAwareEngine),
+            Config::default(),
+            PathBuf::from("/tmp/proj-imp-no-webhook"),
+            "goal".to_owned(),
+        );
+
+        uc.run_cycle(1).await;
+
+        let state = store.load().await.expect("load");
+        assert!(
+            state
+                .chat
+                .iter()
+                .any(|m| m.channel == crate::state::AGENTS_CHANNEL
+                    && m.body.to_lowercase().contains("impediment watch")),
+            "the impediment digest must still post to the in-app AGENTS_CHANNEL when no \
+             external webhook is configured: {:?}",
+            state.chat
+        );
+    }
+
+    /// AC3: with no impediment items, no notification fires on either sink —
+    /// same as current behavior.
+    #[tokio::test]
+    async fn no_impediment_items_means_no_notification_on_either_sink() {
+        let store = Arc::new(MemStore::default()); // clean state: nothing stuck/parked/red/recovering
+        let notifier = Arc::new(SpyNotifier::default());
+        let uc = RunCycleUseCase::new(
+            Arc::clone(&store),
+            Arc::new(RoleAwareEngine),
+            Config::default(),
+            PathBuf::from("/tmp/proj-imp-empty"),
+            "goal".to_owned(),
+        )
+        .with_notifier(Arc::clone(&notifier) as Arc<dyn crate::ports::outbound::NotifierPort>);
+
+        uc.run_cycle(1).await;
+
+        let state = store.load().await.expect("load");
+        assert!(
+            !state
+                .chat
+                .iter()
+                .any(|m| m.body.to_lowercase().contains("impediment watch")),
+            "no impediment chat post should fire when there is nothing to report: {:?}",
+            state.chat
+        );
+        let events = notifier.events.lock().expect("lock");
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.kind.to_lowercase().contains("impediment")
+                    || e.message.to_lowercase().contains("impediment watch")),
+            "no impediment notifier event should fire when there is nothing to report: {events:?}"
+        );
+    }
+
+    /// AC4: the once-per-day gate (`last_impediment_day`) still prevents a
+    /// duplicate send — on both sinks — within the same day after the change.
+    #[tokio::test]
+    async fn impediment_digest_once_per_day_gate_still_dedupes_both_sinks() {
+        let store = Arc::new(MemStore {
+            state: Mutex::new(ProjectState {
+                queue_recovery: true,
+                ..ProjectState::default()
+            }),
+        });
+        let notifier = Arc::new(SpyNotifier::default());
+        // Mirror production's build_notifier wiring: a FanoutNotifier over a
+        // real ChatNotifier (in-app delivery) plus the external sink — so the
+        // gate is exercised end-to-end exactly as it runs live, instead of
+        // against a bare spy that can't itself post chat.
+        let fanout = Arc::new(crate::ports::outbound::FanoutNotifier(vec![
+            Arc::new(crate::ports::outbound::ChatNotifier::new(Arc::clone(
+                &store,
+            ))) as Arc<dyn crate::ports::outbound::NotifierPort>,
+            Arc::clone(&notifier) as Arc<dyn crate::ports::outbound::NotifierPort>,
+        ]));
+        let uc = RunCycleUseCase::new(
+            Arc::clone(&store),
+            Arc::new(RoleAwareEngine),
+            Config::default(),
+            PathBuf::from("/tmp/proj-imp-dedupe"),
+            "goal".to_owned(),
+        )
+        .with_notifier(fanout as Arc<dyn crate::ports::outbound::NotifierPort>);
+
+        uc.run_cycle(1).await;
+        uc.run_cycle(2).await; // same UTC day — must not resend
+
+        let state = store.load().await.expect("load");
+        assert_eq!(
+            state.last_impediment_day,
+            crate::state::now_rfc3339()[..10].to_owned(),
+            "the once-per-day gate must be stamped with today's UTC day"
+        );
+        let chat_hits = state
+            .chat
+            .iter()
+            .filter(|m| {
+                m.channel == crate::state::AGENTS_CHANNEL
+                    && m.body.to_lowercase().contains("impediment watch")
+            })
+            .count();
+        assert_eq!(
+            chat_hits, 1,
+            "the once-per-day gate must prevent a duplicate in-app chat post: {:?}",
+            state.chat
+        );
+        let events = notifier.events.lock().expect("lock");
+        let notifier_hits = events
+            .iter()
+            .filter(|e| {
+                e.kind.to_lowercase().contains("impediment")
+                    || e.message.to_lowercase().contains("impediment watch")
+            })
+            .count();
+        assert_eq!(
+            notifier_hits, 1,
+            "the once-per-day gate must prevent a duplicate external notifier event: {events:?}"
         );
     }
 }
