@@ -1811,7 +1811,7 @@ textarea.np-in{resize:vertical;line-height:1.5}
             <div class="chatcompose">
               <input type="file" id="disc-file" multiple hidden onchange="pickFiles('disc',this)">
               <button class="att-btn" onclick="document.getElementById('disc-file').click()" title="Attach files"><i class="ti ti-paperclip"></i></button>
-              <span id="disc-toolbar"></span><input id="disc-input" placeholder="Message the team…  (type / for commands · Enter to send)" oninput="slashMenu()" onkeydown="if(event.key==='Enter')sendComment()">
+              <span id="disc-toolbar"></span><input id="disc-input" placeholder="Message the team…  (type / for commands · Enter to send)" oninput="slashMenu()" onkeydown="if(!imeEnter(event)&&event.key==='Enter')sendComment()">
               <button class="pri" onclick="sendComment()"><i class="ti ti-send"></i></button>
             </div>
           </div>
@@ -1895,7 +1895,7 @@ textarea.np-in{resize:vertical;line-height:1.5}
         <button title="Emoji" onclick="openEmoji(this,e=>insertAtCaret(document.getElementById('thread-input'),e))"><i class="ti ti-mood-smile"></i></button>
       </div>
       <div style="display:flex;gap:8px">
-        <input id="thread-input" placeholder="Reply to thread…  (**bold** *italic* `code`)" onkeydown="if(event.key==='Enter'){event.preventDefault();sendThreadReply();}">
+        <input id="thread-input" placeholder="Reply to thread…  (**bold** *italic* `code`)" onkeydown="if(!imeEnter(event)&&event.key==='Enter'){event.preventDefault();sendThreadReply();}">
         <button class="pri" onclick="event.preventDefault();sendThreadReply()"><i class="ti ti-send"></i></button>
       </div>
     </div>
@@ -3654,7 +3654,13 @@ function pickMention(i){
   const np=MENTION.start+u.username.length+2;inp.setSelectionRange(np,np);
   closeMention();inp.focus();
 }
+// Vietnamese/CJK IME: the input method commits diacritics with a synthetic
+// Enter (keyCode 229 / isComposing) — treating that as "send" sprays one
+// sentence across several partial messages. Every Enter-to-send handler must
+// pass through this guard.
+function imeEnter(e){return e.isComposing||e.keyCode===229;}
 function chatInputKey(e){
+  if(imeEnter(e))return;
   if(MENTION.open){
     if(e.key==="ArrowDown"){e.preventDefault();MENTION.sel=(MENTION.sel+1)%MENTION.items.length;renderMention();return;}
     if(e.key==="ArrowUp"){e.preventDefault();MENTION.sel=(MENTION.sel-1+MENTION.items.length)%MENTION.items.length;renderMention();return;}
@@ -4578,7 +4584,7 @@ function avat(u,cls){const p=PROFILES[u]||{};const col=userColor(u);
 function statusChip(u){const p=PROFILES[u]||{};
   return p.status_emoji?`<span class="ustatus" title="${esc(p.status_text||"")}">${esc(p.status_emoji)}</span>`:"";}
 const STATUS_PRESETS=[["🎯","Focusing"],["🍜","Lunch"],["🏠","WFH"],["📅","In a meeting"],["🌴","Vacation"],["🤒","Sick"]];
-setInterval(loadProfiles,60000); // teammates' avatar/status refresh
+setInterval(()=>{loadProfiles();loadMembers();},60000); // teammates' avatar/status/name refresh
 function profileTab(t){
   for(const k of ["status","profile","prefs"]){
     document.getElementById("pt-"+k).classList.toggle("on",k===t);
@@ -4611,7 +4617,7 @@ async function savePopupProfile(){
   const pw=document.getElementById("pp-pw").value;
   try{const r=await fetch("/api/auth/profile",{method:"PATCH",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({name:document.getElementById("pp-name").value,email:document.getElementById("pp-email").value,password:pw||undefined})});
-    if(r.ok){n.innerHTML='<span style="color:var(--green)">Saved</span>';try{ME=await(await fetch("/api/auth/me")).json();renderUserBadge&&renderUserBadge();}catch(e){}}
+    if(r.ok){n.innerHTML='<span style="color:var(--green)">Saved</span>';try{ME=await(await fetch("/api/auth/me")).json();renderUserBadge&&renderUserBadge();loadMembers();}catch(e){}}
     else n.innerHTML=`<span style="color:var(--red)">${esc(await r.text())}</span>`;
   }catch(e){n.innerHTML='<span style="color:var(--red)">Network error</span>';}}
 function savePopupPrefs(){
@@ -4759,7 +4765,7 @@ async function showTicket(id){
     ${(t.status==="pending"||t.status==="open")?`<button class="tk-btn danger" onclick="rejectTicket('${t.id}')"><i class="ti ti-ban"></i> Reject</button>`:''}
   </div>`;
   h+=`<div class="mrow" style="display:block;border:none;margin-top:6px"><span class="lbl">Comments</span><div id="tk-comments" style="margin-top:8px">${'<div class="empty" style="padding:8px">loading…</div>'}</div>
-    <div class="tkc-wrap">${mdToolbar('tkc-input')}<div class="tkc-compose"><input id="tkc-input" placeholder="Add a comment…  (**markdown** · Enter to post · @ to mention)" onkeydown="if(event.key==='Enter')postTicketComment('${t.id}')"><button class="pri" onclick="postTicketComment('${t.id}')"><i class="ti ti-send"></i></button></div></div></div>`;
+    <div class="tkc-wrap">${mdToolbar('tkc-input')}<div class="tkc-compose"><input id="tkc-input" placeholder="Add a comment…  (**markdown** · Enter to post · @ to mention)" onkeydown="if(!imeEnter(event)&&event.key==='Enter')postTicketComment('${t.id}')"><button class="pri" onclick="postTicketComment('${t.id}')"><i class="ti ti-send"></i></button></div></div></div>`;
   body.innerHTML=h;
   renderTicketComments(t.id);}
 async function rejectTicket(id){try{await fetch(api("/ticket/"+id+"/reject"),{method:"POST"});close_("ov-ticket");}catch(e){}}
