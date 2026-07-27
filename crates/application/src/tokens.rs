@@ -210,7 +210,9 @@ mod tests {
         // …value-taking ones do, and the value must not be read as the
         // subcommand (`-c core.pager=cat show` is `show`, not `core.pager=cat`).
         assert!(git_needs_exact_output(&args("-c core.pager=cat show HEAD")));
-        assert!(git_needs_exact_output(&args("--git-dir=/repo/.git diff HEAD")));
+        assert!(git_needs_exact_output(&args(
+            "--git-dir=/repo/.git diff HEAD"
+        )));
         // Global flags must not turn porcelain into a passthrough either.
         assert!(!git_needs_exact_output(&args("-C /repo status")));
     }

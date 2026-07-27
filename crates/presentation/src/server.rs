@@ -8994,7 +8994,10 @@ mod pr_preview_tests {
         deploy: Arc<dyn DeployPort>,
         host_port: &str,
     ) -> (tempfile::TempDir, ProjectHandle) {
-        project_handle_with_config(deploy, &format!(r#"{{"deploy":{{"host_port":{host_port}}}}}"#))
+        project_handle_with_config(
+            deploy,
+            &format!(r#"{{"deploy":{{"host_port":{host_port}}}}}"#),
+        )
     }
 
     /// [`project_handle`] over a verbatim `coxagent.json` body, for the cases
