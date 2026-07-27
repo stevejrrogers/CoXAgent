@@ -327,6 +327,7 @@ impl OpencodeEngine {
             .take()
             .ok_or_else(|| PortError::Backend("no stdout".to_owned()))?;
         let mut err = child.stderr.take();
+        let child_pid = child.id();
         let err_task = tokio::spawn(async move {
             let mut s = String::new();
             if let Some(e) = err.as_mut() {
@@ -363,9 +364,16 @@ impl OpencodeEngine {
             Ok::<_, PortError>((raw, status))
         };
 
-        let (raw, status) = tokio::time::timeout(timeout, read)
-            .await
-            .map_err(|_| PortError::Backend("opencode timed out".to_owned()))??;
+        let leader_pid = child_pid;
+        let (raw, status) = match tokio::time::timeout(timeout, read).await {
+            Ok(r) => r?,
+            Err(_) => {
+                if let Some(pid) = leader_pid {
+                    crate::proc::kill_group(pid);
+                }
+                return Err(PortError::Backend("opencode timed out".to_owned()));
+            }
+        };
         let stderr = err_task.await.unwrap_or_default();
 
         if let Some(p) = &live {
