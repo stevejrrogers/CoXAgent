@@ -325,30 +325,61 @@ pub async fn output_confined(
         }
         out = cmd.output().await?;
     }
+    if is_transient_seatbelt_apply_failure(sandbox, out.status.code()) {
+        warn_seatbelt_apply_exhausted();
+    }
     Ok(out)
 }
 
+/// Say out loud that the OS — not the agent — killed the run. Without this the
+/// caller sees an unexplained exit 71 and reads it as the agent CLI failing,
+/// which is how COX-B013 stayed invisible for so long.
+fn warn_seatbelt_apply_exhausted() {
+    tracing::warn!(
+        attempts = SEATBELT_APPLY_RETRIES,
+        "macOS Seatbelt refused to apply the sandbox profile on every attempt \
+         (sandbox-exec: sandbox_apply: Operation not permitted, exit 71) — the \
+         confined command never ran; this is an OS-level Seatbelt failure, not \
+         the agent's own exit status (COX-B013)"
+    );
+}
+
+/// How long a streaming spawn waits to see whether `sandbox-exec` already
+/// bailed. A real agent CLI run never completes this fast (it's a network call
+/// to an LLM), so the wait costs nothing on the success path.
+const SEATBELT_PROBE_GRACE: std::time::Duration = std::time::Duration::from_millis(300);
+
 /// Spawn `cmd` for streaming (live-tailed stdout), retrying the same
-/// transient Seatbelt failure `output_confined` retries (COX-B013). A real
-/// agent CLI run never completes within `GRACE` (it's a network call to an
-/// LLM), so briefly waiting to see whether the child already exited with
-/// `sandbox-exec`'s own failure signature costs nothing on the success path
-/// and does not touch the child's stdout/stderr — those stay untouched for
-/// the caller to stream exactly as if this were a plain first-try spawn.
+/// transient Seatbelt failure `output_confined` retries (COX-B013). Briefly
+/// waiting to see whether the child already exited with `sandbox-exec`'s own
+/// failure signature does not touch the child's stdout/stderr — those stay
+/// untouched for the caller to stream exactly as if this were a plain
+/// first-try spawn.
 pub async fn spawn_confined(
     cmd: &mut Command,
     sandbox: SandboxStatus,
 ) -> std::io::Result<tokio::process::Child> {
-    const GRACE: std::time::Duration = std::time::Duration::from_millis(300);
+    spawn_confined_within(cmd, sandbox, SEATBELT_PROBE_GRACE).await
+}
+
+/// [`spawn_confined`] with the probe window injected. Only the window varies:
+/// tests need one that cannot be lost to scheduling noise on a loaded host,
+/// while production wants the shortest wait that still catches the failure.
+async fn spawn_confined_within(
+    cmd: &mut Command,
+    sandbox: SandboxStatus,
+    grace: std::time::Duration,
+) -> std::io::Result<tokio::process::Child> {
     for _ in 1..SEATBELT_APPLY_RETRIES {
         let mut child = cmd.spawn()?;
-        if let Ok(Ok(exit_status)) = tokio::time::timeout(GRACE, child.wait()).await {
+        if let Ok(Ok(exit_status)) = tokio::time::timeout(grace, child.wait()).await {
             if is_transient_seatbelt_apply_failure(sandbox, exit_status.code()) {
                 continue;
             }
         }
         return Ok(child);
     }
+    warn_seatbelt_apply_exhausted();
     cmd.spawn()
 }
 
@@ -415,8 +446,35 @@ mod tests {
         let out = output_confined(c.arg("-c").arg(&script), status)
             .await
             .unwrap();
-        drop(out);
-        assert!(ws.join("in.txt").exists(), "workspace write allowed");
+        // COX-B022: some hosts refuse `sandbox_apply()` for this process no
+        // matter how often it is retried — measured on this repo's own CI/dev
+        // boxes, where the failure arrives in bursts that outlast the whole
+        // retry loop (a probe of 400 consecutive calls in a warm process saw
+        // zero failures, while a process inside a failing window saw 20 of 20
+        // fail). `sandbox-exec` then exits 71 before the script runs, so NOTHING
+        // about the write policy was exercised and asserting on it would report
+        // an OS condition as a code regression — the false-fail this ticket is
+        // about. The retry policy itself is pinned deterministically by the
+        // `output_confined_*` / `spawn_confined_*` tests below, so skipping here
+        // gives up no coverage of the fix.
+        if is_transient_seatbelt_apply_failure(status, out.status.code()) {
+            eprintln!(
+                "SKIPPED sandboxed_command_blocks_writes_outside_workspace: this host \
+                 refused to apply a Seatbelt profile on all {SEATBELT_APPLY_RETRIES} \
+                 attempts ({}) — the write policy was never exercised",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            let _ = std::fs::remove_dir_all(&ws);
+            return;
+        }
+        // Any OTHER failure is ours: say which, so exit 71 is never confused
+        // with the target program's own status.
+        assert!(
+            ws.join("in.txt").exists(),
+            "workspace write allowed — got exit {:?}, stderr: {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
         assert!(
             !std::path::Path::new(&outside).exists(),
             "outside write must be denied"
@@ -501,6 +559,95 @@ mod tests {
             "must not retry a plain command failure"
         );
         let _ = std::fs::remove_file(&counter);
+    }
+
+    // COX-B022: `spawn_confined` is the half of the fix EVERY real agent run
+    // goes through (claude/opencode stream their NDJSON stdout), yet the
+    // original fix landed with `output_confined` tests only — so a forward-port
+    // could silently drop the streaming retry and every test would still pass.
+    // These pin the streaming path's policy the same way, without Seatbelt.
+
+    #[tokio::test]
+    async fn spawn_confined_retries_the_seatbelt_apply_signature_until_it_succeeds() {
+        let counter = std::env::temp_dir().join(format!("cox-spawn-retry-{}", std::process::id()));
+        std::fs::write(&counter, "0").unwrap();
+        let script = format!(
+            "n=$(cat {0}); n=$((n+1)); echo $n > {0}; [ $n -ge {1} ] && exit 0; exit 71",
+            counter.display(),
+            SEATBELT_APPLY_RETRIES
+        );
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg(&script);
+        // A probe window wide enough that a loaded test host cannot make a
+        // failed attempt look like a still-running one: this test is about the
+        // retry policy, not about how fast `/bin/sh` gets scheduled.
+        let grace = std::time::Duration::from_secs(10);
+        let mut child = spawn_confined_within(&mut cmd, SandboxStatus::Confined("seatbelt"), grace)
+            .await
+            .unwrap();
+        assert!(
+            child.wait().await.unwrap().success(),
+            "must return the child of the attempt that actually applied the profile"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&counter).unwrap().trim(),
+            SEATBELT_APPLY_RETRIES.to_string(),
+            "must have spawned exactly up to the retry cap, not more"
+        );
+        let _ = std::fs::remove_file(&counter);
+    }
+
+    #[tokio::test]
+    async fn spawn_confined_does_not_retry_when_not_seatbelt_confined() {
+        let counter = std::env::temp_dir().join(format!("cox-spawn-gate-{}", std::process::id()));
+        std::fs::write(&counter, "0").unwrap();
+        let script = format!(
+            "n=$(cat {0}); n=$((n+1)); echo $n > {0}; exit 71",
+            counter.display()
+        );
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg(&script);
+        let mut child = spawn_confined(&mut cmd, SandboxStatus::NotRequested)
+            .await
+            .unwrap();
+        assert_eq!(child.wait().await.unwrap().code(), Some(71));
+        assert_eq!(
+            std::fs::read_to_string(&counter).unwrap().trim(),
+            "1",
+            "an unconfined command's own exit 71 is its result, not a sandbox_apply() failure"
+        );
+        let _ = std::fs::remove_file(&counter);
+    }
+
+    /// The retry probe waits on the child to see whether `sandbox-exec` already
+    /// bailed — it must NOT read the child's pipes doing so, or the caller's
+    /// live-tailed stdout arrives short (silent, and invisible to a test that
+    /// only checks exit codes).
+    #[tokio::test]
+    async fn spawn_confined_leaves_the_child_stdout_intact_for_the_caller() {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg("echo streamed-line")
+            .stdout(std::process::Stdio::piped());
+        let mut child = spawn_confined(&mut cmd, SandboxStatus::Confined("seatbelt"))
+            .await
+            .unwrap();
+        let mut buf = String::new();
+        {
+            use tokio::io::AsyncReadExt as _;
+            child
+                .stdout
+                .take()
+                .unwrap()
+                .read_to_string(&mut buf)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            buf.trim(),
+            "streamed-line",
+            "the probe must not consume the stream the caller tails"
+        );
     }
 
     // --- COX-F003: Linux workspace sandboxing (Bubblewrap) ---------------
