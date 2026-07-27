@@ -42,3 +42,7 @@ This project is indexed by GitNexus as **CoXAgent** (4533 symbols, 11769 relatio
 | Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
 
 <!-- gitnexus:end -->
+
+## Team learnings (auto-promoted by memory hygiene)
+- Before editing any file marked M in git status, read its full git diff to catch pre-existing uncommitted changes (test scaffolding, WIP from prior attempts). These often encode design intent that should shape implementation from the start, not be reconciled afterward. Add to CLAUDE.md: "NEVER edit a modified file without reading its full `git diff` first to check for pre-existing uncommitted intent."
+- rtk's output compression hook silently fabricates or truncates content for large reads (git cat-file, git show, grep, cargo test --workspace); verify via `Read` tool directly or per-crate `cargo test -p <crate>` when correctness matters. Shims in $TMPDIR shadow real binaries — use absolute paths (/opt/homebrew/bin/cargo, etc.) as escape hatch. Docker compose in sandbox needs `BUILDX_CONFIG=<scratchpad>`, not DOCKER_CONFIG.

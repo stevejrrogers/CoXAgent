@@ -53,14 +53,13 @@ impl AgentEnginePort for HermesEngine {
         // actually confined instead of spawning raw and unconfined.
         let (mut cmd, sandbox) =
             crate::proc::agent_command(&self.binary, &request.work_dir, self.sandbox);
-        let output = cmd
-            .arg("--model")
+        cmd.arg("--model")
             .arg(&self.model)
             .arg("--prompt")
             .arg(prompt)
             .current_dir(&request.work_dir)
-            .stdin(std::process::Stdio::null())
-            .output()
+            .stdin(std::process::Stdio::null());
+        let output = crate::proc::output_confined(&mut cmd, sandbox)
             .await
             .map_err(|e| PortError::Backend(format!("spawn hermes: {e}")))?;
 
