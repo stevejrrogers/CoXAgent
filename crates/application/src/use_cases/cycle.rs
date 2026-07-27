@@ -3245,7 +3245,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             state
                 .ticket_fail_attempts
                 .iter()
-                .filter(|(id, n)| **n >= 3 && !state.ticket_redesigns.contains_key(*id))
+                .filter(|(id, n)| {
+                    **n >= 3
+                        && state.ticket_redesigns.get(*id).copied().unwrap_or(0)
+                            < MAX_TICKET_RESCUES
+                })
                 .filter_map(|(id, _)| {
                     state
                         .tickets
@@ -3278,10 +3282,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             };
             let route = escalation_route(&history, spec_gap);
             let claimed = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
-                if s.ticket_redesigns.contains_key(&id) {
-                    return Err(crate::PortError::Conflict("already redesigned".into()));
+                let done = s.ticket_redesigns.get(&id).copied().unwrap_or(0);
+                if done >= MAX_TICKET_RESCUES {
+                    return Err(crate::PortError::Conflict("rescues exhausted".into()));
                 }
-                s.ticket_redesigns.insert(id.clone(), 1);
+                s.ticket_redesigns.insert(id.clone(), done + 1);
                 Ok(())
             })
             .await;
@@ -6604,6 +6609,12 @@ mod tests {
     }
 }
 
+/// How many senior rescues one ticket may consume before the decision is a
+/// human's. Two, because the first rescue can misread the failure — a spec
+/// rewrite that turns out to hide a design dead end deserves the second look
+/// a person would give it — while an unbounded ladder just burns budget.
+pub const MAX_TICKET_RESCUES: u32 = 2;
+
 /// Which senior picks up a ticket the developers could not land, mirroring who
 /// you would actually walk over to: the BA when there was never a spec worth
 /// building against, the SA when the design is a dead end — or, when every
@@ -6659,7 +6670,14 @@ pub fn escalation_route(history: &str, spec_gap: bool) -> EscalationRoute {
 
 #[cfg(test)]
 mod escalation_route_tests {
-    use super::{escalation_route, EscalationRoute};
+    use super::{escalation_route, EscalationRoute, MAX_TICKET_RESCUES};
+
+    #[test]
+    fn a_ticket_gets_a_second_rescue_before_it_becomes_a_human_decision() {
+        // The first rescue can misread which senior was needed; one more look
+        // is what a team would do. Unbounded retries are not.
+        assert_eq!(MAX_TICKET_RESCUES, 2);
+    }
 
     #[test]
     fn every_attempt_dying_on_a_gate_is_a_repair_job_not_a_redesign() {

@@ -1921,11 +1921,23 @@ async fn redis_bus_bridge(app: AppState, url: String) {
     }
 }
 
+/// Compose-project prefix of a PR preview (`<workspace>/.preview/<num>` via
+/// `compose_project_name`). Previews are meant to live for as long as someone
+/// is looking at them.
+const PREVIEW_PROJECT_PREFIX: &str = "cox--preview-";
+/// How long a PR preview may stay up before the janitor reclaims it. Someone
+/// opens a preview, reads the diff, and walks away — without this, the
+/// container holds the app port and its share of the host for good. (One was
+/// found still running after eight days.)
+const PREVIEW_TTL: &str = "6h";
+
 /// Docker janitor: agents deploy a lot — the host must not silt up. Hourly:
 /// any `cox-*` compose project whose containers are ALL stopped gets a full
-/// `down --remove-orphans` (dead previews, stale deploys), then dangling
-/// build images are pruned. Scoped strictly to the `cox-` prefix — the
-/// backing-services group (`cox-infra`) is running, so it is never touched.
+/// `down --remove-orphans` (dead previews, stale deploys), any PR preview
+/// still running past [`PREVIEW_TTL`] is reclaimed, then dangling build images
+/// are pruned. Scoped strictly to the `cox-` prefix — the backing-services
+/// group (`cox-infra`) is running, so it is never touched, and a RUNNING
+/// non-preview project is someone's live deploy and is left alone.
 async fn docker_janitor() {
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
@@ -1953,15 +1965,21 @@ async fn docker_janitor() {
             if !name.starts_with("cox-") || name == "cox-infra" {
                 continue;
             }
+            let mut reason = "dead";
             if status.contains("running") {
-                continue;
+                if !name.starts_with(PREVIEW_PROJECT_PREFIX)
+                    || !preview_is_stale(name, PREVIEW_TTL).await
+                {
+                    continue;
+                }
+                reason = "expired preview";
             }
             let _ = tokio::process::Command::new("docker")
                 .args(["compose", "-p", name, "down", "--remove-orphans"])
                 .stdin(std::process::Stdio::null())
                 .output()
                 .await;
-            tracing::info!("docker janitor: removed dead compose project {name}");
+            tracing::info!("docker janitor: removed {reason} compose project {name}");
         }
         let _ = tokio::process::Command::new("docker")
             .args(["image", "prune", "-f"])
@@ -1969,6 +1987,29 @@ async fn docker_janitor() {
             .output()
             .await;
     }
+}
+
+/// Whether a preview project has a container created longer ago than `ttl`.
+/// Docker's own `until` filter does the age arithmetic, so no timestamp
+/// parsing (and no timezone bug) of ours stands between a forgotten preview
+/// and being reclaimed.
+async fn preview_is_stale(project: &str, ttl: &str) -> bool {
+    let Ok(out) = tokio::process::Command::new("docker")
+        .args([
+            "ps",
+            "-q",
+            "--filter",
+            &format!("label=com.docker.compose.project={project}"),
+            "--filter",
+            &format!("until={ttl}"),
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+    else {
+        return false;
+    };
+    !String::from_utf8_lossy(&out.stdout).trim().is_empty()
 }
 
 /// Disaster-recovery floor for the hub-level app_kv documents: once a day,
