@@ -797,17 +797,21 @@ mod tests {
     /// --release` inside the Linux Docker builder — this repo's only
     /// documented deploy path — so nothing ever answers on the published
     /// port. Asserting on the source keeps the guard honest from any host.
+    ///
+    /// Each helper is pinned to the exact set of platforms that call it, not
+    /// merely to "mentions the right one": widening a gate to a platform with
+    /// no call site puts the item back on the Linux builder as dead code, and
+    /// reintroduces this bug just as surely as dropping the gate.
     #[test]
     fn platform_only_helpers_are_cfg_gated() {
         const SRC: &str = include_str!("proc.rs");
-        for (name, target) in [
-            ("seatbelt_profile", "macos"),
-            ("bwrap_args", "linux"),
-            ("bwrap_available", "linux"),
-            ("current_uid", "linux"),
-            // Gated for both platforms it supports.
-            ("confined_command", "macos"),
-            ("confined_command", "linux"),
+        for (name, want) in [
+            ("seatbelt_profile", &["macos"][..]),
+            ("bwrap_args", &["linux"]),
+            ("bwrap_available", &["linux"]),
+            ("current_uid", &["linux"]),
+            // The dispatcher itself is called on, and gated for, both.
+            ("confined_command", &["linux", "macos"]),
         ] {
             let gate = cfg_gate_above(SRC, name).unwrap_or_else(|| {
                 panic!(
@@ -816,12 +820,29 @@ mod tests {
                      fails the Docker (Linux) release build"
                 )
             });
-            let want = format!("target_os = \"{target}\"");
-            assert!(
-                gate.contains(&want),
-                "`fn {name}` must be gated on {want}, found: {gate}"
+            let mut found = targets_in(&gate);
+            found.sort_unstable();
+            found.dedup();
+            assert_eq!(
+                found,
+                want.iter().map(|t| (*t).to_owned()).collect::<Vec<_>>(),
+                "`fn {name}` must be gated on exactly {want:?}, found: {gate}"
             );
         }
+    }
+
+    /// The `target_os` values named by a `#[cfg(...)]` attribute. `test` and
+    /// other non-platform predicates are deliberately ignored — `test` keeps a
+    /// helper available to unit tests without compiling it into any release
+    /// build, so it never causes dead code.
+    fn targets_in(gate: &str) -> Vec<String> {
+        const KEY: &str = "target_os = \"";
+        gate.match_indices(KEY)
+            .filter_map(|(at, _)| {
+                let rest = &gate[at + KEY.len()..];
+                rest.find('"').map(|end| rest[..end].to_owned())
+            })
+            .collect()
     }
 
     /// The base allowlist (work_dir + tool caches) is a pure function of

@@ -124,6 +124,45 @@ fn only_platform_calling(
     }
 }
 
+/// Why `gate` fails to keep `name` — reachable only from `target` — alive on
+/// exactly the platform that calls it, or `None` when the gate is correct.
+///
+/// Naming the calling platform is necessary but not sufficient. A gate that
+/// *also* admits a platform with no call site (`any(target_os = "macos",
+/// target_os = "linux")` on a macOS-only helper) still compiles the item there
+/// unreferenced — which is COX-B006 verbatim, just spelled with an extra
+/// `target_os` instead of no gate at all. `not(...)` inverts the meaning of
+/// the names it encloses, so such a gate is reported for a human to read
+/// rather than guessed at.
+fn gate_violation(name: &str, target: &str, gate: &str) -> Option<String> {
+    if gate.contains("not(") {
+        return Some(format!(
+            "`fn {name}` is only called from {target}-gated code, but its own gate \
+             negates a platform and this guard will not guess at it: {gate}"
+        ));
+    }
+    let gated = targets_in(gate);
+    if !gated.iter().any(|t| t == target) {
+        return Some(format!(
+            "`fn {name}` must be gated on target_os = \"{target}\", found: {gate}"
+        ));
+    }
+    let extra: Vec<&str> = gated
+        .iter()
+        .filter(|t| *t != target)
+        .map(String::as_str)
+        .collect();
+    if extra.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "`fn {name}` is only called from {target}-gated code, but its gate also \
+         admits {extra:?}: there it compiles unreferenced, and `warnings = \"deny\"` \
+         turns the dead_code warning into a hard error in the Docker (Linux) \
+         release build — {gate}"
+    ))
+}
+
 /// Names of the private helpers in `src` that this file checked, plus the
 /// gate violations found. A violation is a helper reachable from exactly one
 /// platform whose definition is missing (or contradicts) that gate.
@@ -150,10 +189,7 @@ fn scan(src: &str) -> (Vec<String>, Vec<String>) {
                  #[cfg(...)] gate: it becomes dead code on other targets and \
                  `warnings = \"deny\"` fails the Docker (Linux) release build"
             )),
-            Some(gate) if !gate.contains(&format!("target_os = \"{target}\"")) => violations.push(
-                format!("`fn {name}` must be gated on target_os = \"{target}\", found: {gate}"),
-            ),
-            Some(_) => {}
+            Some(gate) => violations.extend(gate_violation(name, &target, &gate)),
         }
         checked.push(name.to_owned());
     }
@@ -231,5 +267,36 @@ fn profile(program: &str) -> String {
     assert!(
         scan(&gated).1.is_empty(),
         "a helper gated on the platform that calls it is fine"
+    );
+}
+
+/// A gate that merely *mentions* the calling platform is not enough: widening
+/// it to a platform with no call site puts the helper back on the Linux
+/// builder as dead code, which is COX-B006 all over again. Guarding only
+/// against "no gate at all" would let that through green.
+#[test]
+fn scan_flags_a_gate_that_admits_a_platform_with_no_call_site() {
+    let src = "\
+#[cfg(target_os = \"macos\")]
+fn confined(program: &str) -> String {
+    profile(program)
+}
+
+#[cfg(any(test, target_os = \"macos\", target_os = \"linux\"))]
+fn profile(program: &str) -> String {
+    program.to_owned()
+}
+";
+    let (_, violations) = scan(src);
+    assert_eq!(violations.len(), 1, "{violations:?}");
+    assert!(violations[0].contains("`fn profile`"), "{violations:?}");
+    assert!(violations[0].contains("linux"), "{violations:?}");
+
+    // `test` alone is not a platform — it keeps the helper available to unit
+    // tests on every host without compiling it into any release build.
+    let narrowed = src.replace(", target_os = \"linux\"", "");
+    assert!(
+        scan(&narrowed).1.is_empty(),
+        "`any(test, target_os = \"macos\")` is exactly the correct gate"
     );
 }
