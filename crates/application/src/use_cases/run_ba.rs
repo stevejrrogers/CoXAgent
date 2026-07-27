@@ -111,7 +111,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
             return Err(crate::error::PortError::Backend(format!(
                 "BA engine exited with {:?}: {}",
                 outcome.exit_code,
-                outcome.stderr.trim()
+                outcome.failure_detail()
             ))
             .into());
         }

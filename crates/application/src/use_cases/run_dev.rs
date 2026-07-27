@@ -315,12 +315,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                                 match self.engine.run(fresh).await {
                                     Ok(f) if f.succeeded() => f.session_id.clone(),
                                     Ok(f) => {
-                                        self.record_failure(&id, f.stderr.trim()).await;
+                                        self.record_failure(&id, &f.failure_detail()).await;
                                         self.release_claim(&id).await;
                                         return Err(PortError::Backend(format!(
                                             "{:?} engine failed on {id}: {}",
                                             self.mode,
-                                            f.stderr.trim()
+                                            f.failure_detail()
                                         ))
                                         .into());
                                     }
@@ -337,12 +337,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 }
             }
             Ok(o) => {
-                self.record_failure(&id, o.stderr.trim()).await;
+                self.record_failure(&id, &o.failure_detail()).await;
                 self.release_claim(&id).await;
                 return Err(PortError::Backend(format!(
                     "{:?} engine failed on {id}: {}",
                     self.mode,
-                    o.stderr.trim()
+                    o.failure_detail()
                 ))
                 .into());
             }

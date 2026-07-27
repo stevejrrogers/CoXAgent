@@ -87,7 +87,7 @@ pub async fn run_transcript_raw<E: AgentEnginePort + ?Sized>(
     if !outcome.succeeded() {
         return Err(PortError::Backend(format!(
             "ceremony engine failed: {}",
-            outcome.stderr.trim()
+            outcome.failure_detail()
         ))
         .into());
     }

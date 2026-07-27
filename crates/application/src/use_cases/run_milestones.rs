@@ -118,7 +118,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunMilestonesUseCase<S, E> {
         if !outcome.succeeded() {
             return Err(PortError::Backend(format!(
                 "PO milestones engine failed: {}",
-                outcome.stderr.trim()
+                outcome.failure_detail()
             ))
             .into());
         }
