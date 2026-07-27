@@ -541,4 +541,51 @@ mod tests {
              {outcome:?}"
         );
     }
+
+    /// Regression test (COX-B018): the mandatory gate must poll to the
+    /// configured timeout, not stop at one probe. `health_check` itself is a
+    /// single bounded probe (a fixed 5s reqwest timeout) by design — it's
+    /// `wait_healthy` (the trait's default) that turns it into a poll loop.
+    /// This exercises the real adapter (not a scripted double): nothing is
+    /// listening on the port for the first 8s (connection refused, same as a
+    /// container whose app hasn't bound its port yet), then a real TCP
+    /// listener comes up and answers 200 OK — the kind of cold-start delay a
+    /// container doing DB migrations can have. 8s is longer than a single
+    /// probe cycle but well inside the 20s bound below.
+    #[tokio::test]
+    async fn slow_starting_app_within_the_bound_passes_via_the_poll_loop() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        // Reserve a port, then release it so nothing answers on it yet.
+        let probe = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = probe.local_addr().expect("addr").port();
+        drop(probe);
+
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(8)).await;
+            let listener = TcpListener::bind(("127.0.0.1", port))
+                .await
+                .expect("rebind once the app 'finishes starting'");
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    let _ = socket.read(&mut buf).await;
+                    let _ = socket
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                        .await;
+                });
+            }
+        });
+
+        let result = DockerComposeDeploy
+            .wait_healthy(port, Duration::from_secs(20))
+            .await;
+
+        assert!(
+            result.passed,
+            "an app that binds its port within the configured timeout must pass \
+             the gate, even though earlier probes hit connection refused: {result:?}"
+        );
+    }
 }
