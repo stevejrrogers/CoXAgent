@@ -138,38 +138,48 @@ pub trait DeployPort: Send + Sync {
 
 /// Mandatory post-deploy health probe (COX-B004/COX-B009): a `docker compose
 /// up` exit 0 only proves the containers started — it says nothing about
-/// whether the app inside actually bound its configured port. This polls
-/// [`DeployPort::health`] for a bounded window so every call site that reports
-/// a deploy as a success — the autonomous cycle, chat's "deploy" command, and
-/// the PR-preview endpoint alike — is gated the same way and none of them can
-/// downgrade a dead-on-arrival container into "success" by skipping the
-/// check. No `host_port` configured means nothing to probe (matches
-/// `ops_monitor`'s own gate); a `deploy` port with no real check (default
-/// `DeployPort::health` impl) reports healthy immediately, same as before
-/// this gate existed.
+/// whether the app inside actually bound its configured port. This polls the
+/// app for a bounded window so every call site that reports a deploy as a
+/// success — the autonomous cycle, chat's "deploy" command, and the PR-preview
+/// endpoint alike — is gated the same way and none of them can downgrade a
+/// dead-on-arrival container into "success" by skipping the check. No
+/// `host_port` configured means nothing to probe (matches `ops_monitor`'s own
+/// gate); a `deploy` port with no real check (default [`DeployPort::health`]
+/// impl) reports healthy immediately, same as before this gate existed.
+///
+/// The polling itself is [`DeployPort::wait_healthy`] — deliberately the same
+/// single probe path the COX-F005 gate uses, rather than a second loop of its
+/// own. One implementation means one place for the retry window to be tuned,
+/// and it means an adapter that overrides [`DeployPort::health_check`] with a
+/// real HTTP probe (as the docker-compose adapter does) is honoured here too
+/// instead of being silently downgraded to a bare TCP connect.
 ///
 /// # Errors
-/// Never returns an error — an unreachable/failing health check, and a probe
-/// that errors outright, are both reported as `false`, not propagated.
+/// Never returns an error — an unreachable/failing health check, a probe that
+/// errors outright, and an adapter whose own probe wedges are all reported as
+/// `false`, not propagated and not left hanging.
 pub async fn verify_deploy_health(deploy: &Arc<dyn DeployPort>, host_port: Option<u16>) -> bool {
-    const ATTEMPTS: u32 = 15;
-    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+    /// How long the app gets to bind its port. `docker compose up` returns as
+    /// soon as the containers *start*, seconds before the app inside listens,
+    /// so the gate has to wait rather than probe once and condemn the deploy.
+    const BOUND: std::time::Duration = std::time::Duration::from_secs(30);
+    /// Slack on top of `BOUND` before the gate gives up on the probe itself.
+    /// `wait_healthy` owns the real deadline; this only catches an adapter
+    /// whose own `health_check` wedges — without it, a hung probe would block
+    /// the chat reply or the preview request forever, turning the gate the
+    /// team asked to be unskippable into one that never answers.
+    const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(10);
+
     let Some(port) = host_port else {
         return true;
     };
-    for attempt in 0..ATTEMPTS {
-        // A probe that can't run is NOT evidence the app is up: treat it as
-        // unhealthy, exactly like `DeployPort::health_check`'s own default.
-        // Erring the other way would hand every caller a way to skip the gate
-        // by failing the check itself.
-        if deploy.health(port).await.unwrap_or(false) {
-            return true;
-        }
-        if attempt + 1 < ATTEMPTS {
-            tokio::time::sleep(POLL_INTERVAL).await;
-        }
-    }
-    false
+    // A probe that can't run — or can't finish — is NOT evidence the app is
+    // up: treat it as unhealthy, exactly like `DeployPort::health_check`'s own
+    // default. Erring the other way would hand every caller a way to skip the
+    // gate by breaking the check itself.
+    tokio::time::timeout(BOUND + HANG_GUARD, deploy.wait_healthy(port, BOUND))
+        .await
+        .is_ok_and(|result| result.passed)
 }
 
 #[cfg(test)]
@@ -329,6 +339,39 @@ mod tests {
             probing.probes.load(Ordering::SeqCst),
             0,
             "with no port configured the gate must not probe at all"
+        );
+    }
+
+    /// An adapter whose probe never answers at all — the wedged-connection
+    /// case the fixed per-probe timeouts in real adapters exist to avoid.
+    struct WedgedDeploy;
+    #[async_trait::async_trait]
+    impl DeployPort for WedgedDeploy {
+        async fn deploy(&self, _work_dir: &Path) -> Result<DeployReport, PortError> {
+            unreachable!("the gate never deploys")
+        }
+        async fn health_check(&self, _port: u16) -> crate::state::HealthCheckResult {
+            std::future::pending().await
+        }
+    }
+
+    /// A probe that hangs must fail the gate within the gate's own bound, not
+    /// block the caller forever. Chat's "deploy" and the PR-preview endpoint
+    /// both await this inline, so an unbounded gate would wedge a human's
+    /// request rather than answer it — an unskippable gate that never returns
+    /// is its own outage.
+    #[tokio::test(start_paused = true)]
+    async fn a_probe_that_never_answers_is_bounded_and_fails_the_gate() {
+        let deploy: Arc<dyn DeployPort> = Arc::new(WedgedDeploy);
+        let started = tokio::time::Instant::now();
+
+        let healthy = super::verify_deploy_health(&deploy, Some(8101)).await;
+
+        assert!(!healthy, "a probe that never answers must fail the gate");
+        assert!(
+            started.elapsed() <= Duration::from_secs(60),
+            "the gate must resolve inside its own bound; took {:?}",
+            started.elapsed()
         );
     }
 

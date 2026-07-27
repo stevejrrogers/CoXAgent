@@ -5070,6 +5070,11 @@ async fn pr_preview(
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         .and_then(|v| v["deploy"]["host_port"].as_u64());
+    // The port the health gate probes. `config.deploy.host_port` is a `u16`
+    // everywhere else, so a wider value here is a config the app itself would
+    // reject — and a truncating cast would silently probe a DIFFERENT port,
+    // which is exactly the false "LIVE" this gate exists to prevent.
+    let probe_port = port.and_then(|pt| u16::try_from(pt).ok());
     let chat = |msg: String| {
         let store = Arc::clone(&p.store);
         async move {
@@ -5127,8 +5132,7 @@ async fn pr_preview(
             Ok(r)
                 if r.success
                     && coxagent_application::ports::outbound::verify_deploy_health(
-                        deploy,
-                        port.map(|pt| pt as u16),
+                        deploy, probe_port,
                     )
                     .await =>
             {
@@ -5157,8 +5161,7 @@ async fn pr_preview(
             Ok(r)
                 if r.success
                     && coxagent_application::ports::outbound::verify_deploy_health(
-                        deploy,
-                        port.map(|pt| pt as u16),
+                        deploy, probe_port,
                     )
                     .await =>
             {
@@ -5168,11 +5171,12 @@ async fn pr_preview(
                 .await;
                 Json(serde_json::json!({ "ok": true })).into_response()
             }
-            Ok(r) => internal_error(&format!(
+            Ok(r) if r.success => internal_error(&format!(
                 "restore failed: {} (containers started but the app never bound its port — \
                  health check failed)",
                 r.summary
             )),
+            Ok(r) => internal_error(&format!("restore failed: {}", r.summary)),
             Err(e) => internal_error(&e.to_string()),
         }
     }
