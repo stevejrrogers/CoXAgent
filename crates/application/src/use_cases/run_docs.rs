@@ -399,14 +399,25 @@ fn stalest_page<'a>(
     state: &'a crate::state::ProjectState,
     work_dir: &std::path::Path,
 ) -> Option<&'a crate::state::DocPage> {
+    // Only pages this role owns. Two things would go wrong otherwise, and both
+    // cost real money: the `hub-lessons` mirror the SM rewrites daily is a
+    // lessons list, not a feature page, so it can never satisfy the skeleton —
+    // the refresher would pick it every idle cycle and fail forever. And a page
+    // a HUMAN last edited is not ours to silently rewrite.
+    let mine = |p: &&crate::state::DocPage| p.updated_by == "DOCS";
     let broken = state
         .docs
         .iter()
+        .filter(mine)
         .find(|p| docs_gate_failures(&p.body, work_dir).is_some());
     if broken.is_some() {
         return broken;
     }
-    state.docs.iter().find(|p| page_is_behind_code(p, work_dir))
+    state
+        .docs
+        .iter()
+        .filter(mine)
+        .find(|p| page_is_behind_code(p, work_dir))
 }
 
 /// Whether any file the page's Code map cites has been committed since the
@@ -837,6 +848,32 @@ mod refresh_tests {
             updated_at: updated_at.to_owned(),
             updated_by: "DOCS".to_owned(),
         }
+    }
+
+    #[test]
+    fn pages_this_role_does_not_own_are_left_alone() {
+        // `hub-lessons` is the SM's daily mirror: a lessons list that can never
+        // satisfy the feature skeleton, so picking it up would burn a call
+        // every idle cycle. A human-edited page is off limits for the same
+        // reason in reverse — it is not ours to overwrite.
+        let s = ProjectState {
+            docs: vec![
+                DocPage {
+                    updated_by: "SM".to_owned(),
+                    ..page(
+                        "hub-lessons",
+                        "- a lesson\n- another\n",
+                        "2026-01-01T00:00:00Z",
+                    )
+                },
+                DocPage {
+                    updated_by: "root".to_owned(),
+                    ..page("human", "My own notes.", "2026-01-01T00:00:00Z")
+                },
+            ],
+            ..ProjectState::default()
+        };
+        assert!(stalest_page(&s, std::path::Path::new("/nonexistent")).is_none());
     }
 
     #[test]
