@@ -201,8 +201,10 @@ does NOT compile. Your ONLY job is to make `cargo test` green — fix every \
 single error. Rules:\n\
 1. Run `cargo check` first to see all errors\n\
 2. Fix every error — do not skip any, do not create tickets for them\n\
-3. Minimal changes: fix errors, add missing imports, fix type mismatches, \
-   comment out fundamentally broken code with a TODO\n\
+3. Minimal changes: fix errors, add missing imports, fix type mismatches. \
+   NEVER comment out or delete functionality to silence an error — a green \
+   suite with disabled behaviour is a lie; fix the smallest faulty part \
+   instead, and if something is truly unfixable here, STOP and report it\n\
 4. Do NOT refactor, do NOT improve, do NOT add features — JUST FIX ERRORS\n\
 5. Run `cargo test` to verify — if not green, repeat from step 1\n\
 6. When everything passes, print a one-line summary of total errors fixed";

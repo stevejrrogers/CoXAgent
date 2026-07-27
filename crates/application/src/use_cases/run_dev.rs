@@ -141,12 +141,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                     return self.self_heal_compile(&r.summary).await;
                 }
                 Ok(Err(e)) => {
+                    // Spawn errors and timeouts are INFRASTRUCTURE, not compile
+                    // breakage — healing on them tells the LLM "the project
+                    // doesn't compile" with no compile error to fix.
                     tracing::warn!("DEV boot check: cargo test spawn error — {e}");
-                    return self.self_heal_compile(&e.to_string()).await;
+                    return Ok(None);
                 }
                 Err(_timeout) => {
-                    tracing::warn!("DEV boot check: cargo test timed out — entering self-heal mode");
-                    return self.self_heal_compile("timed out after 5 min").await;
+                    tracing::warn!("DEV boot check: cargo test timed out after 5 min");
+                    return Ok(None);
                 }
             }
         }
@@ -654,7 +657,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
 
             let req = AgentRequest {
                 role: Role::DevBug,
-                system_prompt: prompts::DEV_HEAL.to_owned(),
+                // Through the house wrapper: BASE + engineering standards +
+                // process law ride along, and the prefix stays cache-stable.
+                system_prompt: prompts::system_prompt(prompts::DEV_HEAL),
                 task_prompt: task,
                 work_dir: self.work_dir.clone(),
                 timeout: std::time::Duration::from_secs(600),
@@ -686,9 +691,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             .await
             {
                 Ok(Ok(r)) if r.success => {
-                    tracing::info!(
-                        "DEV self-heal: codebase GREEN after {attempt} attempt(s)!"
-                    );
+                    tracing::info!("DEV self-heal: codebase GREEN after {attempt} attempt(s)!");
                     return Ok(None);
                 }
                 Ok(Ok(r)) => {

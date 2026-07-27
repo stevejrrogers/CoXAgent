@@ -134,7 +134,14 @@ fn git_diff_and_log_p_are_byte_exact_too() {
     // A patch big enough to trip the compressor: the whole file added.
     let path = large_tracked_file(&root);
     for args in [
-        vec!["diff", "--no-color", "4b825dc642cb6eb9a060e54bf8d69288fbee4904", "HEAD", "--", &path],
+        vec![
+            "diff",
+            "--no-color",
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+            "HEAD",
+            "--",
+            &path,
+        ],
         vec!["log", "--no-color", "-p", "--", &path],
     ] {
         let real = git(&root, &args);
@@ -157,7 +164,10 @@ fn binary_blob_content_survives_the_shim_intact() {
     // clipping this ticket is about, on the very subcommands the fix claims to
     // keep byte-exact.
     let blob: Vec<u8> = (0..=255u8).cycle().take(40_000).collect();
-    assert!(std::str::from_utf8(&blob).is_err(), "payload must be binary");
+    assert!(
+        std::str::from_utf8(&blob).is_err(),
+        "payload must be binary"
+    );
 
     for args in [
         vec!["show", "HEAD:assets/logo.png"],
@@ -185,7 +195,10 @@ fn exact_output_larger_than_the_pipe_buffer_is_not_truncated() {
     // is the realistic size for the `git log -p` / `git archive` calls agents
     // make. 4 MiB clears the buffer by two orders of magnitude.
     let root = repo_root();
-    let unit = git(&root, &["show", &format!("HEAD:{}", large_tracked_file(&root))]);
+    let unit = git(
+        &root,
+        &["show", &format!("HEAD:{}", large_tracked_file(&root))],
+    );
     let mut real = Vec::with_capacity(4 << 20);
     while real.len() < (4 << 20) {
         real.extend_from_slice(&unit);
@@ -201,7 +214,10 @@ fn the_same_content_is_compressed_for_porcelain_and_other_tools() {
     // Guards the other side of the fix: content-retrieval subcommands are
     // exempted, everything else still gets the token saving.
     let root = repo_root();
-    let real = git(&root, &["show", &format!("HEAD:{}", large_tracked_file(&root))]);
+    let real = git(
+        &root,
+        &["show", &format!("HEAD:{}", large_tracked_file(&root))],
+    );
 
     for (cmd, args) in [("git", vec!["status"]), ("cargo", vec!["build"])] {
         let out = compress(cmd, &args, &real);
