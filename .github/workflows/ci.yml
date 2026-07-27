@@ -44,11 +44,11 @@ jobs:
         run: cargo build --release --bin coxagent
 
   deploy-smoke:
-    # COX-B008 regression guard for the OTHER half of the bug report: a green
-    # `cargo build` is not a running app. The test brings the stack up with the
-    # exact command this repo's docker-compose.yml documents and proves the hub
-    # answers on the published host port — so "compiles" can never again be
-    # mistaken for "comes up". Catches image build breakage, entrypoint
+    # COX-B006/COX-B008 regression guard for the OTHER half of the bug report:
+    # a green `cargo build` is not a running app. The test brings the stack up
+    # with the exact command this repo's docker-compose.yml documents and proves
+    # the hub answers on the published host port — so "compiles" can never again
+    # be mistaken for "comes up". Catches image build breakage, entrypoint
     # failures and port-binding mistakes in one step. Test rather than shell so
     # a developer can run the same gate locally.
     name: docker compose smoke (app answers on 8101)
