@@ -125,31 +125,40 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
     pub async fn execute(&self) -> Result<Option<TicketId>, AppError> {
         // Self-healing boot: if the project doesn't compile, fix that BEFORE
         // touching any tickets. Otherwise every ticket will fail anyway.
+        // Skipped entirely when the tree is unchanged since the last green
+        // suite run (process-wide fingerprint cache) — one green check per
+        // tree-state serves every runner in the cycle.
         if let Some(deploy) = &self.verify {
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(300),
-                deploy.run_tests(&self.work_dir),
-            )
-            .await
-            {
-                Ok(Ok(r)) if r.success => {}
-                Ok(Ok(r)) => {
-                    tracing::warn!(
-                        "DEV boot check: cargo test failed — self-healing. {}",
-                        &r.summary[..r.summary.len().min(200)]
-                    );
-                    return self.self_heal_compile(&r.summary).await;
-                }
-                Ok(Err(e)) => {
-                    // Spawn errors and timeouts are INFRASTRUCTURE, not compile
-                    // breakage — healing on them tells the LLM "the project
-                    // doesn't compile" with no compile error to fix.
-                    tracing::warn!("DEV boot check: cargo test spawn error — {e}");
-                    return Ok(None);
-                }
-                Err(_timeout) => {
-                    tracing::warn!("DEV boot check: cargo test timed out after 5 min");
-                    return Ok(None);
+            if crate::verify_cache::is_green(&self.work_dir) {
+                // fall through — nothing changed since the last green run
+            } else {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(300),
+                    deploy.run_tests(&self.work_dir),
+                )
+                .await
+                {
+                    Ok(Ok(r)) if r.success => {
+                        crate::verify_cache::mark_green(&self.work_dir);
+                    }
+                    Ok(Ok(r)) => {
+                        tracing::warn!(
+                            "DEV boot check: cargo test failed — self-healing. {}",
+                            &r.summary[..r.summary.len().min(200)]
+                        );
+                        return self.self_heal_compile(&r.summary).await;
+                    }
+                    Ok(Err(e)) => {
+                        // Spawn errors and timeouts are INFRASTRUCTURE, not compile
+                        // breakage — healing on them tells the LLM "the project
+                        // doesn't compile" with no compile error to fix.
+                        tracing::warn!("DEV boot check: cargo test spawn error — {e}");
+                        return Ok(None);
+                    }
+                    Err(_timeout) => {
+                        tracing::warn!("DEV boot check: cargo test timed out after 5 min");
+                        return Ok(None);
+                    }
                 }
             }
         }
@@ -552,6 +561,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             }
         }
 
+        // The suite (plus gates) is green against this exact tree — remember
+        // it so sibling runners skip their boot check this cycle.
+        if self.verify.is_some() {
+            crate::verify_cache::mark_green(&self.work_dir);
+        }
+
         // Complete under an atomic read-modify-write with retry: move to the
         // terminal status, bump the version, record the deploy. A concurrent
         // operator saving the shared state can't make us lose this completion
@@ -640,7 +655,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         };
 
         let mut last_error = error_summary.to_owned();
-        for attempt in 1..=3 {
+        for attempt in 1_u32..=3 {
             let task = if attempt == 1 {
                 format!(
                     "The project does NOT compile. Fix ALL errors:\n\n\
@@ -663,7 +678,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 task_prompt: task,
                 work_dir: self.work_dir.clone(),
                 timeout: std::time::Duration::from_secs(600),
-                escalation_level: (attempt - 1) as u8,
+                escalation_level: u8::try_from(attempt.saturating_sub(1)).unwrap_or(3),
             };
 
             match self.engine.run(req).await {
