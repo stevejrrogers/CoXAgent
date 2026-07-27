@@ -4896,12 +4896,18 @@ mod tests {
 
     #[tokio::test]
     async fn one_cycle_carries_a_feature_from_proposal_to_done() {
+        // DOCS validates its Code map against the tree, so the workspace must
+        // contain the file the scripted page cites.
+        let dir = std::env::temp_dir().join(format!("cyclerun-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("mkdir");
+        std::fs::write(dir.join("src/a.rs"), "// the flow\n").expect("write");
         let store = Arc::new(MemStore::default());
         let uc = RunCycleUseCase::new(
             Arc::clone(&store),
             Arc::new(RoleAwareEngine),
             Config::default(),
-            PathBuf::from("/tmp"),
+            dir.clone(),
             "goal".to_owned(),
         );
         // Cycle 1: BA proposes → SA designs → DEV-FEATURE implements → TEST clean.
@@ -4919,6 +4925,7 @@ mod tests {
         let state = store.load().await.expect("load");
         assert_eq!(state.tickets[0].status(), Status::Documented);
         assert_eq!(state.current_version.to_string(), "0.1.0");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     struct SpyDeploy {
