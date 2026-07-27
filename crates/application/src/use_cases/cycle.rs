@@ -4863,6 +4863,22 @@ mod tests {
                 r#"[{"name":"MVP","goal":"ship it","target_version":"1.0.0"}]"#.to_owned()
             } else if r.system_prompt.contains("QA Engineer") {
                 "[]".to_owned()
+            } else if r.system_prompt.contains("Tech Writer") {
+                // Must satisfy the DOCS structure gate, like a real run.
+                "FOLDER: -\n# Feature A\n**Keywords:** feature, a, flow\n## Overview\nIt does \
+                 the thing the ticket asked for, end to end, for the people who need it. The \
+                 flow starts at the API, runs through the use case, and lands in the store, so \
+                 a reader can follow one request from edge to persistence without guessing. \
+                 Failures surface as errors rather than silent no-ops.\n\
+                 ## How it works\nrun_feature() drives the flow: it validates the request, \
+                 claims the work, and writes the result once.\n\
+                 ## Usage\nCall it from the API or the cycle; both paths are the same code.\n\
+                 ## Interface\nPOST /api/a\n## Configuration\nnone\n\
+                 ## Edge cases and limits\nFails closed: an invalid request is rejected \
+                 before any state is written, and a partial write is never observable.\n\
+                 ## Code map\n- src/a.rs — the flow, from request validation to the store\n\
+                 ## Related\nnone\n"
+                    .to_owned()
             } else {
                 "done".to_owned()
             };

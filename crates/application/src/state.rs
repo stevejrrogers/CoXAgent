@@ -265,6 +265,49 @@ pub fn standard_doc_folder(ticket_type: coxagent_domain::TicketType) -> &'static
     }
 }
 
+/// Which wiki space a ticket's page belongs in. The ticket TYPE alone gets
+/// this wrong: an infrastructure feature (sandboxing, a deploy gate) is a
+/// Feature ticket and would file under Product, which is how a product space
+/// ends up holding nothing a product person would read. The subject decides,
+/// with the type as the tie-breaker.
+#[must_use]
+pub fn doc_space_for(
+    ticket_type: coxagent_domain::TicketType,
+    title: &str,
+    description: &str,
+) -> &'static str {
+    use coxagent_domain::TicketType;
+    const ENGINEERING: &[&str] = &[
+        "docker",
+        "compose",
+        "ci ",
+        "pipeline",
+        "clippy",
+        "lint",
+        "sandbox",
+        "seatbelt",
+        "bwrap",
+        "deploy gate",
+        "health check",
+        "rollback",
+        "refactor",
+        "migration",
+        "schema",
+        "runner",
+        "cargo",
+        "build fails",
+        "compile",
+    ];
+    let text = format!("{title} {description}").to_lowercase();
+    if ENGINEERING.iter().any(|k| text.contains(k)) {
+        return "Engineering";
+    }
+    match ticket_type {
+        TicketType::Feature => "Product",
+        TicketType::Chore | TicketType::Bug => "Engineering",
+    }
+}
+
 /// The colour/category bucket for a Wiki folder, keyed off its top-level space.
 /// Keeps DOCS-written pages consistent with the UI's folder colouring.
 #[must_use]
@@ -281,7 +324,11 @@ pub fn doc_category_of(folder: &str) -> &'static str {
         "design" | "flows" => "flows",
         "qa" | "testing" | "test" | "tests" => "qa",
         "operations" | "ops" | "release notes" | "releases" => "ops",
-        _ => "product",
+        "product" | "features" => "product",
+        // An unrecognised space is not silently "product": mislabelling a
+        // team/ops page as product colours it wrongly in the wiki and skews
+        // every filter built on the category.
+        _ => "general",
     }
 }
 
