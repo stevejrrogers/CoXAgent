@@ -47,12 +47,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
     #[allow(clippy::too_many_lines)] // linear QA pass; splitting hurts readability
     pub async fn execute(&self) -> Result<Vec<TicketId>, AppError> {
         let _choice = self.config.engine.resolve(Role::Test);
-        let (memory, shipped) = self.store.load().await.map_or_else(
-            |_| (String::new(), String::new()),
+        let (memory, shipped, knowledge) = self.store.load().await.map_or_else(
+            |_| (String::new(), String::new(), String::new()),
             |s| {
+                let shipped = shipped_block(&s);
+                let knowledge =
+                    prompts::knowledge_block(&s.docs, &s.tickets, &self.work_dir, &shipped, "");
                 (
                     prompts::team_memory_block(&s.decisions, &s.lessons),
-                    shipped_block(&s),
+                    shipped,
+                    knowledge,
                 )
             },
         );
@@ -67,11 +71,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
             })
             .unwrap_or_default();
         let repo_map = prompts::repo_map_block(&self.work_dir, self.config.workflow.token_saver);
+        // A tester reads the suite and the API before writing a case; without
+        // this the role re-tests what is covered and guesses at endpoints.
+        let surface = prompts::test_surface_block(&self.work_dir);
+
         let request = AgentRequest {
             role: Role::Test,
             system_prompt: prompts::system_prompt(prompts::TEST),
             task_prompt: format!(
-                "Test the current build and report new bugs.{context_block}{shipped}{memory}{repo_map}"
+                "Test the current build and report new bugs.{context_block}{shipped}{memory}\
+                 {repo_map}{surface}{knowledge}"
             ),
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(1800),
