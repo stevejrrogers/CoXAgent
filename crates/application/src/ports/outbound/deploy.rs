@@ -111,12 +111,6 @@ pub trait DeployPort: Send + Sync {
         }
     }
 
-    /// Run the project's test suite as a hard Definition-of-Done gate — detect
-    /// the toolchain and run its tests. `deployed=false` means no toolchain was
-    /// recognised (skipped). The default skips.
-    ///
-    /// # Errors
-    /// [`PortError::Backend`] if the test tool can't be launched.
     /// Count lint errors (e.g. `cargo clippy`) for the workspace. `None` =
     /// linting not supported for this project type. Default: unsupported.
     ///
@@ -126,6 +120,12 @@ pub trait DeployPort: Send + Sync {
         Ok(None)
     }
 
+    /// Run the project's test suite as a hard Definition-of-Done gate — detect
+    /// the toolchain and run its tests. `deployed=false` means no toolchain was
+    /// recognised (skipped). The default skips.
+    ///
+    /// # Errors
+    /// [`PortError::Backend`] if the test tool can't be launched.
     async fn run_tests(&self, work_dir: &Path) -> Result<DeployReport, PortError> {
         let _ = work_dir;
         Ok(DeployReport {
