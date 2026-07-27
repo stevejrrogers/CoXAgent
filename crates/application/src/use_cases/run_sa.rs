@@ -138,7 +138,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             self.store.release_stage(&id, "sa", &worker).await.ok();
             return Err(PortError::Backend(format!(
                 "SA engine failed on {id}: {}",
-                outcome.stderr.trim()
+                outcome.failure_detail()
             ))
             .into());
         }

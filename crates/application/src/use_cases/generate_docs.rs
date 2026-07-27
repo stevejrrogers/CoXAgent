@@ -178,9 +178,11 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> GenerateDocsUseCas
         };
         let outcome = self.engine.run(request).await?;
         if !outcome.succeeded() {
-            return Err(
-                PortError::Backend(format!("doc edit failed: {}", outcome.stderr.trim())).into(),
-            );
+            return Err(PortError::Backend(format!(
+                "doc edit failed: {}",
+                outcome.failure_detail()
+            ))
+            .into());
         }
         let body = strip_outer_fence(outcome.stdout.trim());
         if body.is_empty() {

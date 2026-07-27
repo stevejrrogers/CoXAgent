@@ -65,7 +65,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDesignSystemUseCase<S, E> {
         if !outcome.succeeded() {
             return Err(PortError::Backend(format!(
                 "PD design-system engine failed: {}",
-                outcome.stderr.trim()
+                outcome.failure_detail()
             ))
             .into());
         }

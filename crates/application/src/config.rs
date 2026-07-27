@@ -391,6 +391,12 @@ pub struct GitConfig {
     /// user merges). Implies `auto_review`.
     #[serde(default)]
     pub auto_merge: bool,
+    /// Whether PR review waits on / blocks over the forge's CI status (default
+    /// on). Turn OFF when CI is unavailable (e.g. Actions billing disabled):
+    /// the SA then judges the diff and relies on the local test/lint gates,
+    /// instead of endlessly requesting changes for a CI that can never run.
+    #[serde(default = "default_true")]
+    pub require_ci: bool,
     /// WIP limit on open PRs into the target branch: at/above this, DEV stops
     /// starting NEW features and the team drains the review queue instead —
     /// the brake that prevents cascade merge conflicts. 0 = unlimited.
@@ -426,6 +432,7 @@ impl Default for GitConfig {
             auto_pr: false,
             auto_review: true,
             auto_merge: false,
+            require_ci: true,
             max_open_prs: default_max_open_prs(),
         }
     }

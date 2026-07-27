@@ -23,7 +23,7 @@ pub struct RunChatReplyUseCase<S: StateStorePort + ?Sized, E: AgentEnginePort + 
     deploy: Option<Arc<dyn DeployPort>>,
     host_port: Option<u16>,
     /// Code host + target branch, so chat can trigger an SA merge sweep.
-    forge: Option<(Arc<dyn crate::ports::outbound::ForgePort>, String)>,
+    forge: Option<(Arc<dyn crate::ports::outbound::ForgePort>, String, bool)>,
     context: Option<String>,
     /// Callback: create a new project from scratch. Returns a human-readable status message.
     new_project_fn:
@@ -94,8 +94,9 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         mut self,
         forge: Arc<dyn crate::ports::outbound::ForgePort>,
         target: impl Into<String>,
+        require_ci: bool,
     ) -> Self {
-        self.forge = Some((forge, target.into()));
+        self.forge = Some((forge, target.into(), require_ci));
         self
     }
 
@@ -233,12 +234,13 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         } else if lower.starts_with("deploy") {
             self.deploy_now().await;
         } else if lower.starts_with("merge_queue") || lower.starts_with("merge queue") {
-            if let Some((forge, target)) = &self.forge {
+            if let Some((forge, target, require_ci)) = &self.forge {
                 let _ = crate::use_cases::merge_sweep(
                     forge.as_ref(),
                     self.store.as_ref(),
                     target,
                     self.lang.is_vi(),
+                    *require_ci,
                 )
                 .await;
             }

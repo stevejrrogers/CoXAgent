@@ -113,7 +113,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
             self.store.release_stage(&id, "pd", &worker).await.ok();
             return Err(PortError::Backend(format!(
                 "PD engine failed on {id}: {}",
-                outcome.stderr.trim()
+                outcome.failure_detail()
             ))
             .into());
         }

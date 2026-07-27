@@ -18,6 +18,16 @@ pub struct DeployReport {
     pub summary: String,
 }
 
+/// Lint gate measurement: the error count plus a bounded sample of the actual
+/// error lines, so repair prompts can name the offending lints.
+#[derive(Debug, Clone)]
+pub struct LintReport {
+    /// Number of lint errors in the workspace.
+    pub errors: u64,
+    /// Up to a few of the raw error lines (may be empty when unsupported).
+    pub sample: String,
+}
+
 /// Deploys the codebase so it can be tested/served.
 #[async_trait]
 pub trait DeployPort: Send + Sync {
@@ -118,6 +128,19 @@ pub trait DeployPort: Send + Sync {
     /// [`PortError`] on spawn failure.
     async fn lint(&self, _work_dir: &Path) -> Result<Option<u64>, PortError> {
         Ok(None)
+    }
+
+    /// Like [`Self::lint`] but with a sample of the actual error lines, so a
+    /// repair agent sees WHICH lints it introduced instead of a bare count.
+    /// Default adapts `lint` with an empty sample.
+    ///
+    /// # Errors
+    /// [`PortError`] on spawn failure.
+    async fn lint_report(&self, work_dir: &Path) -> Result<Option<LintReport>, PortError> {
+        Ok(self.lint(work_dir).await?.map(|errors| LintReport {
+            errors,
+            sample: String::new(),
+        }))
     }
 
     /// Run the project's test suite as a hard Definition-of-Done gate — detect

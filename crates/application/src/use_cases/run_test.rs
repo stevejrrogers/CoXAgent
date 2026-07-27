@@ -82,7 +82,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
         if !outcome.succeeded() {
             return Err(crate::error::PortError::Backend(format!(
                 "TEST engine failed: {}",
-                outcome.stderr.trim()
+                outcome.failure_detail()
             ))
             .into());
         }

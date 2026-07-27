@@ -315,12 +315,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                                 match self.engine.run(fresh).await {
                                     Ok(f) if f.succeeded() => f.session_id.clone(),
                                     Ok(f) => {
-                                        self.record_failure(&id, f.stderr.trim()).await;
+                                        self.record_failure(&id, &f.failure_detail()).await;
                                         self.release_claim(&id).await;
                                         return Err(PortError::Backend(format!(
                                             "{:?} engine failed on {id}: {}",
                                             self.mode,
-                                            f.stderr.trim()
+                                            f.failure_detail()
                                         ))
                                         .into());
                                     }
@@ -337,12 +337,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 }
             }
             Ok(o) => {
-                self.record_failure(&id, o.stderr.trim()).await;
+                self.record_failure(&id, &o.failure_detail()).await;
                 self.release_claim(&id).await;
                 return Err(PortError::Backend(format!(
                     "{:?} engine failed on {id}: {}",
                     self.mode,
-                    o.stderr.trim()
+                    o.failure_detail()
                 ))
                 .into());
             }
@@ -434,7 +434,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
 
             // Lint gate: a change may never ADD clippy errors. Baseline is
             // learned on first measure and ratchets DOWN when improved.
-            if let Ok(Some(count)) = deploy.lint(&self.work_dir).await {
+            if let Ok(Some(report)) = deploy.lint_report(&self.work_dir).await {
+                let count = report.errors;
                 let prior = self.store.load().await.ok().and_then(|s| s.clippy_baseline);
                 match prior {
                     None => {
@@ -447,10 +448,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                     }
                     Some(base) if count > base => {
                         // One bounded repair pass for the NEW lint errors only.
+                        // Naming the actual lints beats a bare count: the agent
+                        // can fix them without hunting through the whole run.
+                        let detail = if report.sample.is_empty() {
+                            String::new()
+                        } else {
+                            format!("\nCurrent errors include:\n{}", report.sample)
+                        };
                         let fixup = format!(
                             "Your change introduced NEW `cargo clippy` errors (was {base}, now \
                              {count}). Run `cargo clippy --workspace --all-targets`, fix ONLY \
-                             errors caused by your change, and do not start new work."
+                             errors caused by your change, and do not start new work. If a lint \
+                             fires on code you must keep (e.g. platform-gated symbols), gate it \
+                             with the right #[cfg(...)] rather than deleting behaviour.{detail}"
                         );
                         if let Some(sid) = &session {
                             let _ = self
@@ -468,16 +478,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                             };
                             let _ = self.engine.run(repair).await;
                         }
-                        let after = deploy
-                            .lint(&self.work_dir)
-                            .await
-                            .ok()
-                            .flatten()
-                            .unwrap_or(count);
+                        let after_report = deploy.lint_report(&self.work_dir).await.ok().flatten();
+                        let after = after_report.as_ref().map_or(count, |r| r.errors);
                         if after > base {
+                            let sample = after_report
+                                .filter(|r| !r.sample.is_empty())
+                                .map_or_else(String::new, |r| {
+                                    format!("; e.g. {}", r.sample.lines().next().unwrap_or(""))
+                                });
                             self.record_failure(
                                 &id,
-                                &format!("added clippy errors ({base} -> {after})"),
+                                &format!("added clippy errors ({base} -> {after}{sample})"),
                             )
                             .await;
                             self.release_claim(&id).await;
@@ -513,11 +524,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             // Regression-test gate: a BUG fix that touches no test is a fix
             // on faith. Mechanical check over the working diff; one bounded
             // repair pass to add the missing test.
-            if self.mode == DevMode::Bug && !self.diff_touches_tests() {
+            if self.mode == DevMode::Bug && !self.diff_is_docs_only() && !self.diff_touches_tests()
+            {
                 let fixup = format!(
                     "Your fix for {id} ships with NO regression test. Add a test that FAILS \
                      without your fix and passes with it — that is the only proof the bug is \
-                     dead. Do not start new work or commit."
+                     dead. Put it where the gate can see it: a `tests/` path, a `*_test.rs` / \
+                     `*.test.ts` file, or an added `#[test]`/`#[tokio::test]`/`it(`/`def test_` \
+                     block. Do not start new work or commit."
                 );
                 if let Some(sid) = &session {
                     let _ = self
@@ -602,6 +616,41 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             p(None);
         }
         Ok(Some(id))
+    }
+
+    /// Whether the working diff is documentation/assets only — README fixes,
+    /// docs, images, licences. Such a "bug fix" has no runtime surface, so
+    /// demanding a regression test just parks the ticket.
+    fn diff_is_docs_only(&self) -> bool {
+        let run = |args: &[&str]| -> String {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&self.work_dir)
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default()
+        };
+        let names = format!(
+            "{}\n{}",
+            run(&["diff", "HEAD", "--name-only"]),
+            run(&["ls-files", "--others", "--exclude-standard"])
+        );
+        let mut any = false;
+        for f in names.lines().map(str::trim).filter(|f| !f.is_empty()) {
+            any = true;
+            let lower = f.to_lowercase();
+            let doc_ext = [
+                ".md", ".txt", ".adoc", ".rst", ".png", ".jpg", ".jpeg", ".svg", ".gif",
+            ]
+            .iter()
+            .any(|e| lower.ends_with(e));
+            let doc_name = lower.ends_with("license") || lower.ends_with(".gitignore");
+            let doc_dir = lower.starts_with("docs/") || lower.contains("/docs/");
+            if !(doc_ext || doc_name || doc_dir) {
+                return false;
+            }
+        }
+        any
     }
 
     /// Whether the current working diff (staged/unstaged + untracked) touches
@@ -1105,6 +1154,52 @@ mod tests {
         std::fs::write(dir.join("lib.rs"), "fn f() {}\n#[test]\nfn t() {}\n").unwrap();
         git(&["add", "-A"]);
         assert!(uc.diff_touches_tests(), "added #[test] counts");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn diff_is_docs_only_spares_readme_fixes_but_not_code() {
+        let dir = std::env::temp_dir().join(format!("docsonly-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .unwrap();
+        };
+        git(&["init", "-q"]);
+        git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "--allow-empty",
+            "-q",
+            "-m",
+            "base",
+        ]);
+        let uc = RunDevUseCase::new(
+            Arc::new(MemStore {
+                state: Mutex::new(ProjectState::default()),
+            }),
+            Arc::new(OkEngine),
+            Config::default(),
+            dir.clone(),
+            DevMode::Bug,
+        );
+        assert!(!uc.diff_is_docs_only(), "empty diff is not docs-only");
+        std::fs::write(dir.join("README.md"), "# fixed port\n").unwrap();
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("docs/setup.md"), "steps\n").unwrap();
+        assert!(uc.diff_is_docs_only(), "README + docs/ is docs-only");
+        std::fs::write(dir.join("lib.rs"), "fn f() {}\n").unwrap();
+        assert!(
+            !uc.diff_is_docs_only(),
+            "any code file breaks the exemption"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

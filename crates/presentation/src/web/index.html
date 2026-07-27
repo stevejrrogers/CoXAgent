@@ -816,9 +816,6 @@
   .gm-lbl span{font-size:10.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .gm-track{flex:1;position:relative;height:26px}
   .gm-bar{position:absolute;top:4px;height:18px;border-radius:5px;display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;min-width:6px;z-index:2}
-  .gq{position:absolute;top:0;bottom:0;width:1px;background:var(--border2);opacity:.7}
-  .gwk{position:absolute;top:0;bottom:0;width:1px;background:var(--border);opacity:.4}
-  .gqlab{position:absolute;top:0;transform:translateX(3px);font-size:9.5px;color:var(--dim);white-space:nowrap}
   .gm-now{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--accent2);opacity:.6;z-index:3}
   .gm-nowlab{position:absolute;transform:translateX(-50%);font-size:9px;color:var(--accent2)}
   .gm-marktrack{height:34px}
@@ -1406,11 +1403,12 @@ body:not(.manage) .manage-only { display: none !important; }
 .add-user-btn{padding:8px 16px;font-size:12.5px}
 .invite-btn{padding:9px 22px;font-size:13.5px}
 .pri:hover{background:var(--accenth)}
-.userbox{display:none;align-items:center;gap:10px;margin-top:auto;padding:8px 10px;background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--border2);border-radius:12px}
-.uavatar{width:34px;height:34px;flex-shrink:0;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2))}
+.userbox{display:none;align-items:center;gap:9px;margin-top:auto;padding:8px 9px;background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--border2);border-radius:12px}
+.uavatar{width:34px;height:34px;flex-shrink:0;border-radius:9px;overflow:hidden;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));transition:box-shadow .15s,transform .15s}
+.uavatar:hover{box-shadow:0 0 0 2px var(--accent)55;transform:translateY(-1px)}
 .uinfo{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
 .uname{font-size:13px;font-weight:600;line-height:1.1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.urole{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;padding:1px 6px;border-radius:5px;align-self:flex-start}
+.urole{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;padding:1px 6px;border-radius:5px;align-self:flex-start;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .urole.admin{background:var(--amber)22;color:var(--amber)}
 .urole.viewer{background:var(--accent2)22;color:var(--accent2)}
 .ulogout{background:none;border:1px solid var(--border2);color:var(--muted);cursor:pointer;font-size:15px;padding:6px 8px;border-radius:8px;line-height:0;position:relative}
@@ -1538,7 +1536,7 @@ textarea.np-in{resize:vertical;line-height:1.5}
       <a data-v="mg-audit" onclick="nav('mg-audit')"><i class="ti ti-shield-search"></i> Audit</a>
     </nav>
     <div id="user-badge" class="userbox">
-      <div class="uavatar" onclick="openProfile('status')" style="cursor:pointer" title="Status & profile"><span id="ub-initials">U</span></div>
+      <div class="uavatar" onclick="openProfile('profile')" style="cursor:pointer" title="Status & profile"><span id="ub-initials">U</span></div>
       <div class="uinfo"><div id="ub-name" class="uname"></div><span id="ub-role" class="urole"></span></div>
       <button id="getapp-btn" onclick="openGetApp()" title="Get the app" class="ulogout"><i id="getapp-ic" class="ti ti-download"></i><span id="getapp-ver" hidden style="font-size:11px;font-weight:700;margin-left:5px;letter-spacing:.01em"></span><span class="upd-dot" hidden></span></button>
       <button onclick="doLogout()" title="Sign out" class="ulogout"><i class="ti ti-logout"></i></button>
@@ -2009,8 +2007,11 @@ textarea.np-in{resize:vertical;line-height:1.5}
           </div>
         </div>
         <div id="pp-profile" hidden>
-          <label class="btn-ghost" style="cursor:pointer;display:inline-flex;margin-bottom:12px"><i class="ti ti-camera"></i> Change photo
-            <input type="file" accept="image/*" hidden onchange="uploadAvatar(this)"></label>
+          <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
+            <label class="btn-ghost" style="cursor:pointer;display:inline-flex"><i class="ti ti-camera"></i> Change photo
+              <input type="file" accept="image/*" hidden onchange="uploadAvatar(this)"></label>
+            <button id="pp-rmphoto" class="btn-ghost" hidden onclick="removeAvatar()"><i class="ti ti-trash"></i> Remove photo</button>
+          </div>
           <div class="fr"><span class="lbl">Display name</span><input id="pp-name" style="flex:1"></div>
           <div class="fr"><span class="lbl">Email</span><input id="pp-email" type="email" style="flex:1"></div>
           <div class="fr"><span class="lbl">New password</span><input id="pp-pw" type="password" placeholder="leave empty to keep" style="flex:1"></div>
@@ -2336,15 +2337,11 @@ function roadmapGantt(s){
     const start=Math.min(prev,end);prev=end;
     let st="planned";if(reached)st="reached";else if(firstActive){st="active";firstActive=false;}
     return {name:m.name,goal:m.goal,ver:m.target_version,start,end,st};});
-  const min=Math.min(t0,...rows.map(r=>r.start)),max=Math.max(now,...rows.map(r=>r.end));
-  const span=Math.max(DAY,max-min),pct=t=>((t-min)/span*100);
-  const shortSpan=span<=140*DAY; // show week gridlines only when zoomed-in enough
-  // Quarter gridlines + labels.
-  let grid="",labels="";const d=new Date(min);d.setDate(1);d.setMonth(Math.floor(d.getMonth()/3)*3);
-  for(let q=new Date(d);q.getTime()<max;q.setMonth(q.getMonth()+3)){const x=pct(q.getTime());if(x>=0&&x<=100){
-    grid+=`<div class="gq" style="left:${x}%"></div>`;labels+=`<div class="gqlab" style="left:${x}%">Q${Math.floor(q.getMonth()/3)+1} ${q.getFullYear()}</div>`;}}
-  // Week gridlines (light) when the horizon is short.
-  if(shortSpan){const w=new Date(min);w.setDate(w.getDate()-w.getDay());for(let x=new Date(w);x.getTime()<max;x.setDate(x.getDate()+7)){const p=pct(x.getTime());if(p>=0&&p<=100)grid+=`<div class="gwk" style="left:${p}%"></div>`;}}
+  // NOTE: this is an ordered stepper, not a time-positioned chart. Milestones
+  // routinely land days apart (all five of cox's did), and placing them on a
+  // real date axis stacks them into one illegible clump — so each card carries
+  // its own delivery date instead. Don't reintroduce gridlines here without
+  // solving that collision first.
   const fmt=t=>new Date(t).toLocaleDateString([],{month:"short",day:"numeric",year:"numeric"});
   const quarter=t=>{const d=new Date(t);return "Q"+(Math.floor(d.getMonth()/3)+1)+" "+d.getFullYear();};
   const n=rows.length;
@@ -2365,8 +2362,8 @@ function roadmapGantt(s){
         <div class="msq"><i class="ti ti-calendar-event" style="font-size:12px"></i> ${quarter(r.end)} · ${fmt(r.end)}</div>
         <div class="msprog"><div style="width:${prog}%;background:${col}"></div></div>
         <div class="msgoaltxt" title="${esc(r.goal)}">${esc(r.goal)}</div></div></div>`;}).join("");
-  return `<div class="sec" style="margin-top:22px">Milestone roadmap <span style="font-size:11px;color:var(--dim);font-weight:400">· ${esc(proj)} — shippable targets, when each delivers (by quarter)</span></div>
-    <div class="panel" style="overflow-x:auto;margin-bottom:26px"><div class="mstepper">${cols}</div></div>`;
+  return `<div class="sec" style="margin-top:22px">Milestone roadmap <span style="font-size:11px;color:var(--dim);font-weight:400">· ${esc(proj)} — shippable targets in delivery order, each with the date it lands</span></div>
+    <div class="panel" style="overflow-x:auto;margin-bottom:26px" data-keepscroll="rm-milestones"><div class="mstepper">${cols}</div></div>`;
 }
 // Milestone roadmap — each is a shippable target (a version), spanning several
 // sprints. Status derived from the shipped version.
@@ -2454,17 +2451,36 @@ function renderRoadmap(){
   // Delivery timeline from release history.
   let timeline='';
   if(hist.length){const recent=hist.slice(-8);
-    timeline=`<div class="sec" style="margin-top:22px">Delivery timeline</div><div class="panel" style="overflow-x:auto">
+    timeline=`<div class="sec" style="margin-top:22px">Delivery timeline</div><div class="panel" style="overflow-x:auto" data-keepscroll="rm-timeline" data-scrollend="1">
       <div style="display:flex;align-items:flex-start;min-width:min-content;padding:6px 0">${recent.map((r,i)=>`
-        <div style="flex:1;min-width:118px;position:relative;text-align:center;padding:0 4px">
-          ${i<recent.length-1?'<div style="position:absolute;top:8px;left:50%;width:100%;height:2px;background:var(--border2)"></div>':''}
-          <div style="width:16px;height:16px;border-radius:50%;background:var(--card);border:3px solid var(--green);margin:0 auto;position:relative;z-index:1"></div>
+        <div style="flex:1 1 0;min-width:118px;max-width:190px;position:relative;text-align:center;padding:0 4px">
+          ${i<recent.length-1?'<div style="position:absolute;top:8px;left:50%;width:100%;height:2px;background:var(--border2);pointer-events:none"></div>':''}
+          <div style="width:16px;height:16px;border-radius:50%;background:transparent;border:3px solid var(--green);margin:0 auto;position:relative;z-index:1"></div>
           <div style="font-size:13px;font-weight:700;margin-top:7px;color:var(--accent2)">v${esc(r.version)}</div>
           <div style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.title)}">${esc(r.title)}</div>
           <div style="font-size:10px;color:var(--dim)">${esc((r.at||'').slice(0,10))}</div></div>`).join("")}</div></div>`;
   }
+  const keep=grabScroll(el);
   el.innerHTML=header+timeline+roadmapGantt(s)+board;
+  applyScroll(el,keep);
 }
+// A view re-renders on every state poll, and replacing innerHTML resets each
+// scroll container to its left edge — which yanks the reader back to the start
+// of the timeline mid-scroll. Snapshot by key and put it back. A container
+// marked data-scrollend opens on its newest (right-most) entry.
+function grabScroll(root){const m={};
+  root.querySelectorAll("[data-keepscroll]").forEach(e=>{
+    m[e.dataset.keepscroll]={left:e.scrollLeft,atEnd:e.scrollLeft>=e.scrollWidth-e.clientWidth-4};});
+  return m;}
+function applyScroll(root,m){
+  root.querySelectorAll("[data-keepscroll]").forEach(e=>{
+    const prev=m[e.dataset.keepscroll],end=e.dataset.scrollend==="1";
+    // First render of an end-anchored strip opens on the newest entry; someone
+    // already parked at the end follows new releases instead of drifting back.
+    if(!prev)e.scrollLeft=end?e.scrollWidth:0;
+    else if(prev.atEnd&&end)e.scrollLeft=e.scrollWidth;
+    else e.scrollLeft=prev.left;
+  });}
 // A Gantt-style delivery chart on a real time axis: each shipped version is a
 // bar spanning the time it took to ship (previous release → its own release),
 // and the active sprint is a projected in-flight bar toward its goal.
@@ -2497,7 +2513,7 @@ function ganttHtml(s){
       <div class="gantt-lbl" title="${esc(r.sub||'')}"><b>${esc(r.label)}</b><span>${esc((r.sub||'').slice(0,42))}</span></div>
       <div class="gantt-track"><div class="gantt-bar" style="left:${l}%;width:${w}%;${stripe}" title="${esc(r.label)} · ${esc(r.sub||'')}">${r.kind==='shipped'?'<i class="ti ti-check" style="font-size:11px;color:#fff"></i>':''}</div></div></div>`;}).join("");
   return `<div class="sec" style="margin-top:22px">Release Gantt <span style="font-size:11px;color:var(--dim);font-weight:400">· when each version shipped, and the sprint in flight</span></div>
-    <div class="panel" style="overflow-x:auto"><div style="min-width:520px">
+    <div class="panel" style="overflow-x:auto" data-keepscroll="rm-gantt"><div style="min-width:520px">
       <div class="gantt-axis"><div class="gantt-lbl"></div><div class="gantt-track" style="height:16px">${ticks}<div style="position:absolute;left:${nowPct}%;top:-2px;bottom:-999px;width:2px;background:var(--accent2);opacity:.5" title="now"></div></div></div>
       ${bars}
       <div class="gantt-axis" style="margin-top:6px"><div class="gantt-lbl"></div><div class="gantt-track" style="height:0"><div style="position:absolute;left:${nowPct}%;transform:translateX(-50%);font-size:9px;color:var(--accent2)">now</div></div></div>
@@ -4586,7 +4602,10 @@ function statusChip(u){const p=PROFILES[u]||{};
 const STATUS_PRESETS=[["🎯","Focusing"],["🍜","Lunch"],["🏠","WFH"],["📅","In a meeting"],["🌴","Vacation"],["🤒","Sick"]];
 setInterval(()=>{loadProfiles();loadMembers();},60000); // teammates' avatar/status/name refresh
 function profileTab(t){
-  for(const k of ["status","profile","prefs"]){
+  // Never leave every pane hidden: an unknown tab falls back to Status.
+  const tabs=["status","profile","prefs"];
+  if(!tabs.includes(t))t="status";
+  for(const k of tabs){
     document.getElementById("pt-"+k).classList.toggle("on",k===t);
     document.getElementById("pp-"+k).hidden=k!==t;
   }
@@ -4599,6 +4618,7 @@ function openProfile(tab){const me=(ME&&ME.username)||"";const p=PROFILES[me]||{
   document.getElementById("pf-text").value=p.status_text||"";
   document.getElementById("pf-presets").innerHTML=STATUS_PRESETS.map(([e,t])=>
     `<button class="pf-preset" onclick="pickPreset('${e}','${t}')">${e} ${t}</button>`).join("");
+  document.getElementById("pp-rmphoto").hidden=!p.avatar;
   document.getElementById("pp-name").value=(ME&&ME.name)||"";
   document.getElementById("pp-email").value=(ME&&ME.email)||"";
   document.getElementById("pp-pw").value="";
@@ -4624,11 +4644,16 @@ function savePopupPrefs(){
   localStorage.setItem("cox_desktop",document.getElementById("ppf-desktop").value);
   localStorage.setItem("cox_sound",document.getElementById("ppf-sound").value);
   toasty("Preferences saved","ok");}
+async function removeAvatar(){
+  try{const r=await fetch("/api/profile/avatar",{method:"DELETE"});
+    if(r.ok){await loadProfiles();try{renderMe();}catch(e){}openProfile("profile");toasty("Photo removed","ok");renderChatList(true);}
+    else toasty(await r.text()||"Could not remove","err");
+  }catch(e){toasty("Network error","err");}}
 async function uploadAvatar(input){const f=input.files[0];input.value="";if(!f)return;
   if(f.size>2*1024*1024){toasty("Ảnh tối đa 2MB","err");return;}
   const fd=new FormData();fd.append("file",f);
   try{const r=await fetch("/api/profile/avatar",{method:"POST",body:fd});
-    if(r.ok){await loadProfiles();openProfile();toasty("Avatar updated","ok");renderChatList(true);}
+    if(r.ok){await loadProfiles();try{renderMe();}catch(e){}openProfile("profile");toasty("Avatar updated","ok");renderChatList(true);}
     else toasty(await r.text()||"Upload failed","err");
   }catch(e){toasty("Network error","err");}}
 // NOTE: named saveStatus — `saveProfile` is taken by the account-settings form.
@@ -5954,18 +5979,23 @@ function applyRole(){
   const badge=document.getElementById("user-badge");
   if(ME&&ME.auth){badge.style.display="flex";
     document.getElementById("ub-name").textContent=ME.username;
-    const rc=document.getElementById("ub-role");rc.textContent=roleLabel(ME.role);rc.className="urole "+(ME.role==="admin"?"admin":"viewer");
+    // Full label in the tooltip; the chip itself stays one short line so the
+    // badge never wraps into a two-line block.
+    const rc=document.getElementById("ub-role");rc.textContent=roleLabel(ME.role);rc.title=roleLabel(ME.role);
+    rc.className="urole "+(ME.role==="super"||ME.role==="admin"?"admin":"viewer");
     renderMe();}
   else{badge.style.display="none";}
 }
 // Own badge: avatar (or initials) + status emoji; click opens the profile modal.
 function renderMe(){const box=document.querySelector("#user-badge .uavatar");if(!box||!ME)return;
   const me=ME.username||"?";const p=PROFILES[me]||{};
-  box.style.cursor="pointer";box.title="Edit your profile & status";box.onclick=openProfile;
+  // Bind through a wrapper: assigning openProfile directly hands it the click
+  // Event as `tab`, which matches no pane and opens the modal with nothing selected.
+  box.style.cursor="pointer";box.title="Edit your profile & status";box.onclick=()=>openProfile("profile");
   box.innerHTML=p.avatar?`<img src="${esc(p.avatar)}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit">`
     :`<span id="ub-initials">${esc(me.slice(0,2).toUpperCase())}</span>`;
   const nm=document.getElementById("ub-name");
-  if(nm)nm.innerHTML=esc(me)+(p.status_emoji?` <span class="ustatus" title="${esc(p.status_text||"")}">${esc(p.status_emoji)}</span>`:"");
+  if(nm)nm.innerHTML=esc(ME.name||me)+(p.status_emoji?` <span class="ustatus" title="${esc(p.status_text||"")}">${esc(p.status_emoji)}</span>`:"");
 }
 // Build <option>s for a role <select> (excludes legacy reviewer/viewer).
 function roleOptions(sel){

@@ -468,10 +468,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             if pr.base != target {
                 continue;
             }
-            if pr.ci == "pending" {
+            // With require_ci off (CI unavailable, e.g. Actions billing dead),
+            // CI status is ignored entirely — local test/lint gates plus the
+            // SA's diff judgement carry the review instead.
+            let require_ci = self.config.git.require_ci;
+            if require_ci && pr.ci == "pending" {
                 continue; // wait for CI before judging
             }
-            let blocked = if pr.ci == "failing" {
+            let blocked = if require_ci && pr.ci == "failing" {
                 Some("CI is failing — fix the build/tests.".to_owned())
             } else if !pr.mergeable {
                 Some("The branch has merge conflicts — rebase on the base branch.".to_owned())
@@ -4987,6 +4991,35 @@ mod tests {
             "goal".to_owned(),
         )
         .with_forge(forge as Arc<dyn ForgePort>)
+    }
+
+    #[tokio::test]
+    async fn require_ci_off_reviews_and_merges_despite_failing_ci() {
+        // CI unavailable (e.g. Actions billing dead) + require_ci off: the SA
+        // judges the diff on its own and an approve still merges.
+        let forge = Arc::new(SpyForge {
+            ci: "failing".to_owned(),
+            mergeable: true,
+            ..Default::default()
+        });
+        let mut cfg = Config::default();
+        cfg.git.enabled = true;
+        cfg.git.auto_merge = true;
+        cfg.git.require_ci = false;
+        RunCycleUseCase::new(
+            Arc::new(MemStore::default()),
+            Arc::new(ReviewEngine {
+                decision: "approve",
+            }),
+            cfg,
+            PathBuf::from("/tmp"),
+            "goal".to_owned(),
+        )
+        .with_forge(Arc::clone(&forge) as Arc<dyn ForgePort>)
+        .review_open_prs()
+        .await;
+        assert_eq!(*forge.merged.lock().expect("lock"), vec![7]);
+        assert!(forge.changes.lock().expect("lock").is_empty());
     }
 
     #[tokio::test]

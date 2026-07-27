@@ -76,6 +76,36 @@ impl AgentOutcome {
     pub fn succeeded(&self) -> bool {
         self.exit_code == Some(0)
     }
+
+    /// Why this run failed, for an error message. Prefers stderr, but falls
+    /// back to the tail of stdout: CLI engines print their real reason (an
+    /// expired OAuth session, a quota wall) as a normal output event and exit
+    /// with an EMPTY stderr, which would otherwise strip the cause out of the
+    /// error — and with it every downstream signal that reads the message,
+    /// including the infrastructure-fault taxonomy.
+    #[must_use]
+    pub fn failure_detail(&self) -> String {
+        let err = self.stderr.trim();
+        if !err.is_empty() {
+            return err.to_owned();
+        }
+        let out = self.stdout.trim();
+        if out.is_empty() {
+            return String::new();
+        }
+        // The last lines carry the failure; cap it so an error stays readable.
+        let tail: Vec<&str> = out.lines().rev().take(6).collect();
+        let mut detail: String = tail
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join(" | ")
+            .chars()
+            .take(400)
+            .collect();
+        detail = detail.trim().to_owned();
+        detail
+    }
 }
 
 /// A CLI agent engine.
@@ -120,5 +150,54 @@ pub trait AgentEnginePort: Send + Sync {
             "engine {} does not support session resume",
             self.id()
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn outcome(stdout: &str, stderr: &str) -> AgentOutcome {
+        AgentOutcome {
+            stdout: stdout.to_owned(),
+            stderr: stderr.to_owned(),
+            exit_code: Some(1),
+            usage: None,
+            trace: String::new(),
+            session_id: None,
+            sandbox: SandboxStatus::default(),
+        }
+    }
+
+    #[test]
+    fn failure_detail_falls_back_to_stdout_when_stderr_is_empty() {
+        // The claude CLI reports an expired session on stdout and exits with an
+        // empty stderr; dropping it strips the cause out of every downstream
+        // signal, including the infra-fault taxonomy that pauses the runner.
+        let o = outcome(
+            "starting\nFailed to authenticate: OAuth session expired and could not be refreshed",
+            "",
+        );
+        let detail = o.failure_detail();
+        assert!(
+            detail.contains("OAuth session expired"),
+            "detail was {detail:?}"
+        );
+        assert!(crate::faults::is_infra_fault(&detail));
+    }
+
+    #[test]
+    fn failure_detail_prefers_stderr_and_tolerates_silence() {
+        assert_eq!(
+            outcome("noise on stdout", "  real reason  ").failure_detail(),
+            "real reason"
+        );
+        assert_eq!(outcome("", "").failure_detail(), "");
+    }
+
+    #[test]
+    fn failure_detail_is_bounded() {
+        let long = "x".repeat(5000);
+        assert!(outcome(&long, "").failure_detail().len() <= 400);
     }
 }

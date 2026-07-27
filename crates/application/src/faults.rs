@@ -62,6 +62,10 @@ mod tests {
             "getaddrinfo ENOTFOUND api.anthropic.com",
             "fetch failed: network error",
             "upstream overloaded (529)",
+            // The exact line the claude CLI prints on an expired session —
+            // it reaches us through stdout, not stderr.
+            "PO milestones engine failed: Failed to authenticate: OAuth session expired and \
+             could not be refreshed",
         ] {
             assert!(is_infra_fault(why), "{why:?} must be infra");
         }
