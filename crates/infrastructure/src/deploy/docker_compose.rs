@@ -236,6 +236,57 @@ impl DeployPort for DockerComposeDeploy {
         Ok(Some(count))
     }
 
+    async fn lint_report(
+        &self,
+        work_dir: &Path,
+    ) -> Result<Option<coxagent_application::ports::outbound::LintReport>, PortError> {
+        if !work_dir.join("Cargo.toml").exists() {
+            return Ok(None);
+        }
+        let _slot = crate::proc::heavy_slot().await;
+        let child = crate::proc::low_priority("cargo")
+            .args(["clippy", "--workspace", "--all-targets", "--quiet"])
+            .current_dir(work_dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| PortError::Backend(format!("spawn clippy: {e}")))?;
+        let leader = child.id();
+        let out =
+            match tokio::time::timeout(Duration::from_secs(600), child.wait_with_output()).await {
+                Ok(out) => out.map_err(|e| PortError::Backend(format!("clippy wait: {e}")))?,
+                Err(_) => {
+                    if let Some(pid) = leader {
+                        crate::proc::kill_group(pid);
+                    }
+                    return Err(PortError::Backend("clippy timed out".to_owned()));
+                }
+            };
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let errors: Vec<&str> = text
+            .lines()
+            .filter(|l| l.trim_start().starts_with("error"))
+            .collect();
+        // A dozen error lines is plenty for a repair prompt; the agent can run
+        // clippy itself for the rest.
+        let sample = errors
+            .iter()
+            .take(12)
+            .copied()
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(Some(coxagent_application::ports::outbound::LintReport {
+            errors: errors.len() as u64,
+            sample,
+        }))
+    }
+
     async fn run_tests(&self, work_dir: &Path) -> Result<DeployReport, PortError> {
         let Some((cmd, args)) = test_command(work_dir) else {
             return Ok(DeployReport {
