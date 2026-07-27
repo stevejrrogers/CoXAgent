@@ -269,21 +269,19 @@ impl DeployPort for DockerComposeDeploy {
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
-        let errors: Vec<&str> = text
-            .lines()
-            .filter(|l| l.trim_start().starts_with("error"))
-            .collect();
+        let (errors, files) = parse_clippy(&text);
         // A dozen error lines is plenty for a repair prompt; the agent can run
         // clippy itself for the rest.
         let sample = errors
             .iter()
             .take(12)
-            .copied()
+            .map(String::as_str)
             .collect::<Vec<_>>()
             .join("\n");
         Ok(Some(coxagent_application::ports::outbound::LintReport {
             errors: errors.len() as u64,
             sample,
+            files,
         }))
     }
 
@@ -656,6 +654,68 @@ mod tests {
             result.passed,
             "an app that binds its port within the configured timeout must pass \
              the gate, even though earlier probes hit connection refused: {result:?}"
+        );
+    }
+}
+
+/// Split `cargo clippy` human output into its error lines and the files those
+/// errors point at. Clippy prints the location on the `-->` line that follows
+/// each error, so the two are paired in report order.
+fn parse_clippy(text: &str) -> (Vec<String>, Vec<String>) {
+    let mut errors = Vec::new();
+    let mut files = Vec::new();
+    let mut lines = text.lines().peekable();
+    while let Some(line) = lines.next() {
+        if !line.trim_start().starts_with("error") {
+            continue;
+        }
+        errors.push(line.trim().to_owned());
+        // The location follows within a couple of lines; stop at the next error
+        // so an error without one never steals the following error's file.
+        let mut file = String::new();
+        for _ in 0..3 {
+            let Some(next) = lines.peek() else { break };
+            let next = (*next).trim();
+            if next.starts_with("error") {
+                break;
+            }
+            if let Some(loc) = next.strip_prefix("--> ") {
+                file = loc.split(':').next().unwrap_or("").trim().to_owned();
+                lines.next();
+                break;
+            }
+            lines.next();
+        }
+        files.push(file);
+    }
+    (errors, files)
+}
+
+#[cfg(test)]
+mod clippy_parse_tests {
+    use super::parse_clippy;
+
+    #[test]
+    fn pairs_each_error_with_the_file_it_points_at() {
+        let out = "\
+error: redundant closure
+  --> crates/app/src/lib.rs:12:5
+   |
+error: too many lines
+  --> crates/domain/src/ticket.rs:99:1
+   |
+error: could not compile `x` due to 2 previous errors
+";
+        let (errors, files) = parse_clippy(out);
+        assert_eq!(errors.len(), 3);
+        assert_eq!(
+            files,
+            [
+                "crates/app/src/lib.rs",
+                "crates/domain/src/ticket.rs",
+                // The summary line carries no location and must not borrow one.
+                ""
+            ]
         );
     }
 }

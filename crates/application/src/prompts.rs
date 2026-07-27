@@ -392,6 +392,73 @@ pub fn focus_block(work_dir: &std::path::Path, query: &str) -> String {
     out.chars().take(1800).collect()
 }
 
+/// What has already been done to the code this ticket is about — the reflex a
+/// human brings to unfamiliar code and an agent has to be handed: before
+/// touching a file, look at its recent history. A previous attempt at the same
+/// bug, a refactor that introduced it, or a revert all live here, and none of
+/// them are visible in the ticket text.
+///
+/// Deterministic and cheap: the code graph picks the files, `git log` reports
+/// them. Empty when the graph has no opinion or the directory is not a repo.
+#[must_use]
+pub fn history_block(work_dir: &std::path::Path, query: &str) -> String {
+    use std::fmt::Write as _;
+    let Some(g) = crate::codegraph::CodeGraph::load(work_dir) else {
+        return String::new();
+    };
+    let mut files: Vec<String> = Vec::new();
+    for s in g.relevance_search(query, 12) {
+        if !files.contains(&s.file) {
+            files.push(s.file.clone());
+        }
+        if files.len() == 4 {
+            break;
+        }
+    }
+    if files.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    for f in &files {
+        let Ok(o) = std::process::Command::new("git")
+            .args([
+                "log",
+                "-n",
+                "3",
+                "--no-merges",
+                "--date=short",
+                "--format=%h %ad %s",
+                "--",
+                f,
+            ])
+            .current_dir(work_dir)
+            .output()
+        else {
+            continue;
+        };
+        let log = String::from_utf8_lossy(&o.stdout);
+        let lines: Vec<&str> = log.lines().filter(|l| !l.trim().is_empty()).collect();
+        if lines.is_empty() {
+            continue;
+        }
+        let _ = writeln!(out, "- {f}:");
+        for l in lines.iter().take(3) {
+            let entry: String = l.chars().take(120).collect();
+            let _ = writeln!(out, "    {entry}");
+        }
+    }
+    if out.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n\nRECENT HISTORY of the files above — check whether this was already \
+         attempted or caused by one of these before you change anything:\n{out}"
+    )
+    .chars()
+    .take(1200)
+    .collect()
+}
+
 /// Where cross-project ("hub") lessons live: one markdown bullet per lesson,
 /// shared by EVERY project this user's hub runs — so what one team learns
 /// ("rust:1.79 base image breaks edition2024") benefits the next project too.
@@ -664,5 +731,51 @@ mod tests {
     #[test]
     fn relevant_memory_empty_when_no_memory() {
         assert!(super::team_memory_block_relevant(&[], &[], "anything").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod history_block_tests {
+    use super::history_block;
+
+    #[test]
+    fn stays_silent_when_the_code_graph_has_no_opinion() {
+        let dir = std::env::temp_dir().join(format!("histblock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("mkdir");
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .expect("git");
+        };
+        git(&["init", "-q"]);
+        std::fs::write(dir.join("src/auth.rs"), "fn verify_token() {}\n").expect("write");
+        git(&["add", "-A"]);
+        git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "fix(auth): reject an expired token",
+        ]);
+        // A real repo with a matching commit, but no code graph: the block must
+        // stay silent rather than guess at files — a confidently wrong history
+        // is worse than none.
+        assert!(history_block(&dir, "verify_token").is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_directory_that_is_not_a_repo_yields_nothing() {
+        let dir = std::env::temp_dir().join(format!("histblock-norepo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        assert!(history_block(&dir, "anything").is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

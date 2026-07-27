@@ -1342,7 +1342,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             }
 
             // SM dispatch FIRST (agents resolve), then report what remains.
-            self.sm_unpark_tickets().await;
+            // Boxed: the escalation ladder holds a failure log across its awaits,
+            // and inlining it here pushes the whole cycle future over 16KB.
+            Box::pin(self.sm_unpark_tickets()).await;
             self.impediment_watch().await;
 
             // Merge-queue recovery gate: with a blown-up queue the ONLY useful
@@ -3223,11 +3225,20 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
     }
 
-    /// SM → SA re-design for tickets PARKED after 3 red builds: the failure is
-    /// treated as a spec/design problem, not a typing problem — the SA revises
-    /// the technical approach (simplify, split, change direction) and the
-    /// ticket re-enters the flow with fresh attempts. One redesign per ticket;
-    /// parking again after that is a human decision.
+    /// SM escalation for tickets PARKED after 3 red builds — the stand-in for
+    /// what a real team does when a dev is stuck: someone senior picks it up,
+    /// and WHICH someone depends on why it kept failing.
+    ///
+    /// The three attempts' failure reasons are read from the ticket journal and
+    /// routed: a ticket that never had a workable spec goes to the BA to be
+    /// made answerable; one blocked on a mechanical gate (lints, a missing
+    /// regression test) goes to the SA as a repair brief, because redesigning
+    /// an approach that was never the problem just burns another three
+    /// attempts; anything else is a genuine design dead end and gets the SA's
+    /// revised approach. Every brief now carries the actual failures — the SA
+    /// used to be told only that the ticket was parked. One escalation per
+    /// ticket; parking again after that is a human decision.
+    #[allow(clippy::too_many_lines)] // one escalation, three routes, read top to bottom
     async fn sm_unpark_tickets(&self) {
         let candidates: Vec<(String, String)> = {
             let Ok(state) = self.store.load().await else {
@@ -3236,7 +3247,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             state
                 .ticket_fail_attempts
                 .iter()
-                .filter(|(id, n)| **n >= 3 && !state.ticket_redesigns.contains_key(*id))
+                .filter(|(id, n)| {
+                    **n >= 3
+                        && state.ticket_redesigns.get(*id).copied().unwrap_or(0)
+                            < MAX_TICKET_RESCUES
+                })
                 .filter_map(|(id, _)| {
                     state
                         .tickets
@@ -3248,58 +3263,174 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 .collect()
         };
         for (id, title) in candidates {
-            let claimed = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
-                if s.ticket_redesigns.contains_key(&id) {
-                    return Err(crate::PortError::Conflict("already redesigned".into()));
-                }
-                s.ticket_redesigns.insert(id.clone(), 1);
-                Ok(())
-            })
-            .await;
-            if claimed.is_err() {
-                continue;
+            Box::pin(self.escalate_parked_ticket(id, title)).await;
+        }
+    }
+
+    /// One escalation: read what actually failed, pick the senior who can
+    /// unstick it, and hand the ticket back to the flow. Split out of
+    /// `sm_unpark_tickets` so the cycle's future stays small — this body
+    /// holds a whole failure log across its awaits.
+    #[allow(clippy::too_many_lines)] // one escalation, three routes, read top to bottom
+    async fn escalate_parked_ticket(&self, id: String, title: String) {
+        // What actually went wrong, in the words the gates recorded.
+        let (history, spec_gap, structured) = {
+            let Ok(state) = self.store.load().await else {
+                return;
+            };
+            let structured = state.attempt_failures(&id).to_vec();
+            let hist = if structured.is_empty() {
+                state
+                    .ticket_journal
+                    .get(&id)
+                    .map(|v| v.join("\n"))
+                    .unwrap_or_default()
+            } else {
+                structured
+                    .iter()
+                    .map(|f| {
+                        format!(
+                            "attempt {} — rejected by {} ({:?}): {}",
+                            f.attempt, f.gate, f.layer, f.detail
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            let thin = state
+                .tickets
+                .iter()
+                .find(|t| t.id().to_string() == id)
+                .is_some_and(|t| {
+                    t.acceptance_criteria().is_empty() || t.description().trim().len() < 80
+                });
+            (hist, thin, structured)
+        };
+        // Data beats prose: route on what the gates recorded, and only fall
+        // back to reading English for tickets that failed before the
+        // structured log existed.
+        let route = if structured.is_empty() {
+            escalation_route(&history, spec_gap)
+        } else {
+            route_from_failures(&structured, spec_gap)
+        };
+        let claimed = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+            let done = s.ticket_redesigns.get(&id).copied().unwrap_or(0);
+            if done >= MAX_TICKET_RESCUES {
+                return Err(crate::PortError::Conflict("rescues exhausted".into()));
             }
-            self.report("SA", &format!("re-designing parked {id}"));
-            let request = crate::ports::outbound::AgentRequest {
-                role: coxagent_domain::Role::Sa,
-                system_prompt: crate::prompts::system_prompt(crate::prompts::SA),
-                task_prompt: format!(
-                    "Ticket {id} (\"{title}\") was PARKED after THREE failed build/verify \
-                     attempts — the current technical approach is not working. Study the repo \
-                     and the ticket's history, then reply with a REVISED approach in under 900 \
-                     characters: simplify the scope, change the technique, or split out what's \
-                     achievable. Plain text, imperative, concrete files/modules.",
+            s.ticket_redesigns.insert(id.clone(), done + 1);
+            Ok(())
+        })
+        .await;
+        if claimed.is_err() {
+            return;
+        }
+        let failures = if history.trim().is_empty() {
+            "(no failure detail was recorded)".to_owned()
+        } else {
+            history.clone()
+        };
+        let (who, persona, brief) = match route {
+            EscalationRoute::Spec => (
+                "BA",
+                crate::prompts::BA,
+                format!(
+                    "Ticket {id} (\"{title}\") failed THREE times and the developers never \
+                     had a spec they could build against. Here is what each attempt \
+                     reported:\n{failures}\n\nRewrite the requirement so it is answerable: \
+                     state the exact problem, the steps to reproduce it if it is a bug, and \
+                     numbered acceptance criteria a developer can verify mechanically. Under \
+                     900 characters, plain text, no approach or file names — that is the \
+                     SA's job."
                 ),
-                work_dir: self.work_dir.clone(),
-                timeout: std::time::Duration::from_secs(900),
-                escalation_level: 0,
-            };
-            let out = match self.engine.run(request).await {
-                Ok(o) if o.succeeded() => o.stdout.trim().chars().take(1200).collect::<String>(),
-                _ => String::new(),
-            };
-            if out.len() < 40 {
-                continue; // no usable revision — stays parked for a human
-            }
-            let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
-                if let Some(t) = s.tickets.iter_mut().find(|t| t.id().to_string() == id) {
-                    let design = coxagent_domain::TechnicalDesign {
-                        approach: out.clone(),
-                        ..Default::default()
-                    };
-                    let _ = t.set_technical_design(coxagent_domain::Role::Sa, design);
+            ),
+            EscalationRoute::Mechanical => (
+                "SA",
+                crate::prompts::SA,
+                format!(
+                    "Ticket {id} (\"{title}\") failed THREE times, every time on a mechanical \
+                     quality gate rather than on the design:\n{failures}\n\nThe approach is \
+                     probably fine — the developer could not get past the gate. Study the \
+                     repo and reply with a concrete plan under 900 characters to clear THAT \
+                     blocker: which lint or missing test, in which file, and what the fix \
+                     is. Do not redesign the feature. Plain text, imperative."
+                ),
+            ),
+            EscalationRoute::Design => (
+                "SA",
+                crate::prompts::SA,
+                format!(
+                    "Ticket {id} (\"{title}\") was PARKED after THREE failed build/verify \
+                     attempts — the current technical approach is not working. Each attempt \
+                     reported:\n{failures}\n\nStudy the repo and reply with a REVISED \
+                     approach in under 900 characters: simplify the scope, change the \
+                     technique, or split out what's achievable. Plain text, imperative, \
+                     concrete files/modules."
+                ),
+            ),
+        };
+        self.report(who, &format!("rescuing parked {id}"));
+        let request = crate::ports::outbound::AgentRequest {
+            role: if who == "BA" {
+                coxagent_domain::Role::Ba
+            } else {
+                coxagent_domain::Role::Sa
+            },
+            system_prompt: crate::prompts::system_prompt(persona),
+            task_prompt: brief,
+            work_dir: self.work_dir.clone(),
+            timeout: std::time::Duration::from_secs(900),
+            // A ticket three attempts deep has earned the stronger model.
+            escalation_level: 1,
+        };
+        let out = match self.engine.run(request).await {
+            Ok(o) if o.succeeded() => o.stdout.trim().chars().take(1200).collect::<String>(),
+            _ => String::new(),
+        };
+        if out.len() < 40 {
+            return; // no usable revision — stays parked for a human
+        }
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+            if let Some(t) = s.tickets.iter_mut().find(|t| t.id().to_string() == id) {
+                match route {
+                    // A clarified requirement belongs in the ticket the DEV
+                    // reads, not in a design field.
+                    EscalationRoute::Spec => {
+                        let _ = t.clarify(coxagent_domain::Role::Ba, &out);
+                    }
+                    EscalationRoute::Mechanical | EscalationRoute::Design => {
+                        let design = coxagent_domain::TechnicalDesign {
+                            approach: out.clone(),
+                            ..Default::default()
+                        };
+                        let _ = t.set_technical_design(coxagent_domain::Role::Sa, design);
+                    }
                 }
-                s.ticket_fail_attempts.remove(&id);
-                let msg = format!(
+            }
+            s.ticket_fail_attempts.remove(&id);
+            // The next DEV run reads the journal, so the rescue lands where
+            // the work happens instead of only in a chat message.
+            s.journal_note(&id, &format!("{who} rescue: {out}"));
+            let msg = match route {
+                EscalationRoute::Spec => format!(
+                    "🧯 SM→BA: {id} bị 3 lần đỏ vì spec chưa rõ — BA đã viết lại yêu cầu, \
+                     DEV làm lại. Đỏ tiếp là chuyển người quyết."
+                ),
+                EscalationRoute::Mechanical => format!(
+                    "🧯 SM→SA: {id} bị 3 lần đỏ ở cổng chất lượng (lint/test) chứ không phải \
+                     thiết kế — SA đưa cách gỡ đúng chỗ đó. Đỏ tiếp là chuyển người quyết."
+                ),
+                EscalationRoute::Design => format!(
                     "🧯 SM→SA: {id} được RE-DESIGN sau 3 build đỏ — DEV thử lại với hướng mới. \
                      Đỏ tiếp là chuyển người quyết."
-                );
-                s.post_comment("SM", &msg, Some(id.clone()));
-                s.post_chat_in("SM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
-                Ok(())
-            })
-            .await;
-        }
+                ),
+            };
+            s.post_comment("SM", &msg, Some(id.clone()));
+            s.post_chat_in("SM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+            Ok(())
+        })
+        .await;
     }
 
     /// SM impediment watch: the Scrum Master's real job — surface everything
@@ -4758,7 +4889,7 @@ mod tests {
             "goal".to_owned(),
         );
         // Cycle 1: BA proposes → SA designs → DEV-FEATURE implements → TEST clean.
-        let report = uc.run_cycle(1).await;
+        let report = Box::pin(uc.run_cycle(1)).await;
         assert!(
             report.errors.is_empty(),
             "no agent errored: {:?}",
@@ -4808,7 +4939,7 @@ mod tests {
             "goal".to_owned(),
         )
         .with_deploy(Arc::clone(&spy) as Arc<dyn crate::ports::outbound::DeployPort>);
-        uc.run_cycle(1).await;
+        Box::pin(uc.run_cycle(1)).await;
         assert_eq!(spy.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
@@ -4868,7 +4999,7 @@ mod tests {
             "goal".to_owned(),
         )
         .with_git(Arc::clone(&spy) as Arc<dyn GitPort>);
-        uc.run_cycle(1).await;
+        Box::pin(uc.run_cycle(1)).await;
         assert!(
             spy.commits.lock().expect("lock").is_empty(),
             "no commit when git.enabled is false"
@@ -4888,7 +5019,7 @@ mod tests {
             "goal".to_owned(),
         )
         .with_git(Arc::clone(&spy) as Arc<dyn GitPort>);
-        uc.run_cycle(1).await;
+        Box::pin(uc.run_cycle(1)).await;
 
         let commits = spy.commits.lock().expect("lock");
         assert_eq!(commits.len(), 1, "one commit for the completed feature");
@@ -5328,7 +5459,7 @@ mod tests {
         let notifier = Arc::new(SpyNotifier::default());
         let (store, git, uc) = rollback_uc(true, &deploy, &notifier);
 
-        uc.run_cycle(1).await;
+        Box::pin(uc.run_cycle(1)).await;
 
         assert_eq!(
             deploy.calls(),
@@ -5382,7 +5513,7 @@ mod tests {
         let notifier = Arc::new(SpyNotifier::default());
         let (store, _git, uc) = rollback_uc(true, &deploy, &notifier);
 
-        uc.run_cycle(1).await;
+        Box::pin(uc.run_cycle(1)).await;
 
         let state = store.load().await.expect("load");
         assert!(
@@ -5429,7 +5560,7 @@ mod tests {
         let notifier = Arc::new(SpyNotifier::default());
         let (store, _git, uc) = rollback_uc(true, &deploy, &notifier);
 
-        uc.run_cycle(1).await;
+        Box::pin(uc.run_cycle(1)).await;
 
         let state = store.load().await.expect("load");
         assert_eq!(
@@ -5453,7 +5584,7 @@ mod tests {
         let notifier = Arc::new(SpyNotifier::default());
         let (store, _git, uc) = rollback_uc(false, &deploy, &notifier);
 
-        uc.run_cycle(1).await;
+        Box::pin(uc.run_cycle(1)).await;
 
         assert_eq!(
             deploy.calls(),
@@ -5496,7 +5627,7 @@ mod tests {
         let notifier = Arc::new(SpyNotifier::default());
         let (store, _git, uc) = rollback_uc(true, &deploy, &notifier);
 
-        uc.run_cycle(1).await;
+        Box::pin(uc.run_cycle(1)).await;
 
         assert_eq!(
             deploy.calls(),
@@ -5575,7 +5706,7 @@ mod tests {
         .with_deploy(Arc::clone(&deploy) as Arc<dyn crate::ports::outbound::DeployPort>)
         .with_notifier(Arc::clone(&notifier) as Arc<dyn crate::ports::outbound::NotifierPort>);
 
-        uc.run_cycle(1).await;
+        Box::pin(uc.run_cycle(1)).await;
 
         let state = store.load().await.expect("load");
         assert!(
@@ -5689,7 +5820,7 @@ mod tests {
         .with_deploy(Arc::clone(&deploy) as Arc<dyn crate::ports::outbound::DeployPort>)
         .with_git(Arc::clone(&git) as Arc<dyn GitPort>);
 
-        uc.run_cycle(1).await;
+        Box::pin(uc.run_cycle(1)).await;
 
         assert_eq!(
             deploy.calls(),
@@ -5802,7 +5933,7 @@ mod tests {
         )
         .with_deploy(Arc::clone(&deploy) as Arc<dyn crate::ports::outbound::DeployPort>);
 
-        uc.run_cycle(1).await;
+        Box::pin(uc.run_cycle(1)).await;
 
         assert_eq!(
             deploy.deploy_calls.load(Ordering::SeqCst),
@@ -5883,7 +6014,7 @@ mod tests {
         .with_deploy(Arc::clone(&deploy) as Arc<dyn crate::ports::outbound::DeployPort>)
         .with_git(Arc::clone(&git) as Arc<dyn GitPort>);
 
-        uc.run_cycle(1).await;
+        Box::pin(uc.run_cycle(1)).await;
 
         assert_eq!(
             deploy.deploy_calls.load(Ordering::SeqCst),
@@ -5944,7 +6075,7 @@ mod tests {
         .with_deploy(Arc::clone(&deploy) as Arc<dyn crate::ports::outbound::DeployPort>);
 
         let started = tokio::time::Instant::now();
-        uc.run_cycle(1).await;
+        Box::pin(uc.run_cycle(1)).await;
         let waited = started.elapsed();
 
         assert!(
@@ -6005,7 +6136,7 @@ mod tests {
         )
         .with_deploy(Arc::clone(&deploy) as Arc<dyn crate::ports::outbound::DeployPort>);
 
-        uc.run_cycle(1).await;
+        Box::pin(uc.run_cycle(1)).await;
 
         assert!(
             deploy.health_check_calls.load(Ordering::SeqCst) >= 4,
@@ -6072,8 +6203,8 @@ mod tests {
         )
         .with_notifier(Arc::clone(&notifier) as Arc<dyn crate::ports::outbound::NotifierPort>);
 
-        uc.run_cycle(1).await;
-        uc.run_cycle(2).await;
+        Box::pin(uc.run_cycle(1)).await;
+        Box::pin(uc.run_cycle(2)).await;
 
         let events: Vec<_> = notifier
             .events
@@ -6135,7 +6266,7 @@ mod tests {
         .with_notifier(Arc::clone(&notifier) as Arc<dyn crate::ports::outbound::NotifierPort>)
         .with_meter(Arc::clone(&meter));
 
-        let report = uc.run_cycle(1).await;
+        let report = Box::pin(uc.run_cycle(1)).await;
 
         assert_eq!(
             budget_warning_events(&notifier).len(),
@@ -6168,7 +6299,7 @@ mod tests {
         .with_meter(Arc::clone(&meter));
 
         meter.lock().expect("lock").total_cost_usd = 80.0;
-        uc.run_cycle(1).await;
+        Box::pin(uc.run_cycle(1)).await;
         assert_eq!(
             budget_warning_events(&notifier).len(),
             1,
@@ -6176,7 +6307,7 @@ mod tests {
         );
 
         meter.lock().expect("lock").total_cost_usd = 5.0; // cumulative 85% — still under the cap
-        uc.run_cycle(2).await;
+        Box::pin(uc.run_cycle(2)).await;
         assert_eq!(
             budget_warning_events(&notifier).len(),
             1,
@@ -6204,7 +6335,7 @@ mod tests {
         .with_meter(Arc::clone(&meter));
 
         meter.lock().expect("lock").total_cost_usd = 80.0;
-        uc.run_cycle(1).await;
+        Box::pin(uc.run_cycle(1)).await;
         assert_eq!(
             budget_warning_events(&notifier).len(),
             1,
@@ -6219,7 +6350,7 @@ mod tests {
         store.save(&state).await.expect("save");
 
         meter.lock().expect("lock").total_cost_usd = 80.0;
-        uc.run_cycle(2).await;
+        Box::pin(uc.run_cycle(2)).await;
         assert_eq!(
             budget_warning_events(&notifier).len(),
             2,
@@ -6248,7 +6379,7 @@ mod tests {
         .with_notifier(Arc::clone(&notifier) as Arc<dyn crate::ports::outbound::NotifierPort>)
         .with_meter(Arc::clone(&meter));
 
-        let report = uc.run_cycle(1).await;
+        let report = Box::pin(uc.run_cycle(1)).await;
 
         assert!(
             budget_warning_events(&notifier).is_empty(),
@@ -6283,7 +6414,7 @@ mod tests {
         .with_notifier(Arc::clone(&notifier) as Arc<dyn crate::ports::outbound::NotifierPort>)
         .with_meter(Arc::clone(&meter));
 
-        let report = uc.run_cycle(1).await;
+        let report = Box::pin(uc.run_cycle(1)).await;
 
         assert!(
             report.over_budget,
@@ -6332,7 +6463,7 @@ mod tests {
         )
         .with_notifier(Arc::clone(&notifier) as Arc<dyn crate::ports::outbound::NotifierPort>);
 
-        uc.run_cycle(1).await;
+        Box::pin(uc.run_cycle(1)).await;
 
         // The ticket comment trail must still receive its post_comment write.
         let state = store.load().await.expect("load");
@@ -6392,7 +6523,7 @@ mod tests {
             "goal".to_owned(),
         );
 
-        uc.run_cycle(1).await;
+        Box::pin(uc.run_cycle(1)).await;
 
         let state = store.load().await.expect("load");
         assert!(
@@ -6422,7 +6553,7 @@ mod tests {
         )
         .with_notifier(Arc::clone(&notifier) as Arc<dyn crate::ports::outbound::NotifierPort>);
 
-        uc.run_cycle(1).await;
+        Box::pin(uc.run_cycle(1)).await;
 
         let state = store.load().await.expect("load");
         assert!(
@@ -6473,8 +6604,8 @@ mod tests {
         )
         .with_notifier(fanout as Arc<dyn crate::ports::outbound::NotifierPort>);
 
-        uc.run_cycle(1).await;
-        uc.run_cycle(2).await; // same UTC day — must not resend
+        Box::pin(uc.run_cycle(1)).await;
+        Box::pin(uc.run_cycle(2)).await; // same UTC day — must not resend
 
         let state = store.load().await.expect("load");
         assert_eq!(
@@ -6507,5 +6638,175 @@ mod tests {
             notifier_hits, 1,
             "the once-per-day gate must prevent a duplicate external notifier event: {events:?}"
         );
+    }
+}
+
+/// How many senior rescues one ticket may consume before the decision is a
+/// human's. Two, because the first rescue can misread the failure — a spec
+/// rewrite that turns out to hide a design dead end deserves the second look
+/// a person would give it — while an unbounded ladder just burns budget.
+pub const MAX_TICKET_RESCUES: u32 = 2;
+
+/// Which senior picks up a ticket the developers could not land, mirroring who
+/// you would actually walk over to: the BA when there was never a spec worth
+/// building against, the SA when the design is a dead end — or, when every
+/// attempt died on a mechanical gate, the SA with a repair brief rather than a
+/// redesign of something that was never wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EscalationRoute {
+    /// The requirement itself is unbuildable — hand it to the BA.
+    Spec,
+    /// A quality gate blocked it (lints, missing regression test, red suite).
+    Mechanical,
+    /// A genuine technical dead end — the SA revises the approach.
+    Design,
+}
+
+/// Route from the structured failure log — the gates' own verdicts, so no
+/// wording of an error message can change who gets called in.
+#[must_use]
+pub fn route_from_failures(
+    failures: &[crate::state::AttemptFailure],
+    spec_gap: bool,
+) -> EscalationRoute {
+    use crate::state::FailureLayer;
+    // Infra faults are nobody's failure and never counted against a ticket.
+    let real: Vec<&crate::state::AttemptFailure> = failures
+        .iter()
+        .filter(|f| f.layer != FailureLayer::Infra)
+        .collect();
+    if real.is_empty() {
+        return EscalationRoute::Design;
+    }
+    if real.iter().any(|f| f.layer == FailureLayer::Spec) || spec_gap {
+        return EscalationRoute::Spec;
+    }
+    if real.iter().all(|f| f.layer == FailureLayer::Gate) {
+        return EscalationRoute::Mechanical;
+    }
+    EscalationRoute::Design
+}
+
+/// Classify three failed attempts from what the gates recorded. `spec_gap` is
+/// the deterministic signal that the ticket never carried a usable requirement.
+#[must_use]
+pub fn escalation_route(history: &str, spec_gap: bool) -> EscalationRoute {
+    let low = history.to_lowercase();
+    let unclear = [
+        "unclear",
+        "ambiguous",
+        "no acceptance",
+        "missing acceptance",
+        "cannot reproduce",
+        "could not reproduce",
+        "no repro",
+        "not enough context",
+    ]
+    .iter()
+    .any(|k| low.contains(k));
+    if unclear || (spec_gap && !low.is_empty()) {
+        return EscalationRoute::Spec;
+    }
+    let gates = [
+        "clippy",
+        "regression test",
+        "suite is red",
+        "left tests red",
+        "rustfmt",
+        "cargo fmt",
+        "lint",
+    ];
+    let lines: Vec<&str> = low.lines().filter(|l| !l.trim().is_empty()).collect();
+    // Only when EVERY recorded failure is a gate — one design failure mixed in
+    // means the approach is still suspect.
+    if !lines.is_empty() && lines.iter().all(|l| gates.iter().any(|g| l.contains(g))) {
+        return EscalationRoute::Mechanical;
+    }
+    EscalationRoute::Design
+}
+
+#[cfg(test)]
+mod escalation_route_tests {
+    use super::{escalation_route, EscalationRoute, MAX_TICKET_RESCUES};
+
+    #[test]
+    fn a_ticket_gets_a_second_rescue_before_it_becomes_a_human_decision() {
+        // The first rescue can misread which senior was needed; one more look
+        // is what a team would do. Unbounded retries are not.
+        assert_eq!(MAX_TICKET_RESCUES, 2);
+    }
+
+    #[test]
+    fn every_attempt_dying_on_a_gate_is_a_repair_job_not_a_redesign() {
+        let h = "attempt 1 failed: added clippy errors (37 -> 38)\n\
+                 attempt 2 failed: added clippy errors (37 -> 38)\n\
+                 attempt 3 failed: bug fix shipped without a regression test";
+        assert_eq!(escalation_route(h, false), EscalationRoute::Mechanical);
+    }
+
+    #[test]
+    fn a_missing_spec_goes_to_the_ba() {
+        assert_eq!(
+            escalation_route("attempt 1 failed: requirements unclear", false),
+            EscalationRoute::Spec
+        );
+        // A thin ticket with any failure history is a spec problem too.
+        assert_eq!(
+            escalation_route("attempt 1 failed: engine failed", true),
+            EscalationRoute::Spec
+        );
+    }
+
+    #[test]
+    fn structured_records_route_without_reading_english() {
+        use crate::state::{AttemptFailure, FailureLayer};
+        let f = |attempt, layer, gate: &str| AttemptFailure {
+            attempt,
+            layer,
+            gate: gate.to_owned(),
+            detail: "…".to_owned(),
+            files: Vec::new(),
+        };
+        // Every attempt died on a gate → repair brief, not a redesign.
+        assert_eq!(
+            super::route_from_failures(
+                &[
+                    f(1, FailureLayer::Gate, "clippy"),
+                    f(2, FailureLayer::Gate, "regression-test")
+                ],
+                false
+            ),
+            EscalationRoute::Mechanical
+        );
+        // An outage in the middle must not turn a design failure into a gate one.
+        assert_eq!(
+            super::route_from_failures(
+                &[
+                    f(1, FailureLayer::Gate, "clippy"),
+                    f(2, FailureLayer::Infra, "engine"),
+                    f(3, FailureLayer::Design, "engine")
+                ],
+                false
+            ),
+            EscalationRoute::Design
+        );
+        // Infra-only history says nothing about the work itself.
+        assert_eq!(
+            super::route_from_failures(&[f(1, FailureLayer::Infra, "engine")], false),
+            EscalationRoute::Design
+        );
+        assert_eq!(
+            super::route_from_failures(&[f(1, FailureLayer::Gate, "clippy")], true),
+            EscalationRoute::Spec,
+            "a ticket with no usable requirement is the BA's before it is anyone's"
+        );
+    }
+
+    #[test]
+    fn a_real_build_failure_still_gets_the_sas_redesign() {
+        let h = "attempt 1 failed: left tests red on COX-B009\n\
+                 attempt 2 failed: error[E0308]: mismatched types";
+        assert_eq!(escalation_route(h, false), EscalationRoute::Design);
+        assert_eq!(escalation_route("", false), EscalationRoute::Design);
     }
 }

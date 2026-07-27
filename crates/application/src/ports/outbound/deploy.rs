@@ -18,14 +18,19 @@ pub struct DeployReport {
     pub summary: String,
 }
 
-/// Lint gate measurement: the error count plus a bounded sample of the actual
-/// error lines, so repair prompts can name the offending lints.
-#[derive(Debug, Clone)]
+/// Lint gate measurement: the error count, a bounded sample of the actual
+/// error lines so repair prompts can name the offending lints, and the source
+/// files they point at so a regression can be attributed to the change that
+/// caused it rather than to whoever happens to be holding the ticket.
+#[derive(Debug, Clone, Default)]
 pub struct LintReport {
     /// Number of lint errors in the workspace.
     pub errors: u64,
     /// Up to a few of the raw error lines (may be empty when unsupported).
     pub sample: String,
+    /// Repo-relative paths named by the errors, in report order. Empty when the
+    /// linter's output carries no locations.
+    pub files: Vec<String>,
 }
 
 /// Deploys the codebase so it can be tested/served.
@@ -139,7 +144,7 @@ pub trait DeployPort: Send + Sync {
     async fn lint_report(&self, work_dir: &Path) -> Result<Option<LintReport>, PortError> {
         Ok(self.lint(work_dir).await?.map(|errors| LintReport {
             errors,
-            sample: String::new(),
+            ..LintReport::default()
         }))
     }
 
