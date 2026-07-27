@@ -242,6 +242,32 @@ const SHIM_CMDS: &[&str] = &[
     "docker", "git", "node", "python", "python3", "tsc", "jest", "vitest",
 ];
 
+/// The wrapper script for one command: find the real binary on `PATH` (skipping
+/// `shim_dir` so it never re-enters itself), then pipe its output through
+/// `{exe} compress`, forwarding the wrapped argv so content-retrieval
+/// subcommands can be recognised and left byte-exact. Pure — the caller writes
+/// it, so the shape can be tested without touching the shared shim directory.
+fn shim_script(cmd: &str, shim_dir: &str, exe: &str) -> String {
+    format!(
+        "#!/usr/bin/env bash\n\
+         cmd=\"{cmd}\"\n\
+         real=\"\"\n\
+         _IFS=\"$IFS\"; IFS=:\n\
+         for d in $PATH; do\n\
+         \x20 [ \"$d\" = \"{shim_dir}\" ] && continue\n\
+         \x20 if [ -x \"$d/$cmd\" ]; then real=\"$d/$cmd\"; break; fi\n\
+         done\n\
+         IFS=\"$_IFS\"\n\
+         [ -z \"$real\" ] && {{ echo \"cox-shim: $cmd not found\" >&2; exit 127; }}\n\
+         if [ \"${{COX_COMPRESS:-1}}\" = \"1\" ] && [ ! -t 1 ]; then\n\
+         \x20 set -o pipefail\n\
+         \x20 \"$real\" \"$@\" 2>&1 | \"{exe}\" compress --cmd \"$cmd\" -- \"$@\"\n\
+         \x20 exit \"${{PIPESTATUS[0]:-0}}\"\n\
+         fi\n\
+         exec \"$real\" \"$@\"\n"
+    )
+}
+
 fn setup_command_shims() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = std::env::temp_dir().join("coxagent-shims");
@@ -249,24 +275,7 @@ fn setup_command_shims() -> Option<PathBuf> {
     let dir_disp = dir.display().to_string();
     let exe_disp = exe.display().to_string();
     for cmd in SHIM_CMDS {
-        let script = format!(
-            "#!/usr/bin/env bash\n\
-             cmd=\"{cmd}\"\n\
-             real=\"\"\n\
-             _IFS=\"$IFS\"; IFS=:\n\
-             for d in $PATH; do\n\
-             \x20 [ \"$d\" = \"{dir_disp}\" ] && continue\n\
-             \x20 if [ -x \"$d/$cmd\" ]; then real=\"$d/$cmd\"; break; fi\n\
-             done\n\
-             IFS=\"$_IFS\"\n\
-             [ -z \"$real\" ] && {{ echo \"cox-shim: $cmd not found\" >&2; exit 127; }}\n\
-             if [ \"${{COX_COMPRESS:-1}}\" = \"1\" ] && [ ! -t 1 ]; then\n\
-             \x20 set -o pipefail\n\
-             \x20 \"$real\" \"$@\" 2>&1 | \"{exe_disp}\" compress --cmd \"$cmd\" -- \"$@\"\n\
-             \x20 exit \"${{PIPESTATUS[0]:-0}}\"\n\
-             fi\n\
-             exec \"$real\" \"$@\"\n"
-        );
+        let script = shim_script(cmd, &dir_disp, &exe_disp);
         let p = dir.join(cmd);
         if std::fs::write(&p, script).is_ok() {
             #[cfg(unix)]
@@ -288,6 +297,36 @@ fn enable_command_shims() {
     }
     if let Some(dir) = setup_command_shims() {
         std::env::set_var("COXAGENT_SHIM_DIR", dir);
+    }
+}
+
+#[cfg(test)]
+mod shim_script_tests {
+    use super::{shim_script, SHIM_CMDS};
+
+    /// COX-B015: the shim must forward the wrapped command's argv to
+    /// `compress`, otherwise `git_needs_exact_output` can never see which
+    /// subcommand ran and `git show`/`diff` output gets clipped to nonsense.
+    #[test]
+    fn shim_script_forwards_the_wrapped_argv_to_compress() {
+        for cmd in SHIM_CMDS {
+            let script = shim_script(cmd, "/tmp/coxagent-shims", "/opt/coxagent");
+            let pipe = script
+                .lines()
+                .find(|l| l.contains("compress"))
+                .unwrap_or_else(|| panic!("{cmd} shim never pipes into compress"));
+            assert!(
+                pipe.contains(r#""/opt/coxagent" compress --cmd "$cmd" -- "$@""#),
+                "{cmd} shim drops the wrapped argv: {pipe}"
+            );
+        }
+    }
+
+    /// The shim must not find itself when it resolves the real binary.
+    #[test]
+    fn shim_script_skips_its_own_directory_on_path() {
+        let script = shim_script("git", "/tmp/coxagent-shims", "/opt/coxagent");
+        assert!(script.contains(r#"[ "$d" = "/tmp/coxagent-shims" ] && continue"#));
     }
 }
 
