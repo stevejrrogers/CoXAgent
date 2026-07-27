@@ -3663,6 +3663,10 @@ async fn unpark_ticket(
     };
     let had = state.ticket_fail_attempts.remove(&id).is_some();
     state.ticket_journal.remove(&id);
+    // Also reset the merged-PR sync memory: if this ticket's fix already
+    // merged, the next forge-hygiene pass will close it properly instead of
+    // agents retrying a landed fix. Idempotent for everything else.
+    state.seen_merged_prs.clear();
     if !had && !state.tickets.iter().any(|t| t.id().as_str() == id) {
         return (axum::http::StatusCode::NOT_FOUND, "no such ticket").into_response();
     }

@@ -2697,7 +2697,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             for (number, head) in merged {
                 let ticket = head.rsplit('/').next().unwrap_or(&head).to_owned();
                 let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
-                    if !s.seen_merged_prs.insert(number) {
+                    if s.seen_merged_prs.contains(&number) {
                         return Ok(());
                     }
                     s.ticket_fail_attempts.remove(&ticket);
@@ -2729,6 +2729,24 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                                  un-parked to match."
                             ));
                         }
+                    }
+                    // Mark processed only when the ticket actually reached a
+                    // terminal state (or no longer exists) — a failed sync
+                    // must retry next cycle, not be forgotten forever.
+                    let done = note.is_some()
+                        || s.ticket(&tid).is_none_or(|t| {
+                            use coxagent_domain::Status;
+                            matches!(
+                                t.status(),
+                                Status::Fixed
+                                    | Status::Done
+                                    | Status::Verified
+                                    | Status::Documented
+                                    | Status::Rejected
+                            )
+                        });
+                    if done {
+                        s.seen_merged_prs.insert(number);
                     }
                     if let Some(n) = note {
                         s.post_comment("SM", &n, Some(ticket.clone()));
