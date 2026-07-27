@@ -584,6 +584,7 @@ impl DeployPort for DockerComposeDeploy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     /// AC (COX-F005): a health endpoint that's unreachable (nothing
     /// listening — connection refused) must be treated as a failed check,
@@ -654,6 +655,82 @@ mod tests {
             result.passed,
             "an app that binds its port within the configured timeout must pass \
              the gate, even though earlier probes hit connection refused: {result:?}"
+        );
+    }
+
+    /// A published port with nothing listening on it — from the host, that is
+    /// exactly what a container that started while the app inside crashed or
+    /// never bound looks like. Returned as a live `Arc<dyn DeployPort>` so the
+    /// gate sees the real adapter, not a double.
+    async fn dead_published_port() -> (Arc<dyn DeployPort>, u16) {
+        use tokio::net::TcpListener;
+
+        // Reserve a free port, then release it: nothing answers on it after this.
+        let probe = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = probe.local_addr().expect("addr").port();
+        drop(probe);
+        (Arc::new(DockerComposeDeploy) as Arc<dyn DeployPort>, port)
+    }
+
+    /// Regression test (COX-B009): the ticket's repro run against the REAL
+    /// adapter — `docker compose up` exits 0, the app inside never binds its
+    /// published port, and every deploy path (the cycle, chat's "deploy", the
+    /// PR-preview endpoint) must refuse to report that as a success.
+    ///
+    /// The per-call-site tests all script a fake `DeployPort`, so they prove
+    /// the call sites *consult* the gate but not that the gate plus this
+    /// adapter actually detect a dead port: a fake returns whatever it is told
+    /// and would keep passing even if `DockerComposeDeploy`'s probe stopped
+    /// noticing. This is the seam between the two halves, and no container is
+    /// needed to exercise it.
+    #[tokio::test(start_paused = true)]
+    async fn a_container_that_never_binds_its_port_fails_the_shared_gate() {
+        let (deploy, dead_port) = dead_published_port().await;
+
+        let healthy =
+            coxagent_application::ports::outbound::verify_deploy_health(&deploy, Some(dead_port))
+                .await;
+
+        assert!(
+            !healthy,
+            "a published port nothing ever binds must fail the mandatory gate — \
+             this is the COX-B004 scenario the chat 'deploy' command and the PR \
+             preview used to report as a success"
+        );
+    }
+
+    /// Control for [`a_container_that_never_binds_its_port_fails_the_shared_gate`]:
+    /// the same real adapter behind the same gate passes as soon as something
+    /// answers on the published port. Without this, the negative case above
+    /// could go green for the wrong reason — a gate that always says "not
+    /// healthy" would block every deploy in the product.
+    ///
+    /// Real time, not a paused clock: the probe here has to complete a genuine
+    /// HTTP round-trip, which auto-advancing time could cut short.
+    #[tokio::test]
+    async fn an_app_that_binds_its_published_port_passes_the_shared_gate() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    let _ = socket.read(&mut buf).await;
+                    let _ = socket
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                        .await;
+                });
+            }
+        });
+
+        let deploy: Arc<dyn DeployPort> = Arc::new(DockerComposeDeploy);
+
+        assert!(
+            coxagent_application::ports::outbound::verify_deploy_health(&deploy, Some(port)).await,
+            "an app answering on its published port must pass the mandatory gate"
         );
     }
 }

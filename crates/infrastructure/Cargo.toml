@@ -28,6 +28,9 @@ mongodb.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# `start_paused` for the health-gate tests: the gate waits out a 30s+ bound on
+# a port nothing binds, which is a virtual wait, not a real one.
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true
