@@ -33,6 +33,18 @@ pub fn over_daily_budget(policy: &PolicyConfig, spent_today: f64) -> bool {
         .is_some_and(|cap| cap > 0.0 && spent_today >= cap)
 }
 
+/// Whether `spend` is within the warning band of `cap` — at or past `pct` of
+/// it but not yet at the cap itself. `false` when no cap is configured, the
+/// cap is non-positive, or spend has already reached/passed the cap (that's
+/// [`over_daily_budget`]'s job, not a warning — the two never double-fire for
+/// the same crossing). Single source of truth for "near the line" so callers
+/// (the cycle loop, the hub-level budget watchdog) don't each re-derive the
+/// arithmetic.
+#[must_use]
+pub fn approaching_cap(spend: f64, cap: Option<f64>, pct: f64) -> bool {
+    cap.is_some_and(|cap| cap > 0.0 && spend >= cap * pct && spend < cap)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -42,6 +54,7 @@ mod tests {
             model_allowlist: models.iter().map(|s| (*s).to_owned()).collect(),
             forbidden_paths: paths.iter().map(|s| (*s).to_owned()).collect(),
             daily_budget_usd: daily,
+            ..PolicyConfig::default()
         }
     }
 
@@ -75,5 +88,32 @@ mod tests {
         assert!(!over_daily_budget(&p, 9.99));
         assert!(over_daily_budget(&p, 10.0));
         assert!(!over_daily_budget(&policy(&[], &[], None), 1000.0));
+    }
+
+    #[test]
+    fn approaching_cap_is_false_when_no_cap_is_configured() {
+        assert!(!approaching_cap(1_000.0, None, 0.8));
+    }
+
+    #[test]
+    fn approaching_cap_is_false_below_the_threshold() {
+        assert!(!approaching_cap(79.99, Some(100.0), 0.8));
+    }
+
+    #[test]
+    fn approaching_cap_is_true_at_exactly_the_threshold() {
+        assert!(approaching_cap(80.0, Some(100.0), 0.8));
+    }
+
+    #[test]
+    fn approaching_cap_is_false_once_spend_reaches_the_cap() {
+        assert!(!approaching_cap(100.0, Some(100.0), 0.8));
+        assert!(!approaching_cap(150.0, Some(100.0), 0.8));
+    }
+
+    #[test]
+    fn approaching_cap_is_false_when_cap_is_non_positive() {
+        assert!(!approaching_cap(1.0, Some(0.0), 0.8));
+        assert!(!approaching_cap(1.0, Some(-10.0), 0.8));
     }
 }

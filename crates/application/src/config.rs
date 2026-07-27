@@ -245,7 +245,7 @@ impl Default for WorkflowConfig {
 
 /// Governance policy — human gates turned into configuration (M9-10). Empty
 /// fields mean "no restriction", so policy is opt-in and backward compatible.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PolicyConfig {
     /// Permitted engine models. Empty = any model allowed. A configured model
     /// outside this list stops the loop before spending a token on it.
@@ -259,6 +259,27 @@ pub struct PolicyConfig {
     /// independent of the lifetime `budget_usd` cap.
     #[serde(default)]
     pub daily_budget_usd: Option<f64>,
+    /// Fraction of whichever cap applies (lifetime `budget_usd` or
+    /// `daily_budget_usd`) at which an early `budget_warning` notification
+    /// fires, before the hard stop at 100%. Matches the dashboard's existing
+    /// amber threshold for space budgets, so the UX language stays consistent.
+    #[serde(default = "default_budget_warn_pct")]
+    pub budget_warn_pct: f64,
+}
+
+fn default_budget_warn_pct() -> f64 {
+    0.8
+}
+
+impl Default for PolicyConfig {
+    fn default() -> Self {
+        Self {
+            model_allowlist: Vec::new(),
+            forbidden_paths: Vec::new(),
+            daily_budget_usd: None,
+            budget_warn_pct: default_budget_warn_pct(),
+        }
+    }
 }
 
 /// Deploy configuration. `host_port` is assigned per project at onboard so two

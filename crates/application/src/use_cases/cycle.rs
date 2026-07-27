@@ -4266,8 +4266,44 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             state.log_activity("POLICY", "daily budget cap reached", None);
         }
 
+        let warn_pct = self.config.policy.budget_warn_pct;
+        let (new_lifetime_warning, new_daily_warning) = apply_budget_warnings(
+            &mut state,
+            warn_pct,
+            lifetime_cap,
+            daily_cap,
+            spent_today,
+            over_lifetime,
+            over_daily,
+        );
+
         let _ = self.store.save(&state).await;
+        self.notify_budget_warnings(new_lifetime_warning, new_daily_warning, warn_pct)
+            .await;
+
         over_lifetime || over_daily
+    }
+
+    /// Fires the `budget_warning` NotifierPort event(s) computed by
+    /// [`apply_budget_warnings`] — split out of `record_activity` to keep it
+    /// under the function-length lint, and because dispatch is a distinct
+    /// concern from the pure flag bookkeeping.
+    async fn notify_budget_warnings(&self, new_lifetime: bool, new_daily: bool, warn_pct: f64) {
+        let pct = warn_pct * 100.0;
+        if new_lifetime {
+            self.notify(
+                "budget_warning",
+                format!("lifetime spend crossed {pct:.0}% of the budget cap — approaching the automatic pause"),
+            )
+            .await;
+        }
+        if new_daily {
+            self.notify(
+                "budget_warning",
+                format!("today's spend crossed {pct:.0}% of the daily budget cap — approaching the automatic pause"),
+            )
+            .await;
+        }
     }
 
     fn ba(&self) -> RunBaUseCase<S, E> {
@@ -4426,6 +4462,39 @@ pub(crate) fn diff_has_conflict_markers(diff: &str) -> bool {
             || l.starts_with("+>>>>>>> ")
             || l.starts_with(" >>>>>>> ")
     })
+}
+
+/// Early-warning budget check (COX-F002): updates `state.budget_warned_*` for
+/// this cycle and returns which cap(s), if any, just newly entered the
+/// warning band. `over_*` is OR'd into the "approaching" check so a spend
+/// jump that leaps straight past the warning band into the hard cap in one
+/// cycle still raises the warning — it just never observed the narrower
+/// "approaching but not yet over" window on its own. The `budget_warned_*`
+/// flags dedupe repeats while spend stays in the band, and clear the moment
+/// spend falls back out of it — whether because a human raised the cap, or
+/// the cap was breached and the hard stop already took over — so a later
+/// crossing can warn again.
+fn apply_budget_warnings(
+    state: &mut crate::state::ProjectState,
+    warn_pct: f64,
+    lifetime_cap: Option<f64>,
+    daily_cap: Option<f64>,
+    spent_today: f64,
+    over_lifetime: bool,
+    over_daily: bool,
+) -> (bool, bool) {
+    let approaching_lifetime =
+        crate::policy::approaching_cap(state.spend.total_cost_usd, lifetime_cap, warn_pct)
+            || over_lifetime;
+    let new_lifetime_warning = approaching_lifetime && !state.budget_warned_lifetime;
+    state.budget_warned_lifetime = approaching_lifetime;
+
+    let approaching_daily =
+        crate::policy::approaching_cap(spent_today, daily_cap, warn_pct) || over_daily;
+    let new_daily_warning = approaching_daily && !state.budget_warned_daily;
+    state.budget_warned_daily = approaching_daily;
+
+    (new_lifetime_warning, new_daily_warning)
 }
 
 #[cfg(test)]
@@ -5851,6 +5920,225 @@ mod tests {
             1,
             "must warn about missing sandbox support exactly once per project \
              per process lifetime, not on every cycle (got {events:?})"
+        );
+    }
+
+    // --- COX-F002: early-warning notification before budget cap halts the loop
+    //
+    // When accumulated spend crosses 80% of the configured lifetime or daily
+    // budget (whichever applies), the loop must raise exactly one
+    // `budget_warning` NotifierPort event before the hard `budget_reached`
+    // pause at 100%. The warning fires once per threshold crossing — it must
+    // not repeat every cycle while spend sits between 80% and 100% — and can
+    // fire again once a daily cap resets for a new day and spend re-crosses
+    // 80%. With no budget cap configured, no warning is ever sent, and a
+    // warning alone must never pause the loop.
+
+    fn budget_warning_events(
+        notifier: &SpyNotifier,
+    ) -> Vec<crate::ports::outbound::NotifyEvent> {
+        notifier
+            .events
+            .lock()
+            .expect("lock")
+            .iter()
+            .filter(|e| e.kind == "budget_warning")
+            .cloned()
+            .collect()
+    }
+
+    /// AC: spend at 80% of the configured lifetime cap raises exactly one
+    /// `budget_warning` and does NOT pause the loop.
+    #[tokio::test]
+    async fn budget_warning_fires_at_80_percent_of_lifetime_cap_without_pausing() {
+        let store = Arc::new(MemStore::default());
+        let notifier = Arc::new(SpyNotifier::default());
+        let meter = Arc::new(Mutex::new(Spend {
+            total_cost_usd: 80.0,
+            ..Spend::default()
+        }));
+        let mut cfg = Config::default();
+        cfg.workflow.budget_usd = Some(100.0);
+        let uc = RunCycleUseCase::new(
+            Arc::clone(&store),
+            Arc::new(RoleAwareEngine),
+            cfg,
+            PathBuf::from("/tmp/proj-budget-warn-lifetime"),
+            "goal".to_owned(),
+        )
+        .with_notifier(Arc::clone(&notifier) as Arc<dyn crate::ports::outbound::NotifierPort>)
+        .with_meter(Arc::clone(&meter));
+
+        let report = uc.run_cycle(1).await;
+
+        assert_eq!(
+            budget_warning_events(&notifier).len(),
+            1,
+            "spend at 80% of the lifetime cap must raise exactly one budget_warning"
+        );
+        assert!(
+            !report.over_budget,
+            "80% spend must not pause the loop — only the 100% cap does"
+        );
+    }
+
+    /// AC: the warning does not repeat every cycle while spend stays between
+    /// 80% and 100% of the cap.
+    #[tokio::test]
+    async fn budget_warning_does_not_repeat_while_spend_stays_between_80_and_100_percent() {
+        let store = Arc::new(MemStore::default());
+        let notifier = Arc::new(SpyNotifier::default());
+        let meter = Arc::new(Mutex::new(Spend::default()));
+        let mut cfg = Config::default();
+        cfg.workflow.budget_usd = Some(100.0);
+        let uc = RunCycleUseCase::new(
+            Arc::clone(&store),
+            Arc::new(RoleAwareEngine),
+            cfg,
+            PathBuf::from("/tmp/proj-budget-warn-no-repeat"),
+            "goal".to_owned(),
+        )
+        .with_notifier(Arc::clone(&notifier) as Arc<dyn crate::ports::outbound::NotifierPort>)
+        .with_meter(Arc::clone(&meter));
+
+        meter.lock().expect("lock").total_cost_usd = 80.0;
+        uc.run_cycle(1).await;
+        assert_eq!(
+            budget_warning_events(&notifier).len(),
+            1,
+            "first cycle crosses 80% — exactly one warning"
+        );
+
+        meter.lock().expect("lock").total_cost_usd = 5.0; // cumulative 85% — still under the cap
+        uc.run_cycle(2).await;
+        assert_eq!(
+            budget_warning_events(&notifier).len(),
+            1,
+            "spend staying between 80% and 100% across cycles must not re-fire the warning"
+        );
+    }
+
+    /// AC: after the daily cap resets for a new day, the warning can fire
+    /// again that day if spend re-crosses 80%.
+    #[tokio::test]
+    async fn budget_warning_can_fire_again_after_the_daily_cap_resets_for_a_new_day() {
+        let store = Arc::new(MemStore::default());
+        let notifier = Arc::new(SpyNotifier::default());
+        let meter = Arc::new(Mutex::new(Spend::default()));
+        let mut cfg = Config::default();
+        cfg.policy.daily_budget_usd = Some(100.0);
+        let uc = RunCycleUseCase::new(
+            Arc::clone(&store),
+            Arc::new(RoleAwareEngine),
+            cfg,
+            PathBuf::from("/tmp/proj-budget-warn-daily-reset"),
+            "goal".to_owned(),
+        )
+        .with_notifier(Arc::clone(&notifier) as Arc<dyn crate::ports::outbound::NotifierPort>)
+        .with_meter(Arc::clone(&meter));
+
+        meter.lock().expect("lock").total_cost_usd = 80.0;
+        uc.run_cycle(1).await;
+        assert_eq!(
+            budget_warning_events(&notifier).len(),
+            1,
+            "day 1: crossing 80% of the daily cap warns once"
+        );
+
+        // Force a day rollover: production code keys the daily cap off the
+        // real UTC date, so back-date the persisted counter directly rather
+        // than mocking the clock.
+        let mut state = store.load().await.expect("load");
+        state.spend_day = "2000-01-01".to_owned();
+        store.save(&state).await.expect("save");
+
+        meter.lock().expect("lock").total_cost_usd = 80.0;
+        uc.run_cycle(2).await;
+        assert_eq!(
+            budget_warning_events(&notifier).len(),
+            2,
+            "day 2: re-crossing 80% of the reset daily cap must warn again"
+        );
+    }
+
+    /// AC: with no budget cap configured (neither lifetime nor daily), no
+    /// warning notification is ever sent, no matter how much is spent.
+    #[tokio::test]
+    async fn no_budget_warning_when_no_cap_is_configured() {
+        let store = Arc::new(MemStore::default());
+        let notifier = Arc::new(SpyNotifier::default());
+        let meter = Arc::new(Mutex::new(Spend {
+            total_cost_usd: 999_999.0,
+            ..Spend::default()
+        }));
+        let cfg = Config::default(); // budget_usd and daily_budget_usd both None
+        let uc = RunCycleUseCase::new(
+            Arc::clone(&store),
+            Arc::new(RoleAwareEngine),
+            cfg,
+            PathBuf::from("/tmp/proj-budget-warn-no-cap"),
+            "goal".to_owned(),
+        )
+        .with_notifier(Arc::clone(&notifier) as Arc<dyn crate::ports::outbound::NotifierPort>)
+        .with_meter(Arc::clone(&meter));
+
+        let report = uc.run_cycle(1).await;
+
+        assert!(
+            budget_warning_events(&notifier).is_empty(),
+            "no cap configured must never raise a budget_warning"
+        );
+        assert!(
+            !report.over_budget,
+            "no cap configured must never pause the loop"
+        );
+    }
+
+    /// AC: only crossing 100% still triggers the existing hard stop — spend
+    /// jumping straight past 80% to (or over) the cap in one cycle must still
+    /// raise the 80% warning (before the pause) AND pause the loop.
+    #[tokio::test]
+    async fn crossing_the_full_cap_still_pauses_the_loop_after_the_warning() {
+        let store = Arc::new(MemStore::default());
+        let notifier = Arc::new(SpyNotifier::default());
+        let meter = Arc::new(Mutex::new(Spend {
+            total_cost_usd: 150.0,
+            ..Spend::default()
+        }));
+        let mut cfg = Config::default();
+        cfg.workflow.budget_usd = Some(100.0);
+        let uc = RunCycleUseCase::new(
+            Arc::clone(&store),
+            Arc::new(RoleAwareEngine),
+            cfg,
+            PathBuf::from("/tmp/proj-budget-warn-hard-stop"),
+            "goal".to_owned(),
+        )
+        .with_notifier(Arc::clone(&notifier) as Arc<dyn crate::ports::outbound::NotifierPort>)
+        .with_meter(Arc::clone(&meter));
+
+        let report = uc.run_cycle(1).await;
+
+        assert!(
+            report.over_budget,
+            "spend at/over the lifetime cap must still pause the loop"
+        );
+        let events = notifier.events.lock().expect("lock");
+        assert_eq!(
+            events.iter().filter(|e| e.kind == "budget_reached").count(),
+            1,
+            "exactly one hard budget_reached event"
+        );
+        assert_eq!(
+            events.iter().filter(|e| e.kind == "budget_warning").count(),
+            1,
+            "the 80% warning must still fire even when spend jumps straight past it to the cap"
+        );
+        let warning_at = events.iter().position(|e| e.kind == "budget_warning");
+        let reached_at = events.iter().position(|e| e.kind == "budget_reached");
+        assert!(
+            warning_at < reached_at,
+            "the warning must be emitted before the hard pause, got order {events:?}"
         );
     }
 }
