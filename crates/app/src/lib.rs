@@ -205,11 +205,20 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
             .await
         }
         Command::Codegraph { query, work_dir } => codegraph_query(&work_dir, &query),
-        Command::Compress { cmd: _ } => {
+        Command::Compress { cmd, args } => {
             use std::io::Read as _;
             let mut input = String::new();
             std::io::stdin().read_to_string(&mut input).ok();
-            let out = coxagent_application::tokens::proxy_compress(&input);
+            // git content-retrieval subcommands (show/diff/log/cat-file/...)
+            // can emit raw file content — dedupe/clip would silently mutate
+            // it, so pass those through byte-exact instead of compressing.
+            let needs_exact = cmd.as_deref() == Some("git")
+                && coxagent_application::tokens::git_needs_exact_output(&args);
+            let out = if needs_exact {
+                input.clone()
+            } else {
+                coxagent_application::tokens::proxy_compress(&input)
+            };
             // Record the saving so the dashboard can show how effective the
             // token-saver is (appends "before after" to the shim dir's log).
             record_compression(input.len(), out.len());
@@ -223,8 +232,11 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
 /// `coxagent compress` (only for non-tty, large output — small/exact output is
 /// untouched). Applied to agent subprocesses only, so the hub's own tooling is
 /// never affected.
-/// Verbose, output-heavy commands worth compressing. `git` is included but the
-/// small-output passthrough keeps porcelain (rev-parse/status) exact.
+/// Verbose, output-heavy commands worth compressing. `git` is included: the
+/// small-output passthrough keeps porcelain (rev-parse/status) exact, and
+/// `git_needs_exact_output` bypasses compression for content-retrieval
+/// subcommands (show/diff/log/cat-file/...) so file content is never
+/// dedupe'd or clipped.
 const SHIM_CMDS: &[&str] = &[
     "cargo", "npm", "pnpm", "yarn", "pip", "pip3", "pytest", "go", "gradle", "mvn", "make",
     "docker", "git", "node", "python", "python3", "tsc", "jest", "vitest",
@@ -250,7 +262,7 @@ fn setup_command_shims() -> Option<PathBuf> {
              [ -z \"$real\" ] && {{ echo \"cox-shim: $cmd not found\" >&2; exit 127; }}\n\
              if [ \"${{COX_COMPRESS:-1}}\" = \"1\" ] && [ ! -t 1 ]; then\n\
              \x20 set -o pipefail\n\
-             \x20 \"$real\" \"$@\" 2>&1 | \"{exe_disp}\" compress --cmd \"$cmd\"\n\
+             \x20 \"$real\" \"$@\" 2>&1 | \"{exe_disp}\" compress --cmd \"$cmd\" -- \"$@\"\n\
              \x20 exit \"${{PIPESTATUS[0]:-0}}\"\n\
              fi\n\
              exec \"$real\" \"$@\"\n"
