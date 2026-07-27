@@ -21,6 +21,7 @@ pub async fn merge_sweep<S: StateStorePort + ?Sized>(
     store: &S,
     target: &str,
     vi: bool,
+    require_ci: bool,
 ) -> SweepOutcome {
     let mut out = SweepOutcome::default();
     let Ok(prs) = forge.list_open_prs().await else {
@@ -33,11 +34,11 @@ pub async fn merge_sweep<S: StateStorePort + ?Sized>(
             out.skipped.push((pr.number, "merge conflict".to_owned()));
             continue;
         }
-        if pr.ci == "failing" {
+        if require_ci && pr.ci == "failing" {
             out.skipped.push((pr.number, "CI failing".to_owned()));
             continue;
         }
-        if pr.ci == "pending" {
+        if require_ci && pr.ci == "pending" {
             out.skipped.push((pr.number, "CI pending".to_owned()));
             continue;
         }

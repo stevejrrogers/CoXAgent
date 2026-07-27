@@ -6284,7 +6284,7 @@ async fn chat_reply_ep(
         } else {
             cfg.git.target_branch.clone()
         };
-        uc = uc.with_forge(Arc::clone(f), target);
+        uc = uc.with_forge(Arc::clone(f), target, cfg.git.require_ci);
     }
     match uc.execute(msg).await {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
@@ -7663,9 +7663,15 @@ async fn merge_sweep_ep(
         .unwrap_or("main")
         .to_owned();
     let vi = cfg["workflow"]["language"].as_str() == Some("vi");
-    let out =
-        coxagent_application::use_cases::merge_sweep(forge.as_ref(), p.store.as_ref(), &target, vi)
-            .await;
+    let require_ci = cfg["git"]["require_ci"].as_bool().unwrap_or(true);
+    let out = coxagent_application::use_cases::merge_sweep(
+        forge.as_ref(),
+        p.store.as_ref(),
+        &target,
+        vi,
+        require_ci,
+    )
+    .await;
     Json(serde_json::json!({ "ok": true, "merged": out.merged, "skipped": out.skipped }))
         .into_response()
 }
