@@ -5046,6 +5046,65 @@ async fn git_pv(dir: &std::path::Path, args: &[&str]) -> Result<(), String> {
     }
 }
 
+/// The app port `coxagent.json` publishes, or `None` when the project doesn't
+/// declare one. An unreadable or malformed config is "no port published" — the
+/// preview still runs, it just has nothing to link to or probe.
+fn published_host_port(config_path: &std::path::Path) -> Option<u64> {
+    std::fs::read_to_string(config_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v["deploy"]["host_port"].as_u64())
+}
+
+/// Narrow the raw `deploy.host_port` from `coxagent.json` to the port the
+/// COX-B009 health gate probes.
+///
+/// `config.deploy.host_port` is a `u16` everywhere else, so a wider value here
+/// is a config the app itself would reject. Refusing it is the only safe
+/// reading: truncating would silently probe a DIFFERENT port, and treating it
+/// as "unset" would skip the gate entirely — both hand back the unverified
+/// "LIVE" the gate exists to prevent. `None` in means no port is published,
+/// which is genuinely nothing to probe.
+///
+/// # Errors
+/// The reason to report when the configured port isn't a TCP port.
+fn probe_port(host_port: Option<u64>) -> Result<Option<u16>, String> {
+    match host_port {
+        None => Ok(None),
+        Some(pt) => u16::try_from(pt).map(Some).map_err(|_| {
+            format!(
+                "deploy.host_port {pt} is not a valid TCP port — refusing to deploy a preview \
+                 whose health can't be verified"
+            )
+        }),
+    }
+}
+
+/// Whether one preview `deploy` call may be reported as a success: `None` if
+/// it may, `Some(reason)` if it may not.
+///
+/// Both preview paths — starting a preview and restoring the main build —
+/// decide through this one function, so neither can report a deploy as good on
+/// the compose exit code alone. A `docker compose up` exit 0 only proves the
+/// containers started; the mandatory health gate (COX-B004/COX-B009) is what
+/// proves the app inside actually bound its port.
+async fn preview_deploy_failure(
+    deploy: &Arc<dyn coxagent_application::ports::outbound::DeployPort>,
+    report: &coxagent_application::ports::outbound::DeployReport,
+    probe_port: Option<u16>,
+) -> Option<String> {
+    if !report.success {
+        return Some(report.summary.clone());
+    }
+    if coxagent_application::ports::outbound::verify_deploy_health(deploy, probe_port).await {
+        return None;
+    }
+    Some(format!(
+        "{} (containers started but the app never bound its port — health check failed)",
+        report.summary
+    ))
+}
+
 /// Deploy a PR's branch so the human can SEE the change running before
 /// approving (start=true), or tear the preview down and restore main
 /// (start=false). The preview runs on the project's app port — one app at a
@@ -5066,15 +5125,11 @@ async fn pr_preview(
         .to_path_buf();
     let prev_dir = root.join(".preview").join(num.to_string());
     // The project's published app port, for the "open it" link.
-    let port = std::fs::read_to_string(&p.config_path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| v["deploy"]["host_port"].as_u64());
-    // The port the health gate probes. `config.deploy.host_port` is a `u16`
-    // everywhere else, so a wider value here is a config the app itself would
-    // reject — and a truncating cast would silently probe a DIFFERENT port,
-    // which is exactly the false "LIVE" this gate exists to prevent.
-    let probe_port = port.and_then(|pt| u16::try_from(pt).ok());
+    let port = published_host_port(&p.config_path);
+    let probe_port = match probe_port(port) {
+        Ok(pp) => pp,
+        Err(why) => return internal_error(&why),
+    };
     let chat = |msg: String| {
         let store = Arc::clone(&p.store);
         async move {
@@ -5126,57 +5181,36 @@ async fn pr_preview(
         // Swap: stop the current app, run the PR branch on the app port.
         let _ = deploy.down(&p.work_dir).await;
         match deploy.deploy(&prev_dir).await {
-            // Mandatory health gate (COX-B004/COX-B009): a compose exit-0
-            // only proves the containers started, not that the app inside
-            // bound its port — probe before telling the human it's LIVE.
-            Ok(r)
-                if r.success
-                    && coxagent_application::ports::outbound::verify_deploy_health(
-                        deploy, probe_port,
-                    )
-                    .await =>
-            {
-                let url = port.map(|pt| format!("http://localhost:{pt}"));
-                chat(format!(
-                    "👁 Preview of PR #{num} is LIVE{} — the main build is paused; restore it from the Review tab when done.",
-                    url.as_deref().map(|u| format!(" at {u}")).unwrap_or_default()
-                ))
-                .await;
-                Json(serde_json::json!({ "ok": true, "url": url, "summary": r.summary }))
-                    .into_response()
+            Ok(r) => {
+                if let Some(why) = preview_deploy_failure(deploy, &r, probe_port).await {
+                    internal_error(&format!("preview deploy failed: {why}"))
+                } else {
+                    let url = port.map(|pt| format!("http://localhost:{pt}"));
+                    chat(format!(
+                        "👁 Preview of PR #{num} is LIVE{} — the main build is paused; restore it from the Review tab when done.",
+                        url.as_deref().map(|u| format!(" at {u}")).unwrap_or_default()
+                    ))
+                    .await;
+                    Json(serde_json::json!({ "ok": true, "url": url, "summary": r.summary }))
+                        .into_response()
+                }
             }
-            Ok(r) if r.success => internal_error(&format!(
-                "preview deploy failed: {} (containers started but the app never bound its port \
-                 — health check failed)",
-                r.summary
-            )),
-            Ok(r) => internal_error(&format!("preview deploy failed: {}", r.summary)),
             Err(e) => internal_error(&e.to_string()),
         }
     } else {
         let _ = deploy.down(&prev_dir).await;
         match deploy.deploy(&p.work_dir).await {
-            // Same gate on restore: a "restore" that never comes back up on
-            // the port must not be reported as a clean restore.
-            Ok(r)
-                if r.success
-                    && coxagent_application::ports::outbound::verify_deploy_health(
-                        deploy, probe_port,
-                    )
-                    .await =>
-            {
-                chat(format!(
-                    "↩️ Preview of PR #{num} stopped — main build restored."
-                ))
-                .await;
-                Json(serde_json::json!({ "ok": true })).into_response()
+            Ok(r) => {
+                if let Some(why) = preview_deploy_failure(deploy, &r, probe_port).await {
+                    internal_error(&format!("restore failed: {why}"))
+                } else {
+                    chat(format!(
+                        "↩️ Preview of PR #{num} stopped — main build restored."
+                    ))
+                    .await;
+                    Json(serde_json::json!({ "ok": true })).into_response()
+                }
             }
-            Ok(r) if r.success => internal_error(&format!(
-                "restore failed: {} (containers started but the app never bound its port — \
-                 health check failed)",
-                r.summary
-            )),
-            Ok(r) => internal_error(&format!("restore failed: {}", r.summary)),
             Err(e) => internal_error(&e.to_string()),
         }
     }
@@ -8848,9 +8882,22 @@ mod pr_preview_tests {
     /// A project workspace with a `coxagent.json` naming the published
     /// `deploy.host_port` `pr_preview` reads to probe health.
     fn project_handle(deploy: Arc<dyn DeployPort>) -> (tempfile::TempDir, ProjectHandle) {
+        project_handle_with_port(deploy, "8101")
+    }
+
+    /// [`project_handle`] with an arbitrary `deploy.host_port` literal, so a
+    /// test can hand `pr_preview` a port its typed config would never hold.
+    fn project_handle_with_port(
+        deploy: Arc<dyn DeployPort>,
+        host_port: &str,
+    ) -> (tempfile::TempDir, ProjectHandle) {
         let dir = tempfile::tempdir().expect("tempdir");
         let config_path = dir.path().join("coxagent.json");
-        std::fs::write(&config_path, r#"{"deploy":{"host_port":8101}}"#).expect("write config");
+        std::fs::write(
+            &config_path,
+            format!(r#"{{"deploy":{{"host_port":{host_port}}}}}"#),
+        )
+        .expect("write config");
         let handle = ProjectHandle {
             id: "proj".to_owned(),
             name: "proj".to_owned(),
@@ -8900,6 +8947,28 @@ mod pr_preview_tests {
         let resp = pr_preview(&handle, &forge, 1, false).await;
 
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// AC (COX-B009): the gate must not be skippable. A `host_port` that isn't
+    /// a TCP port leaves nothing to probe, so reporting success would hand
+    /// back the exact unverified "LIVE" the gate exists to prevent — the
+    /// deploy is rejected instead, even though the app reports itself healthy.
+    #[tokio::test(start_paused = true)]
+    async fn an_out_of_range_host_port_is_rejected_rather_than_skipping_the_gate() {
+        let (_dir, handle) = project_handle_with_port(Arc::new(HealthyDeploy), "70000");
+        let forge: Arc<dyn ForgePort> = Arc::new(UnusedForge);
+
+        let resp = pr_preview(&handle, &forge, 1, false).await;
+
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            text.contains("not a valid TCP port"),
+            "expected the invalid-port reason in the response: {text}"
+        );
     }
 
     /// A `ForgePort` stub reporting a single open PR whose head branch is

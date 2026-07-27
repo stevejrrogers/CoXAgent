@@ -3,6 +3,11 @@
 //! M0 provides a plain-text state report; the axum server and clap CLI land in
 //! later milestones. Presentation is swappable — a native shell reuses the same
 //! application ports without touching domain/application.
+//!
+//! Test code may `unwrap`/`expect` — a panicking fixture is a failing test, and
+//! the noise would otherwise drown the lints that matter in production code.
+//! Same allowance domain/application/infrastructure already carry.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod cli;
 pub mod server;
