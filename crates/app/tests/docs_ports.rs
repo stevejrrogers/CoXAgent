@@ -108,24 +108,38 @@ fn compose_publishes_the_projects_assigned_host_port() {
     );
 }
 
+/// The guard itself, over the two texts rather than the two files: every port
+/// the self-host section hands the reader must be one the deploy publishes.
+///
+/// `Err` carries the message the test fails with. Structural faults — no
+/// self-host section, no port mapping — panic out of the helpers instead, so a
+/// blinded guard is loud rather than vacuously green.
+fn docs_agree_with_deploy(readme: &str, compose_src: &str) -> Result<(), String> {
+    let published = published_host_ports(compose_src);
+    let documented = documented_ports(section(readme, SELF_HOST_HEADING));
+
+    if documented.is_empty() {
+        return Err(format!(
+            "README.md `{SELF_HOST_HEADING}` documents no URL to browse to — a reader \
+             has nothing to follow, and this guard has nothing to check"
+        ));
+    }
+    for port in &documented {
+        if !published.contains(port) {
+            return Err(format!(
+                "README.md `{SELF_HOST_HEADING}` sends readers to localhost:{port}, but \
+                 docker-compose.yml publishes {published:?} — following the README gives \
+                 connection refused (COX-B011)"
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn readme_self_host_section_points_at_the_published_host_port() {
-    let published = published_host_ports(&read("docker-compose.yml"));
-    let readme = read("README.md");
-    let documented = documented_ports(section(&readme, SELF_HOST_HEADING));
-
-    assert!(
-        !documented.is_empty(),
-        "README.md `{SELF_HOST_HEADING}` documents no URL to browse to — a reader \
-         has nothing to follow, and this guard has nothing to check"
-    );
-    for port in &documented {
-        assert!(
-            published.contains(port),
-            "README.md `{SELF_HOST_HEADING}` sends readers to localhost:{port}, but \
-             docker-compose.yml publishes {published:?} — following the README gives \
-             connection refused (COX-B011)"
-        );
+    if let Err(why) = docs_agree_with_deploy(&read("README.md"), &read("docker-compose.yml")) {
+        panic!("{why}");
     }
 }
 
@@ -143,6 +157,113 @@ fn compose_header_comment_matches_the_mapping_it_documents() {
         assert!(
             published.contains(&port),
             "docker-compose.yml's header says localhost:{port} but it publishes {published:?}"
+        );
+    }
+}
+
+/// The guard, guarded. The tests above only prove the repo is consistent
+/// *right now*; they say nothing about whether the comparison would still
+/// notice if it stopped being consistent. These run the same comparison over
+/// synthetic docs — the ticket's own repro among them — so drift on either
+/// side, and a docs section or port mapping that goes missing, are each proven
+/// to fail rather than assumed to.
+mod the_guard_itself {
+    use super::{docs_agree_with_deploy, ASSIGNED_HOST_PORT, SELF_HOST_HEADING};
+
+    /// A README whose self-host section sends the reader to `port`.
+    fn readme_pointing_at(port: u16) -> String {
+        format!(
+            "# CoXAgent\n\n## Quickstart\n\n{SELF_HOST_HEADING}\n\n\
+             ```sh\ndocker compose up -d --build\n# → http://localhost:{port}, log in as root\n```\n\n\
+             ### Enterprise\n\nSomething else entirely.\n"
+        )
+    }
+
+    /// A compose file publishing `host` on the container's 4000.
+    fn compose_publishing(host: u16) -> String {
+        format!("services:\n  coxagent:\n    ports:\n      - \"{host}:4000\"\n")
+    }
+
+    #[test]
+    fn matching_docs_and_deploy_pass() {
+        assert!(docs_agree_with_deploy(
+            &readme_pointing_at(ASSIGNED_HOST_PORT),
+            &compose_publishing(ASSIGNED_HOST_PORT),
+        )
+        .is_ok());
+    }
+
+    /// The ticket's repro: the deploy moved to 8101, the docs stayed on 4000.
+    #[test]
+    fn stale_docs_against_a_moved_deploy_are_caught() {
+        let why = docs_agree_with_deploy(
+            &readme_pointing_at(4000),
+            &compose_publishing(ASSIGNED_HOST_PORT),
+        )
+        .expect_err("README on 4000 vs compose on 8101 must not pass");
+        assert!(why.contains("localhost:4000"), "unhelpful message: {why}");
+        assert!(why.contains("8101"), "unhelpful message: {why}");
+    }
+
+    /// The mirror image — the docs are right and the mapping drifted. Either
+    /// side moving alone has to fail; only moving both together may pass.
+    #[test]
+    fn a_deploy_that_moves_away_from_the_docs_is_caught() {
+        docs_agree_with_deploy(
+            &readme_pointing_at(ASSIGNED_HOST_PORT),
+            &compose_publishing(9999),
+        )
+        .expect_err("compose on 9999 vs README on 8101 must not pass");
+    }
+
+    #[test]
+    fn a_self_host_section_with_no_url_is_caught() {
+        let readme = format!("# CoXAgent\n\n{SELF_HOST_HEADING}\n\nRun it somehow.\n");
+        docs_agree_with_deploy(&readme, &compose_publishing(ASSIGNED_HOST_PORT))
+            .expect_err("a section that names no URL leaves the reader nowhere to go");
+    }
+
+    /// Only the *self-host* section is in scope: the native `serve` path
+    /// documents localhost:4000 legitimately and must not be dragged in.
+    #[test]
+    fn ports_documented_outside_the_self_host_section_are_not_compared() {
+        let readme = format!(
+            "# CoXAgent\n\n## Quickstart\n\ncoxagent serve   # → localhost:4000\n\n\
+             {SELF_HOST_HEADING}\n\nOpen http://localhost:{ASSIGNED_HOST_PORT}.\n"
+        );
+        assert!(
+            docs_agree_with_deploy(&readme, &compose_publishing(ASSIGNED_HOST_PORT)).is_ok(),
+            "the non-Docker serve path binds 4000 directly — out of scope here"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "section is gone")]
+    fn a_missing_self_host_section_fails_rather_than_passes() {
+        let _ = docs_agree_with_deploy(
+            "# CoXAgent\n\n## Quickstart\n\nNo Docker section at all.\n",
+            &compose_publishing(ASSIGNED_HOST_PORT),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "ports must be a list")]
+    fn a_compose_service_that_publishes_nothing_fails_rather_than_passes() {
+        let _ = docs_agree_with_deploy(
+            &readme_pointing_at(ASSIGNED_HOST_PORT),
+            "services:\n  coxagent:\n    image: coxagent\n",
+        );
+    }
+
+    /// `- "4000"` publishes to an ephemeral host port, not to 4000. Reading the
+    /// container port as if it were the host port would make the guard bless a
+    /// mapping no reader can reach.
+    #[test]
+    #[should_panic(expected = "no explicit host port")]
+    fn a_mapping_with_no_host_port_fails_rather_than_passes() {
+        let _ = docs_agree_with_deploy(
+            &readme_pointing_at(4000),
+            "services:\n  coxagent:\n    ports:\n      - \"4000\"\n",
         );
     }
 }
