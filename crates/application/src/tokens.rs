@@ -86,6 +86,49 @@ pub fn compress(text: &str, max_chars: usize) -> String {
     clip_middle(&dedupe_lines(text), max_chars)
 }
 
+/// `git` subcommands that can emit raw file/blob content (diffs, patches,
+/// object bodies) rather than short porcelain summaries. Compressing these —
+/// `dedupe_lines` collapsing repeated source lines, `clip_middle` eliding the
+/// middle — silently mutates the file content an agent reads, unlike
+/// `status`/`rev-parse`, which stay exact only because they're small enough
+/// to hit the passthrough in `proxy_compress`.
+const GIT_EXACT_SUBCOMMANDS: &[&str] = &[
+    "show",
+    "diff",
+    "log",
+    "cat-file",
+    "blame",
+    "archive",
+    "format-patch",
+    "diff-tree",
+    "diff-index",
+    "diff-files",
+    "apply",
+    "grep",
+];
+
+/// Global `git` flags that take a separate value argument (e.g. `-C /repo`)
+/// — skipped, along with their value, when hunting for the subcommand.
+const GIT_GLOBAL_VALUE_FLAGS: &[&str] = &["-C", "-c", "--git-dir", "--work-tree", "--namespace"];
+
+/// True when `git <args>` invokes a content-retrieval subcommand whose
+/// output must reach the caller byte-exact — never dedupe/clip these,
+/// regardless of size.
+#[must_use]
+pub fn git_needs_exact_output(args: &[String]) -> bool {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a.starts_with('-') {
+            if GIT_GLOBAL_VALUE_FLAGS.contains(&a.as_str()) {
+                it.next(); // skip the flag's value too
+            }
+            continue;
+        }
+        return GIT_EXACT_SUBCOMMANDS.contains(&a.as_str());
+    }
+    false
+}
+
 /// rtk-style command-output compressor for the shell shims: pass small output
 /// through untouched (so exact/short results are never altered), otherwise
 /// dedupe + clip and note the saving. Deterministic — no model involved.
@@ -146,6 +189,31 @@ mod tests {
         let out = proxy_compress(&big);
         assert!(out.len() < big.len() / 2);
         assert!(out.contains("(×200)"));
+    }
+
+    #[test]
+    fn git_needs_exact_output_flags_content_subcommands() {
+        let args = |s: &str| s.split(' ').map(str::to_owned).collect::<Vec<_>>();
+        assert!(git_needs_exact_output(&args("show HEAD:crates/foo.rs")));
+        assert!(git_needs_exact_output(&args("diff HEAD")));
+        assert!(git_needs_exact_output(&args("log -p")));
+        assert!(git_needs_exact_output(&args("cat-file -p abc123")));
+        assert!(git_needs_exact_output(&args("blame src/lib.rs")));
+    }
+
+    #[test]
+    fn git_needs_exact_output_ignores_leading_global_flags() {
+        let args = |s: &str| s.split(' ').map(str::to_owned).collect::<Vec<_>>();
+        assert!(git_needs_exact_output(&args("-C /repo show HEAD")));
+    }
+
+    #[test]
+    fn git_needs_exact_output_false_for_porcelain() {
+        let args = |s: &str| s.split(' ').map(str::to_owned).collect::<Vec<_>>();
+        assert!(!git_needs_exact_output(&args("status")));
+        assert!(!git_needs_exact_output(&args("rev-parse HEAD")));
+        assert!(!git_needs_exact_output(&args("commit -m msg")));
+        assert!(!git_needs_exact_output(&[]));
     }
 
     #[test]

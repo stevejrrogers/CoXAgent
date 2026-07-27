@@ -94,6 +94,11 @@ pub enum Command {
         /// The wrapped command's name (for the summary line).
         #[arg(long)]
         cmd: Option<String>,
+        /// The wrapped command's own arguments, forwarded verbatim so `git`
+        /// content-retrieval subcommands (show/diff/log/cat-file/...) can be
+        /// detected and passed through byte-exact instead of compressed.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// Query the code knowledge graph (for agents + humans): symbol search,
     /// impact/references, callers, and file dependencies.
