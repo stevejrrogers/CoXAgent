@@ -436,22 +436,29 @@ fn the_installed_git_shim_still_compresses_non_content_subcommands() {
 
 #[test]
 fn the_exactness_check_answers_from_the_argv_alone() {
-    // The shim asks *before* the wrapped command runs, so `--check` has to
-    // answer without touching stdin — reading it there would hang every call.
+    // The shim asks *before* the wrapped command runs, so `--exact-check` has
+    // to answer without touching stdin — reading it there would hang every
+    // call. An exact subcommand answers `exact`; anything else answers nothing,
+    // which is what the shim's `[ "$_exact" = "exact" ]` test compares against.
     let check = |args: &[&str]| {
         let out = Command::new(env!("CARGO_BIN_EXE_coxagent"))
             .arg("compress")
-            .args(["--check", "--cmd", "git", "--"])
+            .args(["--exact-check", "--cmd", "git", "--"])
             .args(args)
             .stdin(Stdio::null())
             .output()
             .expect("failed to spawn the coxagent binary");
-        assert!(out.status.success(), "`compress --check` failed: {out:?}");
+        assert!(
+            out.status.success(),
+            "`compress --exact-check` failed: {out:?}"
+        );
         String::from_utf8(out.stdout).unwrap().trim().to_owned()
     };
     assert_eq!(check(&["show", "HEAD:src/lib.rs"]), "exact");
+    // COX-B015: a global flag's *value* is not the subcommand — `-C /repo` must
+    // not make `diff` invisible to the check.
     assert_eq!(check(&["-C", "/repo", "diff", "HEAD"]), "exact");
-    assert_eq!(check(&["status"]), "compress");
+    assert_eq!(check(&["status"]), "");
 }
 
 #[test]
@@ -598,6 +605,164 @@ fn exact_output_larger_than_the_pipe_buffer_is_not_truncated() {
     let shimmed = compress("git", &["show", "HEAD:big.rs"], &real);
 
     assert_byte_exact("git show (4 MiB)", &real, &shimmed);
+}
+
+/// One line of the fake binary's stdout (newline added when emitted). Repeated
+/// so compression would collapse it to a single `(×N)` line — if the payload
+/// survives intact, no compressor touched it.
+const FAKE_LINE: &str = "warning: unused variable";
+const FAKE_LINES: usize = 500;
+/// What the fake `git` writes to *stderr*. Real `git show` does the same
+/// (`warning: …`, `fatal: …`) while still succeeding or failing usefully.
+const FAKE_DIAGNOSTIC: &str = "git-stderr-diagnostic";
+const FAKE_EXIT: i32 = 3;
+
+/// The real shim script plus a fake `git` for it to find, wired so the shim
+/// resolves the fake instead of the system binary.
+///
+/// The fake is deterministic across git versions and platforms: what is under
+/// test is the *shim's* stream plumbing, not git's. `shim_script` is imported
+/// from the crate rather than copied so this guard cannot drift away from the
+/// script actually shipped.
+struct Shimmed {
+    _dir: tempfile::TempDir,
+    shim: PathBuf,
+    path: std::ffi::OsString,
+}
+
+impl Shimmed {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let shim_dir = dir.path().join("shims");
+        let fake_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&shim_dir).unwrap();
+        std::fs::create_dir_all(&fake_dir).unwrap();
+
+        let shim = shim_dir.join("git");
+        write_exec(
+            &shim,
+            &coxagent_app::shim_script(
+                "git",
+                &shim_dir.display().to_string(),
+                env!("CARGO_BIN_EXE_coxagent"),
+            ),
+        );
+        write_exec(
+            &fake_dir.join("git"),
+            &format!(
+                "#!/usr/bin/env bash\n\
+                 for ((i=0;i<{FAKE_LINES};i++)); do printf '%s\\n' '{FAKE_LINE}'; done\n\
+                 printf '%s\\n' '{FAKE_DIAGNOSTIC}' >&2\n\
+                 exit {FAKE_EXIT}\n"
+            ),
+        );
+
+        // The fake must precede the system `git`; `/usr/bin:/bin` stays on the
+        // tail because the shim's `#!/usr/bin/env bash` resolves `bash` there.
+        let path = format!(
+            "{}:{}:/usr/bin:/bin",
+            shim_dir.display(),
+            fake_dir.display()
+        );
+        Self {
+            _dir: dir,
+            shim,
+            path: path.into(),
+        }
+    }
+
+    /// Invoke the shim exactly as an agent's shell would, with stdout and
+    /// stderr on separate pipes (so neither is a tty, and a merge is visible).
+    fn run(&self, args: &[&str]) -> std::process::Output {
+        Command::new(&self.shim)
+            .args(args)
+            .env("PATH", &self.path)
+            .env_remove("COX_COMPRESS")
+            .stdin(Stdio::null())
+            .output()
+            .expect("failed to run the shim")
+    }
+}
+
+fn write_exec(path: &Path, body: &str) {
+    std::fs::write(path, body).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+fn fake_stdout() -> Vec<u8> {
+    format!("{FAKE_LINE}\n").repeat(FAKE_LINES).into_bytes()
+}
+
+fn fake_stderr() -> Vec<u8> {
+    format!("{FAKE_DIAGNOSTIC}\n").into_bytes()
+}
+
+/// COX-B015 regression guard, at the shim level rather than the `compress`
+/// level: the pipeline merged the wrapped command's stderr into its stdout
+/// (`2>&1`) before compressing. For a content-retrieval `git` subcommand that
+/// merge *is* the corruption this ticket is about — a `warning:`/`fatal:` line
+/// git wrote to stderr is spliced into the file content the agent reads, and
+/// the caller's stderr comes back empty. Fails on pre-fix code.
+#[test]
+fn the_real_shim_leaves_git_show_stdout_stderr_and_exit_code_native() {
+    let sh = Shimmed::new();
+
+    let out = sh.run(&["show", "HEAD:big.rs"]);
+
+    assert_byte_exact("git show stdout", &fake_stdout(), &out.stdout);
+    assert_byte_exact("git show stderr", &fake_stderr(), &out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(FAKE_EXIT),
+        "the shim did not pass the wrapped command's exit code through"
+    );
+}
+
+/// The same guard for the other subcommands named in the ticket, including one
+/// reached past a global value flag (`git -C <dir> diff`).
+#[test]
+fn the_real_shim_leaves_every_content_subcommand_native() {
+    let sh = Shimmed::new();
+    for args in [
+        vec!["diff", "HEAD"],
+        vec!["cat-file", "-p", "abc123"],
+        vec!["log", "-p"],
+        vec!["-C", "/somewhere", "diff"],
+    ] {
+        let out = sh.run(&args);
+        let label = format!("git {}", args.join(" "));
+        assert_byte_exact(&format!("{label} stdout"), &fake_stdout(), &out.stdout);
+        assert_byte_exact(&format!("{label} stderr"), &fake_stderr(), &out.stderr);
+        assert_eq!(out.status.code(), Some(FAKE_EXIT), "{label}: exit code");
+    }
+}
+
+/// The other half of the fix (AC5): a non-content subcommand still gets the
+/// full token saving — same merge, same compression, same exit code as before.
+#[test]
+fn the_real_shim_still_compresses_a_non_exact_subcommand() {
+    let sh = Shimmed::new();
+
+    let out = sh.run(&["status"]);
+
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("output compressed"),
+        "`git status` was not compressed: {text:.200}"
+    );
+    assert!(
+        text.contains(&format!("(×{FAKE_LINES})")),
+        "`git status` output was not deduped: {text:.200}"
+    );
+    assert!(out.stdout.len() < fake_stdout().len());
+    // Unchanged behaviour: stderr is still folded into the compressed stream,
+    // which is where cargo/npm/git-porcelain diagnostics belong.
+    assert!(text.contains(FAKE_DIAGNOSTIC));
+    assert_eq!(out.status.code(), Some(FAKE_EXIT));
 }
 
 #[test]

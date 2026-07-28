@@ -205,23 +205,26 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
             .await
         }
         Command::Codegraph { query, work_dir } => codegraph_query(&work_dir, &query),
-        Command::Compress { cmd, check, args } => {
+        Command::Compress {
+            cmd,
+            exact_check,
+            args,
+        } => {
             use std::io::{Read as _, Write as _};
             // git content-retrieval subcommands (show/diff/log/cat-file/...)
             // can emit raw file content — dedupe/clip would silently mutate
             // it, so pass those through byte-exact instead of compressing.
             let needs_exact = cmd.as_deref() == Some("git")
                 && coxagent_application::tokens::git_needs_exact_output(&args);
-            // `--check` is the shim asking the question before it runs the
-            // command, so it can skip the pipe entirely for those. Answer and
-            // exit without touching stdin — there is nothing on it yet.
-            if check {
+            // Query mode for the shim: answer and exit without touching stdin,
+            // so the shim can run the real command unpiped (native stdout,
+            // stderr and exit code) instead of merging the streams.
+            if exact_check {
                 return Ok(if needs_exact {
-                    EXACT_ANSWER
+                    "exact".to_owned()
                 } else {
-                    "compress"
-                }
-                .to_owned());
+                    String::new()
+                });
             }
             // Bytes, not a String: the wrapped command's output is whatever it
             // emitted. `read_to_string` rejects non-UTF-8 wholesale and leaves
@@ -265,10 +268,11 @@ const SHIM_CMDS: &[&str] = &[
     "docker", "git", "node", "python", "python3", "tsc", "jest", "vitest",
 ];
 
-/// The answer `compress --check` prints when the wrapped command's output must
-/// reach the caller untouched. A shared constant so the shim script and the
-/// CLI that answers it cannot drift apart.
-const EXACT_ANSWER: &str = "exact";
+/// Commands whose argv can select byte-exact output. Their shim asks the
+/// binary before piping, so `git_needs_exact_output` stays the single source
+/// of truth instead of being re-implemented in shell. Only these pay the extra
+/// process; every other shim keeps the plain pipeline.
+const EXACT_AWARE_CMDS: &[&str] = &["git"];
 
 /// The wrapper script for one command: find the real binary on `PATH` (skipping
 /// `shim_dir` so it never re-enters itself), then pipe its output through
@@ -276,24 +280,24 @@ const EXACT_ANSWER: &str = "exact";
 /// subcommands can be recognised and left byte-exact. Pure — the caller writes
 /// it, so the shape can be tested without touching the shared shim directory.
 ///
-/// Public for the COX-B015 regression guard, which installs the real script in
-/// a temp dir and runs `git show` through it: asserting the script *text* is
-/// not enough, only executing it proves the deployed shim is byte-exact.
+/// COX-B015: the pipeline merges stderr into stdout (`2>&1`) because that is
+/// where cargo/npm put most of their output. For a content-retrieval `git`
+/// subcommand that merge is itself corruption — a warning git wrote to stderr
+/// lands in the middle of the file content, and the caller's stderr comes back
+/// empty — so those bypass the pipeline entirely and `exec` the real binary.
+/// Public so the COX-B015 regression test can drive the *real* script rather
+/// than a hand-copied duplicate — a copy is exactly how a shim regression
+/// hides from its own guard.
 #[must_use]
 pub fn shim_script(cmd: &str, shim_dir: &str, exe: &str) -> String {
-    // Passing content-retrieval output through the compressor untouched is not
-    // enough to keep it byte-exact: the pipe itself is `2>&1`, so a warning git
-    // writes to stderr ("inexact rename detection was skipped") lands *inside*
-    // the file content, and stderr comes out empty so nothing signals it. Ask
-    // the binary — the single owner of the subcommand rule — before running,
-    // and exec those unpiped. Only `git` has such subcommands, so only the
-    // `git` shim pays for the extra (few-millisecond) call. If the check fails
-    // to run at all, the substitution is empty and the shim falls back to the
-    // piped path, where the compressor still refuses to rewrite the bytes.
-    let exact_guard = if cmd == "git" {
+    // Prefer exactness over token saving if the check cannot run at all: a
+    // missing/broken binary must not silently re-enable the merge+compress
+    // path for `git show`.
+    let exact_bypass = if EXACT_AWARE_CMDS.contains(&cmd) {
         format!(
-            "\x20 [ \"$(\"{exe}\" compress --check --cmd \"$cmd\" -- \"$@\")\" = \"{EXACT_ANSWER}\" ] \
-             && exec \"$real\" \"$@\"\n"
+            "\x20 _exact=\"$(\"{exe}\" compress --cmd \"$cmd\" --exact-check -- \"$@\" \
+             2>/dev/null)\" || _exact=\"exact\"\n\
+             \x20 [ \"$_exact\" = \"exact\" ] && exec \"$real\" \"$@\"\n"
         )
     } else {
         String::new()
@@ -310,7 +314,7 @@ pub fn shim_script(cmd: &str, shim_dir: &str, exe: &str) -> String {
          IFS=\"$_IFS\"\n\
          [ -z \"$real\" ] && {{ echo \"cox-shim: $cmd not found\" >&2; exit 127; }}\n\
          if [ \"${{COX_COMPRESS:-1}}\" = \"1\" ] && [ ! -t 1 ]; then\n\
-         {exact_guard}\
+         {exact_bypass}\
          \x20 set -o pipefail\n\
          \x20 \"$real\" \"$@\" 2>&1 | \"{exe}\" compress --cmd \"$cmd\" -- \"$@\"\n\
          \x20 exit \"${{PIPESTATUS[0]:-0}}\"\n\
@@ -366,7 +370,8 @@ mod shim_script_tests {
             // `compress` on the line that asks whether to pipe at all.
             let pipe = script
                 .lines()
-                .find(|l| l.contains("2>&1 |"))
+                // Skip the `--exact-check` probe — it is a query, not the pipe.
+                .find(|l| l.contains("compress") && !l.contains("--exact-check"))
                 .unwrap_or_else(|| panic!("{cmd} shim never pipes into compress"));
             assert!(
                 pipe.contains(r#""/opt/coxagent" compress --cmd "$cmd" -- "$@""#),
@@ -375,44 +380,52 @@ mod shim_script_tests {
         }
     }
 
-    /// COX-B015: bypassing the *compressor* is not enough — the shim's pipe is
-    /// `2>&1`, so anything git writes to stderr is spliced into the content it
-    /// hands back. Content-retrieval calls must therefore skip the pipe.
+    /// COX-B015: the git shim must decide *before* the `2>&1` pipeline, and
+    /// bypass it entirely, so a content subcommand's streams stay native.
     #[test]
-    fn the_git_shim_runs_content_retrieval_unpiped() {
+    fn git_shim_checks_exactness_before_the_merging_pipeline() {
         let script = shim_script("git", "/tmp/coxagent-shims", "/opt/coxagent");
-        let guard = script
-            .lines()
-            .find(|l| l.contains("--check"))
-            .expect("git shim never asks whether the output must stay exact");
+        let probe = script
+            .find("--exact-check")
+            .expect("git shim never asks whether the output must be exact");
+        let bypass = script
+            .find(r#"[ "$_exact" = "exact" ] && exec "$real" "$@""#)
+            .expect("git shim never execs the real binary for exact output");
+        let merge = script
+            .find("2>&1")
+            .expect("shim lost its compress pipeline");
         assert!(
-            guard.contains(r#""/opt/coxagent" compress --check --cmd "$cmd" -- "$@""#),
-            "the check must see the wrapped argv: {guard}"
-        );
-        assert!(
-            guard.contains(r#"= "exact" ] && exec "$real" "$@""#),
-            "an exact answer must exec the real binary with no pipe: {guard}"
-        );
-        // Order matters: the guard has to come before the pipe, or the stderr
-        // merge has already happened by the time anyone asks.
-        let check_at = script.find("--check").unwrap();
-        let pipe_at = script.find("2>&1 |").unwrap();
-        assert!(
-            check_at < pipe_at,
-            "the check runs after the pipe:\n{script}"
+            probe < bypass && bypass < merge,
+            "the exactness bypass must come before the stderr merge:\n{script}"
         );
     }
 
-    /// Only `git` has content-retrieval subcommands, so only the `git` shim
-    /// pays for the extra call — every other wrapped command would just be
-    /// spending a process per invocation to be told "compress".
+    /// The probe is only able to answer if it is told which subcommand ran —
+    /// `git_needs_exact_output` reads the wrapped argv. A probe that forwards
+    /// no arguments answers "compress" for everything and the bypass above
+    /// silently never fires.
     #[test]
-    fn only_the_git_shim_pays_for_the_exactness_check() {
+    fn the_exactness_probe_forwards_the_wrapped_argv() {
+        let script = shim_script("git", "/tmp/coxagent-shims", "/opt/coxagent");
+        let probe = script
+            .lines()
+            .find(|l| l.contains("--exact-check"))
+            .expect("git shim never asks whether the output must be exact");
+        assert!(
+            probe.contains(r#""/opt/coxagent" compress --cmd "$cmd" --exact-check -- "$@""#),
+            "the probe must see the wrapped argv: {probe}"
+        );
+    }
+
+    /// …and every other shim keeps the plain pipeline: no extra process, and
+    /// compression of non-git commands is untouched.
+    #[test]
+    fn only_the_exact_aware_shims_pay_for_the_probe() {
         for cmd in SHIM_CMDS.iter().filter(|c| **c != "git") {
             let script = shim_script(cmd, "/tmp/coxagent-shims", "/opt/coxagent");
             assert!(
-                !script.contains("--check"),
-                "{cmd} shim spawns a needless exactness check"
+                !script.contains("--exact-check"),
+                "{cmd} shim spawns a needless exactness probe"
             );
         }
     }
