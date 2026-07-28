@@ -94,6 +94,12 @@ pub enum Command {
         /// The wrapped command's name (for the summary line).
         #[arg(long)]
         cmd: Option<String>,
+        /// Decide instead of compress: read no stdin, print nothing, and exit
+        /// 0 when this command's output must stay byte-exact (1 otherwise).
+        /// The shim uses it to skip the pipe entirely for those commands, so
+        /// stdout, stderr and the exit code reach the caller untouched.
+        #[arg(long)]
+        check_exact: bool,
         /// The wrapped command's own arguments, forwarded verbatim so `git`
         /// content-retrieval subcommands (show/diff/log/cat-file/...) can be
         /// detected and passed through byte-exact instead of compressed.

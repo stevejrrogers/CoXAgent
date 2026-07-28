@@ -205,19 +205,30 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
             .await
         }
         Command::Codegraph { query, work_dir } => codegraph_query(&work_dir, &query),
-        Command::Compress { cmd, args } => {
+        Command::Compress {
+            cmd,
+            check_exact,
+            args,
+        } => {
             use std::io::{Read as _, Write as _};
+            // git content-retrieval subcommands (show/diff/log/cat-file/...)
+            // can emit raw file content — dedupe/clip would silently mutate
+            // it, so pass those through byte-exact instead of compressing.
+            let needs_exact = cmd.as_deref() == Some("git")
+                && coxagent_application::tokens::git_needs_exact_output(&args);
+            if check_exact {
+                // Answer as an exit status so the shim can branch on it in
+                // `if`, without a message on either stream. Exits here rather
+                // than returning: `cli_main` only maps Ok/Err onto 0/1 and an
+                // `Err` would print to the stderr the caller is about to read.
+                std::process::exit(i32::from(!needs_exact));
+            }
             // Bytes, not a String: the wrapped command's output is whatever it
             // emitted. `read_to_string` rejects non-UTF-8 wholesale and leaves
             // the buffer empty, which turned `git show HEAD:logo.png` and
             // `git archive` into silent zero-byte results.
             let mut input = Vec::new();
             std::io::stdin().read_to_end(&mut input).ok();
-            // git content-retrieval subcommands (show/diff/log/cat-file/...)
-            // can emit raw file content — dedupe/clip would silently mutate
-            // it, so pass those through byte-exact instead of compressing.
-            let needs_exact = cmd.as_deref() == Some("git")
-                && coxagent_application::tokens::git_needs_exact_output(&args);
             // Non-UTF-8 output is passed through for the same reason: the
             // compressor works on lines and chars and cannot round-trip bytes.
             let out = match std::str::from_utf8(&input) {
@@ -257,9 +268,17 @@ const SHIM_CMDS: &[&str] = &[
 /// The wrapper script for one command: find the real binary on `PATH` (skipping
 /// `shim_dir` so it never re-enters itself), then pipe its output through
 /// `{exe} compress`, forwarding the wrapped argv so content-retrieval
-/// subcommands can be recognised and left byte-exact. Pure — the caller writes
-/// it, so the shape can be tested without touching the shared shim directory.
-fn shim_script(cmd: &str, shim_dir: &str, exe: &str) -> String {
+/// subcommands can be recognised and left byte-exact.
+///
+/// Commands whose output must stay byte-exact (`compress --check-exact` says
+/// so) skip the pipe altogether and `exec` the real binary: the pipe merges
+/// `2>&1`, which would splice `git`'s diagnostics into the file content on
+/// stdout and hand the caller an empty stderr (COX-B015).
+///
+/// Pure — the caller writes it, so the shape can be tested without touching the
+/// shared shim directory. `pub` so the integration tests can run a real shim.
+#[must_use]
+pub fn shim_script(cmd: &str, shim_dir: &str, exe: &str) -> String {
     format!(
         "#!/usr/bin/env bash\n\
          cmd=\"{cmd}\"\n\
@@ -272,6 +291,9 @@ fn shim_script(cmd: &str, shim_dir: &str, exe: &str) -> String {
          IFS=\"$_IFS\"\n\
          [ -z \"$real\" ] && {{ echo \"cox-shim: $cmd not found\" >&2; exit 127; }}\n\
          if [ \"${{COX_COMPRESS:-1}}\" = \"1\" ] && [ ! -t 1 ]; then\n\
+         \x20 if \"{exe}\" compress --check-exact --cmd \"$cmd\" -- \"$@\"; then\n\
+         \x20 \x20 exec \"$real\" \"$@\"\n\
+         \x20 fi\n\
          \x20 set -o pipefail\n\
          \x20 \"$real\" \"$@\" 2>&1 | \"{exe}\" compress --cmd \"$cmd\" -- \"$@\"\n\
          \x20 exit \"${{PIPESTATUS[0]:-0}}\"\n\
@@ -325,11 +347,42 @@ mod shim_script_tests {
             let script = shim_script(cmd, "/tmp/coxagent-shims", "/opt/coxagent");
             let pipe = script
                 .lines()
-                .find(|l| l.contains("compress"))
+                .find(|l| l.contains("| \""))
                 .unwrap_or_else(|| panic!("{cmd} shim never pipes into compress"));
             assert!(
                 pipe.contains(r#""/opt/coxagent" compress --cmd "$cmd" -- "$@""#),
                 "{cmd} shim drops the wrapped argv: {pipe}"
+            );
+        }
+    }
+
+    /// COX-B015: byte-exact commands must `exec` the real binary instead of
+    /// going through the pipe — the pipe merges `2>&1`, so diagnostics would
+    /// land in the content on stdout and the caller's stderr would be empty.
+    /// Guards the bypass against being dropped in a forward-port.
+    #[test]
+    fn shim_script_bypasses_the_pipe_for_byte_exact_commands() {
+        for cmd in SHIM_CMDS {
+            let script = shim_script(cmd, "/tmp/coxagent-shims", "/opt/coxagent");
+            let check = script
+                .lines()
+                .position(|l| {
+                    l.contains(r#""/opt/coxagent" compress --check-exact --cmd "$cmd" -- "$@""#)
+                })
+                .unwrap_or_else(|| panic!("{cmd} shim never asks whether output must stay exact"));
+            let piped = script
+                .lines()
+                .position(|l| l.contains("| \""))
+                .unwrap_or_else(|| panic!("{cmd} shim never pipes into compress"));
+            assert!(
+                check < piped,
+                "{cmd} shim compresses before checking for byte-exact output"
+            );
+            assert!(
+                script.lines().skip(check).take(piped - check).any(|l| l
+                    .trim()
+                    .starts_with(r#"exec "$real""#)),
+                "{cmd} shim does not exec the real binary on the byte-exact path"
             );
         }
     }

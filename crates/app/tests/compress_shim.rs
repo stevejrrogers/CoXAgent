@@ -209,6 +209,136 @@ fn exact_output_larger_than_the_pipe_buffer_is_not_truncated() {
     assert_byte_exact("git show (4 MiB)", &real, &shimmed);
 }
 
+/// Everything above drives `coxagent compress` directly. These run the *real*
+/// shim script, which is where the second half of COX-B015 lived: the pipe is
+/// `"$real" "$@" 2>&1 | compress`, so `git`'s diagnostics were spliced into the
+/// content on stdout and the caller's stderr came back empty. Byte-exact
+/// subcommands must therefore bypass the pipe entirely, not merely survive it.
+struct Shimmed {
+    stdout: Vec<u8>,
+    stderr: String,
+    code: Option<i32>,
+}
+
+/// Run `git <args>` through a freshly generated shim, as an agent subprocess
+/// would: shim dir first on `PATH`, stdout a pipe (not a tty) so the shim takes
+/// its compressing branch.
+fn through_the_shim(root: &Path, args: &[&str]) -> Shimmed {
+    let dir = tempfile::tempdir().unwrap();
+    let shim_dir = dir.path().display().to_string();
+    let script = coxagent_app::shim_script("git", &shim_dir, env!("CARGO_BIN_EXE_coxagent"));
+    let shim = dir.path().join("git");
+    std::fs::write(&shim, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    // Drop any shim directory the ambient environment already installed, so the
+    // script resolves the true `git` rather than another (possibly stale) shim.
+    let path = std::env::var("PATH").unwrap_or_default();
+    let clean: Vec<&str> = path
+        .split(':')
+        .filter(|d| !d.contains("coxagent-shims"))
+        .collect();
+
+    let out = Command::new(&shim)
+        .args(args)
+        .current_dir(root)
+        .env("PATH", format!("{shim_dir}:{}", clean.join(":")))
+        .env_remove("COX_COMPRESS")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run the `git {}` shim: {e}", args.join(" ")));
+    Shimmed {
+        stdout: out.stdout,
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        code: out.status.code(),
+    }
+}
+
+#[test]
+fn the_real_shim_leaves_git_show_stdout_byte_exact() {
+    let root = repo_root();
+    let path = large_tracked_file(&root);
+    let rev = format!("HEAD:{path}");
+    let real = git(&root, &["show", &rev]);
+
+    let got = through_the_shim(&root, &["show", &rev]);
+
+    assert_byte_exact(&format!("git show {rev}"), &real, &got.stdout);
+    assert_eq!(got.stderr, "", "shim invented output on stderr");
+    assert_eq!(got.code, Some(0));
+}
+
+#[test]
+fn the_real_shim_leaves_git_cat_file_byte_exact() {
+    // The third subcommand the ticket names by hand. `cat-file -p <blob>` takes
+    // an object id rather than a `<rev>:<path>`, so it exercises a different
+    // argv shape through the same bypass.
+    let root = repo_root();
+    let path = large_tracked_file(&root);
+    let blob = String::from_utf8(git(&root, &["rev-parse", &format!("HEAD:{path}")]))
+        .unwrap()
+        .trim()
+        .to_owned();
+    let args = ["cat-file", "-p", &blob];
+    let real = git(&root, &args);
+
+    let got = through_the_shim(&root, &args);
+
+    assert_byte_exact(&format!("git cat-file -p {blob}"), &real, &got.stdout);
+    assert_eq!(got.stderr, "", "shim invented output on stderr");
+    assert_eq!(got.code, Some(0));
+}
+
+#[test]
+fn the_real_shim_keeps_git_diagnostics_on_stderr_and_out_of_the_content() {
+    // `2>&1` made a failing `git show` write `fatal: …` onto stdout — the exact
+    // stream a caller reads as file content — and hand back an empty stderr.
+    let root = repo_root();
+    let args = ["show", "HEAD:no/such/file/COX-B015.rs"];
+    let truth = Command::new("git")
+        .args(args)
+        .current_dir(&root)
+        .env("COX_COMPRESS", "0")
+        .output()
+        .unwrap();
+    assert!(!truth.status.success(), "the probe path must not exist");
+
+    let got = through_the_shim(&root, &args);
+
+    assert_byte_exact("git show <missing>", &truth.stdout, &got.stdout);
+    assert!(
+        got.stdout.is_empty(),
+        "git's diagnostics leaked into stdout: {}",
+        String::from_utf8_lossy(&got.stdout)
+    );
+    assert_eq!(
+        got.stderr,
+        String::from_utf8_lossy(&truth.stderr),
+        "stderr did not pass through unchanged"
+    );
+    assert_eq!(got.code, truth.status.code(), "exit code was rewritten");
+}
+
+#[test]
+fn the_real_shim_still_compresses_a_non_exact_subcommand() {
+    // The other side of the bypass: a listing subcommand keeps the saving, so
+    // the fix cannot be "stop compressing git".
+    let root = repo_root();
+    let args = ["ls-tree", "-r", "HEAD"];
+    let real = git(&root, &args);
+    assert!(real.len() > 2_500, "listing too small to be compressed");
+
+    let got = through_the_shim(&root, &args);
+
+    assert!(
+        String::from_utf8_lossy(&got.stdout).contains("output compressed"),
+        "`git ls-tree` lost its compression"
+    );
+    assert_eq!(got.code, Some(0));
+}
+
 #[test]
 fn the_same_content_is_compressed_for_porcelain_and_other_tools() {
     // Guards the other side of the fix: content-retrieval subcommands are
