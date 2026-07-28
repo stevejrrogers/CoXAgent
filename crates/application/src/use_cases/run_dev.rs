@@ -291,6 +291,22 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         // just read and wrote in context instead of rediscovering it cold.
         let session = match self.engine.run(request).await {
             Ok(o) if o.succeeded() => {
+                // The engine answered: whatever outage was raised against it is
+                // over. Closing it out loud matters as much as raising it — an
+                // alert that never clears is one people stop reading.
+                let engine = self.engine.id().to_owned();
+                let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+                    if let Some(inc) = s.close_engine_incident(&engine) {
+                        let msg = format!(
+                            "✅ {engine} is answering again after {} failed run(s) — {} is \
+                             resolved, work resumes.",
+                            inc.hits, inc.reason
+                        );
+                        s.post_chat_in("SYSTEM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+                    }
+                    Ok(())
+                })
+                .await;
                 // A question is not a failure. If the agent says it would have
                 // to guess, park the QUESTION (not the ticket): the BA answers
                 // next cycle and the retry starts from an answer instead of an
@@ -1012,12 +1028,30 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         let infra = crate::faults::is_infra_fault(why);
         let _ = layer;
         if infra {
+            // Raise it where people look. An outage that only exists as a log
+            // line means the team looks broken while the real problem is an
+            // expired login nobody was told about.
+            let (engine, role, detail) = (
+                self.engine.id().to_owned(),
+                format!("{:?}", self.mode.role()),
+                short.clone(),
+            );
             let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
                 s.log_activity(
                     "SYSTEM",
                     "engine infrastructure fault — attempt not counted",
                     Some(key.clone()),
                 );
+                let first = !s.engine_incidents.iter().any(|i| i.engine == engine);
+                s.open_engine_incident(&engine, &role, &detail);
+                if first {
+                    let msg = format!(
+                        "🔌 {engine} is failing for every agent: {detail}. Work is paused on this \
+                         engine until it answers again — fix the credentials or the model, and \
+                         this clears itself."
+                    );
+                    s.post_chat_in("SYSTEM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+                }
                 Ok(())
             })
             .await;
