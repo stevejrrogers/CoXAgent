@@ -3770,16 +3770,49 @@ function newPC(iceServers){
   pc.onconnectionstatechange=()=>{if(["failed","disconnected","closed"].includes(pc.connectionState))endCall(false);};
   return pc;
 }
+// Why the call could not start, in words the person can act on. A toast that
+// says "cannot access mic/camera" and disappears leaves them clicking a button
+// that looks dead; a denied permission and an absent device need different
+// fixes, and only the browser knows which happened.
+function callDeviceError(err){
+  const name=(err&&err.name)||"";
+  let msg;
+  if(!window.isSecureContext){
+    msg="Calls need a secure page. Open CoXAgent over https or on localhost.";
+  }else if(name==="NotAllowedError"||name==="SecurityError"){
+    msg="Microphone/camera access was denied. Allow it for CoXAgent in System Settings → Privacy & Security, then try again.";
+  }else if(name==="NotFoundError"||name==="OverconstrainedError"){
+    msg="No microphone or camera found on this machine.";
+  }else if(name==="NotReadableError"){
+    msg="Another app is using the microphone/camera. Close it and try again.";
+  }else{
+    msg="Could not start the call: "+(name||err&&err.message||"unknown error");
+  }
+  // Persistent, not a toast: this needs a decision, not a glance.
+  alert(msg);
+}
 async function startCall(peer,video){
   if(CALL.pc){toasty("Already in a call","err");return;}
   try{
     CALL.peer=peer;CALL.video=video;
-    const stream=await navigator.mediaDevices.getUserMedia({audio:true,video});
+    let stream;
+    try{ stream=await navigator.mediaDevices.getUserMedia({audio:true,video}); }
+    catch(err){
+      // A video call that cannot get the camera is still a phone call. Try
+      // audio before giving up — the meeting mesh already does this, and the
+      // 1:1 path silently aborting is why clicking "call" looked like nothing
+      // happened at all.
+      if(video){
+        try{ stream=await navigator.mediaDevices.getUserMedia({audio:true}); video=false; CALL.video=false;
+             toasty("No camera — starting a voice call instead","ok"); }
+        catch(err2){ callDeviceError(err2); endCall(false); return; }
+      } else { callDeviceError(err); endCall(false); return; }
+    }
     CALL.local=stream;openCallUI(peer,video,"Calling…");
     const pc=newPC(await iceConfig());stream.getTracks().forEach(t=>pc.addTrack(t,stream));
     const offer=await pc.createOffer();await pc.setLocalDescription(offer);
     sendSignal(peer,"offer",{sdp:pc.localDescription,video});
-  }catch(e){toasty("Cannot access mic/camera","err");endCall(false);}
+  }catch(e){callDeviceError(e);endCall(false);}
 }
 async function onSignal(msg){
   const from=msg.from,kind=msg.kind,p=msg.payload||{};

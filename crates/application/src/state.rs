@@ -805,6 +805,10 @@ pub struct ProjectState {
     /// Open engine-infrastructure incidents, keyed by engine id.
     #[serde(default)]
     pub engine_incidents: Vec<EngineIncident>,
+    /// Last day each once-a-day job ran (`standup`, `po-milestones`, …), so a
+    /// daily ceremony is not repeated every cycle.
+    #[serde(default)]
+    pub daily_jobs: std::collections::BTreeMap<String, String>,
     /// Whether the Ops/SRE monitor currently sees the deployed app as down —
     /// tracked so it files exactly one bug per outage and can announce recovery.
     #[serde(default)]
@@ -896,6 +900,7 @@ impl Default for ProjectState {
             ticket_failures: std::collections::BTreeMap::new(),
             questions: Vec::new(),
             engine_incidents: Vec::new(),
+            daily_jobs: std::collections::BTreeMap::new(),
             ops_down: false,
             spend_today_usd: 0.0,
             spend_day: String::new(),
@@ -1020,6 +1025,7 @@ impl ProjectState {
     /// Clear an engine's incident because a run just succeeded on it. Returns
     /// the incident that was resolved, so the caller can say so out loud —
     /// an alert nobody sees close is an alert people learn to ignore.
+    #[must_use]
     pub fn close_engine_incident(&mut self, engine: &str) -> Option<EngineIncident> {
         let i = self
             .engine_incidents
@@ -2085,5 +2091,42 @@ mod engine_incident_tests {
             s.close_engine_incident("claude").is_none(),
             "closing twice is not an event"
         );
+    }
+}
+
+#[cfg(test)]
+mod daily_job_tests {
+    use super::ProjectState;
+
+    #[test]
+    fn a_daily_job_is_remembered_per_day_and_per_job() {
+        let mut s = ProjectState::default();
+        s.daily_jobs
+            .insert("standup".to_owned(), "2026-07-29".to_owned());
+        // Same job, same day: already done. Same day, other job: not.
+        assert_eq!(
+            s.daily_jobs.get("standup").map(String::as_str),
+            Some("2026-07-29")
+        );
+        assert!(!s.daily_jobs.contains_key("po-milestones"));
+        // A new day replaces the stamp rather than accumulating entries.
+        s.daily_jobs
+            .insert("standup".to_owned(), "2026-07-30".to_owned());
+        assert_eq!(s.daily_jobs.len(), 1);
+        assert_eq!(
+            s.daily_jobs.get("standup").map(String::as_str),
+            Some("2026-07-30")
+        );
+    }
+
+    #[test]
+    fn state_without_the_field_still_loads() {
+        let mut doc = serde_json::to_value(ProjectState::default()).expect("serialize");
+        doc.as_object_mut().expect("object").remove("daily_jobs");
+        doc.as_object_mut()
+            .expect("object")
+            .remove("engine_incidents");
+        let back: ProjectState = serde_json::from_value(doc).expect("legacy state loads");
+        assert!(back.daily_jobs.is_empty() && back.engine_incidents.is_empty());
     }
 }
