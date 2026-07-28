@@ -441,6 +441,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// requests changes — the automated stand-in for a human reviewer. Gated by
     /// CI (never merges a failing or conflicting PR) and bounded per cycle to
     /// keep cost predictable. Best-effort throughout.
+    #[allow(clippy::too_many_lines)] // one review pass: gate, judge, verify, land
     async fn review_open_prs(&self) {
         // `auto_review` (default on) drives SA review; `auto_merge` additionally
         // lets an approval merge. With neither, humans review by hand.
@@ -518,6 +519,26 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 Some((true, summary)) => {
                     self.record_review(pr.number, "approve", &summary).await;
                     if auto_merge {
+                        // The DoD gates ran on the agent's branch, against the
+                        // base as it was then. Between that and now the target
+                        // has moved, and a PR that was green on an older main
+                        // can still break it — the failure CI would normally
+                        // catch, which is not available here. Build and test
+                        // the MERGED result before landing it.
+                        if let Err(why) = self.verify_merged_result(&pr.head, target).await {
+                            let msg = format!(
+                                "Approved, but the merged result does not build/test clean: \
+                                 {why}. Rebase on {target} and fix it there — nothing lands red."
+                            );
+                            let _ = forge.request_changes(pr.number, &msg).await;
+                            self.record_review(pr.number, "request_changes", &msg).await;
+                            self.log_git(&format!(
+                                "PR #{} held: merged result failed verification",
+                                pr.number
+                            ))
+                            .await;
+                            continue;
+                        }
                         match forge.merge_pr(pr.number).await {
                             Ok(()) => {
                                 self.log_git(&format!("SA approved & merged PR #{}", pr.number))
@@ -3401,6 +3422,70 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
     }
 
+    /// Build and test what main would actually become: the PR's head merged
+    /// into the target, in a throwaway worktree. This is the check CI would do
+    /// and the one thing standing between auto-merge and a red main, since a
+    /// branch's own green run says nothing about a target that has moved since.
+    ///
+    /// The distinction that matters: a project with no git and no test runner
+    /// wired has nothing to verify, and refusing every merge forever would help
+    /// nobody — that skips, loudly. A project that HAS a suite which then fails,
+    /// or cannot be run, blocks: that is a result, not an absent capability.
+    async fn verify_merged_result(&self, head: &str, target: &str) -> Result<(), String> {
+        let (Some(git), Some(deploy)) = (&self.git, &self.deploy) else {
+            tracing::warn!("auto-merge: no git/test runner configured — merging {head} unverified");
+            return Ok(());
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "cox-premerge-{}-{}",
+            std::process::id(),
+            head.replace('/', "-")
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Fetch both sides first: the worktree is created from the target and
+        // the head is merged into it, exactly as the forge would.
+        let fetch = std::process::Command::new("git")
+            .args(["fetch", "origin", head, target])
+            .current_dir(&self.work_dir)
+            .output();
+        if !fetch.is_ok_and(|o| o.status.success()) {
+            return Err(format!("could not fetch {head} and {target}"));
+        }
+        let sha = format!("origin/{target}");
+        if let Err(e) = git.worktree_add(&self.work_dir, &dir, &sha).await {
+            return Err(format!("worktree for {target}: {e}"));
+        }
+        let merged = std::process::Command::new("git")
+            .args(["merge", "--no-edit", &format!("origin/{head}")])
+            .current_dir(&dir)
+            .output();
+        let outcome = match merged {
+            Ok(o) if o.status.success() => match deploy.run_tests(&dir).await {
+                // `deployed=false` means no toolchain was recognised: there is
+                // no suite to be red.
+                Ok(r) if r.success || !r.deployed => Ok(()),
+                Ok(r) => Err(format!(
+                    "tests fail on the merged tree: {}",
+                    r.summary.chars().take(300).collect::<String>()
+                )),
+                // A runner that cannot start is not a red suite, but it is not
+                // a green one either.
+                Err(e) => Err(format!("could not run the suite on the merged tree: {e}")),
+            },
+            Ok(o) => Err(format!(
+                "merging {head} into {target} does not apply cleanly: {}",
+                String::from_utf8_lossy(&o.stderr)
+                    .chars()
+                    .take(200)
+                    .collect::<String>()
+            )),
+            Err(e) => Err(format!("merge failed to run: {e}")),
+        };
+        let _ = git.worktree_remove(&self.work_dir, &dir).await;
+        let _ = std::fs::remove_dir_all(&dir);
+        outcome
+    }
+
     /// SM escalation for tickets PARKED after 3 red builds — the stand-in for
     /// what a real team does when a dev is stuck: someone senior picks it up,
     /// and WHICH someone depends on why it kept failing.
@@ -5321,6 +5406,22 @@ mod tests {
             "goal".to_owned(),
         )
         .with_forge(forge as Arc<dyn ForgePort>)
+    }
+
+    #[tokio::test]
+    async fn a_project_with_nothing_to_verify_with_still_merges() {
+        // Auto-merge demands the merged tree build and test, but a project with
+        // no git and no runner wired has nothing to check — blocking every
+        // merge forever would be the wrong answer to a missing capability.
+        let forge = Arc::new(SpyForge {
+            ci: "passing".to_owned(),
+            mergeable: true,
+            ..Default::default()
+        });
+        review_uc(Arc::clone(&forge), "approve", true)
+            .review_open_prs()
+            .await;
+        assert_eq!(*forge.merged.lock().expect("lock"), vec![7]);
     }
 
     #[tokio::test]
