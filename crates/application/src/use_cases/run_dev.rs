@@ -1193,7 +1193,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         // before editing it; nothing in the ticket text carries that.
         let knowledge = Self::knowledge_brief(state, id, ticket, &self.work_dir);
         // Ask the BA rather than invent a requirement (and read any answer).
-        let asking = prompts::ask_protocol_block(state, &id.to_string(), "BA");
+        let asking = prompts::ask_protocol_block(state, &id.to_string());
         let history = prompts::history_block(
             &self.work_dir,
             &format!(
@@ -1261,10 +1261,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
 /// the acceptance criteria, and the SA's technical design — so the DEV builds
 /// what was specified instead of guessing from the title (and the SA's design
 /// tokens aren't wasted). Caps keep a verbose ticket from bloating the prompt.
-/// Pull an `ASK <ROLE>: <question>` line out of agent output. Returns the role
+/// Pull an `ASK <ROLE>: <question>` line out of agent output. Shared with the
+/// cycle, where an answerer uses the same line to hand a question on. Returns the role
 /// to ask and the question. Only BA and SA can be asked: those are the roles
 /// that own the requirement and the design.
-fn parse_ask(stdout: &str) -> Option<(String, String)> {
+#[must_use]
+pub fn parse_ask(stdout: &str) -> Option<(String, String)> {
     for line in stdout.lines().rev().take(20) {
         let t = line.trim().trim_start_matches(['`', '*', '-', ' ']);
         // `?` here would abandon the scan at the first ordinary line, so the
