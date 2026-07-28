@@ -463,6 +463,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // works it hard — draining the pile-up — rather than nibbling a few PRs.
         // As a suggestion-only reviewer it stays light. Bounded either way for cost.
         let batch = if auto_merge { 12 } else { 3 };
+        // Ticket ids visible in the open queue, for the competing-PR check.
+        let open_titles: Vec<(u64, String)> =
+            prs.iter().map(|p| (p.number, p.title.clone())).collect();
         for pr in prs.into_iter().rev().take(batch) {
             // Only review PRs into the configured target branch; leave PRs aimed
             // elsewhere (e.g. an integration → main promotion) to humans.
@@ -515,10 +518,47 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 .await;
                 continue;
             }
+            // Two open PRs solving the same ticket is a race, not twice the
+            // work: whichever lands first leaves the other conflicting or
+            // fixing it twice. It happened here — #17 and #18 were competing
+            // fixes for one bug — so say so and let a human choose, rather than
+            // letting arrival order decide.
+            if let Some(other) = competing_pr(pr.number, &pr.title, &open_titles) {
+                let reason = format!(
+                    "PR #{other} is open for the same ticket. Two changes for one ticket race \
+                     each other: the second to land conflicts or fixes it twice. Close one, or \
+                     fold this into the other, before either merges."
+                );
+                let _ = forge.request_changes(pr.number, &reason).await;
+                self.record_review(pr.number, "request_changes", &reason)
+                    .await;
+                self.log_git(&format!(
+                    "SA held PR #{}: competes with #{other}",
+                    pr.number
+                ))
+                .await;
+                continue;
+            }
             match self.sa_review(&pr.title, &pr.head, &diff).await {
                 Some((true, summary)) => {
                     self.record_review(pr.number, "approve", &summary).await;
                     if auto_merge {
+                        // Size and blast radius the machine should not decide
+                        // alone: a change this large, or one that edits how the
+                        // project builds and deploys itself, gets a human even
+                        // when every gate is green.
+                        if let Some(why) = needs_human_eyes(&diff) {
+                            let msg = format!(
+                                "Approved, but not auto-merging: {why}. Ask a human to land this."
+                            );
+                            let _ = forge.comment_pr(pr.number, &msg).await;
+                            self.log_git(&format!(
+                                "PR #{} approved but held for a human: {why}",
+                                pr.number
+                            ))
+                            .await;
+                            continue;
+                        }
                         // The DoD gates ran on the agent's branch, against the
                         // base as it was then. Between that and now the target
                         // has moved, and a PR that was green on an older main
@@ -6941,6 +6981,87 @@ mod tests {
     }
 }
 
+/// The other open PR that names the same ticket, if any. Titles carry the id
+/// (`fix(COX-B015): …`), which is how the team already labels its work.
+#[must_use]
+pub fn competing_pr(number: u64, title: &str, open: &[(u64, String)]) -> Option<u64> {
+    let ticket = ticket_id_in(title)?;
+    open.iter()
+        .find(|(n, t)| *n != number && ticket_id_in(t).as_deref() == Some(ticket.as_str()))
+        .map(|(n, _)| *n)
+}
+
+/// The ticket id a PR title refers to, e.g. `COX-B015`.
+fn ticket_id_in(title: &str) -> Option<String> {
+    let bytes = title.as_bytes();
+    let start = title.find(|c: char| c.is_ascii_uppercase())?;
+    for i in start..bytes.len() {
+        if !bytes[i].is_ascii_uppercase() {
+            continue;
+        }
+        let rest = &title[i..];
+        let mut chars = rest.chars();
+        let letters: String = chars
+            .by_ref()
+            .take_while(char::is_ascii_uppercase)
+            .collect::<String>();
+        if letters.len() < 2 {
+            continue;
+        }
+        let after = &rest[letters.len()..];
+        let Some(tail) = after.strip_prefix('-') else {
+            continue;
+        };
+        let digits: String = tail
+            .chars()
+            .take_while(char::is_ascii_alphanumeric)
+            .collect();
+        if digits.chars().any(|c| c.is_ascii_digit()) {
+            return Some(format!("{letters}-{digits}"));
+        }
+    }
+    None
+}
+
+/// Whether a diff is too big, or too load-bearing, for a machine to land on
+/// its own. Both bounds are about blast radius rather than correctness: a
+/// green suite says the code works, not that a 2,000-line change or a rewrite
+/// of the release pipeline should go in unwatched.
+#[must_use]
+pub fn needs_human_eyes(diff: &str) -> Option<String> {
+    const MAX_CHANGED_LINES: usize = 800;
+    const SENSITIVE: &[&str] = &[
+        ".github/workflows",
+        "Dockerfile",
+        "docker-compose",
+        "scripts/",
+        "Cargo.toml",
+        "coxagent.json",
+    ];
+    let changed = diff
+        .lines()
+        .filter(|l| {
+            (l.starts_with('+') || l.starts_with('-'))
+                && !l.starts_with("+++")
+                && !l.starts_with("---")
+        })
+        .count();
+    if changed > MAX_CHANGED_LINES {
+        return Some(format!(
+            "{changed} changed lines is past what lands unreviewed"
+        ));
+    }
+    let hit = SENSITIVE.iter().find(|p| {
+        diff.lines().any(|l| {
+            l.contains(*p)
+                && (l.starts_with("+++") || l.starts_with("---") || l.starts_with("diff "))
+        })
+    })?;
+    Some(format!(
+        "it changes {hit}, which decides how everything else ships"
+    ))
+}
+
 /// How many senior rescues one ticket may consume before the decision is a
 /// human's. Two, because the first rescue can misread the failure — a spec
 /// rewrite that turns out to hide a design dead end deserves the second look
@@ -7023,6 +7144,61 @@ pub fn escalation_route(history: &str, spec_gap: bool) -> EscalationRoute {
         return EscalationRoute::Mechanical;
     }
     EscalationRoute::Design
+}
+
+#[cfg(test)]
+mod merge_guard_tests {
+    use super::{competing_pr, needs_human_eyes};
+
+    #[test]
+    fn two_prs_for_one_ticket_are_a_race_not_two_fixes() {
+        // The real case: #17 and #18 both fixed COX-B015, and whichever landed
+        // first left the other conflicting.
+        let open = vec![
+            (
+                17,
+                "fix(COX-B015): git content subcommands bypass the shim".to_owned(),
+            ),
+            (
+                18,
+                "fix(COX-B015): git content keeps its own stdout".to_owned(),
+            ),
+            (
+                16,
+                "fix(COX-B011): README points at the wrong port".to_owned(),
+            ),
+        ];
+        assert_eq!(competing_pr(18, &open[1].1, &open), Some(17));
+        assert_eq!(
+            competing_pr(16, &open[2].1, &open),
+            None,
+            "its own ticket only"
+        );
+        // A title with no ticket id cannot compete with anything.
+        assert_eq!(competing_pr(20, "chore: tidy imports", &open), None);
+    }
+
+    #[test]
+    fn a_huge_change_or_one_that_moves_the_pipeline_waits_for_a_person() {
+        let small = "diff --git a/src/a.rs b/src/a.rs\n+++ b/src/a.rs\n+let x = 1;\n-let x = 0;\n";
+        assert!(needs_human_eyes(small).is_none());
+
+        let huge = format!(
+            "diff --git a/src/a.rs b/src/a.rs\n+++ b/src/a.rs\n{}",
+            "+line\n".repeat(900)
+        );
+        assert!(needs_human_eyes(&huge)
+            .expect("held")
+            .contains("changed lines"));
+
+        // Green tests say the code works, not that the release pipeline should
+        // change itself unwatched.
+        let ci = "diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml\n\
+                  +++ b/.github/workflows/ci.yml\n+  run: cargo test\n";
+        assert!(needs_human_eyes(ci)
+            .expect("held")
+            .contains(".github/workflows"));
+    }
 }
 
 #[cfg(test)]
