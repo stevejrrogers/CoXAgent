@@ -778,14 +778,65 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             return true;
         }
         let diff = run(&["diff", "HEAD"]);
-        diff.lines().any(|l| {
+        if diff.lines().any(|l| {
             l.starts_with('+')
                 && (l.contains("#[test]")
                     || l.contains("#[tokio::test]")
                     || l.contains("def test_")
                     || l.contains("it(")
                     || l.contains("func Test"))
-        })
+        }) {
+            return true;
+        }
+        // Rust keeps most tests in an inline `#[cfg(test)] mod tests` at the
+        // foot of the file it tests. A fix that hardens or extends one of those
+        // adds no `#[test]` line and lives in no test-shaped path, so the two
+        // checks above miss the single most common way a Rust regression test
+        // actually lands — and the ticket gets failed for shipping without one.
+        self.diff_touches_inline_test_module(&run)
+    }
+
+    /// Whether any changed line falls inside a file's `#[cfg(test)]` module.
+    /// Uses `-U0` so the reported line numbers are the changed lines themselves,
+    /// not context that happens to sit near the boundary.
+    fn diff_touches_inline_test_module(&self, run: &dyn Fn(&[&str]) -> String) -> bool {
+        let diff = run(&["diff", "HEAD", "-U0"]);
+        let mut file: Option<String> = None;
+        for line in diff.lines() {
+            if let Some(rest) = line.strip_prefix("+++ b/") {
+                file = Some(rest.trim().to_owned());
+                continue;
+            }
+            let Some(hunk) = line.strip_prefix("@@ ") else {
+                continue;
+            };
+            let Some(f) = file.as_deref() else { continue };
+            // `@@ -a,b +c,d @@` — c is the first changed line on the new side.
+            let Some(new_side) = hunk.split('+').nth(1) else {
+                continue;
+            };
+            let Ok(start) = new_side
+                .split([',', ' '])
+                .next()
+                .unwrap_or("")
+                .parse::<usize>()
+            else {
+                continue;
+            };
+            let Ok(text) = std::fs::read_to_string(self.work_dir.join(f)) else {
+                continue;
+            };
+            if let Some(test_mod_line) = text
+                .lines()
+                .position(|l| l.trim_start().starts_with("#[cfg(test)]"))
+            {
+                // Line numbers are 1-based in the diff, 0-based from position().
+                if start > test_mod_line {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// When pre-check fails, ask the LLM to fix ALL compile/test errors until
@@ -1355,6 +1406,38 @@ mod tests {
         std::fs::write(dir.join("lib.rs"), "fn f() {}\n#[test]\nfn t() {}\n").unwrap();
         git(&["add", "-A"]);
         assert!(uc.diff_touches_tests(), "added #[test] counts");
+
+        // The case that cost cox four attempts and part of a budget: hardening
+        // an existing test inside an inline `#[cfg(test)] mod tests` adds no
+        // `#[test]` line and sits in no test-shaped path, but it is a test
+        // change and the gate must see it.
+        let engine_src = |prod: &str, timeout: u32| {
+            format!("fn real() {{{prod}}}\n#[cfg(test)]\nmod tests {{\n    #[test]\n    fn t() {{\n        let timeout = {timeout};\n    }}\n}}\n")
+        };
+        std::fs::write(dir.join("engine.rs"), engine_src("", 10)).unwrap();
+        git(&["add", "-A"]);
+        git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "with tests",
+        ]);
+        assert!(!uc.diff_touches_tests(), "committed tree touches nothing");
+        std::fs::write(dir.join("engine.rs"), engine_src("", 30)).unwrap();
+        assert!(
+            uc.diff_touches_tests(),
+            "editing an existing inline test IS touching tests"
+        );
+        // A change to the production half of the same file still is not.
+        std::fs::write(dir.join("engine.rs"), engine_src(" let x = 1; ", 10)).unwrap();
+        assert!(
+            !uc.diff_touches_tests(),
+            "a change above the test module is production code"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
