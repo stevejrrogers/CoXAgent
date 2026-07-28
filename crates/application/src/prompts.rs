@@ -529,12 +529,15 @@ pub fn test_surface_block(work_dir: &std::path::Path) -> String {
 /// report back. Guessing is the expensive option — it fails a gate three
 /// attempts later, having taught nobody anything.
 #[must_use]
-pub fn ask_protocol_block(state: &crate::state::ProjectState, ticket: &str, ask: &str) -> String {
+pub fn ask_protocol_block(state: &crate::state::ProjectState, ticket: &str) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
     let answered = state.answered_questions(ticket);
     if !answered.is_empty() {
-        out.push_str("\n\nANSWERS to what you asked earlier — treat these as the requirement:\n");
+        out.push_str(
+            "\n\nANSWERS to what you asked earlier — treat these as the requirement, and do \
+             what the ACTION line says:\n",
+        );
         for q in answered.iter().rev().take(3) {
             let _ = writeln!(
                 out,
@@ -553,14 +556,14 @@ pub fn ask_protocol_block(state: &crate::state::ProjectState, ticket: &str, ask:
         );
         return out;
     }
-    let _ = write!(
-        out,
-        "\n\nIF YOU WOULD HAVE TO GUESS — about what the requirement means, or about what the \
-         system already does — do not guess. End your output with ONE line, exactly:\n\
-         `ASK {ask}: <your question>`\n\
+    out.push_str(
+        "\n\nIF YOU WOULD HAVE TO GUESS, do not guess — ask the role that owns the answer. End \
+         your output with ONE line, exactly:\n\
+         `ASK BA: <question>`   for what the ticket or the business actually means\n\
+         `ASK SA: <question>`   for how the system works or how this should be built\n\
          Ask only when the answer would change what you build, make it specific and answerable, \
          and ask at most one question. Anything you can settle by reading the code or the docs \
-         yourself is not a question — settle it."
+         yourself is not a question — settle it.",
     );
     out
 }
