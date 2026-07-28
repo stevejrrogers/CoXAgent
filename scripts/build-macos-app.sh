@@ -46,10 +46,14 @@ iconutil -c icns "$ICONSET" -o "$BUILD/AppIcon.icns"
 
 echo "==> Assembling $APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "$BUILD/CoXAgent"               "$APP/Contents/MacOS/CoXAgent"
+# -X: skip extended attributes. A quarantine xattr on the source made plain
+# `cp` exit non-zero here, and with `set -e` the script died BEFORE writing
+# Info.plist — leaving a bundle macOS silently refuses to launch while the
+# copied binaries looked perfectly fine.
+cp -X "$BUILD/CoXAgent"            "$APP/Contents/MacOS/CoXAgent"
 # Named cox-server so it does not collide case-insensitively with CoXAgent.
-cp "$ROOT/target/release/coxagent" "$APP/Contents/MacOS/cox-server"
-cp "$BUILD/AppIcon.icns"           "$APP/Contents/Resources/AppIcon.icns"
+cp -X "$ROOT/target/release/coxagent" "$APP/Contents/MacOS/cox-server"
+cp -X "$BUILD/AppIcon.icns"        "$APP/Contents/Resources/AppIcon.icns"
 chmod +x "$APP/Contents/MacOS/CoXAgent" "$APP/Contents/MacOS/cox-server"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
