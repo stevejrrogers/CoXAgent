@@ -367,6 +367,169 @@ fn the_real_shim_still_compresses_a_non_exact_subcommand() {
     assert_eq!(out.status.code(), Some(FAKE_EXIT));
 }
 
+/// The ticket's own repro, with nothing faked: a repository this test builds,
+/// the system `git`, and the real generated shim wired together. The other
+/// guards each pin one half — `compress` fed real git output, or the real shim
+/// script fed a fake `git` — so a break in how the two *compose* (the shim
+/// resolving the wrong binary, the probe mis-reading a real argv, the wrapped
+/// exit code lost on the bypass) passes both and still corrupts every file an
+/// agent reads. This is the step list in COX-B015, executed.
+const REPRO_LINES: usize = 3_000;
+
+/// The empty tree, so `git diff <empty> HEAD` yields the whole file as a patch.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/// The directory holding the real `git`, skipping any shim directory that
+/// happens to be on the ambient `PATH` (an agent shell has one).
+fn real_git_dir() -> PathBuf {
+    let path = std::env::var_os("PATH").expect("PATH is unset");
+    std::env::split_paths(&path)
+        .find(|d| !d.ends_with("coxagent-shims") && d.join("git").is_file())
+        .expect("no real `git` found on PATH")
+}
+
+/// Isolate every `git` run from the host's global/system config, so a user's
+/// pager, alias or `commit.gpgsign` cannot change what the oracle and the
+/// shimmed run produce — the comparison is only meaningful if the two differ
+/// in the shim alone.
+fn plain_git(cwd: &Path, args: &[&str]) -> std::process::Output {
+    Command::new(real_git_dir().join("git"))
+        .args(args)
+        .current_dir(cwd)
+        .env("COX_COMPRESS", "0")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap_or_else(|e| panic!("`git {}` failed to spawn: {e}", args.join(" ")))
+}
+
+/// Step 1 of the repro: commit a file well past the compression threshold.
+fn repro_repo() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let run = |args: &[&str]| {
+            let out = plain_git(dir.path(), args);
+            assert!(
+                out.status.success(),
+                "setup `git {}` failed:\n{}",
+                args.join(" "),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        run(&["init", "-q", "."]);
+        run(&["config", "user.email", "cox@example.test"]);
+        run(&["config", "user.name", "COX-B015"]);
+        let body: String = (1..=REPRO_LINES)
+            .map(|i| format!("line {i:04}: the quick brown fox jumps over the lazy dog\n"))
+            .collect();
+        std::fs::write(dir.path().join("big.txt"), &body).unwrap();
+        run(&["add", "big.txt"]);
+        run(&["commit", "-qm", "COX-B015 repro"]);
+    }
+    dir
+}
+
+/// The real shim script on a `PATH` where it precedes the real `git`.
+struct RealShim {
+    _dir: tempfile::TempDir,
+    shim: PathBuf,
+    path: std::ffi::OsString,
+}
+
+impl RealShim {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let shim_dir = dir.path().join("shims");
+        std::fs::create_dir_all(&shim_dir).unwrap();
+        let shim = shim_dir.join("git");
+        write_exec(
+            &shim,
+            &coxagent_app::shim_script(
+                "git",
+                &shim_dir.display().to_string(),
+                env!("CARGO_BIN_EXE_coxagent"),
+            ),
+        );
+        let path = std::env::join_paths([
+            shim_dir,
+            real_git_dir(),
+            PathBuf::from("/usr/bin"),
+            PathBuf::from("/bin"),
+        ])
+        .unwrap();
+        Self {
+            _dir: dir,
+            shim,
+            path,
+        }
+    }
+
+    /// Step 2: run it *through* the shim, stdout and stderr on separate pipes
+    /// (neither is a tty, so the shim takes its compressing branch).
+    fn run(&self, cwd: &Path, args: &[&str]) -> std::process::Output {
+        Command::new(&self.shim)
+            .args(args)
+            .current_dir(cwd)
+            .env("PATH", &self.path)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env_remove("COX_COMPRESS")
+            .stdin(Stdio::null())
+            .output()
+            .expect("failed to run the shim")
+    }
+}
+
+#[test]
+fn the_ticket_repro_a_3000_line_file_through_the_real_shim_is_byte_exact() {
+    let repo = repro_repo();
+    let sh = RealShim::new();
+    let blob = String::from_utf8(plain_git(repo.path(), &["rev-parse", "HEAD:big.txt"]).stdout)
+        .unwrap()
+        .trim()
+        .to_owned();
+
+    for args in [
+        vec!["show", "HEAD:big.txt"],
+        vec!["diff", "--no-color", EMPTY_TREE, "HEAD"],
+        vec!["cat-file", "-p", &blob],
+    ] {
+        let label = format!("git {}", args.join(" "));
+        // Step 3: the same command with the shim out of the way — the oracle.
+        let oracle = plain_git(repo.path(), &args);
+        assert!(
+            oracle.status.success(),
+            "`{label}` failed:\n{}",
+            String::from_utf8_lossy(&oracle.stderr)
+        );
+        assert!(
+            oracle.stdout.len() > 6_000,
+            "`{label}` produced only {} bytes — under the clip threshold, so a \
+             pass would prove nothing",
+            oracle.stdout.len()
+        );
+
+        let shimmed = sh.run(repo.path(), &args);
+
+        // Step 4: the middle must still be there. (AC1)
+        assert_byte_exact(&format!("{label} stdout"), &oracle.stdout, &shimmed.stdout);
+        // AC2: no elision, no summary marker — ever, on these subcommands.
+        let text = String::from_utf8_lossy(&shimmed.stdout);
+        assert!(
+            !text.contains("elided") && !text.contains("output compressed"),
+            "`{label}` output carries a compression marker"
+        );
+        // AC3: streams stay separate and the exit code is the wrapped one.
+        assert_byte_exact(&format!("{label} stderr"), &oracle.stderr, &shimmed.stderr);
+        assert_eq!(
+            shimmed.status.code(),
+            oracle.status.code(),
+            "`{label}`: exit code"
+        );
+    }
+}
+
 #[test]
 fn the_same_content_is_compressed_for_porcelain_and_other_tools() {
     // Guards the other side of the fix: content-retrieval subcommands are
