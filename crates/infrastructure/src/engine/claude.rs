@@ -621,7 +621,12 @@ mod tests {
                 system_prompt: "sys".to_owned(),
                 task_prompt: "task".to_owned(),
                 work_dir: dir.clone(),
-                timeout: std::time::Duration::from_secs(10),
+                // Generous, not tight: under a big parallel `cargo test` run
+                // this host's fork/exec latency for an already-spawned child
+                // (pid assigned, not yet scheduled) can spike well past a
+                // couple seconds — a fake instant-exit script has nothing to
+                // do with the 10s figure, so there's no reason to cut it close.
+                timeout: std::time::Duration::from_secs(30),
                 escalation_level: 0,
             })
             .await

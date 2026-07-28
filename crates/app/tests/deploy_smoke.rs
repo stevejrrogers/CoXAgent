@@ -97,21 +97,54 @@ fn is_buildkit_host_fault(text: &str) -> bool {
 /// changes *which builder assembles the image*, never what is built from it,
 /// so a genuine compile error still fails both attempts and still fails the
 /// test.
+fn output_text(out: &std::process::Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
 fn bring_stack_up(root: &Path) -> std::process::Output {
     let up = compose(root, &["up", "-d", "--build"]);
     if up.status.success() {
         return up;
     }
-    let why = format!(
-        "{}{}",
-        String::from_utf8_lossy(&up.stdout),
-        String::from_utf8_lossy(&up.stderr)
-    );
+    let why = output_text(&up);
     if !is_buildkit_host_fault(&why) {
         return up;
     }
     eprintln!("BuildKit is unusable on this host; retrying on the classic builder:\n{why}");
-    compose_with(root, &["up", "-d", "--build"], &CLASSIC_BUILDER)
+    let classic = compose_with(root, &["up", "-d", "--build"], &CLASSIC_BUILDER);
+    if classic.status.success() {
+        return classic;
+    }
+    // On some Docker/Compose versions `DOCKER_BUILDKIT=0` /
+    // `COMPOSE_DOCKER_CLI_BUILD=0` no longer stop `compose build` from
+    // shelling out to buildx bake, so the classic-builder retry hits the
+    // exact same activity-dir permission fault and gains nothing. Pointing
+    // `BUILDX_CONFIG` at a writable, per-run directory keeps BuildKit itself
+    // (fixing the actual permission fault instead of trying to avoid it) —
+    // confirmed to bring the stack up on a host where the classic-builder
+    // retry above did not.
+    let why2 = output_text(&classic);
+    if !is_buildkit_host_fault(&why2) {
+        return classic;
+    }
+    eprintln!("Classic builder retry hit the same host fault; redirecting BUILDX_CONFIG:\n{why2}");
+    let buildx_dir = std::env::temp_dir().join(format!(
+        "coxagent-deploy-smoke-buildx-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::create_dir_all(&buildx_dir);
+    compose_with(
+        root,
+        &["up", "-d", "--build"],
+        &[(
+            "BUILDX_CONFIG",
+            buildx_dir.to_str().expect("temp dir path is valid UTF-8"),
+        )],
+    )
 }
 
 /// Tears the stack down even when the test panics, so a failing run never

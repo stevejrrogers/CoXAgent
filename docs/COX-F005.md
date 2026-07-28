@@ -1,34 +1,29 @@
-# COX-F005: Pre-Deploy Health Check
+FOLDER: -
+
+# COX-F005: Post-Deploy Health Check
+
+**Keywords:** health check, deployment gate, polling, HTTP probe, docker compose, app liveness, auto-rollback
 
 ## Overview
 
-The pre-deploy health check (COX-F005) is a mandatory gate that verifies the deployed application is actually running and accepting requests after a `docker compose up` succeeds. This gate prevents silent deploy failures where containers start but the application inside never binds its configured port or crashes immediately after startup.
+The post-deploy health check ensures the deployed application actually runs and answers requests after `docker compose up` succeeds. A successful compose exit code (0) only proves containers started; it says nothing about whether the app inside bound its port or crashed immediately. This gate polls the app's health endpoint to close that gap, capturing HTTP status and timing diagnostics, and triggering auto-rollback if health checks fail.
 
-**Who it's for:** Every deploy path in CoXAgent — the autonomous cycle, chat's "deploy" command, and the PR-preview endpoint — uses this gate to ensure consistent quality.
-
-**Core value:** A successful `docker compose up` exit code (0) only proves containers started; it says nothing about whether the app inside actually bound its port. This gate closes that gap by probing the app's health endpoint, capturing detailed diagnostics (HTTP status, response time), and triggering auto-rollback if the app never comes up.
+**Who it's for:** Every deploy path—the autonomous cycle, chat's "deploy" command, and the PR-preview endpoint—uses this gate to ensure consistent quality.
 
 ---
 
 ## How It Works
 
-### The Gate Chain
+### The Mandatory Gate
 
-Every deploy request runs through two sequential gates:
+Every successful `docker compose up` is followed by an HTTP health probe. The app gets a bounded window to answer on its configured port; if it never does (connection refused, persistent 5xx status, or timeout), the deploy is rejected and rollback is attempted.
 
-1. **COX-B004 (Liveness Gate):** A simple yes/no TCP liveness check — is something accepting connections on `127.0.0.1:<host_port>`? This is the mandatory gate that blocks all deploy paths.
-
-2. **COX-F005 (Detailed Health Gate):** A richer HTTP probe that captures the full diagnostic picture (HTTP status, response time, pass/fail) and records it in deploy history. This runs *after* COX-B004 passes.
-
-### Polling Strategy
-
-The health check uses polling, not a single probe:
+**Polling, not a single probe:** `docker compose up` returns as soon as containers *start*, seconds before the app inside binds its port. Polling waits for the app to become ready while respecting a bounded timeout, so an app with a cold-start delay (e.g., database migrations) can still pass.
 
 - **Poll interval:** 2 seconds
-- **Timeout:** Configurable via `config.deploy.health_check_timeout_secs` (default: 60 seconds)
-- **Probe count:** Up to 30 probes (60 seconds ÷ 2 seconds/interval)
-
-**Why polling?** `docker compose up` returns as soon as containers *start*, seconds before the app inside binds its port. A single immediate probe would fail perfectly healthy deploys. Polling waits for the app to become ready while respecting a bounded timeout, so an endpoint that never answers resolves to `passed: false` rather than hanging.
+- **Per-probe HTTP timeout:** 5 seconds
+- **Deployment gate timeout:** Fixed at 30 seconds (shared gate used by all deploy paths)
+- **Cycle recording timeout:** Configurable via `config.deploy.health_check_timeout_secs` (default: 60 seconds)
 
 ### Response Classification
 
@@ -40,52 +35,39 @@ The HTTP GET on the app's root (`http://127.0.0.1:<port>/`) is classified as fol
 | **3xx** | Healthy | ✅ Pass (app is up and redirecting) |
 | **4xx** | Healthy | ✅ Pass (app is up; request was bad) |
 | **5xx** | Unhealthy | ❌ Fail (app is broken) |
-| **No response** | Unreachable | ❌ Fail (connection refused, timeout, DNS failure) |
+| **No response** | Unreachable | ❌ Fail (connection refused, timeout) |
 
-This design prevents unnecessary rollbacks for projects that don't have a root route or use it differently — we only fail on 5xx (genuinely broken app) or complete absence of a response (app never bound the port).
+This design prevents unnecessary rollbacks for projects that don't have a root route or use it differently — only 5xx or absence of response triggers failure.
+
+### Two Gates, Same Probe Mechanism
+
+**Shared gate (COX-B004/B009):** `verify_deploy_health()` is called by all deploy paths (cycle, chat, PR preview). Hard-coded 30-second timeout. Returns bool only (no result recording). Used to immediately fail deploys that don't answer on their port.
+
+**Cycle recording gate (COX-F005):** `run_health_check()` in the cycle. Configurable timeout (default 60s). Records full result (HTTP status, response time) in deploy history for dashboard visibility.
+
+Both use the same underlying health check mechanism (`health_check()` method → `wait_healthy()` polling loop).
 
 ---
 
-## Configuration
+## Usage
 
-Health check behavior is controlled via `DeployConfig`:
+### Configuring the Health Check
 
-```rust
-pub struct DeployConfig {
-    /// TCP port on which the deployed app should answer.
-    pub host_port: Option<u16>,
-    /// Whether deploy/test gates are enabled.
-    pub enabled: bool,
-    /// Whether to auto-rollback to the last known-good deploy on failure.
-    pub auto_rollback: bool,
-    /// Maximum age of a known-good deploy before rollback is skipped.
-    pub max_rollback_age_secs: u64,
-    /// Database migration detection paths (to prevent rollback across schema changes).
-    pub migration_detection_paths: Vec<String>,
-    /// Timeout for the health endpoint probe (COX-F005).
-    pub health_check_timeout_secs: u64,
-}
+Enable health checking by setting a port in your deploy configuration:
+
+```toml
+[deploy]
+host_port = 8101
+enabled = true
+auto_rollback = false
+health_check_timeout_secs = 60
 ```
 
-### Defaults
+Once configured, the health check runs automatically after every deployment. No additional setup required in code.
 
-- `host_port`: `None` (no health check — app must opt in by configuring a port)
-- `health_check_timeout_secs`: `60` seconds
-- `auto_rollback`: `false` (opt-in; off by default)
+### Deployment Flow
 
-### Environment Variables
-
-Resource limits on deployed containers (best-effort):
-- `COXAGENT_DEPLOY_CPUS`: CPU limit per container (default: `2`)
-- `COXAGENT_DEPLOY_MEM`: Memory limit per container (default: `1g`)
-
-Set either to `off` to disable the limit.
-
----
-
-## Behavior in the Cycle
-
-### Deploy Success Flow
+The health check integrates into the deployment lifecycle as follows:
 
 ```
 ┌─────────────────────────────────────────────────┐
@@ -96,113 +78,121 @@ Set either to `off` to disable the limit.
         │ Deploy (docker up) │
         └───────┬────────────┘
                 │
-        ┌───────▼──────────────────────────┐
-        │ COX-B004: TCP liveness (yes/no)  │
-        │ polls every 2s for 30s          │
-        └───────┬──────────────────────────┘
+        ┌───────▼────────────────────────────────┐
+        │ Health check: GET /                    │
+        │ Poll every 2s for up to 30s            │
+        │ (shared gate via verify_deploy_health) │
+        └───────┬────────────────────────────────┘
                 │
             ❌ FAIL → attempt auto-rollback
                 │
             ✅ PASS
                 │
-        ┌───────▼─────────────────────────┐
-        │ COX-F005: HTTP health endpoint   │
-        │ GET /; capture status & timing   │
-        └───────┬──────────────────────────┘
+        ┌───────▼────────────────────────────────┐
+        │ Run test suite                         │
+        └───────┬────────────────────────────────┘
                 │
-            ❌ FAIL (5xx or no response)
-                │
-            ✅ PASS (any 1xx–4xx)
-                │
-        ┌───────▼─────────────────┐
-        │ Run test suite           │
-        └───────┬─────────────────┘
-                │
-        ┌───────▼─────────────────────────────────┐
-        │ Record deploy + health_check result     │
-        │ Update refs/coxagent/last-good if ok    │
-        └─────────────────────────────────────────┘
+        ┌───────▼────────────────────────────────┐
+        │ Record deploy + health_check result    │
+        │ (cycle's F005 gate records detail)     │
+        │ Update refs/coxagent/last-good if ok   │
+        └────────────────────────────────────────┘
 ```
 
-### On Health Check Failure
+### When Health Check Fails
 
-If the health endpoint never answers or returns 5xx within the timeout:
+If the health endpoint never answers or returns 5xx within the bound:
 
 1. **Log the failure** with HTTP status and response time
-2. **Trigger auto-rollback** (if enabled) to the last known-good deploy
-3. **File a bug** if rollback fails or is not enabled
-4. **Continue the cycle** — one bad deploy never stalls the team
+2. **Reject the deploy** — it never becomes the auto-rollback target
+3. **Trigger auto-rollback** (if enabled) to the last known-good deploy
+4. **File a bug** if rollback fails or is not enabled
+5. **Continue the cycle** — one bad deploy never stalls the team
 
-The failure is recorded in `deploy_attempt.health_check` with:
+Failure is recorded in `deploy_attempt.health_check` with:
 - `passed: false`
 - `http_status`: The last probe's status (or `None` if unreachable)
 - `response_time_ms`: Milliseconds for the last probe
 
+### Environment Variables
+
+Resource limits on deployed containers (best-effort):
+- `COXAGENT_DEPLOY_CPUS`: CPU limit per container (default: `2`)
+- `COXAGENT_DEPLOY_MEM`: Memory limit per container (default: `1g`)
+
+Set either to `off` to disable the limit.
+
+Example:
+```bash
+export COXAGENT_DEPLOY_CPUS=4
+export COXAGENT_DEPLOY_MEM=2g
+cargo run  # All deployed containers limited to 4 CPUs, 2GB memory
+```
+
 ---
 
-## API & Ports
+## Interface
 
-### DeployPort Trait
-
-Three health-related methods:
+### DeployPort Trait Methods
 
 #### `async fn health(&self, port: u16) -> Result<bool, PortError>`
 
-**TCP liveness check (COX-B004).** Is something accepting connections on the port?
-
-- **Default:** `Ok(true)` (no daemon needed)
-- **Used by:** Auto-rollback path (needs only yes/no)
-- **Adapters override:** Yes, for project-specific health logic
+TCP liveness check. Is something accepting connections on the port? Used by the ops monitor (background, after deploy) to detect crashes. Default: always true (no monitoring).
 
 #### `async fn health_check(&self, port: u16) -> HealthCheckResult`
 
-**HTTP health probe (COX-F005).** GET the app's root and capture diagnostics.
+HTTP health probe. GET the app's root and capture diagnostics.
 
+**Return type:**
 ```rust
 pub struct HealthCheckResult {
-    pub passed: bool,           // true if 1xx–4xx or 5xx not received
+    pub passed: bool,           // true if 1xx–4xx, false if 5xx or unreachable
     pub http_status: Option<u16>, // HTTP status if endpoint was reachable
     pub response_time_ms: Option<u64>, // Round-trip time in milliseconds
 }
 ```
 
-- **Default:** Wraps `health()` so adapters that don't override it still report timing
-- **Used by:** Deploy history and dashboard diagnostics
-- **Adapters override:** Optional; `DockerComposeDeploy` does
+Default implementation wraps `health()` for adapters that don't override it.
 
 #### `async fn wait_healthy(&self, port: u16, timeout: Duration) -> HealthCheckResult`
 
-**The polling gate (COX-F005).** Poll `health_check()` every 2 seconds until it passes or `timeout` elapses.
+The polling gate. Poll `health_check()` every 2 seconds until it passes or `timeout` elapses. Guarantees: returns the probe that decided the outcome; never hangs indefinitely.
 
+**Polling logic (simplified):**
 ```rust
-// Polling loop (pseudocode)
 let deadline = now() + timeout;
 loop {
     let result = self.health_check(port).await;
     if result.passed {
-        return result;  // Pass immediately; no waiting if healthy
+        return result;
     }
     if now() + POLL_INTERVAL >= deadline {
-        return result;  // Timeout; return last probe's detail
+        return result;
     }
     sleep(2 seconds).await;
 }
 ```
 
-- **Guarantee:** Returns the probe that decided the outcome (pass or final timeout)
-- **No hanging:** Unreachable endpoints timeout with `passed: false`, never hang
-- **Deterministic timing:** Last probe's time survives, not a bare "timeout" marker
+### DockerComposeDeploy Implementation
 
-### Example: DockerComposeDeploy
+**HTTP health check probe:**
 
 ```rust
 async fn health_check(&self, port: u16) -> HealthCheckResult {
     let url = format!("http://127.0.0.1:{port}/");
-    let start = std::time::Instant::now();
+    let start = Instant::now();
     
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))  // Per-probe timeout
-        .build()?;
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))  // Per-probe HTTP timeout
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return HealthCheckResult {
+            passed: false,
+            http_status: None,
+            response_time_ms: None,
+        }
+    };
     
     match client.get(&url).send().await {
         Ok(resp) => {
@@ -224,113 +214,48 @@ async fn health_check(&self, port: u16) -> HealthCheckResult {
 
 ---
 
-## Deploy History Recording
+## Configuration
 
-Each deploy attempt captures health check diagnostics:
+Health check behavior is controlled via `DeployConfig`:
 
 ```rust
-pub struct DeployAttempt {
-    pub success: bool,
-    pub deployed: bool,
-    pub summary: String,
-    pub commit_sha: Option<String>,
-    pub health_check: Option<HealthCheckResult>,  // ← COX-F005 result
+pub struct DeployConfig {
+    /// TCP port on which the deployed app should answer.
+    pub host_port: Option<u16>,
+    /// Whether deploy/test gates are enabled.
+    pub enabled: bool,
+    /// Whether to auto-rollback to the last known-good deploy on failure.
+    pub auto_rollback: bool,
+    /// Maximum age of a known-good deploy before rollback is skipped.
+    pub max_rollback_age_secs: u64,
+    /// Database migration detection paths (to prevent rollback across schema changes).
+    pub migration_detection_paths: Vec<String>,
+    /// Timeout for the health endpoint probe (COX-F005 cycle recording).
+    pub health_check_timeout_secs: u64,
 }
 ```
 
-The `health_check` field is populated *after* `wait_healthy` completes, allowing the dashboard and logs to show:
-- Whether the health check passed
-- What HTTP status was returned (if reachable)
-- How long the probe took
-- The probe's timestamp (via `DeployAttempt.at`)
+### Defaults
 
----
+- `host_port`: `None` (no health check — app must opt in by configuring a port)
+- `health_check_timeout_secs`: `60` seconds (cycle recording only; shared gate is always 30s)
+- `auto_rollback`: `false` (opt-in; off by default)
 
-## Edge Cases & Limitations
+### Configuration Examples
 
-### No Host Port Configured
-
-If `config.deploy.host_port` is `None`:
-- Health check is skipped entirely
-- `run_health_check()` returns `(true, None)` immediately
-- Deploy proceeds as if health check passed
-- Use case: Projects that don't expose an HTTP port (e.g., background workers, internal services)
-
-### Adapters Without HTTP Health
-
-Test doubles and simple adapters (e.g., `ScriptedDeploy`) that override only `health()` but not `health_check()`:
-- `wait_healthy` uses the default `health_check` implementation
-- Default wraps `health()` and reports only timing, no HTTP status
-- Deploy works but dashboard shows `http_status: None`
-- No breaking change to existing tests
-
-### Hang Guard
-
-The cycle wraps `wait_healthy` with a hang guard:
-
-```rust
-const HANG_GUARD: Duration = Duration::from_secs(10);  // Slack above the configured bound
-let result = tokio::time::timeout(bound + HANG_GUARD, deploy.wait_healthy(port, bound)).await;
-```
-
-If a custom adapter's `health_check` wedges (takes >5s without returning), the hang guard fires after `health_check_timeout_secs + 10s`, returning `passed: false` with no detail. This catches adapter bugs without losing probe diagnostics when adapters behave correctly.
-
-### Never Healthy Endpoint
-
-If the endpoint never answers (connection refused, timeout, or persistent 5xx):
-- Polling continues for the full timeout window
-- Caller gets the *last* probe's detail (not a bare timeout)
-- Useful for logs: "probe 30 of 30 at 60s: connection refused" vs. "timeout"
-
-### Auto-Rollback Constraints
-
-Auto-rollback is skipped (and the failure is filed as a bug) if:
-- `config.deploy.auto_rollback` is `false` (default)
-- No prior known-good deploy exists (first deploy ever)
-- The known-good deploy is older than `max_rollback_age_secs` (default: 3600s = 1 hour)
-- Any database migrations ran between the known-good and failed deployment
-
----
-
-## Tests & Verification
-
-### Unit Tests
-
-Located in `crates/application/src/ports/outbound/deploy.rs`:
-
-- `already_healthy_resolves_immediately_on_the_first_probe`: Healthy endpoint costs exactly one probe and no waiting
-- `never_healthy_resolves_false_within_the_bound`: Unhealthy endpoint resolves within the configured timeout, not hanging
-- `default_health_check_reports_timing_without_a_status`: Default implementation carries timing even without HTTP status
-
-### Integration Test
-
-Located in `crates/application/src/use_cases/cycle.rs`:
-
-- `health_check_failure_triggers_rollback_like_any_other_deploy_failure`: A deploy whose containers start but never bind the port triggers auto-rollback, same as a hard deploy failure
-
-Example scenario:
-1. Forward deploy starts but app never binds port → health check fails
-2. Auto-rollback triggers, redeploying the last known-good version
-3. Rollback deploy succeeds and health check passes
-4. Cycle records rollback success and continues
-
----
-
-## Configuration Examples
-
-### Basic: Minimal Health Check
+**Basic: Minimal Health Check**
 
 ```toml
 [deploy]
 host_port = 8101
 enabled = true
 auto_rollback = false
-health_check_timeout_secs = 60  # Default
+health_check_timeout_secs = 60  # Cycle recording timeout
 ```
 
-Health check runs after every deploy, but failures only file bugs — no automatic recovery.
+Health check runs after every deploy via the 30-second shared gate. The cycle also records HTTP diagnostics (timeout 60s). Failures only file bugs — no automatic recovery.
 
-### Production: Auto-Rollback Enabled
+**Production: Auto-Rollback Enabled**
 
 ```toml
 [deploy]
@@ -338,56 +263,84 @@ host_port = 8101
 enabled = true
 auto_rollback = true
 max_rollback_age_secs = 3600      # 1 hour
-health_check_timeout_secs = 90    # Allow extra startup time
+health_check_timeout_secs = 90    # Allow extra startup time for cycle recording
 migration_detection_paths = ["db/migrations"]
 ```
 
-Failed deploys roll back automatically if a known-good version exists within the last hour and no migrations have run since.
-
-### Docker Resource Limits
-
-```bash
-export COXAGENT_DEPLOY_CPUS=4
-export COXAGENT_DEPLOY_MEM=2g
-cargo run  # All deployed containers limited to 4 CPUs, 2GB memory
-```
-
-Disable limits with `off`:
-```bash
-export COXAGENT_DEPLOY_CPUS=off
-```
+Failed deploys roll back automatically if a known-good version exists within the last hour and no migrations have run since. Shared gate always uses 30s; cycle recording waits up to 90s.
 
 ---
 
-## Implementation Notes
+## Edge Cases and Limits
 
-### Ports Used
+### No Host Port Configured
 
-- Health probes connect to `127.0.0.1:<host_port>` (e.g., `127.0.0.1:8101`)
-- HTTP client timeout per probe: 5 seconds
-- TCP liveness check (COX-B004): 3-second timeout
-- Polling interval: 2 seconds
+If `config.deploy.host_port` is `None`:
+- Health check is skipped entirely
+- Deploy proceeds as if health check passed
+- **Use case:** Projects that don't expose an HTTP port (e.g., background workers)
 
-### Timing Semantics
+### Adapters Without HTTP Health
 
-- `response_time_ms` is the round-trip time for a single probe GET request
-- Each poll costs 0–5 seconds, depending on what the endpoint does
-- Timeouts are cumulative: if a probe takes 3s to fail and we poll 30 times, worst case is 90+ seconds
-- The last probe's timing is recorded, not the sum or average
+Test doubles and simple adapters that override only `health()` but not `health_check()`:
+- `wait_healthy` uses the default `health_check` implementation
+- Default wraps `health()` with timing, no HTTP status
+- Deploy works but no HTTP-level diagnostics recorded
 
-### Executor Assumptions
+### Hang Guard
 
-- Runs on Tokio async runtime (`tokio::time::sleep`, `tokio::time::timeout`)
-- No blocking calls (all I/O is async)
-- `reqwest` client is used for HTTP probes (Docker adapter)
+Both gates wrap `wait_healthy` with a timeout guard to catch wedged adapters:
+
+```rust
+// Shared gate (verify_deploy_health)
+const HANG_GUARD: Duration = Duration::from_secs(10);
+let result = tokio::time::timeout(30.secs() + HANG_GUARD, 
+    deploy.wait_healthy(port, 30.secs())).await;
+
+// Cycle recording (run_health_check)
+const HANG_GUARD: Duration = Duration::from_secs(10);
+let result = tokio::time::timeout(bound + HANG_GUARD, 
+    deploy.wait_healthy(port, bound)).await;
+```
+
+If a custom adapter's `health_check` wedges (takes >5s without returning), the hang guard fires after the configured timeout, returning `passed: false` with no detail. Catches adapter bugs without losing diagnostics when adapters behave correctly.
+
+### Never-Healthy Endpoint
+
+If the endpoint never answers (connection refused, timeout, or persistent 5xx):
+- Polling continues for the full timeout window
+- Caller gets the *last* probe's detail, not a bare timeout
+- **Useful for logs:** "probe 15 of 15 at 30s: connection refused" vs. "timeout"
+
+### Auto-Rollback Constraints
+
+Auto-rollback is skipped (failure filed as a bug instead) if:
+- `config.deploy.auto_rollback` is `false` (default)
+- No prior known-good deploy exists (first deploy ever)
+- The known-good deploy is older than `max_rollback_age_secs` (default: 3600s = 1 hour)
+- Any database migrations ran between the known-good and failed deployment
+
+### Chat Deploy and PR Preview
+
+The chat "deploy" command and PR-preview endpoint use the same 30-second shared gate (`verify_deploy_health`), but only record a pass/fail bool, not full HTTP diagnostics. This keeps those flows fast and predictable while still preventing silent deploy failures.
 
 ---
 
-## See Also
+## Code Map
 
+- `crates/application/src/ports/outbound/deploy.rs` — `DeployPort` trait, `wait_healthy()`, `health_check()` default, `verify_deploy_health()` shared gate
+- `crates/application/src/state.rs` — `HealthCheckResult` structure
+- `crates/infrastructure/src/deploy/docker_compose.rs` — `DockerComposeDeploy.health_check()` HTTP implementation
+- `crates/application/src/use_cases/cycle.rs` — `run_health_check()` cycle recording, `verify_health_after_deploy()` rollback gate, health failure recording
+- `crates/application/src/config.rs` — `DeployConfig.health_check_timeout_secs` configuration
+- `crates/app/tests/health_gate.rs` — COX-B009 integration tests
+
+---
+
+## Related
+
+- **COX-B004/B009:** Mandatory post-deploy health gate (`verify_deploy_health`)
 - **COX-B001:** Auto-rollback to last known-good deploy on failure
-- **COX-B004:** Mandatory post-deploy liveness gate
-- **COX-F001:** Auto-rollback mechanics and known-good tracking
-- `DeployPort` trait: `crates/application/src/ports/outbound/deploy.rs`
-- `RunCycleUseCase`: `crates/application/src/use_cases/cycle.rs` (see `run_health_check`, `verify_health_after_deploy`)
-- `DockerComposeDeploy`: `crates/infrastructure/src/deploy/docker_compose.rs` (HTTP health_check implementation)
+- **RunCycleUseCase:** `crates/application/src/use_cases/cycle.rs`
+- **PR preview endpoint:** Uses `verify_deploy_health` to gate deployments
+- **Chat deploy command:** Uses `verify_deploy_health` to gate deployments
