@@ -130,15 +130,30 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             .to_owned();
 
         let memory = crate::prompts::team_memory_block(&state.decisions, &state.lessons);
+        // The architect is meant to be the encyclopedia: it cannot arbitrate a
+        // design for a product whose own wiki, docs and solved tickets it has
+        // never been shown.
+        let knowledge = crate::prompts::knowledge_block(
+            &state.docs,
+            &state.tickets,
+            &self.work_dir,
+            &format!(
+                "{title} {}",
+                state
+                    .ticket(&id)
+                    .map_or("", coxagent_domain::Ticket::description)
+            ),
+            &id.to_string(),
+        );
         let outcome = self
             .engine
-            .run(self.build_request(&id, &title, &memory))
+            .run(self.build_request(&id, &title, &memory, &knowledge))
             .await?;
         if !outcome.succeeded() {
             self.store.release_stage(&id, "sa", &worker).await.ok();
             return Err(PortError::Backend(format!(
                 "SA engine failed on {id}: {}",
-                outcome.stderr.trim()
+                outcome.failure_detail()
             ))
             .into());
         }
@@ -349,7 +364,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
         }
     }
 
-    fn build_request(&self, id: &TicketId, title: &str, memory: &str) -> AgentRequest {
+    fn build_request(
+        &self,
+        id: &TicketId,
+        title: &str,
+        memory: &str,
+        knowledge: &str,
+    ) -> AgentRequest {
         let _choice = self.config.engine.resolve(Role::Sa);
         let context_block = self
             .context
@@ -366,7 +387,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             role: Role::Sa,
             system_prompt: prompts::system_prompt(prompts::SA),
             task_prompt: format!(
-                "Design feature {id}: {title}{context_block}{stack}{}{}{memory}",
+                "Design feature {id}: {title}{context_block}{stack}{}{}{knowledge}{memory}",
                 prompts::focus_block(&self.work_dir, title),
                 prompts::repo_map_block(&self.work_dir, self.config.workflow.token_saver),
             ),

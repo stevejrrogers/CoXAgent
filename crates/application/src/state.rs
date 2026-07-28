@@ -265,6 +265,88 @@ pub fn standard_doc_folder(ticket_type: coxagent_domain::TicketType) -> &'static
     }
 }
 
+/// One agent asking another a question it must not guess the answer to.
+///
+/// A developer who cannot tell what the requirement means, or a BA who does
+/// not know what the product already does, has exactly one correct move: ask
+/// the person who knows. Without this the only options were to guess and fail
+/// a gate, or stall — which is how a ticket burned three attempts on the same
+/// misunderstanding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentQuestion {
+    /// Stable id (`<ticket>#<n>` or `open#<n>` when not about one ticket).
+    pub id: String,
+    /// Ticket the question is about; empty for a product-level question.
+    pub ticket: String,
+    /// Role label that asked (`DEV-BUG`, `BA`).
+    pub from: String,
+    /// Role label expected to answer (`BA`, `SA`).
+    pub to: String,
+    /// The question, as asked.
+    pub body: String,
+    /// The answer; empty while unanswered.
+    #[serde(default)]
+    pub answer: String,
+    pub asked_at: String,
+    #[serde(default)]
+    pub answered_at: String,
+    /// Whether this question has already been handed to the other role once.
+    /// A second forward would be two roles passing it back and forth.
+    #[serde(default)]
+    pub forwarded: bool,
+}
+
+impl AgentQuestion {
+    /// Whether this question is still waiting for an answer.
+    #[must_use]
+    pub fn is_open(&self) -> bool {
+        self.answer.trim().is_empty()
+    }
+}
+
+/// Which wiki space a ticket's page belongs in. The ticket TYPE alone gets
+/// this wrong: an infrastructure feature (sandboxing, a deploy gate) is a
+/// Feature ticket and would file under Product, which is how a product space
+/// ends up holding nothing a product person would read. The subject decides,
+/// with the type as the tie-breaker.
+#[must_use]
+pub fn doc_space_for(
+    ticket_type: coxagent_domain::TicketType,
+    title: &str,
+    description: &str,
+) -> &'static str {
+    use coxagent_domain::TicketType;
+    const ENGINEERING: &[&str] = &[
+        "docker",
+        "compose",
+        "ci ",
+        "pipeline",
+        "clippy",
+        "lint",
+        "sandbox",
+        "seatbelt",
+        "bwrap",
+        "deploy gate",
+        "health check",
+        "rollback",
+        "refactor",
+        "migration",
+        "schema",
+        "runner",
+        "cargo",
+        "build fails",
+        "compile",
+    ];
+    let text = format!("{title} {description}").to_lowercase();
+    if ENGINEERING.iter().any(|k| text.contains(k)) {
+        return "Engineering";
+    }
+    match ticket_type {
+        TicketType::Feature => "Product",
+        TicketType::Chore | TicketType::Bug => "Engineering",
+    }
+}
+
 /// The colour/category bucket for a Wiki folder, keyed off its top-level space.
 /// Keeps DOCS-written pages consistent with the UI's folder colouring.
 #[must_use]
@@ -281,7 +363,11 @@ pub fn doc_category_of(folder: &str) -> &'static str {
         "design" | "flows" => "flows",
         "qa" | "testing" | "test" | "tests" => "qa",
         "operations" | "ops" | "release notes" | "releases" => "ops",
-        _ => "product",
+        "product" | "features" => "product",
+        // An unrecognised space is not silently "product": mislabelling a
+        // team/ops page as product colours it wrongly in the wiki and skews
+        // every filter built on the category.
+        _ => "general",
     }
 }
 
@@ -494,6 +580,38 @@ pub struct Milestone {
     pub target_version: String,
 }
 
+/// Why one attempt at a ticket failed, in a form later agents can reason over
+/// instead of pattern-matching prose.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttemptFailure {
+    /// 1-based attempt number.
+    pub attempt: u32,
+    /// Which layer the work died at.
+    pub layer: FailureLayer,
+    /// The gate or step that rejected it (`clippy`, `regression-test`,
+    /// `tests`, `engine`), for routing and for the human digest.
+    pub gate: String,
+    /// The decisive detail, already trimmed (a lint line, an assertion).
+    pub detail: String,
+    /// Repo-relative files implicated, when the gate knows them.
+    #[serde(default)]
+    pub files: Vec<String>,
+}
+
+/// The layer an attempt died at — the thing that decides WHO can unstick it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureLayer {
+    /// The requirement could not be built against (BA's problem).
+    Spec,
+    /// A mechanical quality gate rejected otherwise-sound work.
+    Gate,
+    /// The approach itself does not work (SA's problem).
+    Design,
+    /// Auth, network, capacity — nobody's fault, never counted.
+    Infra,
+}
+
 /// The whole state of one managed project.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[allow(clippy::struct_excessive_bools)] // a persisted data aggregate, not a state machine
@@ -659,6 +777,13 @@ pub struct ProjectState {
     /// entry removed when the ticket completes).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub ticket_journal: std::collections::BTreeMap<String, Vec<String>>,
+    /// Structured failure log per ticket (see [`AttemptFailure`]). Defaulted so
+    /// state written before this existed still loads.
+    #[serde(default)]
+    pub ticket_failures: std::collections::BTreeMap<String, Vec<AttemptFailure>>,
+    /// Questions agents have asked each other (see [`AgentQuestion`]).
+    #[serde(default)]
+    pub questions: Vec<AgentQuestion>,
     /// Whether the Ops/SRE monitor currently sees the deployed app as down —
     /// tracked so it files exactly one bug per outage and can announce recovery.
     #[serde(default)]
@@ -747,6 +872,8 @@ impl Default for ProjectState {
             drain_notice_sprint: 0,
             ticket_fail_attempts: std::collections::BTreeMap::new(),
             ticket_journal: std::collections::BTreeMap::new(),
+            ticket_failures: std::collections::BTreeMap::new(),
+            questions: Vec::new(),
             ops_down: false,
             spend_today_usd: 0.0,
             spend_day: String::new(),
@@ -831,6 +958,112 @@ impl ProjectState {
     /// Append a work-journal note for a ticket (what an attempt tried / where
     /// it got stuck). Bounded: 4 notes per ticket, 500 chars per note — the
     /// journal is a briefing for the next attempt, not a log.
+    /// Record a failed attempt as DATA, not prose. Everything downstream — the
+    /// escalation router, the next developer's brief, the impediment digest —
+    /// used to re-derive the failure class by grepping an English sentence,
+    /// which meant the classification was only ever as good as the wording of
+    /// whoever wrote the message. The gate that rejected the work knows exactly
+    /// what it rejected; this is where it says so.
+    pub fn record_attempt_failure(&mut self, ticket: &str, failure: AttemptFailure) {
+        let log = self.ticket_failures.entry(ticket.to_owned()).or_default();
+        log.push(failure);
+        let overflow = log.len().saturating_sub(6);
+        if overflow > 0 {
+            log.drain(0..overflow);
+        }
+    }
+
+    /// Record a question from one role to another, unless that ticket already
+    /// has one open — a second unanswered question means the first was not the
+    /// blocker, and two of them just queue cost.
+    pub fn ask_question(&mut self, ticket: &str, from: &str, to: &str, body: &str) -> bool {
+        let body = body.trim();
+        if body.is_empty() || self.open_question(ticket).is_some() {
+            return false;
+        }
+        let key = if ticket.is_empty() { "open" } else { ticket };
+        let n = self
+            .questions
+            .iter()
+            .filter(|q| q.ticket == ticket)
+            .count()
+            .saturating_add(1);
+        self.questions.push(AgentQuestion {
+            id: format!("{key}#{n}"),
+            ticket: ticket.to_owned(),
+            from: from.to_owned(),
+            to: to.to_owned(),
+            body: body.chars().take(600).collect(),
+            answer: String::new(),
+            asked_at: now_rfc3339(),
+            answered_at: String::new(),
+            forwarded: false,
+        });
+        // Keep the log bounded; answered questions age out before open ones.
+        while self.questions.len() > 40 {
+            if let Some(i) = self.questions.iter().position(|q| !q.is_open()) {
+                self.questions.remove(i);
+            } else {
+                self.questions.remove(0);
+            }
+        }
+        true
+    }
+
+    /// The open question for `ticket`, if any.
+    #[must_use]
+    pub fn open_question(&self, ticket: &str) -> Option<&AgentQuestion> {
+        self.questions
+            .iter()
+            .find(|q| q.ticket == ticket && q.is_open())
+    }
+
+    /// Hand a question to the other role, once. The BA that lacks the code and
+    /// the SA that lacks the ticket are each one hop from someone who has it;
+    /// a second hop is a loop, so this refuses it.
+    pub fn forward_question(&mut self, id: &str, to: &str) -> bool {
+        let Some(q) = self.questions.iter_mut().find(|q| q.id == id) else {
+            return false;
+        };
+        if q.forwarded || q.to == to || !q.is_open() {
+            return false;
+        }
+        to.clone_into(&mut q.to);
+        q.forwarded = true;
+        true
+    }
+
+    /// Attach an answer to a question. Returns whether it landed.
+    pub fn answer_question(&mut self, id: &str, answer: &str) -> bool {
+        let answer = answer.trim();
+        if answer.is_empty() {
+            return false;
+        }
+        let Some(q) = self.questions.iter_mut().find(|q| q.id == id) else {
+            return false;
+        };
+        q.answer = answer.chars().take(1500).collect();
+        q.answered_at = now_rfc3339();
+        true
+    }
+
+    /// Answered questions about `ticket`, newest last.
+    #[must_use]
+    pub fn answered_questions(&self, ticket: &str) -> Vec<&AgentQuestion> {
+        self.questions
+            .iter()
+            .filter(|q| q.ticket == ticket && !q.is_open())
+            .collect()
+    }
+
+    /// Structured failures recorded for `ticket`, oldest first.
+    #[must_use]
+    pub fn attempt_failures(&self, ticket: &str) -> &[AttemptFailure] {
+        self.ticket_failures
+            .get(ticket)
+            .map_or(&[][..], Vec::as_slice)
+    }
+
     pub fn journal_note(&mut self, ticket: &str, note: &str) {
         let entry: String = note.trim().chars().take(500).collect();
         if entry.is_empty() {
@@ -1666,5 +1899,109 @@ mod alias_tests {
         assert_eq!(ev.len(), 6, "keeps last 6");
         assert!(ev[0].label.contains("proof 2"), "oldest dropped");
         assert!(ev.iter().all(|e| e.detail.chars().count() <= 1200));
+    }
+}
+
+#[cfg(test)]
+mod attempt_failure_tests {
+    use super::{AttemptFailure, FailureLayer, ProjectState};
+
+    fn failure(attempt: u32, gate: &str) -> AttemptFailure {
+        AttemptFailure {
+            attempt,
+            layer: FailureLayer::Gate,
+            gate: gate.to_owned(),
+            detail: "d".to_owned(),
+            files: vec!["crates/app/src/lib.rs".to_owned()],
+        }
+    }
+
+    #[test]
+    fn failures_are_kept_per_ticket_and_bounded() {
+        let mut s = ProjectState::default();
+        for n in 1..=9 {
+            s.record_attempt_failure("COX-B006", failure(n, "clippy"));
+        }
+        s.record_attempt_failure("COX-B007", failure(1, "tests"));
+        let log = s.attempt_failures("COX-B006");
+        assert_eq!(log.len(), 6, "old attempts age out");
+        assert_eq!(log[0].attempt, 4, "the oldest kept is the 4th");
+        assert_eq!(s.attempt_failures("COX-B007").len(), 1);
+        assert!(s.attempt_failures("COX-NONE").is_empty());
+    }
+
+    #[test]
+    fn state_written_before_this_field_existed_still_loads() {
+        // Projects on disk predate the structured log; a missing key must not
+        // fail the load and strand a whole project.
+        let mut doc = serde_json::to_value(ProjectState::default()).expect("serialize");
+        doc.as_object_mut()
+            .expect("object")
+            .remove("ticket_failures");
+        let back: ProjectState = serde_json::from_value(doc).expect("load legacy state");
+        assert!(back.ticket_failures.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod question_tests {
+    use super::ProjectState;
+
+    #[test]
+    fn one_open_question_per_ticket_and_answers_are_readable_back() {
+        let mut s = ProjectState::default();
+        assert!(s.ask_question("COX-B1", "DEV-BUG", "BA", "what does archive mean?"));
+        // A second unanswered question means the first was not the blocker.
+        assert!(
+            !s.ask_question("COX-B1", "DEV-BUG", "BA", "and what about purge?"),
+            "a ticket may hold only one open question"
+        );
+        // A different ticket is unaffected.
+        assert!(s.ask_question("COX-B2", "BA", "SA", "does the product already export?"));
+        let open = s.open_question("COX-B1").expect("open");
+        assert_eq!((open.from.as_str(), open.to.as_str()), ("DEV-BUG", "BA"));
+        assert!(s.answered_questions("COX-B1").is_empty());
+
+        let id = open.id.clone();
+        assert!(s.answer_question(&id, "  soft-delete: the row stays, hidden  "));
+        assert!(
+            !s.answer_question(&id, "   "),
+            "a blank answer is no answer"
+        );
+        assert!(s.open_question("COX-B1").is_none(), "no longer waiting");
+        let answered = s.answered_questions("COX-B1");
+        assert_eq!(answered.len(), 1);
+        assert_eq!(answered[0].answer, "soft-delete: the row stays, hidden");
+        // Asking again is allowed once the first is answered.
+        assert!(s.ask_question("COX-B1", "DEV-BUG", "BA", "and what about purge?"));
+    }
+
+    #[test]
+    fn a_question_may_be_handed_over_once_then_must_be_answered() {
+        let mut s = ProjectState::default();
+        assert!(s.ask_question("COX-B1", "DEV-BUG", "BA", "is archive a soft delete?"));
+        let id = s.open_question("COX-B1").expect("open").id.clone();
+        // The BA reads it as a systems question and hands it to the SA.
+        assert!(s.forward_question(&id, "SA"));
+        assert_eq!(s.open_question("COX-B1").expect("open").to, "SA");
+        // A second hand-off would be the two roles passing it back and forth.
+        assert!(
+            !s.forward_question(&id, "BA"),
+            "one hop only — after that someone has to read the code and answer"
+        );
+        // Handing it to the role that already holds it is not a hand-off.
+        assert!(!s.forward_question(&id, "SA"));
+        assert!(s.answer_question(&id, "soft delete; rows stay, hidden by a flag"));
+        assert!(
+            !s.forward_question(&id, "BA"),
+            "answered questions do not move"
+        );
+    }
+
+    #[test]
+    fn empty_questions_are_not_recorded() {
+        let mut s = ProjectState::default();
+        assert!(!s.ask_question("COX-B1", "DEV-BUG", "BA", "   "));
+        assert!(s.questions.is_empty());
     }
 }

@@ -300,6 +300,7 @@ impl ClaudeEngine {
             .take()
             .ok_or_else(|| PortError::Backend("no stdout".to_owned()))?;
         let mut err = child.stderr.take();
+        let child_pid = child.id();
         let err_task = tokio::spawn(async move {
             let mut s = String::new();
             if let Some(e) = err.as_mut() {
@@ -333,9 +334,18 @@ impl ClaudeEngine {
                 .map_err(|e| PortError::Backend(format!("claude wait: {e}")))?;
             Ok::<_, PortError>((raw, status))
         };
-        let (raw, status) = tokio::time::timeout(timeout, read)
-            .await
-            .map_err(|_| PortError::Backend("claude timed out".to_owned()))??;
+        let leader_pid = child_pid;
+        let (raw, status) = match tokio::time::timeout(timeout, read).await {
+            Ok(r) => r?,
+            Err(_) => {
+                // Reap the WHOLE process tree, not just the CLI: a timed-out
+                // agent may have left builds/dev-servers running.
+                if let Some(pid) = leader_pid {
+                    crate::proc::kill_group(pid);
+                }
+                return Err(PortError::Backend("claude timed out".to_owned()));
+            }
+        };
         let stderr = err_task.await.unwrap_or_default();
 
         // Prefer the streamed events; fall back to the old single-object JSON.

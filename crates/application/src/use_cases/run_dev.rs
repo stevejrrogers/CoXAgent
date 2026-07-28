@@ -125,31 +125,40 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
     pub async fn execute(&self) -> Result<Option<TicketId>, AppError> {
         // Self-healing boot: if the project doesn't compile, fix that BEFORE
         // touching any tickets. Otherwise every ticket will fail anyway.
+        // Skipped entirely when the tree is unchanged since the last green
+        // suite run (process-wide fingerprint cache) — one green check per
+        // tree-state serves every runner in the cycle.
         if let Some(deploy) = &self.verify {
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(300),
-                deploy.run_tests(&self.work_dir),
-            )
-            .await
-            {
-                Ok(Ok(r)) if r.success => {}
-                Ok(Ok(r)) => {
-                    tracing::warn!(
-                        "DEV boot check: cargo test failed — self-healing. {}",
-                        &r.summary[..r.summary.len().min(200)]
-                    );
-                    return self.self_heal_compile(&r.summary).await;
-                }
-                Ok(Err(e)) => {
-                    // Spawn errors and timeouts are INFRASTRUCTURE, not compile
-                    // breakage — healing on them tells the LLM "the project
-                    // doesn't compile" with no compile error to fix.
-                    tracing::warn!("DEV boot check: cargo test spawn error — {e}");
-                    return Ok(None);
-                }
-                Err(_timeout) => {
-                    tracing::warn!("DEV boot check: cargo test timed out after 5 min");
-                    return Ok(None);
+            if crate::verify_cache::is_green(&self.work_dir) {
+                // fall through — nothing changed since the last green run
+            } else {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(300),
+                    deploy.run_tests(&self.work_dir),
+                )
+                .await
+                {
+                    Ok(Ok(r)) if r.success => {
+                        crate::verify_cache::mark_green(&self.work_dir);
+                    }
+                    Ok(Ok(r)) => {
+                        tracing::warn!(
+                            "DEV boot check: cargo test failed — self-healing. {}",
+                            &r.summary[..r.summary.len().min(200)]
+                        );
+                        return self.self_heal_compile(&r.summary).await;
+                    }
+                    Ok(Err(e)) => {
+                        // Spawn errors and timeouts are INFRASTRUCTURE, not compile
+                        // breakage — healing on them tells the LLM "the project
+                        // doesn't compile" with no compile error to fix.
+                        tracing::warn!("DEV boot check: cargo test spawn error — {e}");
+                        return Ok(None);
+                    }
+                    Err(_timeout) => {
+                        tracing::warn!("DEV boot check: cargo test timed out after 5 min");
+                        return Ok(None);
+                    }
                 }
             }
         }
@@ -282,6 +291,30 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         // just read and wrote in context instead of rediscovering it cold.
         let session = match self.engine.run(request).await {
             Ok(o) if o.succeeded() => {
+                // A question is not a failure. If the agent says it would have
+                // to guess, park the QUESTION (not the ticket): the BA answers
+                // next cycle and the retry starts from an answer instead of an
+                // assumption. Counting this as an attempt would punish exactly
+                // the behaviour we want.
+                if let Some((to, body)) = parse_ask(&o.stdout) {
+                    let (key, from) = (id.to_string(), format!("{:?}", self.mode.role()));
+                    let asked =
+                        crate::ports::outbound::mutate_state(self.store.as_ref(), move |st| {
+                            if st.ask_question(&key, &from, &to, &body) {
+                                let msg = format!("❓ {from} → {to}: {body}");
+                                st.post_comment(&from, &msg, Some(key.clone()));
+                            }
+                            Ok(())
+                        })
+                        .await;
+                    if asked.is_ok() {
+                        self.release_claim(&id).await;
+                        if let Some(p) = &self.phase {
+                            p(None);
+                        }
+                        return Ok(None);
+                    }
+                }
                 let sid = o.session_id.clone();
                 match (&sid, plan_first) {
                     (Some(sid_v), true) => {
@@ -306,12 +339,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                                 match self.engine.run(fresh).await {
                                     Ok(f) if f.succeeded() => f.session_id.clone(),
                                     Ok(f) => {
-                                        self.record_failure(&id, f.stderr.trim()).await;
+                                        self.record_failure(&id, &f.failure_detail()).await;
                                         self.release_claim(&id).await;
                                         return Err(PortError::Backend(format!(
                                             "{:?} engine failed on {id}: {}",
                                             self.mode,
-                                            f.stderr.trim()
+                                            f.failure_detail()
                                         ))
                                         .into());
                                     }
@@ -328,12 +361,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 }
             }
             Ok(o) => {
-                self.record_failure(&id, o.stderr.trim()).await;
+                self.record_failure(&id, &o.failure_detail()).await;
                 self.release_claim(&id).await;
                 return Err(PortError::Backend(format!(
                     "{:?} engine failed on {id}: {}",
                     self.mode,
-                    o.stderr.trim()
+                    o.failure_detail()
                 ))
                 .into());
             }
@@ -425,7 +458,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
 
             // Lint gate: a change may never ADD clippy errors. Baseline is
             // learned on first measure and ratchets DOWN when improved.
-            if let Ok(Some(count)) = deploy.lint(&self.work_dir).await {
+            if let Ok(Some(report)) = deploy.lint_report(&self.work_dir).await {
+                let count = report.errors;
                 let prior = self.store.load().await.ok().and_then(|s| s.clippy_baseline);
                 match prior {
                     None => {
@@ -438,10 +472,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                     }
                     Some(base) if count > base => {
                         // One bounded repair pass for the NEW lint errors only.
+                        // Naming the actual lints beats a bare count: the agent
+                        // can fix them without hunting through the whole run.
+                        let detail = if report.sample.is_empty() {
+                            String::new()
+                        } else {
+                            format!("\nCurrent errors include:\n{}", report.sample)
+                        };
                         let fixup = format!(
                             "Your change introduced NEW `cargo clippy` errors (was {base}, now \
                              {count}). Run `cargo clippy --workspace --all-targets`, fix ONLY \
-                             errors caused by your change, and do not start new work."
+                             errors caused by your change, and do not start new work. If a lint \
+                             fires on code you must keep (e.g. platform-gated symbols), gate it \
+                             with the right #[cfg(...)] rather than deleting behaviour.{detail}"
                         );
                         if let Some(sid) = &session {
                             let _ = self
@@ -459,16 +502,45 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                             };
                             let _ = self.engine.run(repair).await;
                         }
-                        let after = deploy
-                            .lint(&self.work_dir)
-                            .await
-                            .ok()
-                            .flatten()
-                            .unwrap_or(count);
-                        if after > base {
-                            self.record_failure(
+                        let after_report = deploy.lint_report(&self.work_dir).await.ok().flatten();
+                        let after = after_report.as_ref().map_or(count, |r| r.errors);
+                        // Blame only what this change touched. The workspace
+                        // carries pre-existing lints, and a rebase can import
+                        // someone else's — failing the holder of the ticket for
+                        // those parks perfectly good fixes after three tries.
+                        // MSRV 1.80 predates Option::is_none_or.
+                        let mine = after_report.as_ref().map_or(true, |r| {
+                            r.files.is_empty() || self.lints_touch_changed_files(&r.files)
+                        });
+                        if after > base && mine {
+                            // Keep the files the lints named: the next attempt
+                            // is told where to look, not just that it failed.
+                            let lint_files = after_report
+                                .as_ref()
+                                .map(|r| {
+                                    let mut f: Vec<String> = r
+                                        .files
+                                        .iter()
+                                        .filter(|f| !f.trim().is_empty())
+                                        .cloned()
+                                        .collect();
+                                    f.sort();
+                                    f.dedup();
+                                    f.truncate(5);
+                                    f
+                                })
+                                .unwrap_or_default();
+                            let sample = after_report
+                                .filter(|r| !r.sample.is_empty())
+                                .map_or_else(String::new, |r| {
+                                    format!("; e.g. {}", r.sample.lines().next().unwrap_or(""))
+                                });
+                            self.record_failure_at(
                                 &id,
-                                &format!("added clippy errors ({base} -> {after})"),
+                                &format!("added clippy errors ({base} -> {after}{sample})"),
+                                crate::state::FailureLayer::Gate,
+                                "clippy",
+                                lint_files,
                             )
                             .await;
                             self.release_claim(&id).await;
@@ -477,6 +549,22 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                                 self.mode
                             ))
                             .into());
+                        }
+                        if after > base {
+                            // Not ours: record the new reality so the next
+                            // change isn't measured against a stale baseline.
+                            tracing::warn!(
+                                "lint count rose {base} -> {after} but no new lint sits in a \
+                                 file {id} touched — not attributing it to this ticket"
+                            );
+                            let _ = crate::ports::outbound::mutate_state(
+                                self.store.as_ref(),
+                                move |s| {
+                                    s.clippy_baseline = Some(after);
+                                    Ok(())
+                                },
+                            )
+                            .await;
                         }
                         if after < base {
                             let _ = crate::ports::outbound::mutate_state(
@@ -501,14 +589,48 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 }
             }
 
+            // Platform gate: this host is macOS, the product ships on Linux.
+            // A symbol gated to the wrong platforms compiles clean here and is
+            // dead code there — the failure cox filed three times under three
+            // different ticket numbers. The check provisions what it needs and
+            // falls back to the Docker build, so an unavailable answer is a
+            // real gap, not laziness, and it is stated rather than skipped.
+            match deploy.cross_target_check(&self.work_dir).await {
+                Ok(check) if check.available && !check.errors.is_empty() => {
+                    let detail = check.errors.join("; ");
+                    let short: String = detail.chars().take(200).collect();
+                    self.record_failure_at(
+                        &id,
+                        &format!("does not compile for the deploy platform: {short}"),
+                        crate::state::FailureLayer::Gate,
+                        "linux-build",
+                        Vec::new(),
+                    )
+                    .await;
+                    self.release_claim(&id).await;
+                    return Err(PortError::Backend(format!(
+                        "{:?} broke the Linux build on {id} — ticket returned to the queue",
+                        self.mode
+                    ))
+                    .into());
+                }
+                Ok(check) if !check.available => {
+                    tracing::warn!("platform verification unavailable — {}", check.reason);
+                }
+                Ok(_) | Err(_) => {}
+            }
+
             // Regression-test gate: a BUG fix that touches no test is a fix
             // on faith. Mechanical check over the working diff; one bounded
             // repair pass to add the missing test.
-            if self.mode == DevMode::Bug && !self.diff_touches_tests() {
+            if self.mode == DevMode::Bug && !self.diff_is_docs_only() && !self.diff_touches_tests()
+            {
                 let fixup = format!(
                     "Your fix for {id} ships with NO regression test. Add a test that FAILS \
                      without your fix and passes with it — that is the only proof the bug is \
-                     dead. Do not start new work or commit."
+                     dead. Put it where the gate can see it: a `tests/` path, a `*_test.rs` / \
+                     `*.test.ts` file, or an added `#[test]`/`#[tokio::test]`/`it(`/`def test_` \
+                     block. Do not start new work or commit."
                 );
                 if let Some(sid) = &session {
                     let _ = self
@@ -527,8 +649,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                     let _ = self.engine.run(repair).await;
                 }
                 if !self.diff_touches_tests() {
-                    self.record_failure(&id, "bug fix shipped without a regression test")
-                        .await;
+                    self.record_failure_at(
+                        &id,
+                        "bug fix shipped without a regression test",
+                        crate::state::FailureLayer::Gate,
+                        "regression-test",
+                        Vec::new(),
+                    )
+                    .await;
                     self.release_claim(&id).await;
                     return Err(PortError::Backend(format!(
                         "{:?} fix for {id} has no regression test — returned to the queue",
@@ -539,8 +667,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 // Suite must STILL be green with the new test in place.
                 if let Ok(r) = deploy.run_tests(&self.work_dir).await {
                     if !r.success {
-                        self.record_failure(&id, "regression test added but suite is red")
-                            .await;
+                        self.record_failure_at(
+                            &id,
+                            "regression test added but suite is red",
+                            crate::state::FailureLayer::Gate,
+                            "tests",
+                            Vec::new(),
+                        )
+                        .await;
                         self.release_claim(&id).await;
                         return Err(PortError::Backend(format!(
                             "{:?} regression test left suite red on {id}",
@@ -550,6 +684,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                     }
                 }
             }
+        }
+
+        // The suite (plus gates) is green against this exact tree — remember
+        // it so sibling runners skip their boot check this cycle.
+        if self.verify.is_some() {
+            crate::verify_cache::mark_green(&self.work_dir);
         }
 
         // Complete under an atomic read-modify-write with retry: move to the
@@ -589,6 +729,80 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         Ok(Some(id))
     }
 
+    /// Whether any lint location sits in a file this working diff touches.
+    /// Paths are compared by suffix so a repo-relative lint path still matches
+    /// a git path listed from the same root.
+    fn lints_touch_changed_files(&self, lint_files: &[String]) -> bool {
+        let changed = self.changed_files();
+        if changed.is_empty() {
+            // Nothing changed on disk — nothing here is attributable.
+            return false;
+        }
+        lint_files.iter().any(|lint| {
+            let lint = lint.trim();
+            !lint.is_empty()
+                && changed
+                    .iter()
+                    .any(|c| lint.ends_with(c.as_str()) || c.ends_with(lint))
+        })
+    }
+
+    /// Paths in the working diff: tracked modifications plus untracked files.
+    fn changed_files(&self) -> Vec<String> {
+        let run = |args: &[&str]| -> String {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&self.work_dir)
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default()
+        };
+        format!(
+            "{}\n{}",
+            run(&["diff", "HEAD", "--name-only"]),
+            run(&["ls-files", "--others", "--exclude-standard"])
+        )
+        .lines()
+        .map(|l| l.trim().to_owned())
+        .filter(|l| !l.is_empty())
+        .collect()
+    }
+
+    /// Whether the working diff is documentation/assets only — README fixes,
+    /// docs, images, licences. Such a "bug fix" has no runtime surface, so
+    /// demanding a regression test just parks the ticket.
+    fn diff_is_docs_only(&self) -> bool {
+        let run = |args: &[&str]| -> String {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&self.work_dir)
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default()
+        };
+        let names = format!(
+            "{}\n{}",
+            run(&["diff", "HEAD", "--name-only"]),
+            run(&["ls-files", "--others", "--exclude-standard"])
+        );
+        let mut any = false;
+        for f in names.lines().map(str::trim).filter(|f| !f.is_empty()) {
+            any = true;
+            let lower = f.to_lowercase();
+            let doc_ext = [
+                ".md", ".txt", ".adoc", ".rst", ".png", ".jpg", ".jpeg", ".svg", ".gif",
+            ]
+            .iter()
+            .any(|e| lower.ends_with(e));
+            let doc_name = lower.ends_with("license") || lower.ends_with(".gitignore");
+            let doc_dir = lower.starts_with("docs/") || lower.contains("/docs/");
+            if !(doc_ext || doc_name || doc_dir) {
+                return false;
+            }
+        }
+        any
+    }
+
     /// Whether the current working diff (staged/unstaged + untracked) touches
     /// tests: a test-ish path, or added lines containing test markers.
     fn diff_touches_tests(&self) -> bool {
@@ -619,14 +833,65 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             return true;
         }
         let diff = run(&["diff", "HEAD"]);
-        diff.lines().any(|l| {
+        if diff.lines().any(|l| {
             l.starts_with('+')
                 && (l.contains("#[test]")
                     || l.contains("#[tokio::test]")
                     || l.contains("def test_")
                     || l.contains("it(")
                     || l.contains("func Test"))
-        })
+        }) {
+            return true;
+        }
+        // Rust keeps most tests in an inline `#[cfg(test)] mod tests` at the
+        // foot of the file it tests. A fix that hardens or extends one of those
+        // adds no `#[test]` line and lives in no test-shaped path, so the two
+        // checks above miss the single most common way a Rust regression test
+        // actually lands — and the ticket gets failed for shipping without one.
+        self.diff_touches_inline_test_module(&run)
+    }
+
+    /// Whether any changed line falls inside a file's `#[cfg(test)]` module.
+    /// Uses `-U0` so the reported line numbers are the changed lines themselves,
+    /// not context that happens to sit near the boundary.
+    fn diff_touches_inline_test_module(&self, run: &dyn Fn(&[&str]) -> String) -> bool {
+        let diff = run(&["diff", "HEAD", "-U0"]);
+        let mut file: Option<String> = None;
+        for line in diff.lines() {
+            if let Some(rest) = line.strip_prefix("+++ b/") {
+                file = Some(rest.trim().to_owned());
+                continue;
+            }
+            let Some(hunk) = line.strip_prefix("@@ ") else {
+                continue;
+            };
+            let Some(f) = file.as_deref() else { continue };
+            // `@@ -a,b +c,d @@` — c is the first changed line on the new side.
+            let Some(new_side) = hunk.split('+').nth(1) else {
+                continue;
+            };
+            let Ok(start) = new_side
+                .split([',', ' '])
+                .next()
+                .unwrap_or("")
+                .parse::<usize>()
+            else {
+                continue;
+            };
+            let Ok(text) = std::fs::read_to_string(self.work_dir.join(f)) else {
+                continue;
+            };
+            if let Some(test_mod_line) = text
+                .lines()
+                .position(|l| l.trim_start().starts_with("#[cfg(test)]"))
+            {
+                // Line numbers are 1-based in the diff, 0-based from position().
+                if start > test_mod_line {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// When pre-check fails, ask the LLM to fix ALL compile/test errors until
@@ -640,7 +905,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         };
 
         let mut last_error = error_summary.to_owned();
-        for attempt in 1..=3 {
+        for attempt in 1_u32..=3 {
             let task = if attempt == 1 {
                 format!(
                     "The project does NOT compile. Fix ALL errors:\n\n\
@@ -663,7 +928,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 task_prompt: task,
                 work_dir: self.work_dir.clone(),
                 timeout: std::time::Duration::from_secs(600),
-                escalation_level: (attempt - 1) as u8,
+                escalation_level: u8::try_from(attempt.saturating_sub(1)).unwrap_or(3),
             };
 
             match self.engine.run(req).await {
@@ -719,19 +984,33 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
     /// Count a failed attempt on `id`; at the 3rd, park it with a visible note
     /// so a human decides instead of the team burning tokens forever.
     async fn record_failure(&self, id: &TicketId, why: &str) {
+        self.record_failure_at(
+            id,
+            why,
+            crate::state::FailureLayer::Design,
+            "engine",
+            Vec::new(),
+        )
+        .await;
+    }
+
+    /// As [`Self::record_failure`], but the caller names the layer and gate it
+    /// rejected the work at, so the next agent reads data instead of guessing
+    /// from a sentence.
+    async fn record_failure_at(
+        &self,
+        id: &TicketId,
+        why: &str,
+        layer: crate::state::FailureLayer,
+        gate: &str,
+        files: Vec<String>,
+    ) {
         let key = id.to_string();
         let short: String = why.chars().take(300).collect();
-        // Infrastructure faults (revoked auth, quota walls, rate limits) are
-        // NOT the ticket's fault — counting them parked 3 innocent tickets
-        // during a 401 outage. Log, don't punish.
-        let low = why.to_lowercase();
-        let infra = why.trim().is_empty()
-            || low.contains("401")
-            || low.contains("authenticate")
-            || low.contains("revoked")
-            || low.contains("quota")
-            || low.contains("rate limit")
-            || low.contains("overloaded");
+        // Infrastructure faults are NOT the ticket's fault — shared predicate
+        // with the runner's circuit breaker (see crate::faults).
+        let infra = crate::faults::is_infra_fault(why);
+        let _ = layer;
         if infra {
             let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
                 s.log_activity(
@@ -753,6 +1032,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             // Brief the NEXT attempt on what this one hit, so a retry builds
             // on prior findings instead of rediscovering them.
             s.journal_note(&key, &format!("attempt {n} failed: {short}"));
+            s.record_attempt_failure(
+                &key,
+                crate::state::AttemptFailure {
+                    attempt: n,
+                    layer,
+                    gate: gate.to_owned(),
+                    detail: short.clone(),
+                    files: files.clone(),
+                },
+            );
             if n == 3 {
                 s.post_comment(
                     "DEV-BUG",
@@ -785,6 +1074,79 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             DevMode::Bug => open_bug_candidates(state),
             DevMode::Feature => ready_feature_candidates(state),
         }
+    }
+
+    /// Everything already written down about this ticket's subject: the team's
+    /// own wiki, the project's docs, and closed tickets with the same symptom.
+    /// A person walking into unfamiliar code reads these before typing; an
+    /// agent only reads what the brief hands it.
+    fn knowledge_brief(
+        state: &ProjectState,
+        id: &TicketId,
+        ticket: Option<&coxagent_domain::Ticket>,
+        work_dir: &std::path::Path,
+    ) -> String {
+        let query = ticket.map_or_else(String::new, |t| {
+            format!(
+                "{} {} {}",
+                t.title(),
+                t.description(),
+                t.design()
+                    .technical
+                    .as_ref()
+                    .map_or("", |d| d.approach.as_str())
+            )
+        });
+        if query.trim().is_empty() {
+            return String::new();
+        }
+        prompts::knowledge_block(
+            &state.docs,
+            &state.tickets,
+            work_dir,
+            &query,
+            &id.to_string(),
+        )
+    }
+
+    /// How previous attempts are briefed to the next one. Structured records
+    /// name the gate and the files; a ticket that failed before that log
+    /// existed falls back to its prose journal.
+    fn attempts_brief(state: &ProjectState, id: &TicketId) -> String {
+        let failures = state.attempt_failures(&id.to_string());
+        if failures.is_empty() {
+            return state
+                .ticket_journal
+                .get(&id.to_string())
+                .filter(|notes| !notes.is_empty())
+                .map(|notes| {
+                    format!(
+                        "\n\nPREVIOUS ATTEMPTS on this ticket — build on these, do not repeat \
+                         them:\n- {}",
+                        notes.join("\n- ")
+                    )
+                })
+                .unwrap_or_default();
+        }
+        let lines: Vec<String> = failures
+            .iter()
+            .map(|f| {
+                let where_ = if f.files.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [in {}]", f.files.join(", "))
+                };
+                format!(
+                    "attempt {} — rejected by {} ({:?}): {}{where_}",
+                    f.attempt, f.gate, f.layer, f.detail
+                )
+            })
+            .collect();
+        format!(
+            "\n\nPREVIOUS ATTEMPTS on this ticket — each was rejected by a specific gate. \
+             Clear THAT, do not start over:\n- {}",
+            lines.join("\n- ")
+        )
     }
 
     fn build_request(&self, state: &ProjectState, id: &TicketId) -> AgentRequest {
@@ -826,18 +1188,21 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 )
             }
         };
-        // Prior attempts' findings on this ticket (empty first time).
-        let journal = state
-            .ticket_journal
-            .get(&id.to_string())
-            .filter(|notes| !notes.is_empty())
-            .map(|notes| {
-                format!(
-                    "\n\nPREVIOUS ATTEMPTS on this ticket — build on these, do not repeat them:\n- {}",
-                    notes.join("\n- ")
-                )
-            })
-            .unwrap_or_default();
+        let journal = Self::attempts_brief(state, id);
+        // What was already done to this code. A human opens the file's history
+        // before editing it; nothing in the ticket text carries that.
+        let knowledge = Self::knowledge_brief(state, id, ticket, &self.work_dir);
+        // Ask the BA rather than invent a requirement (and read any answer).
+        let asking = prompts::ask_protocol_block(state, &id.to_string());
+        let history = prompts::history_block(
+            &self.work_dir,
+            &format!(
+                "{title} {}",
+                ticket
+                    .and_then(|t| t.design().technical.as_ref())
+                    .map_or("", |d| d.approach.as_str())
+            ),
+        );
         AgentRequest {
             role: self.mode.role(),
             // The system prompt stays BYTE-IDENTICAL across every DEV run of a
@@ -847,7 +1212,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             // exists only for UI tickets) belongs in the task prompt below.
             system_prompt: prompts::system_prompt(prompts::DEV),
             task_prompt: format!(
-                "Ticket {id}: {title}\n{}\nImplement it now.{stack}{deploy}{design}{context_block}{}{}{}{}{steering}{journal}",
+                "Ticket {id}: {title}\n{}\nImplement it now.{stack}{deploy}{design}{context_block}{}{history}{knowledge}{}{}{}{steering}{journal}{asking}",
                 ticket_brief(ticket),
                 prompts::focus_block(
                     &self.work_dir,
@@ -896,6 +1261,35 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
 /// the acceptance criteria, and the SA's technical design — so the DEV builds
 /// what was specified instead of guessing from the title (and the SA's design
 /// tokens aren't wasted). Caps keep a verbose ticket from bloating the prompt.
+/// Pull an `ASK <ROLE>: <question>` line out of agent output. Shared with the
+/// cycle, where an answerer uses the same line to hand a question on. Returns the role
+/// to ask and the question. Only BA and SA can be asked: those are the roles
+/// that own the requirement and the design.
+#[must_use]
+pub fn parse_ask(stdout: &str) -> Option<(String, String)> {
+    for line in stdout.lines().rev().take(20) {
+        let t = line.trim().trim_start_matches(['`', '*', '-', ' ']);
+        // `?` here would abandon the scan at the first ordinary line, so the
+        // loop would only ever see the very last one.
+        let Some(rest) = t.strip_prefix("ASK ") else {
+            continue;
+        };
+        let Some((role, question)) = rest.split_once(':') else {
+            continue;
+        };
+        let role = role.trim().to_uppercase();
+        if !matches!(role.as_str(), "BA" | "SA") {
+            continue;
+        }
+        let q = question.trim();
+        if q.len() < 10 {
+            continue;
+        }
+        return Some((role, q.to_owned()));
+    }
+    None
+}
+
 pub fn ticket_brief(ticket: Option<&coxagent_domain::Ticket>) -> String {
     use std::fmt::Write as _;
     let Some(t) = ticket else {
@@ -1098,6 +1492,150 @@ mod tests {
         std::fs::write(dir.join("lib.rs"), "fn f() {}\n#[test]\nfn t() {}\n").unwrap();
         git(&["add", "-A"]);
         assert!(uc.diff_touches_tests(), "added #[test] counts");
+
+        // The case that cost cox four attempts and part of a budget: hardening
+        // an existing test inside an inline `#[cfg(test)] mod tests` adds no
+        // `#[test]` line and sits in no test-shaped path, but it is a test
+        // change and the gate must see it.
+        let engine_src = |prod: &str, timeout: u32| {
+            format!("fn real() {{{prod}}}\n#[cfg(test)]\nmod tests {{\n    #[test]\n    fn t() {{\n        let timeout = {timeout};\n    }}\n}}\n")
+        };
+        std::fs::write(dir.join("engine.rs"), engine_src("", 10)).unwrap();
+        git(&["add", "-A"]);
+        git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "with tests",
+        ]);
+        assert!(!uc.diff_touches_tests(), "committed tree touches nothing");
+        std::fs::write(dir.join("engine.rs"), engine_src("", 30)).unwrap();
+        assert!(
+            uc.diff_touches_tests(),
+            "editing an existing inline test IS touching tests"
+        );
+        // A change to the production half of the same file still is not.
+        std::fs::write(dir.join("engine.rs"), engine_src(" let x = 1; ", 10)).unwrap();
+        assert!(
+            !uc.diff_touches_tests(),
+            "a change above the test module is production code"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_ask_finds_the_question_anywhere_near_the_end() {
+        use super::parse_ask;
+        // Real output ends with prose; the ASK line is not guaranteed last.
+        let out = "I read the ticket and the code.\n\
+                   ASK BA: does 'archive' mean soft-delete or move to cold storage?\n\
+                   I stopped rather than guess.";
+        let (to, q) = parse_ask(out).expect("question found");
+        assert_eq!(to, "BA");
+        assert!(q.starts_with("does 'archive' mean"), "{q}");
+        // Only the two roles that own requirement and design can be asked.
+        assert!(parse_ask("ASK TEST: is this covered?").is_none());
+        // A bare marker with no real question is not a question.
+        assert!(parse_ask("ASK BA: ?").is_none());
+        assert!(parse_ask("no question here").is_none());
+    }
+
+    #[tokio::test]
+    async fn lint_regressions_are_blamed_only_on_files_the_change_touched() {
+        let dir = std::env::temp_dir().join(format!("lintblame-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("crates/app/src")).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .unwrap();
+        };
+        git(&["init", "-q"]);
+        git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "--allow-empty",
+            "-q",
+            "-m",
+            "base",
+        ]);
+        let uc = RunDevUseCase::new(
+            Arc::new(MemStore {
+                state: Mutex::new(ProjectState::default()),
+            }),
+            Arc::new(OkEngine),
+            Config::default(),
+            dir.clone(),
+            DevMode::Bug,
+        );
+        assert!(
+            !uc.lints_touch_changed_files(&["crates/app/src/lib.rs".to_owned()]),
+            "a clean tree can't have caused any lint"
+        );
+        std::fs::write(dir.join("crates/app/src/lib.rs"), "fn f() {}\n").unwrap();
+        assert!(
+            uc.lints_touch_changed_files(&["crates/app/src/lib.rs".to_owned()]),
+            "a lint in the file we edited is ours"
+        );
+        assert!(
+            !uc.lints_touch_changed_files(&["crates/domain/src/ticket.rs".to_owned()]),
+            "a lint somewhere else — e.g. pulled in by a rebase — is not ours"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn diff_is_docs_only_spares_readme_fixes_but_not_code() {
+        let dir = std::env::temp_dir().join(format!("docsonly-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .unwrap();
+        };
+        git(&["init", "-q"]);
+        git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "--allow-empty",
+            "-q",
+            "-m",
+            "base",
+        ]);
+        let uc = RunDevUseCase::new(
+            Arc::new(MemStore {
+                state: Mutex::new(ProjectState::default()),
+            }),
+            Arc::new(OkEngine),
+            Config::default(),
+            dir.clone(),
+            DevMode::Bug,
+        );
+        assert!(!uc.diff_is_docs_only(), "empty diff is not docs-only");
+        std::fs::write(dir.join("README.md"), "# fixed port\n").unwrap();
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("docs/setup.md"), "steps\n").unwrap();
+        assert!(uc.diff_is_docs_only(), "README + docs/ is docs-only");
+        std::fs::write(dir.join("lib.rs"), "fn f() {}\n").unwrap();
+        assert!(
+            !uc.diff_is_docs_only(),
+            "any code file breaks the exemption"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
