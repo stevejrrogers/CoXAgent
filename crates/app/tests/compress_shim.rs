@@ -343,6 +343,43 @@ fn the_real_shim_leaves_every_content_subcommand_native() {
     }
 }
 
+/// COX-B015: a global flag that takes a *separate* value hides the subcommand
+/// behind its value. Every such flag must be skipped with its value, or the
+/// value is read as the subcommand, no content subcommand matches, and the
+/// file the agent asked for comes back deduped and clipped. The fake `git`
+/// emits ~12 KB, twice the 6000-char clip threshold, so a byte-exact result
+/// can only come from the exactness bypass — never from the small-output
+/// passthrough. Fails on pre-fix code for `--super-prefix`/`--config-env`.
+#[test]
+fn the_real_shim_sees_past_every_global_value_flag() {
+    let sh = Shimmed::new();
+    assert!(
+        fake_stdout().len() > 6_000,
+        "fake payload must exceed the clip threshold to prove the bypass"
+    );
+    for args in [
+        vec!["-C", "/repo", "show", "HEAD:big.rs"],
+        vec!["-c", "core.pager=cat", "show", "HEAD:big.rs"],
+        vec!["--git-dir", "/repo/.git", "diff", "HEAD"],
+        vec!["--work-tree", "/repo", "diff", "HEAD"],
+        vec!["--namespace", "ns", "log", "-p"],
+        vec!["--super-prefix", "sub/", "show", "HEAD:big.rs"],
+        vec![
+            "--config-env",
+            "core.pager=PAGER_ENV",
+            "cat-file",
+            "-p",
+            "abc",
+        ],
+    ] {
+        let out = sh.run(&args);
+        let label = format!("git {}", args.join(" "));
+        assert_byte_exact(&format!("{label} stdout"), &fake_stdout(), &out.stdout);
+        assert_byte_exact(&format!("{label} stderr"), &fake_stderr(), &out.stderr);
+        assert_eq!(out.status.code(), Some(FAKE_EXIT), "{label}: exit code");
+    }
+}
+
 /// The other half of the fix (AC5): a non-content subcommand still gets the
 /// full token saving — same merge, same compression, same exit code as before.
 #[test]
