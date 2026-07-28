@@ -343,24 +343,33 @@ fn the_real_shim_leaves_every_content_subcommand_native() {
     }
 }
 
-/// COX-B015 (AC1, "byte-identical at any size"): a global flag whose value is
-/// a separate argv token must be skipped *with* its value when the subcommand
-/// is located. `--super-prefix` and `--config-env` were missing from that list,
-/// so their value (`sub/`, `core.pager=…`) was read as the subcommand, nothing
-/// matched, and `git --super-prefix sub/ show HEAD:file` fell back down the
-/// merge-and-compress path — the exact corruption this ticket closes, reached
-/// through a different argv. Fails on pre-fix code.
+/// COX-B015: a global flag that takes a *separate* value hides the subcommand
+/// behind its value. Every such flag must be skipped with its value, or the
+/// value is read as the subcommand, no content subcommand matches, and the
+/// file the agent asked for comes back deduped and clipped. The fake `git`
+/// emits ~12 KB, twice the 6000-char clip threshold, so a byte-exact result
+/// can only come from the exactness bypass — never from the small-output
+/// passthrough. Fails on pre-fix code for `--super-prefix`/`--config-env`.
 #[test]
-fn a_separate_value_global_flag_does_not_hide_the_content_subcommand() {
+fn the_real_shim_sees_past_every_global_value_flag() {
     let sh = Shimmed::new();
+    assert!(
+        fake_stdout().len() > 6_000,
+        "fake payload must exceed the clip threshold to prove the bypass"
+    );
     for args in [
+        vec!["-C", "/repo", "show", "HEAD:big.rs"],
+        vec!["-c", "core.pager=cat", "show", "HEAD:big.rs"],
+        vec!["--git-dir", "/repo/.git", "diff", "HEAD"],
+        vec!["--work-tree", "/repo", "diff", "HEAD"],
+        vec!["--namespace", "ns", "log", "-p"],
         vec!["--super-prefix", "sub/", "show", "HEAD:big.rs"],
         vec![
             "--config-env",
-            "core.pager=COX_PAGER",
+            "core.pager=PAGER_ENV",
             "cat-file",
             "-p",
-            "abc123",
+            "abc",
         ],
     ] {
         let out = sh.run(&args);

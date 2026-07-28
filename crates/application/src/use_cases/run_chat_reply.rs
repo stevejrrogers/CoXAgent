@@ -128,9 +128,16 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         let task = format!(
             "{context}\nA human teammate just wrote in the team channel:\n\"{msg}\"\n\nYou are \
              {persona}, replying like a sharp senior teammate — the way a good coding agent in a \
-             terminal would. Answer directly and specifically, grounded in the project state above. \
-             If the request is ambiguous or you need a detail to do it right, ASK a crisp \
-             clarifying question instead of guessing. Keep it concise.\n\n\
+             terminal would. Answer directly and specifically, grounded in the project state above \
+             and in the code, which you can read.\n\n\
+             When a teammate reports something broken, that IS the request. Go and look: read the \
+             code for the thing they named, check the backlog above for a ticket that already \
+             covers it, and come back with what you FOUND — the file and the line, whether it is \
+             already filed — then file it or fix it. Never answer a problem report with a menu of \
+             options for the human to pick from, and never ask permission to record a bug they \
+             just told you about. Ask a question only when the answer would change what you do, \
+             you could not find it in the code or the state, and you ask exactly one. Keep it \
+             concise.\n\n\
              You can also DO things by appending EXACTLY ONE final line:\n\
              ACTION: new_project: <name> :: <alias>              — create a new project from scratch\n\
              ACTION: import: <path> :: <name> :: <alias>         — import an existing codebase\n\
@@ -153,11 +160,16 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
              For a real decision that needs the team (should we build X? which approach?), prefer \
              `discuss:` so PO and SA debate and the SM decides. Set a sensible priority when you \
              file work.\n\
-             IMPORTANT — confirm before acting: if the action changes the project (creating a \
-             ticket, running a review/standup/discussion) and the user has NOT clearly confirmed it \
-             in this thread, DO NOT act yet — reply with your proposal and a yes/no question, and \
-             use `ACTION: none`. Only emit the real action once the thread shows they confirmed \
-             (e.g. \"ok\", \"làm đi\", \"yes\").{}",
+             CONFIRM only what is expensive or hard to undo — `new_project`, `import`, `deploy`, \
+             `merge_queue`, `implement`, and the review/standup/discussion runs. For those, if the \
+             thread does not already show a clear yes, propose it and use `ACTION: none`.\n\
+             Recording what the user just told you is NOT in that class: a reported bug gets \
+             `ACTION: bug:` and a requested feature gets `ACTION: feature:` in the same reply that \
+             reports what you found. Asking \"shall I file it?\" wastes their turn.\n\
+             A short affirmative anywhere in the thread — \"ok\", \"uhm\", \"ừ\", \"đi\", \"làm đi\", \
+             \"ưu tiên fix\", \"yes\", \"go\" — IS the confirmation of whatever you last proposed. \
+             Act on it. Asking the same question again after the human already said yes is the \
+             worst thing you can do here: they answered, and the work still has not started.{}",
             self.lang.reply_directive()
         );
         let Some(raw) = self.run(persona, &task).await else {
@@ -726,20 +738,58 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         } else {
             Priority::Medium
         });
+        // A ticket filed from chat used to land as a title, a sentence, and no
+        // acceptance criteria — nothing a developer could build against or a
+        // tester could check. Put it through the same refinement the BA uses,
+        // so a bug arrives with its repro, its actual/expected, and criteria.
+        // The raw report is kept as the fallback: a filed ticket beats none.
+        let raw = if desc.is_empty() {
+            format!("{title} (reported in the team chat)")
+        } else {
+            format!("{title}\n\n{desc}")
+        };
+        let refined = super::RefineTicketUseCase::new(
+            Arc::clone(&self.store),
+            Arc::clone(&self.engine),
+            self.work_dir.clone(),
+        )
+        .execute(
+            &if kind == coxagent_domain::TicketType::Bug {
+                format!(
+                    "Bug report from the team chat. Write it up as a bug ticket: state the \
+                     problem, the steps to reproduce it, the actual result and the expected \
+                     result, and give acceptance criteria a tester can check \
+                     mechanically.\n\n{raw}"
+                )
+            } else {
+                raw.clone()
+            },
+            &self.context().await,
+        )
+        .await
+        .ok();
         let adder = super::AddTicketUseCase::new(Arc::clone(&self.store));
         if let Ok(id) = adder
             .execute(super::AddTicketInput {
                 ticket_type: kind,
                 title: title.to_owned(),
-                description: if desc.is_empty() {
-                    format!("Requested in the team chat: {title}")
-                } else {
-                    desc.to_owned()
-                },
+                description: refined.as_ref().map_or_else(
+                    || {
+                        if desc.is_empty() {
+                            format!("Requested in the team chat: {title}")
+                        } else {
+                            desc.to_owned()
+                        }
+                    },
+                    |r| r.description.clone(),
+                ),
                 priority,
                 complexity: Complexity::Medium,
-                has_ui: false,
-                acceptance_criteria: Vec::new(),
+                has_ui: refined.as_ref().is_some_and(|r| r.has_ui),
+                acceptance_criteria: refined
+                    .as_ref()
+                    .map(|r| r.acceptance_criteria.clone())
+                    .unwrap_or_default(),
             })
             .await
         {

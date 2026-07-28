@@ -226,17 +226,16 @@ mod tests {
             "--work-tree /repo diff-files"
         )));
         assert!(git_needs_exact_output(&args("--namespace ns log -p")));
-        // COX-B015: these two take their value the same way. While they were
-        // missing from the list the value was read as the subcommand, nothing
-        // in `GIT_EXACT_SUBCOMMANDS` matched, and the content output of
-        // `git --super-prefix sub/ show HEAD:file` was compressed after all.
+        // COX-B015: these two take their value the same way. Before they were
+        // listed, the value was read as the subcommand, no `GIT_EXACT_...`
+        // entry matched, and `git show`/`diff` output got compressed.
         assert!(git_needs_exact_output(&args(
             "--super-prefix sub/ show HEAD"
         )));
         assert!(git_needs_exact_output(&args(
             "--config-env core.pager=PAGER_ENV cat-file -p abc123"
         )));
-        // The attached spellings are a single argv token — no value to skip.
+        // The attached spellings are one token — no value to skip.
         assert!(git_needs_exact_output(&args(
             "--git-dir=/repo/.git show HEAD"
         )));
