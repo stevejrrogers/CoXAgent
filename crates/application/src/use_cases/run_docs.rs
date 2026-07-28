@@ -333,9 +333,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
 }
 
 /// What the page is missing, or `None` when it satisfies the skeleton every
-/// page is expected to share. Kept mechanical on purpose: an LLM judging its
+/// page is expected to share. Shared with the docs-review pass, which writes
+/// wiki pages by another route and must clear the same bar. Kept mechanical on purpose: an LLM judging its
 /// own prose is not a gate.
-fn docs_gate_failures(raw: &str, work_dir: &std::path::Path) -> Option<String> {
+#[must_use]
+pub fn docs_gate_failures(raw: &str, work_dir: &std::path::Path) -> Option<String> {
     let body = parse_folder_hint(raw).1;
     let text = body.trim();
     let mut missing: Vec<&str> = Vec::new();
@@ -495,11 +497,14 @@ fn existing_page_for<'a>(
     best.map(|(_, p)| p)
 }
 
+/// Build the DOCS task prompt — shared with the docs-review pass so both
+/// routes into the wiki ask for the same page, not two different ones.
 /// Build the DOCS task prompt, asking the agent to first pick the best
 /// sub-folder for the page under its space — reusing an existing one when it
 /// fits, only proposing a new concise topic when none do, so the Wiki stays
 /// organised rather than sprouting redundant folders.
-fn build_docs_prompt(
+#[must_use]
+pub fn build_docs_prompt(
     id: &TicketId,
     title: &str,
     space: &str,
