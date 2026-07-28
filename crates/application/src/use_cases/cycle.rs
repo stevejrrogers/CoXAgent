@@ -1419,7 +1419,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // the team actually did something since last time. A standup with no
             // real activity is pure token burn (and reads like noise), so we skip
             // it when the board has been quiet.
-            if cycle % 3 == 1 && self.has_recent_activity().await {
+            // A standup is a DAILY ceremony. Every third cycle means one every
+            // ~20 minutes, and each one asks every agent for an update — that
+            // alone was most of the SM's 487 engine runs. Once a day, and only
+            // if the team did something since.
+            if self.claim_daily("standup").await && self.has_recent_activity().await {
                 self.scrum_standup().await;
             }
             // Mid-sprint backlog grooming, offset from the standup so the two
@@ -1460,17 +1464,21 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // Team hygiene: reject any duplicate tickets before design/dev.
             self.dedup_backlog().await;
 
-            // PO lays out the milestone roadmap once the backlog exists.
-            self.report("PO", "planning milestones");
-            if let Err(e) = self.milestones().execute().await {
-                report.errors.push(format!("PO milestones: {e}"));
+            // Both of these are author-once jobs that re-check every cycle and
+            // almost always exit early — but the early exit still costs a
+            // model call. Once a day is enough for work that changes monthly.
+            if self.claim_daily("po-milestones").await {
+                self.report("PO", "planning milestones");
+                if let Err(e) = self.milestones().execute().await {
+                    report.errors.push(format!("PO milestones: {e}"));
+                }
             }
-
-            // PD establishes the project design system once UI work appears.
-            self.report("PD", "designing UX");
-            match self.design_system().execute().await {
-                Ok(created) => report.design_system_created = created,
-                Err(e) => report.errors.push(format!("PD design-system: {e}")),
+            if self.claim_daily("pd-design-system").await {
+                self.report("PD", "designing UX");
+                match self.design_system().execute().await {
+                    Ok(created) => report.design_system_created = created,
+                    Err(e) => report.errors.push(format!("PD design-system: {e}")),
+                }
             }
         }
 
@@ -2611,11 +2619,33 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         if report.feature_done.is_some() || report.bug_fixed.is_some() {
             return true;
         }
-        self.store.load().await.is_ok_and(|s| {
-            s.tickets
-                .iter()
-                .any(|t| t.status() == coxagent_domain::Status::Fixed)
+        // "A Fixed ticket exists" was always true while anything sat waiting to
+        // be verified, so TEST re-ran every cycle and re-confirmed the same
+        // tickets — 412 runs of it. Ask instead whether the set has CHANGED
+        // since the last pass.
+        let Ok(state) = self.store.load().await else {
+            return false;
+        };
+        let waiting: Vec<String> = state
+            .tickets
+            .iter()
+            .filter(|t| t.status() == coxagent_domain::Status::Fixed)
+            .map(|t| t.id().to_string())
+            .collect();
+        if waiting.is_empty() {
+            return false;
+        }
+        let fingerprint = waiting.join(",");
+        if state.daily_jobs.get("test-verified-set") == Some(&fingerprint) {
+            return false;
+        }
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+            s.daily_jobs
+                .insert("test-verified-set".to_owned(), fingerprint.clone());
+            Ok(())
         })
+        .await;
+        true
     }
 
     /// File the periodic tech-debt chore (deduped by title prefix).
@@ -3524,6 +3554,23 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let _ = git.worktree_remove(&self.work_dir, &dir).await;
         let _ = std::fs::remove_dir_all(&dir);
         outcome
+    }
+
+    /// Claim a once-a-day job for today, atomically. Returns whether THIS call
+    /// won it, so a job runs once per day across every runner sharing the state
+    /// rather than once per cycle per runner.
+    async fn claim_daily(&self, job: &str) -> bool {
+        let today = crate::state::now_rfc3339()[..10].to_owned();
+        let key = job.to_owned();
+        crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+            if s.daily_jobs.get(&key).is_some_and(|d| *d == today) {
+                return Err(crate::PortError::Conflict("already ran today".into()));
+            }
+            s.daily_jobs.insert(key.clone(), today.clone());
+            Ok(())
+        })
+        .await
+        .is_ok()
     }
 
     /// SM escalation for tickets PARKED after 3 red builds — the stand-in for
