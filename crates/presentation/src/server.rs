@@ -5110,6 +5110,20 @@ async fn git_pv(dir: &std::path::Path, args: &[&str]) -> Result<(), String> {
     }
 }
 
+/// Run the mandatory post-deploy health gate (COX-B004/COX-B009) for a
+/// probe port that may be invalid (COX-B025): an out-of-range `host_port`
+/// fails the gate outright rather than being treated as "nothing
+/// configured", which would pass unconditionally.
+async fn health_gate(
+    deploy: &Arc<dyn coxagent_application::ports::outbound::DeployPort>,
+    probe_port: Result<Option<u16>, ()>,
+) -> bool {
+    match probe_port {
+        Ok(port) => coxagent_application::ports::outbound::verify_deploy_health(deploy, port).await,
+        Err(()) => false,
+    }
+}
+
 /// Deploy a PR's branch so the human can SEE the change running before
 /// approving (start=true), or tear the preview down and restore main
 /// (start=false). The preview runs on the project's app port — one app at a
@@ -5129,11 +5143,27 @@ async fn pr_preview(
         .unwrap_or(&p.config_path)
         .to_path_buf();
     let prev_dir = root.join(".preview").join(num.to_string());
-    // The project's published app port, for the "open it" link.
+    // The project's published app port, for the "open it" link and the
+    // mandatory post-deploy health probe (COX-B004/COX-B009). Read as raw
+    // JSON, not the typed `Config`, because `Config` requires fields (e.g.
+    // `engine`) this minimal read must not depend on.
+    //
+    // "Nothing configured" and "invalid config" must not collapse into the
+    // same `None` (COX-B025): `host_port` absent/null means there is
+    // nothing to probe and the gate passes, matching
+    // `verify_deploy_health`'s own contract. `host_port` present but out of
+    // `u16` range (corrupted/hand-edited config) means the port is unknown,
+    // and unknown must fail the gate, not be silently skipped like "nothing
+    // configured" would — skipping it here would report a dead app as a
+    // clean "LIVE" preview or restore.
     let port = std::fs::read_to_string(&p.config_path)
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         .and_then(|v| v["deploy"]["host_port"].as_u64());
+    let probe_port: Result<Option<u16>, ()> = match port {
+        None => Ok(None),
+        Some(raw) => u16::try_from(raw).map(Some).map_err(|_| ()),
+    };
     let chat = |msg: String| {
         let store = Arc::clone(&p.store);
         async move {
@@ -5188,14 +5218,7 @@ async fn pr_preview(
             // Mandatory health gate (COX-B004/COX-B009): a compose exit-0
             // only proves the containers started, not that the app inside
             // bound its port — probe before telling the human it's LIVE.
-            Ok(r)
-                if r.success
-                    && coxagent_application::ports::outbound::verify_deploy_health(
-                        deploy,
-                        port.map(|pt| pt as u16),
-                    )
-                    .await =>
-            {
+            Ok(r) if r.success && health_gate(deploy, probe_port).await => {
                 let url = port.map(|pt| format!("http://localhost:{pt}"));
                 chat(format!(
                     "👁 Preview of PR #{num} is LIVE{} — the main build is paused; restore it from the Review tab when done.",
@@ -5218,14 +5241,7 @@ async fn pr_preview(
         match deploy.deploy(&p.work_dir).await {
             // Same gate on restore: a "restore" that never comes back up on
             // the port must not be reported as a clean restore.
-            Ok(r)
-                if r.success
-                    && coxagent_application::ports::outbound::verify_deploy_health(
-                        deploy,
-                        port.map(|pt| pt as u16),
-                    )
-                    .await =>
-            {
+            Ok(r) if r.success && health_gate(deploy, probe_port).await => {
                 chat(format!(
                     "↩️ Preview of PR #{num} stopped — main build restored."
                 ))
@@ -8956,6 +8972,30 @@ mod pr_preview_tests {
         );
     }
 
+    /// AC (COX-B025): a `deploy.host_port` present in config but out of
+    /// `u16` range (corrupted/hand-edited config) must fail the gate — not
+    /// collapse into "nothing configured", which passes unconditionally and
+    /// would report a dead app as a clean restore.
+    #[tokio::test(start_paused = true)]
+    async fn restore_reports_failure_when_host_port_is_out_of_range() {
+        let (_dir, handle) = project_handle(Arc::new(DeployWithDeadPort));
+        std::fs::write(&handle.config_path, r#"{"deploy":{"host_port":99999}}"#)
+            .expect("write invalid config");
+        let forge: Arc<dyn ForgePort> = Arc::new(UnusedForge);
+
+        let resp = pr_preview(&handle, &forge, 1, false).await;
+
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            text.contains("health check failed"),
+            "expected the health-gate failure reason in the response: {text}"
+        );
+    }
+
     /// Control: a restore that actually answers on its port still reports OK
     /// — the gate must not fail a genuinely healthy restore.
     #[tokio::test(start_paused = true)]
@@ -9126,5 +9166,30 @@ mod pr_preview_tests {
         let resp = pr_preview(&handle, &forge, 1, true).await;
 
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// AC (COX-B025): unlike an unset `host_port` (nothing to probe, passes
+    /// above), a `host_port` present but out of `u16` range is an invalid
+    /// config — the gate must fail the preview, not silently pass it like
+    /// "nothing configured" does. Uses a deploy adapter that never binds its
+    /// port, so a false "LIVE" here would mean the bug from COX-B025
+    /// regressed.
+    #[tokio::test(start_paused = true)]
+    async fn preview_start_reports_failure_when_host_port_is_out_of_range() {
+        let (_bare, _work, handle) =
+            git_preview_fixture(Arc::new(DeployWithDeadPort), Some(99999)).await;
+        let forge: Arc<dyn ForgePort> = Arc::new(ForgeWithOpenPr("feat/preview".to_owned()));
+
+        let resp = pr_preview(&handle, &forge, 1, true).await;
+
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            text.contains("health check failed"),
+            "expected the health-gate failure reason in the response: {text}"
+        );
     }
 }
