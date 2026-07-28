@@ -291,6 +291,30 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         // just read and wrote in context instead of rediscovering it cold.
         let session = match self.engine.run(request).await {
             Ok(o) if o.succeeded() => {
+                // A question is not a failure. If the agent says it would have
+                // to guess, park the QUESTION (not the ticket): the BA answers
+                // next cycle and the retry starts from an answer instead of an
+                // assumption. Counting this as an attempt would punish exactly
+                // the behaviour we want.
+                if let Some((to, body)) = parse_ask(&o.stdout) {
+                    let (key, from) = (id.to_string(), format!("{:?}", self.mode.role()));
+                    let asked =
+                        crate::ports::outbound::mutate_state(self.store.as_ref(), move |st| {
+                            if st.ask_question(&key, &from, &to, &body) {
+                                let msg = format!("❓ {from} → {to}: {body}");
+                                st.post_comment(&from, &msg, Some(key.clone()));
+                            }
+                            Ok(())
+                        })
+                        .await;
+                    if asked.is_ok() {
+                        self.release_claim(&id).await;
+                        if let Some(p) = &self.phase {
+                            p(None);
+                        }
+                        return Ok(None);
+                    }
+                }
                 let sid = o.session_id.clone();
                 match (&sid, plan_first) {
                     (Some(sid_v), true) => {
@@ -1168,6 +1192,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         // What was already done to this code. A human opens the file's history
         // before editing it; nothing in the ticket text carries that.
         let knowledge = Self::knowledge_brief(state, id, ticket, &self.work_dir);
+        // Ask the BA rather than invent a requirement (and read any answer).
+        let asking = prompts::ask_protocol_block(state, &id.to_string(), "BA");
         let history = prompts::history_block(
             &self.work_dir,
             &format!(
@@ -1186,7 +1212,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             // exists only for UI tickets) belongs in the task prompt below.
             system_prompt: prompts::system_prompt(prompts::DEV),
             task_prompt: format!(
-                "Ticket {id}: {title}\n{}\nImplement it now.{stack}{deploy}{design}{context_block}{}{history}{knowledge}{}{}{}{steering}{journal}",
+                "Ticket {id}: {title}\n{}\nImplement it now.{stack}{deploy}{design}{context_block}{}{history}{knowledge}{}{}{}{steering}{journal}{asking}",
                 ticket_brief(ticket),
                 prompts::focus_block(
                     &self.work_dir,
@@ -1235,6 +1261,33 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
 /// the acceptance criteria, and the SA's technical design — so the DEV builds
 /// what was specified instead of guessing from the title (and the SA's design
 /// tokens aren't wasted). Caps keep a verbose ticket from bloating the prompt.
+/// Pull an `ASK <ROLE>: <question>` line out of agent output. Returns the role
+/// to ask and the question. Only BA and SA can be asked: those are the roles
+/// that own the requirement and the design.
+fn parse_ask(stdout: &str) -> Option<(String, String)> {
+    for line in stdout.lines().rev().take(20) {
+        let t = line.trim().trim_start_matches(['`', '*', '-', ' ']);
+        // `?` here would abandon the scan at the first ordinary line, so the
+        // loop would only ever see the very last one.
+        let Some(rest) = t.strip_prefix("ASK ") else {
+            continue;
+        };
+        let Some((role, question)) = rest.split_once(':') else {
+            continue;
+        };
+        let role = role.trim().to_uppercase();
+        if !matches!(role.as_str(), "BA" | "SA") {
+            continue;
+        }
+        let q = question.trim();
+        if q.len() < 10 {
+            continue;
+        }
+        return Some((role, q.to_owned()));
+    }
+    None
+}
+
 pub fn ticket_brief(ticket: Option<&coxagent_domain::Ticket>) -> String {
     use std::fmt::Write as _;
     let Some(t) = ticket else {
@@ -1470,6 +1523,23 @@ mod tests {
             "a change above the test module is production code"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_ask_finds_the_question_anywhere_near_the_end() {
+        use super::parse_ask;
+        // Real output ends with prose; the ASK line is not guaranteed last.
+        let out = "I read the ticket and the code.\n\
+                   ASK BA: does 'archive' mean soft-delete or move to cold storage?\n\
+                   I stopped rather than guess.";
+        let (to, q) = parse_ask(out).expect("question found");
+        assert_eq!(to, "BA");
+        assert!(q.starts_with("does 'archive' mean"), "{q}");
+        // Only the two roles that own requirement and design can be asked.
+        assert!(parse_ask("ASK TEST: is this covered?").is_none());
+        // A bare marker with no real question is not a question.
+        assert!(parse_ask("ASK BA: ?").is_none());
+        assert!(parse_ask("no question here").is_none());
     }
 
     #[tokio::test]

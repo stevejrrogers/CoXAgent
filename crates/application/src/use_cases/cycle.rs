@@ -1481,6 +1481,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             }
         }
 
+        // Answer what the team asked before anyone works on it again: a
+        // developer waiting on a requirement is blocked, and the answer is
+        // cheap compared with a wrong implementation. Bounded per cycle.
+        Box::pin(self.answer_open_questions()).await;
+
         // DOCS documents the next completed feature (per-ticket stage claim).
         match self.docs().execute().await {
             Ok(id) => report.documented = id,
@@ -3222,6 +3227,100 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 pr.number
             ))
             .await;
+        }
+    }
+
+    /// Answer the questions agents asked each other. The BA answers what a
+    /// requirement means; the SA reads the code and reports what the system
+    /// actually does. Both get the wiki, the docs and the code graph, because
+    /// an answer invented at the desk is worse than the guess it replaces.
+    /// At most two per cycle — an answer costs a call, and a queue of them
+    /// means the backlog, not the questions, is the problem.
+    async fn answer_open_questions(&self) {
+        let open: Vec<crate::state::AgentQuestion> = {
+            let Ok(state) = self.store.load().await else {
+                return;
+            };
+            state
+                .questions
+                .iter()
+                .filter(|q| q.is_open())
+                .take(2)
+                .cloned()
+                .collect()
+        };
+        for q in open {
+            let Ok(state) = self.store.load().await else {
+                return;
+            };
+            let ticket = state
+                .tickets
+                .iter()
+                .find(|t| t.id().to_string() == q.ticket);
+            let (persona, role) = if q.to == "BA" {
+                (crate::prompts::BA, coxagent_domain::Role::Ba)
+            } else {
+                (crate::prompts::SA, coxagent_domain::Role::Sa)
+            };
+            self.report(&q.to, &format!("answering {}", q.id));
+            let subject = ticket.map_or_else(
+                || q.body.clone(),
+                |t| format!("{} {} {}", t.title(), t.description(), q.body),
+            );
+            let brief = format!(
+                "{} asked you about {}:\n\n\"{}\"\n\nAnswer it so the work can continue. Ground \
+                 every claim in this repository — read the code and the pages below, name the \
+                 files and identifiers you relied on, and if the honest answer is \"the product \
+                 does not do this yet\", say that. Under 900 characters, plain text, no preamble. \
+                 Do not restate the question and do not ask one back.{}{}{}",
+                q.from,
+                if q.ticket.is_empty() {
+                    "the product".to_owned()
+                } else {
+                    format!("ticket {}", q.ticket)
+                },
+                q.body,
+                crate::prompts::knowledge_block(
+                    &state.docs,
+                    &state.tickets,
+                    &self.work_dir,
+                    &subject,
+                    &q.ticket,
+                ),
+                crate::prompts::focus_block(&self.work_dir, &subject),
+                crate::prompts::repo_map_block(&self.work_dir, self.config.workflow.token_saver),
+            );
+            let out = self
+                .engine
+                .run(crate::ports::outbound::AgentRequest {
+                    role,
+                    system_prompt: crate::prompts::system_prompt(persona),
+                    task_prompt: brief,
+                    work_dir: self.work_dir.clone(),
+                    timeout: std::time::Duration::from_secs(900),
+                    escalation_level: 0,
+                })
+                .await;
+            let answer = match out {
+                Ok(o) if o.succeeded() => o.stdout.trim().to_owned(),
+                _ => continue,
+            };
+            if answer.len() < 30 {
+                continue; // nothing usable; it stays open for the next cycle
+            }
+            let (id, to, from) = (q.id.clone(), q.to.clone(), q.from.clone());
+            let tkt = q.ticket.clone();
+            let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+                if s.answer_question(&id, &answer) {
+                    let msg = format!("💬 {to} → {from} ({id}): {answer}");
+                    s.post_comment(&to, &msg, (!tkt.is_empty()).then(|| tkt.clone()));
+                }
+                Ok(())
+            })
+            .await;
+        }
+        if let Some(p) = &self.phase {
+            p(None);
         }
     }
 
