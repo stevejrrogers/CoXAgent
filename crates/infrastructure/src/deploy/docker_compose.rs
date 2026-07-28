@@ -204,18 +204,26 @@ impl DeployPort for DockerComposeDeploy {
             return Ok(None);
         }
         let _slot = crate::proc::heavy_slot().await;
-        let out = tokio::time::timeout(
-            Duration::from_secs(600),
-            crate::proc::low_priority("cargo")
-                .args(["clippy", "--workspace", "--all-targets", "--quiet"])
-                .current_dir(work_dir)
-                .stdin(std::process::Stdio::null())
-                .kill_on_drop(true)
-                .output(),
-        )
-        .await
-        .map_err(|_| PortError::Backend("clippy timed out".to_owned()))?
-        .map_err(|e| PortError::Backend(format!("spawn clippy: {e}")))?;
+        let child = crate::proc::low_priority("cargo")
+            .args(["clippy", "--workspace", "--all-targets", "--quiet"])
+            .current_dir(work_dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| PortError::Backend(format!("spawn clippy: {e}")))?;
+        let leader = child.id();
+        let out =
+            match tokio::time::timeout(Duration::from_secs(600), child.wait_with_output()).await {
+                Ok(out) => out.map_err(|e| PortError::Backend(format!("clippy wait: {e}")))?,
+                Err(_) => {
+                    if let Some(pid) = leader {
+                        crate::proc::kill_group(pid);
+                    }
+                    return Err(PortError::Backend("clippy timed out".to_owned()));
+                }
+            };
         let text = format!(
             "{}{}",
             String::from_utf8_lossy(&out.stdout),
@@ -226,6 +234,142 @@ impl DeployPort for DockerComposeDeploy {
             .filter(|l| l.trim_start().starts_with("error"))
             .count() as u64;
         Ok(Some(count))
+    }
+
+    async fn lint_report(
+        &self,
+        work_dir: &Path,
+    ) -> Result<Option<coxagent_application::ports::outbound::LintReport>, PortError> {
+        if !work_dir.join("Cargo.toml").exists() {
+            return Ok(None);
+        }
+        let _slot = crate::proc::heavy_slot().await;
+        let child = crate::proc::low_priority("cargo")
+            .args(["clippy", "--workspace", "--all-targets", "--quiet"])
+            .current_dir(work_dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| PortError::Backend(format!("spawn clippy: {e}")))?;
+        let leader = child.id();
+        let out =
+            match tokio::time::timeout(Duration::from_secs(600), child.wait_with_output()).await {
+                Ok(out) => out.map_err(|e| PortError::Backend(format!("clippy wait: {e}")))?,
+                Err(_) => {
+                    if let Some(pid) = leader {
+                        crate::proc::kill_group(pid);
+                    }
+                    return Err(PortError::Backend("clippy timed out".to_owned()));
+                }
+            };
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let (errors, files) = parse_clippy(&text);
+        // A dozen error lines is plenty for a repair prompt; the agent can run
+        // clippy itself for the rest.
+        let sample = errors
+            .iter()
+            .take(12)
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(Some(coxagent_application::ports::outbound::LintReport {
+            errors: errors.len() as u64,
+            sample,
+            files,
+        }))
+    }
+
+    async fn cross_target_check(
+        &self,
+        work_dir: &Path,
+    ) -> Result<coxagent_application::ports::outbound::CrossCheck, PortError> {
+        use coxagent_application::ports::outbound::CrossCheck;
+        const TARGET: &str = "x86_64-unknown-linux-gnu";
+        if !work_dir.join("Cargo.toml").exists() {
+            return Ok(CrossCheck {
+                available: false,
+                reason: "not a cargo project".to_owned(),
+                errors: Vec::new(),
+            });
+        }
+        // Self-provision rather than wait to be told. A capability the check
+        // needs and can install itself is not a reason to skip verifying — that
+        // silence is exactly how the same Linux-only dead_code error got filed
+        // three times while every gate on this macOS host stayed green.
+        let mut installed = linux_target_installed(TARGET).await;
+        if !installed {
+            let added = Command::new("rustup")
+                .args(["target", "add", TARGET])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .await
+                .is_ok_and(|s| s.success());
+            if added {
+                installed = linux_target_installed(TARGET).await;
+                if installed {
+                    tracing::info!("cross-check installed the {TARGET} target itself");
+                }
+            }
+        }
+        if !installed {
+            // No rustup to extend — but Docker compiles for Linux by
+            // definition, and it is the build that actually breaks. Use it.
+            if let Some(check) = compose_build_check(work_dir).await {
+                return Ok(check);
+            }
+            return Ok(CrossCheck {
+                available: false,
+                reason: format!(
+                    "cannot verify the {TARGET} build: `rustup target add {TARGET}` did not \
+                     succeed (rustup may be absent) and no Docker build is available here. Until \
+                     one of them exists, a symbol that is dead code on Linux compiles clean on \
+                     this host and only breaks in Docker/CI."
+                ),
+                errors: Vec::new(),
+            });
+        }
+        let _slot = crate::proc::heavy_slot().await;
+        let child = crate::proc::low_priority("cargo")
+            .args(["check", "--workspace", "--all-targets", "--target", TARGET])
+            .current_dir(work_dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| PortError::Backend(format!("spawn cargo check: {e}")))?;
+        let leader = child.id();
+        let out =
+            match tokio::time::timeout(Duration::from_secs(900), child.wait_with_output()).await {
+                Ok(out) => out.map_err(|e| PortError::Backend(format!("cargo check wait: {e}")))?,
+                Err(_) => {
+                    if let Some(pid) = leader {
+                        crate::proc::kill_group(pid);
+                    }
+                    return Err(PortError::Backend(
+                        "cross-target check timed out".to_owned(),
+                    ));
+                }
+            };
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let (errors, _files) = parse_clippy(&text);
+        Ok(CrossCheck {
+            available: true,
+            reason: String::new(),
+            errors: errors.into_iter().take(12).collect(),
+        })
     }
 
     async fn run_tests(&self, work_dir: &Path) -> Result<DeployReport, PortError> {
@@ -240,18 +384,27 @@ impl DeployPort for DockerComposeDeploy {
         // suites run at once across ALL projects, and each runs at background
         // priority — N projects can no longer freeze the machine together.
         let _slot = crate::proc::heavy_slot().await;
-        let output = tokio::time::timeout(
-            Duration::from_secs(900),
-            crate::proc::low_priority(cmd)
-                .args(&args)
-                .current_dir(work_dir)
-                .stdin(std::process::Stdio::null())
-                .kill_on_drop(true)
-                .output(),
-        )
-        .await
-        .map_err(|_| PortError::Backend("test run timed out".to_owned()))?
-        .map_err(|e| PortError::Backend(format!("spawn {cmd}: {e}")))?;
+        let child = crate::proc::low_priority(cmd)
+            .args(&args)
+            .current_dir(work_dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| PortError::Backend(format!("spawn {cmd}: {e}")))?;
+        let leader = child.id();
+        let output =
+            match tokio::time::timeout(Duration::from_secs(900), child.wait_with_output()).await {
+                Ok(out) => out.map_err(|e| PortError::Backend(format!("{cmd} wait: {e}")))?,
+                Err(_) => {
+                    // Kill the whole test-runner tree, not just `nice`.
+                    if let Some(pid) = leader {
+                        crate::proc::kill_group(pid);
+                    }
+                    return Err(PortError::Backend("test run timed out".to_owned()));
+                }
+            };
         let success = output.status.success();
         let tail = |b: &[u8]| -> String {
             String::from_utf8_lossy(b)
@@ -589,5 +742,149 @@ mod tests {
             "an app that binds its port within the configured timeout must pass \
              the gate, even though earlier probes hit connection refused: {result:?}"
         );
+    }
+}
+
+/// Whether rustup reports `target` as installed.
+async fn linux_target_installed(target: &str) -> bool {
+    Command::new("rustup")
+        .args(["target", "list", "--installed"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .ok()
+        .filter(|o| o.status.success())
+        .is_some_and(|o| String::from_utf8_lossy(&o.stdout).contains(target))
+}
+
+/// Fallback cross-check: build the project's Docker image. It compiles for
+/// Linux by definition, so it catches the same class of platform breakage
+/// without a cross toolchain — and it is the build that actually fails in
+/// production. `None` when there is no compose file or no daemon to run it.
+async fn compose_build_check(
+    work_dir: &Path,
+) -> Option<coxagent_application::ports::outbound::CrossCheck> {
+    use coxagent_application::ports::outbound::CrossCheck;
+    if !COMPOSE_FILES.iter().any(|f| work_dir.join(f).exists()) || !daemon_up().await {
+        return None;
+    }
+    let _slot = crate::proc::heavy_slot().await;
+    let proj = compose_project_name(work_dir);
+    let out = tokio::time::timeout(
+        DEPLOY_TIMEOUT,
+        Command::new("docker")
+            .args(["compose", "-p", &proj, "build"])
+            .current_dir(work_dir)
+            .stdin(std::process::Stdio::null())
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if out.status.success() {
+        return Some(CrossCheck {
+            available: true,
+            reason: String::new(),
+            errors: Vec::new(),
+        });
+    }
+    let text = String::from_utf8_lossy(&out.stderr);
+    let (errors, _) = parse_clippy(&text);
+    Some(CrossCheck {
+        available: true,
+        reason: "verified via the Docker (Linux) image build".to_owned(),
+        errors: if errors.is_empty() {
+            vec![text.lines().rev().take(3).collect::<Vec<_>>().join(" | ")]
+        } else {
+            errors.into_iter().take(12).collect()
+        },
+    })
+}
+
+/// Split `cargo clippy` human output into its error lines and the files those
+/// errors point at. Clippy prints the location on the `-->` line that follows
+/// each error, so the two are paired in report order.
+fn parse_clippy(text: &str) -> (Vec<String>, Vec<String>) {
+    let mut errors = Vec::new();
+    let mut files = Vec::new();
+    let mut lines = text.lines().peekable();
+    while let Some(line) = lines.next() {
+        if !line.trim_start().starts_with("error") {
+            continue;
+        }
+        errors.push(line.trim().to_owned());
+        // The location follows within a couple of lines; stop at the next error
+        // so an error without one never steals the following error's file.
+        let mut file = String::new();
+        for _ in 0..3 {
+            let Some(next) = lines.peek() else { break };
+            let next = (*next).trim();
+            if next.starts_with("error") {
+                break;
+            }
+            if let Some(loc) = next.strip_prefix("--> ") {
+                file = loc.split(':').next().unwrap_or("").trim().to_owned();
+                lines.next();
+                break;
+            }
+            lines.next();
+        }
+        files.push(file);
+    }
+    (errors, files)
+}
+
+#[cfg(test)]
+mod clippy_parse_tests {
+    use super::parse_clippy;
+
+    #[test]
+    fn pairs_each_error_with_the_file_it_points_at() {
+        let out = "\
+error: redundant closure
+  --> crates/app/src/lib.rs:12:5
+   |
+error: too many lines
+  --> crates/domain/src/ticket.rs:99:1
+   |
+error: could not compile `x` due to 2 previous errors
+";
+        let (errors, files) = parse_clippy(out);
+        assert_eq!(errors.len(), 3);
+        assert_eq!(
+            files,
+            [
+                "crates/app/src/lib.rs",
+                "crates/domain/src/ticket.rs",
+                // The summary line carries no location and must not borrow one.
+                ""
+            ]
+        );
+    }
+}
+
+#[cfg(test)]
+mod cross_check_tests {
+    use super::DockerComposeDeploy;
+    use coxagent_application::ports::outbound::DeployPort;
+
+    #[tokio::test]
+    async fn a_non_cargo_project_is_reported_unavailable_with_a_reason() {
+        // "Unavailable" must always carry why. A blank reason is how a blind
+        // spot becomes invisible again.
+        let dir = std::env::temp_dir().join(format!("crosschk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let check = DockerComposeDeploy::new()
+            .cross_target_check(&dir)
+            .await
+            .expect("check");
+        assert!(!check.available);
+        assert!(
+            !check.reason.trim().is_empty(),
+            "reason must say what to do"
+        );
+        assert!(check.errors.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

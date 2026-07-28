@@ -265,6 +265,49 @@ pub fn standard_doc_folder(ticket_type: coxagent_domain::TicketType) -> &'static
     }
 }
 
+/// Which wiki space a ticket's page belongs in. The ticket TYPE alone gets
+/// this wrong: an infrastructure feature (sandboxing, a deploy gate) is a
+/// Feature ticket and would file under Product, which is how a product space
+/// ends up holding nothing a product person would read. The subject decides,
+/// with the type as the tie-breaker.
+#[must_use]
+pub fn doc_space_for(
+    ticket_type: coxagent_domain::TicketType,
+    title: &str,
+    description: &str,
+) -> &'static str {
+    use coxagent_domain::TicketType;
+    const ENGINEERING: &[&str] = &[
+        "docker",
+        "compose",
+        "ci ",
+        "pipeline",
+        "clippy",
+        "lint",
+        "sandbox",
+        "seatbelt",
+        "bwrap",
+        "deploy gate",
+        "health check",
+        "rollback",
+        "refactor",
+        "migration",
+        "schema",
+        "runner",
+        "cargo",
+        "build fails",
+        "compile",
+    ];
+    let text = format!("{title} {description}").to_lowercase();
+    if ENGINEERING.iter().any(|k| text.contains(k)) {
+        return "Engineering";
+    }
+    match ticket_type {
+        TicketType::Feature => "Product",
+        TicketType::Chore | TicketType::Bug => "Engineering",
+    }
+}
+
 /// The colour/category bucket for a Wiki folder, keyed off its top-level space.
 /// Keeps DOCS-written pages consistent with the UI's folder colouring.
 #[must_use]
@@ -281,7 +324,11 @@ pub fn doc_category_of(folder: &str) -> &'static str {
         "design" | "flows" => "flows",
         "qa" | "testing" | "test" | "tests" => "qa",
         "operations" | "ops" | "release notes" | "releases" => "ops",
-        _ => "product",
+        "product" | "features" => "product",
+        // An unrecognised space is not silently "product": mislabelling a
+        // team/ops page as product colours it wrongly in the wiki and skews
+        // every filter built on the category.
+        _ => "general",
     }
 }
 
@@ -494,6 +541,38 @@ pub struct Milestone {
     pub target_version: String,
 }
 
+/// Why one attempt at a ticket failed, in a form later agents can reason over
+/// instead of pattern-matching prose.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttemptFailure {
+    /// 1-based attempt number.
+    pub attempt: u32,
+    /// Which layer the work died at.
+    pub layer: FailureLayer,
+    /// The gate or step that rejected it (`clippy`, `regression-test`,
+    /// `tests`, `engine`), for routing and for the human digest.
+    pub gate: String,
+    /// The decisive detail, already trimmed (a lint line, an assertion).
+    pub detail: String,
+    /// Repo-relative files implicated, when the gate knows them.
+    #[serde(default)]
+    pub files: Vec<String>,
+}
+
+/// The layer an attempt died at — the thing that decides WHO can unstick it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureLayer {
+    /// The requirement could not be built against (BA's problem).
+    Spec,
+    /// A mechanical quality gate rejected otherwise-sound work.
+    Gate,
+    /// The approach itself does not work (SA's problem).
+    Design,
+    /// Auth, network, capacity — nobody's fault, never counted.
+    Infra,
+}
+
 /// The whole state of one managed project.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[allow(clippy::struct_excessive_bools)] // a persisted data aggregate, not a state machine
@@ -659,6 +738,10 @@ pub struct ProjectState {
     /// entry removed when the ticket completes).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub ticket_journal: std::collections::BTreeMap<String, Vec<String>>,
+    /// Structured failure log per ticket (see [`AttemptFailure`]). Defaulted so
+    /// state written before this existed still loads.
+    #[serde(default)]
+    pub ticket_failures: std::collections::BTreeMap<String, Vec<AttemptFailure>>,
     /// Whether the Ops/SRE monitor currently sees the deployed app as down —
     /// tracked so it files exactly one bug per outage and can announce recovery.
     #[serde(default)]
@@ -747,6 +830,7 @@ impl Default for ProjectState {
             drain_notice_sprint: 0,
             ticket_fail_attempts: std::collections::BTreeMap::new(),
             ticket_journal: std::collections::BTreeMap::new(),
+            ticket_failures: std::collections::BTreeMap::new(),
             ops_down: false,
             spend_today_usd: 0.0,
             spend_day: String::new(),
@@ -831,6 +915,29 @@ impl ProjectState {
     /// Append a work-journal note for a ticket (what an attempt tried / where
     /// it got stuck). Bounded: 4 notes per ticket, 500 chars per note — the
     /// journal is a briefing for the next attempt, not a log.
+    /// Record a failed attempt as DATA, not prose. Everything downstream — the
+    /// escalation router, the next developer's brief, the impediment digest —
+    /// used to re-derive the failure class by grepping an English sentence,
+    /// which meant the classification was only ever as good as the wording of
+    /// whoever wrote the message. The gate that rejected the work knows exactly
+    /// what it rejected; this is where it says so.
+    pub fn record_attempt_failure(&mut self, ticket: &str, failure: AttemptFailure) {
+        let log = self.ticket_failures.entry(ticket.to_owned()).or_default();
+        log.push(failure);
+        let overflow = log.len().saturating_sub(6);
+        if overflow > 0 {
+            log.drain(0..overflow);
+        }
+    }
+
+    /// Structured failures recorded for `ticket`, oldest first.
+    #[must_use]
+    pub fn attempt_failures(&self, ticket: &str) -> &[AttemptFailure] {
+        self.ticket_failures
+            .get(ticket)
+            .map_or(&[][..], Vec::as_slice)
+    }
+
     pub fn journal_note(&mut self, ticket: &str, note: &str) {
         let entry: String = note.trim().chars().take(500).collect();
         if entry.is_empty() {
@@ -1666,5 +1773,46 @@ mod alias_tests {
         assert_eq!(ev.len(), 6, "keeps last 6");
         assert!(ev[0].label.contains("proof 2"), "oldest dropped");
         assert!(ev.iter().all(|e| e.detail.chars().count() <= 1200));
+    }
+}
+
+#[cfg(test)]
+mod attempt_failure_tests {
+    use super::{AttemptFailure, FailureLayer, ProjectState};
+
+    fn failure(attempt: u32, gate: &str) -> AttemptFailure {
+        AttemptFailure {
+            attempt,
+            layer: FailureLayer::Gate,
+            gate: gate.to_owned(),
+            detail: "d".to_owned(),
+            files: vec!["crates/app/src/lib.rs".to_owned()],
+        }
+    }
+
+    #[test]
+    fn failures_are_kept_per_ticket_and_bounded() {
+        let mut s = ProjectState::default();
+        for n in 1..=9 {
+            s.record_attempt_failure("COX-B006", failure(n, "clippy"));
+        }
+        s.record_attempt_failure("COX-B007", failure(1, "tests"));
+        let log = s.attempt_failures("COX-B006");
+        assert_eq!(log.len(), 6, "old attempts age out");
+        assert_eq!(log[0].attempt, 4, "the oldest kept is the 4th");
+        assert_eq!(s.attempt_failures("COX-B007").len(), 1);
+        assert!(s.attempt_failures("COX-NONE").is_empty());
+    }
+
+    #[test]
+    fn state_written_before_this_field_existed_still_loads() {
+        // Projects on disk predate the structured log; a missing key must not
+        // fail the load and strand a whole project.
+        let mut doc = serde_json::to_value(ProjectState::default()).expect("serialize");
+        doc.as_object_mut()
+            .expect("object")
+            .remove("ticket_failures");
+        let back: ProjectState = serde_json::from_value(doc).expect("load legacy state");
+        assert!(back.ticket_failures.is_empty());
     }
 }

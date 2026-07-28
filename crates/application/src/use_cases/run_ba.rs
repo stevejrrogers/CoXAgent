@@ -86,6 +86,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
             .map(|t| normalize_title(t.title()))
             .collect();
 
+        // A BA who doesn't know what the product already does proposes what it
+        // already has.
+        let knowledge = prompts::knowledge_block(
+            &existing.docs,
+            &existing.tickets,
+            &self.work_dir,
+            &format!("{} {}", self.context, existing.sprint_goal),
+            "",
+        );
         let request = AgentRequest {
             role: Role::Ba,
             system_prompt: prompts::system_prompt(prompts::BA),
@@ -94,11 +103,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
                  here (same or similar title/scope):\n{}\n\nPropose only genuinely NEW features \
                  that are not already covered above. When the project already has code (see the \
                  repo map below), propose features that fit the existing stack and structure — \
-                 concrete, grounded in what's there, not generic.{}{}",
+                 concrete, grounded in what's there, not generic.{}{}{}",
                 self.context,
                 sprint_goal_block(&existing.sprint_goal),
                 backlog_block,
                 prompts::repo_map_block(&self.work_dir, true),
+                knowledge,
                 prompts::team_memory_block(&existing.decisions, &existing.lessons)
             ),
             work_dir: self.work_dir.clone(),
@@ -111,7 +121,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
             return Err(crate::error::PortError::Backend(format!(
                 "BA engine exited with {:?}: {}",
                 outcome.exit_code,
-                outcome.stderr.trim()
+                outcome.failure_detail()
             ))
             .into());
         }

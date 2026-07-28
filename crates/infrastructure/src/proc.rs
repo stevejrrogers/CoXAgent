@@ -55,6 +55,10 @@ pub fn low_priority(program: impl AsRef<OsStr>) -> Command {
     {
         let mut cmd = Command::new("nice");
         cmd.arg("-n").arg("10").arg(program.as_ref());
+        // Own process group: the spawned CLI leads it, every child it spawns
+        // (builds, dev servers) inherits it — so a timeout can kill the WHOLE
+        // tree via kill_group, not just the direct child.
+        cmd.process_group(0);
         cmd
     }
     #[cfg(not(unix))]
@@ -236,6 +240,7 @@ fn confined_command(program: impl AsRef<OsStr>, work_dir: &Path) -> Command {
             .arg("-n")
             .arg("10")
             .arg(program.as_ref());
+        cmd.process_group(0);
         cmd
     }
     #[cfg(target_os = "linux")]
@@ -381,6 +386,24 @@ async fn spawn_confined_within(
     }
     warn_seatbelt_apply_exhausted();
     cmd.spawn()
+}
+
+/// Kill the ENTIRE process group led by `pid` (spawned with
+/// `process_group(0)`), reaping every descendant — the direct child's own
+/// `kill_on_drop` only takes out the leader and orphans its children (a
+/// stray `npm run dev` from a timed-out agent would otherwise live on).
+/// Best-effort; no-op on non-unix.
+pub fn kill_group(pid: u32) {
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new("/bin/kill")
+            .args(["-9", "--", &format!("-{pid}")])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    #[cfg(not(unix))]
+    let _ = pid;
 }
 
 #[cfg(test)]
@@ -811,5 +834,47 @@ mod tests {
         assert!(list.contains(&std::path::PathBuf::from("/srv/proj")));
         assert!(list.contains(&home.join(".cargo")));
         assert!(list.contains(&home.join(".npm")));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn kill_group_reaps_grandchildren_too() {
+        let dir = std::env::temp_dir().join(format!("cox-kg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pidfile = dir.join("bg.pid");
+        // sh (group leader via nice) spawns a background sleep (grandchild),
+        // records its pid, then waits — exactly the shape of an agent leaving
+        // a dev server running.
+        let mut child = low_priority("sh")
+            .arg("-c")
+            .arg(format!("sleep 30 & echo $! > {}; wait", pidfile.display()))
+            .spawn()
+            .expect("spawn");
+        // Wait for the grandchild pid to be written.
+        for _ in 0..50 {
+            if pidfile.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        let bg: u32 = std::fs::read_to_string(&pidfile)
+            .expect("pidfile")
+            .trim()
+            .parse()
+            .expect("pid");
+        let leader = child.id().expect("leader pid");
+        kill_group(leader);
+        // Leader must exit promptly…
+        let waited = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await;
+        assert!(waited.is_ok(), "group leader must die after kill_group");
+        // …and the grandchild must be gone too (signal 0 probe fails).
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let alive = std::process::Command::new("/bin/kill")
+            .args(["-0", &bg.to_string()])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(!alive, "grandchild {bg} must be dead");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

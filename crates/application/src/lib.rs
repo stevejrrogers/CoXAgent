@@ -9,6 +9,7 @@ pub mod codegraph;
 pub mod config;
 pub mod conformance;
 pub mod error;
+pub mod faults;
 pub mod metrics;
 pub mod parsing;
 pub mod policy;
@@ -21,6 +22,7 @@ pub mod system_chat;
 pub mod tokens;
 pub mod ts;
 pub mod use_cases;
+pub mod verify_cache;
 
 pub use auth::{AuthPort, AuthRole, AuthUser, LoginResult, TokenInfo};
 pub use config::{

@@ -85,7 +85,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> AnalyzeAttachmentU
         if !outcome.succeeded() {
             return Err(PortError::Backend(format!(
                 "attachment analysis failed: {}",
-                outcome.stderr.trim()
+                outcome.failure_detail()
             ))
             .into());
         }

@@ -162,6 +162,7 @@ pub type PhaseReporter = std::sync::Arc<dyn Fn(Option<(String, String)>) + Send 
 
 /// Drive the cycle loop under the handle's control until stopped. Waits while
 /// paused; runs one cycle per `step`; sleeps `sleep` between cycles when running.
+#[allow(clippy::too_many_lines)] // one linear supervision loop; splitting hurts readability
 pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
     handle: std::sync::Arc<RunnerHandle>,
     mut cycle_uc: RunCycleUseCase<S, E>,
@@ -220,7 +221,14 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
             let _ = store.heartbeat_worker(&worker, &role, &note, &now).await;
         });
     }));
+    let breaker_store = cycle_uc.store();
     let mut cycle = 0u64;
+    // Circuit breaker: engine-infrastructure outages (revoked auth, network
+    // down) make every cycle fail fast with zero progress. Instead of spinning
+    // forever — 12 empty cycles during a real 401 outage — three consecutive
+    // no-progress cycles whose errors look infrastructural pause the runner
+    // and tell the humans, exactly like the budget cap does.
+    let mut infra_streak = 0u32;
     loop {
         // Gate: wait until running or a step is requested; exit if stopped.
         let stepping = loop {
@@ -240,7 +248,9 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
         // Stamp the live operator identity so ticket claims are owned by whoever
         // resumed this runner, on this host.
         cycle_uc.set_worker(handle.worker_id());
-        let report = cycle_uc.run_cycle(cycle).await;
+        // One cycle drives every role; boxing keeps that 16KB future off the
+        // loop's own stack frame.
+        let report = Box::pin(cycle_uc.run_cycle(cycle)).await;
         handle.update(cycle, report.summary());
         handle.clear_active();
         for e in &report.errors {
@@ -249,6 +259,38 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
 
         if report.over_budget {
             tracing::warn!("budget cap reached — pausing loop");
+            handle.pause();
+            continue;
+        }
+        let progressed = !report.ba_created.is_empty()
+            || report.sa_readied.is_some()
+            || report.feature_done.is_some()
+            || report.bug_fixed.is_some()
+            || report.documented.is_some();
+        let infra_errors = report
+            .errors
+            .iter()
+            .filter(|e| crate::faults::is_infra_fault(e))
+            .count();
+        if !progressed && infra_errors >= 2 {
+            infra_streak += 1;
+        } else {
+            infra_streak = 0;
+        }
+        if infra_streak >= 3 {
+            tracing::warn!(
+                "engine infrastructure appears DOWN (3 consecutive no-progress cycles with \
+                 infra-looking failures) — pausing the loop; resume once auth/network is back"
+            );
+            let _ = crate::ports::outbound::mutate_state(breaker_store.as_ref(), |s| {
+                let msg = "🔌 Engine infrastructure looks DOWN (auth/network) — loop paused \
+                           after 3 empty cycles. Fix the outage, then Resume.";
+                s.post_comment("SM", msg, None);
+                s.post_chat_in("SM", msg, crate::state::AGENTS_CHANNEL, Vec::new());
+                Ok(())
+            })
+            .await;
+            infra_streak = 0;
             handle.pause();
             continue;
         }

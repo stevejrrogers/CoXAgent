@@ -127,7 +127,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RefineTicketUseCas
         if !outcome.succeeded() {
             return Err(PortError::Backend(format!(
                 "BA synthesis failed: {}",
-                outcome.stderr.trim()
+                outcome.failure_detail()
             ))
             .into());
         }

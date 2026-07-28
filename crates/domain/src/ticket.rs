@@ -283,6 +283,30 @@ impl Ticket {
         Ok(())
     }
 
+    /// Restate the requirement after a rescue — the BA rewriting a ticket the
+    /// developers could not build against. Unlike [`Ticket::edit`] the title is
+    /// left alone: the ask has not changed, only how clearly it is stated.
+    ///
+    /// # Errors
+    /// - [`DomainError::FieldNotPermitted`] if `actor` may not restate scope.
+    /// - [`DomainError::Empty`] if the new description is blank.
+    pub fn clarify(&mut self, actor: Role, description: &str) -> Result<(), DomainError> {
+        if !matches!(actor, Role::Ba | Role::Po | Role::User) {
+            return Err(DomainError::FieldNotPermitted {
+                role: actor,
+                field: "description",
+            });
+        }
+        if description.trim().is_empty() {
+            return Err(DomainError::Empty {
+                field: "description",
+            });
+        }
+        self.description.clear();
+        self.description.push_str(description.trim());
+        Ok(())
+    }
+
     /// Atomically claim the ticket for `worker` (`account@host`) by moving it
     /// into `InProgress` and stamping ownership. Fails if the ticket is already
     /// claimed or the transition is not legal — so two concurrent runners racing
@@ -613,5 +637,22 @@ mod tests {
             .expect("claim");
         assert!(t.release_claim(Role::DevFeature).is_err());
         assert_eq!(t.status(), Status::InProgress);
+    }
+
+    #[test]
+    fn clarify_is_the_bas_to_make_and_keeps_the_title() {
+        let mut t = feature(false);
+        assert!(
+            t.clarify(Role::DevBug, "restated").is_err(),
+            "not DEV's call"
+        );
+        t.clarify(Role::Ba, "  Repro: run x, observe y.  ")
+            .expect("BA may restate");
+        assert_eq!(t.description(), "Repro: run x, observe y.");
+        assert_eq!(t.title(), "A feature");
+        assert!(
+            t.clarify(Role::Ba, "   ").is_err(),
+            "blank is not a clarification"
+        );
     }
 }

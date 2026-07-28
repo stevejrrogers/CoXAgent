@@ -571,6 +571,26 @@ async fn profile_set_ep(
     Json(serde_json::json!({ "ok": true })).into_response()
 }
 
+/// Clear the caller's OWN avatar, falling back to the initials tile. Upload
+/// without a way back out leaves a bad photo stuck forever.
+async fn profile_avatar_clear_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let Some(user) = principal_name(&app, &headers).await else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    {
+        let mut doc = app.profiles.inner.lock().await;
+        let p = doc.profiles.entry(user.clone()).or_default();
+        p.avatar.clear();
+        p.at = now_rfc3339();
+    }
+    app.profiles.save().await;
+    audit_push(&app.audit, &user, "avatar removed".to_owned(), 200).await;
+    Json(serde_json::json!({ "ok": true })).into_response()
+}
+
 /// Upload the caller's OWN avatar (image, ≤ 2 MB). Served via chat media.
 async fn profile_avatar_ep(
     State(app): State<AppState>,
@@ -1901,11 +1921,23 @@ async fn redis_bus_bridge(app: AppState, url: String) {
     }
 }
 
+/// Compose-project prefix of a PR preview (`<workspace>/.preview/<num>` via
+/// `compose_project_name`). Previews are meant to live for as long as someone
+/// is looking at them.
+const PREVIEW_PROJECT_PREFIX: &str = "cox--preview-";
+/// How long a PR preview may stay up before the janitor reclaims it. Someone
+/// opens a preview, reads the diff, and walks away — without this, the
+/// container holds the app port and its share of the host for good. (One was
+/// found still running after eight days.)
+const PREVIEW_TTL: &str = "6h";
+
 /// Docker janitor: agents deploy a lot — the host must not silt up. Hourly:
 /// any `cox-*` compose project whose containers are ALL stopped gets a full
-/// `down --remove-orphans` (dead previews, stale deploys), then dangling
-/// build images are pruned. Scoped strictly to the `cox-` prefix — the
-/// backing-services group (`cox-infra`) is running, so it is never touched.
+/// `down --remove-orphans` (dead previews, stale deploys), any PR preview
+/// still running past [`PREVIEW_TTL`] is reclaimed, then dangling build images
+/// are pruned. Scoped strictly to the `cox-` prefix — the backing-services
+/// group (`cox-infra`) is running, so it is never touched, and a RUNNING
+/// non-preview project is someone's live deploy and is left alone.
 async fn docker_janitor() {
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
@@ -1933,15 +1965,21 @@ async fn docker_janitor() {
             if !name.starts_with("cox-") || name == "cox-infra" {
                 continue;
             }
+            let mut reason = "dead";
             if status.contains("running") {
-                continue;
+                if !name.starts_with(PREVIEW_PROJECT_PREFIX)
+                    || !preview_is_stale(name, PREVIEW_TTL).await
+                {
+                    continue;
+                }
+                reason = "expired preview";
             }
             let _ = tokio::process::Command::new("docker")
                 .args(["compose", "-p", name, "down", "--remove-orphans"])
                 .stdin(std::process::Stdio::null())
                 .output()
                 .await;
-            tracing::info!("docker janitor: removed dead compose project {name}");
+            tracing::info!("docker janitor: removed {reason} compose project {name}");
         }
         let _ = tokio::process::Command::new("docker")
             .args(["image", "prune", "-f"])
@@ -1949,6 +1987,29 @@ async fn docker_janitor() {
             .output()
             .await;
     }
+}
+
+/// Whether a preview project has a container created longer ago than `ttl`.
+/// Docker's own `until` filter does the age arithmetic, so no timestamp
+/// parsing (and no timezone bug) of ours stands between a forgotten preview
+/// and being reclaimed.
+async fn preview_is_stale(project: &str, ttl: &str) -> bool {
+    let Ok(out) = tokio::process::Command::new("docker")
+        .args([
+            "ps",
+            "-q",
+            "--filter",
+            &format!("label=com.docker.compose.project={project}"),
+            "--filter",
+            &format!("until={ttl}"),
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+    else {
+        return false;
+    };
+    !String::from_utf8_lossy(&out.stdout).trim().is_empty()
 }
 
 /// Disaster-recovery floor for the hub-level app_kv documents: once a day,
@@ -2127,7 +2188,10 @@ pub async fn serve_full(
         .route("/api/profiles", get(profiles_ep))
         .route("/api/profile", post(profile_set_ep))
         .route("/api/auth/profile", axum::routing::patch(self_profile_ep))
-        .route("/api/profile/avatar", post(profile_avatar_ep))
+        .route(
+            "/api/profile/avatar",
+            post(profile_avatar_ep).delete(profile_avatar_clear_ep),
+        )
         .route(
             "/api/auth/my/tokens/:label",
             axum::routing::delete(revoke_my_token_ep),
@@ -6284,7 +6348,7 @@ async fn chat_reply_ep(
         } else {
             cfg.git.target_branch.clone()
         };
-        uc = uc.with_forge(Arc::clone(f), target);
+        uc = uc.with_forge(Arc::clone(f), target, cfg.git.require_ci);
     }
     match uc.execute(msg).await {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
@@ -7663,9 +7727,15 @@ async fn merge_sweep_ep(
         .unwrap_or("main")
         .to_owned();
     let vi = cfg["workflow"]["language"].as_str() == Some("vi");
-    let out =
-        coxagent_application::use_cases::merge_sweep(forge.as_ref(), p.store.as_ref(), &target, vi)
-            .await;
+    let require_ci = cfg["git"]["require_ci"].as_bool().unwrap_or(true);
+    let out = coxagent_application::use_cases::merge_sweep(
+        forge.as_ref(),
+        p.store.as_ref(),
+        &target,
+        vi,
+        require_ci,
+    )
+    .await;
     Json(serde_json::json!({ "ok": true, "merged": out.merged, "skipped": out.skipped }))
         .into_response()
 }
