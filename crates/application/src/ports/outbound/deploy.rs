@@ -33,6 +33,20 @@ pub struct LintReport {
     pub files: Vec<String>,
 }
 
+/// Result of verifying that the code still compiles for a platform this host
+/// is not. `available: false` is not a pass — it means the check could not run,
+/// and saying so out loud is the whole point: a blind spot nobody reports is
+/// how the same Linux-only build error gets filed three times.
+#[derive(Debug, Clone, Default)]
+pub struct CrossCheck {
+    /// Whether the toolchain could actually perform the check.
+    pub available: bool,
+    /// Why it could not, when it could not (shown to humans and agents).
+    pub reason: String,
+    /// Compiler error lines for the foreign target, empty when it compiles.
+    pub errors: Vec<String>,
+}
+
 /// Deploys the codebase so it can be tested/served.
 #[async_trait]
 pub trait DeployPort: Send + Sync {
@@ -152,6 +166,21 @@ pub trait DeployPort: Send + Sync {
             errors,
             ..LintReport::default()
         }))
+    }
+
+    /// Compile the workspace for the deploy platform (Linux) without running
+    /// it, so a platform-gated symbol that is dead code there is caught on the
+    /// machine that wrote it rather than in a Docker build nobody watches.
+    /// Default: unavailable, with a reason.
+    ///
+    /// # Errors
+    /// [`PortError`] only when the check itself cannot be attempted.
+    async fn cross_target_check(&self, _work_dir: &Path) -> Result<CrossCheck, PortError> {
+        Ok(CrossCheck {
+            available: false,
+            reason: "no cross-target check for this project type".to_owned(),
+            errors: Vec::new(),
+        })
     }
 
     async fn run_tests(&self, work_dir: &Path) -> Result<DeployReport, PortError> {

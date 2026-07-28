@@ -565,6 +565,37 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 }
             }
 
+            // Platform gate: this host is macOS, the product ships on Linux.
+            // A symbol gated to the wrong platforms compiles clean here and is
+            // dead code there — the failure cox filed three times under three
+            // different ticket numbers. The check provisions what it needs and
+            // falls back to the Docker build, so an unavailable answer is a
+            // real gap, not laziness, and it is stated rather than skipped.
+            match deploy.cross_target_check(&self.work_dir).await {
+                Ok(check) if check.available && !check.errors.is_empty() => {
+                    let detail = check.errors.join("; ");
+                    let short: String = detail.chars().take(200).collect();
+                    self.record_failure_at(
+                        &id,
+                        &format!("does not compile for the deploy platform: {short}"),
+                        crate::state::FailureLayer::Gate,
+                        "linux-build",
+                        Vec::new(),
+                    )
+                    .await;
+                    self.release_claim(&id).await;
+                    return Err(PortError::Backend(format!(
+                        "{:?} broke the Linux build on {id} — ticket returned to the queue",
+                        self.mode
+                    ))
+                    .into());
+                }
+                Ok(check) if !check.available => {
+                    tracing::warn!("platform verification unavailable — {}", check.reason);
+                }
+                Ok(_) | Err(_) => {}
+            }
+
             // Regression-test gate: a BUG fix that touches no test is a fix
             // on faith. Mechanical check over the working diff; one bounded
             // repair pass to add the missing test.

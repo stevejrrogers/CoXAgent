@@ -14,7 +14,7 @@ pub mod state_store;
 pub mod storage;
 
 pub use audit::{AuditPort, AuditRecord};
-pub use deploy::{verify_deploy_health, DeployPort, DeployReport, LintReport};
+pub use deploy::{verify_deploy_health, CrossCheck, DeployPort, DeployReport, LintReport};
 pub use doc_store::DocStorePort;
 pub use engine::{AgentEnginePort, AgentOutcome, AgentRequest, SandboxStatus, Usage};
 pub use forge::{ForgePort, PrFeedback, PullRequest};
