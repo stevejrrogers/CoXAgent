@@ -181,6 +181,17 @@ pub struct Channel {
     /// Optional channel topic/description
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub topic: String,
+    /// Parent channel id when this is a sub-channel, empty at the top level.
+    /// A sub-channel is a room inside a room — same members by default, its own
+    /// thread of conversation — so a project channel does not have to carry
+    /// every side discussion.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub parent: String,
+    /// Whether any member may invite others. Off by default: a private channel
+    /// anyone can add people to is a privacy surprise, so this is the setting a
+    /// team turns ON deliberately, not one they discover.
+    #[serde(default)]
+    pub open_invite: bool,
 }
 
 fn chan_kind_private() -> String {
@@ -206,10 +217,34 @@ impl Channel {
         self.is_open() || self.owner == user || self.members.iter().any(|m| m == user)
     }
 
-    /// Whether `user` may invite others (owner, or a delegated inviter).
+    /// Whether `user` may invite others. With `open_invite` any member can;
+    /// otherwise it is the owner and whoever they delegated it to. Admins are
+    /// handled above this, at the endpoint: their authority does not depend on
+    /// a channel's settings.
     #[must_use]
     pub fn can_invite(&self, user: &str) -> bool {
-        self.is_open() || self.owner == user || self.inviters.iter().any(|m| m == user)
+        if self.is_open() {
+            return true;
+        }
+        if self.owner == user || self.inviters.iter().any(|m| m == user) {
+            return true;
+        }
+        self.open_invite && self.members.iter().any(|m| m == user)
+    }
+
+    /// Whether `user` may remove members. Never the whole membership — losing
+    /// someone from a room is not something a room-mate should be able to do
+    /// to another on a whim.
+    #[must_use]
+    pub fn can_kick(&self, user: &str) -> bool {
+        !self.is_open() && (self.owner == user || self.inviters.iter().any(|m| m == user))
+    }
+
+    /// Whether this channel may be made private. `#general` may not: a team
+    /// needs one room nobody can be shut out of.
+    #[must_use]
+    pub fn can_change_privacy(&self) -> bool {
+        self.id != GENERAL_CHANNEL
     }
 }
 
@@ -1484,6 +1519,90 @@ impl ProjectState {
     }
 
     /// Create a channel with an explicit kind. Valid kinds: `"private"`, `"public"`.
+    /// Create a sub-channel under `parent`: a room inside a room. It starts
+    /// with the parent's members so the people already in the conversation can
+    /// follow it without a second round of invites.
+    ///
+    /// # Errors
+    /// The same reasons as [`Self::create_channel_with_kind`], plus an unknown
+    /// parent.
+    pub fn create_sub_channel(
+        &mut self,
+        parent_id: &str,
+        name: &str,
+        owner: &str,
+        kind: &str,
+    ) -> Result<Channel, String> {
+        let Some(parent) = self.channels.iter().find(|c| c.id == parent_id).cloned() else {
+            return Err(format!("no channel {parent_id}"));
+        };
+        if !parent.can_view(owner) {
+            return Err("you are not in that channel".to_owned());
+        }
+        let ch = self.create_channel_with_kind(name, owner, kind)?;
+        let id = ch.id.clone();
+        let Some(created) = self.channels.iter_mut().find(|c| c.id == id) else {
+            return Err("channel vanished".to_owned());
+        };
+        parent_id.clone_into(&mut created.parent);
+        for m in &parent.members {
+            if !created.members.iter().any(|x| x == m) {
+                created.members.push(m.clone());
+            }
+        }
+        Ok(created.clone())
+    }
+
+    /// Apply channel settings. `None` leaves a setting alone. Returns the
+    /// updated channel.
+    ///
+    /// # Errors
+    /// Unknown channel, or a privacy change on `#general`, which must stay the
+    /// one room nobody can be shut out of.
+    pub fn update_channel_settings(
+        &mut self,
+        id: &str,
+        kind: Option<&str>,
+        open_invite: Option<bool>,
+        topic: Option<&str>,
+    ) -> Result<Channel, String> {
+        let Some(ch) = self.channels.iter_mut().find(|c| c.id == id) else {
+            return Err(format!("no channel {id}"));
+        };
+        if let Some(k) = kind {
+            if !ch.can_change_privacy() {
+                return Err("#general cannot be made private".to_owned());
+            }
+            if !matches!(k, "private" | "public") {
+                return Err(format!("unknown channel kind {k}"));
+            }
+            k.clone_into(&mut ch.kind);
+        }
+        if let Some(o) = open_invite {
+            ch.open_invite = o;
+        }
+        if let Some(t) = topic {
+            ch.topic = t.trim().chars().take(200).collect();
+        }
+        Ok(ch.clone())
+    }
+
+    /// Remove a member (and any invite delegation they held) from a channel.
+    ///
+    /// # Errors
+    /// Unknown channel, or an attempt to remove its owner.
+    pub fn remove_channel_member(&mut self, id: &str, user: &str) -> Result<Channel, String> {
+        let Some(ch) = self.channels.iter_mut().find(|c| c.id == id) else {
+            return Err(format!("no channel {id}"));
+        };
+        if ch.owner == user {
+            return Err("the owner cannot be removed from their own channel".to_owned());
+        }
+        ch.members.retain(|m| m != user);
+        ch.inviters.retain(|m| m != user);
+        Ok(ch.clone())
+    }
+
     pub fn create_channel_with_kind(
         &mut self,
         name: &str,
@@ -1508,6 +1627,8 @@ impl ProjectState {
             inviters: Vec::new(),
             created_at: now_rfc3339(),
             kind: kind.to_owned(),
+            parent: String::new(),
+            open_invite: false,
             topic: String::new(),
             project: String::new(),
         };
@@ -1587,6 +1708,8 @@ fn agents_channel_record() -> Channel {
         inviters: Vec::new(),
         created_at: String::new(),
         kind: "general".to_owned(),
+        parent: String::new(),
+        open_invite: false,
         topic: String::new(),
         project: String::new(),
     }
@@ -1601,6 +1724,8 @@ fn general_channel_record() -> Channel {
         inviters: Vec::new(),
         created_at: String::new(),
         kind: "general".to_owned(),
+        parent: String::new(),
+        open_invite: false,
         topic: String::new(),
         project: String::new(),
     }
@@ -2128,5 +2253,88 @@ mod daily_job_tests {
             .remove("engine_incidents");
         let back: ProjectState = serde_json::from_value(doc).expect("legacy state loads");
         assert!(back.daily_jobs.is_empty() && back.engine_incidents.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod channel_settings_tests {
+    use super::{ProjectState, GENERAL_CHANNEL};
+
+    #[test]
+    fn a_sub_channel_inherits_the_room_it_was_opened_inside() {
+        let mut s = ProjectState::default();
+        let parent = s.create_channel("Design", "alice").expect("parent");
+        s.invite_to_channel(&parent.id, "alice", "bob")
+            .expect("invite");
+        let sub = s
+            .create_sub_channel(&parent.id, "Icons", "alice", "private")
+            .expect("sub");
+        assert_eq!(sub.parent, parent.id);
+        assert!(
+            sub.members.iter().any(|m| m == "bob"),
+            "the people already in the conversation follow it without a second invite"
+        );
+        // Someone outside the parent cannot open a room inside it.
+        assert!(s
+            .create_sub_channel(&parent.id, "Nope", "mallory", "private")
+            .is_err());
+    }
+
+    #[test]
+    fn general_may_never_be_made_private() {
+        let mut s = ProjectState::default();
+        s.channels.push(super::Channel {
+            id: GENERAL_CHANNEL.to_owned(),
+            name: "general".to_owned(),
+            owner: String::new(),
+            members: Vec::new(),
+            inviters: Vec::new(),
+            created_at: String::new(),
+            kind: "general".to_owned(),
+            project: String::new(),
+            topic: String::new(),
+            parent: String::new(),
+            open_invite: false,
+        });
+        let err = s
+            .update_channel_settings(GENERAL_CHANNEL, Some("private"), None, None)
+            .expect_err("must refuse");
+        assert!(err.contains("#general"), "{err}");
+        // Its other settings still move.
+        assert!(s
+            .update_channel_settings(GENERAL_CHANNEL, None, None, Some("say hi"))
+            .is_ok());
+    }
+
+    #[test]
+    fn closing_invites_narrows_who_can_add_people() {
+        let mut s = ProjectState::default();
+        let ch = s.create_channel("Ops", "alice").expect("channel");
+        s.invite_to_channel(&ch.id, "alice", "bob").expect("invite");
+        // Closed by default: a plain member cannot bring someone in.
+        assert!(!s.channels[0].can_invite("bob"));
+        s.update_channel_settings(&ch.id, None, Some(true), None)
+            .expect("open invites");
+        assert!(
+            s.channels[0].can_invite("bob"),
+            "turning it on is what lets members invite"
+        );
+        s.update_channel_settings(&ch.id, None, Some(false), None)
+            .expect("close again");
+        let ch = &s.channels[0];
+        assert!(!ch.can_invite("bob"), "a plain member no longer can");
+        assert!(ch.can_invite("alice"), "the owner always can");
+        assert!(!ch.can_kick("bob"), "and cannot remove anyone");
+        assert!(ch.can_kick("alice"));
+    }
+
+    #[test]
+    fn the_owner_cannot_be_removed_from_their_own_channel() {
+        let mut s = ProjectState::default();
+        let ch = s.create_channel("Ops", "alice").expect("channel");
+        s.invite_to_channel(&ch.id, "alice", "bob").expect("invite");
+        assert!(s.remove_channel_member(&ch.id, "alice").is_err());
+        let after = s.remove_channel_member(&ch.id, "bob").expect("removed");
+        assert!(!after.members.iter().any(|m| m == "bob"));
     }
 }

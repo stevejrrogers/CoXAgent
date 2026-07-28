@@ -103,6 +103,8 @@ impl SystemChat {
             kind: "general".to_owned(),
             project: String::new(),
             topic: String::new(),
+            parent: String::new(),
+            open_invite: false,
         }
     }
 
@@ -124,6 +126,8 @@ impl SystemChat {
             kind: "project".to_owned(),
             project: p.id.clone(),
             topic: String::new(),
+            parent: String::new(),
+            open_invite: false,
         }
     }
 
@@ -362,6 +366,8 @@ impl SystemChat {
             kind: kind.to_owned(),
             project: String::new(),
             topic: String::new(),
+            parent: String::new(),
+            open_invite: false,
         };
         self.channels.push(ch.clone());
         Ok(ch)
@@ -416,6 +422,8 @@ impl SystemChat {
             kind: "dm".to_owned(),
             project: String::new(),
             topic: String::new(),
+            parent: String::new(),
+            open_invite: false,
         };
         self.channels.push(ch.clone());
         Ok(ch)
