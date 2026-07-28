@@ -3310,6 +3310,8 @@ function renderDiscuss(){
   // Working indicator: a "thinking…" bubble while a chat-triggered action runs.
   // Clears once new messages arrive (the agent replied/acted) or after a while.
   if(DISC_BUSY){
+    // Count growth still clears the indicator for the fire-and-forget triggers
+    // (standup, reviews); the time bound is the last resort for those.
     if(msgs.length>DISC_BUSY.count||Date.now()-DISC_BUSY.since>150000){DISC_BUSY=null;}
     else{box.innerHTML+=`<div class="cmsg"><div class="cav" style="background:color-mix(in srgb,var(--accent2) 20%,transparent);color:var(--accent2)"><i class="ti ti-loader-2 att-spin"></i></div><div class="ccol"><div class="cbub working"><i class="ti ti-loader-2 att-spin"></i> ${esc(DISC_BUSY.label)}</div></div></div>`;}
   }
@@ -3401,9 +3403,12 @@ function sendComment(){const inp=document.getElementById("disc-input");const bod
         const lbl=document.getElementById("disc-run-label");if(lbl)lbl.textContent="Agent replying…";
         setDiscBusy("The team is thinking…");
         fetch(api("/chat-reply"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({message:body})})
-          .then(async()=>{try{const s=await(await fetch(api("/state"))).json();render(s);renderDiscuss();}catch(e){}})
+          .then(async()=>{try{const s=await(await fetch(api("/state"))).json();render(s);}catch(e){}})
           .catch(()=>{})
-          .finally(()=>{if(lbl)lbl.textContent="Agent discussion";});
+          // The request settling IS the team finishing — clear on it. Waiting
+          // for the message count to grow leaves the spinner up forever when
+          // the reply lands without changing that count, or the call fails.
+          .finally(()=>{if(lbl)lbl.textContent="Agent discussion";DISC_BUSY=null;renderDiscuss();});
       }
     })
     .catch(()=>{});}
