@@ -265,6 +265,24 @@ pub fn standard_doc_folder(ticket_type: coxagent_domain::TicketType) -> &'static
     }
 }
 
+/// A live engine-infrastructure problem: expired auth, a model the provider
+/// rejected, a quota wall. These are not ticket failures and not the team's
+/// fault, but they stop everything — so they are surfaced as an open incident
+/// with the reason, the role that hit it, and when, and cleared the moment a
+/// run of that engine succeeds again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EngineIncident {
+    /// Engine id (`claude`, `opencode`).
+    pub engine: String,
+    /// The decisive line from the failure, already trimmed.
+    pub reason: String,
+    /// Role label that hit it first (`DEV-BUG`).
+    pub role: String,
+    pub since: String,
+    /// How many runs have failed this way since `since`.
+    pub hits: u32,
+}
+
 /// One agent asking another a question it must not guess the answer to.
 ///
 /// A developer who cannot tell what the requirement means, or a BA who does
@@ -784,6 +802,9 @@ pub struct ProjectState {
     /// Questions agents have asked each other (see [`AgentQuestion`]).
     #[serde(default)]
     pub questions: Vec<AgentQuestion>,
+    /// Open engine-infrastructure incidents, keyed by engine id.
+    #[serde(default)]
+    pub engine_incidents: Vec<EngineIncident>,
     /// Whether the Ops/SRE monitor currently sees the deployed app as down —
     /// tracked so it files exactly one bug per outage and can announce recovery.
     #[serde(default)]
@@ -874,6 +895,7 @@ impl Default for ProjectState {
             ticket_journal: std::collections::BTreeMap::new(),
             ticket_failures: std::collections::BTreeMap::new(),
             questions: Vec::new(),
+            engine_incidents: Vec::new(),
             ops_down: false,
             spend_today_usd: 0.0,
             spend_day: String::new(),
@@ -971,6 +993,39 @@ impl ProjectState {
         if overflow > 0 {
             log.drain(0..overflow);
         }
+    }
+
+    /// Raise or reinforce an engine incident. Repeats bump the count rather
+    /// than filling the list with the same outage a hundred times.
+    pub fn open_engine_incident(&mut self, engine: &str, role: &str, reason: &str) {
+        let reason: String = reason.trim().chars().take(300).collect();
+        if let Some(inc) = self
+            .engine_incidents
+            .iter_mut()
+            .find(|i| i.engine == engine)
+        {
+            inc.hits = inc.hits.saturating_add(1);
+            inc.reason = reason;
+            return;
+        }
+        self.engine_incidents.push(EngineIncident {
+            engine: engine.to_owned(),
+            reason,
+            role: role.to_owned(),
+            since: now_rfc3339(),
+            hits: 1,
+        });
+    }
+
+    /// Clear an engine's incident because a run just succeeded on it. Returns
+    /// the incident that was resolved, so the caller can say so out loud —
+    /// an alert nobody sees close is an alert people learn to ignore.
+    pub fn close_engine_incident(&mut self, engine: &str) -> Option<EngineIncident> {
+        let i = self
+            .engine_incidents
+            .iter()
+            .position(|i| i.engine == engine)?;
+        Some(self.engine_incidents.remove(i))
     }
 
     /// Record a question from one role to another, unless that ticket already
@@ -2003,5 +2058,32 @@ mod question_tests {
         let mut s = ProjectState::default();
         assert!(!s.ask_question("COX-B1", "DEV-BUG", "BA", "   "));
         assert!(s.questions.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod engine_incident_tests {
+    use super::ProjectState;
+
+    #[test]
+    fn an_outage_is_raised_once_counted_and_closes_with_its_history() {
+        let mut s = ProjectState::default();
+        s.open_engine_incident("claude", "DevBug", "Failed to authenticate: OAuth expired");
+        s.open_engine_incident("claude", "Test", "Failed to authenticate: OAuth expired");
+        assert_eq!(s.engine_incidents.len(), 1, "one outage, not one per run");
+        assert_eq!(s.engine_incidents[0].hits, 2);
+        assert_eq!(s.engine_incidents[0].role, "DevBug", "who hit it first");
+
+        // A second engine is its own incident.
+        s.open_engine_incident("opencode", "DevFeature", "model not found");
+        assert_eq!(s.engine_incidents.len(), 2);
+
+        let closed = s.close_engine_incident("claude").expect("was open");
+        assert_eq!(closed.hits, 2, "the caller can say how long it lasted");
+        assert!(s.engine_incidents.iter().all(|i| i.engine != "claude"));
+        assert!(
+            s.close_engine_incident("claude").is_none(),
+            "closing twice is not an event"
+        );
     }
 }
