@@ -2680,6 +2680,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             {
                 let with_pr: std::collections::BTreeSet<String> =
                     prs.iter().map(|p| p.head.clone()).collect();
+                // A branch whose PR was closed unmerged is not an orphan — it
+                // is a decision. Reopening it puts rejected work back in front
+                // of the reviewer who just rejected it, every cycle, forever.
+                let rejected: std::collections::BTreeSet<String> = forge
+                    .closed_unmerged()
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(_, head)| head)
+                    .collect();
                 let ls = std::process::Command::new("git")
                     .args(["ls-remote", "--heads", "origin"])
                     .current_dir(&self.work_dir)
@@ -2696,6 +2706,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                         (b.starts_with("feat/") || b.starts_with("fix/"))
                             && *b != target
                             && !with_pr.contains(*b)
+                            && !rejected.contains(*b)
                     })
                     .map(str::to_owned)
                     .take(2)

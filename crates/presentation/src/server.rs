@@ -9104,8 +9104,7 @@ mod pr_preview_tests {
     /// the gate must not fail a genuinely healthy preview.
     #[tokio::test(start_paused = true)]
     async fn preview_start_reports_ok_when_the_app_is_healthy() {
-        let (_bare, _work, handle) =
-            git_preview_fixture(Arc::new(HealthyDeploy), Some(8101)).await;
+        let (_bare, _work, handle) = git_preview_fixture(Arc::new(HealthyDeploy), Some(8101)).await;
         let forge: Arc<dyn ForgePort> = Arc::new(ForgeWithOpenPr("feat/preview".to_owned()));
 
         let resp = pr_preview(&handle, &forge, 1, true).await;
