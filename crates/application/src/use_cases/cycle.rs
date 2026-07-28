@@ -3236,6 +3236,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// an answer invented at the desk is worse than the guess it replaces.
     /// At most two per cycle — an answer costs a call, and a queue of them
     /// means the backlog, not the questions, is the problem.
+    #[allow(clippy::too_many_lines)] // one question, one hand-off, one answer
     async fn answer_open_questions(&self) {
         let open: Vec<crate::state::AgentQuestion> = {
             let Ok(state) = self.store.load().await else {
@@ -3263,6 +3264,22 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 (crate::prompts::SA, coxagent_domain::Role::Sa)
             };
             self.report(&q.to, &format!("answering {}", q.id));
+            // The BA that lacks the code and the SA that lacks the ticket are
+            // each one hop from someone who has it — but only one hop, or the
+            // question ping-pongs. After that, the SA answers from the code:
+            // when nobody remembers, the code is the only thing that knows.
+            let forward_rule = if q.forwarded {
+                " Nobody could answer this from memory — it already came to you from the other \
+                 role. Do NOT hand it back: read the code and answer from what it actually does."
+            } else if q.to == "BA" {
+                " If this is really a question about how the system works rather than what the \
+                 business wants, hand it over: reply with exactly `ASK SA: <question>` and \
+                 nothing else."
+            } else {
+                " If this is really a question about what the business wants rather than how the \
+                 system works, hand it over: reply with exactly `ASK BA: <question>` and nothing \
+                 else."
+            };
             let subject = ticket.map_or_else(
                 || q.body.clone(),
                 |t| format!("{} {} {}", t.title(), t.description(), q.body),
@@ -3271,8 +3288,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 "{} asked you about {}:\n\n\"{}\"\n\nAnswer it so the work can continue. Ground \
                  every claim in this repository — read the code and the pages below, name the \
                  files and identifiers you relied on, and if the honest answer is \"the product \
-                 does not do this yet\", say that. Under 900 characters, plain text, no preamble. \
-                 Do not restate the question and do not ask one back.{}{}{}",
+                 does not do this yet\", say that. Under 900 characters, plain text, no \
+                 preamble.\n\nAn answer that leaves the asker still deciding is not an answer. \
+                 END with one line, exactly:\n`ACTION: <what they should do now>` — the concrete \
+                 next step, not a restatement.{forward_rule}{}{}{}",
                 q.from,
                 if q.ticket.is_empty() {
                     "the product".to_owned()
@@ -3305,9 +3324,56 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 Ok(o) if o.succeeded() => o.stdout.trim().to_owned(),
                 _ => continue,
             };
+            // A hand-off, not an answer: re-target the question and let the
+            // other role take it next pass.
+            if let Some((to, forwarded_q)) = crate::use_cases::run_dev::parse_ask(&answer) {
+                let (id, from_role) = (q.id.clone(), q.to.clone());
+                let tkt = q.ticket.clone();
+                let moved = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+                    if s.forward_question(&id, &to) {
+                        let msg = format!("↪️ {from_role} → {to}: {forwarded_q}");
+                        s.post_comment(&from_role, &msg, (!tkt.is_empty()).then(|| tkt.clone()));
+                    }
+                    Ok(())
+                })
+                .await;
+                if moved.is_ok() {
+                    continue;
+                }
+            }
             if answer.len() < 30 {
                 continue; // nothing usable; it stays open for the next cycle
             }
+            // A discussion that ends without a decision leaves the asker
+            // exactly where it started. Ask once for the missing decision —
+            // but keep the answer either way: an answer without a label still
+            // unblocks the work, and losing it to a formatting rule would be
+            // the rigid choice.
+            let answer = if answer.to_uppercase().contains("ACTION:") {
+                answer
+            } else {
+                match self
+                    .engine
+                    .run(crate::ports::outbound::AgentRequest {
+                        role,
+                        system_prompt: crate::prompts::system_prompt(persona),
+                        task_prompt: format!(
+                            "Your answer below has no decision in it. Repeat it unchanged, then \
+                             add a final line `ACTION: <the concrete next step for {}>`.\n\n{answer}",
+                            q.from
+                        ),
+                        work_dir: self.work_dir.clone(),
+                        timeout: std::time::Duration::from_secs(600),
+                        escalation_level: 0,
+                    })
+                    .await
+                {
+                    Ok(o) if o.succeeded() && o.stdout.to_uppercase().contains("ACTION:") => {
+                        o.stdout.trim().to_owned()
+                    }
+                    _ => answer,
+                }
+            };
             let (id, to, from) = (q.id.clone(), q.to.clone(), q.from.clone());
             let tkt = q.ticket.clone();
             let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {

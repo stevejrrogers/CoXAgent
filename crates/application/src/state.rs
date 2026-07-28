@@ -290,6 +290,10 @@ pub struct AgentQuestion {
     pub asked_at: String,
     #[serde(default)]
     pub answered_at: String,
+    /// Whether this question has already been handed to the other role once.
+    /// A second forward would be two roles passing it back and forth.
+    #[serde(default)]
+    pub forwarded: bool,
 }
 
 impl AgentQuestion {
@@ -993,6 +997,7 @@ impl ProjectState {
             answer: String::new(),
             asked_at: now_rfc3339(),
             answered_at: String::new(),
+            forwarded: false,
         });
         // Keep the log bounded; answered questions age out before open ones.
         while self.questions.len() > 40 {
@@ -1011,6 +1016,21 @@ impl ProjectState {
         self.questions
             .iter()
             .find(|q| q.ticket == ticket && q.is_open())
+    }
+
+    /// Hand a question to the other role, once. The BA that lacks the code and
+    /// the SA that lacks the ticket are each one hop from someone who has it;
+    /// a second hop is a loop, so this refuses it.
+    pub fn forward_question(&mut self, id: &str, to: &str) -> bool {
+        let Some(q) = self.questions.iter_mut().find(|q| q.id == id) else {
+            return false;
+        };
+        if q.forwarded || q.to == to || !q.is_open() {
+            return false;
+        }
+        to.clone_into(&mut q.to);
+        q.forwarded = true;
+        true
     }
 
     /// Attach an answer to a question. Returns whether it landed.
@@ -1954,6 +1974,28 @@ mod question_tests {
         assert_eq!(answered[0].answer, "soft-delete: the row stays, hidden");
         // Asking again is allowed once the first is answered.
         assert!(s.ask_question("COX-B1", "DEV-BUG", "BA", "and what about purge?"));
+    }
+
+    #[test]
+    fn a_question_may_be_handed_over_once_then_must_be_answered() {
+        let mut s = ProjectState::default();
+        assert!(s.ask_question("COX-B1", "DEV-BUG", "BA", "is archive a soft delete?"));
+        let id = s.open_question("COX-B1").expect("open").id.clone();
+        // The BA reads it as a systems question and hands it to the SA.
+        assert!(s.forward_question(&id, "SA"));
+        assert_eq!(s.open_question("COX-B1").expect("open").to, "SA");
+        // A second hand-off would be the two roles passing it back and forth.
+        assert!(
+            !s.forward_question(&id, "BA"),
+            "one hop only — after that someone has to read the code and answer"
+        );
+        // Handing it to the role that already holds it is not a hand-off.
+        assert!(!s.forward_question(&id, "SA"));
+        assert!(s.answer_question(&id, "soft delete; rows stay, hidden by a flag"));
+        assert!(
+            !s.forward_question(&id, "BA"),
+            "answered questions do not move"
+        );
     }
 
     #[test]
