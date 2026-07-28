@@ -332,7 +332,16 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunDocsAuditUseCas
             let request = AgentRequest {
                 role: Role::Docs,
                 system_prompt: crate::prompts::system_prompt(crate::prompts::DOCS),
-                task_prompt: format!("Document ticket {id}: {title}"),
+                // One prompt for both routes into the wiki: this path used to
+                // ask for "documentation" with no shape at all, and got 300
+                // characters back.
+                task_prompt: crate::use_cases::run_docs::build_docs_prompt(
+                    id,
+                    title,
+                    crate::state::standard_doc_folder(*ttype),
+                    &[],
+                    None,
+                ),
                 work_dir: self.work_dir.clone(),
                 timeout: Duration::from_secs(900),
                 escalation_level: 0,
@@ -341,7 +350,16 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunDocsAuditUseCas
                 Ok(o) if o.succeeded() => o.stdout.trim().to_owned(),
                 _ => continue,
             };
-            if body.len() < 200 {
+            // The same structure gate the per-ticket writer enforces. Without
+            // it this path filled the wiki with 300-character stubs hours after
+            // the gate shipped — pages the next agent cannot navigate and the
+            // refresher then has to rewrite one per idle cycle.
+            if let Some(missing) =
+                crate::use_cases::run_docs::docs_gate_failures(&body, &self.work_dir)
+            {
+                tracing::warn!(
+                    "docs review: page for {id} rejected by the structure gate: {missing}"
+                );
                 continue;
             }
             let folder = crate::state::standard_doc_folder(*ttype);
