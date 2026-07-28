@@ -5110,6 +5110,47 @@ async fn git_pv(dir: &std::path::Path, args: &[&str]) -> Result<(), String> {
     }
 }
 
+/// Parse `deploy.host_port` out of a project's raw `coxagent.json` for the
+/// preview health-gate probe. A missing/unreadable file, unparseable JSON, a
+/// missing `host_port` key, or an explicit `null` all mean "nothing
+/// configured" — same contract as `Option<u16>` and
+/// `verify_deploy_health`'s no-port pass. Any other JSON value that isn't a
+/// valid non-negative `u16` (negative, float, string, bool, out of range) is
+/// a corrupt config and must fail the gate rather than being folded into
+/// "nothing configured" (COX-B025/COX-B026) — `serde_json::Value::as_u64`
+/// returns `None` for all of those just as it does for a genuinely absent
+/// field, so the raw JSON value must be inspected instead of going through
+/// `as_u64` first.
+fn parse_preview_host_port(raw_config: &str) -> Result<Option<u16>, ()> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw_config) else {
+        return Ok(None);
+    };
+    match value.get("deploy").and_then(|d| d.get("host_port")) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(v) => v
+            .as_u64()
+            .and_then(|n| u16::try_from(n).ok())
+            .map(Some)
+            .ok_or(()),
+    }
+}
+
+/// Run the mandatory post-deploy health gate (COX-B004/COX-B009) for a probe
+/// port that may be invalid (COX-B025/COX-B026): a corrupt `host_port` fails
+/// the gate outright rather than being treated as "nothing configured",
+/// which would pass unconditionally and report a dead app as LIVE.
+async fn run_preview_health_gate(
+    deploy: &Arc<dyn coxagent_application::ports::outbound::DeployPort>,
+    probe_port: Result<Option<u16>, ()>,
+) -> bool {
+    match probe_port {
+        Ok(port) => {
+            coxagent_application::ports::outbound::verify_deploy_health(deploy, port).await
+        }
+        Err(()) => false,
+    }
+}
+
 /// Deploy a PR's branch so the human can SEE the change running before
 /// approving (start=true), or tear the preview down and restore main
 /// (start=false). The preview runs on the project's app port — one app at a
@@ -5129,11 +5170,14 @@ async fn pr_preview(
         .unwrap_or(&p.config_path)
         .to_path_buf();
     let prev_dir = root.join(".preview").join(num.to_string());
-    // The project's published app port, for the "open it" link.
-    let port = std::fs::read_to_string(&p.config_path)
+    // The project's published app port, for the "open it" link and the
+    // mandatory post-deploy health probe. `probe_port` distinguishes "no
+    // port configured" (pass, nothing to probe) from "host_port present but
+    // invalid" (fail the gate — see `parse_preview_host_port`).
+    let probe_port = std::fs::read_to_string(&p.config_path)
         .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| v["deploy"]["host_port"].as_u64());
+        .map_or(Ok(None), |s| parse_preview_host_port(&s));
+    let port = probe_port.unwrap_or_default();
     let chat = |msg: String| {
         let store = Arc::clone(&p.store);
         async move {
@@ -5188,14 +5232,7 @@ async fn pr_preview(
             // Mandatory health gate (COX-B004/COX-B009): a compose exit-0
             // only proves the containers started, not that the app inside
             // bound its port — probe before telling the human it's LIVE.
-            Ok(r)
-                if r.success
-                    && coxagent_application::ports::outbound::verify_deploy_health(
-                        deploy,
-                        port.map(|pt| pt as u16),
-                    )
-                    .await =>
-            {
+            Ok(r) if r.success && run_preview_health_gate(deploy, probe_port).await => {
                 let url = port.map(|pt| format!("http://localhost:{pt}"));
                 chat(format!(
                     "👁 Preview of PR #{num} is LIVE{} — the main build is paused; restore it from the Review tab when done.",
@@ -5218,14 +5255,7 @@ async fn pr_preview(
         match deploy.deploy(&p.work_dir).await {
             // Same gate on restore: a "restore" that never comes back up on
             // the port must not be reported as a clean restore.
-            Ok(r)
-                if r.success
-                    && coxagent_application::ports::outbound::verify_deploy_health(
-                        deploy,
-                        port.map(|pt| pt as u16),
-                    )
-                    .await =>
-            {
+            Ok(r) if r.success && run_preview_health_gate(deploy, probe_port).await => {
                 chat(format!(
                     "↩️ Preview of PR #{num} stopped — main build restored."
                 ))
@@ -8911,12 +8941,21 @@ mod pr_preview_tests {
         }
     }
 
-    /// A project workspace with a `coxagent.json` naming the published
-    /// `deploy.host_port` `pr_preview` reads to probe health.
-    fn project_handle(deploy: Arc<dyn DeployPort>) -> (tempfile::TempDir, ProjectHandle) {
+    /// A project workspace with a `coxagent.json` whose `deploy.host_port`
+    /// is the given raw JSON literal (e.g. `"8101"`, `"-1"`, `"\"8101\""`,
+    /// `"true"`) — lets tests exercise `parse_preview_host_port` against
+    /// values that aren't valid `u16`s, not just a well-formed port.
+    fn project_handle_with_raw_host_port(
+        deploy: Arc<dyn DeployPort>,
+        raw_host_port: &str,
+    ) -> (tempfile::TempDir, ProjectHandle) {
         let dir = tempfile::tempdir().expect("tempdir");
         let config_path = dir.path().join("coxagent.json");
-        std::fs::write(&config_path, r#"{"deploy":{"host_port":8101}}"#).expect("write config");
+        std::fs::write(
+            &config_path,
+            format!(r#"{{"deploy":{{"host_port":{raw_host_port}}}}}"#),
+        )
+        .expect("write config");
         let handle = ProjectHandle {
             id: "proj".to_owned(),
             name: "proj".to_owned(),
@@ -8932,6 +8971,12 @@ mod pr_preview_tests {
             deploy: Some(deploy),
         };
         (dir, handle)
+    }
+
+    /// A project workspace with a `coxagent.json` naming the published
+    /// `deploy.host_port` `pr_preview` reads to probe health.
+    fn project_handle(deploy: Arc<dyn DeployPort>) -> (tempfile::TempDir, ProjectHandle) {
+        project_handle_with_raw_host_port(deploy, "8101")
     }
 
     /// AC (COX-B009): restoring the main build after a PR preview must run
@@ -9126,5 +9171,86 @@ mod pr_preview_tests {
         let resp = pr_preview(&handle, &forge, 1, true).await;
 
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// AC (COX-B026): an explicit JSON `null` is the same as an absent
+    /// `host_port` key — nothing configured, nothing to probe — matching
+    /// `Option<u16>`'s own deserialization contract. Uses a deploy adapter
+    /// that would fail any real probe, so a false pass here would mean the
+    /// gate is probing a port that was never configured.
+    #[tokio::test(start_paused = true)]
+    async fn an_explicit_null_host_port_leaves_the_gate_nothing_to_probe() {
+        let (_dir, handle) =
+            project_handle_with_raw_host_port(Arc::new(DeployWithDeadPort), "null");
+        let forge: Arc<dyn ForgePort> = Arc::new(UnusedForge);
+
+        let resp = pr_preview(&handle, &forge, 1, false).await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// AC (COX-B026): `serde_json::Value::as_u64` returns `None` for a
+    /// negative `host_port` — the same `None` it returns for a genuinely
+    /// absent field. Without inspecting the raw JSON value first, that
+    /// collapse would let a negative port silently skip the gate exactly
+    /// like COX-B025's out-of-range positive case did before its fix.
+    #[tokio::test(start_paused = true)]
+    async fn a_negative_host_port_is_rejected_rather_than_skipping_the_gate() {
+        let (_dir, handle) = project_handle_with_raw_host_port(Arc::new(HealthyDeploy), "-1");
+        let forge: Arc<dyn ForgePort> = Arc::new(UnusedForge);
+
+        let resp = pr_preview(&handle, &forge, 1, false).await;
+
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    /// AC (COX-B026): a float `host_port` is not a valid TCP port either —
+    /// `as_u64` returns `None` for it same as for a negative number or an
+    /// absent field.
+    #[tokio::test(start_paused = true)]
+    async fn a_float_host_port_is_rejected_rather_than_skipping_the_gate() {
+        let (_dir, handle) = project_handle_with_raw_host_port(Arc::new(HealthyDeploy), "8101.5");
+        let forge: Arc<dyn ForgePort> = Arc::new(UnusedForge);
+
+        let resp = pr_preview(&handle, &forge, 1, false).await;
+
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    /// AC (COX-B026): a quoted-string `host_port` (e.g. from a hand-edited
+    /// config) must fail the gate rather than be treated as unset.
+    #[tokio::test(start_paused = true)]
+    async fn a_string_host_port_is_rejected_rather_than_skipping_the_gate() {
+        let (_dir, handle) =
+            project_handle_with_raw_host_port(Arc::new(HealthyDeploy), "\"8101\"");
+        let forge: Arc<dyn ForgePort> = Arc::new(UnusedForge);
+
+        let resp = pr_preview(&handle, &forge, 1, false).await;
+
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    /// AC (COX-B026): a boolean `host_port` must fail the gate rather than
+    /// be treated as unset.
+    #[tokio::test(start_paused = true)]
+    async fn a_boolean_host_port_is_rejected_rather_than_skipping_the_gate() {
+        let (_dir, handle) = project_handle_with_raw_host_port(Arc::new(HealthyDeploy), "true");
+        let forge: Arc<dyn ForgePort> = Arc::new(UnusedForge);
+
+        let resp = pr_preview(&handle, &forge, 1, false).await;
+
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    /// AC (COX-B025 regression guard): an out-of-`u16`-range positive
+    /// `host_port` must still fail the gate, not silently skip it.
+    #[tokio::test(start_paused = true)]
+    async fn an_out_of_range_host_port_is_rejected_rather_than_skipping_the_gate() {
+        let (_dir, handle) = project_handle_with_raw_host_port(Arc::new(HealthyDeploy), "70000");
+        let forge: Arc<dyn ForgePort> = Arc::new(UnusedForge);
+
+        let resp = pr_preview(&handle, &forge, 1, false).await;
+
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }
