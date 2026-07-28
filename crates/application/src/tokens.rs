@@ -108,8 +108,21 @@ const GIT_EXACT_SUBCOMMANDS: &[&str] = &[
 ];
 
 /// Global `git` flags that take a separate value argument (e.g. `-C /repo`)
-/// — skipped, along with their value, when hunting for the subcommand.
-const GIT_GLOBAL_VALUE_FLAGS: &[&str] = &["-C", "-c", "--git-dir", "--work-tree", "--namespace"];
+/// — skipped, along with their value, when hunting for the subcommand. A flag
+/// missing from this list makes its *value* look like the subcommand, so the
+/// real one is never matched and content output falls back to being compressed
+/// — the corruption this module exists to prevent. The attached spellings
+/// (`--git-dir=…`, `-C.`) need no entry: they are a single argv token and the
+/// `starts_with('-')` skip already covers them.
+const GIT_GLOBAL_VALUE_FLAGS: &[&str] = &[
+    "-C",
+    "-c",
+    "--git-dir",
+    "--work-tree",
+    "--namespace",
+    "--super-prefix",
+    "--config-env",
+];
 
 /// True when `git <args>` invokes a content-retrieval subcommand whose
 /// output must reach the caller byte-exact — never dedupe/clip these,
@@ -205,6 +218,42 @@ mod tests {
     fn git_needs_exact_output_ignores_leading_global_flags() {
         let args = |s: &str| s.split(' ').map(str::to_owned).collect::<Vec<_>>();
         assert!(git_needs_exact_output(&args("-C /repo show HEAD")));
+        assert!(git_needs_exact_output(&args("-c core.pager=cat show HEAD")));
+        assert!(git_needs_exact_output(&args(
+            "--git-dir /repo/.git diff HEAD"
+        )));
+        assert!(git_needs_exact_output(&args(
+            "--work-tree /repo diff-files"
+        )));
+        assert!(git_needs_exact_output(&args("--namespace ns log -p")));
+        // COX-B015: these two take their value the same way. While they were
+        // missing from the list the value was read as the subcommand, nothing
+        // in `GIT_EXACT_SUBCOMMANDS` matched, and the content output of
+        // `git --super-prefix sub/ show HEAD:file` was compressed after all.
+        assert!(git_needs_exact_output(&args(
+            "--super-prefix sub/ show HEAD"
+        )));
+        assert!(git_needs_exact_output(&args(
+            "--config-env core.pager=PAGER_ENV cat-file -p abc123"
+        )));
+        // The attached spellings are a single argv token — no value to skip.
+        assert!(git_needs_exact_output(&args(
+            "--git-dir=/repo/.git show HEAD"
+        )));
+        assert!(git_needs_exact_output(&args(
+            "--super-prefix=sub/ diff HEAD"
+        )));
+    }
+
+    #[test]
+    fn git_needs_exact_output_still_false_past_a_global_flag_for_porcelain() {
+        // AC5: skipping global flags must not turn every flagged invocation
+        // exact — porcelain past a global flag still earns its compression.
+        let args = |s: &str| s.split(' ').map(str::to_owned).collect::<Vec<_>>();
+        assert!(!git_needs_exact_output(&args("--super-prefix sub/ status")));
+        assert!(!git_needs_exact_output(&args(
+            "--config-env core.pager=P rev-parse HEAD"
+        )));
     }
 
     #[test]

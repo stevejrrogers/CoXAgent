@@ -343,6 +343,51 @@ fn the_real_shim_leaves_every_content_subcommand_native() {
     }
 }
 
+/// COX-B015 (AC1, "byte-identical at any size"): a global flag whose value is
+/// a separate argv token must be skipped *with* its value when the subcommand
+/// is located. `--super-prefix` and `--config-env` were missing from that list,
+/// so their value (`sub/`, `core.pager=…`) was read as the subcommand, nothing
+/// matched, and `git --super-prefix sub/ show HEAD:file` fell back down the
+/// merge-and-compress path — the exact corruption this ticket closes, reached
+/// through a different argv. Fails on pre-fix code.
+#[test]
+fn a_separate_value_global_flag_does_not_hide_the_content_subcommand() {
+    let sh = Shimmed::new();
+    for args in [
+        vec!["--super-prefix", "sub/", "show", "HEAD:big.rs"],
+        vec![
+            "--config-env",
+            "core.pager=COX_PAGER",
+            "cat-file",
+            "-p",
+            "abc123",
+        ],
+    ] {
+        let out = sh.run(&args);
+        let label = format!("git {}", args.join(" "));
+        assert_byte_exact(&format!("{label} stdout"), &fake_stdout(), &out.stdout);
+        assert_byte_exact(&format!("{label} stderr"), &fake_stderr(), &out.stderr);
+        assert_eq!(out.status.code(), Some(FAKE_EXIT), "{label}: exit code");
+    }
+}
+
+/// The same argv shape must not drag *porcelain* out of compression (AC5):
+/// skipping a global flag's value locates the real subcommand, it does not
+/// make every flagged invocation exact.
+#[test]
+fn a_separate_value_global_flag_still_compresses_porcelain() {
+    let sh = Shimmed::new();
+
+    let out = sh.run(&["--super-prefix", "sub/", "status"]);
+
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("output compressed") && text.contains(&format!("(×{FAKE_LINES})")),
+        "`git --super-prefix sub/ status` lost its compression: {text:.200}"
+    );
+    assert_eq!(out.status.code(), Some(FAKE_EXIT));
+}
+
 /// The other half of the fix (AC5): a non-content subcommand still gets the
 /// full token saving — same merge, same compression, same exit code as before.
 #[test]
