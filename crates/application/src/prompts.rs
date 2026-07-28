@@ -522,6 +522,49 @@ pub fn test_surface_block(work_dir: &std::path::Path) -> String {
     out.chars().take(1600).collect()
 }
 
+/// The instruction that lets an agent ask instead of guess, plus any answer it
+/// already has. Modelled on how the work actually gets done between people: a
+/// developer who cannot tell what the requirement means asks the BA; a BA who
+/// does not know what the product already does asks the SA to read the code and
+/// report back. Guessing is the expensive option — it fails a gate three
+/// attempts later, having taught nobody anything.
+#[must_use]
+pub fn ask_protocol_block(state: &crate::state::ProjectState, ticket: &str, ask: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let answered = state.answered_questions(ticket);
+    if !answered.is_empty() {
+        out.push_str("\n\nANSWERS to what you asked earlier — treat these as the requirement:\n");
+        for q in answered.iter().rev().take(3) {
+            let _ = writeln!(
+                out,
+                "- You asked {}: {}\n  {} replied: {}",
+                q.to, q.body, q.to, q.answer
+            );
+        }
+    }
+    if let Some(open) = state.open_question(ticket) {
+        // Do not let it ask twice into the void.
+        let _ = write!(
+            out,
+            "\n\nYou already asked {} \"{}\" and no answer has come back yet. Do NOT ask again: \
+             make the smallest safe progress you can, or stop and say what is blocked.",
+            open.to, open.body
+        );
+        return out;
+    }
+    let _ = write!(
+        out,
+        "\n\nIF YOU WOULD HAVE TO GUESS — about what the requirement means, or about what the \
+         system already does — do not guess. End your output with ONE line, exactly:\n\
+         `ASK {ask}: <your question>`\n\
+         Ask only when the answer would change what you build, make it specific and answerable, \
+         and ask at most one question. Anything you can settle by reading the code or the docs \
+         yourself is not a question — settle it."
+    );
+    out
+}
+
 /// Everything the organisation has already written down about a subject: the
 /// team's own wiki, the repo's docs, and closed tickets with the same symptom.
 ///

@@ -265,6 +265,41 @@ pub fn standard_doc_folder(ticket_type: coxagent_domain::TicketType) -> &'static
     }
 }
 
+/// One agent asking another a question it must not guess the answer to.
+///
+/// A developer who cannot tell what the requirement means, or a BA who does
+/// not know what the product already does, has exactly one correct move: ask
+/// the person who knows. Without this the only options were to guess and fail
+/// a gate, or stall — which is how a ticket burned three attempts on the same
+/// misunderstanding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentQuestion {
+    /// Stable id (`<ticket>#<n>` or `open#<n>` when not about one ticket).
+    pub id: String,
+    /// Ticket the question is about; empty for a product-level question.
+    pub ticket: String,
+    /// Role label that asked (`DEV-BUG`, `BA`).
+    pub from: String,
+    /// Role label expected to answer (`BA`, `SA`).
+    pub to: String,
+    /// The question, as asked.
+    pub body: String,
+    /// The answer; empty while unanswered.
+    #[serde(default)]
+    pub answer: String,
+    pub asked_at: String,
+    #[serde(default)]
+    pub answered_at: String,
+}
+
+impl AgentQuestion {
+    /// Whether this question is still waiting for an answer.
+    #[must_use]
+    pub fn is_open(&self) -> bool {
+        self.answer.trim().is_empty()
+    }
+}
+
 /// Which wiki space a ticket's page belongs in. The ticket TYPE alone gets
 /// this wrong: an infrastructure feature (sandboxing, a deploy gate) is a
 /// Feature ticket and would file under Product, which is how a product space
@@ -742,6 +777,9 @@ pub struct ProjectState {
     /// state written before this existed still loads.
     #[serde(default)]
     pub ticket_failures: std::collections::BTreeMap<String, Vec<AttemptFailure>>,
+    /// Questions agents have asked each other (see [`AgentQuestion`]).
+    #[serde(default)]
+    pub questions: Vec<AgentQuestion>,
     /// Whether the Ops/SRE monitor currently sees the deployed app as down —
     /// tracked so it files exactly one bug per outage and can announce recovery.
     #[serde(default)]
@@ -831,6 +869,7 @@ impl Default for ProjectState {
             ticket_fail_attempts: std::collections::BTreeMap::new(),
             ticket_journal: std::collections::BTreeMap::new(),
             ticket_failures: std::collections::BTreeMap::new(),
+            questions: Vec::new(),
             ops_down: false,
             spend_today_usd: 0.0,
             spend_day: String::new(),
@@ -928,6 +967,73 @@ impl ProjectState {
         if overflow > 0 {
             log.drain(0..overflow);
         }
+    }
+
+    /// Record a question from one role to another, unless that ticket already
+    /// has one open — a second unanswered question means the first was not the
+    /// blocker, and two of them just queue cost.
+    pub fn ask_question(&mut self, ticket: &str, from: &str, to: &str, body: &str) -> bool {
+        let body = body.trim();
+        if body.is_empty() || self.open_question(ticket).is_some() {
+            return false;
+        }
+        let key = if ticket.is_empty() { "open" } else { ticket };
+        let n = self
+            .questions
+            .iter()
+            .filter(|q| q.ticket == ticket)
+            .count()
+            .saturating_add(1);
+        self.questions.push(AgentQuestion {
+            id: format!("{key}#{n}"),
+            ticket: ticket.to_owned(),
+            from: from.to_owned(),
+            to: to.to_owned(),
+            body: body.chars().take(600).collect(),
+            answer: String::new(),
+            asked_at: now_rfc3339(),
+            answered_at: String::new(),
+        });
+        // Keep the log bounded; answered questions age out before open ones.
+        while self.questions.len() > 40 {
+            if let Some(i) = self.questions.iter().position(|q| !q.is_open()) {
+                self.questions.remove(i);
+            } else {
+                self.questions.remove(0);
+            }
+        }
+        true
+    }
+
+    /// The open question for `ticket`, if any.
+    #[must_use]
+    pub fn open_question(&self, ticket: &str) -> Option<&AgentQuestion> {
+        self.questions
+            .iter()
+            .find(|q| q.ticket == ticket && q.is_open())
+    }
+
+    /// Attach an answer to a question. Returns whether it landed.
+    pub fn answer_question(&mut self, id: &str, answer: &str) -> bool {
+        let answer = answer.trim();
+        if answer.is_empty() {
+            return false;
+        }
+        let Some(q) = self.questions.iter_mut().find(|q| q.id == id) else {
+            return false;
+        };
+        q.answer = answer.chars().take(1500).collect();
+        q.answered_at = now_rfc3339();
+        true
+    }
+
+    /// Answered questions about `ticket`, newest last.
+    #[must_use]
+    pub fn answered_questions(&self, ticket: &str) -> Vec<&AgentQuestion> {
+        self.questions
+            .iter()
+            .filter(|q| q.ticket == ticket && !q.is_open())
+            .collect()
     }
 
     /// Structured failures recorded for `ticket`, oldest first.
@@ -1814,5 +1920,46 @@ mod attempt_failure_tests {
             .remove("ticket_failures");
         let back: ProjectState = serde_json::from_value(doc).expect("load legacy state");
         assert!(back.ticket_failures.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod question_tests {
+    use super::ProjectState;
+
+    #[test]
+    fn one_open_question_per_ticket_and_answers_are_readable_back() {
+        let mut s = ProjectState::default();
+        assert!(s.ask_question("COX-B1", "DEV-BUG", "BA", "what does archive mean?"));
+        // A second unanswered question means the first was not the blocker.
+        assert!(
+            !s.ask_question("COX-B1", "DEV-BUG", "BA", "and what about purge?"),
+            "a ticket may hold only one open question"
+        );
+        // A different ticket is unaffected.
+        assert!(s.ask_question("COX-B2", "BA", "SA", "does the product already export?"));
+        let open = s.open_question("COX-B1").expect("open");
+        assert_eq!((open.from.as_str(), open.to.as_str()), ("DEV-BUG", "BA"));
+        assert!(s.answered_questions("COX-B1").is_empty());
+
+        let id = open.id.clone();
+        assert!(s.answer_question(&id, "  soft-delete: the row stays, hidden  "));
+        assert!(
+            !s.answer_question(&id, "   "),
+            "a blank answer is no answer"
+        );
+        assert!(s.open_question("COX-B1").is_none(), "no longer waiting");
+        let answered = s.answered_questions("COX-B1");
+        assert_eq!(answered.len(), 1);
+        assert_eq!(answered[0].answer, "soft-delete: the row stays, hidden");
+        // Asking again is allowed once the first is answered.
+        assert!(s.ask_question("COX-B1", "DEV-BUG", "BA", "and what about purge?"));
+    }
+
+    #[test]
+    fn empty_questions_are_not_recorded() {
+        let mut s = ProjectState::default();
+        assert!(!s.ask_question("COX-B1", "DEV-BUG", "BA", "   "));
+        assert!(s.questions.is_empty());
     }
 }
