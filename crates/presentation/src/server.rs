@@ -9014,6 +9014,7 @@ mod pr_preview_tests {
     /// path shells out to `git fetch`/`git worktree add`.
     async fn git_preview_fixture(
         deploy: Arc<dyn DeployPort>,
+        host_port: Option<u64>,
     ) -> (tempfile::TempDir, tempfile::TempDir, ProjectHandle) {
         let bare = tempfile::tempdir().expect("tempdir");
         git_pv(bare.path(), &["init", "--bare", "-q"])
@@ -9055,7 +9056,11 @@ mod pr_preview_tests {
             .await
             .expect("git clone");
         let config_path = work.path().join("coxagent.json");
-        std::fs::write(&config_path, r#"{"deploy":{"host_port":8101}}"#).expect("write config");
+        let config = match host_port {
+            Some(port) => format!(r#"{{"deploy":{{"host_port":{port}}}}}"#),
+            None => r#"{"deploy":{}}"#.to_owned(),
+        };
+        std::fs::write(&config_path, config).expect("write config");
         let handle = ProjectHandle {
             id: "proj".to_owned(),
             name: "proj".to_owned(),
@@ -9078,7 +9083,8 @@ mod pr_preview_tests {
     /// never binds the app's port must NOT be reported as a LIVE preview.
     #[tokio::test(start_paused = true)]
     async fn preview_start_reports_failure_when_the_app_never_binds_its_port() {
-        let (_bare, _work, handle) = git_preview_fixture(Arc::new(DeployWithDeadPort)).await;
+        let (_bare, _work, handle) =
+            git_preview_fixture(Arc::new(DeployWithDeadPort), Some(8101)).await;
         let forge: Arc<dyn ForgePort> = Arc::new(ForgeWithOpenPr("feat/preview".to_owned()));
 
         let resp = pr_preview(&handle, &forge, 1, true).await;
@@ -9098,7 +9104,24 @@ mod pr_preview_tests {
     /// the gate must not fail a genuinely healthy preview.
     #[tokio::test(start_paused = true)]
     async fn preview_start_reports_ok_when_the_app_is_healthy() {
-        let (_bare, _work, handle) = git_preview_fixture(Arc::new(HealthyDeploy)).await;
+        let (_bare, _work, handle) =
+            git_preview_fixture(Arc::new(HealthyDeploy), Some(8101)).await;
+        let forge: Arc<dyn ForgePort> = Arc::new(ForgeWithOpenPr("feat/preview".to_owned()));
+
+        let resp = pr_preview(&handle, &forge, 1, true).await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// AC (COX-B009): a project with no configured `deploy.host_port` has
+    /// nothing for the gate to probe — same contract as
+    /// `verify_deploy_health`'s own `no_configured_host_port_passes_without_probing`
+    /// unit test, exercised here through the actual preview endpoint. Uses a
+    /// deploy adapter that would fail any real probe, so a false pass here
+    /// would mean the gate is probing a port that was never configured.
+    #[tokio::test(start_paused = true)]
+    async fn an_unset_host_port_leaves_the_gate_nothing_to_probe() {
+        let (_bare, _work, handle) = git_preview_fixture(Arc::new(DeployWithDeadPort), None).await;
         let forge: Arc<dyn ForgePort> = Arc::new(ForgeWithOpenPr("feat/preview".to_owned()));
 
         let resp = pr_preview(&handle, &forge, 1, true).await;
