@@ -5259,9 +5259,7 @@ async fn run_preview_health_gate(
     probe_port: Result<Option<u16>, ()>,
 ) -> bool {
     match probe_port {
-        Ok(port) => {
-            coxagent_application::ports::outbound::verify_deploy_health(deploy, port).await
-        }
+        Ok(port) => coxagent_application::ports::outbound::verify_deploy_health(deploy, port).await,
         Err(()) => false,
     }
 }
@@ -9336,8 +9334,7 @@ mod pr_preview_tests {
     /// config) must fail the gate rather than be treated as unset.
     #[tokio::test(start_paused = true)]
     async fn a_string_host_port_is_rejected_rather_than_skipping_the_gate() {
-        let (_dir, handle) =
-            project_handle_with_raw_host_port(Arc::new(HealthyDeploy), "\"8101\"");
+        let (_dir, handle) = project_handle_with_raw_host_port(Arc::new(HealthyDeploy), "\"8101\"");
         let forge: Arc<dyn ForgePort> = Arc::new(UnusedForge);
 
         let resp = pr_preview(&handle, &forge, 1, false).await;

@@ -488,6 +488,32 @@
   .doc-cat-tag.technical{background:color-mix(in srgb,var(--purple) 18%,transparent);color:var(--purple)}
   .doc-cat-tag.flows{background:color-mix(in srgb,var(--amber) 18%,transparent);color:var(--amber)}
   .doc-cat-tag.general{background:color-mix(in srgb,var(--muted) 20%,transparent);color:var(--muted)}
+  /* Modal switch — public/private and friends. */
+  .coxmodal-toggle{display:flex;align-items:center;gap:10px;margin:12px 0 2px;font-size:13px;color:var(--text);cursor:pointer;user-select:none}
+  .coxmodal-toggle input{position:absolute;opacity:0;width:0;height:0}
+  .cmsw{width:38px;height:22px;border-radius:999px;background:var(--card2);border:1px solid var(--border2);position:relative;flex-shrink:0;transition:background .15s,border-color .15s}
+  .cmsw::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:var(--muted);transition:transform .15s,background .15s}
+  .coxmodal-toggle input:checked + .cmsw{background:color-mix(in srgb,var(--accent) 30%,transparent);border-color:var(--accent)}
+  .coxmodal-toggle input:checked + .cmsw::after{transform:translateX(16px);background:var(--accent)}
+  /* Chat search — first thing in the rail. */
+  .chatsearch{display:flex;align-items:center;gap:8px;margin:10px 10px 6px;padding:8px 10px;border-radius:10px;cursor:pointer;
+    background:var(--card2);border:1px solid var(--border2);color:var(--muted);font-size:12.5px;transition:border-color .15s,color .15s}
+  .chatsearch:hover{border-color:var(--accent);color:var(--text)}
+  .chatsearch i{font-size:15px}
+  .chatsearch kbd{margin-left:auto;font-size:10px;padding:1px 5px;border-radius:4px;background:var(--card);border:1px solid var(--border2)}
+  .chanitem.sub{padding-left:26px}
+  .chanitem.sub .channm{opacity:.9}
+  .chansub,.chancog{margin-left:4px;background:none;border:0;color:var(--dim);cursor:pointer;padding:2px;border-radius:5px;opacity:0;transition:opacity .12s,color .12s}
+  .chanitem:hover .chansub,.chanitem:hover .chancog{opacity:1}
+  .chansub:hover,.chancog:hover{color:var(--accent);background:var(--card2)}
+  .cs-item{display:flex;align-items:center;gap:11px;padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--border2)}
+  .cs-item:hover{background:var(--card2)}
+  .cs-item>i{font-size:16px;color:var(--accent2);flex-shrink:0}
+  .cs-txt{display:flex;flex-direction:column;min-width:0;flex:1}
+  .cs-txt b{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .cs-txt span{font-size:11.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .cs-kind{font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--dim);flex-shrink:0}
+  .chset-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 0;font-size:13px;border-bottom:1px solid var(--border2)}
   .eng-alert{display:flex;gap:12px;align-items:flex-start;margin:0 0 10px;padding:12px 16px;border-radius:12px;
     background:color-mix(in srgb,var(--red) 12%,transparent);border:1px solid color-mix(in srgb,var(--red) 40%,transparent)}
   .eng-alert>i{font-size:20px;color:var(--red);flex-shrink:0;margin-top:1px}
@@ -1493,6 +1519,10 @@ textarea.np-in{resize:vertical;line-height:1.5}
       <div class="coxmodal-title" id="cm-title"></div>
       <div class="coxmodal-msg" id="cm-msg"></div>
       <textarea id="cm-input" class="coxmodal-input" rows="3" hidden></textarea>
+      <label class="coxmodal-toggle" id="cm-toggle" hidden>
+        <input type="checkbox" id="cm-toggle-input"><span class="cmsw"></span>
+        <span id="cm-toggle-label"></span>
+      </label>
       <div class="coxmodal-acts">
         <button class="gc-btn" id="cm-cancel" onclick="coxModalCancel()">Cancel</button>
         <button class="pri" id="cm-ok" onclick="coxModalOk()">OK</button>
@@ -1508,6 +1538,11 @@ textarea.np-in{resize:vertical;line-height:1.5}
     </div>
     <!-- Chat mode: channel list replaces the workspace menu -->
     <div class="chatside" id="chat-side">
+      <!-- Search sits ABOVE the rooms because that is what you reach for first
+           in a workspace with more rooms than fit on a screen. -->
+      <div class="chatsearch" onclick="openChatSearch()">
+        <i class="ti ti-search"></i><span>Search channels, people, messages</span><kbd>⌘K</kbd>
+      </div>
       <div class="chanrail-hd"><span>Channels</span><div class="chanrail-actions"><button class="chanadd" id="btn-newchan" onclick="createChannel()" title="Create channel (leads & admins)"><i class="ti ti-plus"></i></button></div></div>
       <div class="chanlist" id="chan-list"></div>
       <div class="chanrail-hd" style="margin-top:10px"><span>Direct messages</span></div>
@@ -2070,6 +2105,27 @@ textarea.np-in{resize:vertical;line-height:1.5}
       <div class="cmdk-list" id="cmdk-list"></div>
     </div>
   </div>
+  <!-- Channel settings: one place for privacy, members and who may invite. -->
+  <div class="ov" id="ov-chset" onclick="if(event.target===this)close_('ov-chset')"><div class="modal pfpop">
+    <span class="x" onclick="close_('ov-chset')" style="top:14px;right:14px"><i class="ti ti-x"></i></span>
+    <div class="pfhead"><span class="pf-avbig" style="background:var(--card2);color:var(--accent)"><i class="ti ti-hash"></i></span>
+      <div><div id="chset-title" style="font-weight:800;font-size:15px"></div><div class="msub" style="margin:0">Channel settings</div></div></div>
+    <div class="pfwrap">
+      <div class="pfnav">
+        <button id="chset-tab-general" class="on" onclick="chsetTab('general')"><i class="ti ti-adjustments"></i> General</button>
+        <button id="chset-tab-members" onclick="chsetTab('members')"><i class="ti ti-users"></i> Members</button>
+        <button id="chset-tab-permissions" onclick="chsetTab('permissions')"><i class="ti ti-lock-cog"></i> Permissions</button>
+      </div>
+      <div class="pfpane" id="chset-body"></div>
+    </div>
+  </div></div>
+  <!-- Chat search: channels, people and messages in one palette. -->
+  <div class="ov" id="ov-chatsearch" onclick="if(event.target===this)closeChatSearch()"><div class="modal" style="max-width:620px;padding:0;overflow:hidden">
+    <div class="cmdk-inp" style="border-radius:0"><i class="ti ti-search"></i>
+      <input id="chatsearch-input" placeholder="Search channels, people, messages…" autocomplete="off"
+        oninput="chatSearchRun()" onkeydown="if(event.key==='Escape')closeChatSearch()"><kbd>esc</kbd></div>
+    <div class="cmdk-list" id="chatsearch-list" style="max-height:60vh"></div>
+  </div></div>
   <div class="toasts" id="toasts"></div>
 
   <div class="ov" id="ov-ticket" onclick="if(event.target===this)close_('ov-ticket')"><div class="modal" id="ticket-body"></div></div>
@@ -3449,8 +3505,11 @@ function renderChannels(){
     const kind=c.kind||(c.id==="general"?"general":"private");
     const u=UNREAD[c.id]||0;
     const icon=kind==="private"?"lock":"hash";
-    return `<div class="chanitem${c.id===CURCHAN?' on':''}${u?' unread':''}" onclick="selectChannel('${esc(c.id)}')">
-      <i class="ti ti-${icon}"></i><span class="channm">${esc(chanDisplay(c))}</span>${u?`<span class="chanbadge">${u>99?'99+':u}</span>`:''}</div>`;}).join("");
+    const sub=(c.parent||"")?' sub':'';
+    return `<div class="chanitem${c.id===CURCHAN?' on':''}${u?' unread':''}${sub}" onclick="selectChannel('${esc(c.id)}')">
+      <i class="ti ti-${icon}"></i><span class="channm">${esc(chanDisplay(c))}</span>${u?`<span class="chanbadge">${u>99?'99+':u}</span>`:''}
+      <button class="chansub" title="New sub-channel here" onclick="event.stopPropagation();createChannel('${esc(c.id)}')"><i class="ti ti-plus"></i></button>
+      <button class="chancog" title="Channel settings" onclick="event.stopPropagation();openChannelSettings('${esc(c.id)}')"><i class="ti ti-settings"></i></button></div>`;}).join("");
   updateChannelBell();
 }
 function getActiveChannel(){return CURCHAN||"general";}
@@ -3491,13 +3550,21 @@ async function loadChatHistory(){
   CHAT.forEach(markSeen); // history is not "new" — don't notify for it
   renderChatList(true);
 }
-async function createChannel(){
-  const name=await coxModal({title:"New channel",message:"Enter channel name. Add +public at the end for a public channel (anyone can join), otherwise it will be private (invite-only).",input:{placeholder:"e.g. design-review  or  general-chat +public"},confirmText:"Create"});
-  if(!name||!name.trim())return;
-  let n=name.trim();let kind="private";
-  if(/\s+\+public\s*$/i.test(n)){kind="public";n=n.replace(/\s+\+public\s*$/i,"").trim();}
+// `parent` is set when the + on a channel row was used: the new room is opened
+// inside that one and starts with its members.
+async function createChannel(parent){
+  const where=parent?` inside #${chanDisplay(CHANNELS.find(c=>c.id===parent)||{name:parent})}`:"";
+  const name=await coxModal({title:parent?"New sub-channel":"New channel",
+    message:`Name the channel${where}. It is private (invite-only) unless you switch it to public.`,
+    input:{placeholder:"e.g. design-review"},
+    toggle:{label:"Public — anyone in the workspace can join",value:false},
+    confirmText:"Create"});
+  if(!name||!name.trim&&!name.value)return;
+  const n=(typeof name==="string"?name:name.value||"").trim();
+  if(!n)return;
+  const kind=(typeof name==="object"&&name.toggle)?"public":"private";
   try{
-    const r=await fetch("/api/chat/channels",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n,kind})});
+    const r=await fetch("/api/chat/channels",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n,kind,parent:parent||null})});
     if(!r.ok){toasty(await r.text()||"could not create channel","err");return;}
     const ch=await r.json();
     await loadChannels();
@@ -3530,6 +3597,136 @@ let MODE=(localStorage.getItem("cox_mode")==="chat")?"chat":"workspace";
 function isChatMode(){return MODE==="chat";}
 function isManageMode(){return MODE==="manage";}
 function markSeen(m){SEEN.add(chatKey(m));}
+// ── Channel settings: privacy, who may invite, members ──────────────────────
+// Everything a room's owner decides about their room, in one place. Admins
+// outrank ownership — the server enforces that; this only shows the controls.
+async function openChannelSettings(id){
+  const ch=CHANNELS.find(c=>c.id===id);
+  if(!ch){toasty("channel not found","err");return;}
+  CHSET={id,tab:"general"};
+  document.getElementById("chset-title").textContent="#"+chanDisplay(ch);
+  renderChannelSettings();
+  document.getElementById("ov-chset").classList.add("open");
+}
+let CHSET=null;
+function chsetTab(t){if(CHSET){CHSET.tab=t;renderChannelSettings();}}
+function renderChannelSettings(){
+  if(!CHSET)return;
+  const ch=CHANNELS.find(c=>c.id===CHSET.id);if(!ch)return;
+  const isGeneral=ch.id==="general";
+  for(const t of ["general","members","permissions"]){
+    const b=document.getElementById("chset-tab-"+t);
+    if(b)b.classList.toggle("on",CHSET.tab===t);
+  }
+  const box=document.getElementById("chset-body");
+  if(CHSET.tab==="general"){
+    box.innerHTML=`
+      <label class="coxmodal-toggle">
+        <input type="checkbox" id="chset-public" ${(ch.kind==="public")?"checked":""} ${isGeneral?"disabled":""}
+          onchange="saveChannelSettings({kind:this.checked?'public':'private'})">
+        <span class="cmsw"></span>
+        <span>Public — anyone in the workspace can join and read</span>
+      </label>
+      ${isGeneral?'<div class="msub">#general is always open: a team needs one room nobody can be shut out of.</div>':''}
+      <div class="fr" style="margin-top:14px"><span class="lbl">Topic</span>
+        <input id="chset-topic" value="${esc(ch.topic||"")}" placeholder="what this channel is for" style="flex:1"
+          onchange="saveChannelSettings({topic:this.value})"></div>`;
+  } else if(CHSET.tab==="permissions"){
+    box.innerHTML=`
+      <label class="coxmodal-toggle">
+        <input type="checkbox" id="chset-openinv" ${ch.open_invite?"checked":""}
+          onchange="saveChannelSettings({open_invite:this.checked})">
+        <span class="cmsw"></span>
+        <span>Any member may invite others</span>
+      </label>
+      <div class="msub">With this off, only the owner and the people they name below can add or remove members. Admins can always do both.</div>
+      <div style="margin-top:14px;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--dim)">Can invite &amp; remove</div>
+      <div id="chset-inviters">${(ch.members||[]).map(m=>`
+        <label class="chset-row"><input type="checkbox" ${(ch.inviters||[]).includes(m)?"checked":""}
+          onchange="delegateInvite('${esc(m)}',this.checked)"> ${esc(m)}</label>`).join("")||'<div class="empty">no members yet</div>'}</div>`;
+  } else {
+    box.innerHTML=`
+      <div id="chset-members">${(ch.members||[]).map(m=>`
+        <div class="chset-row"><span>${esc(m)}${m===ch.owner?' <span class="pbadge on">owner</span>':''}</span>
+          ${m===ch.owner?'':`<button class="btn-ghost" onclick="kickMember('${esc(m)}')">Remove</button>`}</div>`).join("")||'<div class="empty">no members yet</div>'}</div>
+      <button class="save pf-btn" style="margin-top:12px" onclick="inviteToChannel()"><i class="ti ti-user-plus"></i> Invite someone</button>`;
+  }
+}
+async function saveChannelSettings(patch){
+  if(!CHSET)return;
+  try{
+    const r=await fetch(api(`/channels/${encodeURIComponent(CHSET.id)}/settings`),
+      {method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(patch)});
+    if(!r.ok){toasty(await r.text()||"could not save","err");return;}
+    await loadChannels();renderChannelSettings();toasty("Saved","ok");
+  }catch(e){toasty("could not save","err");}
+}
+async function kickMember(user){
+  if(!CHSET)return;
+  const ok=await coxModal({title:"Remove member",message:`Remove ${user} from this channel?`,confirmText:"Remove",danger:true});
+  if(!ok)return;
+  try{
+    const r=await fetch(api(`/channels/${encodeURIComponent(CHSET.id)}/members/${encodeURIComponent(user)}`),{method:"DELETE"});
+    if(!r.ok){toasty(await r.text()||"could not remove","err");return;}
+    await loadChannels();renderChannelSettings();
+  }catch(e){toasty("could not remove","err");}
+}
+async function delegateInvite(user,on){
+  try{
+    await fetch(api(`/channels/${encodeURIComponent(CHSET.id)}/invite`),
+      {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({user,delegate:on})});
+    await loadChannels();renderChannelSettings();
+  }catch(e){toasty("could not update","err");}
+}
+async function inviteToChannel(){
+  const who=await coxModal({title:"Invite to channel",input:{placeholder:"username"},confirmText:"Invite"});
+  const u=(typeof who==="string"?who:"").trim();if(!u)return;
+  try{
+    const r=await fetch(api(`/channels/${encodeURIComponent(CHSET.id)}/invite`),
+      {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({user:u})});
+    if(!r.ok){toasty(await r.text()||"could not invite","err");return;}
+    await loadChannels();renderChannelSettings();
+  }catch(e){toasty("could not invite","err");}
+}
+
+// ── Chat search: channels, people, messages, in one palette ─────────────────
+function openChatSearch(){
+  const ov=document.getElementById("ov-chatsearch");
+  document.getElementById("chatsearch-input").value="";
+  document.getElementById("chatsearch-list").innerHTML='<div class="empty">Type to search channels, people and messages.</div>';
+  ov.classList.add("open");
+  setTimeout(()=>document.getElementById("chatsearch-input").focus(),40);
+}
+function chatSearchRun(){
+  const q=document.getElementById("chatsearch-input").value.trim().toLowerCase();
+  const list=document.getElementById("chatsearch-list");
+  if(!q){list.innerHTML='<div class="empty">Type to search channels, people and messages.</div>';return;}
+  const hit=[];
+  for(const c of CHANNELS){
+    if((c.name||"").toLowerCase().includes(q)||(c.topic||"").toLowerCase().includes(q))
+      hit.push({t:"channel",label:"#"+chanDisplay(c),sub:c.topic||((c.kind==="public")?"public channel":"private channel"),act:`selectChannel('${esc(c.id)}')`});
+  }
+  for(const m of (MEMBERS||[])){
+    const n=m.username||m.name||"";
+    if(n.toLowerCase().includes(q)) hit.push({t:"person",label:n,sub:m.role||"",act:`openDM('${esc(n)}')`});
+  }
+  for(const msg of (CHAT||[]).slice(-800).reverse()){
+    const b=(msg.body||"");
+    if(b.toLowerCase().includes(q)){
+      hit.push({t:"message",label:b.slice(0,90),sub:`${msg.user||""} · #${msg.channel||"general"}`,act:`selectChannel('${esc(msg.channel||"general")}')`});
+      if(hit.filter(h=>h.t==="message").length>=12)break;
+    }
+  }
+  const icon={channel:"hash",person:"user",message:"message-2"};
+  list.innerHTML=hit.length?hit.slice(0,30).map(h=>`
+    <div class="cs-item" onclick="closeChatSearch();${h.act}">
+      <i class="ti ti-${icon[h.t]}"></i>
+      <div class="cs-txt"><b>${esc(h.label)}</b>${h.sub?`<span>${esc(h.sub)}</span>`:''}</div>
+      <span class="cs-kind">${h.t}</span></div>`).join("")
+    :'<div class="empty">Nothing matched.</div>';
+}
+function closeChatSearch(){document.getElementById("ov-chatsearch").classList.remove("open");}
+
 // Enterprise modal replacing browser prompt()/confirm(): returns a Promise —
 // resolves the input string (or true) on confirm, null on cancel.
 let _cmResolve=null;
@@ -3541,6 +3738,11 @@ function coxModal(o){
     document.getElementById("cm-msg").textContent=o.message||"";
     const inp=document.getElementById("cm-input");
     inp.hidden=!o.input; inp.value=(o.input&&o.input.value)||""; inp.placeholder=(o.input&&o.input.placeholder)||"";
+    // Optional switch (e.g. public/private) — resolves alongside the text.
+    const tg=document.getElementById("cm-toggle");
+    if(tg){tg.hidden=!o.toggle;
+      if(o.toggle){document.getElementById("cm-toggle-label").textContent=o.toggle.label||"";
+        document.getElementById("cm-toggle-input").checked=!!o.toggle.value;}}
     document.getElementById("cm-ok").textContent=o.confirmText||"OK";
     document.getElementById("cm-cancel").textContent=o.cancelText||"Cancel";
     m.querySelector(".coxmodal-card").classList.toggle("danger",!!o.danger);
@@ -3552,8 +3754,10 @@ function coxModal(o){
 }
 function coxModalOk(){
   const m=document.getElementById("cox-modal");const inp=document.getElementById("cm-input");
+  const tg=document.getElementById("cm-toggle");
   const val=inp.hidden?true:inp.value.trim();
-  m.hidden=true; if(_cmResolve){_cmResolve(val);_cmResolve=null;}
+  const out=(tg&&!tg.hidden)?{value:inp.hidden?"":inp.value.trim(),toggle:document.getElementById("cm-toggle-input").checked}:val;
+  m.hidden=true; if(_cmResolve){_cmResolve(out);_cmResolve=null;}
 }
 function coxModalCancel(){
   const m=document.getElementById("cox-modal");m.hidden=true;
