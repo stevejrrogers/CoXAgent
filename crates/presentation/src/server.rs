@@ -394,6 +394,7 @@ impl Ws {
 /// A booked meeting. Times are RFC3339 UTC; the watchdog drives reminders,
 /// start announcements, and auto-ringing of absent participants.
 #[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
+#[allow(clippy::struct_excessive_bools)] // a persisted data aggregate, not a state machine
 struct Meeting {
     id: String,
     title: String,
@@ -664,7 +665,8 @@ async fn meeting_watchdog(app: AppState) {
         {
             let mut doc = app.meetings.inner.lock().await;
             doc.meetings.retain(|m| {
-                let keep = parse_rfc3339(&m.start).is_none_or(|s| {
+                // MSRV 1.80 predates Option::is_none_or.
+                let keep = parse_rfc3339(&m.start).map_or(true, |s| {
                     now < s
                         + time::Duration::minutes(i64::from(m.duration_min))
                         + time::Duration::days(1)
@@ -981,6 +983,7 @@ async fn principal_name(app: &AppState, headers: &axum::http::HeaderMap) -> Opti
     resolve_principal(&auth, headers).await.map(|u| u.username)
 }
 
+#[allow(clippy::cast_possible_truncation)] // the low 32 bits of the hash IS the value
 fn rand_u32() -> u32 {
     use std::hash::{BuildHasher, Hasher};
     std::collections::hash_map::RandomState::new()
@@ -1352,6 +1355,27 @@ pub struct HubExtras {
     pub syschat_store: Option<Arc<dyn coxagent_application::ports::outbound::KvDocPort>>,
 }
 
+/// Post one COX budget notice into a project's #agents and log the same line to
+/// its activity feed. Both the warning and the hard stop below report this way.
+async fn post_budget_notice(p: &ProjectHandle, msg: &str, activity: &str) {
+    let _ = coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        s.post_chat_in(
+            "COX",
+            msg,
+            coxagent_application::state::AGENTS_CHANNEL,
+            Vec::new(),
+        );
+        s.log_activity("COX", activity, None);
+        Ok(())
+    })
+    .await;
+}
+
+/// Warn threshold for a space's budget, matching the dashboard's own amber one
+/// (index.html renders the "nearly reached" alert at 80% of a project's cap) —
+/// same UX language, just at the space level and pushed as a chat heads-up.
+const WARN_PCT: f64 = 0.8;
+
 /// Assemble the shared [`AppState`] from the registered projects and hub extras.
 /// Space budget ENFORCEMENT (not just display): every 5 minutes each space's
 /// total spend is compared to its cap; the first breach pauses every runner and
@@ -1361,10 +1385,6 @@ pub struct HubExtras {
 async fn space_budget_watchdog(app: AppState) {
     let mut flagged: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut warned: std::collections::HashSet<String> = std::collections::HashSet::new();
-    // Matches the dashboard's own amber threshold (index.html renders the
-    // "nearly reached" alert at 80% of a project's cap) — same UX language,
-    // just at the space level and pushed as a chat heads-up.
-    const WARN_PCT: f64 = 0.8;
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(300)).await;
         let spaces = app.spaces.inner.lock().await.spaces.clone();
@@ -1405,24 +1425,7 @@ async fn space_budget_watchdog(app: AppState) {
                         spend / sp.budget_usd * 100.0
                     );
                     for p in &handles {
-                        let _ = coxagent_application::ports::outbound::mutate_state(
-                            p.store.as_ref(),
-                            |s| {
-                                s.post_chat_in(
-                                    "COX",
-                                    &msg,
-                                    coxagent_application::state::AGENTS_CHANNEL,
-                                    Vec::new(),
-                                );
-                                s.log_activity(
-                                    "COX",
-                                    "space budget approaching cap — warned",
-                                    None,
-                                );
-                                Ok(())
-                            },
-                        )
-                        .await;
+                        post_budget_notice(p, &msg, "space budget approaching cap — warned").await;
                     }
                 }
             } else {
@@ -1452,18 +1455,7 @@ async fn space_budget_watchdog(app: AppState) {
                         let _ = p.store.set_desired(&w.worker, false).await;
                     }
                 }
-                let _ =
-                    coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
-                        s.post_chat_in(
-                            "COX",
-                            &msg,
-                            coxagent_application::state::AGENTS_CHANNEL,
-                            Vec::new(),
-                        );
-                        s.log_activity("COX", "space budget cap reached — agents paused", None);
-                        Ok(())
-                    })
-                    .await;
+                post_budget_notice(p, &msg, "space budget cap reached — agents paused").await;
             }
         }
     }
@@ -2803,7 +2795,7 @@ async fn git_test_ep(
                         .collect();
                 }
             } else {
-                detail = "ls-remote timed out".to_owned();
+                "ls-remote timed out".clone_into(&mut detail);
             }
         }
         if reachable {
@@ -2831,7 +2823,7 @@ async fn git_test_ep(
                         .collect();
                 }
             } else {
-                detail = "push --dry-run timed out".to_owned();
+                "push --dry-run timed out".clone_into(&mut detail);
             }
         }
     }
@@ -5778,14 +5770,13 @@ async fn syschat_reply_ep(
     }
     let mid_clone = mid.clone();
     let mut sc = app.syschat.inner.lock().await;
-    let channel = match sc
+    let Some(channel) = sc
         .chat
         .iter()
         .find(|m| m.id == mid_clone)
         .map(|p| p.channel.clone())
-    {
-        Some(ch) => ch,
-        None => return (StatusCode::NOT_FOUND, "parent not found").into_response(),
+    else {
+        return (StatusCode::NOT_FOUND, "parent not found").into_response();
     };
     let msg = ChatMsg::reply(&user, &body, &channel, &mid_clone);
     sc.chat.push(msg.clone());
@@ -5914,14 +5905,13 @@ async fn syschat_pin_ep(
     }
     let mid_clone = mid.clone();
     let mut sc = app.syschat.inner.lock().await;
-    let channel = match sc
+    let Some(channel) = sc
         .chat
         .iter()
         .find(|m| m.id == mid_clone)
         .map(|m| m.channel.clone())
-    {
-        Some(ch) => ch,
-        None => return (StatusCode::NOT_FOUND, "not found").into_response(),
+    else {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
     };
     let pins = sc.pins.entry(channel.clone()).or_default();
     if pins.contains(&mid_clone) {
@@ -6558,6 +6548,7 @@ fn project_language(p: &ProjectHandle) -> coxagent_application::config::Language
         })
 }
 
+#[allow(clippy::too_many_lines)] // one linear pass; splitting hurts readability
 async fn standup_ep(
     State(app): State<AppState>,
     Path(pid): Path<String>,

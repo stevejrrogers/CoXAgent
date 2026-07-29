@@ -214,16 +214,15 @@ impl DeployPort for DockerComposeDeploy {
             .spawn()
             .map_err(|e| PortError::Backend(format!("spawn clippy: {e}")))?;
         let leader = child.id();
-        let out =
-            match tokio::time::timeout(Duration::from_secs(600), child.wait_with_output()).await {
-                Ok(out) => out.map_err(|e| PortError::Backend(format!("clippy wait: {e}")))?,
-                Err(_) => {
-                    if let Some(pid) = leader {
-                        crate::proc::kill_group(pid);
-                    }
-                    return Err(PortError::Backend("clippy timed out".to_owned()));
-                }
-            };
+        let Ok(out) =
+            tokio::time::timeout(Duration::from_secs(600), child.wait_with_output()).await
+        else {
+            if let Some(pid) = leader {
+                crate::proc::kill_group(pid);
+            }
+            return Err(PortError::Backend("clippy timed out".to_owned()));
+        };
+        let out = out.map_err(|e| PortError::Backend(format!("clippy wait: {e}")))?;
         let text = format!(
             "{}{}",
             String::from_utf8_lossy(&out.stdout),
@@ -254,16 +253,15 @@ impl DeployPort for DockerComposeDeploy {
             .spawn()
             .map_err(|e| PortError::Backend(format!("spawn clippy: {e}")))?;
         let leader = child.id();
-        let out =
-            match tokio::time::timeout(Duration::from_secs(600), child.wait_with_output()).await {
-                Ok(out) => out.map_err(|e| PortError::Backend(format!("clippy wait: {e}")))?,
-                Err(_) => {
-                    if let Some(pid) = leader {
-                        crate::proc::kill_group(pid);
-                    }
-                    return Err(PortError::Backend("clippy timed out".to_owned()));
-                }
-            };
+        let Ok(out) =
+            tokio::time::timeout(Duration::from_secs(600), child.wait_with_output()).await
+        else {
+            if let Some(pid) = leader {
+                crate::proc::kill_group(pid);
+            }
+            return Err(PortError::Backend("clippy timed out".to_owned()));
+        };
+        let out = out.map_err(|e| PortError::Backend(format!("clippy wait: {e}")))?;
         let text = format!(
             "{}{}",
             String::from_utf8_lossy(&out.stdout),
@@ -347,18 +345,17 @@ impl DeployPort for DockerComposeDeploy {
             .spawn()
             .map_err(|e| PortError::Backend(format!("spawn cargo check: {e}")))?;
         let leader = child.id();
-        let out =
-            match tokio::time::timeout(Duration::from_secs(900), child.wait_with_output()).await {
-                Ok(out) => out.map_err(|e| PortError::Backend(format!("cargo check wait: {e}")))?,
-                Err(_) => {
-                    if let Some(pid) = leader {
-                        crate::proc::kill_group(pid);
-                    }
-                    return Err(PortError::Backend(
-                        "cross-target check timed out".to_owned(),
-                    ));
-                }
-            };
+        let Ok(out) =
+            tokio::time::timeout(Duration::from_secs(900), child.wait_with_output()).await
+        else {
+            if let Some(pid) = leader {
+                crate::proc::kill_group(pid);
+            }
+            return Err(PortError::Backend(
+                "cross-target check timed out".to_owned(),
+            ));
+        };
+        let out = out.map_err(|e| PortError::Backend(format!("cargo check wait: {e}")))?;
         let text = format!(
             "{}{}",
             String::from_utf8_lossy(&out.stdout),
@@ -394,17 +391,16 @@ impl DeployPort for DockerComposeDeploy {
             .spawn()
             .map_err(|e| PortError::Backend(format!("spawn {cmd}: {e}")))?;
         let leader = child.id();
-        let output =
-            match tokio::time::timeout(Duration::from_secs(900), child.wait_with_output()).await {
-                Ok(out) => out.map_err(|e| PortError::Backend(format!("{cmd} wait: {e}")))?,
-                Err(_) => {
-                    // Kill the whole test-runner tree, not just `nice`.
-                    if let Some(pid) = leader {
-                        crate::proc::kill_group(pid);
-                    }
-                    return Err(PortError::Backend("test run timed out".to_owned()));
-                }
-            };
+        let Ok(output) =
+            tokio::time::timeout(Duration::from_secs(900), child.wait_with_output()).await
+        else {
+            // Kill the whole test-runner tree, not just `nice`.
+            if let Some(pid) = leader {
+                crate::proc::kill_group(pid);
+            }
+            return Err(PortError::Backend("test run timed out".to_owned()));
+        };
+        let output = output.map_err(|e| PortError::Backend(format!("{cmd} wait: {e}")))?;
         let success = output.status.success();
         let tail = |b: &[u8]| -> String {
             String::from_utf8_lossy(b)
@@ -464,18 +460,15 @@ impl DeployPort for DockerComposeDeploy {
     async fn health_check(&self, port: u16) -> coxagent_application::state::HealthCheckResult {
         let url = format!("http://127.0.0.1:{port}/");
         let start = std::time::Instant::now();
-        let client = match reqwest::Client::builder()
+        let Ok(client) = reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
             .build()
-        {
-            Ok(c) => c,
-            Err(_) => {
-                return coxagent_application::state::HealthCheckResult {
-                    passed: false,
-                    http_status: None,
-                    response_time_ms: None,
-                }
-            }
+        else {
+            return coxagent_application::state::HealthCheckResult {
+                passed: false,
+                http_status: None,
+                response_time_ms: None,
+            };
         };
         match client.get(&url).send().await {
             Ok(resp) => {
@@ -823,7 +816,11 @@ fn parse_clippy(text: &str) -> (Vec<String>, Vec<String>) {
                 break;
             }
             if let Some(loc) = next.strip_prefix("--> ") {
-                file = loc.split(':').next().unwrap_or("").trim().to_owned();
+                loc.split(':')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .clone_into(&mut file);
                 lines.next();
                 break;
             }

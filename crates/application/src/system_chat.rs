@@ -291,13 +291,12 @@ impl SystemChat {
         self.webhooks.len() != before
     }
 
-    /// Create a private channel owned by `owner`. Collides against general,
-    /// project channels, and existing private channels.
-    /// Set channel topic
-    /// Set channel topic
+    /// Set a channel's topic. Real channels carry it on the channel record;
+    /// anything else (project channels, general) falls back to the side table,
+    /// where an empty topic means "clear it".
     pub fn topic(&mut self, channel_id: &str, topic: String) {
         if let Some(ch) = self.channels.iter_mut().find(|c| c.id == channel_id) {
-            ch.topic = topic.clone();
+            ch.topic = topic;
             return;
         }
         if topic.is_empty() {
@@ -307,6 +306,7 @@ impl SystemChat {
         }
     }
     /// Get channel topic
+    #[must_use]
     pub fn get_topic(&self, channel_id: &str) -> String {
         if let Some(ch) = self.channels.iter().find(|c| c.id == channel_id) {
             if !ch.topic.is_empty() {

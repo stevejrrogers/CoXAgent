@@ -121,6 +121,7 @@ pub struct Reaction {
 }
 
 impl ChatMsg {
+    #[must_use]
     pub fn reply(user: &str, body: &str, channel: &str, thread_id: &str) -> Self {
         Self {
             id: mint_id(),
@@ -1603,6 +1604,12 @@ impl ProjectState {
         Ok(ch.clone())
     }
 
+    /// Create a channel of an explicit `kind` (`"private"` or `"public"`) owned
+    /// by `owner`, who becomes its first member.
+    ///
+    /// # Errors
+    /// When `name` slugifies to nothing, the channel already exists, or `kind`
+    /// is neither `"private"` nor `"public"`.
     pub fn create_channel_with_kind(
         &mut self,
         name: &str,

@@ -3063,6 +3063,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         .await;
     }
 
+    #[allow(clippy::too_many_lines)] // one linear pass; splitting hurts readability
     async fn memory_hygiene(&self) {
         let today = crate::state::now_rfc3339()[..10].to_owned();
         {
@@ -3470,9 +3471,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     })
                     .await
                 {
-                    Ok(o) if o.succeeded() && o.stdout.to_uppercase().contains("ACTION:") => {
-                        o.stdout.trim().to_owned()
-                    }
+                    Ok(o) if o.succeeded() && o.stdout.to_uppercase().contains("ACTION:") => o.stdout.trim().to_owned(),
                     _ => answer,
                 }
             };
@@ -4613,11 +4612,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // Skip if we discussed the exact same topic last cycle — prevents
         // duplicate noise when the trigger condition persists across cycles.
         {
-            let mut last = self.last_discussion_topic.lock().unwrap();
+            // The guard only holds a topic string, so a poisoned lock (another
+            // thread panicked mid-update) costs nothing to recover from — take
+            // the inner value rather than panic a whole cycle over dedupe state.
+            let mut last = self
+                .last_discussion_topic
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if *last == topic {
                 return;
             }
-            *last = topic.clone();
+            (*last).clone_from(&topic);
         }
         self.report("SM", "scrum discussion");
         let uc = crate::use_cases::RunDiscussionUseCase::new(
@@ -6183,13 +6188,15 @@ mod tests {
                 summary: "rollback redeploy ok".to_owned(),
             },
         ]));
-        let mut initial = ProjectState::default();
-        initial.last_good_deploy = Some(crate::state::KnownGoodDeploy {
-            sha: GOOD_SHA.to_owned(),
-            at: crate::state::now_rfc3339(),
-            deploy_index: 1,
-            summary: "prior deploy + tests passed".to_owned(),
-        });
+        let initial = ProjectState {
+            last_good_deploy: Some(crate::state::KnownGoodDeploy {
+                sha: GOOD_SHA.to_owned(),
+                at: crate::state::now_rfc3339(),
+                deploy_index: 1,
+                summary: "prior deploy + tests passed".to_owned(),
+            }),
+            ..ProjectState::default()
+        };
         let store = Arc::new(MemStore {
             state: Mutex::new(initial),
         });
@@ -6338,7 +6345,7 @@ mod tests {
             Some(crate::state::HealthCheckResult {
                 passed: true,
                 http_status: Some(200),
-                response_time_ms: Some(45),
+                response_time_ms: Some(45)
             }),
             "the health check's pass/status/response-time must be recorded in deploy \
              history for this attempt: {:?}",
@@ -6540,7 +6547,7 @@ mod tests {
             Some(crate::state::HealthCheckResult {
                 passed: true,
                 http_status: Some(200),
-                response_time_ms: Some(12),
+                response_time_ms: Some(12)
             }),
             "the passing poll's detail is what belongs in deploy history: {:?}",
             state.deploy

@@ -11,8 +11,9 @@
 //! These tests drive the real `coxagent` binary the shim script invokes, with
 //! the real argv the shim forwards, over real repository content.
 
-#![allow(clippy::unwrap_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -56,12 +57,12 @@ fn large_tracked_file(root: &Path) -> String {
     String::from_utf8(listing)
         .unwrap()
         .lines()
-        .filter_map(|l| {
+        .find_map(|l| {
             let (meta, path) = l.split_once('\t')?;
             let size: u64 = meta.split_whitespace().nth(3)?.parse().ok()?;
-            (size >= MIN_BLOB_BYTES && path.ends_with(".rs")).then(|| path.to_owned())
+            let is_rust = Path::new(path).extension().is_some_and(|e| e == "rs");
+            (size >= MIN_BLOB_BYTES && is_rust).then(|| path.to_owned())
         })
-        .next()
         .expect("repo has no tracked .rs blob over the compression threshold")
 }
 
@@ -105,6 +106,7 @@ fn assert_byte_exact(label: &str, real: &[u8], shimmed: &[u8]) {
         .zip(shimmed)
         .position(|(a, b)| a != b)
         .unwrap_or_else(|| real.len().min(shimmed.len()));
+    #[allow(clippy::naive_bytecount)] // a panic message, not a hot path
     let lines = |b: &[u8]| b.iter().filter(|c| **c == b'\n').count();
     panic!(
         "`{label}` was altered by the shim: {} bytes / {} lines in, {} bytes / {} lines out, \
@@ -457,9 +459,13 @@ fn repro_repo() -> tempfile::TempDir {
         run(&["init", "-q", "."]);
         run(&["config", "user.email", "cox@example.test"]);
         run(&["config", "user.name", "COX-B015"]);
-        let body: String = (1..=REPRO_LINES)
-            .map(|i| format!("line {i:04}: the quick brown fox jumps over the lazy dog\n"))
-            .collect();
+        let mut body = String::new();
+        for i in 1..=REPRO_LINES {
+            let _ = writeln!(
+                body,
+                "line {i:04}: the quick brown fox jumps over the lazy dog"
+            );
+        }
         std::fs::write(dir.path().join("big.txt"), &body).unwrap();
         run(&["add", "big.txt"]);
         run(&["commit", "-qm", "COX-B015 repro"]);

@@ -319,6 +319,9 @@ fn is_transient_seatbelt_apply_failure(sandbox: SandboxStatus, code: Option<i32>
 /// times or how far apart it's retried (nested Seatbelt confinement is
 /// itself unreliable, separately from this bug). A caller that is itself
 /// unconfined — the normal case for the `cox` hub — doesn't hit that case.
+///
+/// # Errors
+/// The underlying spawn/wait error, after the Seatbelt retry has also failed.
 pub async fn output_confined(
     cmd: &mut Command,
     sandbox: SandboxStatus,
@@ -360,6 +363,9 @@ const SEATBELT_PROBE_GRACE: std::time::Duration = std::time::Duration::from_mill
 /// failure signature does not touch the child's stdout/stderr — those stay
 /// untouched for the caller to stream exactly as if this were a plain
 /// first-try spawn.
+///
+/// # Errors
+/// The underlying spawn error, after the Seatbelt retry has also failed.
 pub async fn spawn_confined(
     cmd: &mut Command,
     sandbox: SandboxStatus,

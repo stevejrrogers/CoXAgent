@@ -3,11 +3,12 @@
 //! Parses the CLI, constructs the concrete adapters, and dispatches to the
 //! application use cases: report, engine discovery, one-shot BA, the continuous
 //! cycle loop (with graceful shutdown), and greenfield onboarding.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 mod onboard;
 mod shutdown;
 
-use coxagent_application::config::Config;
+use coxagent_application::config::{Config, DeployConfig, GitConfig, PolicyConfig, WorkflowConfig};
 use coxagent_application::ports::outbound::StateStorePort;
 use coxagent_application::use_cases::{RecoverUseCase, RunBaUseCase, RunCycleUseCase};
 use coxagent_application::Spend;
@@ -28,7 +29,9 @@ use std::time::Duration;
 /// CLI entry shared by every service binary (coxagent, cox-gateway, …).
 pub async fn cli_main() -> ExitCode {
     init_tracing();
-    match run().await {
+    // Boxed: the CLI dispatch future carries every command's locals, so keeping
+    // it off the caller's stack matters more than one allocation per process.
+    match Box::pin(run()).await {
         Ok(output) => {
             print!("{output}");
             ExitCode::SUCCESS
@@ -195,13 +198,13 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
                     || "default".to_owned(),
                     |n| n.to_string_lossy().into_owned(),
                 );
-            run_loop(
+            Box::pin(run_loop(
                 make_store(&pid, &args.state_dir).await?,
                 &args.state_dir,
                 work_dir,
                 context,
                 max_cycles,
-            )
+            ))
             .await
         }
         Command::Codegraph { query, work_dir } => codegraph_query(&work_dir, &query),
@@ -626,6 +629,7 @@ fn heal_host_port(root: &Path, cfg_path: &Path, cfg: &mut Config) {
 
 /// Build one project: store, engine stack, runner (spawned, paused), returned as
 /// a `ProjectHandle` the hub server can host alongside others.
+#[allow(clippy::too_many_lines)] // one linear wiring pass; splitting hurts readability
 async fn build_project(
     id: &str,
     state_dir: &Path,
@@ -643,7 +647,7 @@ async fn build_project(
     // would persist a token the real serving store never loads and every
     // MCP call would 401.
     let mcp = build_mcp_access(&config, auth, id, id).await;
-    let (engine, meter) = build_engine(&config, logs_dir(state_dir), mcp)?;
+    let (engine, meter) = build_engine(&config, logs_dir(state_dir), mcp.as_ref())?;
     let sleep = std::time::Duration::from_secs(config.workflow.sleep_seconds);
 
     let recovered = RecoverUseCase::new(Arc::clone(&store)).execute().await?;
@@ -968,13 +972,13 @@ pub async fn operator_main(
         || "default".to_owned(),
         |n| n.to_string_lossy().into_owned(),
     );
-    run_loop(
+    Box::pin(run_loop(
         make_store(&pid, &state_dir).await?,
         &state_dir,
         work_dir,
         String::new(),
         max_cycles,
-    )
+    ))
     .await
 }
 
@@ -982,8 +986,16 @@ pub async fn operator_main(
 /// selected by `COXAGENT_ROLE`. The registry is a JSON array of
 /// `{ "id", "path" }` where `path` contains `state/` and `codebase/`.
 ///
+/// One entry of the hub registry JSON array.
+#[derive(serde::Deserialize)]
+struct Entry {
+    id: String,
+    path: PathBuf,
+}
+
 /// # Errors
 /// Returns an error when the registry can't be read or the port can't bind.
+#[allow(clippy::too_many_lines)] // one linear wiring pass; splitting hurts readability
 pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::error::Error>> {
     // If the requested port is in use, scan upward for a free one so the hub
     // never fails to start — especially important when the Docker stack (which
@@ -1004,11 +1016,6 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
         }
     }
     tracing::info!("hub binding to port {port}");
-    #[derive(serde::Deserialize)]
-    struct Entry {
-        id: String,
-        path: PathBuf,
-    }
     enable_command_shims();
     let text = std::fs::read_to_string(registry)
         .map_err(|e| format!("cannot read hub registry {}: {e}", registry.display()))?;
@@ -1083,11 +1090,11 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
                 auto_fallback: true,
                 escalation: Vec::new(),
             },
-            git: Default::default(),
-            workflow: Default::default(),
+            git: GitConfig::default(),
+            workflow: WorkflowConfig::default(),
             architecture: Vec::new(),
-            deploy: Default::default(),
-            policy: Default::default(),
+            deploy: DeployConfig::default(),
+            policy: PolicyConfig::default(),
         },
         logs_dir(&base),
         None,
@@ -1224,13 +1231,11 @@ async fn ensure_internal_mcp_token(
                                      // arbitrarily among the member tier, since none of them map naturally to
                                      // "the agent working this project" and MCP tool access doesn't
                                      // distinguish between member sub-roles.
-    match auth.create_token(&label, AuthRole::Be).await {
-        Some(secret) => Some(secret),
-        None => {
-            tracing::warn!("could not mint internal MCP token for {identity}");
-            None
-        }
+    let secret = auth.create_token(&label, AuthRole::Be).await;
+    if secret.is_none() {
+        tracing::warn!("could not mint internal MCP token for {identity}");
     }
+    secret
 }
 
 /// Build this run's loopback [`McpAccess`] for `project` (its id, as known to
@@ -1533,18 +1538,16 @@ fn effective_fallbacks(config: &Config) -> Vec<coxagent_application::config::Eng
 fn build_engine(
     config: &Config,
     logs_dir: PathBuf,
-    mcp: Option<coxagent_infrastructure::engine::McpAccess>,
+    mcp: Option<&coxagent_infrastructure::engine::McpAccess>,
 ) -> Result<BuiltEngine, Box<dyn std::error::Error>> {
     if config.workflow.sandbox && !cfg!(target_os = "macos") {
-        tracing::warn!(
-            "workflow.sandbox is on but this platform has no sandbox backend yet — agents run unsandboxed"
-        );
+        tracing::warn!("workflow.sandbox is on but this platform has no sandbox backend yet — agents run unsandboxed");
     }
     let fallbacks = effective_fallbacks(config);
     let default = build_failover(
         &config.engine.default,
         &fallbacks,
-        mcp.as_ref(),
+        mcp,
         &config.engine.escalation,
         config.workflow.sandbox,
     )?;
@@ -1553,7 +1556,7 @@ fn build_engine(
         match build_failover(
             choice,
             &fallbacks,
-            mcp.as_ref(),
+            mcp,
             &config.engine.escalation,
             config.workflow.sandbox,
         ) {
@@ -1635,7 +1638,7 @@ async fn run_loop(
         &format!("{pid}:{mcp_operator}"),
     )
     .await;
-    let (engine, meter) = build_engine(&config, logs_dir(state_dir), mcp)?;
+    let (engine, meter) = build_engine(&config, logs_dir(state_dir), mcp.as_ref())?;
     let sleep = std::time::Duration::from_secs(config.workflow.sleep_seconds);
 
     // Recovery: release any claims orphaned by a previous crash before looping.
@@ -1805,7 +1808,9 @@ async fn run_loop(
             continue;
         }
         cycle += 1;
-        let report = uc.run_cycle(cycle).await;
+        // Boxed: a cycle future is ~17KB of agent-phase locals, and this loop
+        // frame lives for the whole daemon's life.
+        let report = Box::pin(uc.run_cycle(cycle)).await;
         tracing::info!("{}", report.summary());
         for e in &report.errors {
             tracing::warn!("{e}");
@@ -2182,7 +2187,7 @@ mod live_claude_mcp_test {
     use std::time::Duration;
 
     #[tokio::test]
-    #[ignore]
+    #[ignore = "hits the real Claude CLI and a live MCP endpoint; run it by hand"]
     async fn live_claude_actually_calls_mcp_search_symbols() {
         use coxagent_application::ports::outbound::{AgentEnginePort, AgentRequest};
         use coxagent_domain::Role;

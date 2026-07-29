@@ -13,6 +13,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Creates a new project from scratch: `(name, alias) -> human-readable status`.
+pub type NewProjectFn = Arc<dyn Fn(String, Option<String>) -> Result<String, String> + Send + Sync>;
+
+/// Imports an existing codebase: `(path, name, alias) -> human-readable status`.
+pub type ImportProjectFn =
+    Arc<dyn Fn(String, String, Option<String>) -> Result<String, String> + Send + Sync>;
+
 /// Runs one agent reply to a human's team-channel message.
 pub struct RunChatReplyUseCase<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> {
     store: Arc<S>,
@@ -26,11 +33,9 @@ pub struct RunChatReplyUseCase<S: StateStorePort + ?Sized, E: AgentEnginePort + 
     forge: Option<(Arc<dyn crate::ports::outbound::ForgePort>, String, bool)>,
     context: Option<String>,
     /// Callback: create a new project from scratch. Returns a human-readable status message.
-    new_project_fn:
-        Option<Arc<dyn Fn(String, Option<String>) -> Result<String, String> + Send + Sync>>,
+    new_project_fn: Option<NewProjectFn>,
     /// Callback: import an existing codebase. Returns a human-readable status message.
-    import_project_fn:
-        Option<Arc<dyn Fn(String, String, Option<String>) -> Result<String, String> + Send + Sync>>,
+    import_project_fn: Option<ImportProjectFn>,
 }
 
 /// Common docker-compose filenames we treat as "already has a deploy setup".
@@ -65,19 +70,13 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
     }
 
     #[must_use]
-    pub fn with_new_project_fn(
-        mut self,
-        f: Arc<dyn Fn(String, Option<String>) -> Result<String, String> + Send + Sync>,
-    ) -> Self {
+    pub fn with_new_project_fn(mut self, f: NewProjectFn) -> Self {
         self.new_project_fn = Some(f);
         self
     }
 
     #[must_use]
-    pub fn with_import_project_fn(
-        mut self,
-        f: Arc<dyn Fn(String, String, Option<String>) -> Result<String, String> + Send + Sync>,
-    ) -> Self {
+    pub fn with_import_project_fn(mut self, f: ImportProjectFn) -> Self {
         self.import_project_fn = Some(f);
         self
     }
@@ -278,7 +277,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         let Ok(state) = self.store.load().await else {
             return;
         };
-        let Some(_ticket) = state.ticket(&tid) else {
+        let Some(ticket) = state.ticket(&tid) else {
             let msg = if self.lang.is_vi() {
                 format!("❌ Ticket {tid} không tồn tại.")
             } else {
@@ -297,13 +296,13 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         // Build the DEV prompt manually — same as RunDevUseCase but without the
         // full state-machine cycle (claim/release handled inline).
         let memory = crate::prompts::team_memory_block(&state.decisions, &state.lessons);
-        let title = _ticket.title().to_owned();
-        let brief = super::run_dev::ticket_brief(Some(_ticket));
+        let title = ticket.title().to_owned();
+        let brief = super::run_dev::ticket_brief(Some(ticket));
         let fp = crate::prompts::focus_block(
             &self.work_dir,
             &format!(
                 "{title} {}",
-                _ticket
+                ticket
                     .design()
                     .technical
                     .as_ref()
@@ -464,9 +463,9 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         self.post("TEST", &format!("🧪 QA testing ticket {tid}..."))
             .await;
         let state = self.store.load().await.ok();
-        let shipped = state.as_ref().map_or(String::new(), |s| {
-            crate::use_cases::run_test::shipped_block(s)
-        });
+        let shipped = state
+            .as_ref()
+            .map_or(String::new(), crate::use_cases::run_test::shipped_block);
         let memory = state.as_ref().map_or(String::new(), |s| {
             crate::prompts::team_memory_block(&s.decisions, &s.lessons)
         });
@@ -511,7 +510,10 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
                                     "medium" => coxagent_domain::Complexity::Medium,
                                     _ => coxagent_domain::Complexity::Small,
                                 },
-                                has_ui: b.get("has_ui").and_then(|v| v.as_bool()).unwrap_or(false),
+                                has_ui: b
+                                    .get("has_ui")
+                                    .and_then(serde_json::Value::as_bool)
+                                    .unwrap_or(false),
                                 acceptance_criteria: vec![],
                             })
                             .await
@@ -534,18 +536,19 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
 
     /// Create a new project from scratch via chat: `<name> :: <alias>`
     async fn new_project(&self, rest: &str) {
-        let parts: Vec<&str> = rest.splitn(2, "::").map(|s| s.trim()).collect();
-        let name = parts.first().unwrap_or(&"").to_string();
+        let parts: Vec<&str> = rest.splitn(2, "::").map(str::trim).collect();
+        let name = parts.first().copied().unwrap_or_default().to_owned();
         let alias = parts
             .get(1)
-            .map(|s| s.to_string())
+            .copied()
+            .map(str::to_owned)
             .filter(|s| !s.is_empty());
         if name.is_empty() {
             self.post("SM", "Usage: new_project: Project Name :: ALIAS")
                 .await;
             return;
         }
-        self.post("SM", &format!("🆕 Creating project '{}'...", name))
+        self.post("SM", &format!("🆕 Creating project '{name}'..."))
             .await;
         let result = match &self.new_project_fn {
             Some(f) => f(name, alias),
@@ -562,12 +565,13 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
     }
 
     async fn import_project(&self, rest: &str) {
-        let parts: Vec<&str> = rest.splitn(3, "::").map(|s| s.trim()).collect();
-        let path = parts.first().unwrap_or(&"").to_string();
-        let name = parts.get(1).unwrap_or(&"").to_string();
+        let parts: Vec<&str> = rest.splitn(3, "::").map(str::trim).collect();
+        let path = parts.first().copied().unwrap_or_default().to_owned();
+        let name = parts.get(1).copied().unwrap_or_default().to_owned();
         let alias = parts
             .get(2)
-            .map(|s| s.to_string())
+            .copied()
+            .map(str::to_owned)
             .filter(|s| !s.is_empty());
         if path.is_empty() || name.is_empty() {
             self.post(
@@ -577,7 +581,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             .await;
             return;
         }
-        self.post("SM", &format!("📂 Importing '{}' from {path}...", name))
+        self.post("SM", &format!("📂 Importing '{name}' from {path}..."))
             .await;
         let result = match &self.import_project_fn {
             Some(f) => f(path, name, alias),
