@@ -48,6 +48,22 @@ impl GitPort for SystemGit {
             .is_ok_and(|s| s == "true")
     }
 
+    async fn raw(&self, work_dir: &Path, args: &[&str]) -> (bool, String) {
+        match tokio::process::Command::new("git")
+            .args(args)
+            .current_dir(work_dir)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .await
+        {
+            Ok(o) => (
+                o.status.success(),
+                String::from_utf8_lossy(&o.stdout).into_owned(),
+            ),
+            Err(_) => (false, String::new()),
+        }
+    }
+
     async fn working_tree(
         &self,
         work_dir: &Path,

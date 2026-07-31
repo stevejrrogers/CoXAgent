@@ -42,6 +42,19 @@ pub trait GitPort: Send + Sync {
     /// A port method because the gates were shelling out to `git` from the
     /// application layer — IO the architecture says goes through an adapter,
     /// and the reason those gates could only be tested against real temp repos.
+    /// Raw git plumbing the forge-hygiene flow needs, behind one honest door:
+    /// run `git` with `args` in `work_dir`, succeed-or-not plus stdout. The
+    /// operations (fetch, merge-base, rebase-by-merge, rev-list, ls-remote)
+    /// are too shell-shaped to earn one port method each, but they are still
+    /// IO — and IO lives in the adapter, where the hexagonal ratchet can see
+    /// that the application never spawns a process itself.
+    ///
+    /// Default: failure with empty output, so a double that doesn't care
+    /// reads as "git did nothing".
+    async fn raw(&self, _work_dir: &Path, _args: &[&str]) -> (bool, String) {
+        (false, String::new())
+    }
+
     ///
     /// Default: an empty tree, which reads as "nothing changed". Every REAL
     /// git adapter must override this — the default exists for test doubles,

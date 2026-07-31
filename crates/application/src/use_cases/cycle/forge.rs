@@ -62,9 +62,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         if !outcome.succeeded() {
             return false;
         }
-        // Trust nothing: verify markers are gone from the files git flagged…
+        // Trust nothing: verify markers are gone from the files git flagged.
+        // Read through the port (`git show :file` = index content) — the same
+        // truth the commit will carry, and no application-layer fs.
+        let Some(git) = &self.git else { return false };
         for f in files {
-            if let Ok(text) = std::fs::read_to_string(self.work_dir.join(f)) {
+            {
+                let (_, text) = git.raw(&self.work_dir, &["show", &format!(":{f}")]).await;
                 if text
                     .lines()
                     .any(|l| l.starts_with("<<<<<<< ") || l.starts_with(">>>>>>> "))
@@ -510,35 +514,48 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         if let Ok(prs) = forge.list_open_prs().await {
             let mut rebased: Vec<u64> = Vec::new();
             for pr in prs.iter().filter(|p| p.base == target).take(8) {
-                let git = |args: &[&str]| {
-                    let mut c = std::process::Command::new("git");
-                    c.args(args).current_dir(&self.work_dir);
-                    c.output().is_ok_and(|o| o.status.success())
+                let Some(git) = &self.git else { continue };
+                let run = |args: Vec<String>| {
+                    let git = Arc::clone(git);
+                    let dir = self.work_dir.clone();
+                    async move {
+                        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                        git.raw(&dir, &refs).await.0
+                    }
                 };
-                if !git(&["fetch", "origin", &pr.head, &target]) {
+                if !run(vec![
+                    "fetch".into(),
+                    "origin".into(),
+                    pr.head.clone(),
+                    target.clone(),
+                ])
+                .await
+                {
                     continue;
                 }
                 let local = format!("refs/remotes/origin/{}", pr.head);
                 let base_ref = format!("origin/{target}");
                 // Already contains base? skip cheaply.
-                let up_to_date = std::process::Command::new("git")
-                    .args(["merge-base", "--is-ancestor", &base_ref, &local])
-                    .current_dir(&self.work_dir)
-                    .status()
-                    .is_ok_and(|s| s.success());
-                if up_to_date {
+                if run(vec![
+                    "merge-base".into(),
+                    "--is-ancestor".into(),
+                    base_ref.clone(),
+                    local.clone(),
+                ])
+                .await
+                {
                     continue;
                 }
-                if git(&["checkout", "-B", &pr.head, &local])
-                    && git(&["merge", &base_ref, "--no-edit"])
+                if run(vec!["checkout".into(), "-B".into(), pr.head.clone(), local]).await
+                    && run(vec!["merge".into(), base_ref, "--no-edit".into()]).await
                 {
-                    if git(&["push", "origin", &pr.head]) {
+                    if run(vec!["push".into(), "origin".into(), pr.head.clone()]).await {
                         rebased.push(pr.number);
                     }
                 } else {
-                    let _ = git(&["merge", "--abort"]);
+                    let _ = run(vec!["merge".into(), "--abort".into()]).await;
                 }
-                let _ = git(&["checkout", &target]);
+                let _ = run(vec!["checkout".into(), target.clone()]).await;
             }
             if !rebased.is_empty() {
                 let list = rebased
@@ -573,14 +590,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     .into_iter()
                     .map(|(_, head)| head)
                     .collect();
-                let ls = std::process::Command::new("git")
-                    .args(["ls-remote", "--heads", "origin"])
-                    .current_dir(&self.work_dir)
-                    .output()
-                    .ok()
-                    .filter(|o| o.status.success())
-                    .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-                    .unwrap_or_default();
+                let ls = match &self.git {
+                    Some(git) => {
+                        git.raw(&self.work_dir, &["ls-remote", "--heads", "origin"])
+                            .await
+                            .1
+                    }
+                    None => String::new(),
+                };
                 let orphans: Vec<String> = ls
                     .lines()
                     .filter_map(|l| l.split('\t').nth(1))
@@ -596,34 +613,46 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     .collect();
                 for branch in orphans {
                     // Only when the branch actually carries commits over base.
-                    let ahead = std::process::Command::new("git")
-                        .args([
-                            "rev-list",
-                            "--count",
-                            &format!("origin/{target}..origin/{branch}"),
-                        ])
-                        .current_dir(&self.work_dir)
-                        .output()
-                        .ok()
-                        .filter(|o| o.status.success())
-                        .and_then(|o| {
-                            String::from_utf8_lossy(&o.stdout)
-                                .trim()
-                                .parse::<u64>()
-                                .ok()
-                        })
-                        .unwrap_or(0);
+                    let ahead = match &self.git {
+                        Some(git) => {
+                            let (ok, out) = git
+                                .raw(
+                                    &self.work_dir,
+                                    &[
+                                        "rev-list",
+                                        "--count",
+                                        &format!("origin/{target}..origin/{branch}"),
+                                    ],
+                                )
+                                .await;
+                            if ok {
+                                out.trim().parse::<u64>().unwrap_or(0)
+                            } else {
+                                0
+                            }
+                        }
+                        None => 0,
+                    };
                     if ahead == 0 {
                         continue;
                     }
-                    let title = std::process::Command::new("git")
-                        .args(["log", "-1", "--format=%s", &format!("origin/{branch}")])
-                        .current_dir(&self.work_dir)
-                        .output()
-                        .ok()
-                        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
-                        .filter(|t| !t.is_empty())
-                        .unwrap_or_else(|| branch.clone());
+                    let title = match &self.git {
+                        Some(git) => {
+                            let (_, out) = git
+                                .raw(
+                                    &self.work_dir,
+                                    &["log", "-1", "--format=%s", &format!("origin/{branch}")],
+                                )
+                                .await;
+                            let t = out.trim().to_owned();
+                            if t.is_empty() {
+                                branch.clone()
+                            } else {
+                                t
+                            }
+                        }
+                        None => branch.clone(),
+                    };
                     if let Ok(pr) = forge
                         .open_pr(
                             &branch,
@@ -938,26 +967,28 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             std::process::id(),
             head.replace('/', "-")
         ));
-        let _ = std::fs::remove_dir_all(&dir);
+        // A crashed previous verification can leave this worktree behind and
+        // registered; removing through the port both prunes the registration
+        // and deletes the directory, so the add below starts clean.
+        let _ = git.worktree_remove(&self.work_dir, &dir).await;
         // Fetch both sides first: the worktree is created from the target and
         // the head is merged into it, exactly as the forge would.
-        let fetch = std::process::Command::new("git")
-            .args(["fetch", "origin", head, target])
-            .current_dir(&self.work_dir)
-            .output();
-        if !fetch.is_ok_and(|o| o.status.success()) {
+        if !git
+            .raw(&self.work_dir, &["fetch", "origin", head, target])
+            .await
+            .0
+        {
             return Err(format!("could not fetch {head} and {target}"));
         }
         let sha = format!("origin/{target}");
         if let Err(e) = git.worktree_add(&self.work_dir, &dir, &sha).await {
             return Err(format!("worktree for {target}: {e}"));
         }
-        let merged = std::process::Command::new("git")
-            .args(["merge", "--no-edit", &format!("origin/{head}")])
-            .current_dir(&dir)
-            .output();
-        let outcome = match merged {
-            Ok(o) if o.status.success() => match deploy.run_tests(&dir).await {
+        let (merge_ok, _) = git
+            .raw(&dir, &["merge", "--no-edit", &format!("origin/{head}")])
+            .await;
+        let outcome = if merge_ok {
+            match deploy.run_tests(&dir).await {
                 // `deployed=false` means no toolchain was recognised: there is
                 // no suite to be red.
                 Ok(r) if r.success || !r.deployed => Ok(()),
@@ -968,18 +999,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 // A runner that cannot start is not a red suite, but it is not
                 // a green one either.
                 Err(e) => Err(format!("could not run the suite on the merged tree: {e}")),
-            },
-            Ok(o) => Err(format!(
-                "merging {head} into {target} does not apply cleanly: {}",
-                String::from_utf8_lossy(&o.stderr)
-                    .chars()
-                    .take(200)
-                    .collect::<String>()
-            )),
-            Err(e) => Err(format!("merge failed to run: {e}")),
+            }
+        } else {
+            Err(format!(
+                "merging {head} into {target} does not apply cleanly"
+            ))
         };
         let _ = git.worktree_remove(&self.work_dir, &dir).await;
-        let _ = std::fs::remove_dir_all(&dir);
         outcome
     }
     /// The PR feedback loop: for the newest open PR with unaddressed
