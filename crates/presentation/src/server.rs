@@ -592,6 +592,24 @@ async fn profile_avatar_clear_ep(
     Json(serde_json::json!({ "ok": true })).into_response()
 }
 
+/// Identify a real raster image format from its magic bytes. Never trusts the
+/// client-supplied Content-Type (trivially spoofable via multipart `type=`) —
+/// SVG and every other format that can carry a `<script>` is rejected outright,
+/// since there is no safe way to "sniff-validate" an XML document as inert.
+fn sniff_avatar_image(data: &[u8]) -> Option<(&'static str, &'static str)> {
+    if data.starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) {
+        Some(("png", "image/png"))
+    } else if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some(("jpg", "image/jpeg"))
+    } else if data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a") {
+        Some(("gif", "image/gif"))
+    } else if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
+        Some(("webp", "image/webp"))
+    } else {
+        None
+    }
+}
+
 /// Upload the caller's OWN avatar (image, ≤ 2 MB). Served via chat media.
 async fn profile_avatar_ep(
     State(app): State<AppState>,
@@ -604,20 +622,22 @@ async fn profile_avatar_ep(
     let Ok(Some(field)) = multipart.next_field().await else {
         return (StatusCode::BAD_REQUEST, "no file").into_response();
     };
-    let mime = field.content_type().unwrap_or("").to_owned();
-    if !mime.starts_with("image/") {
-        return (StatusCode::BAD_REQUEST, "avatar must be an image").into_response();
-    }
     let data = match field.bytes().await {
         Ok(b) if b.len() <= 2 * 1024 * 1024 => b,
         Ok(_) => return (StatusCode::PAYLOAD_TOO_LARGE, "max 2MB").into_response(),
         Err(_) => return (StatusCode::BAD_REQUEST, "read failed").into_response(),
     };
-    let ext = mime.strip_prefix("image/").unwrap_or("png");
-    let stored = format!("{}-avatar.{}", mint_media_token(), sanitize_name(ext));
+    let Some((ext, mime)) = sniff_avatar_image(&data) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "avatar must be a real png/jpeg/gif/webp image",
+        )
+            .into_response();
+    };
+    let stored = format!("{}-avatar.{}", mint_media_token(), ext);
     if app
         .storage
-        .put(&format!("chat/{stored}"), &data, &mime)
+        .put(&format!("chat/{stored}"), &data, mime)
         .await
         .is_err()
     {
@@ -5450,14 +5470,16 @@ async fn media_ep(
         return not_found();
     };
     let mime = mime_of(&file);
-    (
+    let mut resp = (
         [
             (header::CONTENT_TYPE, mime),
             (header::CACHE_CONTROL, "private, max-age=31536000"),
         ],
         bytes,
     )
-        .into_response()
+        .into_response();
+    force_download_if_active_content(&file, &mut resp);
+    resp
 }
 
 /// Best-effort MIME from a file extension (for serving uploads).
@@ -5472,6 +5494,31 @@ fn mime_of(name: &str) -> &'static str {
         Some("txt" | "log" | "md") => "text/plain; charset=utf-8",
         Some("json") => "application/json",
         _ => "application/octet-stream",
+    }
+}
+
+/// True for extensions whose MIME type a browser will execute as script if
+/// the file is opened via direct/top-level navigation (SVG documents, HTML,
+/// XML). `mime_of` derives Content-Type from the filename alone, so this
+/// covers files stored through ANY upload path (avatar, chat attachment,
+/// project attachment) — not just the one that first surfaced the bug.
+fn is_active_content_ext(name: &str) -> bool {
+    matches!(
+        name.rsplit('.').next().map(str::to_lowercase).as_deref(),
+        Some("svg" | "html" | "htm" | "xhtml" | "xml")
+    )
+}
+
+/// Force a download instead of inline rendering for [`is_active_content_ext`]
+/// files, so "open in new tab" / direct navigation can't execute embedded
+/// script — the browser downloads the file rather than parsing it as a
+/// top-level document.
+fn force_download_if_active_content(file: &str, resp: &mut axum::response::Response) {
+    if is_active_content_ext(file) {
+        resp.headers_mut().insert(
+            header::CONTENT_DISPOSITION,
+            axum::http::HeaderValue::from_static("attachment"),
+        );
     }
 }
 
@@ -6256,14 +6303,16 @@ async fn syschat_media_ep(
     let Ok(bytes) = app.storage.get(&format!("chat/{file}")).await else {
         return not_found();
     };
-    (
+    let mut resp = (
         [
             (header::CONTENT_TYPE, mime_of(&file)),
             (header::CACHE_CONTROL, "private, max-age=31536000"),
         ],
         bytes,
     )
-        .into_response()
+        .into_response();
+    force_download_if_active_content(&file, &mut resp);
+    resp
 }
 
 /// Sanitize an original filename to a safe stored suffix (keeps the extension).
@@ -9355,5 +9404,88 @@ mod pr_preview_tests {
         let resp = pr_preview(&handle, &forge, 1, false).await;
 
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+}
+
+/// COX-B059: stored XSS via spoofed `image/svg` avatar uploads served as
+/// executable `image/svg+xml` from `/api/chat/media/*`.
+#[cfg(test)]
+mod avatar_media_security_tests {
+    use super::*;
+
+    const PNG_MAGIC: &[u8] = &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    const JPEG_MAGIC: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0];
+    const SVG_BODY: &[u8] = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert(1)</script></svg>";
+
+    #[test]
+    fn a_genuine_png_is_recognized_regardless_of_claimed_content_type() {
+        assert_eq!(sniff_avatar_image(PNG_MAGIC), Some(("png", "image/png")));
+    }
+
+    #[test]
+    fn a_genuine_jpeg_is_recognized() {
+        assert_eq!(sniff_avatar_image(JPEG_MAGIC), Some(("jpg", "image/jpeg")));
+    }
+
+    #[test]
+    fn a_genuine_gif_is_recognized() {
+        assert_eq!(sniff_avatar_image(b"GIF89a...."), Some(("gif", "image/gif")));
+    }
+
+    #[test]
+    fn a_genuine_webp_is_recognized() {
+        let mut riff = b"RIFF".to_vec();
+        riff.extend_from_slice(&[0, 0, 0, 0]);
+        riff.extend_from_slice(b"WEBP");
+        assert_eq!(sniff_avatar_image(&riff), Some(("webp", "image/webp")));
+    }
+
+    /// The exact repro from the ticket: an SVG document with an embedded
+    /// `<script>`, regardless of what multipart Content-Type accompanies it,
+    /// must never be accepted as an avatar.
+    #[test]
+    fn an_svg_document_is_rejected_even_though_it_could_claim_image_svg() {
+        assert_eq!(sniff_avatar_image(SVG_BODY), None);
+    }
+
+    #[test]
+    fn arbitrary_non_image_bytes_are_rejected() {
+        assert_eq!(sniff_avatar_image(b"<html><body>hi</body></html>"), None);
+        assert_eq!(sniff_avatar_image(b"not an image"), None);
+        assert_eq!(sniff_avatar_image(b""), None);
+    }
+
+    /// Regression guard for the sink shared by every upload path (avatar,
+    /// chat attachment, project attachment): a `.svg`/`.html`/`.xml` name must
+    /// never be rendered inline, since `mime_of` derives Content-Type from
+    /// the filename alone and would otherwise let a browser execute it on
+    /// direct navigation.
+    #[test]
+    fn script_capable_extensions_are_flagged_for_forced_download() {
+        assert!(is_active_content_ext("evil.svg"));
+        assert!(is_active_content_ext("evil.HTML"));
+        assert!(is_active_content_ext("evil.xhtml"));
+        assert!(is_active_content_ext("evil.xml"));
+        assert!(!is_active_content_ext("photo.png"));
+        assert!(!is_active_content_ext("photo.jpg"));
+        assert!(!is_active_content_ext("report.pdf"));
+        assert!(!is_active_content_ext("noext"));
+    }
+
+    #[test]
+    fn syschat_media_forces_download_for_svg_but_not_png() {
+        let mut svg_resp = ([(header::CONTENT_TYPE, mime_of("x.svg"))], "body").into_response();
+        force_download_if_active_content("x.svg", &mut svg_resp);
+        assert_eq!(
+            svg_resp
+                .headers()
+                .get(header::CONTENT_DISPOSITION)
+                .and_then(|v| v.to_str().ok()),
+            Some("attachment")
+        );
+
+        let mut png_resp = ([(header::CONTENT_TYPE, mime_of("x.png"))], "body").into_response();
+        force_download_if_active_content("x.png", &mut png_resp);
+        assert!(png_resp.headers().get(header::CONTENT_DISPOSITION).is_none());
     }
 }

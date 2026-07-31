@@ -2115,7 +2115,8 @@ textarea.np-in{resize:vertical;line-height:1.5}
         <div id="pp-profile" hidden>
           <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
             <button type="button" class="btn-ghost" onclick="document.getElementById('pp-avatar-file').click()"><i class="ti ti-camera"></i> Change photo</button>
-            <input type="file" id="pp-avatar-file" accept="image/*" style="display:none" onchange="uploadAvatar(this)">
+            <!-- Raster formats only: SVG avatars are rejected server-side (stored-XSS, COX-B059). -->
+            <input type="file" id="pp-avatar-file" accept="image/png,image/jpeg,image/gif,image/webp" style="display:none" onchange="uploadAvatar(this)">
             <button id="pp-rmphoto" class="btn-ghost" hidden onclick="removeAvatar()"><i class="ti ti-trash"></i> Remove photo</button>
           </div>
           <div class="fr"><span class="lbl">Display name</span><input id="pp-name" style="flex:1"></div>
