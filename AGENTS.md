@@ -1,7 +1,7 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **CoXAgent** (6293 symbols, 16029 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **CoXAgent** (6305 symbols, 16032 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 
@@ -54,9 +54,8 @@ that prevents it is structural, not procedural:
   made two problems out of one.
 - Touching an oversized file? Leave it smaller: extract the part you came to
   change, with its tests. Do not rewrite the module for a one-behaviour ticket.
-- Current offenders, largest first (split these when work takes you into them):
-  `application/src/use_cases/cycle/forge.rs`. Everything else that was on this
-  list has been split — keep it that way. The web UI lives in
+- No current offenders — everything on this list has been split. Keep it that
+  way: a NEW file crossing ~500 lines is the moment to cut along a seam. The web UI lives in
   `web/app.css` + `web/js/*.js` (classic scripts, ONE shared scope, load order
   matters); any UI change must pass `cd e2e && npx playwright test` (golden
   screenshots + console-error gate).

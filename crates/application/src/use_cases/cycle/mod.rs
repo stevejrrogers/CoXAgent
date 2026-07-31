@@ -23,6 +23,9 @@ mod scrum;
 mod wiring;
 mod escalation;
 mod forge;
+mod forge_feedback;
+mod forge_merge;
+mod forge_review;
 mod ops;
 mod qa_evidence;
 

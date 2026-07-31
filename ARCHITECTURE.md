@@ -159,5 +159,5 @@ new top-level state goes in the file that owns the view. `e2e/` (Playwright)
 is the gate: golden screenshots + a console-error assert per view, booted
 from a frozen fixture on COXAGENT_PORT.
 
-Remaining oversized (split when work takes you into them):
-`cycle/forge.rs` (1.46k), `server/mod.rs` router body.
+The forge itself then split along its seams (forge.rs 1,457 → 296 +
+forge_review/forge_merge/forge_feedback). No oversized offenders remain.
