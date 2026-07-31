@@ -538,7 +538,13 @@ struct MeetingRingReq {
 
 /// The caller's username, via session cookie or bearer token.
 async fn principal_name(app: &AppState, headers: &axum::http::HeaderMap) -> Option<String> {
-    let auth = app.auth.clone()?;
+    let Some(auth) = app.auth.clone() else {
+        // Open mode (no accounts configured): every request IS the operator.
+        // Returning None here made profile/meeting endpoints 401 on a hub
+        // whose every other endpoint runs open — an inconsistency the e2e
+        // console gate caught.
+        return Some("operator".to_owned());
+    };
     resolve_principal(&auth, headers).await.map(|u| u.username)
 }
 

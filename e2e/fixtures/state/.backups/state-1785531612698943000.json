@@ -1,0 +1,133 @@
+{
+  "schema_version": 1,
+  "alias": "",
+  "current_version": "0.0.0",
+  "tickets": [
+    {
+      "id": "F001",
+      "type": "feature",
+      "title": "Search box scopes per tab",
+      "description": "Search results must match the active tab (Chat: channels/people/messages; Space: tickets/pages/people; Manage: people/projects).",
+      "priority": "high",
+      "complexity": "medium",
+      "status": "pending",
+      "has_ui": true,
+      "design": {
+        "technical": null,
+        "ux": null
+      },
+      "parent_id": null,
+      "depends_on": [],
+      "acceptance_criteria": [
+        "Switching tabs switches the search scope",
+        "Cmd+K focuses the box"
+      ]
+    },
+    {
+      "id": "B001",
+      "type": "bug",
+      "title": "Delivery timeline connector line breaks between versions",
+      "description": "The vertical line joining releases has gaps at each card boundary.",
+      "priority": "medium",
+      "complexity": "medium",
+      "status": "open",
+      "has_ui": true,
+      "design": {
+        "technical": null,
+        "ux": null
+      },
+      "parent_id": null,
+      "depends_on": [],
+      "acceptance_criteria": []
+    },
+    {
+      "id": "F002",
+      "type": "feature",
+      "title": "Sub-channels under a parent channel",
+      "description": "A channel can own child channels; the sidebar nests them.",
+      "priority": "low",
+      "complexity": "medium",
+      "status": "pending",
+      "has_ui": false,
+      "design": {
+        "technical": null,
+        "ux": null
+      },
+      "parent_id": null,
+      "depends_on": [],
+      "acceptance_criteria": []
+    }
+  ],
+  "history": [],
+  "activity": [
+    {
+      "at": "2026-07-31T21:00:12.658541Z",
+      "agent": "USER",
+      "action": "created ticket",
+      "ticket": "F001"
+    },
+    {
+      "at": "2026-07-31T21:00:12.673299Z",
+      "agent": "USER",
+      "action": "created ticket",
+      "ticket": "B001"
+    },
+    {
+      "at": "2026-07-31T21:00:12.686627Z",
+      "agent": "USER",
+      "action": "created ticket",
+      "ticket": "F002"
+    }
+  ],
+  "spend": {
+    "total_cost_usd": 0.0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "runs": 0,
+    "by_role": {},
+    "runs_by_role": {},
+    "metered_cost_by_role": {},
+    "by_operator": {},
+    "confined_runs": 0,
+    "unconfined_requested_runs": 0,
+    "last_sandbox_status": ""
+  },
+  "sprint": null,
+  "sprints": [],
+  "deploy": null,
+  "comments": [],
+  "chat": [
+    {
+      "id": "18c77b8aa5c446500",
+      "at": "2026-07-31T21:00:12.6925Z",
+      "user": "user",
+      "body": "Standup: timeline fix is in review, search scoping starts today.",
+      "channel": "general",
+      "reply_count": 0,
+      "deleted": false
+    }
+  ],
+  "sprint_cycle": 0,
+  "sprint_goal": "",
+  "last_digest_day": "",
+  "pr_fix_attempts": {},
+  "queue_recovery": false,
+  "last_memory_hygiene_day": "",
+  "jobs": [],
+  "last_impediment_day": "",
+  "pr_rescues": {},
+  "ticket_redesigns": {},
+  "drain_notice_sprint": 0,
+  "ticket_fail_attempts": {},
+  "ticket_failures": {},
+  "questions": [],
+  "engine_incidents": [],
+  "daily_jobs": {},
+  "ops_down": false,
+  "spend_today_usd": 0.0,
+  "spend_day": "",
+  "budget_warned_lifetime": false,
+  "budget_warned_daily": false,
+  "deploy_index": 0,
+  "in_rollback": false
+}

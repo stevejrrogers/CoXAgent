@@ -139,6 +139,33 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             ),
         )
         .await;
+        // Tickets designed before a refactor can name files that no longer
+        // exist. Say so mechanically — a DEV chasing a dead path burns a whole
+        // attempt before it asks.
+        let stale_design = {
+            let listed: Vec<&str> = ticket
+                .and_then(|t| t.design().technical.as_ref())
+                .map(|d| d.files.iter().map(String::as_str).collect())
+                .unwrap_or_default();
+            let mut missing: Vec<&str> = Vec::new();
+            if let Some(fs) = self.files.as_deref() {
+                for f in listed {
+                    if !f.trim().is_empty() && fs.stat(&self.work_dir.join(f)).await.is_none() {
+                        missing.push(f);
+                    }
+                }
+            }
+            if missing.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "\nWARNING: this design predates a refactor — these listed files no \
+                     longer exist: {}. Locate the moved code via `.coxagent/REPO_MAP.md` \
+                     (or ask SA) before implementing; do NOT recreate the old files.",
+                    missing.join(", ")
+                )
+            }
+        };
         AgentRequest {
             role: self.mode.role(),
             // The system prompt stays BYTE-IDENTICAL across every DEV run of a
@@ -148,7 +175,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             // exists only for UI tickets) belongs in the task prompt below.
             system_prompt: prompts::system_prompt(prompts::DEV),
             task_prompt: format!(
-                "Ticket {id}: {title}\n{}\nImplement it now.{stack}{deploy}{design}{context_block}{}{history}{knowledge}{}{}{}{steering}{journal}{asking}",
+                "Ticket {id}: {title}\n{}{stale_design}\nImplement it now.{stack}{deploy}{design}{context_block}{}{history}{knowledge}{}{}{}{steering}{journal}{asking}",
                 ticket_brief(ticket),
                 prompts::focus_block(
                     self.files.as_deref(),
