@@ -534,12 +534,12 @@
   .coxmodal-toggle input:checked + .cmsw{background:color-mix(in srgb,var(--accent) 30%,transparent);border-color:var(--accent)}
   .coxmodal-toggle input:checked + .cmsw::after{transform:translateX(16px);background:var(--accent)}
   /* Chat search — first thing in the rail. */
-  .chatsearch{display:flex;align-items:center;gap:7px;margin:8px 10px 6px;padding:5px 9px;border-radius:8px;cursor:pointer;
-    background:var(--card2);border:1px solid var(--border2);color:var(--muted);font-size:12px;line-height:1.4;white-space:nowrap;
-    transition:border-color .15s,color .15s}
-  .chatsearch:hover{border-color:var(--accent);color:var(--text)}
-  .chatsearch i{font-size:14px}
-  .chatsearch kbd{margin-left:auto;font-size:10px;padding:1px 5px;border-radius:4px;background:var(--card);border:1px solid var(--border2)}
+  .railsearch{display:flex;align-items:center;gap:8px;margin:0 0 8px;padding:7px 12px;border-radius:10px;cursor:pointer;
+    background:var(--card2);border:1px solid var(--border2);color:var(--muted);font-size:12.5px;line-height:1.3;white-space:nowrap;
+    transition:border-color .15s,color .15s,background .15s}
+  .railsearch:hover{border-color:var(--accent);color:var(--text);background:var(--card)}
+  .railsearch i{font-size:14px}
+  .railsearch kbd{margin-left:auto;font-size:10px;padding:1px 5px;border-radius:4px;background:var(--card);border:1px solid var(--border2);color:var(--dim)}
   .chanitem.sub{padding-left:26px}
   .chanitem.sub .channm{opacity:.9}
   .chansub,.chancog{margin-left:4px;background:none;border:0;color:var(--dim);cursor:pointer;padding:2px;border-radius:5px;opacity:0;transition:opacity .12s,color .12s}
@@ -1589,6 +1589,12 @@ textarea.np-in{resize:vertical;line-height:1.5}
   </div>
   <aside class="side">
     <div class="brand"><div class="mk"><i class="ti ti-hexagon-letter-c"></i></div><div><div class="nm">CoXAgent</div><div class="tg">autonomous dev team · <span id="brand-ver"></span></div></div></div>
+    <!-- One search for the whole sidebar, above the mode switch: the same box
+         serves Space, Manage and Chat, so it is never a per-mode afterthought
+         and the rail keeps one rhythm. -->
+    <div class="railsearch" onclick="openGlobalSearch()" title="Search channels, people, messages, tickets and pages">
+      <i class="ti ti-search"></i><span>Search</span><kbd>⌘K</kbd>
+    </div>
     <div class="modeseg">
       <button id="mode-manage" style="display:none" onclick="setMode('manage');nav('mg-spaces')" title="Manage"><i class="ti ti-shield-cog"></i><span class="lbl">Manage</span></button>
       <button id="mode-ws" class="on" onclick="setMode('workspace')" title="Space"><i class="ti ti-layout-grid"></i><span class="lbl">Space</span></button>
@@ -1598,9 +1604,6 @@ textarea.np-in{resize:vertical;line-height:1.5}
     <div class="chatside" id="chat-side">
       <!-- Search sits ABOVE the rooms because that is what you reach for first
            in a workspace with more rooms than fit on a screen. -->
-      <div class="chatsearch" onclick="openChatSearch()" title="Search channels, people and messages">
-        <i class="ti ti-search"></i><span>Search</span><kbd>⌘K</kbd>
-      </div>
       <div class="chanrail-hd"><span>Channels</span><div class="chanrail-actions"><button class="chanadd" id="btn-newchan" onclick="createChannel()" title="Create channel (leads & admins)"><i class="ti ti-plus"></i></button></div></div>
       <div class="chanlist" id="chan-list"></div>
       <div class="chanrail-hd" style="margin-top:10px"><span>Direct messages</span></div>
@@ -2182,7 +2185,7 @@ textarea.np-in{resize:vertical;line-height:1.5}
   <!-- Chat search: channels, people and messages in one palette. -->
   <div class="ov" id="ov-chatsearch" onclick="if(event.target===this)closeChatSearch()"><div class="modal" style="max-width:620px;padding:0;overflow:hidden">
     <div class="cmdk-inp" style="border-radius:0"><i class="ti ti-search"></i>
-      <input id="chatsearch-input" placeholder="Search channels, people, messages…" autocomplete="off"
+      <input id="chatsearch-input" placeholder="Search channels, people, messages, tickets, pages…" autocomplete="off"
         oninput="chatSearchRun()" onkeydown="if(event.key==='Escape')closeChatSearch()"><kbd>esc</kbd></div>
     <div class="cmdk-list" id="chatsearch-list" style="max-height:60vh"></div>
   </div></div>
@@ -3746,7 +3749,10 @@ function renderChannelSettings(){
 async function saveChannelSettings(patch){
   if(!CHSET)return;
   try{
-    const r=await fetch(api(`/channels/${encodeURIComponent(CHSET.id)}/settings`),
+    // Channels live in the system-chat store (they are created through
+    // /api/chat/channels), so their settings do too. Pointing this at the
+    // per-project router answered "no such project" on every save.
+    const r=await fetch(`/api/chat/channels/${encodeURIComponent(CHSET.id)}/settings`,
       {method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(patch)});
     if(!r.ok){toasty(await r.text()||"could not save","err");return;}
     await loadChannels();renderChannelSettings();toasty("Saved","ok");
@@ -3757,14 +3763,14 @@ async function kickMember(user){
   const ok=await coxModal({title:"Remove member",message:`Remove ${user} from this channel?`,confirmText:"Remove",danger:true});
   if(!ok)return;
   try{
-    const r=await fetch(api(`/channels/${encodeURIComponent(CHSET.id)}/members/${encodeURIComponent(user)}`),{method:"DELETE"});
+    const r=await fetch(`/api/chat/channels/${encodeURIComponent(CHSET.id)}/members/${encodeURIComponent(user)}`,{method:"DELETE"});
     if(!r.ok){toasty(await r.text()||"could not remove","err");return;}
     await loadChannels();renderChannelSettings();
   }catch(e){toasty("could not remove","err");}
 }
 async function delegateInvite(user,on){
   try{
-    await fetch(api(`/channels/${encodeURIComponent(CHSET.id)}/invite`),
+    await fetch(`/api/chat/channels/${encodeURIComponent(CHSET.id)}/invite`,
       {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({user,delegate:on})});
     await loadChannels();renderChannelSettings();
   }catch(e){toasty("could not update","err");}
@@ -3776,7 +3782,7 @@ async function inviteToSettingsChannel(){
   const who=await coxModal({title:"Invite to channel",input:{placeholder:"username"},confirmText:"Invite"});
   const u=(typeof who==="string"?who:"").trim();if(!u)return;
   try{
-    const r=await fetch(api(`/channels/${encodeURIComponent(CHSET.id)}/invite`),
+    const r=await fetch(`/api/chat/channels/${encodeURIComponent(CHSET.id)}/invite`,
       {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({user:u})});
     if(!r.ok){toasty(await r.text()||"could not invite","err");return;}
     await loadChannels();renderChannelSettings();
@@ -3787,15 +3793,49 @@ async function inviteToSettingsChannel(){
 function openChatSearch(){
   const ov=document.getElementById("ov-chatsearch");
   document.getElementById("chatsearch-input").value="";
-  document.getElementById("chatsearch-list").innerHTML='<div class="empty">Type to search channels, people and messages.</div>';
+  const sc=searchScope();
+  document.getElementById("chatsearch-input").placeholder=`Search ${sc.label}…`;
+  document.getElementById("chatsearch-list").innerHTML=`<div class="empty">Type to search ${sc.label}.</div>`;
   ov.classList.add("open");
   setTimeout(()=>document.getElementById("chatsearch-input").focus(),40);
 }
+// The rail's single search. In chat it looks at rooms, people and messages;
+// everywhere else it looks at the work — tickets and wiki pages — so the same
+// box is useful in all three modes instead of being a chat-only feature that
+// happens to sit above the switch.
+function openGlobalSearch(){ openChatSearch(); }
+
+// What the palette searches depends on where you are: rooms and messages in
+// Chat, work in Space, people and projects in Manage. One box, the answers of
+// the room you are standing in.
+function searchScope(){
+  if(MODE==="chat")return {kinds:["channel","person","message"],label:"channels, people, messages"};
+  if(MODE==="manage")return {kinds:["person","project"],label:"people and projects"};
+  return {kinds:["ticket","page","person"],label:"tickets, pages, people"};
+}
+
+function searchWorkItems(q){
+  const hit=[];
+  const s=STATE||{};
+  for(const t of (s.tickets||[])){
+    const hay=`${t.id} ${t.title} ${t.description||""}`.toLowerCase();
+    if(hay.includes(q)) hit.push({t:"ticket",label:`${t.id} · ${t.title}`,sub:t.status,act:`showTicket('${esc(t.id)}')`});
+    if(hit.length>=12)break;
+  }
+  for(const d of (s.docs||[])){
+    if(`${d.title} ${d.body||""}`.toLowerCase().includes(q))
+      hit.push({t:"page",label:d.title,sub:d.folder||"wiki",act:`nav('docs')`});
+    if(hit.length>=20)break;
+  }
+  return hit;
+}
+
 function chatSearchRun(){
   const q=document.getElementById("chatsearch-input").value.trim().toLowerCase();
   const list=document.getElementById("chatsearch-list");
-  if(!q){list.innerHTML='<div class="empty">Type to search channels, people and messages.</div>';return;}
-  const hit=[];
+  const scope=searchScope();
+  if(!q){list.innerHTML=`<div class="empty">Type to search ${scope.label}.</div>`;return;}
+  let hit=[];
   for(const c of CHANNELS){
     if((c.name||"").toLowerCase().includes(q)||(c.topic||"").toLowerCase().includes(q))
       hit.push({t:"channel",label:"#"+chanDisplay(c),sub:c.topic||((c.kind==="public")?"public channel":"private channel"),act:`selectChannel('${esc(c.id)}')`});
@@ -3804,6 +3844,11 @@ function chatSearchRun(){
     const n=m.username||m.name||"";
     if(n.toLowerCase().includes(q)) hit.push({t:"person",label:n,sub:m.role||"",act:`openDM('${esc(n)}')`});
   }
+  for(const h of searchWorkItems(q)) hit.push(h);
+  for(const p of (PROJECTS||[])){
+    if(`${p.id} ${p.name||""}`.toLowerCase().includes(q))
+      hit.push({t:"project",label:p.name||p.id,sub:`${p.tickets||0} tickets · v${p.version||"0.0.0"}`,act:`switchProject('${esc(p.id)}')`});
+  }
   for(const msg of (CHAT||[]).slice(-800).reverse()){
     const b=(msg.body||"");
     if(b.toLowerCase().includes(q)){
@@ -3811,7 +3856,9 @@ function chatSearchRun(){
       if(hit.filter(h=>h.t==="message").length>=12)break;
     }
   }
-  const icon={channel:"hash",person:"user",message:"message-2"};
+  const icon={channel:"hash",person:"user",message:"message-2",ticket:"ticket",page:"file-text",project:"folder"};
+  // Keep only what this tab is about; everything else is noise here.
+  hit=hit.filter(h=>scope.kinds.includes(h.t));
   list.innerHTML=hit.length?hit.slice(0,30).map(h=>`
     <div class="cs-item" onclick="closeChatSearch();${h.act}">
       <i class="ti ti-${icon[h.t]}"></i>
@@ -3820,6 +3867,9 @@ function chatSearchRun(){
     :'<div class="empty">Nothing matched.</div>';
 }
 function closeChatSearch(){document.getElementById("ov-chatsearch").classList.remove("open");}
+document.addEventListener("keydown",e=>{
+  if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==="k"){e.preventDefault();openGlobalSearch();}
+});
 
 // Enterprise modal replacing browser prompt()/confirm(): returns a Promise —
 // resolves the input string (or true) on confirm, null on cancel.
@@ -4950,8 +5000,23 @@ let PROFILES={};
 async function loadProfiles(){try{PROFILES=await(await fetch("/api/profiles")).json();}catch(e){}
   renderDMList();try{renderMe();}catch(e){}}
 function avat(u,cls){const p=PROFILES[u]||{};const col=userColor(u);
-  if(p.avatar)return `<img class="${cls} avimg" src="${esc(p.avatar)}" alt="">`;
+  // A broken or degenerate image (a 1x1 pixel scaled to fill) renders as a
+  // solid black square that looks like a bug in the app. Fall back to the
+  // initials tile, which is always readable.
+  if(p.avatar)return `<img class="${cls} avimg" src="${esc(p.avatar)}" alt="" data-u="${esc(u)}"
+    onerror="avatarFallback(this)" onload="if(this.naturalWidth<8||this.naturalHeight<8)avatarFallback(this)">`;
   return `<div class="${cls}" style="background:${col}26;color:${col}">${esc((memberName(u)||"?").slice(0,2).toUpperCase())}</div>`;}
+// Replace an unusable avatar image with its initials tile in place.
+function avatarFallback(img){
+  const u=img.getAttribute("data-u")||"";
+  const col=userColor(u);
+  const cls=(img.className||"").replace("avimg","").trim();
+  const el=document.createElement("div");
+  el.className=cls;
+  el.style.background=col+"26";el.style.color=col;
+  el.textContent=(memberName(u)||u||"?").slice(0,2).toUpperCase();
+  img.replaceWith(el);
+}
 function statusChip(u){const p=PROFILES[u]||{};
   return p.status_emoji?`<span class="ustatus" title="${esc(p.status_text||"")}">${esc(p.status_emoji)}</span>`:"";}
 const STATUS_PRESETS=[["🎯","Focusing"],["🍜","Lunch"],["🏠","WFH"],["📅","In a meeting"],["🌴","Vacation"],["🤒","Sick"]];
@@ -6371,7 +6436,8 @@ function renderMe(){const box=document.querySelector("#user-badge .uavatar");if(
   // Bind through a wrapper: assigning openProfile directly hands it the click
   // Event as `tab`, which matches no pane and opens the modal with nothing selected.
   box.style.cursor="pointer";box.title="Edit your profile & status";box.onclick=()=>openProfile("profile");
-  box.innerHTML=p.avatar?`<img src="${esc(p.avatar)}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit">`
+  box.innerHTML=p.avatar?`<img src="${esc(p.avatar)}" data-u="${esc(me)}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit"
+      onerror="this.remove()" onload="if(this.naturalWidth<8||this.naturalHeight<8)this.remove()">`
     :`<span id="ub-initials">${esc(me.slice(0,2).toUpperCase())}</span>`;
   const nm=document.getElementById("ub-name");
   if(nm)nm.innerHTML=esc(ME.name||me)+(p.status_emoji?` <span class="ustatus" title="${esc(p.status_text||"")}">${esc(p.status_emoji)}</span>`:"");
