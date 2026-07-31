@@ -61,3 +61,12 @@ that prevents it is structural, not procedural:
 - Current offenders, largest first (split these when work takes you into them):
   `presentation/src/server.rs`, `presentation/src/web/index.html`,
   `application/src/use_cases/cycle.rs`, `application/src/state.rs`.
+
+## Running the app you are building
+
+This repository IS the tool running you. When you start a build of it to try
+something, never let it bind the hub's port (4000): the desktop window points
+there, and a hub that finds its port taken moves to another one — the app then
+looks dead while everything is in fact running. Use the project's own
+`deploy.host_port`, or set `COXAGENT_PORT` before `coxagent serve`. Stop what
+you started when you are done.
