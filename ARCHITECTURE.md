@@ -134,7 +134,12 @@ Conventions for these split modules:
   of `src/`; when a split introduces a new visibility form, the guard must
   keep recognising `fn` headers — it caught `pub(super)` being invisible once.
 
-Remaining oversized files, in priority order: `server/mod.rs` (~6k),
-`use_cases/cycle/mod.rs` (~5.1k), `state.rs` (2.3k, split by bounded context:
-tickets/chat/docs/spend), `app/lib.rs` (2.3k, CLI vs hub boot),
-`web/index.html` (7.7k, split JS/CSS per view).
+Completed since: `server/` grew forge/work/docs/manage/engines/assets/realtime
+(mod.rs ≈4.1k); `cycle/` grew forge.rs (mod.rs ≈3.7k); `state/` split into
+chat/work/ops/docs (mod.rs ≈1.4k); `app/` split out shims.rs and builders.rs
+(lib.rs ≈1.6k); `run_dev/` split out gates.rs and briefing.rs (mod.rs ≈1.2k).
+
+Still oversized: `server/mod.rs` (~4.1k — project CRUD and comments next),
+`cycle/mod.rs` (~3.7k — run_cycle itself), and `web/index.html` (~7.7k — needs
+its JS split per view into served assets, a behaviour-affecting change to do
+in its own window with UI smoke tests).
