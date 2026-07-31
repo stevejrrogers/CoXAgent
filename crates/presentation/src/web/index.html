@@ -566,13 +566,12 @@
   .cs-txt span{font-size:11.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .cs-kind{font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--dim);flex-shrink:0}
   .chset-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 0;font-size:13px;border-bottom:1px solid var(--border2)}
-  .eng-alert{display:flex;gap:12px;align-items:flex-start;margin:0 0 10px;padding:12px 16px;border-radius:12px;
-    background:color-mix(in srgb,var(--red) 12%,transparent);border:1px solid color-mix(in srgb,var(--red) 40%,transparent)}
-  .eng-alert>i{font-size:20px;color:var(--red);flex-shrink:0;margin-top:1px}
-  .ea-txt{display:flex;flex-direction:column;gap:2px;min-width:0}
-  .ea-txt b{font-size:13.5px;color:var(--red)}
-  .ea-txt span{font-size:12.5px;color:var(--text);word-break:break-word}
-  .ea-txt small{font-size:11px;color:var(--muted)}
+  .eng-alert{display:flex;gap:10px;align-items:center;margin:0 0 8px;padding:7px 14px;border-radius:10px;font-size:12.5px;
+    background:color-mix(in srgb,var(--red) 10%,transparent);border:1px solid color-mix(in srgb,var(--red) 35%,transparent)}
+  .eng-alert>i{font-size:15px;color:var(--red);flex-shrink:0}
+  .eng-alert b{color:var(--red);white-space:nowrap}
+  .eng-alert span{color:var(--text);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .eng-alert small{margin-left:auto;color:var(--muted);white-space:nowrap;font-size:11px}
   .doc-cat-tag.qa{background:color-mix(in srgb,var(--green) 16%,transparent);color:var(--green)}
   .doc-meta{display:block;font-size:11.5px;color:var(--dim);margin-top:7px}
   .doc-body.md{font-size:14px;line-height:1.7;color:var(--text);max-width:820px}
@@ -1603,8 +1602,9 @@ textarea.np-in{resize:vertical;line-height:1.5}
       </div>
       <div class="chanrail-hd"><span>Channels</span><div class="chanrail-actions"><button class="chanadd" id="btn-newchan" onclick="createChannel()" title="Create channel (leads & admins)"><i class="ti ti-plus"></i></button></div></div>
       <div class="chanlist" id="chan-list"></div>
-      <div class="chanrail-hd" style="margin-top:10px"><span>Direct messages</span></div>
-      <div class="dmsearch"><i class="ti ti-search"></i><input id="dm-search" placeholder="Find a teammate…" autocomplete="off" oninput="renderDMList()"></div>
+      <div class="chanrail-hd" style="margin-top:10px"><span>Direct messages</span>
+        <div class="chanrail-actions"><button class="chanadd" onclick="openChatSearch()" title="Find a teammate"><i class="ti ti-search"></i></button></div></div>
+      <input id="dm-search" type="hidden" value="">
       <div class="chanlist" id="dm-list"></div>
       <div class="chanrail-hd" style="margin-top:10px"><span>Meetings</span><div class="chanrail-actions"><button class="chanadd" onclick="openMeetModal()" title="Book a meeting"><i class="ti ti-plus"></i></button></div></div>
       <div class="meet-cal" id="meet-cal"></div>
@@ -5121,11 +5121,14 @@ function renderEngineAlert(s){
   const inc=(s&&s.engine_incidents)||[];
   if(!inc.length){el.hidden=true;el.innerHTML="";return;}
   el.hidden=false;
-  el.innerHTML=inc.map(i=>`<div class="eng-alert">
+  // One line, with the detail on hover: it must be impossible to miss and
+  // cheap to ignore once read — a banner that eats the screen gets dismissed
+  // mentally, which is the opposite of the point.
+  el.innerHTML=inc.map(i=>`<div class="eng-alert" title="${esc(i.reason)}">
     <i class="ti ti-plug-connected-x"></i>
-    <div class="ea-txt"><b>${esc(i.engine)} is failing every run</b>
-      <span>${esc(i.reason)}</span>
-      <small>first hit by ${esc(i.role)} · ${i.hits} failed run${i.hits>1?"s":""} · clears itself once the engine answers</small></div>
+    <b>${esc(i.engine)} failing</b>
+    <span>${esc(i.reason)}</span>
+    <small>${i.hits} run${i.hits>1?"s":""} · clears itself</small>
   </div>`).join("");
 }
 function depChips(ids){
