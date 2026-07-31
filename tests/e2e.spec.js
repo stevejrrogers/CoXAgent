@@ -1,4 +1,17 @@
 const { test, expect } = require('@playwright/test');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+// 1x1 transparent PNG — enough to satisfy the server's `image/*` mime check.
+const TINY_PNG_B64 =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+
+function writeTinyPng() {
+  const p = path.join(os.tmpdir(), `cox-e2e-avatar-${Date.now()}.png`);
+  fs.writeFileSync(p, Buffer.from(TINY_PNG_B64, 'base64'));
+  return p;
+}
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -510,6 +523,77 @@ test.describe('Sidebar & Misc', () => {
       const link = page.locator(`a[data-v="${v}"]`);
       await expect(link, `nav link [data-v="${v}"] should exist`).toBeVisible({ timeout: 3000 });
     }
+  });
+
+});
+
+// Regression for COX-B056: the file input behind "Change photo" must stay
+// clickable via label/button activation (not merely present in the DOM).
+test.describe('Profile / Avatar upload', () => {
+  test.beforeEach(async ({ page }) => { await initPage(page); });
+
+  async function openProfileTab(page) {
+    await page.locator('.uavatar').click();
+    await page.locator('#pt-profile').click();
+    await expect(page.locator('#pp-profile')).toBeVisible();
+    return page.locator('#pp-profile button:has-text("Change photo")');
+  }
+
+  test('click "Change photo" opens the native file picker with no console error', async ({ page }) => {
+    const errors = [];
+    page.on('pageerror', e => errors.push(e.message));
+    page.on('console', msg => { if (msg.type() === 'error') errors.push(msg.text()); });
+
+    const changePhotoBtn = await openProfileTab(page);
+    const [chooser] = await Promise.all([
+      page.waitForEvent('filechooser', { timeout: 5000 }),
+      changePhotoBtn.click(),
+    ]);
+    expect(chooser).toBeTruthy();
+    expect(errors, `no console errors, got: ${errors.join(' | ')}`).toHaveLength(0);
+  });
+
+  test('selecting a valid image uploads the avatar and updates the preview without reload', async ({ page }) => {
+    const changePhotoBtn = await openProfileTab(page);
+    await page.evaluate(() => { window.__navMarker = 'still-here'; });
+
+    const [chooser] = await Promise.all([
+      page.waitForEvent('filechooser'),
+      changePhotoBtn.click(),
+    ]);
+    await chooser.setFiles(writeTinyPng());
+
+    await expect(page.locator('#toasts .toast.ok', { hasText: /Avatar updated/i }))
+      .toBeVisible({ timeout: 8000 });
+    await expect(page.locator('#pf-av img.avimg')).toBeVisible({ timeout: 5000 });
+
+    const navMarkerSurvived = await page.evaluate(() => window.__navMarker === 'still-here');
+    expect(navMarkerSurvived, 'page must not have reloaded').toBe(true);
+  });
+
+  test('cancelling the picker without choosing a file leaves the UI unchanged', async ({ page }) => {
+    const changePhotoBtn = await openProfileTab(page);
+    const [chooser] = await Promise.all([
+      page.waitForEvent('filechooser'),
+      changePhotoBtn.click(),
+    ]);
+    // Simulate "Cancel": close the native dialog without calling setFiles().
+    await page.waitForTimeout(500);
+
+    await expect(page.locator('#pp-profile')).toBeVisible();
+    expect(await page.locator('#toasts .toast.err').count()).toBe(0);
+  });
+
+  test('keyboard-only Tab + Enter activates the file picker', async ({ page }) => {
+    const changePhotoBtn = await openProfileTab(page);
+    await changePhotoBtn.focus();
+    await expect(changePhotoBtn).toBeFocused();
+
+    const [chooser] = await Promise.all([
+      page.waitForEvent('filechooser', { timeout: 5000 }),
+      page.keyboard.press('Enter'),
+    ]);
+    expect(chooser).toBeTruthy();
   });
 
 });
