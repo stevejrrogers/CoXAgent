@@ -2115,7 +2115,8 @@ textarea.np-in{resize:vertical;line-height:1.5}
         <div id="pp-profile" hidden>
           <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
             <label class="btn-ghost" style="cursor:pointer;display:inline-flex"><i class="ti ti-camera"></i> Change photo
-              <input type="file" accept="image/*" hidden onchange="uploadAvatar(this)"></label>
+              <!-- Raster formats only: SVG avatars are rejected server-side (stored-XSS, COX-B059). -->
+              <input type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden onchange="uploadAvatar(this)"></label>
             <button id="pp-rmphoto" class="btn-ghost" hidden onclick="removeAvatar()"><i class="ti ti-trash"></i> Remove photo</button>
           </div>
           <div class="fr"><span class="lbl">Display name</span><input id="pp-name" style="flex:1"></div>
