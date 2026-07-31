@@ -18,7 +18,7 @@ pub use deploy::{verify_deploy_health, CrossCheck, DeployPort, DeployReport, Lin
 pub use doc_store::DocStorePort;
 pub use engine::{AgentEnginePort, AgentOutcome, AgentRequest, SandboxStatus, Usage};
 pub use forge::{ForgePort, PrFeedback, PullRequest};
-pub use git::{GitAuthor, GitPort, SyncBase};
+pub use git::{GitAuthor, GitPort, SyncBase, WorkingTreeDiff};
 pub use kv_doc::KvDocPort;
 pub use notify::{ChatNotifier, FanoutNotifier, NotifierPort, NotifyEvent, NullNotifier};
 pub use probe::{ApiProbePort, ApiProof};

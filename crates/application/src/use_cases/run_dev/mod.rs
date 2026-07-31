@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 mod briefing;
+mod failures;
 mod gates;
 
 /// Which developer role to run.
@@ -65,6 +66,10 @@ pub struct RunDevUseCase<S: StateStorePort, E: AgentEnginePort> {
     /// Test runner for the mechanical Definition-of-Done check: after the
     /// engine finishes, the suite must be green or the ticket is NOT done.
     verify: Option<Arc<dyn crate::ports::outbound::DeployPort>>,
+    /// Git access for the working-tree snapshot the DoD gates read. `None`
+    /// (tests, git-less projects) reads as an empty tree — the same answer the
+    /// old shell-out gave outside a repo.
+    git: Option<Arc<dyn crate::ports::outbound::GitPort>>,
     context: Option<String>,
 }
 
@@ -85,7 +90,24 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             worker: String::new(),
             phase: None,
             verify: None,
+            git: None,
             context: None,
+        }
+    }
+
+    /// Attach git access for the gates' working-tree snapshot.
+    #[must_use]
+    pub fn with_git(mut self, git: Option<Arc<dyn crate::ports::outbound::GitPort>>) -> Self {
+        self.git = git;
+        self
+    }
+
+    /// One snapshot of the uncommitted tree, taken through the port. The gates
+    /// all read the SAME snapshot, so they cannot disagree about what changed.
+    async fn working_tree(&self) -> crate::ports::outbound::WorkingTreeDiff {
+        match &self.git {
+            Some(git) => git.working_tree(&self.work_dir).await.unwrap_or_default(),
+            None => crate::ports::outbound::WorkingTreeDiff::default(),
         }
     }
 
@@ -528,8 +550,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                         // someone else's — failing the holder of the ticket for
                         // those parks perfectly good fixes after three tries.
                         // MSRV 1.80 predates Option::is_none_or.
+                        let tree = self.working_tree().await;
                         let mine = after_report.as_ref().map_or(true, |r| {
-                            r.files.is_empty() || self.lints_touch_changed_files(&r.files)
+                            r.files.is_empty() || gates::lints_touch_changed_files(&tree, &r.files)
                         });
                         if after > base && mine {
                             // Keep the files the lints named: the next attempt
@@ -642,7 +665,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             // Regression-test gate: a BUG fix that touches no test is a fix
             // on faith. Mechanical check over the working diff; one bounded
             // repair pass to add the missing test.
-            if self.mode == DevMode::Bug && !self.diff_is_docs_only() && !self.diff_touches_tests()
+            let tree = self.working_tree().await;
+            if self.mode == DevMode::Bug
+                && !gates::diff_is_docs_only(&tree)
+                && !gates::diff_touches_tests(&tree)
             {
                 let fixup = format!(
                     "Your fix for {id} ships with NO regression test. Add a test that FAILS \
@@ -667,7 +693,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                     };
                     let _ = self.engine.run(repair).await;
                 }
-                if !self.diff_touches_tests() {
+                if !gates::diff_touches_tests(&self.working_tree().await) {
                     self.record_failure_at(
                         &id,
                         "bug fix shipped without a regression test",
@@ -1053,79 +1079,6 @@ mod tests {
         assert!(uc.execute().await.expect("run").is_none());
     }
 
-    #[tokio::test]
-    async fn diff_touches_tests_detects_markers_and_paths() {
-        let dir = std::env::temp_dir().join(format!("cox-dtt-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let git = |args: &[&str]| {
-            std::process::Command::new("git")
-                .args(args)
-                .current_dir(&dir)
-                .output()
-                .unwrap()
-        };
-        git(&["init", "-q"]);
-        git(&[
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "user.name=t",
-            "commit",
-            "--allow-empty",
-            "-q",
-            "-m",
-            "base",
-        ]);
-        let uc = RunDevUseCase::new(
-            Arc::new(MemStore {
-                state: Mutex::new(ProjectState::default()),
-            }),
-            Arc::new(OkEngine),
-            Config::default(),
-            dir.clone(),
-            DevMode::Bug,
-        );
-        assert!(!uc.diff_touches_tests(), "clean tree touches nothing");
-        std::fs::write(dir.join("lib.rs"), "fn f() {}\n").unwrap();
-        assert!(!uc.diff_touches_tests(), "non-test change is not a test");
-        std::fs::write(dir.join("lib.rs"), "fn f() {}\n#[test]\nfn t() {}\n").unwrap();
-        git(&["add", "-A"]);
-        assert!(uc.diff_touches_tests(), "added #[test] counts");
-
-        // The case that cost cox four attempts and part of a budget: hardening
-        // an existing test inside an inline `#[cfg(test)] mod tests` adds no
-        // `#[test]` line and sits in no test-shaped path, but it is a test
-        // change and the gate must see it.
-        let engine_src = |prod: &str, timeout: u32| {
-            format!("fn real() {{{prod}}}\n#[cfg(test)]\nmod tests {{\n    #[test]\n    fn t() {{\n        let timeout = {timeout};\n    }}\n}}\n")
-        };
-        std::fs::write(dir.join("engine.rs"), engine_src("", 10)).unwrap();
-        git(&["add", "-A"]);
-        git(&[
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "user.name=t",
-            "commit",
-            "-q",
-            "-m",
-            "with tests",
-        ]);
-        assert!(!uc.diff_touches_tests(), "committed tree touches nothing");
-        std::fs::write(dir.join("engine.rs"), engine_src("", 30)).unwrap();
-        assert!(
-            uc.diff_touches_tests(),
-            "editing an existing inline test IS touching tests"
-        );
-        // A change to the production half of the same file still is not.
-        std::fs::write(dir.join("engine.rs"), engine_src(" let x = 1; ", 10)).unwrap();
-        assert!(
-            !uc.diff_touches_tests(),
-            "a change above the test module is production code"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     #[test]
     fn parse_ask_finds_the_question_anywhere_near_the_end() {
         use super::parse_ask;
@@ -1141,100 +1094,5 @@ mod tests {
         // A bare marker with no real question is not a question.
         assert!(parse_ask("ASK BA: ?").is_none());
         assert!(parse_ask("no question here").is_none());
-    }
-
-    #[tokio::test]
-    async fn lint_regressions_are_blamed_only_on_files_the_change_touched() {
-        let dir = std::env::temp_dir().join(format!("lintblame-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("crates/app/src")).unwrap();
-        let git = |args: &[&str]| {
-            std::process::Command::new("git")
-                .args(args)
-                .current_dir(&dir)
-                .output()
-                .unwrap();
-        };
-        git(&["init", "-q"]);
-        git(&[
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "user.name=t",
-            "commit",
-            "--allow-empty",
-            "-q",
-            "-m",
-            "base",
-        ]);
-        let uc = RunDevUseCase::new(
-            Arc::new(MemStore {
-                state: Mutex::new(ProjectState::default()),
-            }),
-            Arc::new(OkEngine),
-            Config::default(),
-            dir.clone(),
-            DevMode::Bug,
-        );
-        assert!(
-            !uc.lints_touch_changed_files(&["crates/app/src/lib.rs".to_owned()]),
-            "a clean tree can't have caused any lint"
-        );
-        std::fs::write(dir.join("crates/app/src/lib.rs"), "fn f() {}\n").unwrap();
-        assert!(
-            uc.lints_touch_changed_files(&["crates/app/src/lib.rs".to_owned()]),
-            "a lint in the file we edited is ours"
-        );
-        assert!(
-            !uc.lints_touch_changed_files(&["crates/domain/src/ticket.rs".to_owned()]),
-            "a lint somewhere else — e.g. pulled in by a rebase — is not ours"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn diff_is_docs_only_spares_readme_fixes_but_not_code() {
-        let dir = std::env::temp_dir().join(format!("docsonly-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let git = |args: &[&str]| {
-            std::process::Command::new("git")
-                .args(args)
-                .current_dir(&dir)
-                .output()
-                .unwrap();
-        };
-        git(&["init", "-q"]);
-        git(&[
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "user.name=t",
-            "commit",
-            "--allow-empty",
-            "-q",
-            "-m",
-            "base",
-        ]);
-        let uc = RunDevUseCase::new(
-            Arc::new(MemStore {
-                state: Mutex::new(ProjectState::default()),
-            }),
-            Arc::new(OkEngine),
-            Config::default(),
-            dir.clone(),
-            DevMode::Bug,
-        );
-        assert!(!uc.diff_is_docs_only(), "empty diff is not docs-only");
-        std::fs::write(dir.join("README.md"), "# fixed port\n").unwrap();
-        std::fs::create_dir_all(dir.join("docs")).unwrap();
-        std::fs::write(dir.join("docs/setup.md"), "steps\n").unwrap();
-        assert!(uc.diff_is_docs_only(), "README + docs/ is docs-only");
-        std::fs::write(dir.join("lib.rs"), "fn f() {}\n").unwrap();
-        assert!(
-            !uc.diff_is_docs_only(),
-            "any code file breaks the exemption"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

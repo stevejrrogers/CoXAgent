@@ -1,261 +1,194 @@
-// Part of the run_dev module split by concern — see run_dev/mod.rs.
-#![allow(clippy::wildcard_imports)]
-//! The mechanical Definition-of-Done gates: what counts as a test, whose
-//! lint a regression is, and how a failed attempt is recorded.
+//! The mechanical Definition-of-Done gates, as PURE functions over a
+//! [`WorkingTreeDiff`] snapshot.
+//!
+//! These used to shell out to `git` from inside the application layer — the
+//! one place the architecture says IO must go through a port. That did more
+//! than bend a rule: it meant every gate test had to build a real git repo in
+//! a temp directory, which is exactly the kind of test that flakes under a
+//! parallel run. The adapter now takes the snapshot once
+//! ([`crate::ports::outbound::GitPort::working_tree`]); the decisions here are
+//! plain functions of it, testable with a struct literal.
 
-use super::*;
+use crate::ports::outbound::WorkingTreeDiff;
 
-impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
-    /// Whether any lint location sits in a file this working diff touches.
-    /// Paths are compared by suffix so a repo-relative lint path still matches
-    /// a git path listed from the same root.
-    pub(super) fn lints_touch_changed_files(&self, lint_files: &[String]) -> bool {
-        let changed = self.changed_files();
-        if changed.is_empty() {
-            // Nothing changed on disk — nothing here is attributable.
+/// Whether any lint location sits in a file this working diff touches.
+/// Paths are compared by suffix so a repo-relative lint path still matches
+/// a git path listed from the same root.
+#[must_use]
+pub(super) fn lints_touch_changed_files(tree: &WorkingTreeDiff, lint_files: &[String]) -> bool {
+    if tree.changed_paths.is_empty() {
+        // Nothing changed on disk — nothing here is attributable.
+        return false;
+    }
+    lint_files.iter().any(|lint| {
+        let lint = lint.trim();
+        !lint.is_empty()
+            && tree
+                .changed_paths
+                .iter()
+                .any(|c| lint.ends_with(c.as_str()) || c.ends_with(lint))
+    })
+}
+
+/// Whether the working diff is documentation/assets only — README fixes,
+/// docs, images, licences. Such a "bug fix" has no runtime surface, so
+/// demanding a regression test just parks the ticket.
+#[must_use]
+pub(super) fn diff_is_docs_only(tree: &WorkingTreeDiff) -> bool {
+    let mut any = false;
+    for f in &tree.changed_paths {
+        any = true;
+        let lower = f.to_lowercase();
+        let doc_ext = [
+            ".md", ".txt", ".adoc", ".rst", ".png", ".jpg", ".jpeg", ".svg", ".gif",
+        ]
+        .iter()
+        .any(|e| lower.ends_with(e));
+        let doc_name = lower.ends_with("license") || lower.ends_with(".gitignore");
+        let doc_dir = lower.starts_with("docs/") || lower.contains("/docs/");
+        if !(doc_ext || doc_name || doc_dir) {
             return false;
         }
-        lint_files.iter().any(|lint| {
-            let lint = lint.trim();
-            !lint.is_empty()
-                && changed
-                    .iter()
-                    .any(|c| lint.ends_with(c.as_str()) || c.ends_with(lint))
-        })
     }
-    /// Paths in the working diff: tracked modifications plus untracked files.
-    pub(super) fn changed_files(&self) -> Vec<String> {
-        let run = |args: &[&str]| -> String {
-            std::process::Command::new("git")
-                .args(args)
-                .current_dir(&self.work_dir)
-                .output()
-                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-                .unwrap_or_default()
-        };
-        format!(
-            "{}\n{}",
-            run(&["diff", "HEAD", "--name-only"]),
-            run(&["ls-files", "--others", "--exclude-standard"])
-        )
-        .lines()
-        .map(|l| l.trim().to_owned())
-        .filter(|l| !l.is_empty())
-        .collect()
+    any
+}
+
+/// Whether the working diff touches tests: a test-ish path, an added line
+/// carrying a test marker, or a change inside a file's `#[cfg(test)]` module.
+#[must_use]
+pub(super) fn diff_touches_tests(tree: &WorkingTreeDiff) -> bool {
+    if tree.changed_paths.iter().any(|f| {
+        let f = f.to_lowercase();
+        f.contains("/tests/")
+            || f.starts_with("tests/")
+            || f.ends_with("_test.rs")
+            || f.ends_with("_test.go")
+            || f.ends_with(".test.ts")
+            || f.ends_with(".test.js")
+            || f.contains("test_")
+    }) {
+        return true;
     }
-    /// Whether the working diff is documentation/assets only — README fixes,
-    /// docs, images, licences. Such a "bug fix" has no runtime surface, so
-    /// demanding a regression test just parks the ticket.
-    pub(super) fn diff_is_docs_only(&self) -> bool {
-        let run = |args: &[&str]| -> String {
-            std::process::Command::new("git")
-                .args(args)
-                .current_dir(&self.work_dir)
-                .output()
-                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-                .unwrap_or_default()
+    if tree.full_diff.lines().any(|l| {
+        l.starts_with('+')
+            && (l.contains("#[test]")
+                || l.contains("#[tokio::test]")
+                || l.contains("def test_")
+                || l.contains("it(")
+                || l.contains("func Test"))
+    }) {
+        return true;
+    }
+    // Rust keeps most tests in an inline `#[cfg(test)] mod tests` at the foot
+    // of the file it tests. A fix that hardens or extends one of those adds no
+    // `#[test]` line and lives in no test-shaped path, so the two checks above
+    // miss the single most common way a Rust regression test actually lands —
+    // and the ticket gets failed for shipping without one.
+    diff_touches_inline_test_module(tree)
+}
+
+/// Whether any changed line falls at or below its file's `#[cfg(test)]`
+/// marker. The `-U0` diff's line numbers are the changed lines themselves,
+/// not context that happens to sit near the boundary.
+fn diff_touches_inline_test_module(tree: &WorkingTreeDiff) -> bool {
+    let mut file: Option<&str> = None;
+    for line in tree.unified0_diff.lines() {
+        if let Some(rest) = line.strip_prefix("+++ b/") {
+            file = Some(rest.trim());
+            continue;
+        }
+        let Some(hunk) = line.strip_prefix("@@ ") else {
+            continue;
         };
-        let names = format!(
-            "{}\n{}",
-            run(&["diff", "HEAD", "--name-only"]),
-            run(&["ls-files", "--others", "--exclude-standard"])
+        let Some(f) = file else { continue };
+        // `@@ -a,b +c,d @@` — c is the first changed line on the new side.
+        let Some(new_side) = hunk.split('+').nth(1) else {
+            continue;
+        };
+        let Ok(start) = new_side
+            .split([',', ' '])
+            .next()
+            .unwrap_or("")
+            .parse::<usize>()
+        else {
+            continue;
+        };
+        if let Some(test_mod_line) = tree.cfg_test_line.get(f) {
+            // Diff line numbers are 1-based; the map is 0-based from position().
+            if start > *test_mod_line {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tree(paths: &[&str]) -> WorkingTreeDiff {
+        WorkingTreeDiff {
+            changed_paths: paths.iter().map(|s| (*s).to_owned()).collect(),
+            ..WorkingTreeDiff::default()
+        }
+    }
+
+    #[test]
+    fn docs_only_spares_readme_fixes_but_not_code() {
+        assert!(
+            !diff_is_docs_only(&tree(&[])),
+            "empty diff is not docs-only"
         );
-        let mut any = false;
-        for f in names.lines().map(str::trim).filter(|f| !f.is_empty()) {
-            any = true;
-            let lower = f.to_lowercase();
-            let doc_ext = [
-                ".md", ".txt", ".adoc", ".rst", ".png", ".jpg", ".jpeg", ".svg", ".gif",
-            ]
-            .iter()
-            .any(|e| lower.ends_with(e));
-            let doc_name = lower.ends_with("license") || lower.ends_with(".gitignore");
-            let doc_dir = lower.starts_with("docs/") || lower.contains("/docs/");
-            if !(doc_ext || doc_name || doc_dir) {
-                return false;
-            }
-        }
-        any
-    }
-    /// Whether the current working diff (staged/unstaged + untracked) touches
-    /// tests: a test-ish path, or added lines containing test markers.
-    pub(super) fn diff_touches_tests(&self) -> bool {
-        let run = |args: &[&str]| -> String {
-            std::process::Command::new("git")
-                .args(args)
-                .current_dir(&self.work_dir)
-                .output()
-                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-                .unwrap_or_default()
-        };
-        let names = format!(
-            "{}\n{}",
-            run(&["diff", "HEAD", "--name-only"]),
-            run(&["ls-files", "--others", "--exclude-standard"])
+        assert!(diff_is_docs_only(&tree(&["README.md", "docs/setup.md"])));
+        assert!(
+            !diff_is_docs_only(&tree(&["README.md", "src/lib.rs"])),
+            "any code file breaks the exemption"
         );
-        if names.lines().any(|f| {
-            let f = f.trim().to_lowercase();
-            !f.is_empty()
-                && (f.contains("/tests/")
-                    || f.starts_with("tests/")
-                    || f.ends_with("_test.rs")
-                    || f.ends_with("_test.go")
-                    || f.ends_with(".test.ts")
-                    || f.ends_with(".test.js")
-                    || f.contains("test_"))
-        }) {
-            return true;
-        }
-        let diff = run(&["diff", "HEAD"]);
-        if diff.lines().any(|l| {
-            l.starts_with('+')
-                && (l.contains("#[test]")
-                    || l.contains("#[tokio::test]")
-                    || l.contains("def test_")
-                    || l.contains("it(")
-                    || l.contains("func Test"))
-        }) {
-            return true;
-        }
-        // Rust keeps most tests in an inline `#[cfg(test)] mod tests` at the
-        // foot of the file it tests. A fix that hardens or extends one of those
-        // adds no `#[test]` line and lives in no test-shaped path, so the two
-        // checks above miss the single most common way a Rust regression test
-        // actually lands — and the ticket gets failed for shipping without one.
-        self.diff_touches_inline_test_module(&run)
     }
-    /// Whether any changed line falls inside a file's `#[cfg(test)]` module.
-    /// Uses `-U0` so the reported line numbers are the changed lines themselves,
-    /// not context that happens to sit near the boundary.
-    pub(super) fn diff_touches_inline_test_module(&self, run: &dyn Fn(&[&str]) -> String) -> bool {
-        let diff = run(&["diff", "HEAD", "-U0"]);
-        let mut file: Option<String> = None;
-        for line in diff.lines() {
-            if let Some(rest) = line.strip_prefix("+++ b/") {
-                file = Some(rest.trim().to_owned());
-                continue;
-            }
-            let Some(hunk) = line.strip_prefix("@@ ") else {
-                continue;
-            };
-            let Some(f) = file.as_deref() else { continue };
-            // `@@ -a,b +c,d @@` — c is the first changed line on the new side.
-            let Some(new_side) = hunk.split('+').nth(1) else {
-                continue;
-            };
-            let Ok(start) = new_side
-                .split([',', ' '])
-                .next()
-                .unwrap_or("")
-                .parse::<usize>()
-            else {
-                continue;
-            };
-            let Ok(text) = std::fs::read_to_string(self.work_dir.join(f)) else {
-                continue;
-            };
-            if let Some(test_mod_line) = text
-                .lines()
-                .position(|l| l.trim_start().starts_with("#[cfg(test)]"))
-            {
-                // Line numbers are 1-based in the diff, 0-based from position().
-                if start > test_mod_line {
-                    return true;
-                }
-            }
-        }
-        false
+
+    #[test]
+    fn test_paths_and_added_markers_count_as_tests() {
+        assert!(diff_touches_tests(&tree(&["crates/app/tests/gate.rs"])));
+        let mut t = tree(&["src/lib.rs"]);
+        assert!(!diff_touches_tests(&t), "a plain code change is not a test");
+        t.full_diff = "+#[test]\n+fn t() {}\n".to_owned();
+        assert!(diff_touches_tests(&t), "an added #[test] counts");
     }
-    /// Count a failed attempt on `id`; at the 3rd, park it with a visible note
-    /// so a human decides instead of the team burning tokens forever.
-    pub(super) async fn record_failure(&self, id: &TicketId, why: &str) {
-        self.record_failure_at(
-            id,
-            why,
-            crate::state::FailureLayer::Design,
-            "engine",
-            Vec::new(),
-        )
-        .await;
+
+    #[test]
+    fn editing_an_existing_inline_test_counts_changing_production_does_not() {
+        // The case that cost cox four attempts and part of a budget cap: a fix
+        // inside `#[cfg(test)] mod tests` adds no #[test] line and sits in no
+        // test-shaped path, but it IS a test change.
+        let mut t = tree(&["src/engine.rs"]);
+        t.cfg_test_line.insert("src/engine.rs".to_owned(), 10);
+        t.unified0_diff =
+            "+++ b/src/engine.rs\n@@ -14,1 +14,1 @@\n-let timeout = 10;\n+let timeout = 30;\n"
+                .to_owned();
+        assert!(diff_touches_tests(&t), "line 14 is below the marker at 10");
+        t.unified0_diff =
+            "+++ b/src/engine.rs\n@@ -3,1 +3,1 @@\n-let x = 0;\n+let x = 1;\n".to_owned();
+        assert!(
+            !diff_touches_tests(&t),
+            "line 3 is above the test module — production code"
+        );
     }
-    /// As [`Self::record_failure`], but the caller names the layer and gate it
-    /// rejected the work at, so the next agent reads data instead of guessing
-    /// from a sentence.
-    pub(super) async fn record_failure_at(
-        &self,
-        id: &TicketId,
-        why: &str,
-        layer: crate::state::FailureLayer,
-        gate: &str,
-        files: Vec<String>,
-    ) {
-        let key = id.to_string();
-        let short: String = why.chars().take(300).collect();
-        // Infrastructure faults are NOT the ticket's fault — shared predicate
-        // with the runner's circuit breaker (see crate::faults).
-        let infra = crate::faults::is_infra_fault(why);
-        let _ = layer;
-        if infra {
-            // Raise it where people look. An outage that only exists as a log
-            // line means the team looks broken while the real problem is an
-            // expired login nobody was told about.
-            let (engine, role, detail) = (
-                self.engine.id().to_owned(),
-                format!("{:?}", self.mode.role()),
-                short.clone(),
-            );
-            let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
-                s.log_activity(
-                    "SYSTEM",
-                    "engine infrastructure fault — attempt not counted",
-                    Some(key.clone()),
-                );
-                let first = !s.engine_incidents.iter().any(|i| i.engine == engine);
-                s.open_engine_incident(&engine, &role, &detail);
-                if first {
-                    let msg = format!(
-                        "🔌 {engine} is failing for every agent: {detail}. Work is paused on this \
-                         engine until it answers again — fix the credentials or the model, and \
-                         this clears itself."
-                    );
-                    s.post_chat_in("SYSTEM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
-                }
-                Ok(())
-            })
-            .await;
-            return;
-        }
-        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
-            let n = {
-                let c = s.ticket_fail_attempts.entry(key.clone()).or_insert(0);
-                *c += 1;
-                *c
-            };
-            // Brief the NEXT attempt on what this one hit, so a retry builds
-            // on prior findings instead of rediscovering them.
-            s.journal_note(&key, &format!("attempt {n} failed: {short}"));
-            s.record_attempt_failure(
-                &key,
-                crate::state::AttemptFailure {
-                    attempt: n,
-                    layer,
-                    gate: gate.to_owned(),
-                    detail: short.clone(),
-                    files: files.clone(),
-                },
-            );
-            if n == 3 {
-                s.post_comment(
-                    "DEV-BUG",
-                    &format!(
-                        "⛔ {id} PARKED after 3 failed attempts (last: {short}) — needs a \
-                         human decision; agents will skip it."
-                    ),
-                    Some(key.clone()),
-                );
-            }
-            Ok(())
-        })
-        .await;
+
+    #[test]
+    fn lint_blame_stays_inside_the_files_the_change_touched() {
+        let t = tree(&["crates/app/src/lib.rs"]);
+        assert!(lints_touch_changed_files(
+            &t,
+            &["crates/app/src/lib.rs".to_owned()]
+        ));
+        assert!(
+            !lints_touch_changed_files(&t, &["crates/domain/src/ticket.rs".to_owned()]),
+            "a lint somewhere else — e.g. pulled in by a rebase — is not ours"
+        );
+        assert!(
+            !lints_touch_changed_files(&tree(&[]), &["src/lib.rs".to_owned()]),
+            "a clean tree can't have caused any lint"
+        );
     }
 }

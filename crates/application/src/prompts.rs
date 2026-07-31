@@ -64,6 +64,12 @@ domain layer, enforced by types.\n\
 scale/deploy needs; one service owns its data — no shared tables; services talk \
 via APIs/events.\n\
 - SOLID always; design patterns only where they REDUCE complexity.\n\
+- IO GOES THROUGH A PORT, always. In the application layer, never reach for \
+std::process or std::fs directly: define/extend a port in ports/outbound/, put \
+the IO in an infrastructure adapter, and keep the decision a PURE function over \
+the data the adapter returns (see GitPort::working_tree and run_dev/gates.rs \
+for the pattern). A guard test (hexagonal_gate.rs) fails any new file that \
+breaks this — its grandfather list only shrinks.\n\
 - ONE FILE PER COHESIVE UNIT, and keep files small. A file every ticket has to \
 edit is where merge conflicts come from: two agents changing the same 7,000-line \
 module conflict by construction, however careful they are. Put each bounded \
