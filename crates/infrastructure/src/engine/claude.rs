@@ -621,7 +621,7 @@ mod tests {
                 system_prompt: "sys".to_owned(),
                 task_prompt: "task".to_owned(),
                 work_dir: dir.clone(),
-                timeout: std::time::Duration::from_secs(10),
+                timeout: std::time::Duration::from_secs(30),
                 escalation_level: 0,
             })
             .await

@@ -2049,6 +2049,18 @@ mod mcp_auth_tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    /// Grab a currently-free port from the OS and release it immediately —
+    /// good enough for a test that binds its own real server moments later
+    /// (a small TOCTOU window remains, but it's far safer than a fixed port
+    /// shared across every run of this test on this machine).
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("bind ephemeral port")
+            .local_addr()
+            .expect("local_addr")
+            .port()
+    }
+
     /// Boots a real `serve_full` hub with RBAC on (one bootstrapped admin,
     /// two extra tokens minted), waits for `/api/health` to answer, and
     /// returns the port, the two tokens under test, and the backing tempdir
@@ -2070,7 +2082,13 @@ mod mcp_auth_tests {
             .expect("mint Viewer token");
         let auth: Arc<dyn AuthPort> = Arc::new(svc);
 
-        let port = 47_654;
+        // Ephemeral, not a fixed port: this repo's working tree is shared by
+        // concurrent agent sessions (see CLAUDE.md team learnings), and a
+        // hardcoded port collides with any other process's server bound to
+        // it — the loser's health-check then "succeeds" against the WINNER's
+        // hub instead, whose token store doesn't know this test's tokens,
+        // producing a spurious 401 instead of the real assertion result.
+        let port = free_port();
         let extras = coxagent_presentation::HubExtras {
             auth: Some(auth),
             hub_dir: Some(dir.path().to_path_buf()),
