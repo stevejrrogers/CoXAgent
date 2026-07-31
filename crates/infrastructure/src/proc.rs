@@ -878,8 +878,7 @@ mod tests {
         let alive = std::process::Command::new("/bin/kill")
             .args(["-0", &bg.to_string()])
             .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+            .is_ok_and(|s| s.success());
         assert!(!alive, "grandchild {bg} must be dead");
         let _ = std::fs::remove_dir_all(&dir);
     }
