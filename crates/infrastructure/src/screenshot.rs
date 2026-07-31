@@ -66,13 +66,18 @@ pub async fn capture(url: &str, out: &Path) -> bool {
     ) && out.exists()
 }
 
-/// Port adapter over the local Chrome/Chromium.
+/// Port adapter over the local Chrome/Chromium. The temp file is OUR detail:
+/// the caller gets bytes and never touches a path.
 pub struct ChromeScreenshot;
 
 #[async_trait::async_trait]
 impl coxagent_application::ports::outbound::ScreenshotPort for ChromeScreenshot {
-    async fn capture(&self, url: &str, out: &std::path::Path) -> bool {
-        capture(url, out).await
+    async fn capture(&self, url: &str) -> Option<Vec<u8>> {
+        let tmp = std::env::temp_dir().join(format!("cox-shot-{}.png", std::process::id()));
+        let ok = capture(url, &tmp).await;
+        let bytes = if ok { std::fs::read(&tmp).ok() } else { None };
+        let _ = std::fs::remove_file(&tmp);
+        bytes.filter(|b| !b.is_empty())
     }
 }
 

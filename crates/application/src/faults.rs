@@ -24,6 +24,12 @@ pub fn is_infra_fault(why: &str) -> bool {
         "unauthorized",
         // Capacity.
         "quota",
+        // The Claude CLI's monthly-cap message carries neither "quota" nor
+        // "rate limit" — it slipped past this list once and 39 innocent
+        // tickets burned three attempts each and were parked in minutes.
+        "spend limit",
+        "usage limit",
+        "spending cap",
         "rate limit",
         "overloaded",
         "529",
@@ -62,6 +68,9 @@ mod tests {
             "getaddrinfo ENOTFOUND api.anthropic.com",
             "fetch failed: network error",
             "upstream overloaded (529)",
+            // The Claude CLI's monthly-cap message, verbatim — it parked 39
+            // tickets before this entry existed.
+            "You've hit your monthly spend limit · raise it at claude.ai/settings/usage",
             // The exact line the claude CLI prints on an expired session —
             // it reaches us through stdout, not stderr.
             "PO milestones engine failed: Failed to authenticate: OAuth session expired and \
