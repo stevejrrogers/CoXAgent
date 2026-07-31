@@ -118,6 +118,9 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     budget: Option<crate::config::LiveBudget>,
     /// Local git, used for branch + commit per ticket when `config.git.enabled`.
     git: Option<Arc<dyn GitPort>>,
+    /// Workspace file access for team notes, memory indexes and generated
+    /// maps — `None` in tests reads as an empty filesystem.
+    files: Option<Arc<dyn crate::ports::outbound::WorkspaceFilesPort>>,
     /// The code host, used to open PRs when `config.git.auto_pr`.
     forge: Option<Arc<dyn ForgePort>>,
     /// Reports the currently executing agent to the runner (live "working now").
@@ -154,6 +157,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             notifier: None,
             budget: None,
             git: None,
+            files: None,
             forge: None,
             phase: None,
             worker: String::new(),
@@ -276,11 +280,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let root = self.work_dir.clone();
         let _ = tokio::task::spawn_blocking(move || {
             let g = crate::codegraph::CodeGraph::index(&root);
+            // save() also writes REPO_MAP.md — one producer, both artifacts.
             let _ = g.save(&root);
-            let _ = std::fs::write(
-                root.join(".coxagent").join("REPO_MAP.md"),
-                g.repo_map(40_000),
-            );
         })
         .await;
     }
@@ -1031,11 +1032,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// Append a promoted team lesson to the repo's `CLAUDE.md` under a
     /// dedicated section — versioned via git, read by the engine on EVERY
     /// machine. Dedupes on exact text. Returns whether anything was written.
-    fn promote_team_note(&self, note: &str) -> bool {
+    async fn promote_team_note(&self, note: &str) -> bool {
         use std::fmt::Write as _;
         const HEADER: &str = "## Team learnings (auto-promoted by memory hygiene)";
+        let Some(files) = &self.files else {
+            return false;
+        };
         let path = self.work_dir.join("CLAUDE.md");
-        let cur = std::fs::read_to_string(&path).unwrap_or_default();
+        let cur = files.read(&path).await.unwrap_or_default();
         if cur.contains(note) {
             return false;
         }
@@ -1049,7 +1053,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             next.push('\n');
         }
         let _ = writeln!(next, "- {note}");
-        std::fs::write(&path, next).is_ok()
+        files.write(&path, &next).await
     }
 
     /// Where the claude CLI keeps its per-project auto-memory for this
@@ -1113,6 +1117,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             })
             .await;
         }
+    }
+
+    /// Attach workspace-file access (team notes, memory indexes, maps).
+    #[must_use]
+    pub fn with_files(
+        mut self,
+        files: Option<Arc<dyn crate::ports::outbound::WorkspaceFilesPort>>,
+    ) -> Self {
+        self.files = files;
+        self
     }
 
     /// The engine this cycle drives, for outage reporting.
@@ -1731,9 +1745,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
 
 /// Drop dangling index lines from the memory dir's `MEMORY.md` after a file is
 /// deleted — a broken index quietly poisons future recall.
-fn prune_memory_index(dir: &std::path::Path, deleted: &str) {
+async fn prune_memory_index(
+    files: &dyn crate::ports::outbound::WorkspaceFilesPort,
+    dir: &std::path::Path,
+    deleted: &str,
+) {
     let idx = dir.join("MEMORY.md");
-    let Ok(cur) = std::fs::read_to_string(&idx) else {
+    let Some(cur) = files.read(&idx).await else {
         return;
     };
     let next: String = cur
@@ -1742,7 +1760,7 @@ fn prune_memory_index(dir: &std::path::Path, deleted: &str) {
         .collect::<Vec<_>>()
         .join("\n");
     if next != cur {
-        let _ = std::fs::write(&idx, next + "\n");
+        let _ = files.write(&idx, &(next + "\n")).await;
     }
 }
 

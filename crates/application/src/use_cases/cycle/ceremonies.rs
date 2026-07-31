@@ -357,6 +357,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let next = crate::metrics::decide_tuning(&evals, backlog, &state.tuning);
         let was = state.tuning.clone();
         drop(state);
+        // Read the hub lessons OUTSIDE the state closure: the closure is sync.
+        let hub_lessons = match &self.files {
+            Some(fs) => fs
+                .read(&crate::prompts::hub_lessons_path())
+                .await
+                .unwrap_or_default(),
+            None => String::new(),
+        };
         let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
             if s.tuning.last_eval_day == today {
                 return Ok(());
@@ -386,8 +394,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // Mirror the hub-wide lessons into this project's Wiki (daily),
             // so cross-project knowledge is readable where people read —
             // not only injected into prompts.
-            let hub =
-                std::fs::read_to_string(crate::prompts::hub_lessons_path()).unwrap_or_default();
+            let hub = hub_lessons.clone();
             if !hub.trim().is_empty() {
                 s.ensure_standard_folders();
                 s.upsert_doc(
@@ -437,34 +444,28 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let Some(dir) = self.engine_memory_dir() else {
             return;
         };
-        let Ok(entries) = std::fs::read_dir(&dir) else {
+        let Some(fs) = &self.files else {
             return;
         };
         // Oldest-modified first; MEMORY.md (the index) is never judged directly.
-        let mut files: Vec<std::path::PathBuf> = entries
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|p| {
-                p.extension().is_some_and(|e| e == "md")
-                    && p.file_name().is_some_and(|n| n != "MEMORY.md")
+        let mut files: Vec<crate::ports::outbound::FileMeta> = fs
+            .list(&dir)
+            .await
+            .into_iter()
+            .filter(|m| {
+                m.path.extension().is_some_and(|e| e == "md")
+                    && m.path.file_name().is_some_and(|n| n != "MEMORY.md")
             })
             .collect();
-        files.sort_by_key(|p| {
-            std::fs::metadata(p)
-                .and_then(|m| m.modified())
-                .unwrap_or(std::time::UNIX_EPOCH)
-        });
+        files.sort_by_key(|m| m.modified_epoch);
         // Batch scales with pressure: normally 3/day; when the memory dir has
         // grown past its budget, judge up to 10 so it converges back under.
-        let total: u64 = files
-            .iter()
-            .filter_map(|p| std::fs::metadata(p).ok())
-            .map(|m| m.len())
-            .sum();
+        let total: u64 = files.iter().map(|m| m.size).sum();
         let batch = if total > 150_000 { 10 } else { 3 };
         let mut actions: Vec<String> = Vec::new();
-        for path in files.into_iter().take(batch) {
-            let Ok(content) = std::fs::read_to_string(&path) else {
+        for meta in files.into_iter().take(batch) {
+            let path = meta.path;
+            let Some(content) = fs.read(&path).await else {
                 continue;
             };
             if content.chars().count() < 1200 {
@@ -508,18 +509,18 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 None => (full, None),
             };
             if let Some(note) = team_note.filter(|n| n.len() > 40 && n.len() < 1000) {
-                if self.promote_team_note(&note) {
+                if self.promote_team_note(&note).await {
                     actions.push(format!("📌 {name} → CLAUDE.md: {note}"));
                 }
             }
             if out.starts_with("DELETE") {
-                if std::fs::remove_file(&path).is_ok() {
-                    prune_memory_index(&dir, &name);
+                if fs.delete(&path).await {
+                    prune_memory_index(fs.as_ref(), &dir, &name).await;
                     actions.push(format!("🗑️ {name} — stale, contradicted current process"));
                 }
             } else if let Some(rest) = out.strip_prefix("REWRITE") {
                 let new = rest.trim_start_matches(['\n', '\r', ' ']);
-                if new.len() > 100 && std::fs::write(&path, new).is_ok() {
+                if new.len() > 100 && fs.write(&path, new).await {
                     actions.push(format!(
                         "✏️ {name} — corrected & compressed ({} → {} chars)",
                         content.chars().count(),

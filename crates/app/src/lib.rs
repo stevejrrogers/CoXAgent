@@ -1041,7 +1041,10 @@ async fn run_loop(
         .with_deploy(std::sync::Arc::new(DockerComposeDeploy::new()))
         .with_git(std::sync::Arc::new(
             coxagent_infrastructure::SystemGit::new(),
-        ));
+        ))
+        .with_files(Some(Arc::new(
+            coxagent_infrastructure::FsWorkspaceFiles::new(),
+        )));
     if let Some(f) = forge {
         uc = uc.with_forge(f);
     }

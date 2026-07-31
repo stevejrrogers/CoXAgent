@@ -370,7 +370,10 @@ impl CodeGraph {
         std::fs::create_dir_all(&dir)?;
         let json = serde_json::to_vec_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        std::fs::write(dir.join("codegraph.json"), json)
+        std::fs::write(dir.join("codegraph.json"), json)?;
+        // The human-readable map ships with the graph: one producer, one save,
+        // no caller left to remember the second artifact.
+        std::fs::write(dir.join("REPO_MAP.md"), self.repo_map(40_000))
     }
 
     /// Load a previously built graph, if present.

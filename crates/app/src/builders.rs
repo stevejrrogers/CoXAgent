@@ -283,7 +283,10 @@ pub(crate) async fn build_project(
                     .join("blobs"),
             ))
         })))
-        .with_git(Arc::new(coxagent_infrastructure::SystemGit::new()));
+        .with_git(Arc::new(coxagent_infrastructure::SystemGit::new()))
+        .with_files(Some(Arc::new(
+            coxagent_infrastructure::FsWorkspaceFiles::new(),
+        )));
         let leader = if let Some(ref f) = forge {
             leader.with_forge(Arc::clone(f))
         } else {
@@ -325,7 +328,10 @@ pub(crate) async fn build_project(
                     .join("blobs"),
             ))
         })))
-        .with_git(Arc::new(coxagent_infrastructure::SystemGit::new()));
+        .with_git(Arc::new(coxagent_infrastructure::SystemGit::new()))
+        .with_files(Some(Arc::new(
+            coxagent_infrastructure::FsWorkspaceFiles::new(),
+        )));
         let worker = if let Some(ref f) = forge {
             worker.with_forge(Arc::clone(f))
         } else {
