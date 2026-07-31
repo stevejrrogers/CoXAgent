@@ -36,7 +36,13 @@ pub fn fingerprint(work_dir: &Path) -> Option<String> {
             .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
     };
     let head = git(&["rev-parse", "HEAD"])?;
-    let status = git(&["status", "--porcelain"])?;
+    // `--untracked-files=all` forces git to list every file inside a new
+    // untracked directory instead of collapsing it to one `?? dir/` line —
+    // without it, a content edit to a file inside that directory changes
+    // nothing in the status output (and stat'ing the dir itself doesn't
+    // move its mtime on an edit to a file inside it), so the fingerprint
+    // would stay green on broken code.
+    let status = git(&["status", "--porcelain", "--untracked-files=all"])?;
     let mut hasher = std::hash::DefaultHasher::new();
     head.trim().hash(&mut hasher);
     for line in status.lines() {
@@ -119,6 +125,23 @@ mod tests {
         assert!(is_green(&dir));
         std::fs::write(dir.join("new.rs"), "fn f() { let _ = 1; }\n").expect("write");
         assert!(!is_green(&dir), "editing a dirty file invalidates too");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn editing_a_file_inside_a_new_untracked_directory_invalidates_the_cache() {
+        let dir = std::env::temp_dir().join(format!("cox-vc-dir-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("newdir")).expect("mkdir");
+        init_repo(&dir);
+        std::fs::write(dir.join("newdir/a.rs"), "fn f() {}\n").expect("write");
+        mark_green(&dir);
+        assert!(is_green(&dir), "freshly marked tree stays green");
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::write(dir.join("newdir/a.rs"), "fn f() { does_not_compile( }\n").expect("write");
+        assert!(
+            !is_green(&dir),
+            "editing a file inside an untracked directory must invalidate the cache"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
