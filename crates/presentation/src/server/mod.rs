@@ -33,24 +33,34 @@ use tokio_stream::{Stream, StreamExt};
 
 mod assets;
 mod auth;
+mod background;
+mod channels;
 mod chat;
+mod comments;
 mod docs;
 mod engines;
 mod forge;
 mod manage;
 mod meetings;
+mod projects;
 mod realtime;
+mod status;
 mod work;
 
 use assets::*;
 use auth::*;
+use background::*;
+use channels::*;
 use chat::*;
+use comments::*;
 use docs::*;
 use engines::*;
 use forge::*;
 use manage::*;
 use meetings::*;
+use projects::*;
 use realtime::*;
+use status::*;
 use work::*;
 
 /// The embedded single-page dashboard.
@@ -949,22 +959,6 @@ pub struct HubExtras {
     pub syschat_store: Option<Arc<dyn coxagent_application::ports::outbound::KvDocPort>>,
 }
 
-/// Post one COX budget notice into a project's #agents and log the same line to
-/// its activity feed. Both the warning and the hard stop below report this way.
-async fn post_budget_notice(p: &ProjectHandle, msg: &str, activity: &str) {
-    let _ = coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
-        s.post_chat_in(
-            "COX",
-            msg,
-            coxagent_application::state::AGENTS_CHANNEL,
-            Vec::new(),
-        );
-        s.log_activity("COX", activity, None);
-        Ok(())
-    })
-    .await;
-}
-
 /// Warn threshold for a space's budget, matching the dashboard's own amber one
 /// (index.html renders the "nearly reached" alert at 80% of a project's cap) —
 /// same UX language, just at the space level and pushed as a chat heads-up.
@@ -1016,95 +1010,6 @@ fn role_guard(need_realtime: bool) -> Option<axum::response::Response> {
     }
 }
 
-/// Bridge the in-process chat broadcast onto Redis pub/sub (`cox:events`), so
-/// every hub instance sees every event — the piece that makes the gateway
-/// horizontally scalable. Loop safety: outbound frames carry this instance's
-/// origin id (dropped by our own subscriber), and payloads just received from
-/// the bus are remembered briefly so re-broadcasting them locally doesn't
-/// publish an echo back.
-async fn redis_bus_bridge(app: AppState, url: String) {
-    use coxagent_contracts::BusEnvelope;
-    let origin = format!("hub-{}", std::process::id());
-    let recent: Arc<std::sync::Mutex<std::collections::VecDeque<String>>> =
-        Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
-    let remember = |recent: &std::sync::Mutex<std::collections::VecDeque<String>>, s: &str| {
-        if let Ok(mut q) = recent.lock() {
-            q.push_back(s.to_owned());
-            while q.len() > 256 {
-                q.pop_front();
-            }
-        }
-    };
-    let seen = |recent: &std::sync::Mutex<std::collections::VecDeque<String>>, s: &str| {
-        recent.lock().is_ok_and(|q| q.iter().any(|x| x == s))
-    };
-    // Outbound: local broadcast → Redis.
-    {
-        let url = url.clone();
-        let origin = origin.clone();
-        let recent = Arc::clone(&recent);
-        let tx = app.syschat.tx.clone();
-        tokio::spawn(async move {
-            loop {
-                let Ok(client) = redis::Client::open(url.as_str()) else {
-                    return;
-                };
-                let Ok(mut conn) = client.get_multiplexed_async_connection().await else {
-                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                    continue;
-                };
-                let mut rx = tx.subscribe();
-                while let Ok(payload) = rx.recv().await {
-                    if seen(&recent, &payload) {
-                        continue; // just came FROM the bus — don't echo it back
-                    }
-                    let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) else {
-                        continue;
-                    };
-                    let env = BusEnvelope::new(&origin, "syschat", v);
-                    if let Ok(frame) = serde_json::to_string(&env) {
-                        let _: Result<(), _> =
-                            redis::AsyncCommands::publish(&mut conn, "cox:events", frame).await;
-                    }
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            }
-        });
-    }
-    // Inbound: Redis → local broadcast.
-    loop {
-        let Ok(client) = redis::Client::open(url.as_str()) else {
-            return;
-        };
-        let Ok(mut pubsub) = client.get_async_pubsub().await else {
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            continue;
-        };
-        if pubsub.subscribe("cox:events").await.is_err() {
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            continue;
-        }
-        let mut stream = pubsub.on_message();
-        while let Some(msg) = futures_util::StreamExt::next(&mut stream).await {
-            let frame: String = match msg.get_payload() {
-                Ok(f) => f,
-                Err(_) => continue,
-            };
-            let Ok(env) = serde_json::from_str::<BusEnvelope>(&frame) else {
-                continue;
-            };
-            if env.origin == origin || env.v != coxagent_contracts::CONTRACT_VERSION {
-                continue;
-            }
-            if let Ok(payload) = serde_json::to_string(&env.payload) {
-                remember(&recent, &payload);
-                let _ = app.syschat.tx.send(payload);
-            }
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-    }
-}
-
 /// Compose-project prefix of a PR preview (`<workspace>/.preview/<num>` via
 /// `compose_project_name`). Previews are meant to live for as long as someone
 /// is looking at them.
@@ -1114,94 +1019,6 @@ const PREVIEW_PROJECT_PREFIX: &str = "cox--preview-";
 /// container holds the app port and its share of the host for good. (One was
 /// found still running after eight days.)
 const PREVIEW_TTL: &str = "6h";
-
-/// Disaster-recovery floor for the hub-level app_kv documents: once a day,
-/// snapshot workspace + spaces + system chat as dated JSON under
-/// `<hub_dir>/backups/YYYY-MM-DD/`, pruning snapshots older than 14 days.
-/// Restore = copy a snapshot back over the store (documented in DEPLOYMENT.md).
-async fn nightly_backup(app: AppState, dir: PathBuf) {
-    loop {
-        let day = coxagent_application::state::now_rfc3339()[..10].to_owned();
-        let dest = dir.join(&day);
-        let done = dest.join("spaces.json").exists();
-        if !done {
-            let _ = std::fs::create_dir_all(&dest);
-            let ws = app.workspace.inner.lock().await.clone();
-            let sp = app.spaces.inner.lock().await.clone();
-            let chat = app.syschat.inner.lock().await.clone();
-            let dump = |name: &str, v: serde_json::Result<String>| {
-                if let Ok(text) = v {
-                    let _ = std::fs::write(dest.join(name), text);
-                }
-            };
-            dump("workspace.json", serde_json::to_string_pretty(&ws));
-            dump("spaces.json", serde_json::to_string_pretty(&sp));
-            dump("system_chat.json", serde_json::to_string_pretty(&chat));
-            tracing::info!("nightly backup written to {}", dest.display());
-            // Prune snapshots older than 14 days (lexicographic = chronologic).
-            if let Ok(entries) = std::fs::read_dir(&dir) {
-                let mut days: Vec<String> = entries
-                    .filter_map(Result::ok)
-                    .filter(|e| e.path().is_dir())
-                    .filter_map(|e| e.file_name().into_string().ok())
-                    .collect();
-                days.sort();
-                while days.len() > 14 {
-                    let old = days.remove(0);
-                    let _ = std::fs::remove_dir_all(dir.join(old));
-                }
-            }
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
-    }
-}
-
-async fn build_state(
-    projects: Vec<ProjectHandle>,
-    audit: Arc<dyn AuditPort>,
-    extras: HubExtras,
-) -> AppState {
-    let order: Vec<String> = projects.iter().map(|p| p.id.clone()).collect();
-    let map: HashMap<String, ProjectHandle> =
-        projects.into_iter().map(|p| (p.id.clone(), p)).collect();
-    let hub_dir = extras.hub_dir.unwrap_or_else(|| PathBuf::from("."));
-    let kv = extras.syschat_store.clone();
-    let kv2 = extras.syschat_store.clone();
-    let kv3 = extras.syschat_store.clone();
-    let kv3_pf = extras.syschat_store.clone();
-    let syschat = SysChat::load(&hub_dir, extras.syschat_store).await;
-    let workspace = Ws::load(&hub_dir, kv).await;
-    let spaces = Sp::load(&hub_dir, kv2).await;
-    let kv4 = kv3_pf.clone();
-    let meetings = Mt::load(&hub_dir, kv3).await;
-    let profiles = Pf::load(&hub_dir, kv4).await;
-    AppState {
-        projects: Arc::new(RwLock::new(map)),
-        chat_bus: Arc::new(RwLock::new(HashMap::new())),
-        docs_bus: Arc::new(RwLock::new(HashMap::new())),
-        docs_editors: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        order: Arc::new(RwLock::new(order)),
-        factory: extras.factory,
-        auth: extras.auth,
-        audit,
-        engines: Arc::new(extras.engines),
-        tooling: Arc::new(extras.tooling),
-        viewers: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        remover: extras.remover,
-        analyzer: extras.analyzer,
-        syschat,
-        workspace,
-        spaces,
-        meetings,
-        profiles,
-        storage: extras.storage.unwrap_or_else(|| {
-            Arc::new(DiskStorage {
-                root: hub_dir.join("blobs"),
-            })
-        }),
-        doc_store: extras.doc_store,
-    }
-}
 
 /// Serve the dashboard and API on `port`, with the security-audit sink and the
 /// optional hub capabilities in `extras`.
@@ -1598,38 +1415,9 @@ fn parse_account(out: &str) -> Option<String> {
     None
 }
 
-async fn project_provider(app: &AppState, pid: &str) -> Option<(String, String)> {
-    let p = app.project(pid).await?;
-    let cfg = std::fs::read_to_string(&p.config_path)
-        .ok()
-        .and_then(|t| serde_json::from_str::<Config>(&t).ok())
-        .unwrap_or_default();
-    Some((cfg.git.provider, cfg.git.base_url))
-}
-
 #[derive(serde::Deserialize)]
 struct ConnectReq {
     token: String,
-}
-
-/// List projects (id, name, alias, version, ticket count) in registration order.
-async fn list_projects(State(app): State<AppState>) -> impl IntoResponse {
-    let order = app.order.read().await.clone();
-    let mut out = Vec::new();
-    for id in &order {
-        if let Some(p) = app.project(id).await {
-            let (version, tickets) = p.store.load().await.map_or_else(
-                |_| ("0.0.0".to_owned(), 0),
-                |s| (s.current_version.to_string(), s.tickets.len()),
-            );
-            out.push(serde_json::json!({
-                "id": p.id, "name": p.name, "alias": p.alias,
-                "version": version, "tickets": tickets,
-                "mode": p.runner.snapshot().mode,
-            }));
-        }
-    }
-    Json(out)
 }
 
 #[derive(serde::Deserialize)]
@@ -1651,357 +1439,14 @@ struct CreateProjectReq {
     space: Option<String>,
 }
 
-/// Onboard a new project from the dashboard (greenfield, or brownfield import
-/// with `existing`, optionally seeded with a `goal`) via the injected factory.
-async fn create_project(
-    State(app): State<AppState>,
-    headers: axum::http::HeaderMap,
-    Json(req): Json<CreateProjectReq>,
-) -> axum::response::Response {
-    // Resolve the target space up front — a bad/unauthorized space must fail
-    // BEFORE the project is scaffolded, never leave a half-registered orphan.
-    let space_id = req
-        .space
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    if let Some(sid) = space_id {
-        let sup = is_super(&app, &headers).await;
-        let me = resolve_username(&app, &headers).await;
-        let doc = app.spaces.inner.lock().await;
-        let Some(space) = doc.spaces.iter().find(|s| s.id == sid) else {
-            return (StatusCode::BAD_REQUEST, format!("unknown space: {sid}")).into_response();
-        };
-        if !sup && !space.admins.iter().any(|a| a.eq_ignore_ascii_case(&me)) {
-            return (StatusCode::FORBIDDEN, "not an admin of this space").into_response();
-        }
-    } else if !app.spaces.inner.lock().await.spaces.is_empty() {
-        // Once spaces exist, every project must belong to one — enforced here,
-        // not just in the UI, so API/service-account callers can't skip it.
-        return (StatusCode::BAD_REQUEST, "space is required").into_response();
-    }
-    let Some(factory) = app.factory.clone() else {
-        return (
-            StatusCode::NOT_IMPLEMENTED,
-            "onboarding is only available in hub mode",
-        )
-            .into_response();
-    };
-    let name = req.name.trim().to_owned();
-    if name.is_empty() {
-        return (StatusCode::BAD_REQUEST, "name is required").into_response();
-    }
-    // Validate brownfield import path: must be under the hub's workspace root
-    // or under /tmp (safe sandbox). Reject paths pointing to system directories.
-    if let Some(ref existing) = req.existing {
-        if !existing.trim().is_empty() {
-            let p = std::path::Path::new(existing.trim());
-            // Resolve to absolute canonical path to prevent symlink tricks.
-            if let Ok(real) = p.canonicalize() {
-                // Allow under /tmp or under $HOME (typical user repos).
-                // Block system directories.
-                let path_str = real.to_string_lossy();
-                // Block if path equals a blocked directory, or if it starts with
-                // a blocked directory plus '/', to catch `/private/etc/foo` etc.
-                let blocked_prefixes = [
-                    "/etc",
-                    "/private/etc",
-                    "/root",
-                    "/var/run",
-                    "/var/log",
-                    "/usr/lib",
-                    "/usr/sbin",
-                    "/bin",
-                    "/sbin",
-                    "/dev",
-                    "/proc",
-                    "/sys",
-                ];
-                let blocked = blocked_prefixes.iter().any(|pfx| {
-                    path_str == *pfx
-                        || path_str.starts_with(pfx)
-                            && path_str.as_bytes().get(pfx.len()).copied() == Some(b'/')
-                });
-                if blocked {
-                    return (StatusCode::FORBIDDEN, "cannot import from this path").into_response();
-                }
-            }
-        }
-    }
-    let handle = match factory(NewProjectReq {
-        name,
-        alias: req.alias,
-        existing: req
-            .existing
-            .filter(|s| !s.trim().is_empty())
-            .map(PathBuf::from),
-        git_url: req.git_url.filter(|s| !s.trim().is_empty()),
-        goal: req.goal.filter(|s| !s.trim().is_empty()),
-    })
-    .await
-    {
-        Ok(h) => h,
-        Err(e) => return internal_error(&e),
-    };
-    let id = handle.id.clone();
-    {
-        let mut map = app.projects.write().await;
-        if map.contains_key(&id) {
-            return (StatusCode::CONFLICT, "project id already exists").into_response();
-        }
-        map.insert(id.clone(), handle);
-        app.order.write().await.push(id.clone());
-    }
-    if let Some(sid) = space_id {
-        {
-            let mut doc = app.spaces.inner.lock().await;
-            if let Some(space) = doc.spaces.iter_mut().find(|s| s.id == sid) {
-                if !space.projects.contains(&id) {
-                    space.projects.push(id.clone());
-                }
-            }
-        }
-        app.spaces.save().await;
-    }
-    Json(serde_json::json!({ "ok": true, "id": id })).into_response()
-}
-
 #[derive(serde::Deserialize)]
 struct RenameProjectReq {
     name: String,
 }
 
-/// Rename a project: persist the custom display name in its state and update the
-/// in-memory handle so the change is live (no restart). Admin-only.
-async fn rename_project_ep(
-    State(app): State<AppState>,
-    Path(pid): Path<String>,
-    Json(req): Json<RenameProjectReq>,
-) -> axum::response::Response {
-    let name = req.name.trim();
-    if name.is_empty() || name.chars().count() > 60 {
-        return (StatusCode::BAD_REQUEST, "name must be 1–60 chars").into_response();
-    }
-    let Some(p) = app.project(&pid).await else {
-        return not_found();
-    };
-    let Ok(mut state) = p.store.load().await else {
-        return internal_error("load failed");
-    };
-    state.display_name = Some(name.to_owned());
-    if let Err(e) = p.store.save(&state).await {
-        return internal_error(&e.to_string());
-    }
-    // Reflect the new name in the live handle so list_projects returns it now.
-    if let Some(h) = app.projects.write().await.get_mut(&pid) {
-        name.clone_into(&mut h.name);
-    }
-    Json(serde_json::json!({ "ok": true, "name": name })).into_response()
-}
-
-/// Delete (deregister) a project: stop its runner, remove it from the hub, and
-/// deregister it from the registry. The workspace files are left on disk.
-async fn delete_project_ep(
-    State(app): State<AppState>,
-    Path(pid): Path<String>,
-    headers: axum::http::HeaderMap,
-) -> axum::response::Response {
-    // Deleting a project is destructive — restrict to admins and the lead tier
-    // (Director/Manager/*Lead). Everyone else is forbidden. Super (hub-wide
-    // owner) is included via `can_manage`.
-    if let Some(auth) = &app.auth {
-        let allowed = match resolve_principal(auth, &headers).await {
-            Some(u) => u.role.can_manage(),
-            None => false,
-        };
-        if !allowed {
-            return (
-                StatusCode::FORBIDDEN,
-                "only an admin or manager may delete a project",
-            )
-                .into_response();
-        }
-    }
-    let Some(p) = app.project(&pid).await else {
-        return not_found();
-    };
-    p.runner.stop();
-    app.projects.write().await.remove(&pid);
-    app.order.write().await.retain(|id| id != &pid);
-    // Clean up space references so no dangling project IDs remain.
-    {
-        let mut sp = app.spaces.inner.lock().await;
-        for space in &mut sp.spaces {
-            space.projects.retain(|p| p != &pid);
-        }
-        drop(sp);
-        app.spaces.save().await;
-    }
-    if let Some(remover) = &app.remover {
-        if let Err(e) = remover(pid.clone()).await {
-            return internal_error(&e);
-        }
-    }
-    // Clean up the project directory on disk. For imported projects this only
-    // removes the CoXAgent workspace scaffolding (state/, coxagent.json, etc.)
-    // — never the original imported codebase.
-    if let Some(root) = p.config_path.parent() {
-        let project_dir = root.to_path_buf();
-        let codebase_linked = project_dir.join("codebase.lnk").exists();
-        // Spawn cleanup in the background — errors are logged, never surfaced.
-        tokio::spawn(async move {
-            if codebase_linked {
-                // Imported project: only delete CoXAgent scaffolding, not the code.
-                let _ = std::fs::remove_file(project_dir.join("codebase.lnk"));
-                if let Err(e) = std::fs::remove_dir_all(project_dir.join("state")) {
-                    tracing::warn!("delete_project: cannot remove state dir: {e}");
-                }
-                let _ = std::fs::remove_file(project_dir.join("coxagent.json"));
-                if let Ok(entries) = std::fs::read_dir(&project_dir) {
-                    if entries.count() == 0 {
-                        let _ = std::fs::remove_dir(&project_dir);
-                    }
-                }
-            } else {
-                // Greenfield: remove the entire project workspace.
-                if let Err(e) = std::fs::remove_dir_all(&project_dir) {
-                    tracing::warn!("delete_project: cannot remove project dir: {e}");
-                }
-            }
-            // Also clean up the Docker compose project if it was deployed.
-            let container_name = format!("cox-{pid}-codebase-app-1");
-            if let Ok(out) = std::process::Command::new("docker")
-                .args(["stop", &container_name])
-                .output()
-            {
-                if !out.status.success() {
-                    tracing::warn!("delete_project: docker stop {container_name} failed");
-                }
-            }
-            let _ = std::process::Command::new("docker")
-                .args(["rm", &container_name])
-                .output();
-        });
-    }
-    Json(serde_json::json!({ "ok": true })).into_response()
-}
-
 #[derive(serde::Deserialize)]
 struct GoalReq {
     goal: String,
-}
-
-/// Serialize state for list views but drop each ticket's heavy `design` specs —
-/// the board/backlog/roadmap only need the summary fields. Full specs load
-/// on demand via [`ticket_detail_ep`], keeping the 1 Hz SSE payload small.
-fn lite_state_value(state: &coxagent_application::ProjectState) -> serde_json::Value {
-    let mut v = serde_json::to_value(state).unwrap_or_default();
-    if let Some(tickets) = v
-        .get_mut("tickets")
-        .and_then(serde_json::Value::as_array_mut)
-    {
-        for t in tickets {
-            if let Some(obj) = t.as_object_mut() {
-                obj.remove("design");
-            }
-        }
-    }
-    // Team chat is delivered instantly over its WebSocket, but we KEEP it in the
-    // 1s SSE snapshot too as a fallback: it reaches clients whose WebSocket
-    // didn't connect (e.g. a WKWebView) and keeps two hubs sharing one state
-    // file in sync. The client merges both sources and de-duplicates.
-    //
-    // The SSE snapshot is broadcast to every viewer indiscriminately, so it may
-    // only carry `#general` — private-channel messages are access-controlled and
-    // reach members exclusively via the WebSocket / REST list, both of which
-    // enforce membership.
-    if let Some(chat) = v.get_mut("chat").and_then(serde_json::Value::as_array_mut) {
-        chat.retain(|m| {
-            m.get("channel").and_then(serde_json::Value::as_str)
-                == Some(coxagent_application::GENERAL_CHANNEL)
-        });
-    }
-    v
-}
-
-async fn state_ep(
-    State(app): State<AppState>,
-    Path(pid): Path<String>,
-) -> axum::response::Response {
-    let Some(p) = app.project(&pid).await else {
-        return not_found();
-    };
-    match p.store.load().await {
-        Ok(state) => Json(lite_state_value(&state)).into_response(),
-        Err(e) => internal_error(&e.to_string()),
-    }
-}
-
-async fn metrics_ep(
-    State(app): State<AppState>,
-    Path(pid): Path<String>,
-) -> axum::response::Response {
-    let Some(p) = app.project(&pid).await else {
-        return not_found();
-    };
-    match p.store.load().await {
-        Ok(state) => Json(metrics::compute(&state)).into_response(),
-        Err(e) => internal_error(&e.to_string()),
-    }
-}
-
-/// The shared worker registry: every team (`account@host`) currently online for
-/// this project, across all machines. Powers the dashboard's cross-machine view.
-async fn workers_ep(
-    State(app): State<AppState>,
-    Path(pid): Path<String>,
-) -> axum::response::Response {
-    let Some(p) = app.project(&pid).await else {
-        return not_found();
-    };
-    let workers = p.store.workers().await.unwrap_or_default();
-    Json(workers).into_response()
-}
-
-async fn get_config(
-    State(app): State<AppState>,
-    Path(pid): Path<String>,
-) -> axum::response::Response {
-    let Some(p) = app.project(&pid).await else {
-        return not_found();
-    };
-    let cfg = std::fs::read_to_string(&p.config_path)
-        .ok()
-        .and_then(|t| serde_json::from_str::<Config>(&t).ok())
-        .unwrap_or_default();
-    Json(cfg).into_response()
-}
-
-async fn put_config(
-    State(app): State<AppState>,
-    Path(pid): Path<String>,
-    Json(cfg): Json<Config>,
-) -> axum::response::Response {
-    let Some(p) = app.project(&pid).await else {
-        return not_found();
-    };
-    // Budget caps apply immediately (shared live cell); everything else needs a
-    // restart since the runner captured it at spawn.
-    if let Ok(mut caps) = p.budget.lock() {
-        caps.lifetime_usd = cfg.workflow.budget_usd;
-        caps.daily_usd = cfg.policy.daily_budget_usd;
-    }
-    match serde_json::to_string_pretty(&cfg) {
-        Ok(text) => match std::fs::write(&p.config_path, text) {
-            Ok(()) => Json(serde_json::json!({
-                "ok": true,
-                "note": "budget applied live; other changes apply on restart"
-            }))
-            .into_response(),
-            Err(e) => internal_error(&e.to_string()),
-        },
-        Err(e) => internal_error(&e.to_string()),
-    }
 }
 
 #[derive(serde::Deserialize)]
@@ -2036,54 +1481,11 @@ struct AnalyzeReq {
     description: String,
 }
 
-async fn set_priority(
-    State(app): State<AppState>,
-    Path((pid, id)): Path<(String, String)>,
-    Json(req): Json<PriorityReq>,
-) -> axum::response::Response {
-    let Some(p) = app.project(&pid).await else {
-        return not_found();
-    };
-    let Ok(tid) = coxagent_domain::TicketId::new(id.clone()) else {
-        return (axum::http::StatusCode::BAD_REQUEST, "bad id").into_response();
-    };
-    let Ok(mut state) = p.store.load().await else {
-        return internal_error("load failed");
-    };
-    let Some(ticket) = state.ticket_mut(&tid) else {
-        return (axum::http::StatusCode::NOT_FOUND, "no such ticket").into_response();
-    };
-    if let Err(e) = ticket.set_priority(coxagent_domain::Role::User, req.priority) {
-        return (axum::http::StatusCode::FORBIDDEN, e.to_string()).into_response();
-    }
-    state.log_activity("USER", "set priority", Some(id));
-    match p.store.save(&state).await {
-        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
-        Err(e) => internal_error(&e.to_string()),
-    }
-}
-
 #[derive(serde::Deserialize)]
 struct EditReq {
     title: String,
     #[serde(default)]
     description: String,
-}
-
-/// List discussion comments, optionally filtered to one ticket via `?ticket=ID`.
-async fn list_comments(
-    State(app): State<AppState>,
-    Path(pid): Path<String>,
-    axum::extract::Query(q): axum::extract::Query<CommentQuery>,
-) -> axum::response::Response {
-    let Some(p) = app.project(&pid).await else {
-        return not_found();
-    };
-    let mut comments = p.store.load().await.map(|s| s.comments).unwrap_or_default();
-    if let Some(tid) = q.ticket {
-        comments.retain(|c| c.ticket.as_deref() == Some(tid.as_str()));
-    }
-    Json(comments).into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -2105,143 +1507,10 @@ struct CommentReactReq {
     emoji: String,
 }
 
-/// Post a comment (as the user) to a ticket thread or the team channel.
-async fn post_comment(
-    State(app): State<AppState>,
-    Path(pid): Path<String>,
-    headers: axum::http::HeaderMap,
-    Json(req): Json<PostCommentReq>,
-) -> axum::response::Response {
-    let Some(p) = app.project(&pid).await else {
-        return not_found();
-    };
-    let body = req.body.trim();
-    if body.is_empty() && req.attachments.is_empty() {
-        return (axum::http::StatusCode::BAD_REQUEST, "empty comment").into_response();
-    }
-    // Attribute the comment to the signed-in account (so Scrum/discussion shows
-    // real names, not a generic "USER"); falls back to "USER" in open mode.
-    let author = resolve_username(&app, &headers).await;
-    let Ok(mut state) = p.store.load().await else {
-        return internal_error("load failed");
-    };
-    state.post_comment_att(&author, body, req.ticket.clone(), req.attachments.clone());
-    if let Err(e) = p.store.save(&state).await {
-        return internal_error(&e.to_string());
-    }
-    // If the user attached something an agent can read, let the SA agent read it
-    // and respond — answering if a question was asked, otherwise reading it
-    // proactively and asking back. Runs in the background so the post is instant.
-    maybe_analyze_attachments(&app, &p, &author, body, req.ticket, &req.attachments);
-    Json(serde_json::json!({ "ok": true })).into_response()
-}
-
-/// Toggle the caller's emoji reaction on a ticket/discussion comment.
-async fn comment_react_ep(
-    State(app): State<AppState>,
-    Path((pid, id)): Path<(String, String)>,
-    headers: axum::http::HeaderMap,
-    Json(req): Json<CommentReactReq>,
-) -> axum::response::Response {
-    let Some(p) = app.project(&pid).await else {
-        return not_found();
-    };
-    let user = resolve_username(&app, &headers).await;
-    let emoji = req.emoji.chars().take(8).collect::<String>();
-    if emoji.is_empty() {
-        return (StatusCode::BAD_REQUEST, "emoji required").into_response();
-    }
-    let Ok(mut state) = p.store.load().await else {
-        return internal_error("load failed");
-    };
-    let Some(updated) = state.react_comment(&id, &user, &emoji) else {
-        return not_found();
-    };
-    if let Err(e) = p.store.save(&state).await {
-        return internal_error(&e.to_string());
-    }
-    Json(updated).into_response()
-}
-
-/// Spawn a background SA turn that reads any readable attachments on a freshly
-/// posted comment and replies. No-op when there are no readable attachments.
-fn maybe_analyze_attachments(
-    app: &AppState,
-    p: &ProjectHandle,
-    author: &str,
-    body: &str,
-    ticket: Option<String>,
-    attachments: &[coxagent_application::Attachment],
-) {
-    use coxagent_application::use_cases::{AnalyzeAttachmentUseCase, ReadableAttachment};
-    // Storage keys for each attachment (the CLI reads local files, so we fetch
-    // the bytes from the blob store into a temp dir — works for disk and S3).
-    let items: Vec<(String, String, String)> = attachments
-        .iter()
-        .filter_map(|a| {
-            let file = a.url.rsplit('/').next()?;
-            Some((
-                a.name.clone(),
-                a.mime.clone(),
-                format!("proj/{}/{file}", p.id),
-            ))
-        })
-        .collect();
-    if items.is_empty() {
-        return;
-    }
-    let storage = Arc::clone(&app.storage);
-    let store = Arc::clone(&p.store);
-    let engine = Arc::clone(&p.engine);
-    let work_dir = p.work_dir.clone();
-    let (author, body) = (author.to_owned(), body.to_owned());
-    tokio::spawn(async move {
-        let tmp = std::env::temp_dir().join(format!("cox-att-{}", mint_media_token()));
-        let _ = std::fs::create_dir_all(&tmp);
-        let mut readable: Vec<ReadableAttachment> = Vec::new();
-        for (name, mime, key) in items {
-            let Ok(bytes) = storage.get(&key).await else {
-                continue;
-            };
-            let fname = key.rsplit('/').next().unwrap_or("file");
-            let path = tmp.join(fname);
-            if std::fs::write(&path, &bytes).is_ok() {
-                readable.push(ReadableAttachment { name, mime, path });
-            }
-        }
-        if !readable.is_empty() {
-            let uc = AnalyzeAttachmentUseCase::new(store, engine, work_dir);
-            if let Err(e) = uc.execute(&author, &body, ticket, &readable).await {
-                tracing::warn!("attachment analysis failed: {e}");
-            }
-        }
-        let _ = std::fs::remove_dir_all(&tmp);
-    });
-}
-
 #[derive(serde::Deserialize)]
 struct ChatListQuery {
     /// Which channel's history to return; defaults to `#general`.
     channel: Option<String>,
-}
-
-/// List the channels the signed-in user can see (`#general` first).
-async fn channels_list_ep(
-    State(app): State<AppState>,
-    Path(pid): Path<String>,
-    headers: axum::http::HeaderMap,
-) -> axum::response::Response {
-    let Some(p) = app.project(&pid).await else {
-        return not_found();
-    };
-    let user = resolve_username(&app, &headers).await;
-    let channels = p
-        .store
-        .load()
-        .await
-        .map(|s| s.channels_for(&user))
-        .unwrap_or_default();
-    Json(channels).into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -2265,109 +1534,6 @@ struct ChannelSettingsReq {
     open_invite: Option<bool>,
     #[serde(default)]
     topic: Option<String>,
-}
-
-/// Create a private channel owned by the signed-in user.
-async fn channel_create_ep(
-    State(app): State<AppState>,
-    Path(pid): Path<String>,
-    headers: axum::http::HeaderMap,
-    Json(req): Json<CreateChannelReq>,
-) -> axum::response::Response {
-    let Some(p) = app.project(&pid).await else {
-        return not_found();
-    };
-    let user = resolve_username(&app, &headers).await;
-    let Ok(mut state) = p.store.load().await else {
-        return internal_error("load failed");
-    };
-    let created = match req.parent.as_deref().filter(|p| !p.trim().is_empty()) {
-        Some(parent) => state.create_sub_channel(
-            parent,
-            &req.name,
-            &user,
-            req.kind.as_deref().unwrap_or("private"),
-        ),
-        None => state.create_channel_with_kind(
-            &req.name,
-            &user,
-            req.kind.as_deref().unwrap_or("private"),
-        ),
-    };
-    match created {
-        Ok(ch) => match p.store.save(&state).await {
-            Ok(()) => (StatusCode::CREATED, Json(ch)).into_response(),
-            Err(e) => internal_error(&e.to_string()),
-        },
-        Err(msg) => (StatusCode::BAD_REQUEST, msg).into_response(),
-    }
-}
-
-/// Change a channel's settings (privacy, who may invite, topic). Owner or an
-/// admin: a room's owner runs their room, and an admin outranks that.
-async fn channel_settings_ep(
-    State(app): State<AppState>,
-    Path((pid, cid)): Path<(String, String)>,
-    headers: axum::http::HeaderMap,
-    Json(req): Json<ChannelSettingsReq>,
-) -> axum::response::Response {
-    let Some(p) = app.project(&pid).await else {
-        return not_found();
-    };
-    let user = resolve_username(&app, &headers).await;
-    let Ok(mut state) = p.store.load().await else {
-        return internal_error("load failed");
-    };
-    let Some(ch) = state.channels.iter().find(|c| c.id == cid) else {
-        return not_found();
-    };
-    if ch.owner != user && !user_can_manage(&app, &headers).await {
-        return (StatusCode::FORBIDDEN, "only the channel owner or an admin").into_response();
-    }
-    match state.update_channel_settings(
-        &cid,
-        req.kind.as_deref(),
-        req.open_invite,
-        req.topic.as_deref(),
-    ) {
-        Ok(ch) => match p.store.save(&state).await {
-            Ok(()) => Json(ch).into_response(),
-            Err(e) => internal_error(&e.to_string()),
-        },
-        Err(msg) => (StatusCode::BAD_REQUEST, msg).into_response(),
-    }
-}
-
-/// Remove a member from a channel. The owner, a delegated inviter, or an admin.
-async fn channel_kick_ep(
-    State(app): State<AppState>,
-    Path((pid, cid, member)): Path<(String, String, String)>,
-    headers: axum::http::HeaderMap,
-) -> axum::response::Response {
-    let Some(p) = app.project(&pid).await else {
-        return not_found();
-    };
-    let user = resolve_username(&app, &headers).await;
-    let Ok(mut state) = p.store.load().await else {
-        return internal_error("load failed");
-    };
-    let Some(ch) = state.channels.iter().find(|c| c.id == cid) else {
-        return not_found();
-    };
-    if !ch.can_kick(&user) && !user_can_manage(&app, &headers).await {
-        return (
-            StatusCode::FORBIDDEN,
-            "only the channel owner, a delegated inviter, or an admin",
-        )
-            .into_response();
-    }
-    match state.remove_channel_member(&cid, &member) {
-        Ok(ch) => match p.store.save(&state).await {
-            Ok(()) => Json(ch).into_response(),
-            Err(e) => internal_error(&e.to_string()),
-        },
-        Err(msg) => (StatusCode::BAD_REQUEST, msg).into_response(),
-    }
 }
 
 /// Whether the caller holds admin/super authority, which outranks channel
@@ -2615,34 +1781,6 @@ struct HookPostReq {
     username: String,
 }
 
-/// WebRTC ICE servers for calls: a public STUN server, plus a TURN relay with
-/// short-lived HMAC credentials when `COXAGENT_TURN_URL`/`_SECRET` are set
-/// (coturn's `use-auth-secret` REST scheme). TURN lets calls traverse NATs that
-/// block direct peer connections.
-async fn ice_config_ep() -> axum::response::Response {
-    let mut servers = vec![serde_json::json!({ "urls": "stun:stun.l.google.com:19302" })];
-    if let (Ok(url), Ok(secret)) = (
-        std::env::var("COXAGENT_TURN_URL"),
-        std::env::var("COXAGENT_TURN_SECRET"),
-    ) {
-        let ttl: u64 = std::env::var("COXAGENT_TURN_TTL")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(3600);
-        let exp = now_unix_secs() + ttl;
-        let username = format!("{exp}:cox");
-        let credential = base64_std(&hmac_sha1(secret.as_bytes(), username.as_bytes()));
-        // Offer the relay over both UDP and TCP for reachability.
-        let base = url.trim_end_matches("?transport=udp").to_owned();
-        servers.push(serde_json::json!({
-            "urls": [format!("{base}?transport=udp"), format!("{base}?transport=tcp")],
-            "username": username,
-            "credential": credential,
-        }));
-    }
-    Json(serde_json::json!({ "iceServers": servers })).into_response()
-}
-
 fn now_unix_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2737,16 +1875,6 @@ async fn user_may_see_broadcast(p: &ProjectHandle, user: &str, json: &str) -> bo
 #[derive(serde::Deserialize)]
 struct ChatReplyReq {
     message: String,
-}
-
-/// The Scrum language configured for a project (English by default).
-fn project_language(p: &ProjectHandle) -> coxagent_application::config::Language {
-    std::fs::read_to_string(&p.config_path)
-        .ok()
-        .and_then(|t| serde_json::from_str::<Config>(&t).ok())
-        .map_or(coxagent_application::config::Language::En, |c| {
-            c.workflow.language
-        })
 }
 
 #[derive(serde::Deserialize)]
