@@ -394,6 +394,7 @@ impl Ws {
 /// A booked meeting. Times are RFC3339 UTC; the watchdog drives reminders,
 /// start announcements, and auto-ringing of absent participants.
 #[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
+#[allow(clippy::struct_excessive_bools)] // a persisted data aggregate, not a state machine
 struct Meeting {
     id: String,
     title: String,
@@ -664,7 +665,8 @@ async fn meeting_watchdog(app: AppState) {
         {
             let mut doc = app.meetings.inner.lock().await;
             doc.meetings.retain(|m| {
-                let keep = parse_rfc3339(&m.start).is_none_or(|s| {
+                // MSRV 1.80 predates Option::is_none_or.
+                let keep = parse_rfc3339(&m.start).map_or(true, |s| {
                     now < s
                         + time::Duration::minutes(i64::from(m.duration_min))
                         + time::Duration::days(1)
@@ -981,6 +983,7 @@ async fn principal_name(app: &AppState, headers: &axum::http::HeaderMap) -> Opti
     resolve_principal(&auth, headers).await.map(|u| u.username)
 }
 
+#[allow(clippy::cast_possible_truncation)] // the low 32 bits of the hash IS the value
 fn rand_u32() -> u32 {
     use std::hash::{BuildHasher, Hasher};
     std::collections::hash_map::RandomState::new()
@@ -1352,6 +1355,27 @@ pub struct HubExtras {
     pub syschat_store: Option<Arc<dyn coxagent_application::ports::outbound::KvDocPort>>,
 }
 
+/// Post one COX budget notice into a project's #agents and log the same line to
+/// its activity feed. Both the warning and the hard stop below report this way.
+async fn post_budget_notice(p: &ProjectHandle, msg: &str, activity: &str) {
+    let _ = coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        s.post_chat_in(
+            "COX",
+            msg,
+            coxagent_application::state::AGENTS_CHANNEL,
+            Vec::new(),
+        );
+        s.log_activity("COX", activity, None);
+        Ok(())
+    })
+    .await;
+}
+
+/// Warn threshold for a space's budget, matching the dashboard's own amber one
+/// (index.html renders the "nearly reached" alert at 80% of a project's cap) —
+/// same UX language, just at the space level and pushed as a chat heads-up.
+const WARN_PCT: f64 = 0.8;
+
 /// Assemble the shared [`AppState`] from the registered projects and hub extras.
 /// Space budget ENFORCEMENT (not just display): every 5 minutes each space's
 /// total spend is compared to its cap; the first breach pauses every runner and
@@ -1361,10 +1385,6 @@ pub struct HubExtras {
 async fn space_budget_watchdog(app: AppState) {
     let mut flagged: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut warned: std::collections::HashSet<String> = std::collections::HashSet::new();
-    // Matches the dashboard's own amber threshold (index.html renders the
-    // "nearly reached" alert at 80% of a project's cap) — same UX language,
-    // just at the space level and pushed as a chat heads-up.
-    const WARN_PCT: f64 = 0.8;
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(300)).await;
         let spaces = app.spaces.inner.lock().await.spaces.clone();
@@ -1405,24 +1425,7 @@ async fn space_budget_watchdog(app: AppState) {
                         spend / sp.budget_usd * 100.0
                     );
                     for p in &handles {
-                        let _ = coxagent_application::ports::outbound::mutate_state(
-                            p.store.as_ref(),
-                            |s| {
-                                s.post_chat_in(
-                                    "COX",
-                                    &msg,
-                                    coxagent_application::state::AGENTS_CHANNEL,
-                                    Vec::new(),
-                                );
-                                s.log_activity(
-                                    "COX",
-                                    "space budget approaching cap — warned",
-                                    None,
-                                );
-                                Ok(())
-                            },
-                        )
-                        .await;
+                        post_budget_notice(p, &msg, "space budget approaching cap — warned").await;
                     }
                 }
             } else {
@@ -1452,18 +1455,7 @@ async fn space_budget_watchdog(app: AppState) {
                         let _ = p.store.set_desired(&w.worker, false).await;
                     }
                 }
-                let _ =
-                    coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
-                        s.post_chat_in(
-                            "COX",
-                            &msg,
-                            coxagent_application::state::AGENTS_CHANNEL,
-                            Vec::new(),
-                        );
-                        s.log_activity("COX", "space budget cap reached — agents paused", None);
-                        Ok(())
-                    })
-                    .await;
+                post_budget_notice(p, &msg, "space budget cap reached — agents paused").await;
             }
         }
     }
@@ -2369,6 +2361,14 @@ pub async fn serve_full(
             get(channels_list_ep).post(channel_create_ep),
         )
         .route(
+            "/api/projects/:pid/channels/:cid/settings",
+            axum::routing::patch(channel_settings_ep),
+        )
+        .route(
+            "/api/projects/:pid/channels/:cid/members/:member",
+            delete(channel_kick_ep),
+        )
+        .route(
             "/api/projects/:pid/channels/:cid/invite",
             post(channel_invite_ep),
         )
@@ -2795,7 +2795,7 @@ async fn git_test_ep(
                         .collect();
                 }
             } else {
-                detail = "ls-remote timed out".to_owned();
+                "ls-remote timed out".clone_into(&mut detail);
             }
         }
         if reachable {
@@ -2823,7 +2823,7 @@ async fn git_test_ep(
                         .collect();
                 }
             } else {
-                detail = "push --dry-run timed out".to_owned();
+                "push --dry-run timed out".clone_into(&mut detail);
             }
         }
     }
@@ -4071,6 +4071,22 @@ struct CreateChannelReq {
     name: String,
     #[serde(default)]
     kind: Option<String>,
+    /// Open this channel INSIDE another one (the `+` on a channel row).
+    #[serde(default)]
+    parent: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct ChannelSettingsReq {
+    /// `"private"` or `"public"`. `#general` may not change.
+    #[serde(default)]
+    kind: Option<String>,
+    /// Whether any member may invite; false leaves it to the owner and the
+    /// people they delegated to.
+    #[serde(default)]
+    open_invite: Option<bool>,
+    #[serde(default)]
+    topic: Option<String>,
 }
 
 /// Create a private channel owned by the signed-in user.
@@ -4087,13 +4103,104 @@ async fn channel_create_ep(
     let Ok(mut state) = p.store.load().await else {
         return internal_error("load failed");
     };
-    match state.create_channel(&req.name, &user) {
+    let created = match req.parent.as_deref().filter(|p| !p.trim().is_empty()) {
+        Some(parent) => state.create_sub_channel(
+            parent,
+            &req.name,
+            &user,
+            req.kind.as_deref().unwrap_or("private"),
+        ),
+        None => state.create_channel_with_kind(
+            &req.name,
+            &user,
+            req.kind.as_deref().unwrap_or("private"),
+        ),
+    };
+    match created {
         Ok(ch) => match p.store.save(&state).await {
             Ok(()) => (StatusCode::CREATED, Json(ch)).into_response(),
             Err(e) => internal_error(&e.to_string()),
         },
         Err(msg) => (StatusCode::BAD_REQUEST, msg).into_response(),
     }
+}
+
+/// Change a channel's settings (privacy, who may invite, topic). Owner or an
+/// admin: a room's owner runs their room, and an admin outranks that.
+async fn channel_settings_ep(
+    State(app): State<AppState>,
+    Path((pid, cid)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<ChannelSettingsReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let user = resolve_username(&app, &headers).await;
+    let Ok(mut state) = p.store.load().await else {
+        return internal_error("load failed");
+    };
+    let Some(ch) = state.channels.iter().find(|c| c.id == cid) else {
+        return not_found();
+    };
+    if ch.owner != user && !user_can_manage(&app, &headers).await {
+        return (StatusCode::FORBIDDEN, "only the channel owner or an admin").into_response();
+    }
+    match state.update_channel_settings(
+        &cid,
+        req.kind.as_deref(),
+        req.open_invite,
+        req.topic.as_deref(),
+    ) {
+        Ok(ch) => match p.store.save(&state).await {
+            Ok(()) => Json(ch).into_response(),
+            Err(e) => internal_error(&e.to_string()),
+        },
+        Err(msg) => (StatusCode::BAD_REQUEST, msg).into_response(),
+    }
+}
+
+/// Remove a member from a channel. The owner, a delegated inviter, or an admin.
+async fn channel_kick_ep(
+    State(app): State<AppState>,
+    Path((pid, cid, member)): Path<(String, String, String)>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let user = resolve_username(&app, &headers).await;
+    let Ok(mut state) = p.store.load().await else {
+        return internal_error("load failed");
+    };
+    let Some(ch) = state.channels.iter().find(|c| c.id == cid) else {
+        return not_found();
+    };
+    if !ch.can_kick(&user) && !user_can_manage(&app, &headers).await {
+        return (
+            StatusCode::FORBIDDEN,
+            "only the channel owner, a delegated inviter, or an admin",
+        )
+            .into_response();
+    }
+    match state.remove_channel_member(&cid, &member) {
+        Ok(ch) => match p.store.save(&state).await {
+            Ok(()) => Json(ch).into_response(),
+            Err(e) => internal_error(&e.to_string()),
+        },
+        Err(msg) => (StatusCode::BAD_REQUEST, msg).into_response(),
+    }
+}
+
+/// Whether the caller holds admin/super authority, which outranks channel
+/// ownership everywhere it is checked.
+async fn user_can_manage(app: &AppState, headers: &axum::http::HeaderMap) -> bool {
+    let Some(auth) = app.auth.clone() else {
+        return true; // running open (no auth configured)
+    };
+    resolve_principal(&auth, headers)
+        .await
+        .is_some_and(|u| u.role.can_manage())
 }
 
 #[derive(serde::Deserialize)]
@@ -5144,9 +5251,7 @@ async fn run_preview_health_gate(
     probe_port: Result<Option<u16>, ()>,
 ) -> bool {
     match probe_port {
-        Ok(port) => {
-            coxagent_application::ports::outbound::verify_deploy_health(deploy, port).await
-        }
+        Ok(port) => coxagent_application::ports::outbound::verify_deploy_health(deploy, port).await,
         Err(()) => false,
     }
 }
@@ -5665,14 +5770,13 @@ async fn syschat_reply_ep(
     }
     let mid_clone = mid.clone();
     let mut sc = app.syschat.inner.lock().await;
-    let channel = match sc
+    let Some(channel) = sc
         .chat
         .iter()
         .find(|m| m.id == mid_clone)
         .map(|p| p.channel.clone())
-    {
-        Some(ch) => ch,
-        None => return (StatusCode::NOT_FOUND, "parent not found").into_response(),
+    else {
+        return (StatusCode::NOT_FOUND, "parent not found").into_response();
     };
     let msg = ChatMsg::reply(&user, &body, &channel, &mid_clone);
     sc.chat.push(msg.clone());
@@ -5801,14 +5905,13 @@ async fn syschat_pin_ep(
     }
     let mid_clone = mid.clone();
     let mut sc = app.syschat.inner.lock().await;
-    let channel = match sc
+    let Some(channel) = sc
         .chat
         .iter()
         .find(|m| m.id == mid_clone)
         .map(|m| m.channel.clone())
-    {
-        Some(ch) => ch,
-        None => return (StatusCode::NOT_FOUND, "not found").into_response(),
+    else {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
     };
     let pins = sc.pins.entry(channel.clone()).or_default();
     if pins.contains(&mid_clone) {
@@ -6445,6 +6548,7 @@ fn project_language(p: &ProjectHandle) -> coxagent_application::config::Language
         })
 }
 
+#[allow(clippy::too_many_lines)] // one linear pass; splitting hurts readability
 async fn standup_ep(
     State(app): State<AppState>,
     Path(pid): Path<String>,
@@ -9221,8 +9325,7 @@ mod pr_preview_tests {
     /// config) must fail the gate rather than be treated as unset.
     #[tokio::test(start_paused = true)]
     async fn a_string_host_port_is_rejected_rather_than_skipping_the_gate() {
-        let (_dir, handle) =
-            project_handle_with_raw_host_port(Arc::new(HealthyDeploy), "\"8101\"");
+        let (_dir, handle) = project_handle_with_raw_host_port(Arc::new(HealthyDeploy), "\"8101\"");
         let forge: Arc<dyn ForgePort> = Arc::new(UnusedForge);
 
         let resp = pr_preview(&handle, &forge, 1, false).await;

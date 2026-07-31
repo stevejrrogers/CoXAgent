@@ -48,3 +48,18 @@ This project is indexed by GitNexus as **CoXAgent** (4970 symbols, 13030 relatio
 - rtk's output compression hook silently fabricates or truncates content for large reads (git cat-file, git show, grep, cargo test --workspace); verify via `Read` tool directly or per-crate `cargo test -p <crate>` when correctness matters. Shims in $TMPDIR shadow real binaries — use absolute paths (/opt/homebrew/bin/cargo, etc.) as escape hatch. Docker compose in sandbox needs `BUILDX_CONFIG=<scratchpad>`, not DOCKER_CONFIG.
 - Concurrent work on shared working trees requires discipline: merge base before pushing, verify the PR graph shows no cross-contamination, and always mutation-test before declaring "already done." The pattern is a symptom of improper branch hygiene, not a feature to accommodate.
 - When `coxagent serve` inherits env vars pointing to shared infrastructure (COXAGENT_DB_DSN, COXAGENT_REDIS_URL, etc.), it connects to the real Postgres/Redis instead of local storage, potentially mutating shared state during dev/test. Add to CLAUDE.md: document the hazard, the env-unset workaround (`env -u COXAGENT_DB_DSN -u COXAGENT_REDIS_URL ...`), and link to the deploy layer's docker-compose setup so devs understand the infra landscape.
+
+## Code layout (why merges keep conflicting)
+
+Two agents editing the same oversized module conflict by construction. The rule
+that prevents it is structural, not procedural:
+
+- One cohesive unit per file; one bounded context per directory.
+- Past ~500 lines, split along a real seam and name the new file for what it
+  IS. `helpers.rs` / `utils2.rs` are not seams — a split you cannot name has
+  made two problems out of one.
+- Touching an oversized file? Leave it smaller: extract the part you came to
+  change, with its tests. Do not rewrite the module for a one-behaviour ticket.
+- Current offenders, largest first (split these when work takes you into them):
+  `presentation/src/server.rs`, `presentation/src/web/index.html`,
+  `application/src/use_cases/cycle.rs`, `application/src/state.rs`.

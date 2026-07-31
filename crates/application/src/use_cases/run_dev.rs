@@ -1324,6 +1324,7 @@ pub fn parse_ask(stdout: &str) -> Option<(String, String)> {
     None
 }
 
+#[must_use]
 pub fn ticket_brief(ticket: Option<&coxagent_domain::Ticket>) -> String {
     use std::fmt::Write as _;
     let Some(t) = ticket else {

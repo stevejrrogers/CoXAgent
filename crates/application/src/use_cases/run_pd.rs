@@ -142,13 +142,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
                     &self.work_dir,
                 )
                 .await;
-                match fixed.as_deref().map(parse_ux) {
-                    Some(Ok(u)) => u,
-                    _ => {
-                        self.store.release_stage(&id, "pd", &worker).await.ok();
-                        return Err(PortError::Corrupt(format!("PD output: {first}")).into());
-                    }
-                }
+                let Some(Ok(repaired)) = fixed.as_deref().map(parse_ux) else {
+                    self.store.release_stage(&id, "pd", &worker).await.ok();
+                    return Err(PortError::Corrupt(format!("PD output: {first}")).into());
+                };
+                repaired
             }
         };
 
@@ -186,9 +184,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
             .context
             .as_deref()
             .filter(|c| !c.trim().is_empty())
-            .map(|c| {
-                format!("\n\n## Project context (goal, stack, scope, design system — stay consistent):\n{c}\n")
-            })
+            .map(|c| format!("\n\n## Project context (goal, stack, scope, design system — stay consistent):\n{c}\n"))
             .unwrap_or_default();
         AgentRequest {
             role: Role::Pd,

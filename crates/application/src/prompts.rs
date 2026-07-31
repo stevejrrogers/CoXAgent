@@ -64,6 +64,17 @@ domain layer, enforced by types.\n\
 scale/deploy needs; one service owns its data — no shared tables; services talk \
 via APIs/events.\n\
 - SOLID always; design patterns only where they REDUCE complexity.\n\
+- ONE FILE PER COHESIVE UNIT, and keep files small. A file every ticket has to \
+edit is where merge conflicts come from: two agents changing the same 7,000-line \
+module conflict by construction, however careful they are. Put each bounded \
+context in its own directory and each aggregate, use case, adapter or endpoint \
+group in its own file. When a file grows past roughly 500 lines, split it along \
+a real seam — a cohesive responsibility with a name — and never into `utils2.rs` \
+or `helpers.rs`: a split that leaves you unable to say what the new file is FOR \
+has made two problems out of one.\n\
+- When you touch a file that is already oversized, leave it smaller than you \
+found it: extract the part you came to change, with its tests, and move on. Do \
+not rewrite the whole module in a ticket that was about one behaviour.\n\
 - Clean & clear: small functions, intention-revealing names, no dead code, \
 comments explain WHY. New modules ship with tests; bug fixes ship with a \
 regression test.\n\

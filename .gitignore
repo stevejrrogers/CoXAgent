@@ -6,6 +6,8 @@ Cargo.lock.orig
 /state/
 /logs/
 /codebase/
+# Local snapshots of hub state (spaces/workspace/system_chat) — machine-local
+/backups/
 
 .DS_Store
 

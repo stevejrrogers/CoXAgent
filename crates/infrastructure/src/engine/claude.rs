@@ -335,17 +335,15 @@ impl ClaudeEngine {
             Ok::<_, PortError>((raw, status))
         };
         let leader_pid = child_pid;
-        let (raw, status) = match tokio::time::timeout(timeout, read).await {
-            Ok(r) => r?,
-            Err(_) => {
-                // Reap the WHOLE process tree, not just the CLI: a timed-out
-                // agent may have left builds/dev-servers running.
-                if let Some(pid) = leader_pid {
-                    crate::proc::kill_group(pid);
-                }
-                return Err(PortError::Backend("claude timed out".to_owned()));
+        let Ok(read) = tokio::time::timeout(timeout, read).await else {
+            // Reap the WHOLE process tree, not just the CLI: a timed-out
+            // agent may have left builds/dev-servers running.
+            if let Some(pid) = leader_pid {
+                crate::proc::kill_group(pid);
             }
+            return Err(PortError::Backend("claude timed out".to_owned()));
         };
+        let (raw, status) = read?;
         let stderr = err_task.await.unwrap_or_default();
 
         // Prefer the streamed events; fall back to the old single-object JSON.

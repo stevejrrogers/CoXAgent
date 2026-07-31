@@ -113,7 +113,7 @@ impl GitPort for SystemGit {
         {
             return Ok(SyncBase::UpToDate);
         }
-        match git(
+        if git(
             work_dir,
             &[
                 "-c",
@@ -126,22 +126,21 @@ impl GitPort for SystemGit {
             ],
         )
         .await
+        .is_ok()
         {
-            Ok(_) => Ok(SyncBase::Merged),
-            Err(_) => {
-                // Merge stopped — list the files left with conflict markers. If
-                // there are none, the merge failed for another reason: bubble up.
-                let unmerged = git(work_dir, &["diff", "--name-only", "--diff-filter=U"]).await?;
-                let files: Vec<String> = unmerged.lines().map(str::to_owned).collect();
-                if files.is_empty() {
-                    let _ = git(work_dir, &["merge", "--abort"]).await;
-                    return Err(PortError::Backend(format!(
-                        "merge of {target} failed without conflicts"
-                    )));
-                }
-                Ok(SyncBase::Conflicts(files))
-            }
+            return Ok(SyncBase::Merged);
         }
+        // Merge stopped — list the files left with conflict markers. If there
+        // are none, the merge failed for another reason: bubble up.
+        let unmerged = git(work_dir, &["diff", "--name-only", "--diff-filter=U"]).await?;
+        let files: Vec<String> = unmerged.lines().map(str::to_owned).collect();
+        if files.is_empty() {
+            let _ = git(work_dir, &["merge", "--abort"]).await;
+            return Err(PortError::Backend(format!(
+                "merge of {target} failed without conflicts"
+            )));
+        }
+        Ok(SyncBase::Conflicts(files))
     }
 
     async fn abort_merge(&self, work_dir: &Path) -> Result<(), PortError> {
