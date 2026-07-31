@@ -73,6 +73,31 @@ const INDEX_HTML: &str = include_str!("../web/index.html");
 const XTERM_JS: &str = include_str!("../web/xterm.min.js");
 const XTERM_CSS: &str = include_str!("../web/xterm.min.css");
 const XTERM_FIT_JS: &str = include_str!("../web/xterm-addon-fit.min.js");
+// The dashboard's own split assets — one CSS file plus classic scripts in
+// load order (they share one global scope; the split is for merge-conflict
+// surface, not modularity). Embedded like everything else: one binary.
+const APP_CSS: &str = include_str!("../web/app.css");
+const APP_JS: &[(&str, &str)] = &[
+    ("core.js", include_str!("../web/js/core.js")),
+    ("manage.js", include_str!("../web/js/manage.js")),
+    ("home.js", include_str!("../web/js/home.js")),
+    ("chat.js", include_str!("../web/js/chat.js")),
+    ("mcp.js", include_str!("../web/js/mcp.js")),
+    ("docs.js", include_str!("../web/js/docs.js")),
+    ("shell.js", include_str!("../web/js/shell.js")),
+];
+
+/// One of the split dashboard scripts, by basename.
+async fn app_js_ep(Path(name): Path<String>) -> axum::response::Response {
+    match APP_JS.iter().find(|(n, _)| *n == name) {
+        Some((_, body)) => (
+            [("content-type", "application/javascript; charset=utf-8")],
+            *body,
+        )
+            .into_response(),
+        None => not_found(),
+    }
+}
 
 /// How often the SSE stream pushes a fresh snapshot.
 const STREAM_INTERVAL: Duration = Duration::from_secs(1);
@@ -993,6 +1018,11 @@ pub async fn serve_full(
 
     let app = Router::new()
         .route("/", get(index))
+        .route(
+            "/assets/app.css",
+            get(|| async { ([("content-type", "text/css; charset=utf-8")], APP_CSS) }),
+        )
+        .route("/assets/js/:name", get(app_js_ep))
         .route(
             "/assets/xterm.min.js",
             get(|| async { ([("content-type", "application/javascript")], XTERM_JS) }),

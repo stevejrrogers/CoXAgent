@@ -151,6 +151,13 @@ Conventions for these split modules:
   of `src/`; when a split introduces a new visibility form, the guard must
   keep recognising `fn` headers — it caught `pub(super)` being invisible once.
 
+The dashboard split (Aug 2026): `web/index.html` (7.8k) became a 780-line
+shell + `web/app.css` + seven ordered classic scripts in `web/js/`
+(core/manage/home/chat/mcp/docs/shell). They share ONE global scope — the
+split is merge-conflict surface, not modularity — so load order matters and
+new top-level state goes in the file that owns the view. `e2e/` (Playwright)
+is the gate: golden screenshots + a console-error assert per view, booted
+from a frozen fixture on COXAGENT_PORT.
+
 Remaining oversized (split when work takes you into them):
-`presentation/src/web/index.html` (~7.7k — needs per-view JS/CSS split with a
-UI smoke test), `cycle/forge.rs` (1.46k), `server/mod.rs` router body.
+`cycle/forge.rs` (1.46k), `server/mod.rs` router body.
