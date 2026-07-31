@@ -81,6 +81,10 @@ impl RunnerHandle {
     pub fn pause(&self) {
         self.mode.store(PAUSED, Ordering::SeqCst);
         self.set_mode_label("paused");
+        // The phase label outlives the cycle it belonged to: pausing mid-cycle
+        // left "SA · reviewing PRs" on the dashboard beside a paused runner,
+        // which reads as "you asked it to stop and it ignored you".
+        self.clear_active();
     }
 
     /// Run exactly one cycle, then pause.
