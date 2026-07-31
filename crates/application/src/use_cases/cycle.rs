@@ -3576,6 +3576,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         .is_ok()
     }
 
+    /// The engine this cycle drives, for outage reporting.
+    pub fn engine_id(&self) -> &'static str {
+        self.engine.id()
+    }
+
     /// SM escalation for tickets PARKED after 3 red builds — the stand-in for
     /// what a real team does when a dev is stuck: someone senior picks it up,
     /// and WHICH someone depends on why it kept failing.

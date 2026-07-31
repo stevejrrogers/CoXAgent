@@ -267,11 +267,46 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
             || report.feature_done.is_some()
             || report.bug_fixed.is_some()
             || report.documented.is_some();
-        let infra_errors = report
+        let infra_faults: Vec<&String> = report
             .errors
             .iter()
             .filter(|e| crate::faults::is_infra_fault(e))
-            .count();
+            .collect();
+        let infra_errors = infra_faults.len();
+        // Raise the outage where EVERY role passes through. The first version
+        // of this listened only inside the developer's failure path, so a
+        // revoked token that failed the whole team left engine_incidents empty
+        // and the dashboard clean while nothing worked at all.
+        {
+            let engine = cycle_uc.engine_id().to_owned();
+            let first = infra_faults.first().map(|e| (*e).clone());
+            let progressed_now = progressed;
+            let _ = crate::ports::outbound::mutate_state(breaker_store.as_ref(), move |s| {
+                if let Some(detail) = &first {
+                    let already = s.engine_incidents.iter().any(|i| i.engine == engine);
+                    s.open_engine_incident(&engine, "CYCLE", detail);
+                    if !already {
+                        let msg = format!(
+                            "🔌 {engine} is failing for the whole team: {detail}. Work pauses on \
+                             this engine until it answers again — fix the credentials or the \
+                             model, and this clears itself."
+                        );
+                        s.post_chat_in("SYSTEM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+                    }
+                } else if progressed_now {
+                    if let Some(inc) = s.close_engine_incident(&engine) {
+                        let msg = format!(
+                            "✅ {engine} is answering again after {} failed run(s) — resolved, \
+                             work resumes.",
+                            inc.hits
+                        );
+                        s.post_chat_in("SYSTEM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+                    }
+                }
+                Ok(())
+            })
+            .await;
+        }
         if !progressed && infra_errors >= 2 {
             infra_streak += 1;
         } else {
