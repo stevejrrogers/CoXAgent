@@ -15,6 +15,9 @@ auth.json
 sessions.json
 **/sessions.json
 
+# Real deploy secrets — copy deploy/.env.example instead, never commit
+deploy/.env
+
 # macOS app build artifacts
 desktop/build/
 /dist/

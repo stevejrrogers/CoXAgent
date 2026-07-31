@@ -1,8 +1,9 @@
 const { test, expect } = require('@playwright/test');
+const { ADMIN_USER, ADMIN_PASS } = require('./helpers/creds');
 
 async function loginViaApi(page) {
   const resp = await page.request.post('http://localhost:4000/api/auth/login', {
-    data: { username: 'root', password: 'Str@wb3rry' }
+    data: { username: ADMIN_USER, password: ADMIN_PASS }
   });
   expect(resp.status()).toBe(200);
   const cookies = resp.headers()['set-cookie'];

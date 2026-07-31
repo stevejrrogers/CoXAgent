@@ -197,9 +197,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         // Load DB creds from .env file in the app bundle so coordination.json
         // placeholders (${VAR}) resolve — credentials never touch json on disk.
         loadDotEnv(into: &hubEnv)
-        // Always set admin credentials — hub boots with RBAC on first launch.
-        hubEnv["COXAGENT_ADMIN_USER"] = "root"
-        hubEnv["COXAGENT_ADMIN_PASSWORD"] = "Str@wb3rry"
+        // First launch only (no auth.json yet): prompt for an admin password,
+        // unless one already came from the environment/.env. Leaving the
+        // prompt blank means no login — matches the hub's own "no auth
+        // configured, running open" default. Never overwrite an existing
+        // auth.json with a new/blank answer on later launches.
+        if !fm.fileExists(atPath: authPath), hubEnv["COXAGENT_ADMIN_PASSWORD"] == nil,
+           let pw = promptForPassword() {
+            hubEnv["COXAGENT_ADMIN_USER"] = "root"
+            hubEnv["COXAGENT_ADMIN_PASSWORD"] = pw
+        }
         if !fm.fileExists(atPath: reg) {
             let ob = Process()
             ob.executableURL = coxagentURL()

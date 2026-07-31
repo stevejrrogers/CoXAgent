@@ -1,10 +1,11 @@
 const { test, expect } = require('@playwright/test');
+const { ADMIN_USER, ADMIN_PASS } = require('./helpers/creds');
 
 test.describe('Responsive Layout', () => {
   test.beforeEach(async ({ page, context }) => {
     await context.clearCookies();
     const resp = await page.request.post('http://localhost:4000/api/auth/login', {
-      data: { username: 'root', password: 'Str@wb3rry' }
+      data: { username: ADMIN_USER, password: ADMIN_PASS }
     });
     const cookies = resp.headers()['set-cookie'];
     if (cookies) {
