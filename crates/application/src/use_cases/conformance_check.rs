@@ -17,6 +17,7 @@ pub struct RunConformanceUseCase<S: StateStorePort> {
     store: Arc<S>,
     work_dir: PathBuf,
     rules: Vec<StackRule>,
+    files: Option<Arc<dyn crate::ports::outbound::WorkspaceFilesPort>>,
 }
 
 impl<S: StateStorePort> RunConformanceUseCase<S> {
@@ -25,7 +26,19 @@ impl<S: StateStorePort> RunConformanceUseCase<S> {
             store,
             work_dir,
             rules,
+            files: None,
         }
+    }
+
+    /// Attach the files port the scan reads through. Without it the check is
+    /// a no-op — there is nothing to scan.
+    #[must_use]
+    pub fn with_files(
+        mut self,
+        files: Option<Arc<dyn crate::ports::outbound::WorkspaceFilesPort>>,
+    ) -> Self {
+        self.files = files;
+        self
     }
 
     /// Run the check, filing a bug per new violation. Returns the filed bug ids.
@@ -36,7 +49,20 @@ impl<S: StateStorePort> RunConformanceUseCase<S> {
         if self.rules.is_empty() {
             return Ok(Vec::new());
         }
-        let violations = conformance::check(&self.work_dir, &self.rules);
+        let Some(workspace) = &self.files else {
+            return Ok(Vec::new());
+        };
+        let mut by_area = std::collections::BTreeMap::new();
+        for rule in &self.rules {
+            let listed: Vec<String> = workspace
+                .list_recursive(&self.work_dir.join(&rule.area))
+                .await
+                .into_iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect();
+            by_area.insert(rule.area.clone(), listed);
+        }
+        let violations = conformance::check(&by_area, &self.rules);
         if violations.is_empty() {
             return Ok(Vec::new());
         }
@@ -109,19 +135,51 @@ mod tests {
         }
     }
 
+    /// In-memory workspace: `list_recursive` answers from a fixed path list.
+    struct FixedFiles(Vec<std::path::PathBuf>);
+    #[async_trait::async_trait]
+    impl crate::ports::outbound::WorkspaceFilesPort for FixedFiles {
+        async fn read(&self, _: &std::path::Path) -> Option<String> {
+            None
+        }
+        async fn write(&self, _: &std::path::Path, _: &str) -> bool {
+            false
+        }
+        async fn write_bytes(&self, _: &std::path::Path, _: &[u8]) -> bool {
+            false
+        }
+        async fn delete(&self, _: &std::path::Path) -> bool {
+            false
+        }
+        async fn stat(&self, _: &std::path::Path) -> Option<crate::ports::outbound::FileMeta> {
+            None
+        }
+        async fn list_recursive(&self, dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+            self.0
+                .iter()
+                .filter(|p| p.starts_with(dir))
+                .cloned()
+                .collect()
+        }
+        async fn list_dirs(&self, _: &std::path::Path) -> Vec<std::path::PathBuf> {
+            Vec::new()
+        }
+        async fn list(&self, _: &std::path::Path) -> Vec<crate::ports::outbound::FileMeta> {
+            Vec::new()
+        }
+    }
+
     #[tokio::test]
     async fn files_bug_for_typescript_server_drift() {
-        let dir = tempfile::tempdir().expect("tmp");
-        let ts = dir.path().join("server/src/index.ts");
-        std::fs::create_dir_all(ts.parent().expect("p")).expect("mkdir");
-        std::fs::write(&ts, "export {}").expect("write");
-
+        let root = std::path::PathBuf::from("/w");
         let store = Arc::new(MemStore::default());
         let uc = RunConformanceUseCase::new(
             Arc::clone(&store),
-            dir.path().to_path_buf(),
+            root.clone(),
             vec![rust_server_rule()],
-        );
+        )
+        .with_files(Some(Arc::new(FixedFiles(vec![root
+            .join("server/src/index.ts")]))));
         let filed = uc.execute().await.expect("run");
         assert!(!filed.is_empty(), "should file drift bugs");
 

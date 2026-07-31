@@ -72,36 +72,27 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     }
     pub(super) async fn collect_ui_evidence(&self, ticket: &TicketId, port: u16) {
         let key = ticket.to_string();
-        let tmp = self.work_dir.join(".coxagent").join("evidence-shot.png");
-        let captured = match &self.shot {
-            Some(shot) => {
-                shot.capture(&format!("http://127.0.0.1:{port}/"), &tmp)
+        let shot = match &self.shot {
+            Some(shot) => shot.capture(&format!("http://127.0.0.1:{port}/")).await,
+            None => None,
+        };
+        let uploaded = match (shot, &self.storage) {
+            (Some(bytes), Some(storage)) => {
+                let pid = self.config_project_label();
+                let file = format!("evidence-{key}.png");
+                match storage
+                    .put(&format!("proj/{pid}/{file}"), &bytes, "image/png")
                     .await
-            }
-            None => false,
-        };
-        let uploaded = if captured {
-            match (std::fs::read(&tmp), &self.storage) {
-                (Ok(bytes), Some(storage)) => {
-                    let pid = self.config_project_label();
-                    let file = format!("evidence-{key}.png");
-                    match storage
-                        .put(&format!("proj/{pid}/{file}"), &bytes, "image/png")
-                        .await
-                    {
-                        Ok(()) => Some((
-                            format!("/api/projects/{pid}/media/{file}"),
-                            bytes.len() as u64,
-                        )),
-                        Err(_) => None,
-                    }
+                {
+                    Ok(()) => Some((
+                        format!("/api/projects/{pid}/media/{file}"),
+                        bytes.len() as u64,
+                    )),
+                    Err(_) => None,
                 }
-                _ => None,
             }
-        } else {
-            None
+            _ => None,
         };
-        let _ = std::fs::remove_file(&tmp);
         let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
             match &uploaded {
                 Some((url, size)) => {
@@ -220,11 +211,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         if !is_ui {
             return;
         }
+        // The PD agent inspects the shot with its file tools, so it must land
+        // on disk — through the files port.
         let out = self.work_dir.join(".coxagent").join("ui-shot.png");
-        if !shot
-            .capture(&format!("http://127.0.0.1:{port}/"), &out)
-            .await
-        {
+        let (Some(bytes), Some(files)) = (
+            shot.capture(&format!("http://127.0.0.1:{port}/")).await,
+            &self.files,
+        ) else {
+            return;
+        };
+        if !files.write_bytes(&out, &bytes).await {
             return;
         }
         self.report("PD", "visual QA on the deployed UI");

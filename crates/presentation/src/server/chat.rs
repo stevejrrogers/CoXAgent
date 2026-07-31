@@ -1034,7 +1034,8 @@ pub(super) async fn chat_reply_ep(
         p.work_dir.clone(),
         cfg.workflow.token_saver,
         cfg.workflow.language,
-    );
+    )
+    .with_files(p.files.clone());
     if let Some(d) = &p.deploy {
         uc = uc
             .with_deploy(Arc::clone(d))

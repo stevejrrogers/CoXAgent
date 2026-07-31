@@ -96,6 +96,9 @@ pub struct ProjectHandle {
     /// Deploy adapter, so on-demand actions (e.g. a chat "deploy" request) can
     /// build & run the app.
     pub deploy: Option<Arc<dyn coxagent_application::ports::outbound::DeployPort>>,
+    /// Workspace file access for on-demand reviews; injected by the
+    /// composition root so this layer stays free of infrastructure.
+    pub files: Option<Arc<dyn coxagent_application::ports::outbound::WorkspaceFilesPort>>,
 }
 
 /// Builds a fresh project on demand (scaffold + register), injected by the
@@ -2882,6 +2885,7 @@ mod pr_preview_tests {
             context_path: dir.path().join("project_context.md"),
             forge: None,
             deploy: Some(deploy),
+            files: None,
         };
         (dir, handle)
     }
@@ -3032,6 +3036,7 @@ mod pr_preview_tests {
             context_path: work.path().join("project_context.md"),
             forge: None,
             deploy: Some(deploy),
+            files: None,
         };
         (bare, work, handle)
     }

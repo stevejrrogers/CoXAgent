@@ -70,6 +70,7 @@ pub struct RunDevUseCase<S: StateStorePort, E: AgentEnginePort> {
     /// (tests, git-less projects) reads as an empty tree — the same answer the
     /// old shell-out gave outside a repo.
     git: Option<Arc<dyn crate::ports::outbound::GitPort>>,
+    files: Option<Arc<dyn crate::ports::outbound::WorkspaceFilesPort>>,
     context: Option<String>,
 }
 
@@ -91,8 +92,20 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             phase: None,
             verify: None,
             git: None,
+            files: None,
             context: None,
         }
+    }
+
+    /// Attach workspace file access, used to stat dirty paths for the green
+    /// fingerprint. Without it (tests) the boot-check cache stands aside.
+    #[must_use]
+    pub fn with_files(
+        mut self,
+        files: Option<Arc<dyn crate::ports::outbound::WorkspaceFilesPort>>,
+    ) -> Self {
+        self.files = files;
+        self
     }
 
     /// Attach git access for the gates' working-tree snapshot.
@@ -142,6 +155,32 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         self
     }
 
+    /// The current tree fingerprint (HEAD + dirty paths with metadata), or
+    /// `None` when it cannot be established — the cache then stands aside.
+    async fn tree_fingerprint(&self) -> Option<String> {
+        let (git, files) = (self.git.as_ref()?, self.files.as_ref()?);
+        let (ok, head) = git.raw(&self.work_dir, &["rev-parse", "HEAD"]).await;
+        if !ok {
+            return None;
+        }
+        let (ok, status) = git.raw(&self.work_dir, &["status", "--porcelain"]).await;
+        if !ok {
+            return None;
+        }
+        let mut dirty: Vec<crate::verify_cache::DirtyEntry> = Vec::new();
+        for line in status.lines() {
+            let meta = match line.get(3..) {
+                Some(path) => files
+                    .stat(&self.work_dir.join(path.trim().trim_matches('"')))
+                    .await
+                    .map(|m| (m.size, m.modified_epoch)),
+                None => None,
+            };
+            dirty.push((line.to_owned(), meta));
+        }
+        Some(crate::verify_cache::fingerprint(&head, &dirty))
+    }
+
     /// Execute one developer pass.
     ///
     /// # Errors
@@ -154,7 +193,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         // suite run (process-wide fingerprint cache) — one green check per
         // tree-state serves every runner in the cycle.
         if let Some(deploy) = &self.verify {
-            if crate::verify_cache::is_green(&self.work_dir) {
+            let fp = self.tree_fingerprint().await;
+            if crate::verify_cache::is_green(&self.work_dir, fp.as_deref()) {
                 // fall through — nothing changed since the last green run
             } else {
                 match tokio::time::timeout(
@@ -164,7 +204,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 .await
                 {
                     Ok(Ok(r)) if r.success => {
-                        crate::verify_cache::mark_green(&self.work_dir);
+                        crate::verify_cache::mark_green(&self.work_dir, fp.as_deref());
                     }
                     Ok(Ok(r)) => {
                         tracing::warn!(
@@ -734,7 +774,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         // The suite (plus gates) is green against this exact tree — remember
         // it so sibling runners skip their boot check this cycle.
         if self.verify.is_some() {
-            crate::verify_cache::mark_green(&self.work_dir);
+            let fp = self.tree_fingerprint().await;
+            crate::verify_cache::mark_green(&self.work_dir, fp.as_deref());
         }
 
         // Complete under an atomic read-modify-write with retry: move to the

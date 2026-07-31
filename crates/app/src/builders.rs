@@ -286,7 +286,8 @@ pub(crate) async fn build_project(
         .with_git(Arc::new(coxagent_infrastructure::SystemGit::new()))
         .with_files(Some(Arc::new(
             coxagent_infrastructure::FsWorkspaceFiles::new(),
-        )));
+        )))
+        .with_janitor(Some(Arc::new(coxagent_infrastructure::OsProcessJanitor)));
         let leader = if let Some(ref f) = forge {
             leader.with_forge(Arc::clone(f))
         } else {
@@ -331,7 +332,8 @@ pub(crate) async fn build_project(
         .with_git(Arc::new(coxagent_infrastructure::SystemGit::new()))
         .with_files(Some(Arc::new(
             coxagent_infrastructure::FsWorkspaceFiles::new(),
-        )));
+        )))
+        .with_janitor(Some(Arc::new(coxagent_infrastructure::OsProcessJanitor)));
         let worker = if let Some(ref f) = forge {
             worker.with_forge(Arc::clone(f))
         } else {
@@ -378,6 +380,9 @@ pub(crate) async fn build_project(
         budget: live_budget,
         context_path: state_dir.join("project_context.md"),
         forge: forge_for_handle,
+        files: Some(std::sync::Arc::new(
+            coxagent_infrastructure::FsWorkspaceFiles::new(),
+        )),
         deploy: Some(Arc::new(DockerComposeDeploy::new())),
     })
 }

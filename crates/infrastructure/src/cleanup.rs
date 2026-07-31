@@ -18,6 +18,15 @@
 use std::path::Path;
 use std::process::Command;
 
+/// Port adapter: the OS process janitor.
+pub struct OsProcessJanitor;
+
+impl coxagent_application::ports::outbound::ProcessJanitorPort for OsProcessJanitor {
+    fn kill_orphaned_drivers(&self, work_dir: &Path) {
+        kill_orphaned_drivers(work_dir);
+    }
+}
+
 static ORPHAN_PATTERNS: &[&str] = &["tl_driver", "cargo test", "pytest", "go test", "npm test"];
 
 pub fn kill_orphaned_drivers(work_dir: &Path) {

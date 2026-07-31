@@ -121,6 +121,8 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     /// Workspace file access for team notes, memory indexes and generated
     /// maps — `None` in tests reads as an empty filesystem.
     files: Option<Arc<dyn crate::ports::outbound::WorkspaceFilesPort>>,
+    /// OS process janitor for the pre-cycle orphan sweep; `None` in tests.
+    janitor: Option<Arc<dyn crate::ports::outbound::ProcessJanitorPort>>,
     /// The code host, used to open PRs when `config.git.auto_pr`.
     forge: Option<Arc<dyn ForgePort>>,
     /// Reports the currently executing agent to the runner (live "working now").
@@ -158,6 +160,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             budget: None,
             git: None,
             files: None,
+            janitor: None,
             forge: None,
             phase: None,
             worker: String::new(),
@@ -331,7 +334,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             self.work_dir.clone(),
             self.config.workflow.token_saver,
             self.config.workflow.language,
-        );
+        )
+        .with_files(self.files.clone());
         if let Err(e) = uc.execute(sprint).await {
             tracing::warn!("architecture review: {e}");
         }
@@ -499,7 +503,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// report so the outer loop keeps going.
     #[allow(clippy::too_many_lines)] // a linear sequence of agent phases; splitting hurts readability
     pub async fn run_cycle(&self, cycle: u64) -> CycleReport {
-        crate::cleanup::kill_orphaned_drivers(&self.work_dir);
+        if let Some(janitor) = &self.janitor {
+            janitor.kill_orphaned_drivers(&self.work_dir);
+        }
         self.warn_if_sandbox_unsupported().await;
 
         let mut report = CycleReport {
@@ -1119,6 +1125,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
     }
 
+    /// Attach the OS process janitor for the pre-cycle orphan sweep.
+    #[must_use]
+    pub fn with_janitor(
+        mut self,
+        janitor: Option<Arc<dyn crate::ports::outbound::ProcessJanitorPort>>,
+    ) -> Self {
+        self.janitor = janitor;
+        self
+    }
+
     /// Attach workspace-file access (team notes, memory indexes, maps).
     #[must_use]
     pub fn with_files(
@@ -1709,6 +1725,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         .with_phase(self.phase.clone())
         .with_verify(self.deploy.clone())
         .with_git(self.git.clone())
+        .with_files(self.files.clone())
         .with_context(Some(self.context.clone()))
     }
 
@@ -1741,6 +1758,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             self.work_dir.clone(),
             self.config.architecture.clone(),
         )
+        .with_files(self.files.clone())
     }
 }
 

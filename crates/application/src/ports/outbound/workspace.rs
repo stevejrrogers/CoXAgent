@@ -18,12 +18,28 @@ pub trait WorkspaceFilesPort: Send + Sync {
     /// the write landed.
     async fn write(&self, path: &Path, content: &str) -> bool;
 
+    /// Write raw bytes (PNG evidence, binary artefacts), creating parent
+    /// directories as needed. Returns whether the write landed.
+    async fn write_bytes(&self, path: &Path, bytes: &[u8]) -> bool;
+
     /// Delete a file. Returns whether it was removed.
     async fn delete(&self, path: &Path) -> bool;
 
     /// The files directly inside `dir` (no recursion), with the metadata the
     /// memory-hygiene pass ranks by. Missing directory reads as empty.
     async fn list(&self, dir: &Path) -> Vec<FileMeta>;
+
+    /// Metadata for one path, or `None` when it does not exist.
+    async fn stat(&self, path: &Path) -> Option<FileMeta>;
+
+    /// Every file under `dir`, recursively, as absolute paths. Missing
+    /// directory reads as empty. Vendor/build directories are the CALLER's
+    /// concern — the adapter reports what is there.
+    async fn list_recursive(&self, dir: &Path) -> Vec<std::path::PathBuf>;
+
+    /// The directories directly inside `dir` (no recursion), sorted by name.
+    /// Missing directory reads as empty.
+    async fn list_dirs(&self, dir: &Path) -> Vec<std::path::PathBuf>;
 }
 
 /// One file as [`WorkspaceFilesPort::list`] reports it.

@@ -116,7 +116,10 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
                 Arc::clone(&store),
                 work_dir,
                 config.architecture,
-            );
+            )
+            .with_files(Some(Arc::new(
+                coxagent_infrastructure::FsWorkspaceFiles::new(),
+            )));
             let filed = uc.execute().await?;
             if filed.is_empty() {
                 Ok("architecture conformance: OK (no drift)\n".to_owned())
@@ -1044,7 +1047,8 @@ async fn run_loop(
         ))
         .with_files(Some(Arc::new(
             coxagent_infrastructure::FsWorkspaceFiles::new(),
-        )));
+        )))
+        .with_janitor(Some(Arc::new(coxagent_infrastructure::OsProcessJanitor)));
     if let Some(f) = forge {
         uc = uc.with_forge(f);
     }

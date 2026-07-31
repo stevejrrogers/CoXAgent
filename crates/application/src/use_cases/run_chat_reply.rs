@@ -36,6 +36,7 @@ pub struct RunChatReplyUseCase<S: StateStorePort + ?Sized, E: AgentEnginePort + 
     new_project_fn: Option<NewProjectFn>,
     /// Callback: import an existing codebase. Returns a human-readable status message.
     import_project_fn: Option<ImportProjectFn>,
+    files: Option<Arc<dyn crate::ports::outbound::WorkspaceFilesPort>>,
 }
 
 /// Common docker-compose filenames we treat as "already has a deploy setup".
@@ -66,7 +67,18 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             context: None,
             new_project_fn: None,
             import_project_fn: None,
+            files: None,
         }
+    }
+
+    /// Attach the files port so chat-triggered reviews can scan the workspace.
+    #[must_use]
+    pub fn with_files(
+        mut self,
+        files: Option<Arc<dyn crate::ports::outbound::WorkspaceFilesPort>>,
+    ) -> Self {
+        self.files = files;
+        self
     }
 
     #[must_use]
@@ -213,7 +225,8 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
                 self.work_dir.clone(),
                 self.token_saver,
                 self.lang,
-            );
+            )
+            .with_files(self.files.clone());
             uc.execute(sprint).await?;
         } else if lower.starts_with("docs_review") {
             let uc = super::RunDocsAuditUseCase::new(

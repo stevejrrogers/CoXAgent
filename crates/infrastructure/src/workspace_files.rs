@@ -29,8 +29,64 @@ impl WorkspaceFilesPort for FsWorkspaceFiles {
         tokio::fs::write(path, content).await.is_ok()
     }
 
+    async fn write_bytes(&self, path: &Path, bytes: &[u8]) -> bool {
+        if let Some(parent) = path.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        tokio::fs::write(path, bytes).await.is_ok()
+    }
+
     async fn delete(&self, path: &Path) -> bool {
         tokio::fs::remove_file(path).await.is_ok()
+    }
+
+    async fn stat(&self, path: &Path) -> Option<coxagent_application::ports::outbound::FileMeta> {
+        let md = tokio::fs::metadata(path).await.ok()?;
+        let modified_epoch = md
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs());
+        Some(coxagent_application::ports::outbound::FileMeta {
+            path: path.to_path_buf(),
+            modified_epoch,
+            size: md.len(),
+        })
+    }
+
+    async fn list_recursive(&self, dir: &Path) -> Vec<std::path::PathBuf> {
+        // Iterative walk: async recursion needs boxing, and a to-visit stack
+        // reads better anyway.
+        let mut stack = vec![dir.to_path_buf()];
+        let mut out = Vec::new();
+        while let Some(d) = stack.pop() {
+            let Ok(mut rd) = tokio::fs::read_dir(&d).await else {
+                continue;
+            };
+            while let Ok(Some(e)) = rd.next_entry().await {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    out.push(p);
+                }
+            }
+        }
+        out
+    }
+
+    async fn list_dirs(&self, dir: &Path) -> Vec<std::path::PathBuf> {
+        let Ok(mut rd) = tokio::fs::read_dir(dir).await else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        while let Ok(Some(e)) = rd.next_entry().await {
+            if e.path().is_dir() {
+                out.push(e.path());
+            }
+        }
+        out.sort();
+        out
     }
 
     async fn list(&self, dir: &Path) -> Vec<coxagent_application::ports::outbound::FileMeta> {
