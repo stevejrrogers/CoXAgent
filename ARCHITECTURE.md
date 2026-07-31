@@ -94,3 +94,47 @@ Key decisions:
   `cox-*` projects + dangling images (never the `cox-infra` backing group).
 - Engine memory: daily hygiene judges `~/.claude` project memory against
   `PROCESS_INVARIANTS`; durable lessons are promoted into `CLAUDE.md`.
+
+## Module layout inside the big crates (July 2026 refactor)
+
+The two conflict magnets — `use_cases/cycle.rs` (7,000 lines) and
+`presentation/src/server.rs` (9,600) — were split into directories. The rule
+behind every cut: **one file per responsibility a person can name**. If you
+cannot say what the new file is FOR, the split made two problems out of one.
+
+```
+application/src/use_cases/
+├── cycle/                  # the orchestrator, split by job
+│   ├── mod.rs              #   run_cycle sequencing + forge hygiene (next to split)
+│   ├── ceremonies.rs       #   sprint boundary, standup, grooming, digest, self-tune
+│   ├── ops.rs              #   deploy, health gate, rollback to last known-good
+│   ├── qa_evidence.rs      #   what a test result must SHOW (screenshots, req/resp)
+│   └── escalation.rs       #   agent questions, escalating parked tickets
+└── merge_policy.rs         # pure decisions: who unsticks a ticket, competing
+                            # PRs, what is too big to auto-merge
+
+presentation/src/server/    # the HTTP router, split by surface
+├── mod.rs                  #   router, middleware, core (still shrinking)
+├── chat.rs                 #   channels, DMs, reactions, uploads, delivery
+├── auth.rs                 #   sign-in, sessions, profiles, avatars
+├── docs.rs                 #   Wiki pages, folders, AI edits, docs-ws
+├── forge.rs                #   PRs: review, merge, preview, git settings
+├── work.rs                 #   tickets, sprints, runner controls
+└── meetings.rs             #   booking, joining, the ring, watchdog
+```
+
+Conventions for these split modules:
+
+- Children use `pub(super)` and `use super::*` — they are ONE logical module
+  split for merge-conflict surface, not an API boundary. The wildcard import
+  is allowed there deliberately (see the header note in each file).
+- Moving a method is mechanical: same signature, doc comment travels with it,
+  no logic edits in the same commit as the move.
+- The COX-B009 deploy-gate guard (`crates/app/tests/health_gate.rs`) scans all
+  of `src/`; when a split introduces a new visibility form, the guard must
+  keep recognising `fn` headers — it caught `pub(super)` being invisible once.
+
+Remaining oversized files, in priority order: `server/mod.rs` (~6k),
+`use_cases/cycle/mod.rs` (~5.1k), `state.rs` (2.3k, split by bounded context:
+tickets/chat/docs/spend), `app/lib.rs` (2.3k, CLI vs hub boot),
+`web/index.html` (7.7k, split JS/CSS per view).
