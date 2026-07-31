@@ -2239,6 +2239,14 @@ pub async fn serve_full(
         )
         .route("/api/chat/channels/:cid/invite", post(syschat_invite_ep))
         .route(
+            "/api/chat/channels/:cid/settings",
+            axum::routing::patch(syschat_settings_ep),
+        )
+        .route(
+            "/api/chat/channels/:cid/members/:member",
+            delete(syschat_kick_ep),
+        )
+        .route(
             "/api/chat/channel/:cid/topic",
             axum::routing::patch(syschat_topic_ep).get(syschat_topic_get_ep),
         )
@@ -5604,6 +5612,112 @@ async fn syschat_create_ep(
 }
 
 /// Invite a user to a private channel (or, with `delegate`, grant invite rights).
+/// Channel settings on the SYSTEM chat store — privacy, who may invite, topic.
+/// Channels are created through `/api/chat/channels`, so this is where their
+/// settings must live too; the first version of this endpoint hung off the
+/// per-project router and answered every request with "no such project".
+async fn syschat_settings_ep(
+    State(app): State<AppState>,
+    Path(cid): Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<ChannelSettingsReq>,
+) -> axum::response::Response {
+    let user = resolve_username(&app, &headers).await;
+    let admin = user_can_manage(&app, &headers).await;
+    // #general is synthesised when the channel list is served rather than
+    // stored, so looking it up here finds nothing and used to answer 404 for
+    // the one channel whose rule people are most likely to test.
+    if cid == coxagent_application::state::GENERAL_CHANNEL {
+        if req.kind.is_some() {
+            return (
+                StatusCode::BAD_REQUEST,
+                "#general cannot be made private — a team needs one room nobody is shut out of",
+            )
+                .into_response();
+        }
+        return (
+            StatusCode::BAD_REQUEST,
+            "#general has no settings to change",
+        )
+            .into_response();
+    }
+    let mut sc = app.syschat.inner.lock().await;
+    let Some(existing) = sc.channels.iter().find(|c| c.id == cid) else {
+        return not_found();
+    };
+    if existing.owner != user && !admin {
+        return (StatusCode::FORBIDDEN, "only the channel owner or an admin").into_response();
+    }
+    let updated = {
+        let Some(ch) = sc.channels.iter_mut().find(|c| c.id == cid) else {
+            return not_found();
+        };
+        if let Some(kind) = req.kind.as_deref() {
+            if !ch.can_change_privacy() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "#general cannot be made private — a team needs one room nobody is shut out of",
+                )
+                    .into_response();
+            }
+            if !matches!(kind, "private" | "public") {
+                return (StatusCode::BAD_REQUEST, "unknown channel kind").into_response();
+            }
+            kind.clone_into(&mut ch.kind);
+        }
+        if let Some(open) = req.open_invite {
+            ch.open_invite = open;
+        }
+        if let Some(topic) = req.topic.as_deref() {
+            ch.topic = topic.trim().chars().take(200).collect();
+        }
+        ch.clone()
+    };
+    drop(sc);
+    app.syschat.save().await;
+    Json(updated).into_response()
+}
+
+/// Remove a member from a system-chat channel: the owner, a delegated inviter,
+/// or an admin. The owner cannot be removed from their own room.
+async fn syschat_kick_ep(
+    State(app): State<AppState>,
+    Path((cid, member)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let user = resolve_username(&app, &headers).await;
+    let admin = user_can_manage(&app, &headers).await;
+    let mut sc = app.syschat.inner.lock().await;
+    let Some(ch) = sc.channels.iter().find(|c| c.id == cid) else {
+        return not_found();
+    };
+    if !ch.can_kick(&user) && !admin {
+        return (
+            StatusCode::FORBIDDEN,
+            "only the channel owner, a delegated inviter, or an admin",
+        )
+            .into_response();
+    }
+    if ch.owner == member {
+        return (
+            StatusCode::BAD_REQUEST,
+            "the owner cannot be removed from their own channel",
+        )
+            .into_response();
+    }
+    let updated = {
+        let Some(ch) = sc.channels.iter_mut().find(|c| c.id == cid) else {
+            return not_found();
+        };
+        ch.members.retain(|m| m != &member);
+        ch.inviters.retain(|m| m != &member);
+        ch.clone()
+    };
+    drop(sc);
+    app.syschat.save().await;
+    Json(updated).into_response()
+}
+
 async fn syschat_invite_ep(
     State(app): State<AppState>,
     Path(cid): Path<String>,
