@@ -9529,7 +9529,8 @@ mod avatar_media_security_tests {
 
     const PNG_MAGIC: &[u8] = &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
     const JPEG_MAGIC: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0];
-    const SVG_BODY: &[u8] = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert(1)</script></svg>";
+    const SVG_BODY: &[u8] =
+        b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert(1)</script></svg>";
 
     #[test]
     fn a_genuine_png_is_recognized_regardless_of_claimed_content_type() {
@@ -9543,7 +9544,10 @@ mod avatar_media_security_tests {
 
     #[test]
     fn a_genuine_gif_is_recognized() {
-        assert_eq!(sniff_avatar_image(b"GIF89a...."), Some(("gif", "image/gif")));
+        assert_eq!(
+            sniff_avatar_image(b"GIF89a...."),
+            Some(("gif", "image/gif"))
+        );
     }
 
     #[test]
@@ -9600,6 +9604,9 @@ mod avatar_media_security_tests {
 
         let mut png_resp = ([(header::CONTENT_TYPE, mime_of("x.png"))], "body").into_response();
         force_download_if_active_content("x.png", &mut png_resp);
-        assert!(png_resp.headers().get(header::CONTENT_DISPOSITION).is_none());
+        assert!(png_resp
+            .headers()
+            .get(header::CONTENT_DISPOSITION)
+            .is_none());
     }
 }
