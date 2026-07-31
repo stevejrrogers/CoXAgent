@@ -188,6 +188,19 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         if lower.is_empty() || lower == "none" {
             return Ok(());
         }
+        // Expensive or hard to undo: deploying, merging the queue, creating or
+        // importing a project, or setting a developer to work. The prompt asks
+        // for confirmation first; a model answering a bug report reached for
+        // `deploy` anyway, so the rule is enforced here where it cannot be
+        // talked out of.
+        if NEEDS_YES.iter().any(|k| lower.starts_with(k)) && !self.thread_has_confirmation().await {
+            let msg = format!(
+                "I held off on `{a}` — that one changes the project, and I do not see a yes in \
+                 this thread yet. Say the word and I will run it."
+            );
+            self.post("SM", &msg).await;
+            return Ok(());
+        }
         let sprint = self.sprint_number().await;
         if let Some(rest) = strip_kw(a, "new_project") {
             self.new_project(rest).await;
@@ -947,13 +960,67 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             ),
             task_prompt: task.to_owned(),
             work_dir: self.work_dir.clone(),
-            timeout: Duration::from_secs(120),
-            escalation_level: 0,
+            // Reading the code before answering takes longer than 2 minutes.
+            timeout: Duration::from_secs(600),
+            // A person is waiting on this: it is the wrong place for the
+            // cheapest model. The first answers this produced were off-topic
+            // and reached for `deploy` on a bug report.
+            escalation_level: 1,
         };
         let outcome = self.engine.run(request).await.ok()?;
-        outcome
-            .succeeded()
-            .then(|| outcome.stdout.trim().to_owned())
+        if !outcome.succeeded() {
+            // Silence is the worst reply. The person clicked send and watched
+            // nothing happen — the failure they cannot see is worse than the
+            // failure they can.
+            let why: String = outcome.failure_detail().chars().take(200).collect();
+            tracing::warn!("chat reply failed: {why}");
+            self.post(
+                "SYSTEM",
+                &format!("⚠️ I could not answer that just now — the agent run failed ({why}). Say it again and I will retry."),
+            )
+            .await;
+            return None;
+        }
+        Some(outcome.stdout.trim().to_owned())
+    }
+
+    /// Whether the thread already shows the human agreeing to something. Used
+    /// to gate the expensive actions in code rather than trusting the model to
+    /// respect the same rule in prose — it did not.
+    async fn thread_has_confirmation(&self) -> bool {
+        const YES: &[&str] = &[
+            "ok",
+            "oke",
+            "okay",
+            "uhm",
+            "ừ",
+            "ù",
+            "đi",
+            "làm đi",
+            "lam di",
+            "yes",
+            "yep",
+            "go",
+            "chơi",
+            "duyệt",
+            "approve",
+            "ưu tiên",
+            "triển",
+        ];
+        let Ok(state) = self.store.load().await else {
+            return false;
+        };
+        state
+            .comments
+            .iter()
+            .rev()
+            .filter(|c| c.author == "USER" || c.author == "root")
+            .take(3)
+            .any(|c| {
+                let b = c.body.trim().to_lowercase();
+                YES.iter()
+                    .any(|y| b == *y || b.starts_with(&format!("{y} ")) || b.contains(*y))
+            })
     }
 
     async fn post(&self, author: &str, body: &str) {
@@ -963,6 +1030,16 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         }
     }
 }
+
+/// Actions that change the project in ways a person should agree to first.
+const NEEDS_YES: &[&str] = &[
+    "deploy",
+    "merge_queue",
+    "merge queue",
+    "implement",
+    "new_project",
+    "import",
+];
 
 /// Pick which agent should answer a human message from its wording.
 fn route_persona(lower: &str) -> &'static str {
