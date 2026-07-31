@@ -165,6 +165,14 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
             }
         }
         Command::Serve { port, work_dir } => {
+            // `COXAGENT_PORT` exists so a build of THIS project, run by an agent
+            // to try it out, does not land on the hub's port. Hunting a hub that
+            // silently moved because its own dogfood build took 4000 is an hour
+            // nobody gets back.
+            let port = std::env::var("COXAGENT_PORT")
+                .ok()
+                .and_then(|v| v.trim().parse::<u16>().ok())
+                .unwrap_or(port);
             serve_with_runner(&args.state_dir, work_dir, port).await?;
             Ok(String::new())
         }
@@ -1000,6 +1008,12 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
     // If the requested port is in use, scan upward for a free one so the hub
     // never fails to start — especially important when the Docker stack (which
     // uses port 4000 internally) and the desktop app share the same host.
+    //
+    // Moving is fine; moving QUIETLY is not. The desktop shell opens the
+    // configured port, so a hub that slid to 4002 left the window pointed at
+    // whatever else answered on 4000 — here, the agents' own build of this
+    // project — and the app looked dead while everything was running.
+    let requested = port;
     {
         let mut free = false;
         for _ in 0..50 {
@@ -1014,6 +1028,13 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
         if !free {
             return Err(format!("no free port found starting at {port}").into());
         }
+    }
+    if port != requested {
+        let squatter = port_holder(requested);
+        tracing::warn!(
+            "port {requested} is already taken{} — the hub moved to {port}. Anything pointed at              {requested} (the desktop window, bookmarks, the MCP endpoint) is talking to that              other process, not to this hub.",
+            squatter.map_or(String::new(), |p| format!(" by {p}"))
+        );
     }
     tracing::info!("hub binding to port {port}");
     enable_command_shims();
@@ -2269,4 +2290,29 @@ mod live_claude_mcp_test {
             outcome.trace
         );
     }
+}
+
+/// Who holds `port`, as `name (pid)`, for the message a person needs when the
+/// hub had to move. Best-effort: an unavailable `lsof` just means less detail.
+fn port_holder(port: u16) -> Option<String> {
+    let out = std::process::Command::new("lsof")
+        .args(["-ti", &format!(":{port}")])
+        .output()
+        .ok()?;
+    let pid = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()?
+        .trim()
+        .to_owned();
+    if pid.is_empty() {
+        return None;
+    }
+    let name = std::process::Command::new("ps")
+        .args(["-p", &pid, "-o", "comm="])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "an unknown process".to_owned());
+    Some(format!("{name} (pid {pid})"))
 }
