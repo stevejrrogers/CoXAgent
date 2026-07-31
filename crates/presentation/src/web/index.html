@@ -534,10 +534,11 @@
   .coxmodal-toggle input:checked + .cmsw{background:color-mix(in srgb,var(--accent) 30%,transparent);border-color:var(--accent)}
   .coxmodal-toggle input:checked + .cmsw::after{transform:translateX(16px);background:var(--accent)}
   /* Chat search — first thing in the rail. */
-  .chatsearch{display:flex;align-items:center;gap:8px;margin:10px 10px 6px;padding:8px 10px;border-radius:10px;cursor:pointer;
-    background:var(--card2);border:1px solid var(--border2);color:var(--muted);font-size:12.5px;transition:border-color .15s,color .15s}
+  .chatsearch{display:flex;align-items:center;gap:7px;margin:8px 10px 6px;padding:5px 9px;border-radius:8px;cursor:pointer;
+    background:var(--card2);border:1px solid var(--border2);color:var(--muted);font-size:12px;line-height:1.4;white-space:nowrap;
+    transition:border-color .15s,color .15s}
   .chatsearch:hover{border-color:var(--accent);color:var(--text)}
-  .chatsearch i{font-size:15px}
+  .chatsearch i{font-size:14px}
   .chatsearch kbd{margin-left:auto;font-size:10px;padding:1px 5px;border-radius:4px;background:var(--card);border:1px solid var(--border2)}
   .chanitem.sub{padding-left:26px}
   .chanitem.sub .channm{opacity:.9}
@@ -1597,13 +1598,12 @@ textarea.np-in{resize:vertical;line-height:1.5}
     <div class="chatside" id="chat-side">
       <!-- Search sits ABOVE the rooms because that is what you reach for first
            in a workspace with more rooms than fit on a screen. -->
-      <div class="chatsearch" onclick="openChatSearch()">
-        <i class="ti ti-search"></i><span>Search channels, people, messages</span><kbd>⌘K</kbd>
+      <div class="chatsearch" onclick="openChatSearch()" title="Search channels, people and messages">
+        <i class="ti ti-search"></i><span>Search</span><kbd>⌘K</kbd>
       </div>
       <div class="chanrail-hd"><span>Channels</span><div class="chanrail-actions"><button class="chanadd" id="btn-newchan" onclick="createChannel()" title="Create channel (leads & admins)"><i class="ti ti-plus"></i></button></div></div>
       <div class="chanlist" id="chan-list"></div>
-      <div class="chanrail-hd" style="margin-top:10px"><span>Direct messages</span>
-        <div class="chanrail-actions"><button class="chanadd" onclick="openChatSearch()" title="Find a teammate"><i class="ti ti-search"></i></button></div></div>
+      <div class="chanrail-hd" style="margin-top:10px"><span>Direct messages</span></div>
       <input id="dm-search" type="hidden" value="">
       <div class="chanlist" id="dm-list"></div>
       <div class="chanrail-hd" style="margin-top:10px"><span>Meetings</span><div class="chanrail-actions"><button class="chanadd" onclick="openMeetModal()" title="Book a meeting"><i class="ti ti-plus"></i></button></div></div>
@@ -5127,7 +5127,7 @@ function renderEngineAlert(s){
   // mentally, which is the opposite of the point.
   el.innerHTML=inc.map(i=>`<div class="eng-alert" title="${esc(i.reason)}">
     <i class="ti ti-plug-connected-x"></i>
-    <b>${esc(i.engine)} failing</b>
+    <b>${esc(i.engine)}: ${i.hits} failed run${i.hits>1?"s":""}</b>
     <span>${esc(i.reason)}</span>
     <small>${i.hits} run${i.hits>1?"s":""} · clears itself</small>
   </div>`).join("");
