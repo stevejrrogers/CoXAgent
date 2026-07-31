@@ -654,7 +654,8 @@ pub(super) async fn architecture_review_ep(
         p.work_dir.clone(),
         cfg.workflow.token_saver,
         cfg.workflow.language,
-    );
+    )
+    .with_files(p.files.clone());
     match uc.execute(current_sprint(&p).await).await {
         Ok(filed) => Json(serde_json::json!({ "ok": true, "filed": filed })).into_response(),
         Err(e) => internal_error(&e.to_string()),

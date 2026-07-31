@@ -513,7 +513,7 @@ pub async fn brownfield<S: StateStorePort + 'static>(
     // blind. Index the code into a REPO_MAP the agents read first, and detect the
     // stack to (a) seed governance rules that match reality and (b) draft a real
     // project_context.md instead of an empty template.
-    let repo_stats = build_repo_map(codebase);
+    let repo_stats = build_repo_map(codebase).await;
     let (rules, stack_lines) = detect_stack(codebase);
 
     // ── Docker smarts: parse compose, detect running services, avoid clashes ─
@@ -625,15 +625,12 @@ pub async fn brownfield<S: StateStorePort + 'static>(
 
 /// Index the codebase into a graph + write `.coxagent/REPO_MAP.md` (the map the
 /// agents read first to orient). Returns a one-line stat summary; best-effort.
-fn build_repo_map(codebase: &Path) -> String {
+async fn build_repo_map(codebase: &Path) -> String {
     use coxagent_application::codegraph::CodeGraph;
-    let g = CodeGraph::index(codebase);
-    let _ = g.save(codebase);
-    let _ = std::fs::create_dir_all(codebase.join(".coxagent"));
-    let _ = std::fs::write(
-        codebase.join(".coxagent").join("REPO_MAP.md"),
-        g.repo_map(40_000),
-    );
+    let files = coxagent_infrastructure::FsWorkspaceFiles::new();
+    let g = CodeGraph::index(&files, codebase).await;
+    // save() also writes REPO_MAP.md — one producer, both artifacts.
+    let _ = g.save(&files, codebase).await;
     format!(
         "indexed {} files, {} symbols, {} calls",
         g.files.len(),

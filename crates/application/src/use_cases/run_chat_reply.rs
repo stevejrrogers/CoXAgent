@@ -36,6 +36,7 @@ pub struct RunChatReplyUseCase<S: StateStorePort + ?Sized, E: AgentEnginePort + 
     new_project_fn: Option<NewProjectFn>,
     /// Callback: import an existing codebase. Returns a human-readable status message.
     import_project_fn: Option<ImportProjectFn>,
+    files: Option<Arc<dyn crate::ports::outbound::WorkspaceFilesPort>>,
 }
 
 /// Common docker-compose filenames we treat as "already has a deploy setup".
@@ -66,7 +67,18 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             context: None,
             new_project_fn: None,
             import_project_fn: None,
+            files: None,
         }
+    }
+
+    /// Attach the files port so chat-triggered reviews can scan the workspace.
+    #[must_use]
+    pub fn with_files(
+        mut self,
+        files: Option<Arc<dyn crate::ports::outbound::WorkspaceFilesPort>>,
+    ) -> Self {
+        self.files = files;
+        self
     }
 
     #[must_use]
@@ -213,7 +225,8 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
                 self.work_dir.clone(),
                 self.token_saver,
                 self.lang,
-            );
+            )
+            .with_files(self.files.clone());
             uc.execute(sprint).await?;
         } else if lower.starts_with("docs_review") {
             let uc = super::RunDocsAuditUseCase::new(
@@ -312,6 +325,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         let title = ticket.title().to_owned();
         let brief = super::run_dev::ticket_brief(Some(ticket));
         let fp = crate::prompts::focus_block(
+            self.files.as_deref(),
             &self.work_dir,
             &format!(
                 "{title} {}",
@@ -321,8 +335,11 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
                     .as_ref()
                     .map_or("", |d| d.approach.as_str())
             ),
-        );
-        let rp = crate::prompts::repo_map_block(&self.work_dir, self.token_saver);
+        )
+        .await;
+        let rp =
+            crate::prompts::repo_map_block(self.files.as_deref(), &self.work_dir, self.token_saver)
+                .await;
 
         let request = crate::ports::outbound::AgentRequest {
             role: coxagent_domain::Role::DevFeature,
@@ -397,8 +414,11 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         };
         self.post("SA", &announce).await;
 
-        let fp = crate::prompts::focus_block(&self.work_dir, &title);
-        let rp = crate::prompts::repo_map_block(&self.work_dir, self.token_saver);
+        let fp =
+            crate::prompts::focus_block(self.files.as_deref(), &self.work_dir, &title).await;
+        let rp =
+            crate::prompts::repo_map_block(self.files.as_deref(), &self.work_dir, self.token_saver)
+                .await;
         let request = crate::ports::outbound::AgentRequest {
             role: coxagent_domain::Role::Sa,
             system_prompt: crate::prompts::system_prompt(crate::prompts::SA),

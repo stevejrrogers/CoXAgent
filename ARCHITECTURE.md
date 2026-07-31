@@ -94,3 +94,70 @@ Key decisions:
   `cox-*` projects + dangling images (never the `cox-infra` backing group).
 - Engine memory: daily hygiene judges `~/.claude` project memory against
   `PROCESS_INVARIANTS`; durable lessons are promoted into `CLAUDE.md`.
+
+## Module layout inside the big crates (July–August 2026 refactor)
+
+The two conflict magnets — `use_cases/cycle.rs` (7,000 lines) and
+`presentation/src/server.rs` (9,600) — were split into directories. The rule
+behind every cut: **one file per responsibility a person can name**. If you
+cannot say what the new file is FOR, the split made two problems out of one.
+
+```
+application/src/use_cases/
+├── cycle/                  # the orchestrator, split by job
+│   ├── mod.rs              #   run_cycle sequencing + report (~1.5k)
+│   ├── ceremonies.rs       #   sprint boundary, standup, grooming, digest, self-tune
+│   ├── forge.rs            #   PR review/merge/rebase, verify-merged-result
+│   ├── ops.rs              #   deploy, health gate, rollback to last known-good
+│   ├── qa_evidence.rs      #   what a test result must SHOW (screenshots, req/resp)
+│   ├── escalation.rs       #   agent questions, escalating parked tickets
+│   ├── scrum.rs            #   scrum topic, next-feature clarification, activity record
+│   ├── wiring.rs           #   one builder per agent role (BA/SA/PD/DEV/TEST/DOCS…)
+│   └── cycle_tests.rs      #   the full-cycle integration tests
+├── run_dev/                # DEV pass: mod, briefing, gates (pure), failures
+└── merge_policy.rs         # pure decisions: who unsticks a ticket, competing
+                            # PRs, what is too big to auto-merge
+
+presentation/src/server/    # the HTTP router, split by surface
+├── mod.rs                  #   router, middleware, core (~2.1k)
+├── chat.rs                 #   channels, DMs, reactions, uploads, delivery
+├── auth.rs                 #   sign-in, sessions cookie flow, avatar upload
+├── people.rs               #   users, tokens, members, profiles, analytics
+├── transcripts.rs          #   live agent-log tail, transcript downloads
+├── docs.rs                 #   Wiki pages, folders, AI edits, docs-ws
+├── forge.rs                #   PRs: review, merge, preview, git settings
+├── work.rs                 #   tickets, sprints, runner controls
+├── meetings.rs             #   booking, joining, the ring, watchdog
+└── …assets/engines/manage/projects/status/comments/channels/background/realtime
+```
+
+**IO discipline is now total**: `crates/app/tests/hexagonal_gate.rs` forbids
+`std::process`/`std::fs` in ALL of the application layer's production code —
+its grandfather list is empty and may only stay so. Every effect goes through
+`ports/outbound/` (`GitPort`, `WorkspaceFilesPort`, `ScreenshotPort`,
+`ProcessJanitorPort`, …); decisions are pure functions of a snapshot the
+adapter takes once.
+
+Conventions for these split modules:
+
+- Children use `pub(super)` and `use super::*` — they are ONE logical module
+  split for merge-conflict surface, not an API boundary. The wildcard import
+  is allowed there deliberately (see the header note in each file).
+- Moving a method is mechanical: same signature, doc comment travels with it,
+  no logic edits in the same commit as the move.
+- When cutting, take the item's doc comments and `#[derive]` attributes WITH
+  it — an orphaned attribute above the seam is the classic split bug.
+- The COX-B009 deploy-gate guard (`crates/app/tests/health_gate.rs`) scans all
+  of `src/`; when a split introduces a new visibility form, the guard must
+  keep recognising `fn` headers — it caught `pub(super)` being invisible once.
+
+The dashboard split (Aug 2026): `web/index.html` (7.8k) became a 780-line
+shell + `web/app.css` + seven ordered classic scripts in `web/js/`
+(core/manage/home/chat/mcp/docs/shell). They share ONE global scope — the
+split is merge-conflict surface, not modularity — so load order matters and
+new top-level state goes in the file that owns the view. `e2e/` (Playwright)
+is the gate: golden screenshots + a console-error assert per view, booted
+from a frozen fixture on COXAGENT_PORT.
+
+The forge itself then split along its seams (forge.rs 1,457 → 296 +
+forge_review/forge_merge/forge_feedback). No oversized offenders remain.

@@ -1,7 +1,7 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **CoXAgent** (4970 symbols, 13030 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **CoXAgent** (6305 symbols, 16032 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 
@@ -60,9 +60,11 @@ that prevents it is structural, not procedural:
   made two problems out of one.
 - Touching an oversized file? Leave it smaller: extract the part you came to
   change, with its tests. Do not rewrite the module for a one-behaviour ticket.
-- Current offenders, largest first (split these when work takes you into them):
-  `presentation/src/server.rs`, `presentation/src/web/index.html`,
-  `application/src/use_cases/cycle.rs`, `application/src/state.rs`.
+- No current offenders — everything on this list has been split. Keep it that
+  way: a NEW file crossing ~500 lines is the moment to cut along a seam. The web UI lives in
+  `web/app.css` + `web/js/*.js` (classic scripts, ONE shared scope, load order
+  matters); any UI change must pass `cd e2e && npx playwright test` (golden
+  screenshots + console-error gate).
 
 ## Running the app you are building
 
@@ -72,3 +74,12 @@ there, and a hub that finds its port taken moves to another one — the app then
 looks dead while everything is in fact running. Use the project's own
 `deploy.host_port`, or set `COXAGENT_PORT` before `coxagent serve`. Stop what
 you started when you are done.
+
+## IO discipline (enforced by hexagonal_gate.rs)
+
+Application code never calls `std::process` / `std::fs` directly. The pattern,
+end to end, is `GitPort::working_tree` → `run_dev/gates.rs`: the adapter takes
+one snapshot of the outside world; the decision is a pure function of the
+snapshot, testable with a struct literal. `crates/app/tests/hexagonal_gate.rs`
+fails any NEW application file that does direct IO, and its grandfather list
+may only shrink — fixing a file without delisting it also fails.

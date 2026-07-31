@@ -78,14 +78,21 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 },
                 q.body,
                 crate::prompts::knowledge_block(
+                    self.files.as_deref(),
                     &state.docs,
                     &state.tickets,
                     &self.work_dir,
                     &subject,
                     &q.ticket,
-                ),
-                crate::prompts::focus_block(&self.work_dir, &subject),
-                crate::prompts::repo_map_block(&self.work_dir, self.config.workflow.token_saver),
+                )
+                .await,
+                crate::prompts::focus_block(self.files.as_deref(), &self.work_dir, &subject).await,
+                crate::prompts::repo_map_block(
+                    self.files.as_deref(),
+                    &self.work_dir,
+                    self.config.workflow.token_saver,
+                )
+                .await,
             );
             let out = self
                 .engine

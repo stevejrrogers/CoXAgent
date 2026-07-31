@@ -15,6 +15,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+mod briefing;
+mod failures;
+mod gates;
+
 /// Which developer role to run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DevMode {
@@ -62,6 +66,11 @@ pub struct RunDevUseCase<S: StateStorePort, E: AgentEnginePort> {
     /// Test runner for the mechanical Definition-of-Done check: after the
     /// engine finishes, the suite must be green or the ticket is NOT done.
     verify: Option<Arc<dyn crate::ports::outbound::DeployPort>>,
+    /// Git access for the working-tree snapshot the DoD gates read. `None`
+    /// (tests, git-less projects) reads as an empty tree — the same answer the
+    /// old shell-out gave outside a repo.
+    git: Option<Arc<dyn crate::ports::outbound::GitPort>>,
+    files: Option<Arc<dyn crate::ports::outbound::WorkspaceFilesPort>>,
     context: Option<String>,
 }
 
@@ -82,7 +91,36 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             worker: String::new(),
             phase: None,
             verify: None,
+            git: None,
+            files: None,
             context: None,
+        }
+    }
+
+    /// Attach workspace file access, used to stat dirty paths for the green
+    /// fingerprint. Without it (tests) the boot-check cache stands aside.
+    #[must_use]
+    pub fn with_files(
+        mut self,
+        files: Option<Arc<dyn crate::ports::outbound::WorkspaceFilesPort>>,
+    ) -> Self {
+        self.files = files;
+        self
+    }
+
+    /// Attach git access for the gates' working-tree snapshot.
+    #[must_use]
+    pub fn with_git(mut self, git: Option<Arc<dyn crate::ports::outbound::GitPort>>) -> Self {
+        self.git = git;
+        self
+    }
+
+    /// One snapshot of the uncommitted tree, taken through the port. The gates
+    /// all read the SAME snapshot, so they cannot disagree about what changed.
+    async fn working_tree(&self) -> crate::ports::outbound::WorkingTreeDiff {
+        match &self.git {
+            Some(git) => git.working_tree(&self.work_dir).await.unwrap_or_default(),
+            None => crate::ports::outbound::WorkingTreeDiff::default(),
         }
     }
 
@@ -117,6 +155,32 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         self
     }
 
+    /// The current tree fingerprint (HEAD + dirty paths with metadata), or
+    /// `None` when it cannot be established — the cache then stands aside.
+    async fn tree_fingerprint(&self) -> Option<String> {
+        let (git, files) = (self.git.as_ref()?, self.files.as_ref()?);
+        let (ok, head) = git.raw(&self.work_dir, &["rev-parse", "HEAD"]).await;
+        if !ok {
+            return None;
+        }
+        let (ok, status) = git.raw(&self.work_dir, &["status", "--porcelain"]).await;
+        if !ok {
+            return None;
+        }
+        let mut dirty: Vec<crate::verify_cache::DirtyEntry> = Vec::new();
+        for line in status.lines() {
+            let meta = match line.get(3..) {
+                Some(path) => files
+                    .stat(&self.work_dir.join(path.trim().trim_matches('"')))
+                    .await
+                    .map(|m| (m.size, m.modified_epoch)),
+                None => None,
+            };
+            dirty.push((line.to_owned(), meta));
+        }
+        Some(crate::verify_cache::fingerprint(&head, &dirty))
+    }
+
     /// Execute one developer pass.
     ///
     /// # Errors
@@ -129,7 +193,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         // suite run (process-wide fingerprint cache) — one green check per
         // tree-state serves every runner in the cycle.
         if let Some(deploy) = &self.verify {
-            if crate::verify_cache::is_green(&self.work_dir) {
+            let fp = self.tree_fingerprint().await;
+            if crate::verify_cache::is_green(&self.work_dir, fp.as_deref()) {
                 // fall through — nothing changed since the last green run
             } else {
                 match tokio::time::timeout(
@@ -139,7 +204,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 .await
                 {
                     Ok(Ok(r)) if r.success => {
-                        crate::verify_cache::mark_green(&self.work_dir);
+                        crate::verify_cache::mark_green(&self.work_dir, fp.as_deref());
                     }
                     Ok(Ok(r)) => {
                         tracing::warn!(
@@ -275,7 +340,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         // name the risks — no code yet), then EXECUTE the plan in the SAME
         // conversation. Thinking is cheap; unplanned code is not. Falls back
         // to single-shot on engines without session resume.
-        let mut request = self.build_request(&state, &id);
+        let mut request = self.build_request(&state, &id).await;
         let plan_first = request.escalation_level == 0; // retries already carry a journal
         if plan_first {
             request.task_prompt = format!(
@@ -351,7 +416,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                             _ => {
                                 // Resume unsupported/failed: run single-shot fresh
                                 // with the plan folded in as a normal task.
-                                let fresh = self.build_request(&state, &id);
+                                let fresh = self.build_request(&state, &id).await;
                                 match self.engine.run(fresh).await {
                                     Ok(f) if f.succeeded() => f.session_id.clone(),
                                     Ok(f) => {
@@ -525,8 +590,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                         // someone else's — failing the holder of the ticket for
                         // those parks perfectly good fixes after three tries.
                         // MSRV 1.80 predates Option::is_none_or.
+                        let tree = self.working_tree().await;
                         let mine = after_report.as_ref().map_or(true, |r| {
-                            r.files.is_empty() || self.lints_touch_changed_files(&r.files)
+                            r.files.is_empty() || gates::lints_touch_changed_files(&tree, &r.files)
                         });
                         if after > base && mine {
                             // Keep the files the lints named: the next attempt
@@ -639,7 +705,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             // Regression-test gate: a BUG fix that touches no test is a fix
             // on faith. Mechanical check over the working diff; one bounded
             // repair pass to add the missing test.
-            if self.mode == DevMode::Bug && !self.diff_is_docs_only() && !self.diff_touches_tests()
+            let tree = self.working_tree().await;
+            if self.mode == DevMode::Bug
+                && !gates::diff_is_docs_only(&tree)
+                && !gates::diff_touches_tests(&tree)
             {
                 let fixup = format!(
                     "Your fix for {id} ships with NO regression test. Add a test that FAILS \
@@ -664,7 +733,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                     };
                     let _ = self.engine.run(repair).await;
                 }
-                if !self.diff_touches_tests() {
+                if !gates::diff_touches_tests(&self.working_tree().await) {
                     self.record_failure_at(
                         &id,
                         "bug fix shipped without a regression test",
@@ -705,7 +774,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         // The suite (plus gates) is green against this exact tree — remember
         // it so sibling runners skip their boot check this cycle.
         if self.verify.is_some() {
-            crate::verify_cache::mark_green(&self.work_dir);
+            let fp = self.tree_fingerprint().await;
+            crate::verify_cache::mark_green(&self.work_dir, fp.as_deref());
         }
 
         // Complete under an atomic read-modify-write with retry: move to the
@@ -743,171 +813,6 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             p(None);
         }
         Ok(Some(id))
-    }
-
-    /// Whether any lint location sits in a file this working diff touches.
-    /// Paths are compared by suffix so a repo-relative lint path still matches
-    /// a git path listed from the same root.
-    fn lints_touch_changed_files(&self, lint_files: &[String]) -> bool {
-        let changed = self.changed_files();
-        if changed.is_empty() {
-            // Nothing changed on disk — nothing here is attributable.
-            return false;
-        }
-        lint_files.iter().any(|lint| {
-            let lint = lint.trim();
-            !lint.is_empty()
-                && changed
-                    .iter()
-                    .any(|c| lint.ends_with(c.as_str()) || c.ends_with(lint))
-        })
-    }
-
-    /// Paths in the working diff: tracked modifications plus untracked files.
-    fn changed_files(&self) -> Vec<String> {
-        let run = |args: &[&str]| -> String {
-            std::process::Command::new("git")
-                .args(args)
-                .current_dir(&self.work_dir)
-                .output()
-                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-                .unwrap_or_default()
-        };
-        format!(
-            "{}\n{}",
-            run(&["diff", "HEAD", "--name-only"]),
-            run(&["ls-files", "--others", "--exclude-standard"])
-        )
-        .lines()
-        .map(|l| l.trim().to_owned())
-        .filter(|l| !l.is_empty())
-        .collect()
-    }
-
-    /// Whether the working diff is documentation/assets only — README fixes,
-    /// docs, images, licences. Such a "bug fix" has no runtime surface, so
-    /// demanding a regression test just parks the ticket.
-    fn diff_is_docs_only(&self) -> bool {
-        let run = |args: &[&str]| -> String {
-            std::process::Command::new("git")
-                .args(args)
-                .current_dir(&self.work_dir)
-                .output()
-                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-                .unwrap_or_default()
-        };
-        let names = format!(
-            "{}\n{}",
-            run(&["diff", "HEAD", "--name-only"]),
-            run(&["ls-files", "--others", "--exclude-standard"])
-        );
-        let mut any = false;
-        for f in names.lines().map(str::trim).filter(|f| !f.is_empty()) {
-            any = true;
-            let lower = f.to_lowercase();
-            let doc_ext = [
-                ".md", ".txt", ".adoc", ".rst", ".png", ".jpg", ".jpeg", ".svg", ".gif",
-            ]
-            .iter()
-            .any(|e| lower.ends_with(e));
-            let doc_name = lower.ends_with("license") || lower.ends_with(".gitignore");
-            let doc_dir = lower.starts_with("docs/") || lower.contains("/docs/");
-            if !(doc_ext || doc_name || doc_dir) {
-                return false;
-            }
-        }
-        any
-    }
-
-    /// Whether the current working diff (staged/unstaged + untracked) touches
-    /// tests: a test-ish path, or added lines containing test markers.
-    fn diff_touches_tests(&self) -> bool {
-        let run = |args: &[&str]| -> String {
-            std::process::Command::new("git")
-                .args(args)
-                .current_dir(&self.work_dir)
-                .output()
-                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-                .unwrap_or_default()
-        };
-        let names = format!(
-            "{}\n{}",
-            run(&["diff", "HEAD", "--name-only"]),
-            run(&["ls-files", "--others", "--exclude-standard"])
-        );
-        if names.lines().any(|f| {
-            let f = f.trim().to_lowercase();
-            !f.is_empty()
-                && (f.contains("/tests/")
-                    || f.starts_with("tests/")
-                    || f.ends_with("_test.rs")
-                    || f.ends_with("_test.go")
-                    || f.ends_with(".test.ts")
-                    || f.ends_with(".test.js")
-                    || f.contains("test_"))
-        }) {
-            return true;
-        }
-        let diff = run(&["diff", "HEAD"]);
-        if diff.lines().any(|l| {
-            l.starts_with('+')
-                && (l.contains("#[test]")
-                    || l.contains("#[tokio::test]")
-                    || l.contains("def test_")
-                    || l.contains("it(")
-                    || l.contains("func Test"))
-        }) {
-            return true;
-        }
-        // Rust keeps most tests in an inline `#[cfg(test)] mod tests` at the
-        // foot of the file it tests. A fix that hardens or extends one of those
-        // adds no `#[test]` line and lives in no test-shaped path, so the two
-        // checks above miss the single most common way a Rust regression test
-        // actually lands — and the ticket gets failed for shipping without one.
-        self.diff_touches_inline_test_module(&run)
-    }
-
-    /// Whether any changed line falls inside a file's `#[cfg(test)]` module.
-    /// Uses `-U0` so the reported line numbers are the changed lines themselves,
-    /// not context that happens to sit near the boundary.
-    fn diff_touches_inline_test_module(&self, run: &dyn Fn(&[&str]) -> String) -> bool {
-        let diff = run(&["diff", "HEAD", "-U0"]);
-        let mut file: Option<String> = None;
-        for line in diff.lines() {
-            if let Some(rest) = line.strip_prefix("+++ b/") {
-                file = Some(rest.trim().to_owned());
-                continue;
-            }
-            let Some(hunk) = line.strip_prefix("@@ ") else {
-                continue;
-            };
-            let Some(f) = file.as_deref() else { continue };
-            // `@@ -a,b +c,d @@` — c is the first changed line on the new side.
-            let Some(new_side) = hunk.split('+').nth(1) else {
-                continue;
-            };
-            let Ok(start) = new_side
-                .split([',', ' '])
-                .next()
-                .unwrap_or("")
-                .parse::<usize>()
-            else {
-                continue;
-            };
-            let Ok(text) = std::fs::read_to_string(self.work_dir.join(f)) else {
-                continue;
-            };
-            if let Some(test_mod_line) = text
-                .lines()
-                .position(|l| l.trim_start().starts_with("#[cfg(test)]"))
-            {
-                // Line numbers are 1-based in the diff, 0-based from position().
-                if start > test_mod_line {
-                    return true;
-                }
-            }
-        }
-        false
     }
 
     /// When pre-check fails, ask the LLM to fix ALL compile/test errors until
@@ -997,100 +902,6 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         Ok(None)
     }
 
-    /// Count a failed attempt on `id`; at the 3rd, park it with a visible note
-    /// so a human decides instead of the team burning tokens forever.
-    async fn record_failure(&self, id: &TicketId, why: &str) {
-        self.record_failure_at(
-            id,
-            why,
-            crate::state::FailureLayer::Design,
-            "engine",
-            Vec::new(),
-        )
-        .await;
-    }
-
-    /// As [`Self::record_failure`], but the caller names the layer and gate it
-    /// rejected the work at, so the next agent reads data instead of guessing
-    /// from a sentence.
-    async fn record_failure_at(
-        &self,
-        id: &TicketId,
-        why: &str,
-        layer: crate::state::FailureLayer,
-        gate: &str,
-        files: Vec<String>,
-    ) {
-        let key = id.to_string();
-        let short: String = why.chars().take(300).collect();
-        // Infrastructure faults are NOT the ticket's fault — shared predicate
-        // with the runner's circuit breaker (see crate::faults).
-        let infra = crate::faults::is_infra_fault(why);
-        let _ = layer;
-        if infra {
-            // Raise it where people look. An outage that only exists as a log
-            // line means the team looks broken while the real problem is an
-            // expired login nobody was told about.
-            let (engine, role, detail) = (
-                self.engine.id().to_owned(),
-                format!("{:?}", self.mode.role()),
-                short.clone(),
-            );
-            let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
-                s.log_activity(
-                    "SYSTEM",
-                    "engine infrastructure fault — attempt not counted",
-                    Some(key.clone()),
-                );
-                let first = !s.engine_incidents.iter().any(|i| i.engine == engine);
-                s.open_engine_incident(&engine, &role, &detail);
-                if first {
-                    let msg = format!(
-                        "🔌 {engine} is failing for every agent: {detail}. Work is paused on this \
-                         engine until it answers again — fix the credentials or the model, and \
-                         this clears itself."
-                    );
-                    s.post_chat_in("SYSTEM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
-                }
-                Ok(())
-            })
-            .await;
-            return;
-        }
-        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
-            let n = {
-                let c = s.ticket_fail_attempts.entry(key.clone()).or_insert(0);
-                *c += 1;
-                *c
-            };
-            // Brief the NEXT attempt on what this one hit, so a retry builds
-            // on prior findings instead of rediscovering them.
-            s.journal_note(&key, &format!("attempt {n} failed: {short}"));
-            s.record_attempt_failure(
-                &key,
-                crate::state::AttemptFailure {
-                    attempt: n,
-                    layer,
-                    gate: gate.to_owned(),
-                    detail: short.clone(),
-                    files: files.clone(),
-                },
-            );
-            if n == 3 {
-                s.post_comment(
-                    "DEV-BUG",
-                    &format!(
-                        "⛔ {id} PARKED after 3 failed attempts (last: {short}) — needs a \
-                         human decision; agents will skip it."
-                    ),
-                    Some(key.clone()),
-                );
-            }
-            Ok(())
-        })
-        .await;
-    }
-
     /// Return a stranded ticket to the queue when the run failed, so it isn't
     /// stuck In-Progress. `System` is the only actor allowed to un-claim.
     async fn release_claim(&self, id: &TicketId) {
@@ -1107,186 +918,6 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         match self.mode {
             DevMode::Bug => open_bug_candidates(state),
             DevMode::Feature => ready_feature_candidates(state),
-        }
-    }
-
-    /// Everything already written down about this ticket's subject: the team's
-    /// own wiki, the project's docs, and closed tickets with the same symptom.
-    /// A person walking into unfamiliar code reads these before typing; an
-    /// agent only reads what the brief hands it.
-    fn knowledge_brief(
-        state: &ProjectState,
-        id: &TicketId,
-        ticket: Option<&coxagent_domain::Ticket>,
-        work_dir: &std::path::Path,
-    ) -> String {
-        let query = ticket.map_or_else(String::new, |t| {
-            format!(
-                "{} {} {}",
-                t.title(),
-                t.description(),
-                t.design()
-                    .technical
-                    .as_ref()
-                    .map_or("", |d| d.approach.as_str())
-            )
-        });
-        if query.trim().is_empty() {
-            return String::new();
-        }
-        prompts::knowledge_block(
-            &state.docs,
-            &state.tickets,
-            work_dir,
-            &query,
-            &id.to_string(),
-        )
-    }
-
-    /// How previous attempts are briefed to the next one. Structured records
-    /// name the gate and the files; a ticket that failed before that log
-    /// existed falls back to its prose journal.
-    fn attempts_brief(state: &ProjectState, id: &TicketId) -> String {
-        let failures = state.attempt_failures(&id.to_string());
-        if failures.is_empty() {
-            return state
-                .ticket_journal
-                .get(&id.to_string())
-                .filter(|notes| !notes.is_empty())
-                .map(|notes| {
-                    format!(
-                        "\n\nPREVIOUS ATTEMPTS on this ticket — build on these, do not repeat \
-                         them:\n- {}",
-                        notes.join("\n- ")
-                    )
-                })
-                .unwrap_or_default();
-        }
-        let lines: Vec<String> = failures
-            .iter()
-            .map(|f| {
-                let where_ = if f.files.is_empty() {
-                    String::new()
-                } else {
-                    format!(" [in {}]", f.files.join(", "))
-                };
-                format!(
-                    "attempt {} — rejected by {} ({:?}): {}{where_}",
-                    f.attempt, f.gate, f.layer, f.detail
-                )
-            })
-            .collect();
-        format!(
-            "\n\nPREVIOUS ATTEMPTS on this ticket — each was rejected by a specific gate. \
-             Clear THAT, do not start over:\n- {}",
-            lines.join("\n- ")
-        )
-    }
-
-    fn build_request(&self, state: &ProjectState, id: &TicketId) -> AgentRequest {
-        let ticket = state.ticket(id);
-        let title = ticket.map_or("", coxagent_domain::Ticket::title);
-        let _choice = self.config.engine.resolve(self.mode.role());
-        let stack = prompts::stack_constraints(&self.config.architecture);
-        let deploy = prompts::deploy_constraints(&self.config.deploy);
-        // A UI ticket also carries the project design system into the prompt.
-        let design = if ticket.is_some_and(coxagent_domain::Ticket::has_ui) {
-            prompts::design_constraints(state.design_system.as_ref())
-        } else {
-            String::new()
-        };
-        let context_block = self
-            .context
-            .as_deref()
-            .filter(|c| !c.trim().is_empty())
-            .map(|c| format!("\n\n## Project context (goal, stack, scope, constraints):\n{c}\n"))
-            .unwrap_or_default();
-        // Human steering: recent USER comments on this ticket become explicit
-        // instructions — commenting on an in-progress ticket steers the agent
-        // on its next run instead of shouting into the void.
-        let steering = {
-            let notes: Vec<String> = state
-                .comments
-                .iter()
-                .filter(|c| c.author == "USER" && c.ticket.as_deref() == Some(id.as_str()))
-                .rev()
-                .take(3)
-                .map(|c| c.body.chars().take(400).collect::<String>())
-                .collect();
-            if notes.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    "\n\nHUMAN STEERING on this ticket (newest first — follow it):\n- {}",
-                    notes.join("\n- ")
-                )
-            }
-        };
-        let journal = Self::attempts_brief(state, id);
-        // What was already done to this code. A human opens the file's history
-        // before editing it; nothing in the ticket text carries that.
-        let knowledge = Self::knowledge_brief(state, id, ticket, &self.work_dir);
-        // Ask the BA rather than invent a requirement (and read any answer).
-        let asking = prompts::ask_protocol_block(state, &id.to_string());
-        let history = prompts::history_block(
-            &self.work_dir,
-            &format!(
-                "{title} {}",
-                ticket
-                    .and_then(|t| t.design().technical.as_ref())
-                    .map_or("", |d| d.approach.as_str())
-            ),
-        );
-        AgentRequest {
-            role: self.mode.role(),
-            // The system prompt stays BYTE-IDENTICAL across every DEV run of a
-            // project: engines put it in the provider prompt cache, so a stable
-            // prefix means cache READ pricing on back-to-back runs. Anything
-            // per-ticket (stack/deploy/design blocks included — the design one
-            // exists only for UI tickets) belongs in the task prompt below.
-            system_prompt: prompts::system_prompt(prompts::DEV),
-            task_prompt: format!(
-                "Ticket {id}: {title}\n{}\nImplement it now.{stack}{deploy}{design}{context_block}{}{history}{knowledge}{}{}{}{steering}{journal}{asking}",
-                ticket_brief(ticket),
-                prompts::focus_block(
-                    &self.work_dir,
-                    &format!(
-                        "{title} {}",
-                        ticket
-                            .and_then(|t| t.design().technical.as_ref())
-                            .map_or("", |d| d.approach.as_str())
-                    ),
-                ),
-                prompts::repo_map_block(&self.work_dir, self.config.workflow.token_saver),
-                prompts::team_memory_block_relevant(
-                    &state.decisions,
-                    &state.lessons,
-                    &format!(
-                        "{title} {}",
-                        ticket
-                            .and_then(|t| t.design().technical.as_ref())
-                            .map_or("", |d| d.approach.as_str())
-                    ),
-                ),
-                prompts::hub_lessons_block(),
-            ),
-            work_dir: self.work_dir.clone(),
-            timeout: Duration::from_secs(3600),
-            // Escalation: retries climb the ladder — and a LARGE ticket starts
-            // on rung 1 outright. Experts don't try the cheap model first on
-            // the hard problem and hope.
-            escalation_level: {
-                let attempts = state
-                    .ticket_fail_attempts
-                    .get(&id.to_string())
-                    .copied()
-                    .unwrap_or(0)
-                    .min(3);
-                let floor = u32::from(ticket.is_some_and(|t| {
-                    t.complexity() == coxagent_domain::ticket::Complexity::Large
-                }));
-                u8::try_from(attempts.max(floor)).unwrap_or(3)
-            },
         }
     }
 }
@@ -1489,79 +1120,6 @@ mod tests {
         assert!(uc.execute().await.expect("run").is_none());
     }
 
-    #[tokio::test]
-    async fn diff_touches_tests_detects_markers_and_paths() {
-        let dir = std::env::temp_dir().join(format!("cox-dtt-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let git = |args: &[&str]| {
-            std::process::Command::new("git")
-                .args(args)
-                .current_dir(&dir)
-                .output()
-                .unwrap()
-        };
-        git(&["init", "-q"]);
-        git(&[
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "user.name=t",
-            "commit",
-            "--allow-empty",
-            "-q",
-            "-m",
-            "base",
-        ]);
-        let uc = RunDevUseCase::new(
-            Arc::new(MemStore {
-                state: Mutex::new(ProjectState::default()),
-            }),
-            Arc::new(OkEngine),
-            Config::default(),
-            dir.clone(),
-            DevMode::Bug,
-        );
-        assert!(!uc.diff_touches_tests(), "clean tree touches nothing");
-        std::fs::write(dir.join("lib.rs"), "fn f() {}\n").unwrap();
-        assert!(!uc.diff_touches_tests(), "non-test change is not a test");
-        std::fs::write(dir.join("lib.rs"), "fn f() {}\n#[test]\nfn t() {}\n").unwrap();
-        git(&["add", "-A"]);
-        assert!(uc.diff_touches_tests(), "added #[test] counts");
-
-        // The case that cost cox four attempts and part of a budget: hardening
-        // an existing test inside an inline `#[cfg(test)] mod tests` adds no
-        // `#[test]` line and sits in no test-shaped path, but it is a test
-        // change and the gate must see it.
-        let engine_src = |prod: &str, timeout: u32| {
-            format!("fn real() {{{prod}}}\n#[cfg(test)]\nmod tests {{\n    #[test]\n    fn t() {{\n        let timeout = {timeout};\n    }}\n}}\n")
-        };
-        std::fs::write(dir.join("engine.rs"), engine_src("", 10)).unwrap();
-        git(&["add", "-A"]);
-        git(&[
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "user.name=t",
-            "commit",
-            "-q",
-            "-m",
-            "with tests",
-        ]);
-        assert!(!uc.diff_touches_tests(), "committed tree touches nothing");
-        std::fs::write(dir.join("engine.rs"), engine_src("", 30)).unwrap();
-        assert!(
-            uc.diff_touches_tests(),
-            "editing an existing inline test IS touching tests"
-        );
-        // A change to the production half of the same file still is not.
-        std::fs::write(dir.join("engine.rs"), engine_src(" let x = 1; ", 10)).unwrap();
-        assert!(
-            !uc.diff_touches_tests(),
-            "a change above the test module is production code"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     #[test]
     fn parse_ask_finds_the_question_anywhere_near_the_end() {
         use super::parse_ask;
@@ -1577,100 +1135,5 @@ mod tests {
         // A bare marker with no real question is not a question.
         assert!(parse_ask("ASK BA: ?").is_none());
         assert!(parse_ask("no question here").is_none());
-    }
-
-    #[tokio::test]
-    async fn lint_regressions_are_blamed_only_on_files_the_change_touched() {
-        let dir = std::env::temp_dir().join(format!("lintblame-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("crates/app/src")).unwrap();
-        let git = |args: &[&str]| {
-            std::process::Command::new("git")
-                .args(args)
-                .current_dir(&dir)
-                .output()
-                .unwrap();
-        };
-        git(&["init", "-q"]);
-        git(&[
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "user.name=t",
-            "commit",
-            "--allow-empty",
-            "-q",
-            "-m",
-            "base",
-        ]);
-        let uc = RunDevUseCase::new(
-            Arc::new(MemStore {
-                state: Mutex::new(ProjectState::default()),
-            }),
-            Arc::new(OkEngine),
-            Config::default(),
-            dir.clone(),
-            DevMode::Bug,
-        );
-        assert!(
-            !uc.lints_touch_changed_files(&["crates/app/src/lib.rs".to_owned()]),
-            "a clean tree can't have caused any lint"
-        );
-        std::fs::write(dir.join("crates/app/src/lib.rs"), "fn f() {}\n").unwrap();
-        assert!(
-            uc.lints_touch_changed_files(&["crates/app/src/lib.rs".to_owned()]),
-            "a lint in the file we edited is ours"
-        );
-        assert!(
-            !uc.lints_touch_changed_files(&["crates/domain/src/ticket.rs".to_owned()]),
-            "a lint somewhere else — e.g. pulled in by a rebase — is not ours"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn diff_is_docs_only_spares_readme_fixes_but_not_code() {
-        let dir = std::env::temp_dir().join(format!("docsonly-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let git = |args: &[&str]| {
-            std::process::Command::new("git")
-                .args(args)
-                .current_dir(&dir)
-                .output()
-                .unwrap();
-        };
-        git(&["init", "-q"]);
-        git(&[
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "user.name=t",
-            "commit",
-            "--allow-empty",
-            "-q",
-            "-m",
-            "base",
-        ]);
-        let uc = RunDevUseCase::new(
-            Arc::new(MemStore {
-                state: Mutex::new(ProjectState::default()),
-            }),
-            Arc::new(OkEngine),
-            Config::default(),
-            dir.clone(),
-            DevMode::Bug,
-        );
-        assert!(!uc.diff_is_docs_only(), "empty diff is not docs-only");
-        std::fs::write(dir.join("README.md"), "# fixed port\n").unwrap();
-        std::fs::create_dir_all(dir.join("docs")).unwrap();
-        std::fs::write(dir.join("docs/setup.md"), "steps\n").unwrap();
-        assert!(uc.diff_is_docs_only(), "README + docs/ is docs-only");
-        std::fs::write(dir.join("lib.rs"), "fn f() {}\n").unwrap();
-        assert!(
-            !uc.diff_is_docs_only(),
-            "any code file breaks the exemption"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
