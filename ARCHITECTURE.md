@@ -95,7 +95,7 @@ Key decisions:
 - Engine memory: daily hygiene judges `~/.claude` project memory against
   `PROCESS_INVARIANTS`; durable lessons are promoted into `CLAUDE.md`.
 
-## Module layout inside the big crates (July 2026 refactor)
+## Module layout inside the big crates (July–August 2026 refactor)
 
 The two conflict magnets — `use_cases/cycle.rs` (7,000 lines) and
 `presentation/src/server.rs` (9,600) — were split into directories. The rule
@@ -105,23 +105,38 @@ cannot say what the new file is FOR, the split made two problems out of one.
 ```
 application/src/use_cases/
 ├── cycle/                  # the orchestrator, split by job
-│   ├── mod.rs              #   run_cycle sequencing + forge hygiene (next to split)
+│   ├── mod.rs              #   run_cycle sequencing + report (~1.5k)
 │   ├── ceremonies.rs       #   sprint boundary, standup, grooming, digest, self-tune
+│   ├── forge.rs            #   PR review/merge/rebase, verify-merged-result
 │   ├── ops.rs              #   deploy, health gate, rollback to last known-good
 │   ├── qa_evidence.rs      #   what a test result must SHOW (screenshots, req/resp)
-│   └── escalation.rs       #   agent questions, escalating parked tickets
+│   ├── escalation.rs       #   agent questions, escalating parked tickets
+│   ├── scrum.rs            #   scrum topic, next-feature clarification, activity record
+│   ├── wiring.rs           #   one builder per agent role (BA/SA/PD/DEV/TEST/DOCS…)
+│   └── cycle_tests.rs      #   the full-cycle integration tests
+├── run_dev/                # DEV pass: mod, briefing, gates (pure), failures
 └── merge_policy.rs         # pure decisions: who unsticks a ticket, competing
                             # PRs, what is too big to auto-merge
 
 presentation/src/server/    # the HTTP router, split by surface
-├── mod.rs                  #   router, middleware, core (still shrinking)
+├── mod.rs                  #   router, middleware, core (~2.1k)
 ├── chat.rs                 #   channels, DMs, reactions, uploads, delivery
-├── auth.rs                 #   sign-in, sessions, profiles, avatars
+├── auth.rs                 #   sign-in, sessions cookie flow, avatar upload
+├── people.rs               #   users, tokens, members, profiles, analytics
+├── transcripts.rs          #   live agent-log tail, transcript downloads
 ├── docs.rs                 #   Wiki pages, folders, AI edits, docs-ws
 ├── forge.rs                #   PRs: review, merge, preview, git settings
 ├── work.rs                 #   tickets, sprints, runner controls
-└── meetings.rs             #   booking, joining, the ring, watchdog
+├── meetings.rs             #   booking, joining, the ring, watchdog
+└── …assets/engines/manage/projects/status/comments/channels/background/realtime
 ```
+
+**IO discipline is now total**: `crates/app/tests/hexagonal_gate.rs` forbids
+`std::process`/`std::fs` in ALL of the application layer's production code —
+its grandfather list is empty and may only stay so. Every effect goes through
+`ports/outbound/` (`GitPort`, `WorkspaceFilesPort`, `ScreenshotPort`,
+`ProcessJanitorPort`, …); decisions are pure functions of a snapshot the
+adapter takes once.
 
 Conventions for these split modules:
 
@@ -130,16 +145,12 @@ Conventions for these split modules:
   is allowed there deliberately (see the header note in each file).
 - Moving a method is mechanical: same signature, doc comment travels with it,
   no logic edits in the same commit as the move.
+- When cutting, take the item's doc comments and `#[derive]` attributes WITH
+  it — an orphaned attribute above the seam is the classic split bug.
 - The COX-B009 deploy-gate guard (`crates/app/tests/health_gate.rs`) scans all
   of `src/`; when a split introduces a new visibility form, the guard must
   keep recognising `fn` headers — it caught `pub(super)` being invisible once.
 
-Completed since: `server/` grew forge/work/docs/manage/engines/assets/realtime
-(mod.rs ≈4.1k); `cycle/` grew forge.rs (mod.rs ≈3.7k); `state/` split into
-chat/work/ops/docs (mod.rs ≈1.4k); `app/` split out shims.rs and builders.rs
-(lib.rs ≈1.6k); `run_dev/` split out gates.rs and briefing.rs (mod.rs ≈1.2k).
-
-Still oversized: `server/mod.rs` (~4.1k — project CRUD and comments next),
-`cycle/mod.rs` (~3.7k — run_cycle itself), and `web/index.html` (~7.7k — needs
-its JS split per view into served assets, a behaviour-affecting change to do
-in its own window with UI smoke tests).
+Remaining oversized (split when work takes you into them):
+`presentation/src/web/index.html` (~7.7k — needs per-view JS/CSS split with a
+UI smoke test), `cycle/forge.rs` (1.46k), `server/mod.rs` router body.

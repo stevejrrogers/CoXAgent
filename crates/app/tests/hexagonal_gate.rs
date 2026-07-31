@@ -32,7 +32,15 @@ fn application_sources() -> Vec<(String, String)> {
             let p: PathBuf = e.path();
             if p.is_dir() {
                 stack.push(p);
-            } else if p.extension().is_some_and(|x| x == "rs") {
+            } else if p.extension().is_some_and(|x| x == "rs")
+                // Whole-file test modules (`mod x_tests;` declared under
+                // #[cfg(test)]) are test code end to end — the production-half
+                // split below never sees a `#[cfg(test)]` marker inside them,
+                // so exempt them by the naming convention the splits use.
+                && !p
+                    .file_stem()
+                    .is_some_and(|n| n.to_string_lossy().ends_with("_tests"))
+            {
                 let rel = p
                     .strip_prefix(&root)
                     .unwrap_or(&p)

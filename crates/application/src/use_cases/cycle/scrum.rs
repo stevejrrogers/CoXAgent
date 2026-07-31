@@ -1,0 +1,289 @@
+// Part of the cycle module split by concern — see cycle/mod.rs.
+#![allow(clippy::wildcard_imports)]
+//! Scrum ceremonies the cycle runs between agent passes: the standing scrum
+//! topic, next-feature clarification, and the per-cycle activity record.
+
+use super::*;
+
+impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
+    /// Whether the board has any recent team activity to hold a standup over —
+    /// the gate that stops empty, token-wasting standups on a quiet board.
+    pub(super) async fn has_recent_activity(&self) -> bool {
+        self.store
+            .load()
+            .await
+            .is_ok_and(|s| !s.activity.is_empty())
+    }
+
+    /// Pick the most pressing thing worth a team discussion this cycle, or `None`
+    /// when there's nothing to talk about (so the team isn't noisy for no reason).
+    pub(super) fn scrum_topic(
+        state: &crate::state::ProjectState,
+        report: &CycleReport,
+        cycle: u64,
+        lang: crate::config::Language,
+    ) -> Option<String> {
+        use coxagent_domain::{Status, TicketType};
+        let vi = lang.is_vi();
+        // A failed deploy is the loudest signal — discuss root cause + prevention.
+        if report.errors.iter().any(|e| e.contains("DEPLOY")) || !report.bugs_filed.is_empty() {
+            return Some(
+                if vi {
+                    "Lần deploy hoặc chạy test gần nhất phát sinh lỗi. Nguyên nhân gốc có thể là gì, \
+                     và ta nên thay đổi gì để nó không tái diễn?"
+                } else {
+                    "The last deploy or test run surfaced failures. What's the likely root cause, \
+                     and what should we change to stop it recurring?"
+                }
+                .to_owned(),
+            );
+        }
+        let open_bugs = state
+            .tickets
+            .iter()
+            .filter(|t| t.ticket_type() == TicketType::Bug && t.status() == Status::Open)
+            .count();
+        if open_bugs >= 3 {
+            return Some(if vi {
+                format!(
+                    "Đang có {open_bugs} bug mở. Nên tạm dừng tính năng mới để dọn hết bug trước, \
+                     hay tiếp tục ship? Quyết định đi, và nếu cần thì tạo ticket theo dõi."
+                )
+            } else {
+                format!(
+                    "We have {open_bugs} open bugs. Should we pause new features and burn down the \
+                     bug backlog first, or keep shipping? Decide and, if useful, create a tracking ticket."
+                )
+            });
+        }
+        // A stalled in-progress ticket is worth flagging as a possible blocker.
+        if let Some(t) = state
+            .tickets
+            .iter()
+            .find(|t| t.status() == Status::InProgress)
+        {
+            if cycle % 4 == 0 {
+                return Some(if vi {
+                    format!(
+                        "{} đã ở trạng thái đang làm khá lâu. Có bị block hay quá lớn không? \
+                         Nên tách nhỏ hay gỡ block cho nó?",
+                        t.id()
+                    )
+                } else {
+                    format!(
+                        "{} has been in progress for a while. Is it blocked or too big? \
+                         Should we split it or unblock it?",
+                        t.id()
+                    )
+                });
+            }
+        }
+        // Otherwise a light periodic check-in keeps the sprint honest.
+        if cycle % 6 == 0 {
+            return Some(
+                if vi {
+                    "Điểm tin sprint: có đang đúng hướng với mục tiêu sprint không? Có rủi ro, phình \
+                     phạm vi, hay blocker nào cần nêu? Chốt một bước tiếp theo cụ thể."
+                } else {
+                    "Sprint check-in: are we on track for the sprint goal? Any risks, scope creep, \
+                     or blockers to raise? Decide on one concrete next step."
+                }
+                .to_owned(),
+            );
+        }
+        None
+    }
+
+    /// Clarification loop: if the next ready feature has no acceptance criteria,
+    /// DEV-FEATURE "raises it" on the ticket thread and the BA jumps in to pin
+    /// down the definition of done — so nobody builds against a fuzzy spec.
+    /// Best-effort, at most one clarification per cycle.
+    pub(super) async fn clarify_next_feature(&self) {
+        use coxagent_domain::ticket::{Status, TicketType};
+        let Ok(state) = self.store.load().await else {
+            return;
+        };
+        let Some((id, title)) = state
+            .tickets
+            .iter()
+            .find(|t| {
+                t.ticket_type() == TicketType::Feature
+                    && t.status() == Status::Ready
+                    && t.acceptance_criteria().is_empty()
+            })
+            .map(|t| (t.id().clone(), t.title().to_owned()))
+        else {
+            return;
+        };
+
+        // DEV flags it — in a human tone — on the ticket thread.
+        if let Ok(mut s) = self.store.load().await {
+            s.post_comment(
+                "DEV-FEATURE",
+                &format!(
+                    "Hold on — {id} has no acceptance criteria. I'm not going to guess what \
+                     \"done\" means and risk building the wrong thing. BA, can you pin it down?"
+                ),
+                Some(id.to_string()),
+            );
+            let _ = self.store.save(&s).await;
+        }
+
+        // BA answers by generating concrete criteria.
+        let request = AgentRequest {
+            role: coxagent_domain::Role::Ba,
+            system_prompt: crate::prompts::system_prompt(crate::prompts::BA),
+            task_prompt: format!(
+                "A developer flagged that ticket {id} (\"{title}\") has no acceptance criteria \
+                 and won't start without them. Write 2-5 concrete, testable acceptance criteria \
+                 (user-visible behaviour, not implementation). Respond with ONLY a JSON array of \
+                 strings."
+            ),
+            work_dir: self.work_dir.clone(),
+            timeout: std::time::Duration::from_secs(300),
+            escalation_level: 0,
+        };
+        let Ok(outcome) = self.engine.run(request).await else {
+            return;
+        };
+        if !outcome.succeeded() {
+            return;
+        }
+        let Ok(criteria) = crate::parsing::parse_string_list(&outcome.stdout) else {
+            return;
+        };
+        let criteria: Vec<String> = criteria.into_iter().take(5).collect();
+        if criteria.is_empty() {
+            return;
+        }
+        if let Ok(mut s) = self.store.load().await {
+            if let Some(t) = s.ticket_mut(&id) {
+                t.set_acceptance_criteria(criteria.clone());
+            }
+            s.post_comment(
+                "BA",
+                &format!(
+                    "Good catch — my bad for leaving {id} fuzzy. Definition of done: {}. \
+                     Updated the ticket, you're clear to build.",
+                    criteria.join("; ")
+                ),
+                Some(id.to_string()),
+            );
+            s.log_activity("BA", "clarified acceptance criteria", Some(id.to_string()));
+            let _ = self.store.save(&s).await;
+        }
+    }
+
+    /// Append a human-readable activity trail plus drain the spend meter into
+    /// state. Returns whether accumulated spend has crossed the budget cap.
+    /// Best-effort: a failure here never fails a cycle.
+    pub(super) async fn record_activity(&self, report: &CycleReport) -> bool {
+        let Ok(mut state) = self.store.load().await else {
+            return false;
+        };
+        for id in &report.ba_created {
+            state.log_activity("BA", "proposed feature", Some(id.to_string()));
+        }
+        if let Some(id) = &report.sa_readied {
+            state.log_activity("SA", "designed (technical)", Some(id.to_string()));
+        }
+        if report.design_system_created {
+            state.log_activity("PD", "established design system", None);
+        }
+        if let Some(id) = &report.pd_designed {
+            state.log_activity("PD", "designed UX & readied", Some(id.to_string()));
+        }
+        if let Some(id) = &report.bug_fixed {
+            state.log_activity("DEV-BUG", "fixed bug", Some(id.to_string()));
+        }
+        if let Some(id) = &report.feature_done {
+            state.log_activity("DEV-FEATURE", "implemented feature", Some(id.to_string()));
+        }
+        if let Some(id) = &report.documented {
+            state.log_activity("DOCS", "documented", Some(id.to_string()));
+        }
+        for id in &report.bugs_filed {
+            state.log_activity("TEST", "filed bug", Some(id.to_string()));
+        }
+
+        // Drain the spend meter (deltas since last cycle) into persistent state.
+        let mut cycle_cost = 0.0;
+        if let Some(meter) = &self.meter {
+            if let Ok(mut m) = meter.lock() {
+                cycle_cost = m.total_cost_usd;
+                state.spend.total_cost_usd += m.total_cost_usd;
+                state.spend.input_tokens += m.input_tokens;
+                state.spend.output_tokens += m.output_tokens;
+                state.spend.runs += m.runs;
+                for (role, cost) in std::mem::take(&mut m.by_role) {
+                    *state.spend.by_role.entry(role).or_default() += cost;
+                }
+                for (role, n) in std::mem::take(&mut m.runs_by_role) {
+                    *state.spend.runs_by_role.entry(role).or_default() += n;
+                }
+                for (role, cost) in std::mem::take(&mut m.metered_cost_by_role) {
+                    *state.spend.metered_cost_by_role.entry(role).or_default() += cost;
+                }
+                // Attribute this cycle's spend to the operator that ran it, so
+                // each user's token usage is measurable in a shared project.
+                if !self.worker.is_empty() {
+                    let op = state
+                        .spend
+                        .by_operator
+                        .entry(self.worker.clone())
+                        .or_default();
+                    op.cost_usd += m.total_cost_usd;
+                    op.input_tokens += m.input_tokens;
+                    op.output_tokens += m.output_tokens;
+                    op.runs += m.runs;
+                }
+                *m = Spend::default();
+            }
+        }
+        let spent_today = state.add_daily_spend(cycle_cost);
+
+        // Effective caps: the live cell (adjustable without restart) when present,
+        // otherwise the caps from the loaded config.
+        let (lifetime_cap, daily_cap) = self.budget.as_ref().map_or_else(
+            || {
+                (
+                    self.config.workflow.budget_usd,
+                    self.config.policy.daily_budget_usd,
+                )
+            },
+            |b| {
+                b.lock().map_or(
+                    (
+                        self.config.workflow.budget_usd,
+                        self.config.policy.daily_budget_usd,
+                    ),
+                    |caps| (caps.lifetime_usd, caps.daily_usd),
+                )
+            },
+        );
+        // Pause on either the lifetime cap or the per-day cap.
+        let over_lifetime =
+            lifetime_cap.is_some_and(|cap| cap > 0.0 && state.spend.total_cost_usd >= cap);
+        let over_daily = daily_cap.is_some_and(|cap| cap > 0.0 && spent_today >= cap);
+        if over_daily {
+            state.log_activity("POLICY", "daily budget cap reached", None);
+        }
+
+        let warn_pct = self.config.policy.budget_warn_pct;
+        let (new_lifetime_warning, new_daily_warning) = apply_budget_warnings(
+            &mut state,
+            warn_pct,
+            lifetime_cap,
+            daily_cap,
+            spent_today,
+            over_lifetime,
+            over_daily,
+        );
+
+        let _ = self.store.save(&state).await;
+        self.notify_budget_warnings(new_lifetime_warning, new_daily_warning, warn_pct)
+            .await;
+
+        over_lifetime || over_daily
+    }
+}
