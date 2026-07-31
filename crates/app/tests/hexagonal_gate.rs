@@ -21,7 +21,6 @@ const GRANDFATHERED: &[&str] = &[
     "conformance.rs",
     "prompts.rs",
     "use_cases/cycle/qa_evidence.rs",
-    "use_cases/run_docs.rs",
     "use_cases/run_reviews.rs",
     "verify_cache.rs",
 ];

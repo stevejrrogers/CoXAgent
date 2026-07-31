@@ -1731,6 +1731,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         )
         .with_worker(self.worker.clone())
         .with_phase(self.phase.clone())
+        .with_git(self.git.clone())
         .with_context(Some(self.context.clone()))
     }
 

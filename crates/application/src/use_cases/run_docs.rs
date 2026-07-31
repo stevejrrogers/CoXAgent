@@ -20,10 +20,20 @@ pub struct RunDocsUseCase<S: StateStorePort, E: AgentEnginePort> {
     work_dir: PathBuf,
     worker: String,
     phase: Option<crate::use_cases::runner::PhaseReporter>,
+    /// Git access for the staleness check (`git log --since` over a page's
+    /// Code-map files). `None` reads as "nothing is stale".
+    git: Option<Arc<dyn crate::ports::outbound::GitPort>>,
     context: Option<String>,
 }
 
 impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
+    /// Attach git access for the page-staleness check.
+    #[must_use]
+    pub fn with_git(mut self, git: Option<Arc<dyn crate::ports::outbound::GitPort>>) -> Self {
+        self.git = git;
+        self
+    }
+
     pub fn new(store: Arc<S>, engine: Arc<E>, config: Config, work_dir: PathBuf) -> Self {
         Self {
             store,
@@ -32,6 +42,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
             work_dir,
             worker: String::new(),
             phase: None,
+            git: None,
             context: None,
         }
     }
@@ -62,7 +73,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
     /// commits newer than the page. Bounded to a single page per cycle so the
     /// wiki converges without the bill growing with it.
     async fn refresh_stale_page(&self, state: &crate::state::ProjectState) {
-        let Some(page) = stalest_page(state, &self.work_dir) else {
+        let behind = pages_behind_code(self.git.as_ref(), state, &self.work_dir).await;
+        let Some(page) = stalest_page(state, &self.work_dir, &behind) else {
             return;
         };
         if let Some(p) = &self.phase {
@@ -400,6 +412,7 @@ pub fn docs_gate_failures(raw: &str, work_dir: &std::path::Path) -> Option<Strin
 fn stalest_page<'a>(
     state: &'a crate::state::ProjectState,
     work_dir: &std::path::Path,
+    behind: &std::collections::BTreeSet<String>,
 ) -> Option<&'a crate::state::DocPage> {
     // Only pages this role owns. Two things would go wrong otherwise, and both
     // cost real money: the `hub-lessons` mirror the SM rewrites daily is a
@@ -419,13 +432,34 @@ fn stalest_page<'a>(
         .docs
         .iter()
         .filter(mine)
-        .find(|p| page_is_behind_code(p, work_dir))
+        .find(|p| behind.contains(&p.id))
+}
+
+/// Ids of pages whose Code-map files have commits newer than the page — asked
+/// of git through the port, once, so `stalest_page` stays a pure choice.
+async fn pages_behind_code(
+    git: Option<&Arc<dyn crate::ports::outbound::GitPort>>,
+    state: &crate::state::ProjectState,
+    work_dir: &std::path::Path,
+) -> std::collections::BTreeSet<String> {
+    let mut behind = std::collections::BTreeSet::new();
+    let Some(git) = git else { return behind };
+    for page in state.docs.iter().filter(|p| p.updated_by == "DOCS") {
+        if page_is_behind_code(git.as_ref(), page, work_dir).await {
+            behind.insert(page.id.clone());
+        }
+    }
+    behind
 }
 
 /// Whether any file the page's Code map cites has been committed since the
 /// page was last written. Git answers this exactly, so no heuristic decides
 /// that perfectly current documentation is stale.
-fn page_is_behind_code(page: &crate::state::DocPage, work_dir: &std::path::Path) -> bool {
+async fn page_is_behind_code(
+    git: &dyn crate::ports::outbound::GitPort,
+    page: &crate::state::DocPage,
+    work_dir: &std::path::Path,
+) -> bool {
     if page.updated_at.trim().is_empty() {
         return false;
     }
@@ -452,11 +486,9 @@ fn page_is_behind_code(page: &crate::state::DocPage, work_dir: &std::path::Path)
     ]
     .to_vec();
     args.extend(paths.iter().map(|p| (*p).to_owned()));
-    std::process::Command::new("git")
-        .args(&args)
-        .current_dir(work_dir)
-        .output()
-        .is_ok_and(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (ok, out) = git.raw(work_dir, &refs).await;
+    ok && !out.trim().is_empty()
 }
 
 /// The page that already documents this ticket's area, if the team wrote one.
@@ -878,7 +910,12 @@ mod refresh_tests {
             ],
             ..ProjectState::default()
         };
-        assert!(stalest_page(&s, std::path::Path::new("/nonexistent")).is_none());
+        assert!(stalest_page(
+            &s,
+            std::path::Path::new("/nonexistent"),
+            &std::collections::BTreeSet::default()
+        )
+        .is_none());
     }
 
     #[test]
@@ -893,60 +930,100 @@ mod refresh_tests {
             ..ProjectState::default()
         };
         assert_eq!(
-            stalest_page(&s, std::path::Path::new("/nonexistent")).map(|p| p.id.as_str()),
+            stalest_page(
+                &s,
+                std::path::Path::new("/nonexistent"),
+                &std::collections::BTreeSet::default()
+            )
+            .map(|p| p.id.as_str()),
             Some("legacy")
         );
     }
 
-    #[test]
-    fn a_page_with_no_timestamp_or_no_paths_is_never_called_stale() {
-        let dir = std::env::temp_dir().join(format!("docstale-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        // No Code map paths: nothing to compare against, so no claim either way.
-        let p = page("x", "## Code map\n- the module\n", "2026-01-01T00:00:00Z");
-        assert!(!page_is_behind_code(&p, &dir));
-        // No timestamp: we cannot know what "since" means.
-        let p2 = page("y", "## Code map\n- src/a.rs — flow\n", "");
-        assert!(!page_is_behind_code(&p2, &dir));
-        let _ = std::fs::remove_dir_all(&dir);
+    /// A scripted git for the staleness check: `raw` answers with a fixed
+    /// (ok, stdout) — the double that replaces two temp-repo tests which had
+    /// to shell out to real git.
+    struct ScriptedGit(bool, &'static str);
+    #[async_trait::async_trait]
+    impl crate::ports::outbound::GitPort for ScriptedGit {
+        async fn is_repo(&self, _: &std::path::Path) -> bool {
+            true
+        }
+        async fn current_branch(&self, _: &std::path::Path) -> Result<String, crate::PortError> {
+            Ok("main".into())
+        }
+        async fn checkout_branch(
+            &self,
+            _: &std::path::Path,
+            _: &str,
+        ) -> Result<(), crate::PortError> {
+            Ok(())
+        }
+        async fn commit_all(
+            &self,
+            _: &std::path::Path,
+            _: &str,
+            _: &crate::ports::outbound::GitAuthor,
+        ) -> Result<Option<String>, crate::PortError> {
+            Ok(None)
+        }
+        async fn push(&self, _: &std::path::Path, _: &str) -> Result<(), crate::PortError> {
+            Ok(())
+        }
+        async fn sync_base(
+            &self,
+            _: &std::path::Path,
+            _: &str,
+        ) -> Result<crate::ports::outbound::SyncBase, crate::PortError> {
+            Err(crate::PortError::Backend("scripted".into()))
+        }
+        async fn abort_merge(&self, _: &std::path::Path) -> Result<(), crate::PortError> {
+            Ok(())
+        }
+        async fn raw(&self, _: &std::path::Path, _: &[&str]) -> (bool, String) {
+            (self.0, self.1.to_owned())
+        }
     }
 
-    #[test]
-    fn a_commit_after_the_page_marks_it_behind() {
-        let dir = std::env::temp_dir().join(format!("docstale-git-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+    #[tokio::test]
+    async fn a_page_with_no_timestamp_or_no_paths_is_never_called_stale() {
+        let git = ScriptedGit(true, "2026-01-01T00:00:00Z");
+        let dir = std::path::Path::new("/nonexistent");
+        // No Code map paths: nothing to compare against, so no claim either way.
+        let p = page("x", "## Code map\n- the module\n", "2026-01-01T00:00:00Z");
+        assert!(!page_is_behind_code(&git, &p, dir).await);
+        // No timestamp: we cannot know what "since" means.
+        let p2 = page("y", "## Code map\n- src/a.rs — flow\n", "");
+        assert!(!page_is_behind_code(&git, &p2, dir).await);
+    }
+
+    #[tokio::test]
+    async fn a_commit_after_the_page_marks_it_behind() {
+        // The check trusts git's own answer to `log --since`: stdout carrying a
+        // commit means behind, empty means current. Path extraction is covered
+        // above; git's date arithmetic is git's to test.
+        let dir = std::env::temp_dir().join(format!("docstale-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("src")).expect("mkdir");
-        let git = |args: &[&str]| {
-            std::process::Command::new("git")
-                .args(args)
-                .current_dir(&dir)
-                .output()
-                .expect("git");
-        };
-        git(&["init", "-q"]);
         std::fs::write(dir.join("src/a.rs"), "fn a() {}\n").expect("write");
-        git(&["add", "-A"]);
-        git(&[
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "user.name=t",
-            "commit",
-            "-q",
-            "-m",
-            "change a",
-        ]);
         let body = "## Code map\n- src/a.rs — the flow\n";
-        // Page predates the commit → behind. Page written after it → current.
-        assert!(page_is_behind_code(
-            &page("old", body, "2000-01-01T00:00:00Z"),
-            &dir
-        ));
-        assert!(!page_is_behind_code(
-            &page("new", body, "2099-01-01T00:00:00Z"),
-            &dir
-        ));
+        let behind_git = ScriptedGit(true, "2026-07-31T00:00:00Z\n");
+        assert!(
+            page_is_behind_code(
+                &behind_git,
+                &page("old", body, "2000-01-01T00:00:00Z"),
+                &dir
+            )
+            .await
+        );
+        let current_git = ScriptedGit(true, "");
+        assert!(
+            !page_is_behind_code(
+                &current_git,
+                &page("new", body, "2099-01-01T00:00:00Z"),
+                &dir
+            )
+            .await
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
