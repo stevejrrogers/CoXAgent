@@ -24,6 +24,7 @@ pub struct RunDocsUseCase<S: StateStorePort, E: AgentEnginePort> {
     /// Code-map files). `None` reads as "nothing is stale".
     git: Option<Arc<dyn crate::ports::outbound::GitPort>>,
     context: Option<String>,
+    files: Option<Arc<dyn crate::ports::outbound::WorkspaceFilesPort>>,
 }
 
 impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
@@ -44,7 +45,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
             phase: None,
             git: None,
             context: None,
+            files: None,
         }
+    }
+
+    /// Attach workspace file access for prompt context blocks; `None` (tests)
+    /// reads as no context.
+    #[must_use]
+    pub fn with_files(
+        mut self,
+        files: Option<Arc<dyn crate::ports::outbound::WorkspaceFilesPort>>,
+    ) -> Self {
+        self.files = files;
+        self
     }
 
     #[must_use]
@@ -218,8 +231,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
                 format!("\n\n## Project context (goal, stack — doc within this framing):\n{c}\n")
             })
             .unwrap_or_default();
-        let repo_map = prompts::repo_map_block(&self.work_dir, self.config.workflow.token_saver);
-        let focus = prompts::focus_block(&self.work_dir, &title);
+        let repo_map = prompts::repo_map_block(
+            self.files.as_deref(),
+            &self.work_dir,
+            self.config.workflow.token_saver,
+        )
+        .await;
+        let focus = prompts::focus_block(self.files.as_deref(), &self.work_dir, &title).await;
         // Revising beats rewriting: when a page already covers this area the
         // agent must see it, or "update" silently becomes "replace" and the
         // page loses everything the last ticket documented.

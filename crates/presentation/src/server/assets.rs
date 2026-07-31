@@ -240,7 +240,12 @@ pub(super) async fn codegraph_ep(
     let Some(p) = app.project(&pid).await else {
         return not_found();
     };
-    let Some(g) = coxagent_application::codegraph::CodeGraph::load(&p.work_dir) else {
+    let Some(files) = p.files.clone() else {
+        return Json(serde_json::json!({ "built": false })).into_response();
+    };
+    let Some(g) =
+        coxagent_application::codegraph::CodeGraph::load(files.as_ref(), &p.work_dir).await
+    else {
         return Json(serde_json::json!({ "built": false })).into_response();
     };
     if let Some(q) = query.q.filter(|q| !q.trim().is_empty()) {
@@ -263,7 +268,12 @@ pub(super) async fn codegraph_deps_ep(
     let Some(p) = app.project(&pid).await else {
         return not_found();
     };
-    let Some(g) = coxagent_application::codegraph::CodeGraph::load(&p.work_dir) else {
+    let Some(files) = p.files.clone() else {
+        return Json(serde_json::json!({ "built": false })).into_response();
+    };
+    let Some(g) =
+        coxagent_application::codegraph::CodeGraph::load(files.as_ref(), &p.work_dir).await
+    else {
         return Json(serde_json::json!({ "built": false })).into_response();
     };
     let edges = g.resolved_edges();
@@ -320,18 +330,18 @@ pub(super) async fn codegraph_refs_ep(
     if name.len() < 2 {
         return (StatusCode::BAD_REQUEST, "name too short").into_response();
     }
-    let work_dir = p.work_dir.clone();
-    let scan_name = name.clone();
-    let refs = tokio::task::spawn_blocking(move || {
-        coxagent_application::codegraph::references(&work_dir, &scan_name, 200)
-    })
-    .await
-    .unwrap_or_default();
+    let Some(files) = p.files.clone() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "no workspace access").into_response();
+    };
+    let refs =
+        coxagent_application::codegraph::references(files.as_ref(), &p.work_dir, &name, 200).await;
     let defs = refs.iter().filter(|r| r.is_def).count();
     // Call graph (from the persisted index): who calls this fn, and what it calls.
-    let (inbound, outbound) = coxagent_application::codegraph::CodeGraph::load(&p.work_dir)
-        .map(|g| (g.callers(&name), g.callees(&name)))
-        .unwrap_or_default();
+    let (inbound, outbound) =
+        coxagent_application::codegraph::CodeGraph::load(files.as_ref(), &p.work_dir)
+            .await
+            .map(|g| (g.callers(&name), g.callees(&name)))
+            .unwrap_or_default();
     let cg = |v: Vec<(String, String, usize)>| -> Vec<serde_json::Value> {
         v.into_iter()
             .take(100)
@@ -360,23 +370,15 @@ pub(super) async fn codegraph_build_ep(
     let Some(p) = app.project(&pid).await else {
         return not_found();
     };
+    let Some(files) = p.files.clone() else {
+        return internal_error("no workspace access configured");
+    };
     let work_dir = p.work_dir.clone();
-    // Indexing is pure file I/O + string work — run it off the async runtime.
-    let result = tokio::task::spawn_blocking(move || {
-        let g = coxagent_application::codegraph::CodeGraph::index(&work_dir);
-        g.save(&work_dir)?;
-        // Also drop a readable repo map the CLI agents will find naturally.
-        let _ = std::fs::write(
-            work_dir.join(".coxagent").join("REPO_MAP.md"),
-            g.repo_map(40_000),
-        );
-        std::io::Result::Ok(g)
-    })
-    .await;
-    match result {
-        Ok(Ok(g)) => Json(codegraph_summary(&g)).into_response(),
-        Ok(Err(e)) => internal_error(&format!("codegraph save failed: {e}")),
-        Err(e) => internal_error(&format!("codegraph build failed: {e}")),
+    let g = coxagent_application::codegraph::CodeGraph::index(files.as_ref(), &work_dir).await;
+    // save() also writes REPO_MAP.md — one producer, both artifacts.
+    match g.save(files.as_ref(), &work_dir).await {
+        Ok(()) => Json(codegraph_summary(&g)).into_response(),
+        Err(e) => internal_error(&format!("codegraph save failed: {e}")),
     }
 }
 

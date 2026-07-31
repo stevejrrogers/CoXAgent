@@ -122,22 +122,23 @@ pub(super) async fn mcp_call(
     match name {
         "search_symbols" => {
             let q = s("query").ok_or("missing 'query'")?;
-            let g = coxagent_application::codegraph::CodeGraph::load(&p.work_dir)
+            let files = p.files.clone().ok_or("no workspace access")?;
+            let g = coxagent_application::codegraph::CodeGraph::load(files.as_ref(), &p.work_dir)
+                .await
                 .ok_or("code graph not built yet")?;
             serde_json::to_string_pretty(&g.relevance_search(q, 30)).map_err(|e| e.to_string())
         }
         "symbol_refs" => {
             let sym = s("name").ok_or("missing 'name'")?.to_owned();
             let wd = p.work_dir.clone();
-            let refs = tokio::task::spawn_blocking({
-                let (wd, sym) = (wd.clone(), sym.clone());
-                move || coxagent_application::codegraph::references(&wd, &sym, 100)
-            })
-            .await
-            .unwrap_or_default();
-            let (inbound, outbound) = coxagent_application::codegraph::CodeGraph::load(&wd)
-                .map(|g| (g.callers(&sym), g.callees(&sym)))
-                .unwrap_or_default();
+            let files = p.files.clone().ok_or("no workspace access")?;
+            let refs =
+                coxagent_application::codegraph::references(files.as_ref(), &wd, &sym, 100).await;
+            let (inbound, outbound) =
+                coxagent_application::codegraph::CodeGraph::load(files.as_ref(), &wd)
+                    .await
+                    .map(|g| (g.callers(&sym), g.callees(&sym)))
+                    .unwrap_or_default();
             serde_json::to_string_pretty(&serde_json::json!({
                 "refs": refs, "callers": inbound, "callees": outbound
             }))

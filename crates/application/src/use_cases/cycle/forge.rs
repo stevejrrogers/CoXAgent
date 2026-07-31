@@ -395,8 +395,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// From a unified diff, list the functions it touches and who calls them
     /// (from the code graph). Empty when no graph or nothing recognised — a
     /// best-effort blast-radius hint for the reviewer.
-    pub(super) fn diff_impact(&self, diff: &str) -> String {
-        let Some(g) = crate::codegraph::CodeGraph::load(&self.work_dir) else {
+    pub(super) async fn diff_impact(&self, diff: &str) -> String {
+        let Some(files) = self.files.as_deref() else {
+            return String::new();
+        };
+        let Some(g) = crate::codegraph::CodeGraph::load(files, &self.work_dir).await else {
             return String::new();
         };
         // Files the diff changes (`+++ b/path`), normalised.
@@ -457,7 +460,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let terse = if saver { crate::tokens::TERSE } else { "" };
         // Call-graph impact: functions this diff touches, and who calls them —
         // so the reviewer checks the change doesn't break existing callers.
-        let impact = self.diff_impact(diff);
+        let impact = self.diff_impact(diff).await;
         let task = format!(
             "You are the SA with full merge authority on this pull request. Do a deep code review \
              for correctness, completeness, safety, and architecture fit. You may APPROVE (which \
@@ -691,7 +694,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                             if lesson.is_empty() {
                                 continue;
                             }
-                            crate::prompts::record_hub_lesson(&lesson);
+                            crate::prompts::record_hub_lesson(self.files.as_deref(), &lesson).await;
                             let l2 = lesson.clone();
                             let _ = crate::ports::outbound::mutate_state(
                                 self.store.as_ref(),
@@ -788,7 +791,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 let lesson = format!(
                     "PR #{number} ({ticket}) was closed by a human WITHOUT merging — the approach                      was rejected, not the details. Re-read the ticket and redesign before recoding."
                 );
-                crate::prompts::record_hub_lesson(&lesson);
+                crate::prompts::record_hub_lesson(self.files.as_deref(), &lesson).await;
                 let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
                     s.seen_closed_prs.insert(number);
                     s.add_lesson(&lesson);

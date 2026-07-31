@@ -334,13 +334,16 @@ pub fn system_prompt(role_section: &str) -> String {
 /// A compact repo-map context block for code-touching agents: the file/symbol
 /// layout so they locate code without exploring blind (fewer tool calls / tokens).
 /// Empty when the token-saver is off or no map has been built yet.
-#[must_use]
-pub fn repo_map_block(work_dir: &std::path::Path, enabled: bool) -> String {
-    if !enabled {
+pub async fn repo_map_block(
+    files: Option<&dyn crate::ports::outbound::WorkspaceFilesPort>,
+    work_dir: &std::path::Path,
+    enabled: bool,
+) -> String {
+    let (true, Some(files)) = (enabled, files) else {
         return String::new();
-    }
+    };
     let path = work_dir.join(".coxagent").join("REPO_MAP.md");
-    let Ok(map) = std::fs::read_to_string(&path) else {
+    let Some(map) = files.read(&path).await else {
         return String::new();
     };
     let compact: String = map.chars().take(3000).collect();
@@ -354,10 +357,16 @@ pub fn repo_map_block(work_dir: &std::path::Path, enabled: bool) -> String {
 /// `query` (title + design), grouped by file, plus who calls the top hits — so
 /// DEV/SA jump straight to the right code instead of exploring, and see the
 /// blast radius before changing it. Empty when no graph is built yet.
-#[must_use]
-pub fn focus_block(work_dir: &std::path::Path, query: &str) -> String {
+pub async fn focus_block(
+    files: Option<&dyn crate::ports::outbound::WorkspaceFilesPort>,
+    work_dir: &std::path::Path,
+    query: &str,
+) -> String {
     use std::fmt::Write as _;
-    let Some(g) = crate::codegraph::CodeGraph::load(work_dir) else {
+    let Some(files) = files else {
+        return String::new();
+    };
+    let Some(g) = crate::codegraph::CodeGraph::load(files, work_dir).await else {
         return String::new();
     };
     let hits = g.relevance_search(query, 12);
@@ -365,15 +374,15 @@ pub fn focus_block(work_dir: &std::path::Path, query: &str) -> String {
         return String::new();
     }
     // Group by file, preserving relevance order of first appearance.
-    let mut files: Vec<(String, Vec<String>)> = Vec::new();
+    let mut by_file: Vec<(String, Vec<String>)> = Vec::new();
     for s in &hits {
-        match files.iter_mut().find(|(f, _)| *f == s.file) {
+        match by_file.iter_mut().find(|(f, _)| *f == s.file) {
             Some((_, syms)) => syms.push(s.name.clone()),
-            None => files.push((s.file.clone(), vec![s.name.clone()])),
+            None => by_file.push((s.file.clone(), vec![s.name.clone()])),
         }
     }
     let mut out = String::from("\n\nLIKELY RELEVANT CODE (from the code graph — start here):\n");
-    for (f, syms) in files.iter().take(6) {
+    for (f, syms) in by_file.iter().take(6) {
         let _ = writeln!(out, "- {f}: {}", syms.join(", "));
     }
     // Signatures of the top hits — often enough to orient without opening the
@@ -384,8 +393,8 @@ pub fn focus_block(work_dir: &std::path::Path, query: &str) -> String {
         let idx = file_cache
             .iter()
             .position(|(f, _)| *f == s.file)
-            .unwrap_or_else(|| {
-                let content = std::fs::read_to_string(work_dir.join(&s.file)).unwrap_or_default();
+            .unwrap_or({
+                let content = files.read(&work_dir.join(&s.file)).await.unwrap_or_default();
                 file_cache.push((s.file.clone(), content.lines().map(str::to_owned).collect()));
                 file_cache.len() - 1
             });
@@ -442,8 +451,10 @@ fn query_terms(query: &str) -> Vec<String> {
 ///
 /// A bounded walk of the repo — no LLM call, and `target/`, `node_modules/`
 /// and friends are skipped, so the cost is a directory read.
-#[must_use]
-pub fn test_surface_block(work_dir: &std::path::Path) -> String {
+pub async fn test_surface_block(
+    files: Option<&dyn crate::ports::outbound::WorkspaceFilesPort>,
+    work_dir: &std::path::Path,
+) -> String {
     use std::fmt::Write as _;
     const SKIP: &[&str] = &[
         "target",
@@ -454,23 +465,29 @@ pub fn test_surface_block(work_dir: &std::path::Path) -> String {
         "vendor",
         ".venv",
     ];
+    let Some(files) = files else {
+        return String::new();
+    };
     let mut tests: Vec<(String, usize)> = Vec::new();
     let mut routes: Vec<String> = Vec::new();
     let mut stack: Vec<std::path::PathBuf> = vec![work_dir.to_path_buf()];
     let mut files_read = 0_usize;
     while let Some(dir) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in rd.flatten() {
-            let path = entry.path();
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if path.is_dir() {
-                if !name.starts_with('.') && !SKIP.contains(&name.as_str()) && stack.len() < 200 {
-                    stack.push(path);
-                }
-                continue;
+        for sub in files.list_dirs(&dir).await {
+            let name = sub
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if !name.starts_with('.') && !SKIP.contains(&name.as_str()) && stack.len() < 200 {
+                stack.push(sub);
             }
+        }
+        for meta in files.list(&dir).await {
+            let path = meta.path;
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
             // Budget the walk: a big repo must not turn one prompt into a
             // full-text scan.
             if files_read >= 400 {
@@ -482,7 +499,7 @@ pub fn test_surface_block(work_dir: &std::path::Path) -> String {
             if !is_source {
                 continue;
             }
-            let Ok(text) = std::fs::read_to_string(&path) else {
+            let Some(text) = files.read(&path).await else {
                 continue;
             };
             files_read += 1;
@@ -593,8 +610,8 @@ pub fn ask_protocol_block(state: &crate::state::ProjectState, ticket: &str) -> S
 /// BA, PO and PD cannot write a sound requirement without knowing what the
 /// product already does. `exclude` keeps a ticket from being offered its own
 /// history; pass an empty string when there is no ticket in hand.
-#[must_use]
-pub fn knowledge_block(
+pub async fn knowledge_block(
+    files: Option<&dyn crate::ports::outbound::WorkspaceFilesPort>,
     docs: &[crate::state::DocPage],
     tickets: &[coxagent_domain::Ticket],
     work_dir: &std::path::Path,
@@ -607,7 +624,7 @@ pub fn knowledge_block(
     format!(
         "{}{}{}",
         wiki_block(docs, query),
-        repo_docs_block(work_dir, query),
+        repo_docs_block(files, work_dir, query).await,
         prior_fix_block(tickets, query, exclude),
     )
 }
@@ -714,29 +731,32 @@ pub fn prior_fix_block(tickets: &[coxagent_domain::Ticket], query: &str, exclude
 /// The repo's own written word — README, CLAUDE.md/AGENTS.md, `docs/*.md` —
 /// narrowed to what this ticket is about. The rules a project writes down for
 /// its contributors apply to the agent contributor too.
-#[must_use]
-pub fn repo_docs_block(work_dir: &std::path::Path, query: &str) -> String {
+pub async fn repo_docs_block(
+    files: Option<&dyn crate::ports::outbound::WorkspaceFilesPort>,
+    work_dir: &std::path::Path,
+    query: &str,
+) -> String {
     use std::fmt::Write as _;
+    let Some(files) = files else {
+        return String::new();
+    };
     let terms = query_terms(query);
     if terms.is_empty() {
         return String::new();
     }
-    let mut files: Vec<std::path::PathBuf> = ["README.md", "CLAUDE.md", "AGENTS.md", "docs"]
+    let mut candidates: Vec<std::path::PathBuf> = ["README.md", "CLAUDE.md", "AGENTS.md"]
         .iter()
         .map(|n| work_dir.join(n))
         .collect();
     // One level of docs/ is enough; deep trees are the code graph's job.
-    if let Ok(rd) = std::fs::read_dir(work_dir.join("docs")) {
-        for e in rd.flatten().take(40) {
-            let p = e.path();
-            if p.extension().is_some_and(|x| x == "md") {
-                files.push(p);
-            }
+    for meta in files.list(&work_dir.join("docs")).await.into_iter().take(40) {
+        if meta.path.extension().is_some_and(|x| x == "md") {
+            candidates.push(meta.path);
         }
     }
     let mut scored: Vec<(usize, String, String)> = Vec::new();
-    for f in files.iter().filter(|f| f.is_file()) {
-        let Ok(text) = std::fs::read_to_string(f) else {
+    for f in &candidates {
+        let Some(text) = files.read(f).await else {
             continue;
         };
         let name = f
@@ -780,10 +800,17 @@ pub fn repo_docs_block(work_dir: &std::path::Path, query: &str) -> String {
 ///
 /// Deterministic and cheap: the code graph picks the files, `git log` reports
 /// them. Empty when the graph has no opinion or the directory is not a repo.
-#[must_use]
-pub fn history_block(work_dir: &std::path::Path, query: &str) -> String {
+pub async fn history_block(
+    files: Option<&dyn crate::ports::outbound::WorkspaceFilesPort>,
+    git: Option<&dyn crate::ports::outbound::GitPort>,
+    work_dir: &std::path::Path,
+    query: &str,
+) -> String {
     use std::fmt::Write as _;
-    let Some(g) = crate::codegraph::CodeGraph::load(work_dir) else {
+    let (Some(files), Some(git)) = (files, git) else {
+        return String::new();
+    };
+    let Some(g) = crate::codegraph::CodeGraph::load(files, work_dir).await else {
         return String::new();
     };
     let mut files: Vec<String> = Vec::new();
@@ -800,23 +827,24 @@ pub fn history_block(work_dir: &std::path::Path, query: &str) -> String {
     }
     let mut out = String::new();
     for f in &files {
-        let Ok(o) = std::process::Command::new("git")
-            .args([
-                "log",
-                "-n",
-                "3",
-                "--no-merges",
-                "--date=short",
-                "--format=%h %ad %s",
-                "--",
-                f,
-            ])
-            .current_dir(work_dir)
-            .output()
-        else {
+        let (ok, log) = git
+            .raw(
+                work_dir,
+                &[
+                    "log",
+                    "-n",
+                    "3",
+                    "--no-merges",
+                    "--date=short",
+                    "--format=%h %ad %s",
+                    "--",
+                    f,
+                ],
+            )
+            .await;
+        if !ok {
             continue;
-        };
-        let log = String::from_utf8_lossy(&o.stdout);
+        }
         let lines: Vec<&str> = log.lines().filter(|l| !l.trim().is_empty()).collect();
         if lines.is_empty() {
             continue;
@@ -858,13 +886,20 @@ pub fn hub_lessons_path() -> std::path::PathBuf {
 /// Record a lesson into the hub-wide store (dedup, newest last, capped at 30
 /// so the block stays prompt-sized). Best-effort: IO errors are swallowed —
 /// a lesson lost beats a crashed retro.
-pub fn record_hub_lesson(lesson: &str) {
-    let lesson = lesson.trim();
+pub async fn record_hub_lesson(
+    files: Option<&dyn crate::ports::outbound::WorkspaceFilesPort>,
+    lesson: &str,
+) {
+    let (Some(files), lesson) = (files, lesson.trim()) else {
+        return;
+    };
     if lesson.is_empty() {
         return;
     }
     let path = hub_lessons_path();
-    let mut lines: Vec<String> = std::fs::read_to_string(&path)
+    let mut lines: Vec<String> = files
+        .read(&path)
+        .await
         .unwrap_or_default()
         .lines()
         .map(str::to_owned)
@@ -879,17 +914,18 @@ pub fn record_hub_lesson(lesson: &str) {
     if overflow > 0 {
         lines.drain(0..overflow);
     }
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let _ = std::fs::write(&path, lines.join("\n") + "\n");
+    let _ = files.write(&path, &(lines.join("\n") + "\n")).await;
 }
 
 /// Prompt block with the most recent hub-wide lessons (max 8). Empty when the
 /// store is empty/absent.
-#[must_use]
-pub fn hub_lessons_block() -> String {
-    let text = std::fs::read_to_string(hub_lessons_path()).unwrap_or_default();
+pub async fn hub_lessons_block(
+    files: Option<&dyn crate::ports::outbound::WorkspaceFilesPort>,
+) -> String {
+    let Some(files) = files else {
+        return String::new();
+    };
+    let text = files.read(&hub_lessons_path()).await.unwrap_or_default();
     let recent: Vec<&str> = text
         .lines()
         .filter(|l| !l.trim().is_empty())
@@ -1014,8 +1050,9 @@ mod tests {
     use crate::config::DeployConfig;
     use crate::state::DesignSystem;
 
-    #[test]
-    fn repo_map_block_gated_and_present() {
+    #[tokio::test]
+    async fn repo_map_block_gated_and_present() {
+        let fs = &crate::test_fs::StdFsFiles;
         let dir = std::env::temp_dir().join(format!("rmb-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join(".coxagent")).expect("mk");
@@ -1024,11 +1061,18 @@ mod tests {
             "# Repo map\n## src/x.rs (rust)\n  fn go",
         )
         .expect("w");
-        assert!(repo_map_block(&dir, false).is_empty(), "off = empty");
-        let on = repo_map_block(&dir, true);
+        assert!(
+            repo_map_block(Some(fs), &dir, false).await.is_empty(),
+            "off = empty"
+        );
+        let on = repo_map_block(Some(fs), &dir, true).await;
         assert!(on.contains("src/x.rs") && on.contains("Repo map"));
         // Missing map = empty even when enabled.
-        assert!(repo_map_block(std::path::Path::new("/no/such/dir"), true).is_empty());
+        assert!(
+            repo_map_block(Some(fs), std::path::Path::new("/no/such/dir"), true)
+                .await
+                .is_empty()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1071,21 +1115,22 @@ mod tests {
         assert!(out.contains("8px radius"));
     }
 
-    #[test]
-    fn hub_lessons_record_dedup_cap_and_block() {
+    #[tokio::test]
+    async fn hub_lessons_record_dedup_cap_and_block() {
+        let fs = &crate::test_fs::StdFsFiles;
         let dir = std::env::temp_dir().join(format!("cox-hub-lessons-{}", std::process::id()));
         let file = dir.join("hub_lessons.md");
         std::env::set_var("COXAGENT_HUB_LESSONS_PATH", &file);
         let _ = std::fs::remove_file(&file);
         for i in 0..35 {
-            super::record_hub_lesson(&format!("lesson {i}"));
+            super::record_hub_lesson(Some(fs), &format!("lesson {i}")).await;
         }
-        super::record_hub_lesson("lesson 34"); // duplicate — ignored
+        super::record_hub_lesson(Some(fs), "lesson 34").await; // duplicate — ignored
         let text = std::fs::read_to_string(&file).expect("written");
         let n = text.lines().count();
         assert_eq!(n, 30, "capped at 30");
         assert!(!text.contains("lesson 0"), "oldest evicted");
-        let block = super::hub_lessons_block();
+        let block = super::hub_lessons_block(Some(fs)).await;
         assert!(block.contains("OTHER projects"));
         assert!(block.contains("lesson 34"));
         assert_eq!(block.matches("- lesson").count(), 8, "block caps at 8");
@@ -1118,44 +1163,66 @@ mod tests {
 mod history_block_tests {
     use super::history_block;
 
-    #[test]
-    fn stays_silent_when_the_code_graph_has_no_opinion() {
+    struct NoGit;
+
+    #[async_trait::async_trait]
+    impl crate::ports::outbound::GitPort for NoGit {
+        async fn is_repo(&self, _: &std::path::Path) -> bool {
+            false
+        }
+        async fn current_branch(&self, _: &std::path::Path) -> Result<String, crate::PortError> {
+            Ok(String::new())
+        }
+        async fn checkout_branch(
+            &self,
+            _: &std::path::Path,
+            _: &str,
+        ) -> Result<(), crate::PortError> {
+            Ok(())
+        }
+        async fn commit_all(
+            &self,
+            _: &std::path::Path,
+            _: &str,
+            _: &crate::ports::outbound::GitAuthor,
+        ) -> Result<Option<String>, crate::PortError> {
+            Ok(None)
+        }
+        async fn push(&self, _: &std::path::Path, _: &str) -> Result<(), crate::PortError> {
+            Ok(())
+        }
+        async fn sync_base(
+            &self,
+            _: &std::path::Path,
+            _: &str,
+        ) -> Result<crate::ports::outbound::SyncBase, crate::PortError> {
+            Ok(crate::ports::outbound::SyncBase::UpToDate)
+        }
+        async fn abort_merge(&self, _: &std::path::Path) -> Result<(), crate::PortError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn stays_silent_without_ports_or_a_code_graph() {
+        // No ports (tests, git-less projects): the block must stay silent
+        // rather than guess at files — a confidently wrong history is worse
+        // than none.
         let dir = std::env::temp_dir().join(format!("histblock-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).expect("mkdir");
-        let git = |args: &[&str]| {
-            std::process::Command::new("git")
-                .args(args)
-                .current_dir(&dir)
-                .output()
-                .expect("git");
-        };
-        git(&["init", "-q"]);
-        std::fs::write(dir.join("src/auth.rs"), "fn verify_token() {}\n").expect("write");
-        git(&["add", "-A"]);
-        git(&[
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "user.name=t",
-            "commit",
-            "-q",
-            "-m",
-            "fix(auth): reject an expired token",
-        ]);
-        // A real repo with a matching commit, but no code graph: the block must
-        // stay silent rather than guess at files — a confidently wrong history
-        // is worse than none.
-        assert!(history_block(&dir, "verify_token").is_empty());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn a_directory_that_is_not_a_repo_yields_nothing() {
-        let dir = std::env::temp_dir().join(format!("histblock-norepo-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        assert!(history_block(&dir, "anything").is_empty());
+        assert!(history_block(None, None, &dir, "verify_token")
+            .await
+            .is_empty());
+        // Ports present but no persisted code graph: still silent.
+        assert!(history_block(
+            Some(&crate::test_fs::StdFsFiles),
+            Some(&NoGit),
+            &dir,
+            "verify_token"
+        )
+        .await
+        .is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
@@ -1279,8 +1346,8 @@ mod knowledge_block_tests {
         );
     }
 
-    #[test]
-    fn project_docs_are_matched_by_section_not_by_file_size() {
+    #[tokio::test]
+    async fn project_docs_are_matched_by_section_not_by_file_size() {
         let dir = std::env::temp_dir().join(format!("repodocs-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("docs")).expect("mkdir");
@@ -1294,10 +1361,13 @@ mod knowledge_block_tests {
             "## Style\nTabs versus spaces, and other opinions.\n",
         )
         .expect("write");
-        let out = repo_docs_block(&dir, "deploy health gate port polling");
+        let fs = &crate::test_fs::StdFsFiles;
+        let out = repo_docs_block(Some(fs), &dir, "deploy health gate port polling").await;
         assert!(out.contains("README.md"), "the matching section wins");
         assert!(!out.contains("style.md"));
-        assert!(repo_docs_block(&dir, "unrelated subject matter").is_empty());
+        assert!(repo_docs_block(Some(fs), &dir, "unrelated subject matter")
+            .await
+            .is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
@@ -1306,8 +1376,8 @@ mod knowledge_block_tests {
 mod test_surface_tests {
     use super::test_surface_block;
 
-    #[test]
-    fn reports_existing_suites_and_registered_routes() {
+    #[tokio::test]
+    async fn reports_existing_suites_and_registered_routes() {
         let dir = std::env::temp_dir().join(format!("surface-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).expect("mkdir");
@@ -1326,20 +1396,22 @@ mod test_surface_tests {
         // nothing.
         std::fs::write(dir.join("target/debug/junk.rs"), "#[test]\nfn nope() {}\n").expect("write");
 
-        let out = test_surface_block(&dir);
+        let out = test_surface_block(Some(&crate::test_fs::StdFsFiles), &dir).await;
         assert!(out.contains("src/auth.rs (2)"), "counts both test macros");
         assert!(out.contains("/api/health"), "registered route surfaces");
         assert!(!out.contains("junk.rs"), "target/ is skipped");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn a_project_with_neither_says_nothing() {
+    #[tokio::test]
+    async fn a_project_with_neither_says_nothing() {
         let dir = std::env::temp_dir().join(format!("surface-empty-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
         std::fs::write(dir.join("main.rs"), "fn main() {}\n").expect("write");
-        assert!(test_surface_block(&dir).is_empty());
+        assert!(test_surface_block(Some(&crate::test_fs::StdFsFiles), &dir)
+            .await
+            .is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

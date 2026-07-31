@@ -100,7 +100,8 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunArchitectureAud
              high/critical and continuing to add features would make it worse. `refactors` names \
              concrete work (files + target design); [] only if genuinely solid.{}{}",
             self.lang.reply_directive(),
-            crate::prompts::repo_map_block(&self.work_dir, self.token_saver)
+            crate::prompts::repo_map_block(self.files.as_deref(), &self.work_dir, self.token_saver)
+                .await
         );
         let request = AgentRequest {
             role: Role::Sa,

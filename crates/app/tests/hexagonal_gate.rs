@@ -16,8 +16,6 @@ use std::path::{Path, PathBuf};
 /// Files that already did direct IO when the ratchet was installed
 /// (2026-07-31). Remove an entry when you fix the file — never add one.
 const GRANDFATHERED: &[&str] = &[
-    "codegraph.rs",
-    "prompts.rs",
 ];
 
 const FORBIDDEN: &[&str] = &["std::process::Command", "std::fs::"];

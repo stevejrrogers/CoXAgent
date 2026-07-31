@@ -10,7 +10,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
     /// own wiki, the project's docs, and closed tickets with the same symptom.
     /// A person walking into unfamiliar code reads these before typing; an
     /// agent only reads what the brief hands it.
-    pub(super) fn knowledge_brief(
+    pub(super) async fn knowledge_brief(
+        files: Option<&dyn crate::ports::outbound::WorkspaceFilesPort>,
         state: &ProjectState,
         id: &TicketId,
         ticket: Option<&coxagent_domain::Ticket>,
@@ -31,12 +32,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             return String::new();
         }
         prompts::knowledge_block(
+            files,
             &state.docs,
             &state.tickets,
             work_dir,
             &query,
             &id.to_string(),
         )
+        .await
     }
     /// How previous attempts are briefed to the next one. Structured records
     /// name the gate and the files; a ticket that failed before that log
@@ -77,7 +80,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             lines.join("\n- ")
         )
     }
-    pub(super) fn build_request(&self, state: &ProjectState, id: &TicketId) -> AgentRequest {
+    #[allow(clippy::too_many_lines)] // one linear prompt assembly; splitting hurts readability
+    pub(super) async fn build_request(&self, state: &ProjectState, id: &TicketId) -> AgentRequest {
         let ticket = state.ticket(id);
         let title = ticket.map_or("", coxagent_domain::Ticket::title);
         let _choice = self.config.engine.resolve(self.mode.role());
@@ -119,10 +123,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         let journal = Self::attempts_brief(state, id);
         // What was already done to this code. A human opens the file's history
         // before editing it; nothing in the ticket text carries that.
-        let knowledge = Self::knowledge_brief(state, id, ticket, &self.work_dir);
+        let knowledge =
+            Self::knowledge_brief(self.files.as_deref(), state, id, ticket, &self.work_dir).await;
         // Ask the BA rather than invent a requirement (and read any answer).
         let asking = prompts::ask_protocol_block(state, &id.to_string());
         let history = prompts::history_block(
+            self.files.as_deref(),
+            self.git.as_deref(),
             &self.work_dir,
             &format!(
                 "{title} {}",
@@ -130,7 +137,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                     .and_then(|t| t.design().technical.as_ref())
                     .map_or("", |d| d.approach.as_str())
             ),
-        );
+        )
+        .await;
         AgentRequest {
             role: self.mode.role(),
             // The system prompt stays BYTE-IDENTICAL across every DEV run of a
@@ -143,6 +151,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 "Ticket {id}: {title}\n{}\nImplement it now.{stack}{deploy}{design}{context_block}{}{history}{knowledge}{}{}{}{steering}{journal}{asking}",
                 ticket_brief(ticket),
                 prompts::focus_block(
+                    self.files.as_deref(),
                     &self.work_dir,
                     &format!(
                         "{title} {}",
@@ -150,8 +159,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                             .and_then(|t| t.design().technical.as_ref())
                             .map_or("", |d| d.approach.as_str())
                     ),
-                ),
-                prompts::repo_map_block(&self.work_dir, self.config.workflow.token_saver),
+                )
+                .await,
+                prompts::repo_map_block(
+                    self.files.as_deref(),
+                    &self.work_dir,
+                    self.config.workflow.token_saver,
+                )
+                .await,
                 prompts::team_memory_block_relevant(
                     &state.decisions,
                     &state.lessons,
@@ -162,7 +177,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                             .map_or("", |d| d.approach.as_str())
                     ),
                 ),
-                prompts::hub_lessons_block(),
+                prompts::hub_lessons_block(self.files.as_deref()).await,
             ),
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(3600),

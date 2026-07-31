@@ -206,7 +206,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             let _ = self.store.save(&s).await;
         }
         // Cross-project: the same lesson benefits every other project on this hub.
-        crate::prompts::record_hub_lesson(&lesson);
+        crate::prompts::record_hub_lesson(self.files.as_deref(), &lesson).await;
     }
     /// Sprint Review + Retrospective, posted to the team channel: what shipped
     /// vs. what was committed, and a plain-spoken takeaway for next time.

@@ -39,6 +39,7 @@ pub struct RunSaUseCase<S: StateStorePort, E: AgentEnginePort> {
     worker: String,
     phase: Option<crate::use_cases::runner::PhaseReporter>,
     context: Option<String>,
+    files: Option<Arc<dyn crate::ports::outbound::WorkspaceFilesPort>>,
 }
 
 impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
@@ -51,7 +52,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             worker: String::new(),
             phase: None,
             context: None,
+            files: None,
         }
+    }
+
+    /// Attach workspace file access for prompt context blocks; `None` (tests)
+    /// reads as no context.
+    #[must_use]
+    pub fn with_files(
+        mut self,
+        files: Option<Arc<dyn crate::ports::outbound::WorkspaceFilesPort>>,
+    ) -> Self {
+        self.files = files;
+        self
     }
 
     /// Attach the project context (`project_context.md`) so the SA understands
@@ -135,6 +148,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
         // design for a product whose own wiki, docs and solved tickets it has
         // never been shown.
         let knowledge = crate::prompts::knowledge_block(
+            self.files.as_deref(),
             &state.docs,
             &state.tickets,
             &self.work_dir,
@@ -145,10 +159,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
                     .map_or("", coxagent_domain::Ticket::description)
             ),
             &id.to_string(),
-        );
+        )
+        .await;
         let outcome = self
             .engine
-            .run(self.build_request(&id, &title, &memory, &knowledge))
+            .run(self.build_request(&id, &title, &memory, &knowledge).await)
             .await?;
         if !outcome.succeeded() {
             self.store.release_stage(&id, "sa", &worker).await.ok();
@@ -363,7 +378,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
         }
     }
 
-    fn build_request(
+    async fn build_request(
         &self,
         id: &TicketId,
         title: &str,
@@ -383,8 +398,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             system_prompt: prompts::system_prompt(prompts::SA),
             task_prompt: format!(
                 "Design feature {id}: {title}{context_block}{stack}{}{}{knowledge}{memory}",
-                prompts::focus_block(&self.work_dir, title),
-                prompts::repo_map_block(&self.work_dir, self.config.workflow.token_saver),
+                prompts::focus_block(self.files.as_deref(), &self.work_dir, title).await,
+                prompts::repo_map_block(
+                    self.files.as_deref(),
+                    &self.work_dir,
+                    self.config.workflow.token_saver,
+                )
+                .await,
             ),
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(1200),

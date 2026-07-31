@@ -325,6 +325,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         let title = ticket.title().to_owned();
         let brief = super::run_dev::ticket_brief(Some(ticket));
         let fp = crate::prompts::focus_block(
+            self.files.as_deref(),
             &self.work_dir,
             &format!(
                 "{title} {}",
@@ -334,8 +335,11 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
                     .as_ref()
                     .map_or("", |d| d.approach.as_str())
             ),
-        );
-        let rp = crate::prompts::repo_map_block(&self.work_dir, self.token_saver);
+        )
+        .await;
+        let rp =
+            crate::prompts::repo_map_block(self.files.as_deref(), &self.work_dir, self.token_saver)
+                .await;
 
         let request = crate::ports::outbound::AgentRequest {
             role: coxagent_domain::Role::DevFeature,
@@ -410,8 +414,11 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         };
         self.post("SA", &announce).await;
 
-        let fp = crate::prompts::focus_block(&self.work_dir, &title);
-        let rp = crate::prompts::repo_map_block(&self.work_dir, self.token_saver);
+        let fp =
+            crate::prompts::focus_block(self.files.as_deref(), &self.work_dir, &title).await;
+        let rp =
+            crate::prompts::repo_map_block(self.files.as_deref(), &self.work_dir, self.token_saver)
+                .await;
         let request = crate::ports::outbound::AgentRequest {
             role: coxagent_domain::Role::Sa,
             system_prompt: crate::prompts::system_prompt(crate::prompts::SA),

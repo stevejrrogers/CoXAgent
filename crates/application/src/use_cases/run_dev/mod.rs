@@ -340,7 +340,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         // name the risks — no code yet), then EXECUTE the plan in the SAME
         // conversation. Thinking is cheap; unplanned code is not. Falls back
         // to single-shot on engines without session resume.
-        let mut request = self.build_request(&state, &id);
+        let mut request = self.build_request(&state, &id).await;
         let plan_first = request.escalation_level == 0; // retries already carry a journal
         if plan_first {
             request.task_prompt = format!(
@@ -416,7 +416,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                             _ => {
                                 // Resume unsupported/failed: run single-shot fresh
                                 // with the plan folded in as a normal task.
-                                let fresh = self.build_request(&state, &id);
+                                let fresh = self.build_request(&state, &id).await;
                                 match self.engine.run(fresh).await {
                                     Ok(f) if f.succeeded() => f.session_id.clone(),
                                     Ok(f) => {

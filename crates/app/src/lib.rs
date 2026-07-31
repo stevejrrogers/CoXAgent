@@ -182,7 +182,7 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
             ))
             .await
         }
-        Command::Codegraph { query, work_dir } => codegraph_query(&work_dir, &query),
+        Command::Codegraph { query, work_dir } => codegraph_query(&work_dir, &query).await,
         Command::Compress {
             cmd,
             exact_check,
@@ -318,7 +318,7 @@ mod shim_script_tests {
 
 /// Answer a code-graph query for agents (and humans) — structured, token-cheap
 /// output instead of grepping the tree by hand.
-fn codegraph_query(
+async fn codegraph_query(
     work_dir: &Path,
     query: &coxagent_presentation::CodegraphQuery,
 ) -> Result<String, Box<dyn std::error::Error>> {
@@ -326,17 +326,19 @@ fn codegraph_query(
     use coxagent_presentation::CodegraphQuery as Q;
     use std::fmt::Write as _;
 
+    let files = coxagent_infrastructure::FsWorkspaceFiles::new();
     // Build fresh for `build`; otherwise use the persisted index (build if absent).
-    let graph = || CodeGraph::load(work_dir).unwrap_or_else(|| CodeGraph::index(work_dir));
+    let graph = || async {
+        match CodeGraph::load(&files, work_dir).await {
+            Some(g) => g,
+            None => CodeGraph::index(&files, work_dir).await,
+        }
+    };
     let mut out = String::new();
     match query {
         Q::Build => {
-            let g = CodeGraph::index(work_dir);
-            g.save(work_dir)?;
-            let _ = std::fs::write(
-                work_dir.join(".coxagent").join("REPO_MAP.md"),
-                g.repo_map(40_000),
-            );
+            let g = CodeGraph::index(&files, work_dir).await;
+            g.save(&files, work_dir).await?;
             let _ = writeln!(
                 out,
                 "indexed {} files, {} symbols, {} calls",
@@ -346,7 +348,7 @@ fn codegraph_query(
             );
         }
         Q::Search { query: q } => {
-            let g = graph();
+            let g = graph().await;
             for s in g.relevance_search(q, 50) {
                 let scope = s
                     .scope
@@ -356,7 +358,7 @@ fn codegraph_query(
             }
         }
         Q::Impact { name } => {
-            let refs = references(work_dir, name, 200);
+            let refs = references(&files, work_dir, name, 200).await;
             let (defs, uses): (Vec<_>, Vec<_>) = refs.iter().partition(|r| r.is_def);
             let _ = writeln!(
                 out,
@@ -370,7 +372,7 @@ fn codegraph_query(
             }
         }
         Q::Callers { name } => {
-            let g = graph();
+            let g = graph().await;
             let callers = g.callers(name);
             if callers.is_empty() {
                 let _ = writeln!(out, "no callers found for `{name}`");
@@ -380,13 +382,13 @@ fn codegraph_query(
             }
         }
         Q::Deps { file } => {
-            let g = graph();
+            let g = graph().await;
             for f in g.dependents(file) {
                 let _ = writeln!(out, "{f}");
             }
         }
         Q::Map => {
-            out.push_str(&graph().repo_map(40_000));
+            out.push_str(&graph().await.repo_map(40_000));
         }
     }
     Ok(out.trim_end().to_owned())

@@ -68,45 +68,63 @@ pub struct CodeGraph {
     pub languages: BTreeMap<String, usize>,
 }
 
+/// Walk source files under `root` through the files port, yielding
+/// `(relative_path, language, contents)`. Skips vendored/build/VCS
+/// directories and binary/huge files; unreadable files are skipped.
+async fn walk_sources(
+    files: &dyn crate::ports::outbound::WorkspaceFilesPort,
+    root: &Path,
+) -> Vec<(String, &'static str, String)> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for sub in files.list_dirs(&dir).await {
+            let name = sub
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if !is_skipped_dir(&name) {
+                stack.push(sub);
+            }
+        }
+        for meta in files.list(&dir).await {
+            let name = meta
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let Some(lang) = lang_of(&name) else { continue };
+            // Guard against pathological files.
+            if meta.size > 1_500_000 {
+                continue;
+            }
+            let Some(text) = files.read(&meta.path).await else {
+                continue;
+            };
+            let rel = meta
+                .path
+                .strip_prefix(root)
+                .unwrap_or(&meta.path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            out.push((rel, lang, text));
+        }
+    }
+    out
+}
+
 impl CodeGraph {
-    /// Build the graph by walking `root`. Skips vendored/build/VCS directories
-    /// and binary/huge files. Best-effort — unreadable files are skipped.
-    #[must_use]
-    pub fn index(root: &Path) -> Self {
+    /// Build the graph by walking `root` through the files port.
+    pub async fn index(
+        files: &dyn crate::ports::outbound::WorkspaceFilesPort,
+        root: &Path,
+    ) -> Self {
         let mut g = CodeGraph {
             built_at: now_rfc3339(),
             ..Default::default()
         };
-        let mut stack = vec![root.to_path_buf()];
-        while let Some(dir) = stack.pop() {
-            let Ok(entries) = std::fs::read_dir(&dir) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let name = entry.file_name().to_string_lossy().to_string();
-                if path.is_dir() {
-                    if is_skipped_dir(&name) {
-                        continue;
-                    }
-                    stack.push(path);
-                } else if let Some(lang) = lang_of(&name) {
-                    // Guard against pathological files.
-                    let Ok(meta) = entry.metadata() else { continue };
-                    if meta.len() > 1_500_000 {
-                        continue;
-                    }
-                    let Ok(text) = std::fs::read_to_string(&path) else {
-                        continue;
-                    };
-                    let rel = path
-                        .strip_prefix(root)
-                        .unwrap_or(&path)
-                        .to_string_lossy()
-                        .replace('\\', "/");
-                    g.ingest_file(&rel, lang, &text);
-                }
-            }
+        for (rel, lang, text) in walk_sources(files, root).await {
+            g.ingest_file(&rel, lang, &text);
         }
         g.files.sort_by(|a, b| a.path.cmp(&b.path));
         g.symbols.sort_by_key(|s| s.name.to_lowercase());
@@ -365,21 +383,37 @@ impl CodeGraph {
     ///
     /// # Errors
     /// IO/serialisation failures.
-    pub fn save(&self, root: &Path) -> std::io::Result<()> {
+    pub async fn save(
+        &self,
+        files: &dyn crate::ports::outbound::WorkspaceFilesPort,
+        root: &Path,
+    ) -> std::io::Result<()> {
         let dir = root.join(".coxagent");
-        std::fs::create_dir_all(&dir)?;
-        let json = serde_json::to_vec_pretty(self)
+        let json = serde_json::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        std::fs::write(dir.join("codegraph.json"), json)?;
+        let err = || std::io::Error::other("codegraph write failed");
+        if !files.write(&dir.join("codegraph.json"), &json).await {
+            return Err(err());
+        }
         // The human-readable map ships with the graph: one producer, one save,
         // no caller left to remember the second artifact.
-        std::fs::write(dir.join("REPO_MAP.md"), self.repo_map(40_000))
+        if !files
+            .write(&dir.join("REPO_MAP.md"), &self.repo_map(40_000))
+            .await
+        {
+            return Err(err());
+        }
+        Ok(())
     }
 
     /// Load a previously built graph, if present.
-    #[must_use]
-    pub fn load(root: &Path) -> Option<Self> {
-        let text = std::fs::read_to_string(root.join(".coxagent").join("codegraph.json")).ok()?;
+    pub async fn load(
+        files: &dyn crate::ports::outbound::WorkspaceFilesPort,
+        root: &Path,
+    ) -> Option<Self> {
+        let text = files
+            .read(&root.join(".coxagent").join("codegraph.json"))
+            .await?;
         serde_json::from_str(&text).ok()
     }
 }
@@ -416,67 +450,47 @@ fn is_ident(b: u8) -> bool {
 }
 
 /// Impact analysis: scan the tree for whole-word usages of `name`. On-demand
-/// (re-reads source), so it reflects the current tree without a rebuild.
-#[must_use]
-pub fn references(root: &Path, name: &str, limit: usize) -> Vec<Reference> {
+/// (re-reads source through the files port), so it reflects the current tree
+/// without a rebuild.
+pub async fn references(
+    files: &dyn crate::ports::outbound::WorkspaceFilesPort,
+    root: &Path,
+    name: &str,
+    limit: usize,
+) -> Vec<Reference> {
     let name = name.trim();
     if name.is_empty() || name.len() < 2 {
         return Vec::new();
     }
     let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
+    for (rel, lang, text) in walk_sources(files, root).await {
+        let lines: Vec<&str> = text.lines().collect();
+        let push_ref = |out: &mut Vec<Reference>, ln: usize, raw: &str| {
+            let is_def = extract_symbol(lang, raw.trim()).is_some_and(|(_, n)| n == name);
+            out.push(Reference {
+                file: rel.clone(),
+                line: ln,
+                text: raw.trim().chars().take(200).collect(),
+                is_def,
+            });
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let fname = entry.file_name().to_string_lossy().to_string();
-            if path.is_dir() {
-                if !is_skipped_dir(&fname) {
-                    stack.push(path);
+        // Tree-sitter counts only real identifier tokens — usages inside
+        // comments and string literals are correctly ignored. Heuristic
+        // word-scan for languages without a grammar.
+        if let Some(ref_lines) = crate::ts::reference_lines(lang, &text, name) {
+            for ln in ref_lines {
+                let raw = lines.get(ln.saturating_sub(1)).copied().unwrap_or("");
+                push_ref(&mut out, ln, raw);
+                if out.len() >= limit {
+                    return sort_refs(out);
                 }
-            } else if let Some(lang) = lang_of(&fname) {
-                if entry.metadata().map_or(0, |m| m.len()) > 1_500_000 {
-                    continue;
-                }
-                let Ok(text) = std::fs::read_to_string(&path) else {
-                    continue;
-                };
-                let rel = path
-                    .strip_prefix(root)
-                    .unwrap_or(&path)
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                let lines: Vec<&str> = text.lines().collect();
-                let push_ref = |out: &mut Vec<Reference>, ln: usize, raw: &str| {
-                    let is_def = extract_symbol(lang, raw.trim()).is_some_and(|(_, n)| n == name);
-                    out.push(Reference {
-                        file: rel.clone(),
-                        line: ln,
-                        text: raw.trim().chars().take(200).collect(),
-                        is_def,
-                    });
-                };
-                // Tree-sitter counts only real identifier tokens — usages inside
-                // comments and string literals are correctly ignored. Heuristic
-                // word-scan for languages without a grammar.
-                if let Some(ref_lines) = crate::ts::reference_lines(lang, &text, name) {
-                    for ln in ref_lines {
-                        let raw = lines.get(ln.saturating_sub(1)).copied().unwrap_or("");
-                        push_ref(&mut out, ln, raw);
-                        if out.len() >= limit {
-                            return sort_refs(out);
-                        }
-                    }
-                } else {
-                    for (i, raw) in lines.iter().enumerate() {
-                        if word_matches(raw, name) {
-                            push_ref(&mut out, i + 1, raw);
-                            if out.len() >= limit {
-                                return sort_refs(out);
-                            }
-                        }
+            }
+        } else {
+            for (i, raw) in lines.iter().enumerate() {
+                if word_matches(raw, name) {
+                    push_ref(&mut out, i + 1, raw);
+                    if out.len() >= limit {
+                        return sort_refs(out);
                     }
                 }
             }
@@ -714,8 +728,8 @@ mod tests {
         assert!(!word_matches("building = 1", "build"));
     }
 
-    #[test]
-    fn treesitter_excludes_comments_and_strings() {
+    #[tokio::test]
+    async fn treesitter_excludes_comments_and_strings() {
         let dir = std::env::temp_dir().join(format!("cgts-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).expect("mk");
@@ -725,7 +739,7 @@ mod tests {
             "pub fn widget() {}\nfn caller() { widget(); }\n// call widget here\nlet s = \"widget\";\n",
         )
         .expect("w");
-        let refs = references(&dir, "widget", 50);
+        let refs = references(&crate::test_fs::StdFsFiles, &dir, "widget", 50).await;
         // Heuristic would return 4; tree-sitter returns only the 2 real ones.
         assert_eq!(refs.len(), 2, "comment + string usages must be excluded");
         assert!(refs.iter().any(|r| r.is_def && r.line == 1));
@@ -743,8 +757,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn relevance_ranks_multi_term_matches_higher() {
+    #[tokio::test]
+    async fn relevance_ranks_multi_term_matches_higher() {
         let dir = std::env::temp_dir().join(format!("cgrel-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("auth")).expect("mk");
@@ -753,7 +767,7 @@ mod tests {
             "pub fn authenticate_user() {}\npub fn parse_json() {}\n",
         )
         .expect("w");
-        let g = CodeGraph::index(&dir);
+        let g = CodeGraph::index(&crate::test_fs::StdFsFiles, &dir).await;
         let hits = g.relevance_search("auth user", 10);
         assert_eq!(
             hits.first().map(|s| s.name.as_str()),
@@ -763,8 +777,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn c_cpp_ruby_php_symbols_and_calls() {
+    #[tokio::test]
+    async fn c_cpp_ruby_php_symbols_and_calls() {
         let dir = std::env::temp_dir().join(format!("cgccrp-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).expect("mk");
@@ -788,7 +802,7 @@ mod tests {
             "<?php\nclass Foo { function bar(){ baz(); } }\nfunction baz(){}",
         )
         .expect("php");
-        let g = CodeGraph::index(&dir);
+        let g = CodeGraph::index(&crate::test_fs::StdFsFiles, &dir).await;
         // C free function + call.
         assert!(g.symbols.iter().any(|s| s.name == "help" && s.kind == "fn"));
         assert!(g.callers("help").iter().any(|(w, _, _)| w == "run"));
@@ -812,8 +826,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn java_csharp_swift_symbols_and_calls() {
+    #[tokio::test]
+    async fn java_csharp_swift_symbols_and_calls() {
         let dir = std::env::temp_dir().join(format!("cgjcs-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).expect("mk");
@@ -832,7 +846,7 @@ mod tests {
             "class App { func build() { validate() }\nfunc validate() {} }",
         )
         .expect("s");
-        let g = CodeGraph::index(&dir);
+        let g = CodeGraph::index(&crate::test_fs::StdFsFiles, &dir).await;
         // Scope-aware methods across all three languages.
         assert!(g
             .symbols
@@ -856,8 +870,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn call_graph_links_callers_and_callees() {
+    #[tokio::test]
+    async fn call_graph_links_callers_and_callees() {
         let dir = std::env::temp_dir().join(format!("cgcall-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).expect("mk");
@@ -866,7 +880,7 @@ mod tests {
             "fn helper() {}\nfn run() { helper(); helper(); }\nfn main() { run(); }\n",
         )
         .expect("w");
-        let g = CodeGraph::index(&dir);
+        let g = CodeGraph::index(&crate::test_fs::StdFsFiles, &dir).await;
         let callers = g.callers("helper");
         assert!(
             callers.iter().any(|(who, _, _)| who == "run"),
@@ -897,14 +911,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn resolved_edges_link_files() {
+    #[tokio::test]
+    async fn resolved_edges_link_files() {
         let dir = std::env::temp_dir().join(format!("cgdep-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).expect("mk");
         std::fs::write(dir.join("src/tokens.rs"), "pub fn compress() {}\n").expect("w");
         std::fs::write(dir.join("src/user.rs"), "use crate::tokens::compress;\n").expect("w2");
-        let g = CodeGraph::index(&dir);
+        let g = CodeGraph::index(&crate::test_fs::StdFsFiles, &dir).await;
         let e = g.resolved_edges();
         assert!(e
             .iter()
@@ -912,8 +926,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn references_finds_usages_and_marks_def() {
+    #[tokio::test]
+    async fn references_finds_usages_and_marks_def() {
         let dir = std::env::temp_dir().join(format!("cgref-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).expect("mk");
@@ -923,15 +937,15 @@ mod tests {
             "fn main() { widget(); let w = widget(); }\n",
         )
         .expect("w2");
-        let refs = references(&dir, "widget", 50);
+        let refs = references(&crate::test_fs::StdFsFiles, &dir, "widget", 50).await;
         assert!(refs.iter().any(|r| r.is_def && r.file == "src/a.rs"));
         assert!(refs.iter().filter(|r| !r.is_def).count() >= 1);
         assert!(refs[0].is_def, "definition should sort first");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn index_walks_and_maps() {
+    #[tokio::test]
+    async fn index_walks_and_maps() {
         let dir = std::env::temp_dir().join(format!("cgtest-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).expect("mk");
@@ -943,7 +957,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("node_modules")).expect("mk2");
         std::fs::write(dir.join("node_modules/skip.js"), "function ignoreMe(){}").expect("w2");
 
-        let g = CodeGraph::index(&dir);
+        let g = CodeGraph::index(&crate::test_fs::StdFsFiles, &dir).await;
         assert_eq!(g.files.len(), 1, "node_modules must be skipped");
         assert!(g.symbols.iter().any(|s| s.name == "main" && s.kind == "fn"));
         assert!(g
@@ -953,8 +967,8 @@ mod tests {
         assert!(g.search("mai", 10).iter().any(|s| s.name == "main"));
         assert!(g.repo_map(10_000).contains("src/main.rs"));
 
-        g.save(&dir).expect("save");
-        assert!(CodeGraph::load(&dir).is_some());
+        g.save(&crate::test_fs::StdFsFiles, &dir).await.expect("save");
+        assert!(CodeGraph::load(&crate::test_fs::StdFsFiles, &dir).await.is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

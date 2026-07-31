@@ -280,11 +280,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         if !(missing || cycle % 3 == 1) {
             return;
         }
+        let Some(files) = self.files.clone() else {
+            return;
+        };
         let root = self.work_dir.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            let g = crate::codegraph::CodeGraph::index(&root);
+        let _ = tokio::spawn(async move {
+            let g = crate::codegraph::CodeGraph::index(files.as_ref(), &root).await;
             // save() also writes REPO_MAP.md — one producer, both artifacts.
-            let _ = g.save(&root);
+            let _ = g.save(files.as_ref(), &root).await;
         })
         .await;
     }
@@ -1668,6 +1671,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             self.work_dir.clone(),
             self.context.clone(),
         )
+        .with_files(self.files.clone())
     }
 
     fn sa(&self) -> RunSaUseCase<S, E> {
@@ -1677,6 +1681,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             self.config.clone(),
             self.work_dir.clone(),
         )
+        .with_files(self.files.clone())
         .with_worker(self.worker.clone())
         .with_phase(self.phase.clone())
         .with_context(Some(self.context.clone()))
@@ -1690,6 +1695,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             self.work_dir.clone(),
             self.context.clone(),
         )
+        .with_files(self.files.clone())
     }
 
     fn design_system(&self) -> RunDesignSystemUseCase<S, E> {
@@ -1708,6 +1714,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             self.config.clone(),
             self.work_dir.clone(),
         )
+        .with_files(self.files.clone())
         .with_worker(self.worker.clone())
         .with_phase(self.phase.clone())
         .with_context(Some(self.context.clone()))
@@ -1736,6 +1743,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             self.config.clone(),
             self.work_dir.clone(),
         )
+        .with_files(self.files.clone())
         .with_context(Some(self.context.clone()))
     }
 
@@ -1746,6 +1754,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             self.config.clone(),
             self.work_dir.clone(),
         )
+        .with_files(self.files.clone())
         .with_worker(self.worker.clone())
         .with_phase(self.phase.clone())
         .with_git(self.git.clone())

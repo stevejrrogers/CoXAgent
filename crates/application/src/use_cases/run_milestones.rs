@@ -30,6 +30,7 @@ pub struct RunMilestonesUseCase<S: StateStorePort, E: AgentEnginePort> {
     config: Config,
     work_dir: PathBuf,
     context: String,
+    files: Option<Arc<dyn crate::ports::outbound::WorkspaceFilesPort>>,
 }
 
 impl<S: StateStorePort, E: AgentEnginePort> RunMilestonesUseCase<S, E> {
@@ -46,7 +47,18 @@ impl<S: StateStorePort, E: AgentEnginePort> RunMilestonesUseCase<S, E> {
             config,
             work_dir,
             context,
+            files: None,
         }
+    }
+
+    /// Attach workspace file access for prompt context blocks.
+    #[must_use]
+    pub fn with_files(
+        mut self,
+        files: Option<Arc<dyn crate::ports::outbound::WorkspaceFilesPort>>,
+    ) -> Self {
+        self.files = files;
+        self
     }
 
     /// Author the milestone plan when the project has a backlog but no
@@ -80,12 +92,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunMilestonesUseCase<S, E> {
         let backlog_text = backlog.join("\n");
         // A roadmap written without knowing what already shipped re-promises it.
         let knowledge = crate::prompts::knowledge_block(
+            self.files.as_deref(),
             &state.docs,
             &state.tickets,
             &self.work_dir,
             &format!("{} {}", self.context, backlog_text),
             "",
-        );
+        )
+        .await;
         let backlog_block = format!("{backlog_text}{knowledge}");
         let task_prompt = if extending {
             let shipped: Vec<String> = state
