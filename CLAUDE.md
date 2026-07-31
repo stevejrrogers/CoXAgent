@@ -46,3 +46,27 @@ This project is indexed by GitNexus as **CoXAgent** (4970 symbols, 13030 relatio
 ## Team learnings (auto-promoted by memory hygiene)
 - Before editing any file marked M in git status, read its full git diff to catch pre-existing uncommitted changes (test scaffolding, WIP from prior attempts). These often encode design intent that should shape implementation from the start, not be reconciled afterward. Add to CLAUDE.md: "NEVER edit a modified file without reading its full `git diff` first to check for pre-existing uncommitted intent."
 - rtk's output compression hook silently fabricates or truncates content for large reads (git cat-file, git show, grep, cargo test --workspace); verify via `Read` tool directly or per-crate `cargo test -p <crate>` when correctness matters. Shims in $TMPDIR shadow real binaries — use absolute paths (/opt/homebrew/bin/cargo, etc.) as escape hatch. Docker compose in sandbox needs `BUILDX_CONFIG=<scratchpad>`, not DOCKER_CONFIG.
+
+## Code layout (why merges keep conflicting)
+
+Two agents editing the same oversized module conflict by construction. The rule
+that prevents it is structural, not procedural:
+
+- One cohesive unit per file; one bounded context per directory.
+- Past ~500 lines, split along a real seam and name the new file for what it
+  IS. `helpers.rs` / `utils2.rs` are not seams — a split you cannot name has
+  made two problems out of one.
+- Touching an oversized file? Leave it smaller: extract the part you came to
+  change, with its tests. Do not rewrite the module for a one-behaviour ticket.
+- Current offenders, largest first (split these when work takes you into them):
+  `presentation/src/server.rs`, `presentation/src/web/index.html`,
+  `application/src/use_cases/cycle.rs`, `application/src/state.rs`.
+
+## Running the app you are building
+
+This repository IS the tool running you. When you start a build of it to try
+something, never let it bind the hub's port (4000): the desktop window points
+there, and a hub that finds its port taken moves to another one — the app then
+looks dead while everything is in fact running. Use the project's own
+`deploy.host_port`, or set `COXAGENT_PORT` before `coxagent serve`. Stop what
+you started when you are done.

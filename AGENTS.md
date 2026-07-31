@@ -42,3 +42,27 @@ This project is indexed by GitNexus as **CoXAgent** (4970 symbols, 13030 relatio
 | Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
 
 <!-- gitnexus:end -->
+
+## Code layout (why merges keep conflicting)
+
+Two agents editing the same oversized module conflict by construction. The rule
+that prevents it is structural, not procedural:
+
+- One cohesive unit per file; one bounded context per directory.
+- Past ~500 lines, split along a real seam and name the new file for what it
+  IS. `helpers.rs` / `utils2.rs` are not seams — a split you cannot name has
+  made two problems out of one.
+- Touching an oversized file? Leave it smaller: extract the part you came to
+  change, with its tests. Do not rewrite the module for a one-behaviour ticket.
+- Current offenders, largest first (split these when work takes you into them):
+  `presentation/src/server.rs`, `presentation/src/web/index.html`,
+  `application/src/use_cases/cycle.rs`, `application/src/state.rs`.
+
+## Running the app you are building
+
+This repository IS the tool running you. When you start a build of it to try
+something, never let it bind the hub's port (4000): the desktop window points
+there, and a hub that finds its port taken moves to another one — the app then
+looks dead while everything is in fact running. Use the project's own
+`deploy.host_port`, or set `COXAGENT_PORT` before `coxagent serve`. Stop what
+you started when you are done.

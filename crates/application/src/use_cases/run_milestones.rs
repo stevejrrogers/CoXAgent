@@ -257,16 +257,18 @@ mod tests {
     }
 
     fn seeded(version: &str, milestones: Vec<(&str, &str)>) -> Arc<MemStore> {
-        let mut st = ProjectState::default();
-        st.current_version = SemVer::parse(version).expect("version");
-        st.milestones = milestones
-            .into_iter()
-            .map(|(name, target)| Milestone {
-                name: name.to_owned(),
-                goal: "g".to_owned(),
-                target_version: target.to_owned(),
-            })
-            .collect();
+        let mut st = ProjectState {
+            current_version: SemVer::parse(version).expect("version"),
+            milestones: milestones
+                .into_iter()
+                .map(|(name, target)| Milestone {
+                    name: name.to_owned(),
+                    goal: "g".to_owned(),
+                    target_version: target.to_owned(),
+                })
+                .collect(),
+            ..ProjectState::default()
+        };
         st.tickets.push(
             Ticket::new(
                 TicketId::new("COX-F001").expect("id"),

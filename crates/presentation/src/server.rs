@@ -394,6 +394,7 @@ impl Ws {
 /// A booked meeting. Times are RFC3339 UTC; the watchdog drives reminders,
 /// start announcements, and auto-ringing of absent participants.
 #[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
+#[allow(clippy::struct_excessive_bools)] // a persisted data aggregate, not a state machine
 struct Meeting {
     id: String,
     title: String,
@@ -591,6 +592,24 @@ async fn profile_avatar_clear_ep(
     Json(serde_json::json!({ "ok": true })).into_response()
 }
 
+/// Identify a real raster image format from its magic bytes. Never trusts the
+/// client-supplied Content-Type (trivially spoofable via multipart `type=`) —
+/// SVG and every other format that can carry a `<script>` is rejected outright,
+/// since there is no safe way to "sniff-validate" an XML document as inert.
+fn sniff_avatar_image(data: &[u8]) -> Option<(&'static str, &'static str)> {
+    if data.starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) {
+        Some(("png", "image/png"))
+    } else if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some(("jpg", "image/jpeg"))
+    } else if data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a") {
+        Some(("gif", "image/gif"))
+    } else if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
+        Some(("webp", "image/webp"))
+    } else {
+        None
+    }
+}
+
 /// Upload the caller's OWN avatar (image, ≤ 2 MB). Served via chat media.
 async fn profile_avatar_ep(
     State(app): State<AppState>,
@@ -603,20 +622,22 @@ async fn profile_avatar_ep(
     let Ok(Some(field)) = multipart.next_field().await else {
         return (StatusCode::BAD_REQUEST, "no file").into_response();
     };
-    let mime = field.content_type().unwrap_or("").to_owned();
-    if !mime.starts_with("image/") {
-        return (StatusCode::BAD_REQUEST, "avatar must be an image").into_response();
-    }
     let data = match field.bytes().await {
         Ok(b) if b.len() <= 2 * 1024 * 1024 => b,
         Ok(_) => return (StatusCode::PAYLOAD_TOO_LARGE, "max 2MB").into_response(),
         Err(_) => return (StatusCode::BAD_REQUEST, "read failed").into_response(),
     };
-    let ext = mime.strip_prefix("image/").unwrap_or("png");
-    let stored = format!("{}-avatar.{}", mint_media_token(), sanitize_name(ext));
+    let Some((ext, mime)) = sniff_avatar_image(&data) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "avatar must be a real png/jpeg/gif/webp image",
+        )
+            .into_response();
+    };
+    let stored = format!("{}-avatar.{}", mint_media_token(), ext);
     if app
         .storage
-        .put(&format!("chat/{stored}"), &data, &mime)
+        .put(&format!("chat/{stored}"), &data, mime)
         .await
         .is_err()
     {
@@ -664,7 +685,8 @@ async fn meeting_watchdog(app: AppState) {
         {
             let mut doc = app.meetings.inner.lock().await;
             doc.meetings.retain(|m| {
-                let keep = parse_rfc3339(&m.start).is_none_or(|s| {
+                // MSRV 1.80 predates Option::is_none_or.
+                let keep = parse_rfc3339(&m.start).map_or(true, |s| {
                     now < s
                         + time::Duration::minutes(i64::from(m.duration_min))
                         + time::Duration::days(1)
@@ -981,6 +1003,7 @@ async fn principal_name(app: &AppState, headers: &axum::http::HeaderMap) -> Opti
     resolve_principal(&auth, headers).await.map(|u| u.username)
 }
 
+#[allow(clippy::cast_possible_truncation)] // the low 32 bits of the hash IS the value
 fn rand_u32() -> u32 {
     use std::hash::{BuildHasher, Hasher};
     std::collections::hash_map::RandomState::new()
@@ -1352,6 +1375,27 @@ pub struct HubExtras {
     pub syschat_store: Option<Arc<dyn coxagent_application::ports::outbound::KvDocPort>>,
 }
 
+/// Post one COX budget notice into a project's #agents and log the same line to
+/// its activity feed. Both the warning and the hard stop below report this way.
+async fn post_budget_notice(p: &ProjectHandle, msg: &str, activity: &str) {
+    let _ = coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        s.post_chat_in(
+            "COX",
+            msg,
+            coxagent_application::state::AGENTS_CHANNEL,
+            Vec::new(),
+        );
+        s.log_activity("COX", activity, None);
+        Ok(())
+    })
+    .await;
+}
+
+/// Warn threshold for a space's budget, matching the dashboard's own amber one
+/// (index.html renders the "nearly reached" alert at 80% of a project's cap) —
+/// same UX language, just at the space level and pushed as a chat heads-up.
+const WARN_PCT: f64 = 0.8;
+
 /// Assemble the shared [`AppState`] from the registered projects and hub extras.
 /// Space budget ENFORCEMENT (not just display): every 5 minutes each space's
 /// total spend is compared to its cap; the first breach pauses every runner and
@@ -1361,10 +1405,6 @@ pub struct HubExtras {
 async fn space_budget_watchdog(app: AppState) {
     let mut flagged: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut warned: std::collections::HashSet<String> = std::collections::HashSet::new();
-    // Matches the dashboard's own amber threshold (index.html renders the
-    // "nearly reached" alert at 80% of a project's cap) — same UX language,
-    // just at the space level and pushed as a chat heads-up.
-    const WARN_PCT: f64 = 0.8;
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(300)).await;
         let spaces = app.spaces.inner.lock().await.spaces.clone();
@@ -1405,24 +1445,7 @@ async fn space_budget_watchdog(app: AppState) {
                         spend / sp.budget_usd * 100.0
                     );
                     for p in &handles {
-                        let _ = coxagent_application::ports::outbound::mutate_state(
-                            p.store.as_ref(),
-                            |s| {
-                                s.post_chat_in(
-                                    "COX",
-                                    &msg,
-                                    coxagent_application::state::AGENTS_CHANNEL,
-                                    Vec::new(),
-                                );
-                                s.log_activity(
-                                    "COX",
-                                    "space budget approaching cap — warned",
-                                    None,
-                                );
-                                Ok(())
-                            },
-                        )
-                        .await;
+                        post_budget_notice(p, &msg, "space budget approaching cap — warned").await;
                     }
                 }
             } else {
@@ -1452,18 +1475,7 @@ async fn space_budget_watchdog(app: AppState) {
                         let _ = p.store.set_desired(&w.worker, false).await;
                     }
                 }
-                let _ =
-                    coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
-                        s.post_chat_in(
-                            "COX",
-                            &msg,
-                            coxagent_application::state::AGENTS_CHANNEL,
-                            Vec::new(),
-                        );
-                        s.log_activity("COX", "space budget cap reached — agents paused", None);
-                        Ok(())
-                    })
-                    .await;
+                post_budget_notice(p, &msg, "space budget cap reached — agents paused").await;
             }
         }
     }
@@ -2227,6 +2239,14 @@ pub async fn serve_full(
         )
         .route("/api/chat/channels/:cid/invite", post(syschat_invite_ep))
         .route(
+            "/api/chat/channels/:cid/settings",
+            axum::routing::patch(syschat_settings_ep),
+        )
+        .route(
+            "/api/chat/channels/:cid/members/:member",
+            delete(syschat_kick_ep),
+        )
+        .route(
             "/api/chat/channel/:cid/topic",
             axum::routing::patch(syschat_topic_ep).get(syschat_topic_get_ep),
         )
@@ -2367,6 +2387,14 @@ pub async fn serve_full(
         .route(
             "/api/projects/:pid/channels",
             get(channels_list_ep).post(channel_create_ep),
+        )
+        .route(
+            "/api/projects/:pid/channels/:cid/settings",
+            axum::routing::patch(channel_settings_ep),
+        )
+        .route(
+            "/api/projects/:pid/channels/:cid/members/:member",
+            delete(channel_kick_ep),
         )
         .route(
             "/api/projects/:pid/channels/:cid/invite",
@@ -2795,7 +2823,7 @@ async fn git_test_ep(
                         .collect();
                 }
             } else {
-                detail = "ls-remote timed out".to_owned();
+                "ls-remote timed out".clone_into(&mut detail);
             }
         }
         if reachable {
@@ -2823,7 +2851,7 @@ async fn git_test_ep(
                         .collect();
                 }
             } else {
-                detail = "push --dry-run timed out".to_owned();
+                "push --dry-run timed out".clone_into(&mut detail);
             }
         }
     }
@@ -4071,6 +4099,22 @@ struct CreateChannelReq {
     name: String,
     #[serde(default)]
     kind: Option<String>,
+    /// Open this channel INSIDE another one (the `+` on a channel row).
+    #[serde(default)]
+    parent: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct ChannelSettingsReq {
+    /// `"private"` or `"public"`. `#general` may not change.
+    #[serde(default)]
+    kind: Option<String>,
+    /// Whether any member may invite; false leaves it to the owner and the
+    /// people they delegated to.
+    #[serde(default)]
+    open_invite: Option<bool>,
+    #[serde(default)]
+    topic: Option<String>,
 }
 
 /// Create a private channel owned by the signed-in user.
@@ -4087,13 +4131,104 @@ async fn channel_create_ep(
     let Ok(mut state) = p.store.load().await else {
         return internal_error("load failed");
     };
-    match state.create_channel(&req.name, &user) {
+    let created = match req.parent.as_deref().filter(|p| !p.trim().is_empty()) {
+        Some(parent) => state.create_sub_channel(
+            parent,
+            &req.name,
+            &user,
+            req.kind.as_deref().unwrap_or("private"),
+        ),
+        None => state.create_channel_with_kind(
+            &req.name,
+            &user,
+            req.kind.as_deref().unwrap_or("private"),
+        ),
+    };
+    match created {
         Ok(ch) => match p.store.save(&state).await {
             Ok(()) => (StatusCode::CREATED, Json(ch)).into_response(),
             Err(e) => internal_error(&e.to_string()),
         },
         Err(msg) => (StatusCode::BAD_REQUEST, msg).into_response(),
     }
+}
+
+/// Change a channel's settings (privacy, who may invite, topic). Owner or an
+/// admin: a room's owner runs their room, and an admin outranks that.
+async fn channel_settings_ep(
+    State(app): State<AppState>,
+    Path((pid, cid)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<ChannelSettingsReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let user = resolve_username(&app, &headers).await;
+    let Ok(mut state) = p.store.load().await else {
+        return internal_error("load failed");
+    };
+    let Some(ch) = state.channels.iter().find(|c| c.id == cid) else {
+        return not_found();
+    };
+    if ch.owner != user && !user_can_manage(&app, &headers).await {
+        return (StatusCode::FORBIDDEN, "only the channel owner or an admin").into_response();
+    }
+    match state.update_channel_settings(
+        &cid,
+        req.kind.as_deref(),
+        req.open_invite,
+        req.topic.as_deref(),
+    ) {
+        Ok(ch) => match p.store.save(&state).await {
+            Ok(()) => Json(ch).into_response(),
+            Err(e) => internal_error(&e.to_string()),
+        },
+        Err(msg) => (StatusCode::BAD_REQUEST, msg).into_response(),
+    }
+}
+
+/// Remove a member from a channel. The owner, a delegated inviter, or an admin.
+async fn channel_kick_ep(
+    State(app): State<AppState>,
+    Path((pid, cid, member)): Path<(String, String, String)>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let user = resolve_username(&app, &headers).await;
+    let Ok(mut state) = p.store.load().await else {
+        return internal_error("load failed");
+    };
+    let Some(ch) = state.channels.iter().find(|c| c.id == cid) else {
+        return not_found();
+    };
+    if !ch.can_kick(&user) && !user_can_manage(&app, &headers).await {
+        return (
+            StatusCode::FORBIDDEN,
+            "only the channel owner, a delegated inviter, or an admin",
+        )
+            .into_response();
+    }
+    match state.remove_channel_member(&cid, &member) {
+        Ok(ch) => match p.store.save(&state).await {
+            Ok(()) => Json(ch).into_response(),
+            Err(e) => internal_error(&e.to_string()),
+        },
+        Err(msg) => (StatusCode::BAD_REQUEST, msg).into_response(),
+    }
+}
+
+/// Whether the caller holds admin/super authority, which outranks channel
+/// ownership everywhere it is checked.
+async fn user_can_manage(app: &AppState, headers: &axum::http::HeaderMap) -> bool {
+    let Some(auth) = app.auth.clone() else {
+        return true; // running open (no auth configured)
+    };
+    resolve_principal(&auth, headers)
+        .await
+        .is_some_and(|u| u.role.can_manage())
 }
 
 #[derive(serde::Deserialize)]
@@ -5144,9 +5279,7 @@ async fn run_preview_health_gate(
     probe_port: Result<Option<u16>, ()>,
 ) -> bool {
     match probe_port {
-        Ok(port) => {
-            coxagent_application::ports::outbound::verify_deploy_health(deploy, port).await
-        }
+        Ok(port) => coxagent_application::ports::outbound::verify_deploy_health(deploy, port).await,
         Err(()) => false,
     }
 }
@@ -5345,14 +5478,16 @@ async fn media_ep(
         return not_found();
     };
     let mime = mime_of(&file);
-    (
+    let mut resp = (
         [
             (header::CONTENT_TYPE, mime),
             (header::CACHE_CONTROL, "private, max-age=31536000"),
         ],
         bytes,
     )
-        .into_response()
+        .into_response();
+    force_download_if_active_content(&file, &mut resp);
+    resp
 }
 
 /// Best-effort MIME from a file extension (for serving uploads).
@@ -5367,6 +5502,31 @@ fn mime_of(name: &str) -> &'static str {
         Some("txt" | "log" | "md") => "text/plain; charset=utf-8",
         Some("json") => "application/json",
         _ => "application/octet-stream",
+    }
+}
+
+/// True for extensions whose MIME type a browser will execute as script if
+/// the file is opened via direct/top-level navigation (SVG documents, HTML,
+/// XML). `mime_of` derives Content-Type from the filename alone, so this
+/// covers files stored through ANY upload path (avatar, chat attachment,
+/// project attachment) — not just the one that first surfaced the bug.
+fn is_active_content_ext(name: &str) -> bool {
+    matches!(
+        name.rsplit('.').next().map(str::to_lowercase).as_deref(),
+        Some("svg" | "html" | "htm" | "xhtml" | "xml")
+    )
+}
+
+/// Force a download instead of inline rendering for [`is_active_content_ext`]
+/// files, so "open in new tab" / direct navigation can't execute embedded
+/// script — the browser downloads the file rather than parsing it as a
+/// top-level document.
+fn force_download_if_active_content(file: &str, resp: &mut axum::response::Response) {
+    if is_active_content_ext(file) {
+        resp.headers_mut().insert(
+            header::CONTENT_DISPOSITION,
+            axum::http::HeaderValue::from_static("attachment"),
+        );
     }
 }
 
@@ -5452,6 +5612,112 @@ async fn syschat_create_ep(
 }
 
 /// Invite a user to a private channel (or, with `delegate`, grant invite rights).
+/// Channel settings on the SYSTEM chat store — privacy, who may invite, topic.
+/// Channels are created through `/api/chat/channels`, so this is where their
+/// settings must live too; the first version of this endpoint hung off the
+/// per-project router and answered every request with "no such project".
+async fn syschat_settings_ep(
+    State(app): State<AppState>,
+    Path(cid): Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<ChannelSettingsReq>,
+) -> axum::response::Response {
+    let user = resolve_username(&app, &headers).await;
+    let admin = user_can_manage(&app, &headers).await;
+    // #general is synthesised when the channel list is served rather than
+    // stored, so looking it up here finds nothing and used to answer 404 for
+    // the one channel whose rule people are most likely to test.
+    if cid == coxagent_application::state::GENERAL_CHANNEL {
+        if req.kind.is_some() {
+            return (
+                StatusCode::BAD_REQUEST,
+                "#general cannot be made private — a team needs one room nobody is shut out of",
+            )
+                .into_response();
+        }
+        return (
+            StatusCode::BAD_REQUEST,
+            "#general has no settings to change",
+        )
+            .into_response();
+    }
+    let mut sc = app.syschat.inner.lock().await;
+    let Some(existing) = sc.channels.iter().find(|c| c.id == cid) else {
+        return not_found();
+    };
+    if existing.owner != user && !admin {
+        return (StatusCode::FORBIDDEN, "only the channel owner or an admin").into_response();
+    }
+    let updated = {
+        let Some(ch) = sc.channels.iter_mut().find(|c| c.id == cid) else {
+            return not_found();
+        };
+        if let Some(kind) = req.kind.as_deref() {
+            if !ch.can_change_privacy() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "#general cannot be made private — a team needs one room nobody is shut out of",
+                )
+                    .into_response();
+            }
+            if !matches!(kind, "private" | "public") {
+                return (StatusCode::BAD_REQUEST, "unknown channel kind").into_response();
+            }
+            kind.clone_into(&mut ch.kind);
+        }
+        if let Some(open) = req.open_invite {
+            ch.open_invite = open;
+        }
+        if let Some(topic) = req.topic.as_deref() {
+            ch.topic = topic.trim().chars().take(200).collect();
+        }
+        ch.clone()
+    };
+    drop(sc);
+    app.syschat.save().await;
+    Json(updated).into_response()
+}
+
+/// Remove a member from a system-chat channel: the owner, a delegated inviter,
+/// or an admin. The owner cannot be removed from their own room.
+async fn syschat_kick_ep(
+    State(app): State<AppState>,
+    Path((cid, member)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let user = resolve_username(&app, &headers).await;
+    let admin = user_can_manage(&app, &headers).await;
+    let mut sc = app.syschat.inner.lock().await;
+    let Some(ch) = sc.channels.iter().find(|c| c.id == cid) else {
+        return not_found();
+    };
+    if !ch.can_kick(&user) && !admin {
+        return (
+            StatusCode::FORBIDDEN,
+            "only the channel owner, a delegated inviter, or an admin",
+        )
+            .into_response();
+    }
+    if ch.owner == member {
+        return (
+            StatusCode::BAD_REQUEST,
+            "the owner cannot be removed from their own channel",
+        )
+            .into_response();
+    }
+    let updated = {
+        let Some(ch) = sc.channels.iter_mut().find(|c| c.id == cid) else {
+            return not_found();
+        };
+        ch.members.retain(|m| m != &member);
+        ch.inviters.retain(|m| m != &member);
+        ch.clone()
+    };
+    drop(sc);
+    app.syschat.save().await;
+    Json(updated).into_response()
+}
+
 async fn syschat_invite_ep(
     State(app): State<AppState>,
     Path(cid): Path<String>,
@@ -5665,14 +5931,13 @@ async fn syschat_reply_ep(
     }
     let mid_clone = mid.clone();
     let mut sc = app.syschat.inner.lock().await;
-    let channel = match sc
+    let Some(channel) = sc
         .chat
         .iter()
         .find(|m| m.id == mid_clone)
         .map(|p| p.channel.clone())
-    {
-        Some(ch) => ch,
-        None => return (StatusCode::NOT_FOUND, "parent not found").into_response(),
+    else {
+        return (StatusCode::NOT_FOUND, "parent not found").into_response();
     };
     let msg = ChatMsg::reply(&user, &body, &channel, &mid_clone);
     sc.chat.push(msg.clone());
@@ -5801,14 +6066,13 @@ async fn syschat_pin_ep(
     }
     let mid_clone = mid.clone();
     let mut sc = app.syschat.inner.lock().await;
-    let channel = match sc
+    let Some(channel) = sc
         .chat
         .iter()
         .find(|m| m.id == mid_clone)
         .map(|m| m.channel.clone())
-    {
-        Some(ch) => ch,
-        None => return (StatusCode::NOT_FOUND, "not found").into_response(),
+    else {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
     };
     let pins = sc.pins.entry(channel.clone()).or_default();
     if pins.contains(&mid_clone) {
@@ -6153,14 +6417,16 @@ async fn syschat_media_ep(
     let Ok(bytes) = app.storage.get(&format!("chat/{file}")).await else {
         return not_found();
     };
-    (
+    let mut resp = (
         [
             (header::CONTENT_TYPE, mime_of(&file)),
             (header::CACHE_CONTROL, "private, max-age=31536000"),
         ],
         bytes,
     )
-        .into_response()
+        .into_response();
+    force_download_if_active_content(&file, &mut resp);
+    resp
 }
 
 /// Sanitize an original filename to a safe stored suffix (keeps the extension).
@@ -6445,6 +6711,7 @@ fn project_language(p: &ProjectHandle) -> coxagent_application::config::Language
         })
 }
 
+#[allow(clippy::too_many_lines)] // one linear pass; splitting hurts readability
 async fn standup_ep(
     State(app): State<AppState>,
     Path(pid): Path<String>,
@@ -9221,8 +9488,7 @@ mod pr_preview_tests {
     /// config) must fail the gate rather than be treated as unset.
     #[tokio::test(start_paused = true)]
     async fn a_string_host_port_is_rejected_rather_than_skipping_the_gate() {
-        let (_dir, handle) =
-            project_handle_with_raw_host_port(Arc::new(HealthyDeploy), "\"8101\"");
+        let (_dir, handle) = project_handle_with_raw_host_port(Arc::new(HealthyDeploy), "\"8101\"");
         let forge: Arc<dyn ForgePort> = Arc::new(UnusedForge);
 
         let resp = pr_preview(&handle, &forge, 1, false).await;
@@ -9252,5 +9518,88 @@ mod pr_preview_tests {
         let resp = pr_preview(&handle, &forge, 1, false).await;
 
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+}
+
+/// COX-B059: stored XSS via spoofed `image/svg` avatar uploads served as
+/// executable `image/svg+xml` from `/api/chat/media/*`.
+#[cfg(test)]
+mod avatar_media_security_tests {
+    use super::*;
+
+    const PNG_MAGIC: &[u8] = &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    const JPEG_MAGIC: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0];
+    const SVG_BODY: &[u8] = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert(1)</script></svg>";
+
+    #[test]
+    fn a_genuine_png_is_recognized_regardless_of_claimed_content_type() {
+        assert_eq!(sniff_avatar_image(PNG_MAGIC), Some(("png", "image/png")));
+    }
+
+    #[test]
+    fn a_genuine_jpeg_is_recognized() {
+        assert_eq!(sniff_avatar_image(JPEG_MAGIC), Some(("jpg", "image/jpeg")));
+    }
+
+    #[test]
+    fn a_genuine_gif_is_recognized() {
+        assert_eq!(sniff_avatar_image(b"GIF89a...."), Some(("gif", "image/gif")));
+    }
+
+    #[test]
+    fn a_genuine_webp_is_recognized() {
+        let mut riff = b"RIFF".to_vec();
+        riff.extend_from_slice(&[0, 0, 0, 0]);
+        riff.extend_from_slice(b"WEBP");
+        assert_eq!(sniff_avatar_image(&riff), Some(("webp", "image/webp")));
+    }
+
+    /// The exact repro from the ticket: an SVG document with an embedded
+    /// `<script>`, regardless of what multipart Content-Type accompanies it,
+    /// must never be accepted as an avatar.
+    #[test]
+    fn an_svg_document_is_rejected_even_though_it_could_claim_image_svg() {
+        assert_eq!(sniff_avatar_image(SVG_BODY), None);
+    }
+
+    #[test]
+    fn arbitrary_non_image_bytes_are_rejected() {
+        assert_eq!(sniff_avatar_image(b"<html><body>hi</body></html>"), None);
+        assert_eq!(sniff_avatar_image(b"not an image"), None);
+        assert_eq!(sniff_avatar_image(b""), None);
+    }
+
+    /// Regression guard for the sink shared by every upload path (avatar,
+    /// chat attachment, project attachment): a `.svg`/`.html`/`.xml` name must
+    /// never be rendered inline, since `mime_of` derives Content-Type from
+    /// the filename alone and would otherwise let a browser execute it on
+    /// direct navigation.
+    #[test]
+    fn script_capable_extensions_are_flagged_for_forced_download() {
+        assert!(is_active_content_ext("evil.svg"));
+        assert!(is_active_content_ext("evil.HTML"));
+        assert!(is_active_content_ext("evil.xhtml"));
+        assert!(is_active_content_ext("evil.xml"));
+        assert!(!is_active_content_ext("photo.png"));
+        assert!(!is_active_content_ext("photo.jpg"));
+        assert!(!is_active_content_ext("report.pdf"));
+        assert!(!is_active_content_ext("noext"));
+    }
+
+    #[test]
+    fn syschat_media_forces_download_for_svg_but_not_png() {
+        let mut svg_resp = ([(header::CONTENT_TYPE, mime_of("x.svg"))], "body").into_response();
+        force_download_if_active_content("x.svg", &mut svg_resp);
+        assert_eq!(
+            svg_resp
+                .headers()
+                .get(header::CONTENT_DISPOSITION)
+                .and_then(|v| v.to_str().ok()),
+            Some("attachment")
+        );
+
+        let mut png_resp = ([(header::CONTENT_TYPE, mime_of("x.png"))], "body").into_response();
+        force_download_if_active_content("x.png", &mut png_resp);
+        assert!(png_resp.headers().get(header::CONTENT_DISPOSITION).is_none());
     }
 }

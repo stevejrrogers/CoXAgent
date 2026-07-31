@@ -64,11 +64,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
             .context
             .as_deref()
             .filter(|c| !c.trim().is_empty())
-            .map(|c| {
-                format!(
-                    "\n\n## Project context (goal, stack, what was built — test against this):\n{c}\n"
-                )
-            })
+            .map(|c| format!("\n\n## Project context (goal, stack, what was built — test against this):\n{c}\n"))
             .unwrap_or_default();
         let repo_map = prompts::repo_map_block(&self.work_dir, self.config.workflow.token_saver);
         // A tester reads the suite and the API before writing a case; without
@@ -177,6 +173,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
 /// What just shipped and is awaiting verification, WITH its acceptance
 /// criteria — so TEST verifies the actual contract of each change instead of
 /// poking the app blind. Newest first, bounded.
+#[must_use]
 pub fn shipped_block(state: &crate::state::ProjectState) -> String {
     use std::fmt::Write as _;
     let recent: Vec<_> = state

@@ -16,7 +16,10 @@
   :root.light{--bg:#F5F5F7;--panel:#FFFFFF;--card:#FFFFFF;--card2:#F0F0F3;--hover:#E8E8EC;
     --border:rgba(0,0,0,.08);--border2:rgba(0,0,0,.14);
     --text:#1A1A2E;--muted:#5A5D6E;--dim:#8A8D9E;
-    --accent:#0E7490;--accenth:#0E95B0;--accent2:#0EA5E9;--accentbg:rgba(14,165,233,.12)}
+    --accent:#0E7490;--accenth:#0E95B0;--accent2:#0EA5E9;--accentbg:rgba(14,165,233,.12);
+    /* Semantic colours were dark-tuned only; darken them for light theme so
+       coloured text and white-on-colour badges stay legible (WCAG). */
+    --green:#15803D;--amber:#B45309;--red:#DC2626;--blue:#2563EB;--teal:#0D9488;--purple:#7C3AED}
   *{box-sizing:border-box}
   html,body{margin:0;height:100%}
   body{background:var(--bg);color:var(--text);font-family:Inter,-apple-system,system-ui,sans-serif;font-size:14px;display:flex;-webkit-font-smoothing:antialiased}
@@ -166,6 +169,38 @@
   .term-pane{position:absolute;inset:8px}
   .term-pane[hidden]{display:none}
   .term-pane .xterm{height:100%}
+  /* Live agent work log — engine-agnostic timeline (Claude / opencode / any) */
+  .worklog{flex:1;min-height:0;overflow:auto;background:var(--card2);border:1px solid var(--border);border-radius:12px;padding:16px 16px 42px;position:relative}
+  .worklog .wl-empty{color:var(--dim);font-size:12.5px;text-align:center;padding:44px 0;display:flex;flex-direction:column;align-items:center;gap:10px}
+  .worklog .wl-empty i{font-size:26px;opacity:.5}
+  .wl-item{animation:wlin .2s ease both}
+  @keyframes wlin{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+  .wl-msg{display:flex;gap:11px;padding:9px 0}
+  .wl-msg .wl-ic{flex-shrink:0;width:27px;height:27px;border-radius:9px;display:flex;align-items:center;justify-content:center;background:var(--accentbg);color:var(--accent2);font-size:14px;margin-top:1px}
+  .wl-msg .wl-body{flex:1;min-width:0;font-size:13px;line-height:1.62;color:var(--text);white-space:pre-wrap;word-break:break-word}
+  .wl-msg .wl-body code{background:var(--card);border:1px solid var(--border);border-radius:5px;padding:1px 5px;font-family:ui-monospace,monospace;font-size:11.5px;color:var(--accent2)}
+  .wl-msg .wl-body b{font-weight:700}
+  /* tool call + result share a subtle vertical rail under the message column */
+  .wl-tool{padding:5px 0 5px 38px;position:relative}
+  .wl-tool::before,.wl-result::before{content:"";position:absolute;left:13px;top:0;bottom:0;width:1.5px;background:var(--border)}
+  .wl-chip{display:inline-flex;align-items:center;gap:8px;background:var(--card);border:1px solid var(--border2);border-radius:9px;padding:6px 11px;max-width:100%;min-width:0}
+  .wl-chip .wl-tic{font-size:14px;flex-shrink:0}
+  .wl-chip .wl-tname{font-family:ui-monospace,monospace;font-size:11.5px;font-weight:700;color:var(--text);white-space:nowrap;flex-shrink:0}
+  .wl-chip .wl-targs{font-family:ui-monospace,monospace;font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+  .wl-result{padding:1px 0 8px 38px;position:relative}
+  .wl-result .wl-rin{display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--dim);font-family:ui-monospace,monospace}
+  .wl-result .wl-rin i{font-size:13px;color:var(--green)}
+  .wl-meta{display:flex;align-items:center;gap:10px;color:var(--dim);font-size:10.5px;text-transform:uppercase;letter-spacing:.09em;margin:4px 0 14px;font-weight:700}
+  .wl-meta::before,.wl-meta::after{content:"";flex:1;height:1px;background:var(--border)}
+  .wl-end{display:flex;justify-content:center;margin:16px 0 4px}
+  .wl-end span{display:inline-flex;align-items:center;gap:7px;color:var(--green);font-size:11.5px;font-weight:700;background:color-mix(in srgb,var(--green) 14%,transparent);border:1px solid color-mix(in srgb,var(--green) 33%,transparent);padding:4px 12px;border-radius:999px}
+  .wl-typing{display:flex;gap:11px;align-items:center;padding:7px 0 2px}
+  .wl-typing .wl-ic{flex-shrink:0;width:27px;height:27px;border-radius:9px;background:var(--accentbg);color:var(--accent2);display:flex;align-items:center;justify-content:center;font-size:14px}
+  .wl-typing .dots{display:inline-flex;gap:5px}
+  .wl-typing .dots i{width:6px;height:6px;border-radius:50%;background:var(--accent2);animation:wldot 1.1s infinite}
+  .wl-typing .dots i:nth-child(2){animation-delay:.16s}
+  .wl-typing .dots i:nth-child(3){animation-delay:.32s}
+  @keyframes wldot{0%,64%,100%{opacity:.3;transform:translateY(0)}32%{opacity:1;transform:translateY(-4px)}}
   /* Jarvis-style HUD: deep-space bg, grid, sweep, glow */
   .cg-graph{position:relative;border:1px solid #164e63;border-radius:12px;overflow:hidden;cursor:grab;
     background:radial-gradient(ellipse at 50% 35%,#0b1a2e 0%,#060b14 70%,#04070d 100%);
@@ -363,6 +398,9 @@
   .tcmsg.grp .tcbub{border-radius:12px}
   .tcmsg.mine .tcbub{background:var(--accent);border-color:transparent;color:#fff;border-radius:12px 4px 12px 12px}
   .tcmsg.mine.grp .tcbub{border-radius:12px}
+  /* Light theme: incoming bubbles sit near-white on near-white — a stronger
+     border gives them a readable edge (own bubbles keep their accent fill). */
+  :root.light .tcmsg:not(.mine) .tcbub,:root.light .cmsg:not(.mine) .cbub{border-color:var(--border2)}
   /* Attachments — compose strip + in-message rendering (chat + discussion) */
   .composewrap{display:flex;flex-direction:column;gap:0}
   .att-strip{display:none;flex-wrap:wrap;gap:6px;padding:8px 8px 0}
@@ -380,7 +418,7 @@
   .tk-role{font-weight:700;font-size:11px;min-width:26px;flex-shrink:0}
   .att-btn{background:transparent;border:none;color:var(--muted);cursor:pointer;font-size:17px;padding:0 8px;display:flex;align-items:center}
   .att-btn:hover{color:var(--accent)}
-  .dropping{outline:2px dashed var(--accent);outline-offset:-4px;background:var(--accent)08}
+  .dropping{outline:2px dashed var(--accent);outline-offset:-4px;background:color-mix(in srgb,var(--accent) 8%,transparent)}
   .msg-att{display:flex;flex-direction:column;gap:6px;margin-top:5px}
   .msg-img{display:inline-block;max-width:260px;border-radius:8px;overflow:hidden;border:1px solid var(--border)}
   .msg-img img{display:block;max-width:100%;max-height:280px;object-fit:cover}
@@ -488,13 +526,53 @@
   .doc-cat-tag.technical{background:color-mix(in srgb,var(--purple) 18%,transparent);color:var(--purple)}
   .doc-cat-tag.flows{background:color-mix(in srgb,var(--amber) 18%,transparent);color:var(--amber)}
   .doc-cat-tag.general{background:color-mix(in srgb,var(--muted) 20%,transparent);color:var(--muted)}
-  .eng-alert{display:flex;gap:12px;align-items:flex-start;margin:0 0 10px;padding:12px 16px;border-radius:12px;
-    background:color-mix(in srgb,var(--red) 12%,transparent);border:1px solid color-mix(in srgb,var(--red) 40%,transparent)}
-  .eng-alert>i{font-size:20px;color:var(--red);flex-shrink:0;margin-top:1px}
-  .ea-txt{display:flex;flex-direction:column;gap:2px;min-width:0}
-  .ea-txt b{font-size:13.5px;color:var(--red)}
-  .ea-txt span{font-size:12.5px;color:var(--text);word-break:break-word}
-  .ea-txt small{font-size:11px;color:var(--muted)}
+  /* Modal switch — public/private and friends. */
+  .coxmodal-toggle{display:flex;align-items:center;gap:10px;margin:12px 0 2px;font-size:13px;color:var(--text);cursor:pointer;user-select:none}
+  .coxmodal-toggle input{position:absolute;opacity:0;width:0;height:0}
+  .cmsw{width:38px;height:22px;border-radius:999px;background:var(--card2);border:1px solid var(--border2);position:relative;flex-shrink:0;transition:background .15s,border-color .15s}
+  .cmsw::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:var(--muted);transition:transform .15s,background .15s}
+  .coxmodal-toggle input:checked + .cmsw{background:color-mix(in srgb,var(--accent) 30%,transparent);border-color:var(--accent)}
+  .coxmodal-toggle input:checked + .cmsw::after{transform:translateX(16px);background:var(--accent)}
+  /* Chat search — first thing in the rail. */
+  .railsearch{display:flex;align-items:center;gap:8px;margin:0 0 8px;padding:7px 12px;border-radius:10px;cursor:pointer;
+    background:var(--card2);border:1px solid var(--border2);color:var(--muted);font-size:12.5px;line-height:1.3;white-space:nowrap;
+    transition:border-color .15s,color .15s,background .15s}
+  .railsearch:hover{border-color:var(--accent);color:var(--text);background:var(--card)}
+  .railsearch i{font-size:14px}
+  .railsearch kbd{margin-left:auto;font-size:10px;padding:1px 5px;border-radius:4px;background:var(--card);border:1px solid var(--border2);color:var(--dim)}
+  .chanitem.sub{padding-left:26px}
+  .chanitem.sub .channm{opacity:.9}
+  .chansub,.chancog{margin-left:4px;background:none;border:0;color:var(--dim);cursor:pointer;padding:2px;border-radius:5px;opacity:0;transition:opacity .12s,color .12s}
+  /* Reveal on hover AND on keyboard focus, so these actions are reachable
+     without a mouse (they were previously opacity:0 unless hovered). */
+  .chanitem:hover .chansub,.chanitem:hover .chancog,
+  .chanitem:focus-within .chansub,.chanitem:focus-within .chancog{opacity:1}
+  /* Visible keyboard focus for every chat control — none existed before. */
+  .chanadd:focus-visible,.chaninvite:focus-visible,.att-btn:focus-visible,.chatstart:focus-visible,
+  .react:focus-visible,.reactadd:focus-visible,.chansub:focus-visible,.chancog:focus-visible,
+  .chat-scroll-down:focus-visible,.chatsearch:focus-visible,.pin-chip:focus-visible,
+  .cmtool button:focus-visible,.chatcompose input:focus-visible,.chatcompose .pri:focus-visible,
+  .chanitem:focus-visible,.dmitem:focus-visible,.chaninvite:focus-visible,
+  .callbtn:focus-visible,.membtn:focus-visible{
+    outline:2px solid var(--accent2);outline-offset:2px}
+  /* On hover the two actions pin to the right edge (same spot on every row);
+     hide the unread badge so they never shift by the badge's width. */
+  .chanitem:hover .chanbadge{display:none}
+  .chansub:hover,.chancog:hover{color:var(--accent);background:var(--card2)}
+  .cs-item{display:flex;align-items:center;gap:11px;padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--border2)}
+  .cs-item:hover{background:var(--card2)}
+  .cs-item>i{font-size:16px;color:var(--accent2);flex-shrink:0}
+  .cs-txt{display:flex;flex-direction:column;min-width:0;flex:1}
+  .cs-txt b{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .cs-txt span{font-size:11.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .cs-kind{font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--dim);flex-shrink:0}
+  .chset-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 0;font-size:13px;border-bottom:1px solid var(--border2)}
+  .eng-alert{display:flex;gap:10px;align-items:center;margin:0 0 8px;padding:7px 14px;border-radius:10px;font-size:12.5px;
+    background:color-mix(in srgb,var(--red) 10%,transparent);border:1px solid color-mix(in srgb,var(--red) 35%,transparent)}
+  .eng-alert>i{font-size:15px;color:var(--red);flex-shrink:0}
+  .eng-alert b{color:var(--red);white-space:nowrap}
+  .eng-alert span{color:var(--text);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .eng-alert small{margin-left:auto;color:var(--muted);white-space:nowrap;font-size:11px}
   .doc-cat-tag.qa{background:color-mix(in srgb,var(--green) 16%,transparent);color:var(--green)}
   .doc-meta{display:block;font-size:11.5px;color:var(--dim);margin-top:7px}
   .doc-body.md{font-size:14px;line-height:1.7;color:var(--text);max-width:820px}
@@ -563,7 +641,9 @@
   .inlinecode{background:var(--bg);border:1px solid var(--border2);border-radius:4px;padding:1px 5px;font-family:ui-monospace,monospace;font-size:12px}
   .tcmsg.mine .inlinecode{background:rgba(0,0,0,.22);border-color:rgba(255,255,255,.18)}
   .mention{background:var(--accentbg);color:var(--accent2);border-radius:4px;padding:0 3px;font-weight:600}
-  .mention.me{background:var(--amber);color:#1a1205}
+  /* Highlighter-style "you were mentioned" — fixed amber (dark text) in both
+     themes; must NOT follow the theme-darkened --amber or it'd be dark-on-dark. */
+  .mention.me{background:#FBBF24;color:#1a1205}
   .tcbub a{color:var(--accent2);text-decoration:underline}
   .tcmsg.mine .tcbub a{color:#dff}
   /* @mention autocomplete popup */
@@ -959,6 +1039,9 @@
   .stm{font-size:11px;color:var(--dim)}
   .smsg-body{font-size:13.5px;line-height:1.55;color:var(--text);word-wrap:break-word;overflow-wrap:anywhere}
   .smsg-body.deleted{color:var(--dim)}
+  /* Brief highlight when jumped to via search / pin / permalink. */
+  .msg-flash{animation:msgflash 1.6s ease}
+  @keyframes msgflash{0%,40%{background:color-mix(in srgb,var(--accent2) 16%,transparent);border-radius:8px}100%{background:transparent}}
   .smsg-body code{background:var(--card2);border:1px solid var(--border2);border-radius:5px;padding:1px 5px;font-size:12px}
   .sacts{position:absolute;top:-14px;right:14px;display:none;gap:2px;background:var(--panel);border:1px solid var(--border2);border-radius:9px;padding:3px;box-shadow:0 6px 18px rgba(0,0,0,.35);z-index:5}
   .smsg:hover .sacts{display:flex}
@@ -1000,9 +1083,9 @@
   .meet-daylist.on{display:flex;flex-direction:column;gap:3px}
   .meet-daylist .md-hd{font-size:11px;font-weight:700;color:var(--muted);margin-bottom:2px}
   .mt-drop .mtd-item{padding:6px 12px;cursor:pointer;font-size:12px;display:flex;align-items:center;gap:8px;border-radius:6px;margin:2px 4px}
-  .mt-drop .mtd-item:hover{background:var(--accent2)14;color:var(--text)}
-  .mt-drop .mtd-item.sel{background:var(--accent2)22;color:var(--accent2)}
-  .mt-chip{display:inline-flex;align-items:center;gap:4px;background:var(--accent2)18;color:var(--accent2);border-radius:99px;padding:3px 8px;font-size:11px;font-weight:600}
+  .mt-drop .mtd-item:hover{background:color-mix(in srgb,var(--accent2) 8%,transparent);color:var(--text)}
+  .mt-drop .mtd-item.sel{background:color-mix(in srgb,var(--accent2) 13%,transparent);color:var(--accent2)}
+  .mt-chip{display:inline-flex;align-items:center;gap:4px;background:color-mix(in srgb,var(--accent2) 9%,transparent);color:var(--accent2);border-radius:99px;padding:3px 8px;font-size:11px;font-weight:600}
   .mt-chip button{background:none;border:none;color:inherit;cursor:pointer;padding:0;font-size:14px;line-height:1;opacity:.6}
   .mt-chip button:hover{opacity:1}
   #ov-mtdetail .modal{padding:20px}
@@ -1012,7 +1095,7 @@
   .room-tile{position:relative;background:var(--card2);border-radius:12px;aspect-ratio:16/10;overflow:hidden;display:grid;place-items:center}
   .room-tile video{width:100%;height:100%;object-fit:cover}
   .room-tile .rt-name{position:absolute;left:8px;bottom:6px;font-size:11.5px;background:#0008;color:#fff;padding:2px 8px;border-radius:99px}
-  .room-tile .rt-av{width:56px;height:56px;border-radius:50%;background:var(--accent2)22;color:var(--accent2);display:grid;place-items:center;font-weight:800;font-size:20px}
+  .room-tile .rt-av{width:56px;height:56px;border-radius:50%;background:color-mix(in srgb,var(--accent2) 13%,transparent);color:var(--accent2);display:grid;place-items:center;font-weight:800;font-size:20px}
   .room-tile.screen{grid-column:1/-1;aspect-ratio:auto;min-height:240px}
   #room-share.on{background:var(--accent2);color:#fff;border-color:var(--accent2)}
   .rt-ringbtn{display:inline-flex;align-items:center;gap:5px;background:var(--card2);border:1px solid var(--border2);color:var(--muted);border-radius:99px;padding:4px 10px;font-size:11.5px;cursor:pointer;font-family:inherit}
@@ -1041,14 +1124,14 @@
   .cal-wrap .cal-scroll .cal-body .cal-col{flex:1;position:relative;border-left:1px solid var(--border);min-width:0}
   .cal-wrap .cal-scroll .cal-body .cal-col:first-child{border-left:none}
   .cal-wrap .cal-scroll .cal-body .cal-col .ch{position:absolute;left:0;right:0;top:calc(var(--i)*60px);height:60px;cursor:pointer}
-  .cal-wrap .cal-scroll .cal-body .cal-col .ch:hover{background:var(--accent2)06}
+  .cal-wrap .cal-scroll .cal-body .cal-col .ch:hover{background:color-mix(in srgb,var(--accent2) 2%,transparent)}
   .cal-wrap .cal-scroll .cal-body .cal-col .chl{position:absolute;left:0;right:0;top:calc(var(--i)*60px);height:0;border-top:1px solid var(--border)}
   .cal-wrap .cal-scroll .cal-body .cal-col .chl.half{top:calc(var(--i)*60px + 30px)}
-  .cal-wrap .cal-scroll .cal-body .cb{position:absolute;left:2px;right:2px;top:calc(var(--t)*60px);height:calc(var(--h)*60px);background:var(--accent2)14;border:1px solid var(--accent2)25;border-left:3px solid var(--accent2);border-radius:6px;padding:3px 6px;cursor:pointer;overflow:hidden;z-index:1;min-height:20px;margin:1px 2px}
+  .cal-wrap .cal-scroll .cal-body .cb{position:absolute;left:2px;right:2px;top:calc(var(--t)*60px);height:calc(var(--h)*60px);background:color-mix(in srgb,var(--accent2) 8%,transparent);border:1px solid color-mix(in srgb,var(--accent2) 15%,transparent);border-left:3px solid var(--accent2);border-radius:6px;padding:3px 6px;cursor:pointer;overflow:hidden;z-index:1;min-height:20px;margin:1px 2px}
   .cal-wrap .cal-scroll .cal-body .cb:hover{z-index:3;box-shadow:0 2px 8px #0003}
   .cal-wrap .cal-scroll .cal-body .cb .cbt{font-size:11px;font-weight:700;color:var(--text);line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .cal-wrap .cal-scroll .cal-body .cb .cbs{font-size:10px;color:var(--muted);line-height:1.3}
-  .cal-wrap .cal-scroll .cal-body .cb.live{border-left-color:var(--green);background:var(--green)12;border-color:var(--green)25}
+  .cal-wrap .cal-scroll .cal-body .cb.live{border-left-color:var(--green);background:color-mix(in srgb,var(--green) 7%,transparent);border-color:color-mix(in srgb,var(--green) 15%,transparent)}
   .cal-wrap.day .cal-scroll .cal-body .cal-col{flex:1}
   .cal-wrap .cal-now{position:absolute;left:50px;right:0;top:calc(var(--t)*60px);height:2px;background:var(--red);z-index:2;pointer-events:none}
   .cal-wrap .cal-now::before{content:"";position:absolute;left:-6px;top:-5px;width:12px;height:12px;border-radius:50%;background:var(--red)}
@@ -1107,7 +1190,7 @@
   .chanitem:hover{background:var(--card2)}
   .chanitem.on{background:var(--accentbg);color:var(--accent2);font-weight:600}
   .chanitem i{font-size:14px;opacity:.7;flex:none}
-  .chanitem .channm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .chanitem .channm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .chaninvite{display:inline-flex;align-items:center;gap:6px;background:var(--card);border:1px solid var(--border2);color:var(--muted);border-radius:8px;padding:6px 11px;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;flex:none}
   .chaninvite:hover{color:var(--accent);border-color:var(--accent)}
   @media(max-width:760px){.chanrail{width:150px}}
@@ -1123,8 +1206,9 @@
   .chathead .chatstart{flex:none}
   .chatchan{display:flex;align-items:center;gap:10px;flex:1;min-width:0}
   .chatdot{width:9px;height:9px;border-radius:50%;background:var(--green);flex:none;box-shadow:0 0 0 3px color-mix(in srgb,var(--green) 22%,transparent)}
-  .chattitle{font-size:14px;font-weight:700}
-  .chatsub{font-size:11px;color:var(--muted)}
+  .chattitle{font-size:14px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .chatsub{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #chat-topic{font-size:11px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .chatstart{display:inline-flex;align-items:center;gap:6px;background:var(--accentbg);color:var(--accent2);border:1px solid var(--border2);border-radius:8px;padding:7px 12px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;white-space:nowrap}
   .chatstart:hover{border-color:var(--accent2)}
   .chatbody{flex:1;overflow-y:auto;padding:18px 16px;display:flex;flex-direction:column;gap:13px;background:var(--bg)}
@@ -1137,8 +1221,8 @@
   .cmsg.mine .ccol{align-items:flex-end}
   .chead{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted)}
   .chead b{color:var(--text);font-size:12px}
-  .cbadge{font-size:9px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:var(--accent2);background:var(--accentbg);padding:1px 6px;border-radius:5px}
-  .crole{font-size:9.5px;font-weight:700;letter-spacing:.3px;color:var(--muted);background:var(--card2);border:1px solid var(--border2);padding:1px 6px;border-radius:5px}
+  .cbadge{font-size:10.5px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:var(--accent2);background:var(--accentbg);padding:1px 6px;border-radius:5px}
+  .crole{font-size:10.5px;font-weight:700;letter-spacing:.3px;color:var(--muted);background:var(--card2);border:1px solid var(--border2);padding:1px 6px;border-radius:5px}
   .cby{font-size:10px;color:var(--dim);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--card2);border:1px solid var(--border2);padding:1px 6px;border-radius:5px}
   .ctk{font-size:10px;font-family:ui-monospace,monospace;color:var(--muted);background:var(--card2);padding:1px 6px;border-radius:5px}
   .tref{color:var(--accent2);cursor:pointer;font-family:ui-monospace,monospace;text-decoration:none;border-bottom:1px dashed color-mix(in srgb,var(--accent2) 50%,transparent)}
@@ -1290,7 +1374,7 @@
   .tcedit-box{background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:8px 10px}
   .tcedit-ta{width:100%;background:var(--card);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:8px 10px;font-size:13px;font-family:inherit;resize:vertical}
   /* Inline edit (Slack-style) */
-  .edit-inline{width:100%;background:var(--card);color:var(--text);border:2px solid var(--accent2);border-radius:8px;padding:8px 10px;font-size:13px;font-family:inherit;resize:none;outline:none;box-shadow:0 0 0 2px var(--accent2)22}
+  .edit-inline{width:100%;background:var(--card);color:var(--text);border:2px solid var(--accent2);border-radius:8px;padding:8px 10px;font-size:13px;font-family:inherit;resize:none;outline:none;box-shadow:0 0 0 2px color-mix(in srgb,var(--accent2) 13%,transparent)}
   .edit-hint{font-size:10px;color:var(--dim);margin-top:3px}
   /* Deleted message */
   .tcmsg.deleted .tcbub{opacity:.5;font-style:italic}
@@ -1413,12 +1497,12 @@ body:not(.manage) .manage-only { display: none !important; }
 .pri:hover{background:var(--accenth)}
 .userbox{display:none;align-items:center;gap:9px;margin-top:auto;padding:8px 9px;background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--border2);border-radius:12px}
 .uavatar{width:34px;height:34px;flex-shrink:0;border-radius:9px;overflow:hidden;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));transition:box-shadow .15s,transform .15s}
-.uavatar:hover{box-shadow:0 0 0 2px var(--accent)55;transform:translateY(-1px)}
+.uavatar:hover{box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 33%,transparent);transform:translateY(-1px)}
 .uinfo{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
 .uname{font-size:13px;font-weight:600;line-height:1.1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .urole{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;padding:1px 6px;border-radius:5px;align-self:flex-start;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.urole.admin{background:var(--amber)22;color:var(--amber)}
-.urole.viewer{background:var(--accent2)22;color:var(--accent2)}
+.urole.admin{background:color-mix(in srgb,var(--amber) 13%,transparent);color:var(--amber)}
+.urole.viewer{background:color-mix(in srgb,var(--accent2) 13%,transparent);color:var(--accent2)}
 .ulogout{background:none;border:1px solid var(--border2);color:var(--muted);cursor:pointer;font-size:15px;padding:6px 8px;border-radius:8px;line-height:0;position:relative}
 /* Update available: the get-app button lights up and gently pulses */
 #getapp-btn.has-update{color:#fff;background:var(--accent);border-color:var(--accent);animation:updpulse 2s ease-in-out infinite}
@@ -1448,7 +1532,7 @@ textarea.np-in{resize:vertical;line-height:1.5}
 <body>
   <div class="ov" id="ov-login" style="backdrop-filter:blur(8px)"><div class="modal" style="max-width:360px">
     <div style="text-align:center;margin-bottom:18px">
-      <div class="mk" style="width:44px;height:44px;margin:0 auto 10px;display:flex;align-items:center;justify-content:center;background:var(--accent)22;border-radius:12px"><i class="ti ti-hexagon-letter-c" style="font-size:24px;color:var(--accent)"></i></div>
+      <div class="mk" style="width:44px;height:44px;margin:0 auto 10px;display:flex;align-items:center;justify-content:center;background:color-mix(in srgb,var(--accent) 13%,transparent);border-radius:12px"><i class="ti ti-hexagon-letter-c" style="font-size:24px;color:var(--accent)"></i></div>
       <h3 style="margin:0">CoXAgent</h3>
       <div class="msub">Sign in to continue</div>
     </div>
@@ -1493,6 +1577,10 @@ textarea.np-in{resize:vertical;line-height:1.5}
       <div class="coxmodal-title" id="cm-title"></div>
       <div class="coxmodal-msg" id="cm-msg"></div>
       <textarea id="cm-input" class="coxmodal-input" rows="3" hidden></textarea>
+      <label class="coxmodal-toggle" id="cm-toggle" hidden>
+        <input type="checkbox" id="cm-toggle-input"><span class="cmsw"></span>
+        <span id="cm-toggle-label"></span>
+      </label>
       <div class="coxmodal-acts">
         <button class="gc-btn" id="cm-cancel" onclick="coxModalCancel()">Cancel</button>
         <button class="pri" id="cm-ok" onclick="coxModalOk()">OK</button>
@@ -1501,6 +1589,12 @@ textarea.np-in{resize:vertical;line-height:1.5}
   </div>
   <aside class="side">
     <div class="brand"><div class="mk"><i class="ti ti-hexagon-letter-c"></i></div><div><div class="nm">CoXAgent</div><div class="tg">autonomous dev team · <span id="brand-ver"></span></div></div></div>
+    <!-- One search for the whole sidebar, above the mode switch: the same box
+         serves Space, Manage and Chat, so it is never a per-mode afterthought
+         and the rail keeps one rhythm. -->
+    <div class="railsearch" onclick="openGlobalSearch()" title="Search channels, people, messages, tickets and pages">
+      <i class="ti ti-search"></i><span>Search</span><kbd>⌘K</kbd>
+    </div>
     <div class="modeseg">
       <button id="mode-manage" style="display:none" onclick="setMode('manage');nav('mg-spaces')" title="Manage"><i class="ti ti-shield-cog"></i><span class="lbl">Manage</span></button>
       <button id="mode-ws" class="on" onclick="setMode('workspace')" title="Space"><i class="ti ti-layout-grid"></i><span class="lbl">Space</span></button>
@@ -1508,10 +1602,12 @@ textarea.np-in{resize:vertical;line-height:1.5}
     </div>
     <!-- Chat mode: channel list replaces the workspace menu -->
     <div class="chatside" id="chat-side">
+      <!-- Search sits ABOVE the rooms because that is what you reach for first
+           in a workspace with more rooms than fit on a screen. -->
       <div class="chanrail-hd"><span>Channels</span><div class="chanrail-actions"><button class="chanadd" id="btn-newchan" onclick="createChannel()" title="Create channel (leads & admins)"><i class="ti ti-plus"></i></button></div></div>
       <div class="chanlist" id="chan-list"></div>
       <div class="chanrail-hd" style="margin-top:10px"><span>Direct messages</span></div>
-      <div class="dmsearch"><i class="ti ti-search"></i><input id="dm-search" placeholder="Find a teammate…" autocomplete="off" oninput="renderDMList()"></div>
+      <input id="dm-search" type="hidden" value="">
       <div class="chanlist" id="dm-list"></div>
       <div class="chanrail-hd" style="margin-top:10px"><span>Meetings</span><div class="chanrail-actions"><button class="chanadd" onclick="openMeetModal()" title="Book a meeting"><i class="ti ti-plus"></i></button></div></div>
       <div class="meet-cal" id="meet-cal"></div>
@@ -1673,8 +1769,8 @@ textarea.np-in{resize:vertical;line-height:1.5}
         <div id="agent-picker" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px"></div>
         <div class="sec" style="margin-top:10px">Recent actions</div>
         <div id="agent-acts" class="panel" style="max-height:16vh;overflow:auto"></div>
-        <div class="sec" style="margin-top:12px;display:flex;align-items:center;gap:8px">Work log <span id="agent-live-badge" style="font-size:10px;font-weight:700;padding:1px 7px;border-radius:5px;background:var(--green)22;color:var(--green);display:none">● LIVE</span> <span style="font-size:11px;color:var(--dim);font-weight:400">· what the agent is doing, step by step</span></div>
-        <pre id="agent-transcript" style="flex:1;min-height:0;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.5;background:var(--card2);padding:12px;border-radius:8px">—</pre>
+        <div class="sec" style="margin-top:12px;display:flex;align-items:center;gap:8px">Work log <span id="agent-live-badge" style="font-size:10px;font-weight:700;padding:1px 7px;border-radius:5px;background:color-mix(in srgb,var(--green) 22%,transparent);color:var(--green);display:none">● LIVE</span> <span style="font-size:11px;color:var(--dim);font-weight:400">· what the agent is doing, step by step</span></div>
+        <div id="agent-transcript" class="worklog"><div class="wl-empty"><i class="ti ti-loader-2"></i> loading…</div></div>
       </div></div>
       <div class="ov" id="ov-transcript" onclick="if(event.target===this)close_('ov-transcript')"><div class="modal" style="max-width:760px">
         <span class="x" onclick="close_('ov-transcript')"><i class="ti ti-x"></i></span>
@@ -1803,7 +1899,7 @@ textarea.np-in{resize:vertical;line-height:1.5}
       <div class="view" id="view-discuss">
         <div class="chatwrap">
           <div class="chathead">
-            <div class="chatchan"><span class="chatdot"></span><div><div class="chattitle" id="disc-title">Team channel</div><div class="chatsub" id="disc-sub">standups, decisions & threads</div></div></div>
+            <div class="chatchan"><span class="chatdot"></span><div style="min-width:0"><div class="chattitle" id="disc-title">Team channel</div><div class="chatsub" id="disc-sub">standups, decisions & threads</div></div></div>
             <select class="sel" id="disc-filter" onchange="renderDiscuss()"><option value="">Team channel</option></select>
             <button class="ticket-actions chatstart" onclick="runStandup(this)" title="SM posts a status roundup pulling every agent in — free, no engine cost"><i class="ti ti-clipboard-check"></i> Standup</button>
             <button class="ticket-actions chatstart" onclick="startDiscussion()"><i class="ti ti-users-group"></i> <span id="disc-run-label">Agent discussion</span></button>
@@ -1853,7 +1949,7 @@ textarea.np-in{resize:vertical;line-height:1.5}
     <div id="chat-main">
       <div class="chatwrap">
           <div class="chathead">
-            <div class="chatchan"><span class="chatdot" style="background:var(--accent2)"></span><div><div class="chattitle" id="chat-title"># general</div><div class="chatsub" id="chat-sub">everyone in the workspace</div><div id="chat-topic"></div></div></div>
+            <div class="chatchan"><span class="chatdot" style="background:var(--accent2)"></span><div style="min-width:0"><div class="chattitle" id="chat-title"># general</div><div class="chatsub" id="chat-sub">everyone in the workspace</div><div id="chat-topic"></div></div></div>
             <div style="display:flex;gap:8px;align-items:center">
               <button class="chaninvite callbtn" id="chat-call" onclick="callCurrent(false)" title="Voice call" style="display:none"><i class="ti ti-phone"></i></button>
               <button class="chaninvite callbtn" id="chat-vcall" onclick="callCurrent(true)" title="Video call" style="display:none"><i class="ti ti-video"></i></button>
@@ -1876,6 +1972,7 @@ textarea.np-in{resize:vertical;line-height:1.5}
           <button class="chat-scroll-down" id="chat-scroll-btn" onclick="scrollChatToBottom()" title="Scroll to bottom"><i class="ti ti-chevron-down"></i></button>
           <div id="chat-msgs" class="chatbody chatmsgs" ondragover="event.preventDefault();this.classList.add('dropping')" ondragleave="this.classList.remove('dropping')" ondrop="dropFiles('chat',event)" onscroll="chatScrollSpy()"></div>
           <div id="typing-bar" style="display:none;padding:2px 14px;font-size:11px;color:var(--dim)"></div>
+          <div id="chat-conn" style="display:none;align-items:center;gap:6px;padding:4px 14px;font-size:11px;font-weight:600;color:var(--amber);background:color-mix(in srgb,var(--amber) 10%,transparent);border-top:1px solid var(--border)"><i class="ti ti-loader-2 att-spin"></i> Reconnecting to chat…</div>
           <div class="composewrap">
             <div class="att-strip" id="chat-att"></div>
             <div class="chatcompose">
@@ -2021,7 +2118,8 @@ textarea.np-in{resize:vertical;line-height:1.5}
         <div id="pp-profile" hidden>
           <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
             <button type="button" class="btn-ghost" onclick="document.getElementById('pp-avatar-file').click()"><i class="ti ti-camera"></i> Change photo</button>
-            <input type="file" id="pp-avatar-file" accept="image/*" style="display:none" onchange="uploadAvatar(this)">
+            <!-- Raster formats only: SVG avatars are rejected server-side (stored-XSS, COX-B059). -->
+            <input type="file" id="pp-avatar-file" accept="image/png,image/jpeg,image/gif,image/webp" style="display:none" onchange="uploadAvatar(this)">
             <button id="pp-rmphoto" class="btn-ghost" hidden onclick="removeAvatar()"><i class="ti ti-trash"></i> Remove photo</button>
           </div>
           <div class="fr"><span class="lbl">Display name</span><input id="pp-name" style="flex:1"></div>
@@ -2042,7 +2140,7 @@ textarea.np-in{resize:vertical;line-height:1.5}
     </div>
     
   <div class="ov" id="ov-meetring"><div class="modal incbox" style="max-width:340px;text-align:center">
-    <div class="inc-av" style="background:var(--accent2)22;color:var(--accent2)"><i class="ti ti-calendar-event"></i></div>
+    <div class="inc-av" style="background:color-mix(in srgb,var(--accent2) 13%,transparent);color:var(--accent2)"><i class="ti ti-calendar-event"></i></div>
     <h3 id="mr-title" style="margin:12px 0 2px">—</h3>
     <div class="msub" id="mr-sub">Meeting is starting</div>
     <div class="inc-ctl">
@@ -2070,6 +2168,27 @@ textarea.np-in{resize:vertical;line-height:1.5}
       <div class="cmdk-list" id="cmdk-list"></div>
     </div>
   </div>
+  <!-- Channel settings: one place for privacy, members and who may invite. -->
+  <div class="ov" id="ov-chset" onclick="if(event.target===this)close_('ov-chset')"><div class="modal pfpop">
+    <span class="x" onclick="close_('ov-chset')" style="top:14px;right:14px"><i class="ti ti-x"></i></span>
+    <div class="pfhead"><span class="pf-avbig" style="background:var(--card2);color:var(--accent)"><i class="ti ti-hash"></i></span>
+      <div><div id="chset-title" style="font-weight:800;font-size:15px"></div><div class="msub" style="margin:0">Channel settings</div></div></div>
+    <div class="pfwrap">
+      <div class="pfnav">
+        <button id="chset-tab-general" class="on" onclick="chsetTab('general')"><i class="ti ti-adjustments"></i> General</button>
+        <button id="chset-tab-members" onclick="chsetTab('members')"><i class="ti ti-users"></i> Members</button>
+        <button id="chset-tab-permissions" onclick="chsetTab('permissions')"><i class="ti ti-lock-cog"></i> Permissions</button>
+      </div>
+      <div class="pfpane" id="chset-body"></div>
+    </div>
+  </div></div>
+  <!-- Chat search: channels, people and messages in one palette. -->
+  <div class="ov" id="ov-chatsearch" onclick="if(event.target===this)closeChatSearch()"><div class="modal" style="max-width:620px;padding:0;overflow:hidden">
+    <div class="cmdk-inp" style="border-radius:0"><i class="ti ti-search"></i>
+      <input id="chatsearch-input" placeholder="Search channels, people, messages, tickets, pages…" autocomplete="off"
+        oninput="chatSearchRun()" onkeydown="if(event.key==='Escape')closeChatSearch()"><kbd>esc</kbd></div>
+    <div class="cmdk-list" id="chatsearch-list" style="max-height:60vh"></div>
+  </div></div>
   <div class="toasts" id="toasts"></div>
 
   <div class="ov" id="ov-ticket" onclick="if(event.target===this)close_('ov-ticket')"><div class="modal" id="ticket-body"></div></div>
@@ -2415,7 +2534,7 @@ function designSystemHtml(ds){
 }
 function roadmapCard(t){const pc={high:"var(--red)",medium:"var(--amber)",low:"var(--dim)"}[t.priority]||"var(--dim)";
   const deps=(t.depends_on||[]);
-  const depBadge=deps.length?`<span class="b" style="background:var(--purple)22;color:var(--purple)"><i class="ti ti-link" style="font-size:11px"></i> ${deps.length}</span>`:"";
+  const depBadge=deps.length?`<span class="b" style="background:color-mix(in srgb,var(--purple) 13%,transparent);color:var(--purple)"><i class="ti ti-link" style="font-size:11px"></i> ${deps.length}</span>`:"";
   const ui=t.has_ui?'<span class="b ui">UI</span>':'',bug=t.type==="bug"?'<span class="b bug">bug</span>':'';
   return `<div class="card-t" onclick="showTicket('${t.id}')" style="border-left:3px solid ${pc}">
     <div class="cid">${esc(t.id)}</div><div class="ct">${esc(t.title)}</div>
@@ -3424,7 +3543,7 @@ function sendComment(){const inp=document.getElementById("disc-input");const bod
     })
     .catch(()=>{});}
 // ── Team chat (human-to-human channel, live over WebSocket) ─────────────────
-let CHAT=[], CHATWS=null, CHATWS_PID=null, chatwsRetry=null;
+let CHAT=[], CHATWS=null, CHATWS_PID=null, chatwsRetry=null, CHAT_LOAD_ERR=false;
 let CHANNELS=[], CURCHAN="general";
 // Initialise the always-visible chat dock: apply its collapsed state, load
 // channels, open the current one, and connect the live socket.
@@ -3449,13 +3568,30 @@ function renderChannels(){
     const kind=c.kind||(c.id==="general"?"general":"private");
     const u=UNREAD[c.id]||0;
     const icon=kind==="private"?"lock":"hash";
-    return `<div class="chanitem${c.id===CURCHAN?' on':''}${u?' unread':''}" onclick="selectChannel('${esc(c.id)}')">
-      <i class="ti ti-${icon}"></i><span class="channm">${esc(chanDisplay(c))}</span>${u?`<span class="chanbadge">${u>99?'99+':u}</span>`:''}</div>`;}).join("");
+    const sub=(c.parent||"")?' sub':'';
+    return `<div class="chanitem${c.id===CURCHAN?' on':''}${u?' unread':''}${sub}" role="button" tabindex="0" aria-label="Channel ${esc(chanDisplay(c))}${u?', '+u+' unread':''}" onkeydown="rowKey(event)" onclick="selectChannel('${esc(c.id)}')">
+      <i class="ti ti-${icon}"></i><span class="channm">${esc(chanDisplay(c))}</span>${u?`<span class="chanbadge">${u>99?'99+':u}</span>`:''}
+      <button class="chansub" title="New sub-channel here" onclick="event.stopPropagation();createChannel('${esc(c.id)}')"><i class="ti ti-plus"></i></button>
+      <button class="chancog" title="Channel settings" onclick="event.stopPropagation();openChannelSettings('${esc(c.id)}')"><i class="ti ti-settings"></i></button></div>`;}).join("");
   updateChannelBell();
+}
+// Keyboard activation for role="button" list rows (channels, DMs).
+function rowKey(e){if(e.key==="Enter"||e.key===" "){e.preventDefault();e.currentTarget.click();}}
+// Jump to a message, switching channels first when the hit is elsewhere. The
+// target only exists after the new history renders, so poll briefly for it.
+function gotoMsg(id,channel){
+  closeThread();
+  const scroll=()=>{const el=document.getElementById("msg-"+id);if(!el)return false;
+    el.scrollIntoView({behavior:"smooth",block:"center"});
+    el.classList.add("msg-flash");setTimeout(()=>el.classList.remove("msg-flash"),1600);return true;};
+  if(channel&&channel!==CURCHAN){selectChannel(channel);let n=0;
+    const t=setInterval(()=>{if(scroll()||++n>20)clearInterval(t);},100);}
+  else scroll();
 }
 function getActiveChannel(){return CURCHAN||"general";}
 function currentChannel(){return CHANNELS.find(c=>c.id===CURCHAN)||{id:"general",name:"general",owner:""};}
 function selectChannel(id){
+  const switching=id!==CURCHAN;
   CURCHAN=id;
   clearUnread(id);
   const ch=currentChannel();
@@ -3482,22 +3618,47 @@ function selectChannel(id){
   const canInvite=kind==="private"&&(ch.owner===me||(ch.inviters||[]).includes(me));
   document.getElementById("chat-invite").style.display=canInvite?"inline-flex":"none";
   renderChannels();renderDMList();
+  // Show a spinner immediately on a real switch so the previous channel's
+  // messages don't linger while the new history loads.
+  if(switching){
+    const box=document.getElementById("chat-msgs");
+    if(box){box.innerHTML='<div class="chatempty"><i class="ti ti-loader-2 att-spin"></i><div>Loading…</div></div>';box.dataset.sig="loading";}
+    CHAT=[];CHAT_LOAD_ERR=false;
+  }
   loadChatHistory();
 }
 async function loadChatHistory(){
   const chan=CURCHAN;
-  try{CHAT=await(await fetch("/api/chat/messages?channel="+encodeURIComponent(chan))).json();}catch(e){CHAT=[];}
-  if(chan!==CURCHAN)return; // channel switched mid-flight
+  try{
+    const r=await fetch("/api/chat/messages?channel="+encodeURIComponent(chan));
+    if(!r.ok)throw new Error(r.status);
+    const data=await r.json();
+    if(chan!==CURCHAN)return; // channel switched mid-flight
+    CHAT=data;CHAT_LOAD_ERR=false;
+  }catch(e){
+    if(chan!==CURCHAN)return;
+    // Distinguish a failed load from a genuinely empty room (see renderChatList):
+    // clear so we never bleed another channel's messages, and flag the error.
+    CHAT=[];CHAT_LOAD_ERR=true;
+  }
   CHAT.forEach(markSeen); // history is not "new" — don't notify for it
   renderChatList(true);
 }
-async function createChannel(){
-  const name=await coxModal({title:"New channel",message:"Enter channel name. Add +public at the end for a public channel (anyone can join), otherwise it will be private (invite-only).",input:{placeholder:"e.g. design-review  or  general-chat +public"},confirmText:"Create"});
-  if(!name||!name.trim())return;
-  let n=name.trim();let kind="private";
-  if(/\s+\+public\s*$/i.test(n)){kind="public";n=n.replace(/\s+\+public\s*$/i,"").trim();}
+// `parent` is set when the + on a channel row was used: the new room is opened
+// inside that one and starts with its members.
+async function createChannel(parent){
+  const where=parent?` inside #${chanDisplay(CHANNELS.find(c=>c.id===parent)||{name:parent})}`:"";
+  const name=await coxModal({title:parent?"New sub-channel":"New channel",
+    message:`Name the channel${where}. It is private (invite-only) unless you switch it to public.`,
+    input:{placeholder:"e.g. design-review"},
+    toggle:{label:"Public — anyone in the workspace can join",value:false},
+    confirmText:"Create"});
+  if(!name||!name.trim&&!name.value)return;
+  const n=(typeof name==="string"?name:name.value||"").trim();
+  if(!n)return;
+  const kind=(typeof name==="object"&&name.toggle)?"public":"private";
   try{
-    const r=await fetch("/api/chat/channels",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n,kind})});
+    const r=await fetch("/api/chat/channels",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:n,kind,parent:parent||null})});
     if(!r.ok){toasty(await r.text()||"could not create channel","err");return;}
     const ch=await r.json();
     await loadChannels();
@@ -3530,6 +3691,186 @@ let MODE=(localStorage.getItem("cox_mode")==="chat")?"chat":"workspace";
 function isChatMode(){return MODE==="chat";}
 function isManageMode(){return MODE==="manage";}
 function markSeen(m){SEEN.add(chatKey(m));}
+// ── Channel settings: privacy, who may invite, members ──────────────────────
+// Everything a room's owner decides about their room, in one place. Admins
+// outrank ownership — the server enforces that; this only shows the controls.
+async function openChannelSettings(id){
+  const ch=CHANNELS.find(c=>c.id===id);
+  if(!ch){toasty("channel not found","err");return;}
+  CHSET={id,tab:"general"};
+  document.getElementById("chset-title").textContent="#"+chanDisplay(ch);
+  renderChannelSettings();
+  document.getElementById("ov-chset").classList.add("open");
+}
+let CHSET=null;
+function chsetTab(t){if(CHSET){CHSET.tab=t;renderChannelSettings();}}
+function renderChannelSettings(){
+  if(!CHSET)return;
+  const ch=CHANNELS.find(c=>c.id===CHSET.id);if(!ch)return;
+  const isGeneral=ch.id==="general";
+  for(const t of ["general","members","permissions"]){
+    const b=document.getElementById("chset-tab-"+t);
+    if(b)b.classList.toggle("on",CHSET.tab===t);
+  }
+  const box=document.getElementById("chset-body");
+  if(CHSET.tab==="general"){
+    box.innerHTML=`
+      <label class="coxmodal-toggle">
+        <input type="checkbox" id="chset-public" ${(ch.kind==="public")?"checked":""} ${isGeneral?"disabled":""}
+          onchange="saveChannelSettings({kind:this.checked?'public':'private'})">
+        <span class="cmsw"></span>
+        <span>Public — anyone in the workspace can join and read</span>
+      </label>
+      ${isGeneral?'<div class="msub">#general is always open: a team needs one room nobody can be shut out of.</div>':''}
+      <div class="fr" style="margin-top:14px"><span class="lbl">Topic</span>
+        <input id="chset-topic" value="${esc(ch.topic||"")}" placeholder="what this channel is for" style="flex:1"
+          onchange="saveChannelSettings({topic:this.value})"></div>`;
+  } else if(CHSET.tab==="permissions"){
+    box.innerHTML=`
+      <label class="coxmodal-toggle">
+        <input type="checkbox" id="chset-openinv" ${ch.open_invite?"checked":""}
+          onchange="saveChannelSettings({open_invite:this.checked})">
+        <span class="cmsw"></span>
+        <span>Any member may invite others</span>
+      </label>
+      <div class="msub">With this off, only the owner and the people they name below can add or remove members. Admins can always do both.</div>
+      <div style="margin-top:14px;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--dim)">Can invite &amp; remove</div>
+      <div id="chset-inviters">${(ch.members||[]).map(m=>`
+        <label class="chset-row"><input type="checkbox" ${(ch.inviters||[]).includes(m)?"checked":""}
+          onchange="delegateInvite('${esc(m)}',this.checked)"> ${esc(m)}</label>`).join("")||'<div class="empty">no members yet</div>'}</div>`;
+  } else {
+    box.innerHTML=`
+      <div id="chset-members">${(ch.members||[]).map(m=>`
+        <div class="chset-row"><span>${esc(m)}${m===ch.owner?' <span class="pbadge on">owner</span>':''}</span>
+          ${m===ch.owner?'':`<button class="btn-ghost" onclick="kickMember('${esc(m)}')">Remove</button>`}</div>`).join("")||'<div class="empty">no members yet</div>'}</div>
+      <button class="save pf-btn" style="margin-top:12px" onclick="inviteToSettingsChannel()"><i class="ti ti-user-plus"></i> Invite someone</button>`;
+  }
+}
+async function saveChannelSettings(patch){
+  if(!CHSET)return;
+  try{
+    // Channels live in the system-chat store (they are created through
+    // /api/chat/channels), so their settings do too. Pointing this at the
+    // per-project router answered "no such project" on every save.
+    const r=await fetch(`/api/chat/channels/${encodeURIComponent(CHSET.id)}/settings`,
+      {method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(patch)});
+    if(!r.ok){toasty(await r.text()||"could not save","err");return;}
+    await loadChannels();renderChannelSettings();toasty("Saved","ok");
+  }catch(e){toasty("could not save","err");}
+}
+async function kickMember(user){
+  if(!CHSET)return;
+  const ok=await coxModal({title:"Remove member",message:`Remove ${user} from this channel?`,confirmText:"Remove",danger:true});
+  if(!ok)return;
+  try{
+    const r=await fetch(`/api/chat/channels/${encodeURIComponent(CHSET.id)}/members/${encodeURIComponent(user)}`,{method:"DELETE"});
+    if(!r.ok){toasty(await r.text()||"could not remove","err");return;}
+    await loadChannels();renderChannelSettings();
+  }catch(e){toasty("could not remove","err");}
+}
+async function delegateInvite(user,on){
+  try{
+    await fetch(`/api/chat/channels/${encodeURIComponent(CHSET.id)}/invite`,
+      {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({user,delegate:on})});
+    await loadChannels();renderChannelSettings();
+  }catch(e){toasty("could not update","err");}
+}
+// Invite from the Channel Settings modal — targets the channel whose settings
+// are open (CHSET.id), via the project-scoped route the rest of that modal uses.
+async function inviteToSettingsChannel(){
+  if(!CHSET){toasty("open channel settings first","err");return;}
+  const who=await coxModal({title:"Invite to channel",input:{placeholder:"username"},confirmText:"Invite"});
+  const u=(typeof who==="string"?who:"").trim();if(!u)return;
+  try{
+    const r=await fetch(`/api/chat/channels/${encodeURIComponent(CHSET.id)}/invite`,
+      {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({user:u})});
+    if(!r.ok){toasty(await r.text()||"could not invite","err");return;}
+    await loadChannels();renderChannelSettings();
+  }catch(e){toasty("could not invite","err");}
+}
+
+// ── Chat search: channels, people, messages, in one palette ─────────────────
+function openChatSearch(){
+  const ov=document.getElementById("ov-chatsearch");
+  document.getElementById("chatsearch-input").value="";
+  const sc=searchScope();
+  document.getElementById("chatsearch-input").placeholder=`Search ${sc.label}…`;
+  document.getElementById("chatsearch-list").innerHTML=`<div class="empty">Type to search ${sc.label}.</div>`;
+  ov.classList.add("open");
+  setTimeout(()=>document.getElementById("chatsearch-input").focus(),40);
+}
+// The rail's single search. In chat it looks at rooms, people and messages;
+// everywhere else it looks at the work — tickets and wiki pages — so the same
+// box is useful in all three modes instead of being a chat-only feature that
+// happens to sit above the switch.
+function openGlobalSearch(){ openChatSearch(); }
+
+// What the palette searches depends on where you are: rooms and messages in
+// Chat, work in Space, people and projects in Manage. One box, the answers of
+// the room you are standing in.
+function searchScope(){
+  if(MODE==="chat")return {kinds:["channel","person","message"],label:"channels, people, messages"};
+  if(MODE==="manage")return {kinds:["person","project"],label:"people and projects"};
+  return {kinds:["ticket","page","person"],label:"tickets, pages, people"};
+}
+
+function searchWorkItems(q){
+  const hit=[];
+  const s=STATE||{};
+  for(const t of (s.tickets||[])){
+    const hay=`${t.id} ${t.title} ${t.description||""}`.toLowerCase();
+    if(hay.includes(q)) hit.push({t:"ticket",label:`${t.id} · ${t.title}`,sub:t.status,act:`showTicket('${esc(t.id)}')`});
+    if(hit.length>=12)break;
+  }
+  for(const d of (s.docs||[])){
+    if(`${d.title} ${d.body||""}`.toLowerCase().includes(q))
+      hit.push({t:"page",label:d.title,sub:d.folder||"wiki",act:`nav('docs')`});
+    if(hit.length>=20)break;
+  }
+  return hit;
+}
+
+function chatSearchRun(){
+  const q=document.getElementById("chatsearch-input").value.trim().toLowerCase();
+  const list=document.getElementById("chatsearch-list");
+  const scope=searchScope();
+  if(!q){list.innerHTML=`<div class="empty">Type to search ${scope.label}.</div>`;return;}
+  let hit=[];
+  for(const c of CHANNELS){
+    if((c.name||"").toLowerCase().includes(q)||(c.topic||"").toLowerCase().includes(q))
+      hit.push({t:"channel",label:"#"+chanDisplay(c),sub:c.topic||((c.kind==="public")?"public channel":"private channel"),act:`selectChannel('${esc(c.id)}')`});
+  }
+  for(const m of (MEMBERS||[])){
+    const n=m.username||m.name||"";
+    if(n.toLowerCase().includes(q)) hit.push({t:"person",label:n,sub:m.role||"",act:`openDM('${esc(n)}')`});
+  }
+  for(const h of searchWorkItems(q)) hit.push(h);
+  for(const p of (PROJECTS||[])){
+    if(`${p.id} ${p.name||""}`.toLowerCase().includes(q))
+      hit.push({t:"project",label:p.name||p.id,sub:`${p.tickets||0} tickets · v${p.version||"0.0.0"}`,act:`switchProject('${esc(p.id)}')`});
+  }
+  for(const msg of (CHAT||[]).slice(-800).reverse()){
+    const b=(msg.body||"");
+    if(b.toLowerCase().includes(q)){
+      hit.push({t:"message",label:b.slice(0,90),sub:`${msg.user||""} · #${msg.channel||"general"}`,act:`selectChannel('${esc(msg.channel||"general")}')`});
+      if(hit.filter(h=>h.t==="message").length>=12)break;
+    }
+  }
+  const icon={channel:"hash",person:"user",message:"message-2",ticket:"ticket",page:"file-text",project:"folder"};
+  // Keep only what this tab is about; everything else is noise here.
+  hit=hit.filter(h=>scope.kinds.includes(h.t));
+  list.innerHTML=hit.length?hit.slice(0,30).map(h=>`
+    <div class="cs-item" onclick="closeChatSearch();${h.act}">
+      <i class="ti ti-${icon[h.t]}"></i>
+      <div class="cs-txt"><b>${esc(h.label)}</b>${h.sub?`<span>${esc(h.sub)}</span>`:''}</div>
+      <span class="cs-kind">${h.t}</span></div>`).join("")
+    :'<div class="empty">Nothing matched.</div>';
+}
+function closeChatSearch(){document.getElementById("ov-chatsearch").classList.remove("open");}
+document.addEventListener("keydown",e=>{
+  if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==="k"){e.preventDefault();openGlobalSearch();}
+});
+
 // Enterprise modal replacing browser prompt()/confirm(): returns a Promise —
 // resolves the input string (or true) on confirm, null on cancel.
 let _cmResolve=null;
@@ -3541,6 +3882,11 @@ function coxModal(o){
     document.getElementById("cm-msg").textContent=o.message||"";
     const inp=document.getElementById("cm-input");
     inp.hidden=!o.input; inp.value=(o.input&&o.input.value)||""; inp.placeholder=(o.input&&o.input.placeholder)||"";
+    // Optional switch (e.g. public/private) — resolves alongside the text.
+    const tg=document.getElementById("cm-toggle");
+    if(tg){tg.hidden=!o.toggle;
+      if(o.toggle){document.getElementById("cm-toggle-label").textContent=o.toggle.label||"";
+        document.getElementById("cm-toggle-input").checked=!!o.toggle.value;}}
     document.getElementById("cm-ok").textContent=o.confirmText||"OK";
     document.getElementById("cm-cancel").textContent=o.cancelText||"Cancel";
     m.querySelector(".coxmodal-card").classList.toggle("danger",!!o.danger);
@@ -3552,8 +3898,10 @@ function coxModal(o){
 }
 function coxModalOk(){
   const m=document.getElementById("cox-modal");const inp=document.getElementById("cm-input");
+  const tg=document.getElementById("cm-toggle");
   const val=inp.hidden?true:inp.value.trim();
-  m.hidden=true; if(_cmResolve){_cmResolve(val);_cmResolve=null;}
+  const out=(tg&&!tg.hidden)?{value:inp.hidden?"":inp.value.trim(),toggle:document.getElementById("cm-toggle-input").checked}:val;
+  m.hidden=true; if(_cmResolve){_cmResolve(out);_cmResolve=null;}
 }
 function coxModalCancel(){
   const m=document.getElementById("cox-modal");m.hidden=true;
@@ -3657,7 +4005,7 @@ function renderDMList(){
     const p=PROFILES[u.username]||{};
     const av=p.avatar?`<span class="dmav" style="padding:0;overflow:hidden"><img src="${esc(p.avatar)}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit"><span class="dmpres${on?' on':''}"></span></span>`
       :`<span class="dmav" style="background:${userColor(u.username)}">${esc((u.name||u.username).slice(0,2).toUpperCase())}<span class="dmpres${on?' on':''}"></span></span>`;
-    return `<div class="chanitem dmitem${active?' on':''}" onclick="openDM('${esc(u.username)}')" title="@${esc(u.username)}${p.status_text?' · '+esc(p.status_text):''}">
+    return `<div class="chanitem dmitem${active?' on':''}" role="button" tabindex="0" aria-label="Direct message ${esc(u.name||u.username)}" onkeydown="rowKey(event)" onclick="openDM('${esc(u.username)}')" title="@${esc(u.username)}${p.status_text?' · '+esc(p.status_text):''}">
       ${av}<span class="channm">${esc(u.name||u.username)}</span>${statusChip(u.username)}</div>`;
   }).join(""):'<div class="dm-empty">No teammates yet</div>';
 }
@@ -4593,13 +4941,13 @@ function openChatWS(){
   let ws;try{ws=new WebSocket(`${proto}://${location.host}/api/chat/ws`);}catch(e){return;}
   CHATWS=ws;
   // On (re)connect, resync the open channel so nothing sent during a gap is lost.
-  ws.onopen=()=>{if(CHATWS===ws&&isChatMode())loadChatHistory();};
+  ws.onopen=()=>{if(CHATWS===ws){setChatConn(true);if(isChatMode())loadChatHistory();}};
   ws.onmessage=e=>{try{const m=JSON.parse(e.data);
     if(m.type==="signal"){onSignal(m);return;}
     if(m.type==="reaction"){applyReaction(m);return;}
     // The socket only carries channels this user may see (enforced server-side).
     onChatIncoming(m);}catch(_){}};
-  ws.onclose=()=>{if(CHATWS===ws){CHATWS=null;
+  ws.onclose=()=>{if(CHATWS===ws){CHATWS=null;setChatConn(false);
     // Keep the socket alive for the whole session (any page), so notifications
     // arrive even when the user isn't on the Chat view. Reconnect while the
     // same project is active.
@@ -4618,17 +4966,24 @@ function startChatPoll(){
   },2500);
 }
 function closeChatWS(){clearTimeout(chatwsRetry);if(CHATWS){try{CHATWS.onclose=null;CHATWS.close();}catch(_){}}CHATWS=null;}
+// Show a subtle "reconnecting" banner while the chat socket is down. Only ever
+// appears after a live socket drops — the first connect stays silent.
+function setChatConn(ok){const el=document.getElementById("chat-conn");if(el)el.style.display=ok?"none":"flex";}
 function renderChatList(force){
   const box=document.getElementById("chat-msgs");if(!box)return;
   const msgs=CHAT;const me=(ME&&ME.username)||"";
   if(!force&&box.dataset.sig===msgs.length)return;
   const atBottom=box.scrollHeight-box.scrollTop-box.clientHeight<90;
   box.dataset.sig=msgs.length;
-  if(!msgs.length){box.innerHTML='<div class="chatempty"><i class="ti ti-message-circle-2"></i><div>No messages yet</div><span>Say hello to your teammates.</span></div>';return;}
+  if(!msgs.length){box.innerHTML=CHAT_LOAD_ERR
+    ? '<div class="chatempty"><i class="ti ti-plug-connected-x" style="color:var(--amber)"></i><div>Couldn\'t load messages</div><span>Check your connection — <a onclick="loadChatHistory()" style="color:var(--accent2);cursor:pointer;text-decoration:underline">retry</a>.</span></div>'
+    : '<div class="chatempty"><i class="ti ti-message-circle-2"></i><div>No messages yet</div><span>Say hello to your teammates.</span></div>';
+    return;}
   let lastDay="",html="";
   let prev=null;
   msgs.forEach(m=>{
-    if(m.deleted&&!force)return; // skip deleted unless forced refresh
+    // Deleted messages always render as a tombstone (was inconsistent before:
+    // shown on forced refresh, silently dropped on the next live render).
     if(m.thread_id)return; // thread replies live in the thread panel, not the channel
     const t=m.at||"";const day=t.slice(0,10);
     if(day&&day!==lastDay){lastDay=day;html+=`<div class="chatday"><span>${esc(dayLabel(day))}</span></div>`;prev=null;}
@@ -4645,8 +5000,23 @@ let PROFILES={};
 async function loadProfiles(){try{PROFILES=await(await fetch("/api/profiles")).json();}catch(e){}
   renderDMList();try{renderMe();}catch(e){}}
 function avat(u,cls){const p=PROFILES[u]||{};const col=userColor(u);
-  if(p.avatar)return `<img class="${cls} avimg" src="${esc(p.avatar)}" alt="">`;
+  // A broken or degenerate image (a 1x1 pixel scaled to fill) renders as a
+  // solid black square that looks like a bug in the app. Fall back to the
+  // initials tile, which is always readable.
+  if(p.avatar)return `<img class="${cls} avimg" src="${esc(p.avatar)}" alt="" data-u="${esc(u)}"
+    onerror="avatarFallback(this)" onload="if(this.naturalWidth<8||this.naturalHeight<8)avatarFallback(this)">`;
   return `<div class="${cls}" style="background:${col}26;color:${col}">${esc((memberName(u)||"?").slice(0,2).toUpperCase())}</div>`;}
+// Replace an unusable avatar image with its initials tile in place.
+function avatarFallback(img){
+  const u=img.getAttribute("data-u")||"";
+  const col=userColor(u);
+  const cls=(img.className||"").replace("avimg","").trim();
+  const el=document.createElement("div");
+  el.className=cls;
+  el.style.background=col+"26";el.style.color=col;
+  el.textContent=(memberName(u)||u||"?").slice(0,2).toUpperCase();
+  img.replaceWith(el);
+}
 function statusChip(u){const p=PROFILES[u]||{};
   return p.status_emoji?`<span class="ustatus" title="${esc(p.status_text||"")}">${esc(p.status_emoji)}</span>`:"";}
 const STATUS_PRESETS=[["🎯","Focusing"],["🍜","Lunch"],["🏠","WFH"],["📅","In a meeting"],["🌴","Vacation"],["🤒","Sick"]];
@@ -4731,15 +5101,23 @@ function chatWrap(mk){const inp=document.getElementById("chat-input");if(!inp)re
 function sendChat(){const inp=document.getElementById("chat-input");const body=inp.value.trim();
   const attachments=(ATT.chat||[]).slice();
   if(!body&&!attachments.length)return;
-  inp.value="";ATT.chat=[];renderAttStrip("chat");
-  // Prefer the live socket; the server echoes the canonical message straight
-  // back over WS (so no optimistic insert). Fall back to REST if the socket
-  // isn't open — SSE-independent, still persisted server-side.
   const channel=CURCHAN;
-  if(CHATWS&&CHATWS.readyState===1){CHATWS.send(JSON.stringify({body,channel,attachments}));}
-  else{fetch("/api/chat/send",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({body,channel,attachments})}).then(loadChatHistory).catch(()=>{});}
+  const payload=JSON.stringify({body,channel,attachments});
+  // Clear the composer optimistically, but keep the text so we can put it back
+  // verbatim if the send fails — otherwise a dropped message is unrecoverable.
+  const restore=()=>{if(!inp.value)inp.value=body;ATT.chat=attachments;renderAttStrip("chat");inp.focus();};
+  inp.value="";ATT.chat=[];renderAttStrip("chat");
+  // Prefer the live socket (the server echoes the canonical message back). Fall
+  // back to REST whenever the socket isn't OPEN or the frame can't be queued.
+  let viaWs=false;
+  if(CHATWS&&CHATWS.readyState===1){try{CHATWS.send(payload);viaWs=true;}catch(_){}}
+  if(!viaWs){
+    fetch("/api/chat/send",{method:"POST",headers:{"Content-Type":"application/json"},body:payload})
+      .then(r=>{if(!r.ok)throw new Error(r.status);return loadChatHistory();})
+      .catch(()=>{restore();toasty("Couldn't send — check your connection and try again.","err");});
+  }
   setTimeout(scrollChatToBottom, 100);}
-function scrollChatToBottom(){const box=document.getElementById("chat-msgs");if(box){box.scrollTop=box.scrollHeight;updateScrollBtn();}}
+function scrollChatToBottom(){const box=document.getElementById("chat-msgs");if(box){box.scrollTop=box.scrollHeight;chatScrollSpy();}}
 function chatScrollSpy(){const box=document.getElementById("chat-msgs");if(!box)return;const btn=document.getElementById("chat-scroll-btn");const dist=box.scrollHeight-box.scrollTop-box.clientHeight;btn.classList.toggle("show",dist>120);}
 // ── Shared attachment upload + rendering (chat + discussion) ────────────────
 let ATT={chat:[],disc:[]};
@@ -4809,11 +5187,14 @@ function renderEngineAlert(s){
   const inc=(s&&s.engine_incidents)||[];
   if(!inc.length){el.hidden=true;el.innerHTML="";return;}
   el.hidden=false;
-  el.innerHTML=inc.map(i=>`<div class="eng-alert">
+  // One line, with the detail on hover: it must be impossible to miss and
+  // cheap to ignore once read — a banner that eats the screen gets dismissed
+  // mentally, which is the opposite of the point.
+  el.innerHTML=inc.map(i=>`<div class="eng-alert" title="${esc(i.reason)}">
     <i class="ti ti-plug-connected-x"></i>
-    <div class="ea-txt"><b>${esc(i.engine)} is failing every run</b>
-      <span>${esc(i.reason)}</span>
-      <small>first hit by ${esc(i.role)} · ${i.hits} failed run${i.hits>1?"s":""} · clears itself once the engine answers</small></div>
+    <b>${esc(i.engine)}: ${i.hits} failed run${i.hits>1?"s":""}</b>
+    <span>${esc(i.reason)}</span>
+    <small>${i.hits} run${i.hits>1?"s":""} · clears itself</small>
   </div>`).join("");
 }
 function depChips(ids){
@@ -4963,7 +5344,7 @@ async function loadSettings(){
   const opt=(s)=>eng.map(e=>`<option value="${e}" ${e===s?'selected':''}>${label(e)}</option>`).join("");
   const detBanner=(detected&&detected.length)
     ? `<div class="panel" style="margin-bottom:12px"><div style="font-size:12px;color:var(--muted);margin-bottom:6px"><i class="ti ti-cpu" style="color:var(--accent2)"></i> Detected agent CLIs on this machine — agents run locally via these:</div>`
-      + detected.map(d=>`<div style="display:flex;align-items:center;gap:8px;font-size:12px;padding:2px 0"><span class="tk" style="background:var(--green)22;color:var(--green)">${esc(d.name)}</span><span style="color:var(--dim);font-family:ui-monospace,monospace">${esc(d.path)}</span></div>`).join("")
+      + detected.map(d=>`<div style="display:flex;align-items:center;gap:8px;font-size:12px;padding:2px 0"><span class="tk" style="background:color-mix(in srgb,var(--green) 13%,transparent);color:var(--green)">${esc(d.name)}</span><span style="color:var(--dim);font-family:ui-monospace,monospace">${esc(d.path)}</span></div>`).join("")
       + `</div>`
     : `<div class="panel" style="margin-bottom:12px"><div style="font-size:12px;color:var(--amber)"><i class="ti ti-alert-triangle"></i> No agent CLI detected on PATH. Install <b>claude</b> or <b>opencode</b> to run real agents (scripted/mock work offline).</div></div>`;
   const defRow=`<div class="fr"><span class="lbl">Default engine</span><select id="eng-default" onchange="onEngine('default')">${opt(def.engine)}</select>
@@ -5144,7 +5525,7 @@ async function renderMcpPanel(){const el=document.getElementById("mcp-panel");if
     </div>
     <div class="panel" style="margin-bottom:12px">
       <div style="font-size:13px;font-weight:700;margin-bottom:6px"><i class="ti ti-key" style="color:var(--accent2)"></i> Your access tokens</div>
-      ${fresh?`<div style="background:var(--green)18;border:1px solid var(--green)55;border-radius:8px;padding:9px 12px;margin-bottom:9px;font-size:12px">
+      ${fresh?`<div style="background:color-mix(in srgb,var(--green) 9%,transparent);border:1px solid color-mix(in srgb,var(--green) 33%,transparent);border-radius:8px;padding:9px 12px;margin-bottom:9px;font-size:12px">
         <b style="color:var(--green)">Token created.</b> Copy it now — it is not shown again.<br>
         <code style="user-select:all;word-break:break-all">${esc(fresh.token)}</code>
         <button class="toolcopy" onclick="copyText(this,'${esc(fresh.token)}')" title="Copy"><i class="ti ti-copy"></i></button></div>`:""}
@@ -6055,7 +6436,8 @@ function renderMe(){const box=document.querySelector("#user-badge .uavatar");if(
   // Bind through a wrapper: assigning openProfile directly hands it the click
   // Event as `tab`, which matches no pane and opens the modal with nothing selected.
   box.style.cursor="pointer";box.title="Edit your profile & status";box.onclick=()=>openProfile("profile");
-  box.innerHTML=p.avatar?`<img src="${esc(p.avatar)}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit">`
+  box.innerHTML=p.avatar?`<img src="${esc(p.avatar)}" data-u="${esc(me)}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit"
+      onerror="this.remove()" onload="if(this.naturalWidth<8||this.naturalHeight<8)this.remove()">`
     :`<span id="ub-initials">${esc(me.slice(0,2).toUpperCase())}</span>`;
   const nm=document.getElementById("ub-name");
   if(nm)nm.innerHTML=esc(ME.name||me)+(p.status_emoji?` <span class="ustatus" title="${esc(p.status_text||"")}">${esc(p.status_emoji)}</span>`:"");
@@ -6764,14 +7146,77 @@ async function openAgent(role,worker){
   document.getElementById("agent-acts").innerHTML=acts.length?acts.map(a=>
     `<div class="act"><div class="atx"><span>${esc(a.action)}</span> ${a.ticket?`<span class="tk">${esc(a.ticket)}</span>`:''}</div><span class="tm">${esc((a.at||'').slice(11,16))}</span></div>`).join("")
     :'<div class="empty">no recorded actions yet</div>';
-  const body=document.getElementById("agent-transcript");body.textContent="loading…";
+  const body=document.getElementById("agent-transcript");
+  body.innerHTML='<div class="wl-empty"><i class="ti ti-loader-2"></i> loading…</div>';
+  AGENT_LOG_LAST=null;   // force a fresh render for this role/operator
   document.getElementById("ov-agent").classList.add("open");
   AGENT_LOG_ROLE=role.toLowerCase().replace(/-/g,"_");  // serde key: DEV-FEATURE→dev_feature
   await pollAgentLog();               // first fetch now
   clearInterval(AGENT_LOG_TIMER);
   AGENT_LOG_TIMER=setInterval(pollAgentLog,1500);  // then live every 1.5s
 }
-let AGENT_LOG_TIMER=null, AGENT_LOG_ROLE=null, AGENT_LOG_WORKER="";
+let AGENT_LOG_TIMER=null, AGENT_LOG_ROLE=null, AGENT_LOG_WORKER="", AGENT_LOG_LAST=null;
+// Icon + colour for a tool name, so every engine's tool calls read at a glance.
+function wlToolMeta(name){
+  const n=(name||"").toLowerCase().replace(/^mcp__[^_]*__/,"");  // strip mcp__server__ prefix
+  const rules=[
+    [/(^|_)(read|view|cat|open|file_?text)/,"ti-file-text","--blue"],
+    [/(edit|write|patch|create|apply|multiedit)/,"ti-pencil","--amber"],
+    [/(bash|shell|exec|run|cmd|command|terminal)/,"ti-terminal-2","--green"],
+    [/(grep|search|glob|find|ripgrep|query|symbol)/,"ti-search","--purple"],
+    [/(web|fetch|http|url|browse)/,"ti-world","--teal"],
+    [/(task|agent|spawn|delegate)/,"ti-robot","--accent2"],
+    [/(git|commit|diff|branch|pr|pull)/,"ti-git-branch","--accent2"],
+    [/(todo|plan|list)/,"ti-list-check","--muted"],
+  ];
+  for(const [re,ic,col] of rules) if(re.test(n)) return {ic,col};
+  return {ic:"ti-tool",col:"--muted"};
+}
+// Light inline formatting for assistant text: `code` and **bold**.
+function wlFmt(t){
+  return esc(t)
+    .replace(/`([^`]+)`/g,'<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>');
+}
+// Parse the raw live log (a common line protocol both engines emit) into items.
+//   💬 <text>        assistant message (may span following unmarked lines)
+//   🔧 name(args)    tool call
+//   ↳ result (N…)    tool result
+//   # <header>       run-start / meta divider
+//   — run finished — end marker
+// Unmarked non-empty lines (e.g. opencode's plain streamed text) attach to the
+// current message, so engines that emit no emojis still render as messages.
+function parseWorklog(raw){
+  const items=[]; let cur=null;
+  const flush=()=>{ if(cur){ cur.text=cur.text.replace(/\s+$/,""); if(cur.text) items.push(cur); cur=null; } };
+  for(const line of (raw||"").split("\n")){
+    const s=line.replace(/\s+$/,"");
+    if(/^#\s/.test(s)){ flush(); items.push({k:"meta",text:s.replace(/^#\s*/,"")}); continue; }
+    if(/^\s*—\s*run finished/.test(s)){ flush(); items.push({k:"end"}); continue; }
+    if(s.startsWith("💬")){ flush(); cur={k:"msg",text:s.slice(2).replace(/^\s+/,"")}; continue; }
+    if(s.startsWith("🔧")){ flush(); const m=s.slice(2).trim(); const i=m.indexOf("(");
+      items.push({k:"tool",name:i>=0?m.slice(0,i):m,args:i>=0?m.slice(i+1).replace(/\)$/,""):""}); continue; }
+    const rm=s.match(/^\s*↳\s*result\s*\(([^)]*)\)/);
+    if(rm){ flush(); items.push({k:"result",info:rm[1]}); continue; }
+    // continuation / plain text
+    if(cur&&cur.k==="msg") cur.text+="\n"+s;
+    else if(s.trim()) cur={k:"msg",text:s};
+  }
+  flush();
+  return items;
+}
+function renderWorklog(items,live){
+  const parts=items.map(it=>{
+    if(it.k==="meta") return `<div class="wl-item wl-meta"><i class="ti ti-player-play"></i> ${esc(it.text)}</div>`;
+    if(it.k==="end")  return `<div class="wl-item wl-end"><span><i class="ti ti-circle-check"></i> run finished</span></div>`;
+    if(it.k==="tool"){ const m=wlToolMeta(it.name);
+      return `<div class="wl-item wl-tool"><span class="wl-chip"><i class="ti ${m.ic} wl-tic" style="color:var(${m.col})"></i><span class="wl-tname">${esc(it.name)}</span>${it.args?`<span class="wl-targs">${esc(it.args)}</span>`:""}</span></div>`; }
+    if(it.k==="result") return `<div class="wl-item wl-result"><span class="wl-rin"><i class="ti ti-corner-down-right"></i> ${esc(it.info)}</span></div>`;
+    return `<div class="wl-item wl-msg"><span class="wl-ic"><i class="ti ti-sparkles"></i></span><div class="wl-body">${wlFmt(it.text)}</div></div>`;
+  });
+  if(live) parts.push(`<div class="wl-typing"><span class="wl-ic"><i class="ti ti-sparkles"></i></span><span class="dots"><i></i><i></i><i></i></span></div>`);
+  return parts.join("");
+}
 async function pollAgentLog(){
   if(!AGENT_LOG_ROLE)return;
   const body=document.getElementById("agent-transcript");
@@ -6779,9 +7224,18 @@ async function pollAgentLog(){
   try{
     const url="/agent-log?role="+encodeURIComponent(AGENT_LOG_ROLE)+(AGENT_LOG_WORKER?"&worker="+encodeURIComponent(AGENT_LOG_WORKER):"");
     const d=await(await fetch(api(url))).json();
-    const atBottom=body.scrollHeight-body.scrollTop-body.clientHeight<40;
-    body.textContent=d.log&&d.log.trim()?d.log:"(this agent hasn't run yet)";
     if(badge)badge.style.display=d.live?"inline-block":"none";
+    const raw=(d.log||"").trim();
+    // Skip the DOM churn (and preserve the user's scroll) when nothing changed.
+    const sig=raw+"|"+(d.live?1:0);
+    if(sig===AGENT_LOG_LAST)return;
+    AGENT_LOG_LAST=sig;
+    const atBottom=body.scrollHeight-body.scrollTop-body.clientHeight<60;
+    if(!raw){
+      body.innerHTML='<div class="wl-empty"><i class="ti ti-moon-stars"></i> this agent hasn\'t run yet</div>';
+      return;
+    }
+    body.innerHTML=renderWorklog(parseWorklog(raw),d.live);
     if(atBottom)body.scrollTop=body.scrollHeight;   // follow the tail
   }catch(e){}
 }
@@ -6798,7 +7252,7 @@ function renderTwofa(){
   const on=ME&&ME.twofa;
   if(on){
     el.innerHTML=`<div style="display:flex;align-items:center;gap:10px">
-      <span class="tk" style="background:var(--green)22;color:var(--green)"><i class="ti ti-shield-check" style="font-size:13px"></i> enabled</span>
+      <span class="tk" style="background:color-mix(in srgb,var(--green) 13%,transparent);color:var(--green)"><i class="ti ti-shield-check" style="font-size:13px"></i> enabled</span>
       <span style="font-size:13px;color:var(--muted)">2FA is active for <b>${esc(ME.username)}</b>.</span>
       <div style="flex:1"></div>
       <button onclick="disable2fa()" style="background:transparent;color:var(--red);border:1px solid var(--red);border-radius:8px;padding:7px 13px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit">Disable</button></div>`;
@@ -6993,6 +7447,18 @@ function openThread(mid){
   }).catch(e=>{document.getElementById("thread-msgs").innerHTML='<div class="empty">Failed to load</div>';});
 }
 function closeThread(){document.getElementById("thread-side").classList.remove("on");document.getElementById("thread-back").classList.remove("on");THREAD_MSG=null;}
+// Escape closes chat overlays and the thread panel (they only had backdrop/X
+// close before). Skip when coxModal is up — it has its own Escape and sits on top.
+document.addEventListener("keydown",e=>{
+  if(e.key!=="Escape")return;
+  const cm=document.getElementById("cox-modal");if(cm&&!cm.hidden)return;
+  const th=document.getElementById("thread-side");
+  if(th&&th.classList.contains("on")){closeThread();return;}
+  for(const id of ["ov-chset","ov-members","ov-webhooks"]){
+    const el=document.getElementById(id);
+    if(el&&el.classList.contains("open")){close_(id);return;}
+  }
+});
 async function sendThreadReply(){
   if(!THREAD_MSG){console.warn("sendThreadReply: no THREAD_MSG");return;}
   const inp=document.getElementById("thread-input");
@@ -7028,7 +7494,7 @@ function renderSlackMsg(m){
   const me=ME?.username,isMe=m.user===me,deleted=m.deleted,hasId=m.id&&m.id.length>5;
   const col=userColor(m.user);
   const body=deleted?'<div class="smsg-body deleted"><i>This message was deleted</i></div>'
-    :`<div class="smsg-body">${formatMsg(m.body)}${m.edited?' <span class="tcedit">(edited)</span>':''}</div>`;
+    :(m.body?`<div class="smsg-body">${formatMsg(m.body)}${m.edited?' <span class="tcedit">(edited)</span>':''}</div>`:'');
   const reacts=(!deleted&&m.reactions&&m.reactions.length)?'<div class="tcr">'+m.reactions.map(r=>`<span class="tcre${r.users.includes(me)?' me':''}" onclick="reactTo('${esc(m.id)}','${esc(r.emoji)}')" title="${r.users.map(memberName).join(', ')}">${esc(r.emoji)} ${r.users.length}</span>`).join("")+`<span class="tcre add" onclick="openEmoji(document.getElementById('tcr-${esc(m.id)}'),e=>reactTo('${esc(m.id)}',e))" id="tcr-${esc(m.id)}"><i class="ti ti-mood-plus"></i></span></div>`:'';
   // Slack's signature: a clickable "N replies" bar under threaded parents.
   const thread=(!deleted&&m.reply_count>0)?`<div class="sthread" onclick="openThread('${esc(m.id)}')"><i class="ti ti-message-2"></i> ${m.reply_count} ${m.reply_count>1?'replies':'reply'} <span class="sthread-go">View thread ›</span></div>`:'';
@@ -7099,7 +7565,8 @@ async function saveEditInline(id,original){
   }catch(e){toasty("Network error","err");cancelEditInline(id,original);}
 }
 function cancelEdit(id){renderChatList(true);}
-async function deleteMsg(id){if(!confirm("Delete this message?"))return;
+async function deleteMsg(id){
+  if(!await coxModal({title:"Delete message?",message:"This can't be undone.",confirmText:"Delete",danger:true}))return;
   try{const r=await fetch("/api/chat/messages/"+id,{method:"DELETE"});if(!r.ok)toasty("Cannot delete","err");}
   catch(e){toasty("Network error","err");}}
 async function togglePin(id){
@@ -7122,13 +7589,16 @@ function startTyping(){
   const now=Date.now();if(now-TYPING_SENT<2000)return;TYPING_SENT=now;
   const ch=getActiveChannel();if(!ch||!CHATWS||CHATWS.readyState!==1)return;
   CHATWS.send(JSON.stringify({op:"typing",channel:ch}));}
+let TYPING_TIMER=null;
 function renderTyping(){
   const el=document.getElementById("typing-bar");if(!el)return;
-  const ch=getActiveChannel();
   const typers=[...TYPING.entries()].filter(([u,t])=>Date.now()-t<5000&&u!==ME?.username).map(([u])=>memberName(u));
-  if(!typers.length){el.style.display="none";return;}
-  el.style.display="block";el.innerHTML=typers.length===1?`<span class="typing-dots">${typers[0]} is typing<span>.</span><span>.</span><span>.</span></span>`
-    :`${typers.slice(0,2).join(", ")}${typers.length>2?' and '+(typers.length-2)+' more':''} typing…`;}
+  if(!typers.length){el.style.display="none";clearTimeout(TYPING_TIMER);TYPING_TIMER=null;return;}
+  el.style.display="block";el.innerHTML=typers.length===1?`<span class="typing-dots">${esc(typers[0])} is typing<span>.</span><span>.</span><span>.</span></span>`
+    :`${esc(typers.slice(0,2).join(", "))}${typers.length>2?' and '+(typers.length-2)+' more':''} typing…`;
+  // Re-check when the oldest entry crosses the 5s window, so the indicator
+  // clears itself even if no further chat event triggers a render.
+  clearTimeout(TYPING_TIMER);TYPING_TIMER=setTimeout(renderTyping,1200);}
 let USER_STATUS="online";
 function setUserStatus(s){USER_STATUS=s;localStorage.setItem("cox_status",s);
   if(CHATWS&&CHATWS.readyState===1)CHATWS.send(JSON.stringify({op:"status",status:s}));
@@ -7138,7 +7608,7 @@ function chatSearch(q){
   if(!q||q.length<2){document.getElementById("search-results").innerHTML="";return;}
   fetch("/api/chat/search?q="+encodeURIComponent(q)).then(r=>r.json()).then(msgs=>{
     const el=document.getElementById("search-results");
-    el.innerHTML=msgs.length?msgs.map(m=>`<div class="search-hit" onclick="document.getElementById('msg-${esc(m.id)}')?.scrollIntoView({behavior:'smooth',block:'center'});document.getElementById('chat-search-bar').style.display='none';closeThread();">
+    el.innerHTML=msgs.length?msgs.map(m=>`<div class="search-hit" onclick="gotoMsg('${esc(m.id)}','${esc(m.channel||'')}');document.getElementById('chat-search-bar').style.display='none';">
         <span class="sht">${esc(memberName(m.user))}</span> <span class="shb">${esc(m.body.substring(0,120))}</span>
         <span class="shtime">${esc((m.at||'').slice(5,16).replace('T',' '))}</span></div>`).join(""):'<div class="empty" style="padding:6px 12px">No results</div>';});}
 

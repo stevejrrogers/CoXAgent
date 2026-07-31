@@ -84,6 +84,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
     ///
     /// # Errors
     /// [`AppError`] on engine failure, unparseable output, or a DoR violation.
+    #[allow(clippy::too_many_lines)] // one linear pass; splitting hurts readability
     pub async fn execute(&self) -> Result<Option<TicketId>, AppError> {
         let state = self.store.load().await?;
         // Walk the SA queue best-first and claim the first ticket no other runner
@@ -167,13 +168,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
                     &self.work_dir,
                 )
                 .await;
-                match fixed.as_deref().map(parse_design) {
-                    Some(Ok(d)) => d,
-                    _ => {
-                        self.store.release_stage(&id, "sa", &worker).await.ok();
-                        return Err(PortError::Corrupt(format!("SA output: {first}")).into());
-                    }
-                }
+                let Some(Ok(repaired)) = fixed.as_deref().map(parse_design) else {
+                    self.store.release_stage(&id, "sa", &worker).await.ok();
+                    return Err(PortError::Corrupt(format!("SA output: {first}")).into());
+                };
+                repaired
             }
         };
 
@@ -376,11 +375,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             .context
             .as_deref()
             .filter(|c| !c.trim().is_empty())
-            .map(|c| {
-                format!(
-                    "\n\n## Project context (goal, stack, scope, constraints — design within this):\n{c}\n"
-                )
-            })
+            .map(|c| format!("\n\n## Project context (goal, stack, scope, constraints — design within this):\n{c}\n"))
             .unwrap_or_default();
         let stack = prompts::stack_constraints(&self.config.architecture);
         AgentRequest {

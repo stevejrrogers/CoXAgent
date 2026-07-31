@@ -58,6 +58,7 @@ pub struct EngineChoice {
 impl EngineChoice {
     /// Sanity-check the model string against a simple allowlist pattern to
     /// prevent accidental CLI argument injection through the config file.
+    #[must_use]
     pub fn is_model_valid(&self) -> bool {
         self.model.chars().all(|c| {
             c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '/' || c == '-' || c == ':'
@@ -143,6 +144,7 @@ impl Language {
 
 /// Loop tuning.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)] // config flags, not a state machine
 pub struct WorkflowConfig {
     /// BA runs when `cycle % ba_every == 1` (0 disables BA).
     pub ba_every_n_cycles: u64,
@@ -190,7 +192,7 @@ pub struct WorkflowConfig {
     #[serde(default = "default_true")]
     pub tdd: bool,
     /// Sandbox agent CLIs: confine their file WRITES to the project workspace
-    /// + tool caches (macOS Seatbelt today; other platforms run unsandboxed
+    /// and tool caches (macOS Seatbelt today; other platforms run unsandboxed
     /// with a warning). Off by default — turn on for untrusted codebases.
     #[serde(default)]
     pub sandbox: bool,

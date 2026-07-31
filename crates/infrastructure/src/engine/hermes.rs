@@ -63,11 +63,11 @@ impl AgentEnginePort for HermesEngine {
             .await
             .map_err(|e| PortError::Backend(format!("spawn hermes: {e}")))?;
 
+        // ~3.8 chars per token, as integer ceil-div of `len * 10` by 38 — same
+        // result as the float form, with no lossy casts to lint around.
         let estimate = |len: usize| -> u64 {
-            if len == 0 {
-                return 0;
-            }
-            (len as f64 / 3.8).ceil() as u64
+            let chars = u64::try_from(len).unwrap_or(u64::MAX);
+            chars.saturating_mul(10).saturating_add(37) / 38
         };
 
         Ok(AgentOutcome {

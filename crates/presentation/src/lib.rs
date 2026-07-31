@@ -3,6 +3,7 @@
 //! M0 provides a plain-text state report; the axum server and clap CLI land in
 //! later milestones. Presentation is swappable — a native shell reuses the same
 //! application ports without touching domain/application.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod cli;
 pub mod server;
