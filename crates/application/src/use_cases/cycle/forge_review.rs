@@ -264,7 +264,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
              code is clean (clear naming, no dead code, follows the repo's conventions and the \
              established architecture). If it merely works but is untested, sloppy, or drifts from \
              the architecture, REQUEST_CHANGES with the concrete fixes — a green diff is not enough, \
-             the merged code must be good.\n\nPR: {title}\nBranch: {head}\n\nUnified diff:\n```\n\
+             the merged code must be good. Judge the diff against the codebase AS IT IS NOW, not as \
+             it was when the branch was cut: open the files it touches and check the change still \
+             fits — right module, current structure, current conventions. When it no longer fits \
+             (moved code, dead paths, superseded patterns — any reason), REQUEST_CHANGES and say \
+             concretely what to change and where that code lives now, so the DEV can fix and you \
+             re-review the corrected PR on the next pass.\n\nPR: {title}\nBranch: {head}\n\nUnified diff:\n```\n\
              {clipped}\n```\n{impact}\nRespond with ONLY JSON: {{\"decision\": \"approve\" | \
              \"request_changes\", \"summary\": \"one short paragraph; if request_changes, list the \
              concrete fixes\"}}.{terse}"
