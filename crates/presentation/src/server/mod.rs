@@ -34,6 +34,8 @@ use tokio_stream::{Stream, StreamExt};
 mod assets;
 mod auth;
 mod background;
+mod hub_docs;
+mod requests;
 mod channels;
 mod chat;
 mod comments;
@@ -54,6 +56,8 @@ use auth::*;
 use background::*;
 use channels::*;
 use chat::*;
+use hub_docs::*;
+use requests::*;
 use comments::*;
 use docs::*;
 use engines::*;
@@ -196,369 +200,6 @@ fn now_rfc3339() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default()
-}
-
-/// A project's live team-chat channel: a broadcast fan-out to every connected
-/// WebSocket, plus a mutex that serializes the load→append→save of chat writes
-/// so two simultaneous messages can't clobber each other.
-#[derive(Clone)]
-struct ChatChannel {
-    tx: tokio::sync::broadcast::Sender<String>,
-    write_lock: Arc<tokio::sync::Mutex<()>>,
-}
-
-/// Hub-level, system-wide chat: one store shared across every project. Holds the
-/// [`SystemChat`] aggregate (private channels + all messages) behind a mutex,
-/// the JSON file it persists to, a broadcast bus for live WebSockets, and the
-/// directory uploaded chat media lives in.
-/// Hub-wide chat key in the shared KV store.
-const SYSCHAT_KEY: &str = "system_chat";
-
-#[derive(Clone)]
-struct SysChat {
-    inner: Arc<tokio::sync::Mutex<coxagent_application::SystemChat>>,
-    /// Local-file fallback path, used only when no shared store is configured.
-    path: PathBuf,
-    /// Shared DB store (Postgres). When set, it is the system of record and the
-    /// file is not touched.
-    store: Option<Arc<dyn coxagent_application::ports::outbound::KvDocPort>>,
-    tx: tokio::sync::broadcast::Sender<String>,
-}
-
-impl SysChat {
-    /// Load the store from the shared DB when `store` is set, else from
-    /// `dir/system_chat.json` (empty if absent).
-    async fn load(
-        dir: &std::path::Path,
-        store: Option<Arc<dyn coxagent_application::ports::outbound::KvDocPort>>,
-    ) -> Self {
-        let path = dir.join("system_chat.json");
-        let text = if let Some(s) = &store {
-            s.load(SYSCHAT_KEY).await.ok().flatten()
-        } else {
-            std::fs::read_to_string(&path).ok()
-        };
-        let inner = text
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
-        Self {
-            inner: Arc::new(tokio::sync::Mutex::new(inner)),
-            path,
-            store,
-            tx: tokio::sync::broadcast::channel(256).0,
-        }
-    }
-
-    /// Persist the current state (best-effort) to the shared DB, or the local
-    /// file when no store is configured.
-    async fn save(&self) {
-        let json = { serde_json::to_string(&*self.inner.lock().await).unwrap_or_default() };
-        if let Some(s) = &self.store {
-            if let Err(e) = s.save(SYSCHAT_KEY, &json).await {
-                tracing::warn!("system chat save failed: {e}");
-            }
-            return;
-        }
-        if let Some(parent) = self.path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(&self.path, json);
-    }
-}
-
-/// Workspace identity + invites: the company-level document (name, branding,
-/// pending invite links) persisted in the shared KV store (Postgres) when
-/// configured, else a local `workspace.json` under the hub dir.
-#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
-struct WorkspaceDoc {
-    #[serde(default)]
-    name: String,
-    #[serde(default)]
-    tagline: String,
-    #[serde(default)]
-    accent: String,
-    /// Company-wide engineering conventions (coding standards, style, do/don't).
-    /// Injected into every agent's prompt across every project.
-    #[serde(default)]
-    conventions: String,
-    #[serde(default)]
-    invites: Vec<Invite>,
-    /// Client-app distribution: where users download CoXAgent for each
-    /// platform, refreshed automatically from GitHub Releases when
-    /// `releases_repo` is set (manual URLs act as overrides).
-    #[serde(default)]
-    downloads: DownloadsCfg,
-}
-
-/// Per-platform download links + the release source of truth.
-#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
-struct DownloadsCfg {
-    /// `owner/name` GitHub repo whose Releases carry the app builds. When set,
-    /// a background task polls the latest release and fills version + asset
-    /// URLs automatically after every deploy that tags a release.
-    #[serde(default)]
-    releases_repo: String,
-    /// Newest published app version (auto from releases, or set manually).
-    #[serde(default)]
-    latest_version: String,
-    #[serde(default)]
-    macos: String,
-    #[serde(default)]
-    windows: String,
-    #[serde(default)]
-    linux: String,
-    /// App Store / TestFlight link — iOS can't sideload, so this is a URL only.
-    #[serde(default)]
-    ios: String,
-    /// Release notes of the latest version (from the GitHub release body,
-    /// capped) — shown as "What's new" in the update modal.
-    #[serde(default)]
-    notes: String,
-}
-
-/// One shareable invite link: whoever opens it can create their own account
-/// with the preset role + project membership, `uses_left` times.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-struct Invite {
-    token: String,
-    role: String,
-    #[serde(default)]
-    projects: Vec<String>,
-    created_by: String,
-    created_at: String,
-    uses_left: u32,
-}
-
-/// One space: an organizational unit grouping projects + members under its own
-/// admins. Spaces live in the shared KV (`app_kv` key `spaces`); a normal admin
-/// manages only spaces that list them, a super admin manages all.
-#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
-struct Space {
-    /// URL-safe slug id.
-    id: String,
-    name: String,
-    #[serde(default)]
-    tagline: String,
-    /// Usernames who administer THIS space (invite, edit, assign projects).
-    #[serde(default)]
-    admins: Vec<String>,
-    /// Project ids belonging to this space.
-    #[serde(default)]
-    projects: Vec<String>,
-    /// Explicit member usernames. Saving the space additionally ASSIGNS each
-    /// member to every project of the space (additive — never auto-revokes).
-    #[serde(default)]
-    members: Vec<String>,
-    /// Monthly USD spend cap for this space; 0 = no cap. Set by Super only.
-    #[serde(default)]
-    budget_usd: f64,
-    #[serde(default)]
-    created_by: String,
-    #[serde(default)]
-    created_at: String,
-}
-
-#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
-struct SpacesDoc {
-    #[serde(default)]
-    spaces: Vec<Space>,
-}
-
-/// The hub-wide spaces store (see [`SpacesDoc`]).
-#[derive(Clone)]
-struct Sp {
-    inner: Arc<tokio::sync::Mutex<SpacesDoc>>,
-    path: PathBuf,
-    store: Option<Arc<dyn coxagent_application::ports::outbound::KvDocPort>>,
-}
-
-impl Sp {
-    async fn load(
-        dir: &std::path::Path,
-        store: Option<Arc<dyn coxagent_application::ports::outbound::KvDocPort>>,
-    ) -> Self {
-        let path = dir.join("spaces.json");
-        let text = if let Some(s) = &store {
-            s.load("spaces").await.ok().flatten()
-        } else {
-            std::fs::read_to_string(&path).ok()
-        };
-        let inner = text
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
-        Self {
-            inner: Arc::new(tokio::sync::Mutex::new(inner)),
-            path,
-            store,
-        }
-    }
-
-    async fn save(&self) {
-        let json = { serde_json::to_string(&*self.inner.lock().await).unwrap_or_default() };
-        if let Some(s) = &self.store {
-            if let Err(e) = s.save("spaces", &json).await {
-                tracing::warn!("spaces save failed: {e}");
-            }
-            return;
-        }
-        let _ = std::fs::write(&self.path, json);
-    }
-}
-
-/// The hub-wide workspace store (see [`WorkspaceDoc`]).
-#[derive(Clone)]
-struct Ws {
-    inner: Arc<tokio::sync::Mutex<WorkspaceDoc>>,
-    path: PathBuf,
-    store: Option<Arc<dyn coxagent_application::ports::outbound::KvDocPort>>,
-}
-
-impl Ws {
-    async fn load(
-        dir: &std::path::Path,
-        store: Option<Arc<dyn coxagent_application::ports::outbound::KvDocPort>>,
-    ) -> Self {
-        let path = dir.join("workspace.json");
-        let text = if let Some(s) = &store {
-            s.load("workspace").await.ok().flatten()
-        } else {
-            std::fs::read_to_string(&path).ok()
-        };
-        let inner = text
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
-        Self {
-            inner: Arc::new(tokio::sync::Mutex::new(inner)),
-            path,
-            store,
-        }
-    }
-
-    async fn save(&self) {
-        let json = { serde_json::to_string(&*self.inner.lock().await).unwrap_or_default() };
-        if let Some(s) = &self.store {
-            if let Err(e) = s.save("workspace", &json).await {
-                tracing::warn!("workspace save failed: {e}");
-            }
-            return;
-        }
-        let _ = std::fs::write(&self.path, json);
-    }
-}
-
-/// A booked meeting. Times are RFC3339 UTC; the watchdog drives reminders,
-/// start announcements, and auto-ringing of absent participants.
-#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
-#[allow(clippy::struct_excessive_bools)] // a persisted data aggregate, not a state machine
-struct Meeting {
-    id: String,
-    title: String,
-    /// RFC3339 start instant.
-    start: String,
-    duration_min: u32,
-    created_by: String,
-    participants: Vec<String>,
-    /// Minutes before start to remind (0 = no reminder).
-    #[serde(default)]
-    remind_min: u32,
-    /// Who has actually entered the meeting room.
-    #[serde(default)]
-    joined: Vec<String>,
-    #[serde(default)]
-    reminded: bool,
-    #[serde(default)]
-    start_announced: bool,
-    /// One automatic ring of the not-yet-joined, ~1 min after start.
-    #[serde(default)]
-    auto_rang: bool,
-    #[serde(default)]
-    cancelled: bool,
-    #[serde(default)]
-    agenda: String,
-}
-
-#[derive(Default, serde::Serialize, serde::Deserialize)]
-struct MeetingsDoc {
-    meetings: Vec<Meeting>,
-}
-
-/// Meeting store: shared KV (`app_kv` key `meetings`) when configured, else a
-/// local `meetings.json` under the hub dir — same shape as [`Ws`].
-#[derive(Clone)]
-struct Mt {
-    inner: Arc<tokio::sync::Mutex<MeetingsDoc>>,
-    path: PathBuf,
-    store: Option<Arc<dyn coxagent_application::ports::outbound::KvDocPort>>,
-}
-
-impl Mt {
-    async fn load(
-        dir: &std::path::Path,
-        store: Option<Arc<dyn coxagent_application::ports::outbound::KvDocPort>>,
-    ) -> Self {
-        let path = dir.join("meetings.json");
-        let text = if let Some(s) = &store {
-            s.load("meetings").await.ok().flatten()
-        } else {
-            std::fs::read_to_string(&path).ok()
-        };
-        let inner = text
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
-        Self {
-            inner: Arc::new(tokio::sync::Mutex::new(inner)),
-            path,
-            store,
-        }
-    }
-
-    async fn save(&self) {
-        let json = { serde_json::to_string(&*self.inner.lock().await).unwrap_or_default() };
-        if let Some(s) = &self.store {
-            if let Err(e) = s.save("meetings", &json).await {
-                tracing::warn!("meetings save failed: {e}");
-            }
-            return;
-        }
-        let _ = std::fs::write(&self.path, json);
-    }
-}
-
-fn parse_rfc3339(s: &str) -> Option<time::OffsetDateTime> {
-    time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok()
-}
-
-#[derive(serde::Deserialize)]
-struct MeetingReq {
-    title: String,
-    start: String,
-    duration_min: Option<u32>,
-    participants: Vec<String>,
-    #[serde(default)]
-    remind_min: Option<u32>,
-    #[serde(default)]
-    agenda: Option<String>,
-}
-
-#[derive(serde::Deserialize)]
-struct MeetingPatch {
-    #[serde(default)]
-    cancel: Option<bool>,
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default)]
-    start: Option<String>,
-    #[serde(default)]
-    duration_min: Option<u32>,
-    #[serde(default)]
-    participants: Option<Vec<String>>,
-    #[serde(default)]
-    agenda: Option<String>,
-}
-
-#[derive(serde::Deserialize)]
-struct MeetingRingReq {
-    user: String,
 }
 
 /// The caller's username, via session cookie or bearer token.
@@ -1372,127 +1013,6 @@ fn parse_account(out: &str) -> Option<String> {
     None
 }
 
-#[derive(serde::Deserialize)]
-struct ConnectReq {
-    token: String,
-}
-
-#[derive(serde::Deserialize)]
-struct CreateProjectReq {
-    name: String,
-    #[serde(default)]
-    alias: Option<String>,
-    /// Adopt an existing codebase at this path (brownfield import).
-    #[serde(default)]
-    existing: Option<String>,
-    /// Clone this git URL and adopt it (brownfield import from remote).
-    #[serde(default)]
-    git_url: Option<String>,
-    /// Confirmed project goal/context to seed (from AI-assisted drafting).
-    #[serde(default)]
-    goal: Option<String>,
-    /// Space to file the new project under (super admin or that space's admin).
-    #[serde(default)]
-    space: Option<String>,
-}
-
-#[derive(serde::Deserialize)]
-struct RenameProjectReq {
-    name: String,
-}
-
-#[derive(serde::Deserialize)]
-struct GoalReq {
-    goal: String,
-}
-
-#[derive(serde::Deserialize)]
-struct PriorityReq {
-    priority: coxagent_domain::Priority,
-}
-
-#[derive(serde::Deserialize)]
-struct CreateTicketReq {
-    #[serde(default)]
-    ticket_type: Option<String>,
-    title: String,
-    #[serde(default)]
-    description: String,
-    #[serde(default)]
-    priority: Option<coxagent_domain::Priority>,
-    #[serde(default)]
-    complexity: Option<coxagent_domain::Complexity>,
-    #[serde(default)]
-    has_ui: bool,
-    #[serde(default)]
-    acceptance_criteria: Vec<String>,
-}
-
-#[derive(serde::Deserialize)]
-struct DiscussReq {
-    topic: String,
-}
-
-#[derive(serde::Deserialize)]
-struct AnalyzeReq {
-    description: String,
-}
-
-#[derive(serde::Deserialize)]
-struct EditReq {
-    title: String,
-    #[serde(default)]
-    description: String,
-}
-
-#[derive(serde::Deserialize)]
-struct CommentQuery {
-    ticket: Option<String>,
-}
-
-#[derive(serde::Deserialize)]
-struct PostCommentReq {
-    body: String,
-    #[serde(default)]
-    ticket: Option<String>,
-    #[serde(default)]
-    attachments: Vec<coxagent_application::Attachment>,
-}
-
-#[derive(serde::Deserialize)]
-struct CommentReactReq {
-    emoji: String,
-}
-
-#[derive(serde::Deserialize)]
-struct ChatListQuery {
-    /// Which channel's history to return; defaults to `#general`.
-    channel: Option<String>,
-}
-
-#[derive(serde::Deserialize)]
-struct CreateChannelReq {
-    name: String,
-    #[serde(default)]
-    kind: Option<String>,
-    /// Open this channel INSIDE another one (the `+` on a channel row).
-    #[serde(default)]
-    parent: Option<String>,
-}
-
-#[derive(serde::Deserialize)]
-struct ChannelSettingsReq {
-    /// `"private"` or `"public"`. `#general` may not change.
-    #[serde(default)]
-    kind: Option<String>,
-    /// Whether any member may invite; false leaves it to the owner and the
-    /// people they delegated to.
-    #[serde(default)]
-    open_invite: Option<bool>,
-    #[serde(default)]
-    topic: Option<String>,
-}
-
 /// Whether the caller holds admin/super authority, which outranks channel
 /// ownership everywhere it is checked.
 async fn user_can_manage(app: &AppState, headers: &axum::http::HeaderMap) -> bool {
@@ -1504,15 +1024,6 @@ async fn user_can_manage(app: &AppState, headers: &axum::http::HeaderMap) -> boo
         .is_some_and(|u| u.role.can_manage())
 }
 
-#[derive(serde::Deserialize)]
-struct ChannelMemberReq {
-    /// Username to invite or delegate to.
-    user: String,
-    /// When true, grant invite permission (owner only), not just membership.
-    #[serde(default)]
-    delegate: bool,
-}
-
 /// Resolve the signed-in username, or `"user"` when auth is disabled.
 async fn resolve_username(app: &AppState, headers: &axum::http::HeaderMap) -> String {
     match &app.auth {
@@ -1521,15 +1032,6 @@ async fn resolve_username(app: &AppState, headers: &axum::http::HeaderMap) -> St
             .map_or_else(|| "user".to_owned(), |u| u.username),
         None => "user".to_owned(),
     }
-}
-
-#[derive(serde::Deserialize)]
-struct PostChatReq {
-    body: String,
-    #[serde(default)]
-    channel: Option<String>,
-    #[serde(default)]
-    attachments: Vec<coxagent_application::Attachment>,
 }
 
 /// The project brief agents are seeded with (`project_context.md`): its `Goal`
@@ -1548,25 +1050,6 @@ async fn context_ep(
     Json(serde_json::json!({ "goal": extract_goal(&md), "full": md })).into_response()
 }
 
-#[derive(serde::Deserialize)]
-struct DocUpsertReq {
-    #[serde(default)]
-    folder: String,
-    title: String,
-    #[serde(default)]
-    body: String,
-}
-
-#[derive(serde::Deserialize)]
-struct DocEditReq {
-    instruction: String,
-}
-
-#[derive(serde::Deserialize)]
-struct FolderReq {
-    path: String,
-}
-
 /// Serialise a presence roster broadcast.
 fn presence_json(editors: &[String]) -> String {
     serde_json::json!({ "op": "presence", "editors": editors }).to_string()
@@ -1578,16 +1061,6 @@ struct CodeGraphQuery {
     q: Option<String>,
     #[serde(default)]
     map: Option<u8>,
-}
-
-#[derive(serde::Deserialize)]
-struct RefsQuery {
-    name: String,
-}
-
-#[derive(serde::Deserialize)]
-struct GoalUpdateReq {
-    goal: String,
 }
 
 /// List open pull/merge requests for a project's repository.
@@ -1631,12 +1104,6 @@ async fn list_prs_ep(
                 .into_response()
         }
     }
-}
-
-#[derive(serde::Deserialize)]
-struct PrActionReq {
-    #[serde(default)]
-    comment: String,
 }
 
 /// Force-merge one PR on the human's order: if it's already green, merge now;
@@ -1706,37 +1173,7 @@ async fn resolve_user_caps(app: &AppState, headers: &axum::http::HeaderMap) -> (
     }
 }
 
-#[derive(serde::Deserialize)]
-struct DmReq {
-    user: String,
-}
-
-#[derive(serde::Deserialize)]
-struct ReactReq {
-    id: String,
-    emoji: String,
-}
-
-#[derive(serde::Deserialize)]
-struct WebhookReq {
-    channel: String,
-    #[serde(default)]
-    label: String,
-}
-
 // ── Topic ──────────────────────────────────────────────────────────────────
-#[derive(serde::Deserialize)]
-struct TopicReq {
-    topic: String,
-}
-
-#[derive(serde::Deserialize)]
-struct HookPostReq {
-    #[serde(default)]
-    text: String,
-    #[serde(default)]
-    username: String,
-}
 
 fn now_unix_secs() -> u64 {
     std::time::SystemTime::now()
@@ -1829,17 +1266,6 @@ async fn user_may_see_broadcast(p: &ProjectHandle, user: &str, json: &str) -> bo
     }
 }
 
-#[derive(serde::Deserialize)]
-struct ChatReplyReq {
-    message: String,
-}
-
-#[derive(serde::Deserialize)]
-struct PathQuery {
-    #[serde(default)]
-    path: String,
-}
-
 /// Resolve a user-supplied relative path under `root`, rejecting traversal
 /// outside it. Returns the canonicalized path when safe.
 /// This machine's hostname (the "machine" the agents run on), or `"local"`.
@@ -1886,40 +1312,6 @@ async fn digest_ep(
 
 // ---------------- Workspace: identity, invites, overview, my-agents ----------
 
-#[derive(serde::Deserialize)]
-struct WorkspacePutReq {
-    #[serde(default)]
-    name: String,
-    #[serde(default)]
-    tagline: String,
-    #[serde(default)]
-    accent: String,
-    #[serde(default)]
-    conventions: Option<String>,
-    /// Download/release config — only overwritten when provided.
-    #[serde(default)]
-    downloads: Option<DownloadsCfg>,
-}
-
-#[derive(serde::Deserialize)]
-struct InviteCreateReq {
-    #[serde(default)]
-    role: Option<String>,
-    #[serde(default)]
-    projects: Vec<String>,
-    #[serde(default)]
-    uses: Option<u32>,
-}
-
-#[derive(serde::Deserialize)]
-struct JoinReq {
-    token: String,
-    username: String,
-    password: String,
-    #[serde(default)]
-    name: String,
-}
-
 // ---------------- Spaces (multi-workspace) + Manage --------------------------
 
 /// Whether the caller is the hub super admin.
@@ -1931,22 +1323,6 @@ async fn is_super(app: &AppState, headers: &axum::http::HeaderMap) -> bool {
         // Open mode (no auth): single-user local — allow.
         None => true,
     }
-}
-
-#[derive(serde::Deserialize)]
-struct SpaceReq {
-    name: String,
-    #[serde(default)]
-    tagline: String,
-    #[serde(default)]
-    admins: Vec<String>,
-    #[serde(default)]
-    projects: Vec<String>,
-    #[serde(default)]
-    members: Vec<String>,
-    /// Monthly USD cap (0 = none). Applied by Super only.
-    #[serde(default)]
-    budget_usd: f64,
 }
 
 /// The super admin's cross-space overview: every space with its live stats
