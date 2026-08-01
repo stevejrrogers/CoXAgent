@@ -633,6 +633,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // developer waiting on a requirement is blocked, and the answer is
         // cheap compared with a wrong implementation. Bounded per cycle.
         Box::pin(self.answer_open_questions()).await;
+        self.escalate_stale_human_questions().await;
 
         // DOCS documents the next completed feature (per-ticket stage claim).
         match self.docs().execute().await {
@@ -951,7 +952,7 @@ fn short_sha(sha: &str) -> &str {
 
 /// Seconds elapsed since an RFC3339 timestamp, or `None` if it can't be
 /// parsed — the caller then treats the value conservatively (as unknown-age).
-fn seconds_since(at: &str) -> Option<u64> {
+pub(super) fn seconds_since(at: &str) -> Option<u64> {
     let then =
         time::OffsetDateTime::parse(at, &time::format_description::well_known::Rfc3339).ok()?;
     let secs = (time::OffsetDateTime::now_utc() - then).whole_seconds();

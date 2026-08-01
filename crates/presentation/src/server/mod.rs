@@ -35,6 +35,7 @@ mod assets;
 mod auth;
 mod background;
 mod hub_docs;
+mod inbox;
 mod requests;
 mod channels;
 mod chat;
@@ -57,6 +58,7 @@ use background::*;
 use channels::*;
 use chat::*;
 use hub_docs::*;
+use inbox::*;
 use requests::*;
 use comments::*;
 use docs::*;
@@ -88,6 +90,7 @@ const APP_JS: &[(&str, &str)] = &[
     ("chat.js", include_str!("../web/js/chat.js")),
     ("mcp.js", include_str!("../web/js/mcp.js")),
     ("docs.js", include_str!("../web/js/docs.js")),
+    ("inbox.js", include_str!("../web/js/inbox.js")),
     ("shell.js", include_str!("../web/js/shell.js")),
 ];
 
@@ -875,6 +878,10 @@ pub async fn serve_full(
             "/api/projects/:pid/ticket/:id/approve-cost",
             post(approve_cost),
         )
+        .route("/api/projects/:pid/inbox", get(inbox_ep))
+        .route("/api/projects/:pid/ticket/:id/ready", post(human_ready_ep))
+        .route("/api/projects/:pid/ticket/:id/verify", post(human_verify_ep))
+        .route("/api/projects/:pid/ticket/:id/assign", post(assign_ticket_ep))
         .route("/api/projects/:pid/ticket/:id/unpark", post(unpark_ticket))
         .route("/api/projects/:pid/ticket/:id/edit", post(edit_ticket))
         .route(

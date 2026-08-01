@@ -180,6 +180,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
                 state.post_comment("TEST", &note, Some(id.to_string()));
                 continue;
             }
+            // Human QA gate: with `workflow.human.gate_verify` on, the agent
+            // stops at "evidence attached" and a person renders the verdict
+            // from their inbox — the ticket stays Fixed until then.
+            if self.config.workflow.human.gate_verify {
+                let note = format!(
+                    "🧑‍⚖️ {id}: regression passed, evidence attached — awaiting HUMAN                      verification (workflow.human.gate_verify)."
+                );
+                state.post_comment("TEST", &note, Some(id.to_string()));
+                continue;
+            }
             if let Some(t) = state.ticket_mut(&id) {
                 if t.transition_to(Role::Test, coxagent_domain::Status::Verified)
                     .is_ok()

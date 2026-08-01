@@ -234,6 +234,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
         // Atomic read-modify-write with retry, so a concurrent operator can't
         // clobber this SA design or lose the transition (parallel-safe).
         let td = technical_of(&design);
+        let gate_ready = self.config.workflow.human.gate_ready;
         crate::ports::outbound::mutate_state(self.store.as_ref(), |state| {
             let ticket = state
                 .ticket_mut(&id)
@@ -242,8 +243,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
                 .set_technical_design(Role::Sa, td.clone())
                 .map_err(|e| PortError::Corrupt(e.to_string()))?;
             // SA owns the technical design only. A non-UI ticket is ready now;
-            // a UI ticket stays pending for PD to author UX.
-            if !has_ui {
+            // a UI ticket stays pending for PD to author UX. With the human
+            // ready-gate on, designed tickets WAIT in Pending for a person's
+            // approval (their inbox) instead of flowing straight to DEV.
+            if !has_ui && !gate_ready {
                 ticket
                     .transition_to(Role::Sa, Status::Ready)
                     .map_err(|e| PortError::Corrupt(e.to_string()))?;

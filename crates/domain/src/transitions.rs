@@ -39,7 +39,9 @@ pub fn can_transition(actor: Role, from: Status, to: Status) -> bool {
 
     match (from, to) {
         // Design gate: SA/PD move a ticket to ready (aggregate re-checks DoR).
-        (Pending, Ready) => matches!(actor, Role::Sa | Role::Pd),
+        // A human (dashboard user) approves readiness when the hybrid
+        // ready-gate is on — same move, person instead of agent.
+        (Pending, Ready) => matches!(actor, Role::Sa | Role::Pd | Role::User),
         // PO (or a user acting as super-PO) rejects.
         (Pending | Open, Rejected) => matches!(actor, Role::Po | Role::User),
         // Claiming work is a dev action.
@@ -48,7 +50,8 @@ pub fn can_transition(actor: Role, from: Status, to: Status) -> bool {
         (InProgress, Done) => matches!(actor, Role::DevFeature | Role::DevBug),
         (InProgress, Fixed) => actor == Role::DevBug,
         // Test verifies / reopens.
-        (Fixed, Verified | Open) => actor == Role::Test,
+        // Human QA renders the verdict when the hybrid verify-gate is on.
+        (Fixed, Verified | Open) => matches!(actor, Role::Test | Role::User),
         // Docs marks documented.
         (Done, Documented) => actor == Role::Docs,
         _ => false,

@@ -97,6 +97,7 @@
       <a data-v="home" id="nav-home" onclick="nav('home')"><i class="ti ti-home"></i> Home</a>
       <a data-v="overview" class="on" onclick="nav('overview')"><i class="ti ti-layout-dashboard"></i> Overview</a>
       <a data-v="team" onclick="nav('team')"><i class="ti ti-robot"></i> Agents</a>
+      <a data-v="inbox" onclick="nav('inbox')"><i class="ti ti-inbox"></i> Inbox <span id="inbox-badge" class="modeseg-badge" style="display:none"></span></a>
       <a data-v="board" onclick="nav('board')"><i class="ti ti-columns"></i> Work</a>
       <a data-v="roadmap" onclick="nav('roadmap')"><i class="ti ti-timeline"></i> Roadmap</a>
       <a data-v="review" onclick="nav('review')"><i class="ti ti-git-pull-request"></i> Review</a>
@@ -218,6 +219,7 @@
         <div class="sec admin-only" style="margin-top:22px">People on this project <span style="font-size:11px;color:var(--dim);font-weight:400">· humans who oversee & collaborate</span></div>
         <div class="acard admin-only" id="team-people"><div class="empty">loading…</div></div>
       </div>
+      <div class="view" id="view-inbox"><div id="inbox-body" style="max-width:820px"></div></div>
       <div class="view" id="view-board">
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
           <div class="seg" id="work-seg">
@@ -774,6 +776,7 @@
 <script src="/assets/js/chat.js"></script>
 <script src="/assets/js/mcp.js"></script>
 <script src="/assets/js/docs.js"></script>
+<script src="/assets/js/inbox.js"></script>
 <script src="/assets/js/shell.js"></script>
 </body>
 </html>

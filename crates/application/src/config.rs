@@ -196,6 +196,29 @@ pub struct WorkflowConfig {
     /// with a warning). Off by default — turn on for untrusted codebases.
     #[serde(default)]
     pub sandbox: bool,
+    /// Hybrid-team knobs: which lifecycle moves wait for a person, and where
+    /// exception work routes. All off by default — an unstaffed project
+    /// behaves exactly like the fully autonomous mode.
+    #[serde(default)]
+    pub human: HumanConfig,
+}
+
+/// Human-in-the-loop configuration (see docs/HYBRID_TEAM.md).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HumanConfig {
+    /// `Pending → Ready` waits for a person (the PO gate): agents may draft
+    /// and design, but only a human approval releases work to DEV.
+    pub gate_ready: bool,
+    /// `Fixed → Verified` waits for a person (the QA gate): the TEST agent
+    /// still attaches evidence, but a human renders the verdict.
+    pub gate_verify: bool,
+    /// Route exception tickets to a person automatically: `large` complexity
+    /// at design time, and tickets parked after repeated agent failures.
+    pub route_exceptions_to: Option<String>,
+    /// Minutes a question @mentioning a person may wait before it escalates
+    /// to the SM channel and the impediment digest. 0 = never escalate.
+    pub question_sla_minutes: u64,
 }
 
 fn default_max_open_prs() -> u32 {
@@ -241,6 +264,7 @@ impl Default for WorkflowConfig {
             approve_over_usd: None,
             tdd: true,
             sandbox: false,
+            human: HumanConfig::default(),
         }
     }
 }
