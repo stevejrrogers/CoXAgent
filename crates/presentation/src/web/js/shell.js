@@ -1172,6 +1172,20 @@ async function openAgent(role,worker){
 }
 let AGENT_LOG_TIMER=null, AGENT_LOG_ROLE=null, AGENT_LOG_WORKER="", AGENT_LOG_LAST=null;
 // Icon + colour for a tool name, so every engine's tool calls read at a glance.
+// Plain-language labels for the agent-harness bookkeeping tools, so a log
+// reader doesn't mistake normal scheduling for a failure.
+function wlHarnessNote(name,args){
+  const n=(name||"").toLowerCase();
+  const a=String(args||"");
+  if(n==="schedulewakeup"){
+    if(a.includes('"stop"'))return "cancelled its own wake-up timer (not an error — the task will notify by itself)";
+    return "set a wake-up timer to check back later";
+  }
+  if(n==="taskstop")return "stopped one of its background tasks";
+  if(n==="croncreate"||n==="crondelete")return "adjusted its own schedule";
+  return null;
+}
+
 function wlToolMeta(name){
   const n=(name||"").toLowerCase().replace(/^mcp__[^_]*__/,"");  // strip mcp__server__ prefix
   const rules=[
@@ -1225,6 +1239,10 @@ function renderWorklog(items,live){
     if(it.k==="meta") return `<div class="wl-item wl-meta"><i class="ti ti-player-play"></i> ${esc(it.text)}</div>`;
     if(it.k==="end")  return `<div class="wl-item wl-end"><span><i class="ti ti-circle-check"></i> run finished</span></div>`;
     if(it.k==="tool"){ const m=wlToolMeta(it.name);
+      // Harness-control calls read like errors to a person ("ScheduleWakeup
+      // {stop:true}"?!) — annotate them in plain language instead.
+      const note=wlHarnessNote(it.name,it.args);
+      if(note) return `<div class="wl-item wl-tool"><span class="wl-chip"><i class="ti ti-clock-pause wl-tic" style="color:var(--muted)"></i><span class="wl-tname">${esc(note)}</span></span></div>`;
       return `<div class="wl-item wl-tool"><span class="wl-chip"><i class="ti ${m.ic} wl-tic" style="color:var(${m.col})"></i><span class="wl-tname">${esc(it.name)}</span>${it.args?`<span class="wl-targs">${esc(it.args)}</span>`:""}</span></div>`; }
     if(it.k==="result") return `<div class="wl-item wl-result"><span class="wl-rin"><i class="ti ti-corner-down-right"></i> ${esc(it.info)}</span></div>`;
     return `<div class="wl-item wl-msg"><span class="wl-ic"><i class="ti ti-sparkles"></i></span><div class="wl-body">${wlFmt(it.text)}</div></div>`;
