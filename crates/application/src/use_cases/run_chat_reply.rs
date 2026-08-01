@@ -1035,7 +1035,23 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             // and reached for `deploy` on a bug report.
             escalation_level: 1,
         };
-        let outcome = self.engine.run(request).await.ok()?;
+        let outcome = match self.engine.run(request).await {
+            Ok(o) => o,
+            Err(e) => {
+                // A transport-level error (engine busy, spawn failure) used to
+                // return None silently — the person clicked send and watched
+                // nothing happen at all. Same rule as below: the failure they
+                // cannot see is worse than the failure they can.
+                let why: String = e.to_string().chars().take(200).collect();
+                tracing::warn!("chat reply engine error: {why}");
+                self.post(
+                    "SYSTEM",
+                    &format!("⚠️ I couldn't answer that: {why}. Try again in a moment."),
+                )
+                .await;
+                return None;
+            }
+        };
         if !outcome.succeeded() {
             // Silence is the worst reply. The person clicked send and watched
             // nothing happen — the failure they cannot see is worse than the
