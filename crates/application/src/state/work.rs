@@ -102,6 +102,11 @@ pub struct PrReview {
     pub decision: String,
     pub summary: String,
     pub at: String,
+    /// Head commit the verdict was rendered against. A PR whose head has not
+    /// moved since a request-changes needs no re-review — re-judging the same
+    /// commits burns an engine call to repeat the same comment.
+    #[serde(default)]
+    pub head_sha: String,
 }
 
 /// A product milestone — a named delivery target that one or more sprints work
