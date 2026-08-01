@@ -1,9 +1,9 @@
 const { test, expect } = require('@playwright/test');
-const { ADMIN_USER, ADMIN_PASS } = require('./helpers/creds');
+const { ADMIN_USER, ADMIN_PASSWORD } = require('./credentials');
 
 async function loginViaApi(page) {
   const resp = await page.request.post('http://localhost:4000/api/auth/login', {
-    data: { username: ADMIN_USER, password: ADMIN_PASS }
+    data: { username: ADMIN_USER, password: ADMIN_PASSWORD }
   });
   expect(resp.status()).toBe(200);
   const cookies = resp.headers()['set-cookie'];
@@ -35,8 +35,8 @@ async function initPage(page) {
 test.describe('CoXAgent UI', () => {
   test.beforeEach(async ({ page }) => { await initPage(page); });
 
-  test('user badge shows root super', async ({ page }) => {
-    await expect(page.locator('#ub-name')).toContainText('root');
+  test('user badge shows the admin user as super', async ({ page }) => {
+    await expect(page.locator('#ub-name')).toContainText(ADMIN_USER);
     await expect(page.locator('#ub-role')).toContainText(/super/i);
   });
 
