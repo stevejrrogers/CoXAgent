@@ -178,7 +178,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
             // DoR re-checked here; passes now that both technical and UX exist.
             // With the human ready-gate on, the designed ticket waits in
             // Pending for a person's approval instead.
-            if !gate_ready {
+            if gate_ready {
+                let msg = format!(
+                    "🧑‍⚖️ {id} is fully designed and WAITS for a human approval to Ready — \
+                     it is in the Inbox (workflow.human.gate_ready)."
+                );
+                state.post_chat_in("SYSTEM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+            } else {
                 ticket
                     .transition_to(Role::Pd, Status::Ready)
                     .map_err(|e| PortError::Corrupt(e.to_string()))?;

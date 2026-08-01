@@ -188,6 +188,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
                     "🧑‍⚖️ {id}: regression passed, evidence attached — awaiting HUMAN                      verification (workflow.human.gate_verify)."
                 );
                 state.post_comment("TEST", &note, Some(id.to_string()));
+                state.post_chat_in("SYSTEM", &note, crate::state::AGENTS_CHANNEL, Vec::new());
                 continue;
             }
             if let Some(t) = state.ticket_mut(&id) {
