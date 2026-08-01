@@ -26,6 +26,11 @@ sessions.json
 # Per-install desktop admin password, generated on first launch (0600).
 admin-password
 
+# Per-agent git worktrees: whole checkouts with their own target/, tens of GB.
+# Never committed, and excluded from the docker build context too — see
+# .dockerignore, where their target/ dirs once sank the release build.
+.claude/worktrees/
+
 # macOS app build artifacts
 desktop/build/
 /dist/
