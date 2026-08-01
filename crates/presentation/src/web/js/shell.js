@@ -1541,12 +1541,35 @@ function renderSlackMsg(m){
       <button onclick="copyMsgLink('${esc(m.id)}')" title="Copy link"><i class="ti ti-link"></i></button>
     </div>`:'';
   const gutter=m.grouped?`<span class="sgt">${time}</span>`:avat(m.user,"sav");
+  // Hybrid gate announcements become ACTION CARDS: the decision is one click
+  // away from the message that asked for it (see docs/HYBRID_TEAM.md).
+  const gate=(!deleted&&m.user==="SYSTEM")?gateActions(m.body):"";
   return `<div class="smsg${m.grouped?' grouped':''}" id="msg-${esc(m.id)}">
     <div class="sgut">${gutter}</div>
     <div class="smain">
       ${m.grouped?'':`<div class="shdr"><span class="snm" style="color:${col}">${esc(memberName(m.user))}</span>${statusChip(m.user)}<span class="stm">${time}</span></div>`}
-      ${body}${attHtml(m.attachments)}${reacts}${thread}
+      ${body}${attHtml(m.attachments)}${reacts}${gate}${thread}
     </div>${acts}</div>`;
+}
+// Inline approve/verify buttons for gate-hold SYSTEM messages. The ticket id
+// is parsed from the message; the buttons call the same endpoints as the
+// Inbox, so chat and Inbox stay two doors to one decision.
+function gateActions(body){
+  const b=String(body||"");
+  const id=(b.match(/\b([A-Z][A-Z0-9]+-[BF]\d+)\b/)||[])[1];
+  if(!id)return "";
+  const btn=(label,ic,fn,pri)=>`<button class="tk-btn${pri?' go':''}" style="padding:4px 12px;font-size:12px" onclick="${fn}"><i class="ti ${ic}"></i> ${label}</button>`;
+  if(b.includes("gate_ready"))
+    return `<div style="display:flex;gap:8px;margin-top:7px">${btn("Approve → Ready","ti-checks",`chatGate('${id}','ready')`,1)}${btn("Open ticket","ti-external-link",`showTicket('${id}')`)}</div>`;
+  if(b.includes("awaiting HUMAN verification")||b.includes("gate_verify"))
+    return `<div style="display:flex;gap:8px;margin-top:7px">${btn("Mark Verified","ti-shield-check",`chatGate('${id}','verify')`,1)}${btn("Open ticket","ti-external-link",`showTicket('${id}')`)}</div>`;
+  return "";
+}
+async function chatGate(id,action){
+  try{const r=await fetch(api("/ticket/"+encodeURIComponent(id)+"/"+action),{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
+    if(!r.ok)toasty(await r.text(),"err");
+    else toasty(action==="ready"?(id+" → Ready"):(id+" verified"),"ok");
+  }catch(e){}
 }
 // Wrap the selection of any input/textarea in a markdown marker (**,*,`).
 function wrapField(el,mk){if(!el)return;

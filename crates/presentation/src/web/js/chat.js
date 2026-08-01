@@ -1677,6 +1677,14 @@ async function showTicket(id){
       <div style="display:flex;gap:6px;align-items:center">
         ${["high","medium","low"].map(p=>`<span onclick="setPriority('${t.id}','${p}')" style="cursor:pointer;font-size:11px;padding:3px 10px;border-radius:7px;font-weight:600;${t.priority===p?`background:var(--accentbg);color:var(--accent2)`:'background:var(--card2);color:var(--muted)'}">${p}</span>`).join("")}
         <span style="color:var(--dim);font-size:12px;margin-left:6px">· ${esc(t.complexity)}${t.has_ui?' · UI':''}</span></div></div>
+    <div class="mrow"><span class="lbl">Assignee</span>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        ${t.assignee?`<span class="tk" style="background:var(--accentbg);color:var(--accent2)"><i class="ti ti-user"></i> @${esc(t.assignee)}</span>
+          <button class="tk-btn" style="padding:4px 10px;font-size:11px" onclick="assignTicket('${t.id}','')"><i class="ti ti-robot"></i> Return to agents</button>`
+        :`<span style="color:var(--dim);font-size:12px">agents (pool)</span>
+          <select id="tk-assign-sel" style="background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:7px;padding:4px 8px;font-size:12px"><option value="">choose person…</option></select>
+          <button class="tk-btn" style="padding:4px 10px;font-size:11px" onclick="assignTicket('${t.id}',document.getElementById('tk-assign-sel').value)"><i class="ti ti-user-plus"></i> Assign</button>`}
+      </div></div>
     <div class="mrow"><span class="lbl">Blocked by</span>${depChips(t.depends_on)}</div>
     <div class="mrow"><span class="lbl">Blocks</span>${depChips((STATE.tickets||[]).filter(x=>(x.depends_on||[]).includes(t.id)).map(x=>x.id))}</div>
     <div class="mrow" style="display:block"><span class="lbl">Description</span><div class="doc-body md" style="margin-top:7px;color:var(--muted);line-height:1.6;font-size:13px">${t.description?mdRender(t.description):'—'}</div></div>
@@ -1688,12 +1696,30 @@ async function showTicket(id){
   h+=`<div class="tk-actions">
     <button class="tk-btn" onclick="editTicket('${t.id}')"><i class="ti ti-edit"></i> Edit</button>
     ${canWork?`<button class="tk-btn go" onclick="workNext('${t.id}')"><i class="ti ti-player-play-filled"></i> Work on this next</button>`:''}
+    ${(t.status==="pending"&&tech)?`<button class="tk-btn go" onclick="humanGate('${t.id}','ready')"><i class="ti ti-checks"></i> Approve → Ready</button>`:''}
+    ${t.status==="fixed"?`<button class="tk-btn go" onclick="humanGate('${t.id}','verify')"><i class="ti ti-shield-check"></i> Mark Verified</button>`:''}
     ${(t.status==="pending"||t.status==="open")?`<button class="tk-btn danger" onclick="rejectTicket('${t.id}')"><i class="ti ti-ban"></i> Reject</button>`:''}
   </div>`;
   h+=`<div class="mrow" style="display:block;border:none;margin-top:6px"><span class="lbl">Comments</span><div id="tk-comments" style="margin-top:8px">${'<div class="empty" style="padding:8px">loading…</div>'}</div>
     <div class="tkc-wrap">${mdToolbar('tkc-input')}<div class="tkc-compose"><input id="tkc-input" placeholder="Add a comment…  (**markdown** · Enter to post · @ to mention)" onkeydown="if(!imeEnter(event)&&event.key==='Enter')postTicketComment('${t.id}')"><button class="pri" onclick="postTicketComment('${t.id}')"><i class="ti ti-send"></i></button></div></div></div>`;
   body.innerHTML=h;
+  fillAssignSelect();
   renderTicketComments(t.id);}
+async function fillAssignSelect(){
+  const sel=document.getElementById("tk-assign-sel");if(!sel)return;
+  try{const members=await(await fetch(api("/members"))).json();
+    for(const m of (members||[])){const o=document.createElement("option");o.value=m.username||m;o.textContent="@"+(m.username||m);sel.appendChild(o);}
+  }catch(e){}}
+async function assignTicket(id,user){
+  try{const r=await fetch(api("/ticket/"+encodeURIComponent(id)+"/assign"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:user||""})});
+    if(!r.ok)toasty(await r.text(),"err");else toasty(user?("Assigned to @"+user):"Returned to agents","ok");
+  }catch(e){}
+  showTicket(id);}
+async function humanGate(id,action){
+  try{const r=await fetch(api("/ticket/"+encodeURIComponent(id)+"/"+action),{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
+    if(!r.ok)toasty(await r.text(),"err");else toasty(action==="ready"?(id+" → Ready"):(id+" verified"),"ok");
+  }catch(e){}
+  showTicket(id);}
 async function rejectTicket(id){try{await fetch(api("/ticket/"+id+"/reject"),{method:"POST"});close_("ov-ticket");}catch(e){}}
 async function approveCost(id){try{await fetch(api("/ticket/"+id+"/approve-cost"),{method:"POST"});toasty("Approved — agents may run "+id,"ok");showTicket(id);}catch(e){toasty("Approve failed","err");}}
 function editTicket(id){const t=(STATE.tickets||[]).find(x=>x.id===id);if(!t)return;

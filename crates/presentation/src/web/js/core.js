@@ -378,8 +378,10 @@ function actItem(a){const col=cvar(AC[a.agent]||"--muted");
       <div class="tl-t" title="${esc(a.at||'')}">${esc(relTime(a.at))}</div></div></div>`;}
 function card(t){const a={high:"var(--red)",medium:"var(--amber)",low:"var(--dim)"}[t.priority]||"var(--dim)";
   const ui=t.has_ui?'<span class="b ui">UI</span>':'',bug=t.type==="bug"?'<span class="b bug">bug</span>':'';
+  // A human-assigned ticket is out of the agent pool — say WHO owns it.
+  const who=t.assignee?`<span class="b" style="background:var(--accentbg);color:var(--accent2)"><i class="ti ti-user" style="font-size:10px"></i> @${esc(t.assignee)}</span>`:'';
   return `<div class="card-t" onclick="showTicket('${t.id}')"><div class="cid">${esc(t.id)}</div>
-    <div class="ct">${esc(t.title)}</div><div class="badges"><span class="b ${t.priority}">${t.priority}</span>${ui}${bug}</div></div>`;}
+    <div class="ct">${esc(t.title)}</div><div class="badges"><span class="b ${t.priority}">${t.priority}</span>${ui}${bug}${who}</div></div>`;}
 function column([k,l,c],ts){const items=ts.filter(t=>t.status===k);
   return `<div class="col"><h3><span class="dot" style="background:var(${c})"></span>${l}<span class="n">${items.length}</span></h3>${items.length?items.map(card).join(""):'<div class="empty">—</div>'}</div>`;}
 // Unified column: collects both features and bugs whose status maps to this stage.

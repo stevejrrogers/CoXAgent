@@ -69,6 +69,7 @@ pub(super) async fn inbox_ep(
             items.push(serde_json::json!({
                 "kind": "question", "id": q.id, "ticket": q.ticket,
                 "from": q.from, "body": q.body,
+                "asked_at": q.asked_at, "escalated": q.escalated,
             }));
         }
     }

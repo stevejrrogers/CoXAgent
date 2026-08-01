@@ -28,6 +28,7 @@ async function renderInbox(){
     el.innerHTML='<div class="card" style="padding:28px;text-align:center" class="muted">🎉 Nothing waits on you.</div>';
     return;
   }
+  items.sort((a,b)=>(b.escalated?1:0)-(a.escalated?1:0));
   const label={approve_ready:"⏳ Approve to Ready",verify:"🧪 Verify fix",assigned:"🧑‍💻 Assigned to you",question:"❓ Question for you",review_pr:"👀 PR held for human"};
   let html="";
   for(const it of items){
@@ -46,8 +47,11 @@ async function renderInbox(){
         `<b>${label[it.kind]}</b> · <span class="muted">${esc(it.ticket)} · ${esc(it.status||"")}</span><br>${esc(it.title)}`,
         `<button onclick="inboxUnassign('${esc(it.ticket)}')">Return to agents</button>`);
     }else if(it.kind==="question"){
+      const ageMin=it.asked_at?Math.max(0,Math.round((Date.now()-new Date(it.asked_at))/60000)):null;
+      const age=ageMin==null?"":(ageMin<60?` · waiting ${ageMin}m`:` · waiting ${Math.round(ageMin/60)}h`);
+      const late=it.escalated?` <span style="color:var(--red);font-weight:700">· past SLA</span>`:"";
       html+=inboxCard(
-        `<b>${label[it.kind]}</b> · <span class="muted">${esc(it.from)}${it.ticket?" · "+esc(it.ticket):""}</span><br>${esc(it.body)}`,
+        `<b>${label[it.kind]}</b> · <span class="muted">${esc(it.from)}${it.ticket?" · "+esc(it.ticket):""}${age}</span>${late}<br>${esc(it.body)}`,
         `<button class="pri" onclick="nav('discuss')">Answer in Scrum</button>`);
     }else if(it.kind==="review_pr"){
       html+=inboxCard(
