@@ -62,7 +62,7 @@ fn goal_from(state: &ProjectState, committed: &[TicketId]) -> String {
 
 /// Feature/chore tickets not yet shipped — the work a sprint commits to.
 fn open_backlog(state: &ProjectState) -> Vec<TicketId> {
-    state
+    let ready: Vec<TicketId> = state
         .tickets
         .iter()
         .filter(|t| {
@@ -73,7 +73,27 @@ fn open_backlog(state: &ProjectState) -> Vec<TicketId> {
                 )
         })
         .map(|t| t.id().clone())
-        .collect()
+        .collect();
+    ready.into_iter().take(sprint_capacity(state)).collect()
+}
+
+/// How much to commit to one sprint: what the team has actually been finishing,
+/// with a little stretch, never less than a few.
+///
+/// Committing the WHOLE backlog made every sprint a lie — 59 tickets in, ~0
+/// out, every retro reporting 0% velocity and carrying all 59 forward. A sprint
+/// that contains everything says nothing about what the team intends to do
+/// next, and a goal derived from it is noise.
+fn sprint_capacity(state: &ProjectState) -> usize {
+    const FLOOR: usize = 3;
+    let history: Vec<usize> = state.sprints.iter().rev().take(5).map(|s| s.done).collect();
+    if history.is_empty() {
+        return FLOOR * 2;
+    }
+    let avg = history.iter().sum::<usize>() / history.len().max(1);
+    // A half-step of stretch over the measured average — enough to pull ahead
+    // on a good sprint, not enough to make the number meaningless again.
+    (avg + avg / 2).max(FLOOR)
 }
 
 /// How many committed tickets have shipped — for the burndown/progress view.
@@ -145,5 +165,40 @@ mod tests {
         // cycle 11 is 10 cycles after start -> roll over.
         assert_eq!(advance(&mut state, 11, 10), Some(2));
         assert_eq!(state.sprint.as_ref().expect("s").number, 2);
+    }
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::sprint_capacity;
+    use crate::state::{ProjectState, SprintRecord};
+
+    fn with_history(done: &[usize]) -> ProjectState {
+        let mut s = ProjectState::default();
+        for (i, d) in done.iter().enumerate() {
+            s.sprints.push(SprintRecord {
+                number: u32::try_from(i).unwrap_or(0) + 1,
+                goal: String::new(),
+                committed: 50,
+                done: *d,
+                at: String::new(),
+            });
+        }
+        s
+    }
+
+    #[test]
+    fn capacity_follows_what_the_team_actually_finished() {
+        // A team shipping ~4 a sprint commits to 6, not to the whole backlog.
+        assert_eq!(sprint_capacity(&with_history(&[4, 4, 4])), 6);
+        // A brand-new project has no history to go on; start modest.
+        assert_eq!(sprint_capacity(&with_history(&[])), 6);
+        // Even a team that shipped nothing commits to something — a sprint of
+        // zero would never recover.
+        assert_eq!(sprint_capacity(&with_history(&[0, 0])), 3);
+        // Only the recent past counts: an old heroic sprint does not license
+        // over-committing forever.
+        let long = with_history(&[40, 1, 1, 1, 1, 1]);
+        assert_eq!(sprint_capacity(&long), 3);
     }
 }

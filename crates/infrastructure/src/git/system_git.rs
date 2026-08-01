@@ -48,6 +48,63 @@ impl GitPort for SystemGit {
             .is_ok_and(|s| s == "true")
     }
 
+    async fn raw(&self, work_dir: &Path, args: &[&str]) -> (bool, String) {
+        match tokio::process::Command::new("git")
+            .args(args)
+            .current_dir(work_dir)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .await
+        {
+            Ok(o) => (
+                o.status.success(),
+                String::from_utf8_lossy(&o.stdout).into_owned(),
+            ),
+            Err(_) => (false, String::new()),
+        }
+    }
+
+    async fn working_tree(
+        &self,
+        work_dir: &Path,
+    ) -> Result<coxagent_application::ports::outbound::WorkingTreeDiff, PortError> {
+        // Three reads, one snapshot: the gates decide on all of them together,
+        // and half a snapshot (paths from one moment, diff from another) is how
+        // a gate mis-blames a change.
+        let tracked = git(work_dir, &["diff", "HEAD", "--name-only"])
+            .await
+            .unwrap_or_default();
+        let untracked = git(work_dir, &["ls-files", "--others", "--exclude-standard"])
+            .await
+            .unwrap_or_default();
+        let changed_paths = tracked
+            .lines()
+            .chain(untracked.lines())
+            .map(|l| l.trim().to_owned())
+            .filter(|l| !l.is_empty())
+            .collect();
+        let changed_paths: Vec<String> = changed_paths;
+        let mut cfg_test_line = std::collections::BTreeMap::new();
+        for p in &changed_paths {
+            if let Ok(text) = std::fs::read_to_string(work_dir.join(p)) {
+                if let Some(line) = text
+                    .lines()
+                    .position(|l| l.trim_start().starts_with("#[cfg(test)]"))
+                {
+                    cfg_test_line.insert(p.clone(), line);
+                }
+            }
+        }
+        Ok(coxagent_application::ports::outbound::WorkingTreeDiff {
+            changed_paths,
+            full_diff: git(work_dir, &["diff", "HEAD"]).await.unwrap_or_default(),
+            unified0_diff: git(work_dir, &["diff", "HEAD", "-U0"])
+                .await
+                .unwrap_or_default(),
+            cfg_test_line,
+        })
+    }
+
     async fn current_branch(&self, work_dir: &Path) -> Result<String, PortError> {
         let b = git(work_dir, &["rev-parse", "--abbrev-ref", "HEAD"]).await?;
         if b.is_empty() {
@@ -113,7 +170,7 @@ impl GitPort for SystemGit {
         {
             return Ok(SyncBase::UpToDate);
         }
-        match git(
+        if git(
             work_dir,
             &[
                 "-c",
@@ -126,22 +183,21 @@ impl GitPort for SystemGit {
             ],
         )
         .await
+        .is_ok()
         {
-            Ok(_) => Ok(SyncBase::Merged),
-            Err(_) => {
-                // Merge stopped — list the files left with conflict markers. If
-                // there are none, the merge failed for another reason: bubble up.
-                let unmerged = git(work_dir, &["diff", "--name-only", "--diff-filter=U"]).await?;
-                let files: Vec<String> = unmerged.lines().map(str::to_owned).collect();
-                if files.is_empty() {
-                    let _ = git(work_dir, &["merge", "--abort"]).await;
-                    return Err(PortError::Backend(format!(
-                        "merge of {target} failed without conflicts"
-                    )));
-                }
-                Ok(SyncBase::Conflicts(files))
-            }
+            return Ok(SyncBase::Merged);
         }
+        // Merge stopped — list the files left with conflict markers. If there
+        // are none, the merge failed for another reason: bubble up.
+        let unmerged = git(work_dir, &["diff", "--name-only", "--diff-filter=U"]).await?;
+        let files: Vec<String> = unmerged.lines().map(str::to_owned).collect();
+        if files.is_empty() {
+            let _ = git(work_dir, &["merge", "--abort"]).await;
+            return Err(PortError::Backend(format!(
+                "merge of {target} failed without conflicts"
+            )));
+        }
+        Ok(SyncBase::Conflicts(files))
     }
 
     async fn abort_merge(&self, work_dir: &Path) -> Result<(), PortError> {

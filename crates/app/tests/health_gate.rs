@@ -79,10 +79,15 @@ fn production_source(src: &str) -> String {
 /// Whether `line` opens a function definition.
 fn is_fn_header(line: &str) -> bool {
     let t = line.trim_start();
-    let t = t
-        .strip_prefix("pub(crate) ")
-        .or_else(|| t.strip_prefix("pub "))
-        .unwrap_or(t);
+    // Any visibility, not a list of the ones we happened to think of: splitting
+    // a module introduced `pub(super)` and every method behind it went invisible
+    // to this scan, which then reported itself broken. It was right to.
+    let t = t.strip_prefix("pub").map_or(t, |rest| {
+        let rest = rest
+            .strip_prefix('(')
+            .map_or(rest, |r| r.split_once(')').map_or(r, |(_, after)| after));
+        rest.trim_start()
+    });
     let t = t.strip_prefix("async ").unwrap_or(t);
     t.starts_with("fn ")
 }
