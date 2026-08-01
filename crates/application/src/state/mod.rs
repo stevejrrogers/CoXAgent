@@ -596,12 +596,13 @@ impl ProjectState {
     }
 
     /// Record (or replace) the SA agent's latest review verdict for a PR.
-    pub fn upsert_review(&mut self, number: u64, decision: &str, summary: &str) {
+    pub fn upsert_review(&mut self, number: u64, decision: &str, summary: &str, head_sha: &str) {
         let review = PrReview {
             number,
             decision: decision.to_owned(),
             summary: summary.to_owned(),
             at: now_rfc3339(),
+            head_sha: head_sha.to_owned(),
         };
         if let Some(r) = self.reviews.iter_mut().find(|r| r.number == number) {
             *r = review;

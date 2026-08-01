@@ -43,6 +43,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             if pr.base != target {
                 continue;
             }
+            // Skip PRs whose head has not moved since the last request-changes:
+            // the verdict cannot change and the repeat comment is pure noise.
+            let head_sha = self.pr_head_sha(&pr.head).await;
+            if self.already_reviewed_at(pr.number, &head_sha).await {
+                continue;
+            }
             // With require_ci off (CI unavailable, e.g. Actions billing dead),
             // CI status is ignored entirely — local test/lint gates plus the
             // SA's diff judgement carry the review instead.
@@ -59,7 +65,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             };
             if let Some(reason) = blocked {
                 let _ = forge.request_changes(pr.number, &reason).await;
-                self.record_review(pr.number, "request_changes", &reason)
+                self.record_review(pr.number, "request_changes", &reason, &head_sha)
                     .await;
                 self.log_git(&format!(
                     "SA requested changes on PR #{} ({reason})",
@@ -80,7 +86,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 let reason = "Committed git conflict markers found in the diff — the conflict \
                               was not actually resolved. Fix the affected files and push again.";
                 let _ = forge.request_changes(pr.number, reason).await;
-                self.record_review(pr.number, "request_changes", reason)
+                self.record_review(pr.number, "request_changes", reason, &head_sha)
                     .await;
                 self.log_git(&format!(
                     "SA blocked PR #{}: committed conflict markers",
@@ -101,7 +107,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                      fold this into the other, before either merges."
                 );
                 let _ = forge.request_changes(pr.number, &reason).await;
-                self.record_review(pr.number, "request_changes", &reason)
+                self.record_review(pr.number, "request_changes", &reason, &head_sha)
                     .await;
                 self.log_git(&format!(
                     "SA held PR #{}: competes with #{other}",
@@ -112,7 +118,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             }
             match self.sa_review(&pr.title, &pr.head, &diff).await {
                 Some((true, summary)) => {
-                    self.record_review(pr.number, "approve", &summary).await;
+                    self.record_review(pr.number, "approve", &summary, &head_sha).await;
                     if auto_merge {
                         // Size and blast radius the machine should not decide
                         // alone: a change this large, or one that edits how the
@@ -142,7 +148,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                                  {why}. Rebase on {target} and fix it there — nothing lands red."
                             );
                             let _ = forge.request_changes(pr.number, &msg).await;
-                            self.record_review(pr.number, "request_changes", &msg).await;
+                            self.record_review(pr.number, "request_changes", &msg, &head_sha).await;
                             self.log_git(&format!(
                                 "PR #{} held: merged result failed verification",
                                 pr.number
@@ -171,7 +177,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 }
                 Some((false, comment)) => {
                     let _ = forge.request_changes(pr.number, &comment).await;
-                    self.record_review(pr.number, "request_changes", &comment)
+                    self.record_review(pr.number, "request_changes", &comment, &head_sha)
                         .await;
                     self.log_git(&format!("SA requested changes on PR #{}", pr.number))
                         .await;
@@ -181,9 +187,41 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
     }
     /// Persist the SA's verdict so the Review tab can show it as a suggestion.
-    pub(super) async fn record_review(&self, number: u64, decision: &str, summary: &str) {
+    /// The PR head's current commit sha via `git ls-remote` — cheap, no
+    /// checkout. Empty when it cannot be established (then no skip happens).
+    pub(super) async fn pr_head_sha(&self, head: &str) -> String {
+        let Some(git) = &self.git else {
+            return String::new();
+        };
+        let (ok, out) = git
+            .raw(
+                &self.work_dir,
+                &["ls-remote", "origin", &format!("refs/heads/{head}")],
+            )
+            .await;
+        if !ok {
+            return String::new();
+        }
+        out.split_whitespace().next().unwrap_or("").to_owned()
+    }
+
+    /// Whether this PR already got a request-changes at exactly this head —
+    /// nothing new to judge until the DEV pushes.
+    pub(super) async fn already_reviewed_at(&self, number: u64, head_sha: &str) -> bool {
+        if head_sha.is_empty() {
+            return false;
+        }
+        let Ok(state) = self.store.load().await else {
+            return false;
+        };
+        state.reviews.iter().any(|r| {
+            r.number == number && r.decision == "request_changes" && r.head_sha == head_sha
+        })
+    }
+
+    pub(super) async fn record_review(&self, number: u64, decision: &str, summary: &str, head_sha: &str) {
         if let Ok(mut s) = self.store.load().await {
-            s.upsert_review(number, decision, summary);
+            s.upsert_review(number, decision, summary, head_sha);
             let _ = self.store.save(&s).await;
         }
     }
