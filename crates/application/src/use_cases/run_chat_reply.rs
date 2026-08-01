@@ -155,6 +155,8 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
              ACTION: arch_review                — review the architecture, file refactor tickets\n\
              ACTION: docs_review                — fill missing Wiki docs\n\
              ACTION: sa_design: <ticket-id>     — SA designs ONE ticket (runs the SA agent now)\n\
+             ACTION: approve: <ticket-id>       — HUMAN gate: release a designed ticket to Ready\n\
+             ACTION: verify: <ticket-id>        — HUMAN gate: render the QA verdict (Fixed→Verified)\n\
              ACTION: implement: <ticket-id>     — code the ticket NOW (DEV runs, writes code, tests)\n\
              ACTION: test: <ticket-id>          — QA tests the deployed ticket, files bugs\n\
              ACTION: standup                    — run a standup\n\
@@ -268,6 +270,12 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             self.test_ticket(rest.trim()).await;
         } else if let Some(rest) = strip_kw(a, "priority") {
             self.reprioritize(rest).await;
+        } else if let Some(rest) = strip_kw(a, "approve") {
+            self.human_gate_action(rest, coxagent_domain::Status::Ready)
+                .await;
+        } else if let Some(rest) = strip_kw(a, "verify") {
+            self.human_gate_action(rest, coxagent_domain::Status::Verified)
+                .await;
         } else if lower.starts_with("deploy") {
             self.deploy_now().await;
         } else if lower.starts_with("merge_queue") || lower.starts_with("merge queue") {
@@ -283,6 +291,46 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             }
         }
         Ok(())
+    }
+
+    /// A human gate decision typed in chat: "approve F012" moves a designed
+    /// ticket to Ready, "verify B031" renders the QA verdict — the same moves
+    /// the Inbox buttons make, executed with the chat user's authority
+    /// (Role::User; the domain transition table decides legality).
+    async fn human_gate_action(&self, rest: &str, to: coxagent_domain::Status) {
+        use coxagent_domain::TicketId;
+        let tid_s = rest.trim();
+        let Ok(tid) = TicketId::new(tid_s) else {
+            let msg = if self.lang.is_vi() {
+                format!("{tid_s} không phải ticket ID hợp lệ.")
+            } else {
+                format!("{tid_s} is not a valid ticket ID.")
+            };
+            self.post("SYSTEM", &msg).await;
+            return;
+        };
+        let label = format!("{to:?}").to_lowercase();
+        let result = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+            let t = s
+                .ticket_mut(&tid)
+                .ok_or_else(|| crate::PortError::Corrupt(format!("no ticket {tid}")))?;
+            t.transition_to(coxagent_domain::Role::User, to)
+                .map_err(|e| crate::PortError::Corrupt(e.to_string()))?;
+            s.log_activity("USER", &format!("chat-approved to {label}"), Some(tid.to_string()));
+            Ok(())
+        })
+        .await;
+        let msg = match result {
+            Ok(()) => {
+                if self.lang.is_vi() {
+                    format!("✅ {tid} → {label}.")
+                } else {
+                    format!("✅ {tid} moved to {label}.")
+                }
+            }
+            Err(e) => format!("⚠️ {tid}: {e}"),
+        };
+        self.post("SYSTEM", &msg).await;
     }
 
     /// Run the DEV agent for this specific ticket. Uses the engine directly
