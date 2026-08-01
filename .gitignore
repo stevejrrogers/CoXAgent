@@ -17,6 +17,15 @@ auth.json
 sessions.json
 **/sessions.json
 
+# Filled-in deploy secrets (COX-B030). `.env` carries the admin password and
+# every backing-service credential — it is per-environment, never committed.
+# Only the placeholder template `.env.example` belongs in git.
+.env
+!.env.example
+
+# Per-install desktop admin password, generated on first launch (0600).
+admin-password
+
 # macOS app build artifacts
 desktop/build/
 /dist/

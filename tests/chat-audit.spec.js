@@ -1,13 +1,14 @@
 // Audit chat UI — check layout, spacing, readability
 const { test, expect } = require('@playwright/test');
+const { ADMIN_USER, ADMIN_PASSWORD } = require('./credentials');
 
 const BASE = 'http://localhost:4000';
 
 async function login(page) {
   await page.goto(BASE + '/');
   await page.waitForSelector('#lg-user', { timeout: 8000 });
-  await page.fill('#lg-user', 'root');
-  await page.fill('#lg-pass', 'Str@wb3rry');
+  await page.fill('#lg-user', ADMIN_USER);
+  await page.fill('#lg-pass', ADMIN_PASSWORD);
   await page.click('button:has-text("Sign in")');
   await page.waitForSelector('.side', { timeout: 10000 });
 }

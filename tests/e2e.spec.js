@@ -2,6 +2,7 @@ const { test, expect } = require('@playwright/test');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { ADMIN_USER, ADMIN_PASSWORD } = require('./credentials');
 
 // 1x1 transparent PNG — enough to satisfy the server's `image/*` mime check.
 const TINY_PNG_B64 =
@@ -15,11 +16,9 @@ function writeTinyPng() {
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
-const PASS = 'Str@wb3rry';
-
 async function loginViaApi(page) {
   const resp = await page.request.post('http://localhost:4000/api/auth/login', {
-    data: { username: 'root', password: PASS }
+    data: { username: ADMIN_USER, password: ADMIN_PASSWORD }
   });
   expect(resp.status(), 'login should succeed').toBe(200);
   const cookies = resp.headers()['set-cookie'];
@@ -66,8 +65,8 @@ test.describe('Authentication', () => {
   test('login with wrong password fails', async ({ page }) => {
     await page.goto('/', { waitUntil: 'domcontentloaded' });
     await expect(page.locator('#ov-login')).toBeVisible({ timeout: 10000 });
-    await page.locator('#lg-user').fill('root');
-    await page.locator('#lg-pass').fill('wrong');
+    await page.locator('#lg-user').fill(ADMIN_USER);
+    await page.locator('#lg-pass').fill('definitely-not-the-admin-password');
     // Click the login button instead of Enter
     await page.locator('#ov-login button:has-text("Sign in"), #ov-login .pri').click();
     await page.waitForTimeout(1500);
@@ -78,8 +77,8 @@ test.describe('Authentication', () => {
   test('login with correct password succeeds', async ({ page }) => {
     await page.goto('/', { waitUntil: 'domcontentloaded' });
     await expect(page.locator('#ov-login')).toBeVisible({ timeout: 10000 });
-    await page.locator('#lg-user').fill('root');
-    await page.locator('#lg-pass').fill(PASS);
+    await page.locator('#lg-user').fill(ADMIN_USER);
+    await page.locator('#lg-pass').fill(ADMIN_PASSWORD);
     await page.locator('#ov-login button:has-text("Sign in"), #ov-login .pri').click();
     await page.waitForTimeout(2000);
     // After login, user badge should appear
@@ -166,8 +165,8 @@ test.describe('Navigation', () => {
 test.describe('Dashboard', () => {
   test.beforeEach(async ({ page }) => { await initPage(page); });
 
-  test('user badge shows root as super admin', async ({ page }) => {
-    await expect(page.locator('#ub-name')).toContainText('root');
+  test('user badge shows the admin user as super admin', async ({ page }) => {
+    await expect(page.locator('#ub-name')).toContainText(ADMIN_USER);
     await expect(page.locator('#ub-role')).toContainText(/super/i);
   });
 
@@ -388,7 +387,7 @@ test.describe('API Endpoints', () => {
       return r.json();
     });
     expect(data.role).toBe('super');
-    expect(data.username).toBe('root');
+    expect(data.username).toBe(ADMIN_USER);
   });
 
   test('/api/auth/me includes user info', async ({ page }) => {
