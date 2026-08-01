@@ -148,6 +148,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         return pw.isEmpty ? nil : pw
     }
 
+    /// Where this install keeps its generated admin password. Inside the
+    /// workspace, not the app bundle: the bundle is a build output that gets
+    /// copied around and shipped, the workspace is per-machine and gitignored.
+    func adminPasswordPath(in workspace: String) -> String {
+        workspace + "/admin-password"
+    }
+
+    /// This install's admin password, generated on first use.
+    ///
+    /// COX-B030: this used to be a password literal compiled into the binary,
+    /// so every desktop install on earth shared one super-admin login that
+    /// anyone could read off GitHub. A per-install secret means reading the
+    /// source tells an attacker nothing.
+    ///
+    /// Read-or-create, so a reinstall over an existing workspace keeps working
+    /// with the password the user already wrote down.
+    func adminPassword(in workspace: String) -> String {
+        let path = adminPasswordPath(in: workspace)
+        if let stored = try? String(contentsOfFile: path, encoding: .utf8) {
+            let secret = stored.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !secret.isEmpty { return secret }
+        }
+        let secret = generatedSecret()
+        // Create at 0600 up front rather than widening then narrowing — a
+        // world-readable window, however short, is a window.
+        FileManager.default.createFile(
+            atPath: path,
+            contents: Data((secret + "\n").utf8),
+            attributes: [.posixPermissions: 0o600])
+        announceGeneratedPassword(secret, at: path)
+        return secret
+    }
+
+    /// A 32-character secret (~185 bits) from the platform CSPRNG —
+    /// `randomElement` draws on `SystemRandomNumberGenerator`, which is
+    /// `arc4random` here, and is uniform over the alphabet (no modulo bias).
+    /// The alphabet drops the glyphs people misread when copying by hand
+    /// (`l`/`1`/`I`, `O`/`0`).
+    func generatedSecret() -> String {
+        let alphabet = Array("abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789")
+        return String((0..<32).map { _ in alphabet.randomElement()! })
+    }
+
+    /// Show the generated password once, at the moment it is created — it is
+    /// the only login to a hub that is about to start, and nothing else in the
+    /// UI can reveal it later (the hub stores a hash, not the password).
+    func announceGeneratedPassword(_ secret: String, at path: String) {
+        let alert = NSAlert()
+        alert.messageText = "CoXAgent generated an admin password"
+        alert.informativeText =
+            "Sign in as \"root\" with:\n\n\(secret)\n\n"
+            + "Saved to \(path), readable only by you. "
+            + "Set COXAGENT_ADMIN_PASSWORD to choose your own instead."
+        alert.addButton(withTitle: "Copy and continue")
+        alert.runModal()
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(secret, forType: .string)
+    }
+
     /// Quick synchronous check: is a local MinIO answering on :9000?
     func minioReachable() -> Bool {
         var ok = false
@@ -198,8 +258,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         // placeholders (${VAR}) resolve — credentials never touch json on disk.
         loadDotEnv(into: &hubEnv)
         // Always set admin credentials — hub boots with RBAC on first launch.
-        hubEnv["COXAGENT_ADMIN_USER"] = "root"
-        hubEnv["COXAGENT_ADMIN_PASSWORD"] = "Str@wb3rry"
+        // The password is never a literal in this source (COX-B030): an
+        // operator-supplied COXAGENT_ADMIN_PASSWORD (environment or the bundled
+        // .env, both already merged into hubEnv) wins, and with none a secret
+        // unique to this install is generated once and kept in the workspace.
+        hubEnv["COXAGENT_ADMIN_USER"] = hubEnv["COXAGENT_ADMIN_USER"] ?? "root"
+        hubEnv["COXAGENT_ADMIN_PASSWORD"] =
+            hubEnv["COXAGENT_ADMIN_PASSWORD"] ?? adminPassword(in: ws)
         if !fm.fileExists(atPath: reg) {
             let ob = Process()
             ob.executableURL = coxagentURL()

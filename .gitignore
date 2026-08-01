@@ -17,6 +17,20 @@ auth.json
 sessions.json
 **/sessions.json
 
+# Filled-in deploy secrets (COX-B030). `.env` carries the admin password and
+# every backing-service credential — it is per-environment, never committed.
+# Only the placeholder template `.env.example` belongs in git.
+.env
+!.env.example
+
+# Per-install desktop admin password, generated on first launch (0600).
+admin-password
+
+# Per-agent git worktrees: whole checkouts with their own target/, tens of GB.
+# Never committed, and excluded from the docker build context too — see
+# .dockerignore, where their target/ dirs once sank the release build.
+.claude/worktrees/
+
 # macOS app build artifacts
 desktop/build/
 /dist/
