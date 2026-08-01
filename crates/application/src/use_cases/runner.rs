@@ -81,6 +81,10 @@ impl RunnerHandle {
     pub fn pause(&self) {
         self.mode.store(PAUSED, Ordering::SeqCst);
         self.set_mode_label("paused");
+        // The phase label outlives the cycle it belonged to: pausing mid-cycle
+        // left "SA · reviewing PRs" on the dashboard beside a paused runner,
+        // which reads as "you asked it to stop and it ignored you".
+        self.clear_active();
     }
 
     /// Run exactly one cycle, then pause.
@@ -267,11 +271,54 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
             || report.feature_done.is_some()
             || report.bug_fixed.is_some()
             || report.documented.is_some();
-        let infra_errors = report
+        let infra_faults: Vec<&String> = report
             .errors
             .iter()
             .filter(|e| crate::faults::is_infra_fault(e))
-            .count();
+            .collect();
+        let infra_errors = infra_faults.len();
+        // Raise the outage where EVERY role passes through. The first version
+        // of this listened only inside the developer's failure path, so a
+        // revoked token that failed the whole team left engine_incidents empty
+        // and the dashboard clean while nothing worked at all.
+        {
+            let engine = cycle_uc.engine_id().to_owned();
+            let first = infra_faults.first().map(|e| (*e).clone());
+            let fault_count = infra_errors;
+            let _ = crate::ports::outbound::mutate_state(breaker_store.as_ref(), move |s| {
+                if let Some(detail) = &first {
+                    let already = s.engine_incidents.iter().any(|i| i.engine == engine);
+                    s.open_engine_incident(&engine, "CYCLE", detail);
+                    // Announce once, and only when the whole cycle went down —
+                    // a single dropped connection is a blip the retry handles,
+                    // and shouting about it teaches people to ignore the alert
+                    // that matters.
+                    if !already && fault_count >= 2 {
+                        let msg = format!(
+                            "🔌 {engine} failed {fault_count} runs this cycle: {detail}. If it \
+                             keeps up, the loop pauses itself — fix the credentials or the model \
+                             and this clears."
+                        );
+                        s.post_chat_in("SYSTEM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+                    }
+                } else {
+                    // The engine answered this cycle: nothing infra-shaped
+                    // failed. That is the promise the banner makes, so it is
+                    // what closes it — waiting for the team to also SHIP would
+                    // leave a stale alert up through a quiet backlog.
+                    if let Some(inc) = s.close_engine_incident(&engine) {
+                        let msg = format!(
+                            "✅ {engine} is answering again after {} failed run(s) — resolved, \
+                             work resumes.",
+                            inc.hits
+                        );
+                        s.post_chat_in("SYSTEM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+                    }
+                }
+                Ok(())
+            })
+            .await;
+        }
         if !progressed && infra_errors >= 2 {
             infra_streak += 1;
         } else {

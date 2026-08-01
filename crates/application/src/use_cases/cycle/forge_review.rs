@@ -1,0 +1,339 @@
+// Part of the cycle module split by concern — see cycle/mod.rs.
+//! SA reviews open PRs: verdicts, review records, blast-radius hints.
+
+use super::{diff_has_conflict_markers, ReviewVerdict, RunCycleUseCase};
+use crate::ports::outbound::{AgentEnginePort, AgentRequest, StateStorePort};
+use crate::use_cases::merge_policy::{competing_pr, needs_human_eyes};
+use std::fmt::Write as _;
+
+impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
+    /// When `auto_merge` is on, the SA agent deep-dives each open PR (reads the
+    /// diff, judges correctness/completeness/safety) and either merges it or
+    /// requests changes — the automated stand-in for a human reviewer. Gated by
+    /// CI (never merges a failing or conflicting PR) and bounded per cycle to
+    /// keep cost predictable. Best-effort throughout.
+    #[allow(clippy::too_many_lines)] // one review pass: gate, judge, verify, land
+    pub(super) async fn review_open_prs(&self) {
+        // `auto_review` (default on) drives SA review; `auto_merge` additionally
+        // lets an approval merge. With neither, humans review by hand.
+        let auto_merge = self.config.git.auto_merge;
+        let auto_review = self.config.git.auto_review || auto_merge;
+        if !self.config.git.enabled || !auto_review {
+            return;
+        }
+        let Some(forge) = &self.forge else { return };
+        let prs = match forge.list_open_prs().await {
+            Ok(p) => p,
+            Err(e) => {
+                self.log_git(&format!("review: list PRs failed: {e}")).await;
+                return;
+            }
+        };
+        let target = self.flow_base();
+        // With full merge authority (auto_merge on) the SA owns the queue and
+        // works it hard — draining the pile-up — rather than nibbling a few PRs.
+        // As a suggestion-only reviewer it stays light. Bounded either way for cost.
+        let batch = if auto_merge { 12 } else { 3 };
+        // Ticket ids visible in the open queue, for the competing-PR check.
+        let open_titles: Vec<(u64, String)> =
+            prs.iter().map(|p| (p.number, p.title.clone())).collect();
+        for pr in prs.into_iter().rev().take(batch) {
+            // Only review PRs into the configured target branch; leave PRs aimed
+            // elsewhere (e.g. an integration → main promotion) to humans.
+            if pr.base != target {
+                continue;
+            }
+            // Skip PRs whose head has not moved since the last request-changes:
+            // the verdict cannot change and the repeat comment is pure noise.
+            let head_sha = self.pr_head_sha(&pr.head).await;
+            if self.already_reviewed_at(pr.number, &head_sha).await {
+                continue;
+            }
+            // With require_ci off (CI unavailable, e.g. Actions billing dead),
+            // CI status is ignored entirely — local test/lint gates plus the
+            // SA's diff judgement carry the review instead.
+            let require_ci = self.config.git.require_ci;
+            if require_ci && pr.ci == "pending" {
+                continue; // wait for CI before judging
+            }
+            let blocked = if require_ci && pr.ci == "failing" {
+                Some("CI is failing — fix the build/tests.".to_owned())
+            } else if !pr.mergeable {
+                Some("The branch has merge conflicts — rebase on the base branch.".to_owned())
+            } else {
+                None
+            };
+            if let Some(reason) = blocked {
+                let _ = forge.request_changes(pr.number, &reason).await;
+                self.record_review(pr.number, "request_changes", &reason, &head_sha)
+                    .await;
+                self.log_git(&format!(
+                    "SA requested changes on PR #{} ({reason})",
+                    pr.number
+                ))
+                .await;
+                // Conflicts are resolved IN PLACE on the original branch by
+                // address_pr_feedback — never filed as tickets: a ticket spawns
+                // a NEW branch + PR, which is how a queue explodes.
+                continue;
+            }
+            let Ok(diff) = forge.pr_diff(pr.number).await else {
+                continue;
+            };
+            // Hard gate: a diff carrying committed conflict markers must NEVER
+            // merge, no matter what the review says.
+            if diff_has_conflict_markers(&diff) {
+                let reason = "Committed git conflict markers found in the diff — the conflict \
+                              was not actually resolved. Fix the affected files and push again.";
+                let _ = forge.request_changes(pr.number, reason).await;
+                self.record_review(pr.number, "request_changes", reason, &head_sha)
+                    .await;
+                self.log_git(&format!(
+                    "SA blocked PR #{}: committed conflict markers",
+                    pr.number
+                ))
+                .await;
+                continue;
+            }
+            // Two open PRs solving the same ticket is a race, not twice the
+            // work: whichever lands first leaves the other conflicting or
+            // fixing it twice. It happened here — #17 and #18 were competing
+            // fixes for one bug — so say so and let a human choose, rather than
+            // letting arrival order decide.
+            if let Some(other) = competing_pr(pr.number, &pr.title, &open_titles) {
+                let reason = format!(
+                    "PR #{other} is open for the same ticket. Two changes for one ticket race \
+                     each other: the second to land conflicts or fixes it twice. Close one, or \
+                     fold this into the other, before either merges."
+                );
+                let _ = forge.request_changes(pr.number, &reason).await;
+                self.record_review(pr.number, "request_changes", &reason, &head_sha)
+                    .await;
+                self.log_git(&format!(
+                    "SA held PR #{}: competes with #{other}",
+                    pr.number
+                ))
+                .await;
+                continue;
+            }
+            match self.sa_review(&pr.title, &pr.head, &diff).await {
+                Some((true, summary)) => {
+                    self.record_review(pr.number, "approve", &summary, &head_sha).await;
+                    if auto_merge {
+                        // Size and blast radius the machine should not decide
+                        // alone: a change this large, or one that edits how the
+                        // project builds and deploys itself, gets a human even
+                        // when every gate is green.
+                        if let Some(why) = needs_human_eyes(&diff) {
+                            let msg = format!(
+                                "Approved, but not auto-merging: {why}. Ask a human to land this."
+                            );
+                            let _ = forge.comment_pr(pr.number, &msg).await;
+                            self.log_git(&format!(
+                                "PR #{} approved but held for a human: {why}",
+                                pr.number
+                            ))
+                            .await;
+                            continue;
+                        }
+                        // The DoD gates ran on the agent's branch, against the
+                        // base as it was then. Between that and now the target
+                        // has moved, and a PR that was green on an older main
+                        // can still break it — the failure CI would normally
+                        // catch, which is not available here. Build and test
+                        // the MERGED result before landing it.
+                        if let Err(why) = self.verify_merged_result(&pr.head, target).await {
+                            let msg = format!(
+                                "Approved, but the merged result does not build/test clean: \
+                                 {why}. Rebase on {target} and fix it there — nothing lands red."
+                            );
+                            let _ = forge.request_changes(pr.number, &msg).await;
+                            self.record_review(pr.number, "request_changes", &msg, &head_sha).await;
+                            self.log_git(&format!(
+                                "PR #{} held: merged result failed verification",
+                                pr.number
+                            ))
+                            .await;
+                            continue;
+                        }
+                        match forge.merge_pr(pr.number).await {
+                            Ok(()) => {
+                                self.log_git(&format!("SA approved & merged PR #{}", pr.number))
+                                    .await;
+                            }
+                            Err(e) => {
+                                self.log_git(&format!("merge PR #{} failed: {e}", pr.number))
+                                    .await;
+                            }
+                        }
+                    } else {
+                        // Suggestion only — the user merges from the Review tab.
+                        self.log_git(&format!(
+                            "SA approved PR #{} — awaiting your merge",
+                            pr.number
+                        ))
+                        .await;
+                    }
+                }
+                Some((false, comment)) => {
+                    let _ = forge.request_changes(pr.number, &comment).await;
+                    self.record_review(pr.number, "request_changes", &comment, &head_sha)
+                        .await;
+                    self.log_git(&format!("SA requested changes on PR #{}", pr.number))
+                        .await;
+                }
+                None => {}
+            }
+        }
+    }
+    /// Persist the SA's verdict so the Review tab can show it as a suggestion.
+    /// The PR head's current commit sha via `git ls-remote` — cheap, no
+    /// checkout. Empty when it cannot be established (then no skip happens).
+    pub(super) async fn pr_head_sha(&self, head: &str) -> String {
+        let Some(git) = &self.git else {
+            return String::new();
+        };
+        let (ok, out) = git
+            .raw(
+                &self.work_dir,
+                &["ls-remote", "origin", &format!("refs/heads/{head}")],
+            )
+            .await;
+        if !ok {
+            return String::new();
+        }
+        out.split_whitespace().next().unwrap_or("").to_owned()
+    }
+
+    /// Whether this PR already got a request-changes at exactly this head —
+    /// nothing new to judge until the DEV pushes.
+    pub(super) async fn already_reviewed_at(&self, number: u64, head_sha: &str) -> bool {
+        if head_sha.is_empty() {
+            return false;
+        }
+        let Ok(state) = self.store.load().await else {
+            return false;
+        };
+        state.reviews.iter().any(|r| {
+            r.number == number && r.decision == "request_changes" && r.head_sha == head_sha
+        })
+    }
+
+    pub(super) async fn record_review(&self, number: u64, decision: &str, summary: &str, head_sha: &str) {
+        if let Ok(mut s) = self.store.load().await {
+            s.upsert_review(number, decision, summary, head_sha);
+            let _ = self.store.save(&s).await;
+        }
+    }
+    /// From a unified diff, list the functions it touches and who calls them
+    /// (from the code graph). Empty when no graph or nothing recognised — a
+    /// best-effort blast-radius hint for the reviewer.
+    pub(super) async fn diff_impact(&self, diff: &str) -> String {
+        let Some(files) = self.files.as_deref() else {
+            return String::new();
+        };
+        let Some(g) = crate::codegraph::CodeGraph::load(files, &self.work_dir).await else {
+            return String::new();
+        };
+        // Files the diff changes (`+++ b/path`), normalised.
+        let changed: std::collections::HashSet<String> = diff
+            .lines()
+            .filter_map(|l| l.strip_prefix("+++ b/").or_else(|| l.strip_prefix("+++ ")))
+            .map(|p| p.trim().replace('\\', "/"))
+            .collect();
+        if changed.is_empty() {
+            return String::new();
+        }
+        // Symbols defined in a changed file whose name appears on a changed line.
+        let touched: Vec<&crate::codegraph::Symbol> = g
+            .symbols
+            .iter()
+            .filter(|s| changed.iter().any(|c| c.ends_with(&s.file) || &s.file == c))
+            .filter(|s| {
+                diff.lines().any(|l| {
+                    (l.starts_with('+') || l.starts_with('-')) && l.contains(s.name.as_str())
+                })
+            })
+            .collect();
+        let mut out = String::new();
+        for s in touched.iter().take(10) {
+            let callers = g.callers(&s.name);
+            if callers.is_empty() {
+                continue;
+            }
+            let who: Vec<String> = callers.into_iter().take(8).map(|(w, _, _)| w).collect();
+            let _ = writeln!(out, "- `{}` is called by: {}", s.name, who.join(", "));
+        }
+        if out.is_empty() {
+            String::new()
+        } else {
+            format!("\nCall-graph impact — verify the change does not break these callers:\n{out}")
+        }
+    }
+    /// Run the SA engine as a code reviewer over a PR diff. Returns
+    /// `Some((approved, comment))`, or `None` if the engine failed / was
+    /// unparseable (in which case the PR is left untouched for a human).
+    pub(super) async fn sa_review(
+        &self,
+        title: &str,
+        head: &str,
+        diff: &str,
+    ) -> Option<(bool, String)> {
+        use coxagent_domain::Role;
+        let _ = self.config.engine.resolve(Role::Sa);
+        // Cap the diff so a huge PR doesn't blow the prompt budget. With the
+        // token-saver on, compress (dedupe + drop index noise) rather than a
+        // blunt truncation, so more of the real change survives the cap.
+        let saver = self.config.workflow.token_saver;
+        let clipped: String = if saver {
+            crate::tokens::compress_diff(diff, 16_000)
+        } else {
+            diff.chars().take(16_000).collect()
+        };
+        let terse = if saver { crate::tokens::TERSE } else { "" };
+        // Call-graph impact: functions this diff touches, and who calls them —
+        // so the reviewer checks the change doesn't break existing callers.
+        let impact = self.diff_impact(diff).await;
+        let task = format!(
+            "You are the SA with full merge authority on this pull request. Do a deep code review \
+             for correctness, completeness, safety, and architecture fit. You may APPROVE (which \
+             merges it) only when ALL hold: the change is functionally correct and will keep the \
+             build/tests green after merge; it carries adequate tests for what it changes; and the \
+             code is clean (clear naming, no dead code, follows the repo's conventions and the \
+             established architecture). If it merely works but is untested, sloppy, or drifts from \
+             the architecture, REQUEST_CHANGES with the concrete fixes — a green diff is not enough, \
+             the merged code must be good. Judge the diff against the codebase AS IT IS NOW, not as \
+             it was when the branch was cut: open the files it touches and check the change still \
+             fits — right module, current structure, current conventions. When it no longer fits \
+             (moved code, dead paths, superseded patterns — any reason), REQUEST_CHANGES and say \
+             concretely what to change and where that code lives now, so the DEV can fix and you \
+             re-review the corrected PR on the next pass.\n\nPR: {title}\nBranch: {head}\n\nUnified diff:\n```\n\
+             {clipped}\n```\n{impact}\nRespond with ONLY JSON: {{\"decision\": \"approve\" | \
+             \"request_changes\", \"summary\": \"one short paragraph; if request_changes, list the \
+             concrete fixes\"}}.{terse}"
+        );
+        let request = AgentRequest {
+            role: Role::Sa,
+            system_prompt: crate::prompts::system_prompt(crate::prompts::SA),
+            task_prompt: task,
+            work_dir: self.work_dir.clone(),
+            timeout: std::time::Duration::from_secs(600),
+            escalation_level: 0,
+        };
+        let outcome = self.engine.run(request).await.ok()?;
+        if !outcome.succeeded() {
+            return None;
+        }
+        let raw = &outcome.stdout;
+        let start = raw.find('{')?;
+        let end = raw.rfind('}')?;
+        let v: ReviewVerdict = serde_json::from_str(raw.get(start..=end)?).ok()?;
+        let approved = v.decision.eq_ignore_ascii_case("approve");
+        let comment = if v.summary.trim().is_empty() {
+            "Changes requested by the SA reviewer.".to_owned()
+        } else {
+            v.summary
+        };
+        Some((approved, comment))
+    }
+}

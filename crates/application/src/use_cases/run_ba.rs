@@ -20,6 +20,7 @@ pub struct RunBaUseCase<S: StateStorePort, E: AgentEnginePort> {
     config: Config,
     work_dir: PathBuf,
     context: String,
+    files: Option<Arc<dyn crate::ports::outbound::WorkspaceFilesPort>>,
 }
 
 impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
@@ -36,7 +37,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
             config,
             work_dir,
             context,
+            files: None,
         }
+    }
+
+    /// Attach workspace file access for prompt context blocks; `None` (tests)
+    /// reads as no context.
+    #[must_use]
+    pub fn with_files(
+        mut self,
+        files: Option<Arc<dyn crate::ports::outbound::WorkspaceFilesPort>>,
+    ) -> Self {
+        self.files = files;
+        self
     }
 
     /// Execute the BA cycle, returning the ids of the tickets created.
@@ -89,12 +102,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
         // A BA who doesn't know what the product already does proposes what it
         // already has.
         let knowledge = prompts::knowledge_block(
+            self.files.as_deref(),
             &existing.docs,
             &existing.tickets,
             &self.work_dir,
             &format!("{} {}", self.context, existing.sprint_goal),
             "",
-        );
+        )
+        .await;
         let request = AgentRequest {
             role: Role::Ba,
             system_prompt: prompts::system_prompt(prompts::BA),
@@ -107,7 +122,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
                 self.context,
                 sprint_goal_block(&existing.sprint_goal),
                 backlog_block,
-                prompts::repo_map_block(&self.work_dir, true),
+                prompts::repo_map_block(self.files.as_deref(), &self.work_dir, true).await,
                 knowledge,
                 prompts::team_memory_block(&existing.decisions, &existing.lessons)
             ),

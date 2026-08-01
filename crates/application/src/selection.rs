@@ -100,7 +100,13 @@ fn deps_satisfied(state: &ProjectState, ticket: &Ticket) -> bool {
 
 /// All tickets matching `pred`, best-first: priority desc, then id ascending.
 fn candidates<F: Fn(&Ticket) -> bool>(state: &ProjectState, pred: F) -> Vec<TicketId> {
-    let mut matched: Vec<&Ticket> = state.tickets.iter().filter(|t| pred(t)).collect();
+    // Human-assigned tickets are a person's, end to end — never an agent
+    // candidate. The person hands one back by clearing the assignment.
+    let mut matched: Vec<&Ticket> = state
+        .tickets
+        .iter()
+        .filter(|t| t.assignee().is_none() && pred(t))
+        .collect();
     matched.sort_by(|a, b| {
         priority_rank(b.priority())
             .cmp(&priority_rank(a.priority()))

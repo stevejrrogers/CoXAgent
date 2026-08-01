@@ -21,6 +21,7 @@ pub struct RunTestUseCase<S: StateStorePort, E: AgentEnginePort> {
     config: Config,
     work_dir: PathBuf,
     context: Option<String>,
+    files: Option<Arc<dyn crate::ports::outbound::WorkspaceFilesPort>>,
 }
 
 impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
@@ -31,7 +32,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
             config,
             work_dir,
             context: None,
+            files: None,
         }
+    }
+
+    /// Attach workspace file access for prompt context blocks; `None` (tests)
+    /// reads as no context.
+    #[must_use]
+    pub fn with_files(
+        mut self,
+        files: Option<Arc<dyn crate::ports::outbound::WorkspaceFilesPort>>,
+    ) -> Self {
+        self.files = files;
+        self
     }
 
     #[must_use]
@@ -47,33 +60,41 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
     #[allow(clippy::too_many_lines)] // linear QA pass; splitting hurts readability
     pub async fn execute(&self) -> Result<Vec<TicketId>, AppError> {
         let _choice = self.config.engine.resolve(Role::Test);
-        let (memory, shipped, knowledge) = self.store.load().await.map_or_else(
-            |_| (String::new(), String::new(), String::new()),
-            |s| {
+        let (memory, shipped, knowledge) = match self.store.load().await {
+            Ok(s) => {
                 let shipped = shipped_block(&s);
-                let knowledge =
-                    prompts::knowledge_block(&s.docs, &s.tickets, &self.work_dir, &shipped, "");
+                let knowledge = prompts::knowledge_block(
+                    self.files.as_deref(),
+                    &s.docs,
+                    &s.tickets,
+                    &self.work_dir,
+                    &shipped,
+                    "",
+                )
+                .await;
                 (
                     prompts::team_memory_block(&s.decisions, &s.lessons),
                     shipped,
                     knowledge,
                 )
-            },
-        );
+            }
+            Err(_) => (String::new(), String::new(), String::new()),
+        };
         let context_block = self
             .context
             .as_deref()
             .filter(|c| !c.trim().is_empty())
-            .map(|c| {
-                format!(
-                    "\n\n## Project context (goal, stack, what was built — test against this):\n{c}\n"
-                )
-            })
+            .map(|c| format!("\n\n## Project context (goal, stack, what was built — test against this):\n{c}\n"))
             .unwrap_or_default();
-        let repo_map = prompts::repo_map_block(&self.work_dir, self.config.workflow.token_saver);
+        let repo_map = prompts::repo_map_block(
+            self.files.as_deref(),
+            &self.work_dir,
+            self.config.workflow.token_saver,
+        )
+        .await;
         // A tester reads the suite and the API before writing a case; without
         // this the role re-tests what is covered and guesses at endpoints.
-        let surface = prompts::test_surface_block(&self.work_dir);
+        let surface = prompts::test_surface_block(self.files.as_deref(), &self.work_dir).await;
 
         let request = AgentRequest {
             role: Role::Test,
@@ -159,6 +180,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
                 state.post_comment("TEST", &note, Some(id.to_string()));
                 continue;
             }
+            // Human QA gate: with `workflow.human.gate_verify` on, the agent
+            // stops at "evidence attached" and a person renders the verdict
+            // from their inbox — the ticket stays Fixed until then.
+            if self.config.workflow.human.gate_verify {
+                let note = format!(
+                    "🧑‍⚖️ {id}: regression passed, evidence attached — awaiting HUMAN                      verification (workflow.human.gate_verify)."
+                );
+                state.post_comment("TEST", &note, Some(id.to_string()));
+                state.post_chat_in("SYSTEM", &note, crate::state::AGENTS_CHANNEL, Vec::new());
+                continue;
+            }
             if let Some(t) = state.ticket_mut(&id) {
                 if t.transition_to(Role::Test, coxagent_domain::Status::Verified)
                     .is_ok()
@@ -177,6 +209,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
 /// What just shipped and is awaiting verification, WITH its acceptance
 /// criteria — so TEST verifies the actual contract of each change instead of
 /// poking the app blind. Newest first, bounded.
+#[must_use]
 pub fn shipped_block(state: &crate::state::ProjectState) -> String {
     use std::fmt::Write as _;
     let recent: Vec<_> = state

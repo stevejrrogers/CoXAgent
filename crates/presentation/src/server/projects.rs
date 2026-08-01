@@ -1,0 +1,275 @@
+// One logical module split across files for merge-conflict surface, not an API
+// boundary — see server/mod.rs.
+#![allow(clippy::wildcard_imports)]
+//! Project lifecycle: list, create, import, rename, delete, providers.
+
+use super::*;
+
+pub(super) async fn project_provider(app: &AppState, pid: &str) -> Option<(String, String)> {
+    let p = app.project(pid).await?;
+    let cfg = std::fs::read_to_string(&p.config_path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Config>(&t).ok())
+        .unwrap_or_default();
+    Some((cfg.git.provider, cfg.git.base_url))
+}
+
+/// List projects (id, name, alias, version, ticket count) in registration order.
+pub(super) async fn list_projects(State(app): State<AppState>) -> impl IntoResponse {
+    let order = app.order.read().await.clone();
+    let mut out = Vec::new();
+    for id in &order {
+        if let Some(p) = app.project(id).await {
+            let (version, tickets) = p.store.load().await.map_or_else(
+                |_| ("0.0.0".to_owned(), 0),
+                |s| (s.current_version.to_string(), s.tickets.len()),
+            );
+            out.push(serde_json::json!({
+                "id": p.id, "name": p.name, "alias": p.alias,
+                "version": version, "tickets": tickets,
+                "mode": p.runner.snapshot().mode,
+            }));
+        }
+    }
+    Json(out)
+}
+
+/// Onboard a new project from the dashboard (greenfield, or brownfield import
+/// with `existing`, optionally seeded with a `goal`) via the injected factory.
+pub(super) async fn create_project(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<CreateProjectReq>,
+) -> axum::response::Response {
+    // Resolve the target space up front — a bad/unauthorized space must fail
+    // BEFORE the project is scaffolded, never leave a half-registered orphan.
+    let space_id = req
+        .space
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(sid) = space_id {
+        let sup = is_super(&app, &headers).await;
+        let me = resolve_username(&app, &headers).await;
+        let doc = app.spaces.inner.lock().await;
+        let Some(space) = doc.spaces.iter().find(|s| s.id == sid) else {
+            return (StatusCode::BAD_REQUEST, format!("unknown space: {sid}")).into_response();
+        };
+        if !sup && !space.admins.iter().any(|a| a.eq_ignore_ascii_case(&me)) {
+            return (StatusCode::FORBIDDEN, "not an admin of this space").into_response();
+        }
+    } else if !app.spaces.inner.lock().await.spaces.is_empty() {
+        // Once spaces exist, every project must belong to one — enforced here,
+        // not just in the UI, so API/service-account callers can't skip it.
+        return (StatusCode::BAD_REQUEST, "space is required").into_response();
+    }
+    let Some(factory) = app.factory.clone() else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            "onboarding is only available in hub mode",
+        )
+            .into_response();
+    };
+    let name = req.name.trim().to_owned();
+    if name.is_empty() {
+        return (StatusCode::BAD_REQUEST, "name is required").into_response();
+    }
+    // Validate brownfield import path: must be under the hub's workspace root
+    // or under /tmp (safe sandbox). Reject paths pointing to system directories.
+    if let Some(ref existing) = req.existing {
+        if !existing.trim().is_empty() {
+            let p = std::path::Path::new(existing.trim());
+            // Resolve to absolute canonical path to prevent symlink tricks.
+            if let Ok(real) = p.canonicalize() {
+                // Allow under /tmp or under $HOME (typical user repos).
+                // Block system directories.
+                let path_str = real.to_string_lossy();
+                // Block if path equals a blocked directory, or if it starts with
+                // a blocked directory plus '/', to catch `/private/etc/foo` etc.
+                let blocked_prefixes = [
+                    "/etc",
+                    "/private/etc",
+                    "/root",
+                    "/var/run",
+                    "/var/log",
+                    "/usr/lib",
+                    "/usr/sbin",
+                    "/bin",
+                    "/sbin",
+                    "/dev",
+                    "/proc",
+                    "/sys",
+                ];
+                let blocked = blocked_prefixes.iter().any(|pfx| {
+                    path_str == *pfx
+                        || path_str.starts_with(pfx)
+                            && path_str.as_bytes().get(pfx.len()).copied() == Some(b'/')
+                });
+                if blocked {
+                    return (StatusCode::FORBIDDEN, "cannot import from this path").into_response();
+                }
+            }
+        }
+    }
+    let handle = match factory(NewProjectReq {
+        name,
+        alias: req.alias,
+        existing: req
+            .existing
+            .filter(|s| !s.trim().is_empty())
+            .map(PathBuf::from),
+        git_url: req.git_url.filter(|s| !s.trim().is_empty()),
+        goal: req.goal.filter(|s| !s.trim().is_empty()),
+    })
+    .await
+    {
+        Ok(h) => h,
+        Err(e) => return internal_error(&e),
+    };
+    let id = handle.id.clone();
+    {
+        let mut map = app.projects.write().await;
+        if map.contains_key(&id) {
+            return (StatusCode::CONFLICT, "project id already exists").into_response();
+        }
+        map.insert(id.clone(), handle);
+        app.order.write().await.push(id.clone());
+    }
+    if let Some(sid) = space_id {
+        {
+            let mut doc = app.spaces.inner.lock().await;
+            if let Some(space) = doc.spaces.iter_mut().find(|s| s.id == sid) {
+                if !space.projects.contains(&id) {
+                    space.projects.push(id.clone());
+                }
+            }
+        }
+        app.spaces.save().await;
+    }
+    Json(serde_json::json!({ "ok": true, "id": id })).into_response()
+}
+
+/// Rename a project: persist the custom display name in its state and update the
+/// in-memory handle so the change is live (no restart). Admin-only.
+pub(super) async fn rename_project_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    Json(req): Json<RenameProjectReq>,
+) -> axum::response::Response {
+    let name = req.name.trim();
+    if name.is_empty() || name.chars().count() > 60 {
+        return (StatusCode::BAD_REQUEST, "name must be 1–60 chars").into_response();
+    }
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Ok(mut state) = p.store.load().await else {
+        return internal_error("load failed");
+    };
+    state.display_name = Some(name.to_owned());
+    if let Err(e) = p.store.save(&state).await {
+        return internal_error(&e.to_string());
+    }
+    // Reflect the new name in the live handle so list_projects returns it now.
+    if let Some(h) = app.projects.write().await.get_mut(&pid) {
+        name.clone_into(&mut h.name);
+    }
+    Json(serde_json::json!({ "ok": true, "name": name })).into_response()
+}
+
+/// Delete (deregister) a project: stop its runner, remove it from the hub, and
+/// deregister it from the registry. The workspace files are left on disk.
+pub(super) async fn delete_project_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    // Deleting a project is destructive — restrict to admins and the lead tier
+    // (Director/Manager/*Lead). Everyone else is forbidden. Super (hub-wide
+    // owner) is included via `can_manage`.
+    if let Some(auth) = &app.auth {
+        let allowed = match resolve_principal(auth, &headers).await {
+            Some(u) => u.role.can_manage(),
+            None => false,
+        };
+        if !allowed {
+            return (
+                StatusCode::FORBIDDEN,
+                "only an admin or manager may delete a project",
+            )
+                .into_response();
+        }
+    }
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    p.runner.stop();
+    app.projects.write().await.remove(&pid);
+    app.order.write().await.retain(|id| id != &pid);
+    // Clean up space references so no dangling project IDs remain.
+    {
+        let mut sp = app.spaces.inner.lock().await;
+        for space in &mut sp.spaces {
+            space.projects.retain(|p| p != &pid);
+        }
+        drop(sp);
+        app.spaces.save().await;
+    }
+    if let Some(remover) = &app.remover {
+        if let Err(e) = remover(pid.clone()).await {
+            return internal_error(&e);
+        }
+    }
+    // Clean up the project directory on disk. For imported projects this only
+    // removes the CoXAgent workspace scaffolding (state/, coxagent.json, etc.)
+    // — never the original imported codebase.
+    if let Some(root) = p.config_path.parent() {
+        let project_dir = root.to_path_buf();
+        let codebase_linked = project_dir.join("codebase.lnk").exists();
+        // Spawn cleanup in the background — errors are logged, never surfaced.
+        tokio::spawn(async move {
+            if codebase_linked {
+                // Imported project: only delete CoXAgent scaffolding, not the code.
+                let _ = std::fs::remove_file(project_dir.join("codebase.lnk"));
+                if let Err(e) = std::fs::remove_dir_all(project_dir.join("state")) {
+                    tracing::warn!("delete_project: cannot remove state dir: {e}");
+                }
+                let _ = std::fs::remove_file(project_dir.join("coxagent.json"));
+                if let Ok(entries) = std::fs::read_dir(&project_dir) {
+                    if entries.count() == 0 {
+                        let _ = std::fs::remove_dir(&project_dir);
+                    }
+                }
+            } else {
+                // Greenfield: remove the entire project workspace.
+                if let Err(e) = std::fs::remove_dir_all(&project_dir) {
+                    tracing::warn!("delete_project: cannot remove project dir: {e}");
+                }
+            }
+            // Also clean up the Docker compose project if it was deployed.
+            let container_name = format!("cox-{pid}-codebase-app-1");
+            if let Ok(out) = std::process::Command::new("docker")
+                .args(["stop", &container_name])
+                .output()
+            {
+                if !out.status.success() {
+                    tracing::warn!("delete_project: docker stop {container_name} failed");
+                }
+            }
+            let _ = std::process::Command::new("docker")
+                .args(["rm", &container_name])
+                .output();
+        });
+    }
+    Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+/// The Scrum language configured for a project (English by default).
+pub(super) fn project_language(p: &ProjectHandle) -> coxagent_application::config::Language {
+    std::fs::read_to_string(&p.config_path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Config>(&t).ok())
+        .map_or(coxagent_application::config::Language::En, |c| {
+            c.workflow.language
+        })
+}

@@ -22,9 +22,18 @@ Mongo + coturn + Caddy (automatic HTTPS).
 
 ```sh
 cd deploy
-cp .env.example .env   # fill in domain, admin password, secrets
+cp .env.example .env                    # fill in domain, admin password, secrets
+../scripts/rotate-admin-password.sh     # generates ADMIN_PASSWORD for you
 docker compose up -d
 ```
+
+`.env` is gitignored and must stay that way — it holds the live super-admin
+password and every backing-service credential. Only `.env.example`, with its
+`change-me-…` placeholders, belongs in git (COX-B030: a working admin password
+was once committed here, so it is public in this repo's history; any deployment
+that ever used it must rotate). `scripts/rotate-admin-password.sh --restart`
+rotates and recreates the app in one step; `cargo test -p coxagent-app --test
+committed_secrets_gate` fails the build if a credential is ever committed again.
 
 **Full split on one host** — the same 4-service shape as Helm (gateway /
 realtime / knowledge as separate containers, Caddy routing sockets to

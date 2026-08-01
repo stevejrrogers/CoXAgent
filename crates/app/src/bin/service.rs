@@ -19,7 +19,7 @@ async fn main() -> ExitCode {
     // the CLI dispatcher — otherwise it would try to start another hub
     // server and fail with "Address already in use".
     let args: Vec<String> = std::env::args().collect();
-    if args.get(1).map(|s| s.as_str()) == Some("compress") {
+    if args.get(1).map(String::as_str) == Some("compress") {
         return coxagent_app::cli_main().await;
     }
     let role = match name.as_str() {

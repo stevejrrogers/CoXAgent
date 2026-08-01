@@ -150,9 +150,11 @@ fn scan(src: &str) -> (Vec<String>, Vec<String>) {
                  #[cfg(...)] gate: it becomes dead code on other targets and \
                  `warnings = \"deny\"` fails the Docker (Linux) release build"
             )),
-            Some(gate) if !gate.contains(&format!("target_os = \"{target}\"")) => violations.push(
-                format!("`fn {name}` must be gated on target_os = \"{target}\", found: {gate}"),
-            ),
+            Some(gate) if !gate.contains(&format!("target_os = \"{target}\"")) => {
+                violations.push(format!(
+                    "`fn {name}` must be gated on target_os = \"{target}\", found: {gate}"
+                ));
+            }
             Some(_) => {}
         }
         checked.push(name.to_owned());

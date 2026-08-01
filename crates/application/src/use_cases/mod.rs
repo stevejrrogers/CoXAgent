@@ -7,6 +7,7 @@ pub mod conformance_check;
 pub mod cycle;
 pub mod generate_docs;
 pub mod json_repair;
+pub mod merge_policy;
 pub mod merge_sweep;
 pub mod recover;
 pub mod refine_ticket;
@@ -32,6 +33,10 @@ pub use conformance_check::RunConformanceUseCase;
 pub use cycle::{CycleReport, RunCycleUseCase};
 pub use generate_docs::GenerateDocsUseCase;
 pub use json_repair::repair_json;
+pub use merge_policy::{
+    competing_pr, escalation_route, needs_human_eyes, route_from_failures, EscalationRoute,
+    MAX_TICKET_RESCUES,
+};
 pub use merge_sweep::{merge_sweep, SweepOutcome};
 pub use recover::RecoverUseCase;
 pub use refine_ticket::{RefineTicketUseCase, RefinedTicket, TeamNote};

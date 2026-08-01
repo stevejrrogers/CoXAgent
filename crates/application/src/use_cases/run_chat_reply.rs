@@ -13,6 +13,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Creates a new project from scratch: `(name, alias) -> human-readable status`.
+pub type NewProjectFn = Arc<dyn Fn(String, Option<String>) -> Result<String, String> + Send + Sync>;
+
+/// Imports an existing codebase: `(path, name, alias) -> human-readable status`.
+pub type ImportProjectFn =
+    Arc<dyn Fn(String, String, Option<String>) -> Result<String, String> + Send + Sync>;
+
 /// Runs one agent reply to a human's team-channel message.
 pub struct RunChatReplyUseCase<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> {
     store: Arc<S>,
@@ -26,11 +33,10 @@ pub struct RunChatReplyUseCase<S: StateStorePort + ?Sized, E: AgentEnginePort + 
     forge: Option<(Arc<dyn crate::ports::outbound::ForgePort>, String, bool)>,
     context: Option<String>,
     /// Callback: create a new project from scratch. Returns a human-readable status message.
-    new_project_fn:
-        Option<Arc<dyn Fn(String, Option<String>) -> Result<String, String> + Send + Sync>>,
+    new_project_fn: Option<NewProjectFn>,
     /// Callback: import an existing codebase. Returns a human-readable status message.
-    import_project_fn:
-        Option<Arc<dyn Fn(String, String, Option<String>) -> Result<String, String> + Send + Sync>>,
+    import_project_fn: Option<ImportProjectFn>,
+    files: Option<Arc<dyn crate::ports::outbound::WorkspaceFilesPort>>,
 }
 
 /// Common docker-compose filenames we treat as "already has a deploy setup".
@@ -61,23 +67,28 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             context: None,
             new_project_fn: None,
             import_project_fn: None,
+            files: None,
         }
     }
 
+    /// Attach the files port so chat-triggered reviews can scan the workspace.
     #[must_use]
-    pub fn with_new_project_fn(
+    pub fn with_files(
         mut self,
-        f: Arc<dyn Fn(String, Option<String>) -> Result<String, String> + Send + Sync>,
+        files: Option<Arc<dyn crate::ports::outbound::WorkspaceFilesPort>>,
     ) -> Self {
+        self.files = files;
+        self
+    }
+
+    #[must_use]
+    pub fn with_new_project_fn(mut self, f: NewProjectFn) -> Self {
         self.new_project_fn = Some(f);
         self
     }
 
     #[must_use]
-    pub fn with_import_project_fn(
-        mut self,
-        f: Arc<dyn Fn(String, String, Option<String>) -> Result<String, String> + Send + Sync>,
-    ) -> Self {
+    pub fn with_import_project_fn(mut self, f: ImportProjectFn) -> Self {
         self.import_project_fn = Some(f);
         self
     }
@@ -189,6 +200,19 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         if lower.is_empty() || lower == "none" {
             return Ok(());
         }
+        // Expensive or hard to undo: deploying, merging the queue, creating or
+        // importing a project, or setting a developer to work. The prompt asks
+        // for confirmation first; a model answering a bug report reached for
+        // `deploy` anyway, so the rule is enforced here where it cannot be
+        // talked out of.
+        if NEEDS_YES.iter().any(|k| lower.starts_with(k)) && !self.thread_has_confirmation().await {
+            let msg = format!(
+                "I held off on `{a}` — that one changes the project, and I do not see a yes in \
+                 this thread yet. Say the word and I will run it."
+            );
+            self.post("SM", &msg).await;
+            return Ok(());
+        }
         let sprint = self.sprint_number().await;
         if let Some(rest) = strip_kw(a, "new_project") {
             self.new_project(rest).await;
@@ -201,7 +225,8 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
                 self.work_dir.clone(),
                 self.token_saver,
                 self.lang,
-            );
+            )
+            .with_files(self.files.clone());
             uc.execute(sprint).await?;
         } else if lower.starts_with("docs_review") {
             let uc = super::RunDocsAuditUseCase::new(
@@ -278,7 +303,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         let Ok(state) = self.store.load().await else {
             return;
         };
-        let Some(_ticket) = state.ticket(&tid) else {
+        let Some(ticket) = state.ticket(&tid) else {
             let msg = if self.lang.is_vi() {
                 format!("❌ Ticket {tid} không tồn tại.")
             } else {
@@ -297,20 +322,24 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         // Build the DEV prompt manually — same as RunDevUseCase but without the
         // full state-machine cycle (claim/release handled inline).
         let memory = crate::prompts::team_memory_block(&state.decisions, &state.lessons);
-        let title = _ticket.title().to_owned();
-        let brief = super::run_dev::ticket_brief(Some(_ticket));
+        let title = ticket.title().to_owned();
+        let brief = super::run_dev::ticket_brief(Some(ticket));
         let fp = crate::prompts::focus_block(
+            self.files.as_deref(),
             &self.work_dir,
             &format!(
                 "{title} {}",
-                _ticket
+                ticket
                     .design()
                     .technical
                     .as_ref()
                     .map_or("", |d| d.approach.as_str())
             ),
-        );
-        let rp = crate::prompts::repo_map_block(&self.work_dir, self.token_saver);
+        )
+        .await;
+        let rp =
+            crate::prompts::repo_map_block(self.files.as_deref(), &self.work_dir, self.token_saver)
+                .await;
 
         let request = crate::ports::outbound::AgentRequest {
             role: coxagent_domain::Role::DevFeature,
@@ -385,8 +414,11 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         };
         self.post("SA", &announce).await;
 
-        let fp = crate::prompts::focus_block(&self.work_dir, &title);
-        let rp = crate::prompts::repo_map_block(&self.work_dir, self.token_saver);
+        let fp =
+            crate::prompts::focus_block(self.files.as_deref(), &self.work_dir, &title).await;
+        let rp =
+            crate::prompts::repo_map_block(self.files.as_deref(), &self.work_dir, self.token_saver)
+                .await;
         let request = crate::ports::outbound::AgentRequest {
             role: coxagent_domain::Role::Sa,
             system_prompt: crate::prompts::system_prompt(crate::prompts::SA),
@@ -464,9 +496,9 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         self.post("TEST", &format!("🧪 QA testing ticket {tid}..."))
             .await;
         let state = self.store.load().await.ok();
-        let shipped = state.as_ref().map_or(String::new(), |s| {
-            crate::use_cases::run_test::shipped_block(s)
-        });
+        let shipped = state
+            .as_ref()
+            .map_or(String::new(), crate::use_cases::run_test::shipped_block);
         let memory = state.as_ref().map_or(String::new(), |s| {
             crate::prompts::team_memory_block(&s.decisions, &s.lessons)
         });
@@ -511,7 +543,10 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
                                     "medium" => coxagent_domain::Complexity::Medium,
                                     _ => coxagent_domain::Complexity::Small,
                                 },
-                                has_ui: b.get("has_ui").and_then(|v| v.as_bool()).unwrap_or(false),
+                                has_ui: b
+                                    .get("has_ui")
+                                    .and_then(serde_json::Value::as_bool)
+                                    .unwrap_or(false),
                                 acceptance_criteria: vec![],
                             })
                             .await
@@ -534,18 +569,19 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
 
     /// Create a new project from scratch via chat: `<name> :: <alias>`
     async fn new_project(&self, rest: &str) {
-        let parts: Vec<&str> = rest.splitn(2, "::").map(|s| s.trim()).collect();
-        let name = parts.first().unwrap_or(&"").to_string();
+        let parts: Vec<&str> = rest.splitn(2, "::").map(str::trim).collect();
+        let name = parts.first().copied().unwrap_or_default().to_owned();
         let alias = parts
             .get(1)
-            .map(|s| s.to_string())
+            .copied()
+            .map(str::to_owned)
             .filter(|s| !s.is_empty());
         if name.is_empty() {
             self.post("SM", "Usage: new_project: Project Name :: ALIAS")
                 .await;
             return;
         }
-        self.post("SM", &format!("🆕 Creating project '{}'...", name))
+        self.post("SM", &format!("🆕 Creating project '{name}'..."))
             .await;
         let result = match &self.new_project_fn {
             Some(f) => f(name, alias),
@@ -562,12 +598,13 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
     }
 
     async fn import_project(&self, rest: &str) {
-        let parts: Vec<&str> = rest.splitn(3, "::").map(|s| s.trim()).collect();
-        let path = parts.first().unwrap_or(&"").to_string();
-        let name = parts.get(1).unwrap_or(&"").to_string();
+        let parts: Vec<&str> = rest.splitn(3, "::").map(str::trim).collect();
+        let path = parts.first().copied().unwrap_or_default().to_owned();
+        let name = parts.get(1).copied().unwrap_or_default().to_owned();
         let alias = parts
             .get(2)
-            .map(|s| s.to_string())
+            .copied()
+            .map(str::to_owned)
             .filter(|s| !s.is_empty());
         if path.is_empty() || name.is_empty() {
             self.post(
@@ -577,7 +614,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             .await;
             return;
         }
-        self.post("SM", &format!("📂 Importing '{}' from {path}...", name))
+        self.post("SM", &format!("📂 Importing '{name}' from {path}..."))
             .await;
         let result = match &self.import_project_fn {
             Some(f) => f(path, name, alias),
@@ -943,13 +980,67 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             ),
             task_prompt: task.to_owned(),
             work_dir: self.work_dir.clone(),
-            timeout: Duration::from_secs(120),
-            escalation_level: 0,
+            // Reading the code before answering takes longer than 2 minutes.
+            timeout: Duration::from_secs(600),
+            // A person is waiting on this: it is the wrong place for the
+            // cheapest model. The first answers this produced were off-topic
+            // and reached for `deploy` on a bug report.
+            escalation_level: 1,
         };
         let outcome = self.engine.run(request).await.ok()?;
-        outcome
-            .succeeded()
-            .then(|| outcome.stdout.trim().to_owned())
+        if !outcome.succeeded() {
+            // Silence is the worst reply. The person clicked send and watched
+            // nothing happen — the failure they cannot see is worse than the
+            // failure they can.
+            let why: String = outcome.failure_detail().chars().take(200).collect();
+            tracing::warn!("chat reply failed: {why}");
+            self.post(
+                "SYSTEM",
+                &format!("⚠️ I could not answer that just now — the agent run failed ({why}). Say it again and I will retry."),
+            )
+            .await;
+            return None;
+        }
+        Some(outcome.stdout.trim().to_owned())
+    }
+
+    /// Whether the thread already shows the human agreeing to something. Used
+    /// to gate the expensive actions in code rather than trusting the model to
+    /// respect the same rule in prose — it did not.
+    async fn thread_has_confirmation(&self) -> bool {
+        const YES: &[&str] = &[
+            "ok",
+            "oke",
+            "okay",
+            "uhm",
+            "ừ",
+            "ù",
+            "đi",
+            "làm đi",
+            "lam di",
+            "yes",
+            "yep",
+            "go",
+            "chơi",
+            "duyệt",
+            "approve",
+            "ưu tiên",
+            "triển",
+        ];
+        let Ok(state) = self.store.load().await else {
+            return false;
+        };
+        state
+            .comments
+            .iter()
+            .rev()
+            .filter(|c| c.author == "USER" || c.author == "root")
+            .take(3)
+            .any(|c| {
+                let b = c.body.trim().to_lowercase();
+                YES.iter()
+                    .any(|y| b == *y || b.starts_with(&format!("{y} ")) || b.contains(*y))
+            })
     }
 
     async fn post(&self, author: &str, body: &str) {
@@ -959,6 +1050,16 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         }
     }
 }
+
+/// Actions that change the project in ways a person should agree to first.
+const NEEDS_YES: &[&str] = &[
+    "deploy",
+    "merge_queue",
+    "merge queue",
+    "implement",
+    "new_project",
+    "import",
+];
 
 /// Pick which agent should answer a human message from its wording.
 fn route_persona(lower: &str) -> &'static str {

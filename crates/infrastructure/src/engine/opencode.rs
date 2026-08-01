@@ -141,6 +141,7 @@ fn ensure_opencode_mcp_config(work_dir: &std::path::Path, mcp: &crate::engine::M
 ///   key surgically removed, restoring the user's config;
 /// - either way the exact `opencode.json` .gitignore line we used to add is
 ///   dropped, so the user's real config doesn't stay silently git-ignored.
+///
 /// Files without our marker are untouched — they were never ours.
 fn migrate_legacy_opencode_config(work_dir: &std::path::Path) {
     let legacy = work_dir.join("opencode.json");
@@ -206,12 +207,12 @@ fn remove_gitignore_line(work_dir: &std::path::Path, entry: &str) {
 /// a write failure just means the file goes untracked-but-not-git-ignored,
 /// same as before this function existed.
 fn ensure_gitignored(work_dir: &std::path::Path, entry: &str) {
+    use std::io::Write as _;
     let path = work_dir.join(".gitignore");
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
     if existing.lines().any(|l| l.trim() == entry) {
         return;
     }
-    use std::io::Write as _;
     let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -429,15 +430,13 @@ impl OpencodeEngine {
         };
 
         let leader_pid = child_pid;
-        let (raw, status) = match tokio::time::timeout(timeout, read).await {
-            Ok(r) => r?,
-            Err(_) => {
-                if let Some(pid) = leader_pid {
-                    crate::proc::kill_group(pid);
-                }
-                return Err(PortError::Backend("opencode timed out".to_owned()));
+        let Ok(read) = tokio::time::timeout(timeout, read).await else {
+            if let Some(pid) = leader_pid {
+                crate::proc::kill_group(pid);
             }
+            return Err(PortError::Backend("opencode timed out".to_owned()));
         };
+        let (raw, status) = read?;
         let stderr = err_task.await.unwrap_or_default();
 
         if let Some(p) = &live {
@@ -558,12 +557,11 @@ fn parse_json_stream(raw: &str) -> (String, coxagent_application::ports::outboun
     (text, usage)
 }
 
-/// Rough token estimate (~3.8 chars per token).
+/// Rough token estimate (~3.8 chars per token). Integer ceil-div of `len * 10`
+/// by 38 — same result as the float form, with no lossy casts to lint around.
 fn estimate_tokens_raw(len: usize) -> u64 {
-    if len == 0 {
-        return 0;
-    }
-    (len as f64 / 3.8).ceil() as u64
+    let chars = u64::try_from(len).unwrap_or(u64::MAX);
+    chars.saturating_mul(10).saturating_add(37) / 38
 }
 
 /// Provider ids opencode ships with. Anything else defined under `provider`
@@ -668,7 +666,7 @@ mod tests {
         let (text, usage) = parse_json_stream("not json at all");
         assert_eq!(text, "not json at all");
         assert!(usage.input_tokens > 0);
-        assert_eq!(usage.cost_usd, 0.0);
+        assert!(usage.cost_usd.abs() < f64::EPSILON);
     }
 
     #[test]

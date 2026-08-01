@@ -37,6 +37,7 @@ pub struct RunPdUseCase<S: StateStorePort, E: AgentEnginePort> {
     worker: String,
     phase: Option<crate::use_cases::runner::PhaseReporter>,
     context: Option<String>,
+    files: Option<Arc<dyn crate::ports::outbound::WorkspaceFilesPort>>,
 }
 
 impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
@@ -49,7 +50,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
             worker: String::new(),
             phase: None,
             context: None,
+            files: None,
         }
+    }
+
+    /// Attach workspace file access for prompt context blocks; `None` (tests)
+    /// reads as no context.
+    #[must_use]
+    pub fn with_files(
+        mut self,
+        files: Option<Arc<dyn crate::ports::outbound::WorkspaceFilesPort>>,
+    ) -> Self {
+        self.files = files;
+        self
     }
 
     #[must_use]
@@ -109,6 +122,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
         // team's own pages; designing without them is how a second design
         // language gets born.
         let knowledge = prompts::knowledge_block(
+            self.files.as_deref(),
             &state.docs,
             &state.tickets,
             &self.work_dir,
@@ -119,10 +133,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
                     .map_or("", coxagent_domain::Ticket::description)
             ),
             &id.to_string(),
-        );
+        )
+        .await;
         let outcome = self
             .engine
-            .run(self.build_request(&id, &title, &memory, &knowledge))
+            .run(self.build_request(&id, &title, &memory, &knowledge).await)
             .await?;
         if !outcome.succeeded() {
             self.store.release_stage(&id, "pd", &worker).await.ok();
@@ -142,18 +157,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
                     &self.work_dir,
                 )
                 .await;
-                match fixed.as_deref().map(parse_ux) {
-                    Some(Ok(u)) => u,
-                    _ => {
-                        self.store.release_stage(&id, "pd", &worker).await.ok();
-                        return Err(PortError::Corrupt(format!("PD output: {first}")).into());
-                    }
-                }
+                let Some(Ok(repaired)) = fixed.as_deref().map(parse_ux) else {
+                    self.store.release_stage(&id, "pd", &worker).await.ok();
+                    return Err(PortError::Corrupt(format!("PD output: {first}")).into());
+                };
+                repaired
             }
         };
 
         // Atomic read-modify-write with retry (parallel-safe).
         let ux_design = ux_of(&ux);
+        let gate_ready = self.config.workflow.human.gate_ready;
         crate::ports::outbound::mutate_state(self.store.as_ref(), |state| {
             let ticket = state
                 .ticket_mut(&id)
@@ -162,9 +176,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
                 .set_ux_design(Role::Pd, ux_design.clone())
                 .map_err(|e| PortError::Corrupt(e.to_string()))?;
             // DoR re-checked here; passes now that both technical and UX exist.
-            ticket
-                .transition_to(Role::Pd, Status::Ready)
-                .map_err(|e| PortError::Corrupt(e.to_string()))?;
+            // With the human ready-gate on, the designed ticket waits in
+            // Pending for a person's approval instead.
+            if gate_ready {
+                let msg = format!(
+                    "🧑‍⚖️ {id} is fully designed and WAITS for a human approval to Ready — \
+                     it is in the Inbox (workflow.human.gate_ready)."
+                );
+                state.post_chat_in("SYSTEM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+            } else {
+                ticket
+                    .transition_to(Role::Pd, Status::Ready)
+                    .map_err(|e| PortError::Corrupt(e.to_string()))?;
+            }
             Ok(())
         })
         .await?;
@@ -174,7 +198,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
         Ok(Some(id))
     }
 
-    fn build_request(
+    async fn build_request(
         &self,
         id: &TicketId,
         title: &str,
@@ -186,17 +210,20 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
             .context
             .as_deref()
             .filter(|c| !c.trim().is_empty())
-            .map(|c| {
-                format!("\n\n## Project context (goal, stack, scope, design system — stay consistent):\n{c}\n")
-            })
+            .map(|c| format!("\n\n## Project context (goal, stack, scope, design system — stay consistent):\n{c}\n"))
             .unwrap_or_default();
         AgentRequest {
             role: Role::Pd,
             system_prompt: prompts::system_prompt(prompts::PD),
             task_prompt: format!(
                 "Design the UX for feature {id}: {title}{context_block}{knowledge}{memory}{}{}",
-                prompts::focus_block(&self.work_dir, title),
-                prompts::repo_map_block(&self.work_dir, self.config.workflow.token_saver),
+                prompts::focus_block(self.files.as_deref(), &self.work_dir, title).await,
+                prompts::repo_map_block(
+                    self.files.as_deref(),
+                    &self.work_dir,
+                    self.config.workflow.token_saver,
+                )
+                .await,
             ),
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(1200),
