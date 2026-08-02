@@ -112,13 +112,35 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
         // of runway; past that the SA stands down this cycle.
         {
             use coxagent_domain::Status;
-            let ready = state
+            // Runway = tickets DEV can pull (Ready) PLUS designs already done
+            // and parked behind the human ready-gate. Counting only Ready
+            // starved design forever on a hybrid board: 16 pre-gate Ready
+            // tickets meant the SA never designed the tickets humans were
+            // actually waiting to approve.
+            let runway = state
                 .tickets
                 .iter()
-                .filter(|t| t.status() == Status::Ready)
+                .filter(|t| {
+                    t.status() == Status::Ready
+                        || (t.status() == Status::Pending && t.design().technical.is_some())
+                })
                 .count();
-            if ready >= 6 {
+            if runway >= 6 && !self.config.workflow.human.gate_ready {
                 return Ok(None);
+            }
+            // With the gate on, cap the APPROVAL queue instead — six designs
+            // awaiting a human is plenty; more just floods their inbox.
+            if self.config.workflow.human.gate_ready {
+                let awaiting = state
+                    .tickets
+                    .iter()
+                    .filter(|t| {
+                        t.status() == Status::Pending && t.design().technical.is_some()
+                    })
+                    .count();
+                if awaiting >= 6 {
+                    return Ok(None);
+                }
             }
         }
         let now = crate::state::now_rfc3339();

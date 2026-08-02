@@ -67,6 +67,22 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
         // first, capped; the rest is a one-line count. Exact duplicates are
         // caught by the code-side title/semantic dedup regardless.
         let existing = self.store.load().await?;
+        // Backpressure: a fat backlog means the constraint is DELIVERY, not
+        // ideas. Proposing more just buries the board (91 pending happened).
+        let pending = existing
+            .tickets
+            .iter()
+            .filter(|t| {
+                t.status() == coxagent_domain::Status::Pending
+                    && matches!(
+                        t.ticket_type(),
+                        coxagent_domain::TicketType::Feature | coxagent_domain::TicketType::Chore
+                    )
+            })
+            .count();
+        if pending > self.config.workflow.backlog_cap() {
+            return Ok(Vec::new());
+        }
         let active: Vec<String> = existing
             .tickets
             .iter()

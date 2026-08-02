@@ -943,6 +943,16 @@ pub async fn serve_full(
 }
 
 async fn index() -> impl IntoResponse {
+    // Cache-bust the split assets per build: the desktop WebView happily kept
+    // an older shell.js against a newer index.html across redeploys, which
+    // broke whole views (Code map went blank). The version query makes every
+    // build a fresh URL.
+    static VERSIONED: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        let v = env!("CARGO_PKG_VERSION");
+        INDEX_HTML
+            .replace("/assets/app.css", &format!("/assets/app.css?v={v}"))
+            .replace(".js\"></script>", &format!(".js?v={v}\"></script>"))
+    });
     // Always revalidate so a rebuilt dashboard is picked up on reload (the SPA is
     // small; no-cache avoids stale UI after an upgrade).
     //
@@ -966,7 +976,7 @@ async fn index() -> impl IntoResponse {
             (header::X_FRAME_OPTIONS, "DENY"),
             (header::REFERRER_POLICY, "strict-origin-when-cross-origin"),
         ],
-        Html(INDEX_HTML),
+        Html(VERSIONED.as_str()),
     )
 }
 

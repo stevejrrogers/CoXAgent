@@ -219,6 +219,10 @@ pub struct ProjectState {
     /// forever. Cleared when a human edits the ticket.
     #[serde(default)]
     pub ticket_fail_attempts: std::collections::BTreeMap<String, u32>,
+    /// Stale-PR sweep memory: PR number → rescue attempts already spent, so
+    /// the policy rescues once and closes on the second pass, never loops.
+    #[serde(default)]
+    pub pr_rescue_attempts: std::collections::BTreeMap<String, u32>,
     /// Per-ticket work journal: what past attempts tried and where they got
     /// stuck, fed into the next attempt's prompt so a retried ticket resumes
     /// from prior findings instead of rediscovering them (bounded per ticket;
@@ -326,6 +330,7 @@ impl Default for ProjectState {
             ticket_evidence: std::collections::BTreeMap::new(),
             drain_notice_sprint: 0,
             ticket_fail_attempts: std::collections::BTreeMap::new(),
+            pr_rescue_attempts: std::collections::BTreeMap::new(),
             ticket_journal: std::collections::BTreeMap::new(),
             ticket_failures: std::collections::BTreeMap::new(),
             questions: Vec::new(),

@@ -201,6 +201,14 @@ pub struct WorkflowConfig {
     /// behaves exactly like the fully autonomous mode.
     #[serde(default)]
     pub human: HumanConfig,
+    /// See [`WorkflowConfig::backlog_cap`]; 0 = default (40).
+    #[serde(default)]
+    pub backlog_cap: usize,
+    /// Days a PR may sit with an unchanged head after request-changes before
+    /// forge hygiene force-rescues it once and then closes it (the ticket is
+    /// linked back so no work is lost). 0 = default (2).
+    #[serde(default)]
+    pub pr_stale_days: u64,
 }
 
 /// Human-in-the-loop configuration (see docs/HYBRID_TEAM.md).
@@ -219,6 +227,29 @@ pub struct HumanConfig {
     /// Minutes a question @mentioning a person may wait before it escalates
     /// to the SM channel and the impediment digest. 0 = never escalate.
     pub question_sla_minutes: u64,
+}
+
+impl WorkflowConfig {
+    /// Pending feature/chore count past which the BA stops proposing —
+    /// backlog inflation drowns the board long before DEV runs dry.
+    #[must_use]
+    pub fn backlog_cap(&self) -> usize {
+        if self.backlog_cap == 0 {
+            40
+        } else {
+            self.backlog_cap
+        }
+    }
+
+    /// See the `pr_stale_days` field; 0 = default (2 days).
+    #[must_use]
+    pub fn pr_stale_days(&self) -> u64 {
+        if self.pr_stale_days == 0 {
+            2
+        } else {
+            self.pr_stale_days
+        }
+    }
 }
 
 fn default_max_open_prs() -> u32 {
@@ -265,6 +296,8 @@ impl Default for WorkflowConfig {
             tdd: true,
             sandbox: false,
             human: HumanConfig::default(),
+            backlog_cap: 0,
+            pr_stale_days: 0,
         }
     }
 }
