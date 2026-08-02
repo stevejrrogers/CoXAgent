@@ -1535,7 +1535,9 @@ textarea.np-in{resize:vertical;line-height:1.5}
   .chatside .railcount:empty{display:none}
   /* Sections stack top-down; only the two lists may scroll, and the rail
      never leaves a hole between DMs and Meetings. */
-  .chatside{display:flex;flex-direction:column;min-height:0}
+  /* NO `display` here: the rail is shown only by `body.mode-chat .chatside`.
+     Forcing display:flex leaked the channel tree into Manage and Space. */
+  .chatside{flex-direction:column;min-height:0}
   /* Lists size to content and scroll only when they must — an empty DM list
      must not stretch and push Meetings to the floor. `flex:0 0 auto` beats
      the generic `.chanlist` rule that made them grow. */
