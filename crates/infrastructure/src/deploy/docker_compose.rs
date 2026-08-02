@@ -392,7 +392,9 @@ impl DeployPort for DockerComposeDeploy {
             .map_err(|e| PortError::Backend(format!("spawn {cmd}: {e}")))?;
         let leader = child.id();
         let Ok(output) =
-            tokio::time::timeout(Duration::from_secs(900), child.wait_with_output()).await
+            // 30 minutes: a cold target dir (fresh agent branch) compiles the
+            // whole workspace before a single test runs — 15 was not enough.
+            tokio::time::timeout(Duration::from_secs(1800), child.wait_with_output()).await
         else {
             // Kill the whole test-runner tree, not just `nice`.
             if let Some(pid) = leader {
