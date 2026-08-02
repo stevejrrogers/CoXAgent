@@ -134,6 +134,26 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         if msg.is_empty() {
             return Ok(());
         }
+        // Bare gate commands are deterministic — "approve COX-F023" needs no
+        // model in the loop. The engine path once answered it with "COX-F023
+        // does not exist" because the PROMPT's bounded backlog block didn't
+        // include the ticket: never let a context cap veto a direct command.
+        {
+            let lower = msg.to_lowercase();
+            for (kw, to) in [
+                ("approve", coxagent_domain::Status::Ready),
+                ("verify", coxagent_domain::Status::Verified),
+            ] {
+                if let Some(rest) = lower.strip_prefix(kw) {
+                    let id = rest.trim_start_matches([':', ' ']).trim();
+                    let orig = msg[msg.len() - id.len()..].trim();
+                    if !id.is_empty() && !id.contains(' ') && id.contains('-') {
+                        self.human_gate_action(orig, to).await;
+                        return Ok(());
+                    }
+                }
+            }
+        }
         let persona = route_persona(&msg.to_lowercase());
         let context = self.context().await;
         let task = format!(
