@@ -513,7 +513,10 @@ impl AppState {
                 .await
                 .into_iter()
                 .map(|u| UserRef {
-                    admin: u.role.as_str() == "admin",
+                    // Super counts as admin here: comparing the string to
+                    // "admin" alone hid every PROJECT channel from the hub
+                    // owner, who is the one person guaranteed to want them.
+                    admin: u.role.can_manage(),
                     username: u.username,
                     projects: u.projects,
                 })
@@ -746,6 +749,10 @@ pub async fn serve_full(
             "/api/chat/channels",
             get(syschat_channels_ep).post(syschat_create_ep),
         )
+        .route(
+            "/api/chat/channels/:cid",
+            axum::routing::delete(syschat_delete_channel_ep),
+        )
         .route("/api/chat/channels/:cid/invite", post(syschat_invite_ep))
         .route(
             "/api/chat/channels/:cid/settings",
@@ -882,6 +889,10 @@ pub async fn serve_full(
         .route("/api/projects/:pid/ticket/:id/ready", post(human_ready_ep))
         .route("/api/projects/:pid/ticket/:id/verify", post(human_verify_ep))
         .route("/api/projects/:pid/ticket/:id/assign", post(assign_ticket_ep))
+        .route(
+            "/api/projects/:pid/ticket/:id/undo-approval",
+            post(undo_approval_ep),
+        )
         .route("/api/projects/:pid/ticket/:id/unpark", post(unpark_ticket))
         .route("/api/projects/:pid/ticket/:id/edit", post(edit_ticket))
         .route(
@@ -943,6 +954,29 @@ pub async fn serve_full(
 }
 
 async fn index() -> impl IntoResponse {
+    // Cache-bust the split assets per build: the desktop WebView happily kept
+    // an older shell.js against a newer index.html across redeploys, which
+    // broke whole views (Code map went blank). The version query makes every
+    // build a fresh URL.
+    static VERSIONED: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        // Keyed on the asset CONTENT, not the crate version: two builds of
+        // the same version ship different CSS, and a stale WebView cache
+        // painted the DM list on top of the channel tree for exactly that
+        // reason. Hash changes ⇒ URL changes ⇒ refetch.
+        let v = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            APP_CSS.hash(&mut h);
+            for (_, body) in APP_JS {
+                body.hash(&mut h);
+            }
+            INDEX_HTML.hash(&mut h);
+            format!("{:x}", h.finish())
+        };
+        INDEX_HTML
+            .replace("/assets/app.css", &format!("/assets/app.css?v={v}"))
+            .replace(".js\"></script>", &format!(".js?v={v}\"></script>"))
+    });
     // Always revalidate so a rebuilt dashboard is picked up on reload (the SPA is
     // small; no-cache avoids stale UI after an upgrade).
     //
@@ -966,7 +1000,7 @@ async fn index() -> impl IntoResponse {
             (header::X_FRAME_OPTIONS, "DENY"),
             (header::REFERRER_POLICY, "strict-origin-when-cross-origin"),
         ],
-        Html(INDEX_HTML),
+        Html(VERSIONED.as_str()),
     )
 }
 

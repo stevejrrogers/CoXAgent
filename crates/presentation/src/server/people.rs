@@ -123,6 +123,28 @@ pub(super) fn role_from(s: Option<&str>) -> coxagent_application::AuthRole {
     coxagent_application::AuthRole::from_str_lenient(s.unwrap_or(""))
 }
 
+/// As [`role_from`], but an UNRECOGNISED non-empty name is an error instead
+/// of silently becoming Viewer — "member" quietly demoting a user to
+/// read-only cost a confused hour in the hybrid role-play test.
+pub(super) fn role_from_strict(
+    s: Option<&str>,
+) -> Result<coxagent_application::AuthRole, String> {
+    use coxagent_application::AuthRole;
+    let raw = s.unwrap_or("").trim();
+    let role = AuthRole::from_str_lenient(raw);
+    if role == AuthRole::Viewer && !raw.is_empty() && !raw.eq_ignore_ascii_case("viewer") {
+        return Err(format!(
+            "unknown role '{raw}' — valid: {}",
+            AuthRole::all()
+                .iter()
+                .map(|r| r.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    Ok(role)
+}
+
 /// Create or update a user account (admin-only via the write gate).
 pub(super) async fn create_user_ep(
     State(app): State<AppState>,
@@ -143,7 +165,10 @@ pub(super) async fn create_user_ep(
         return (StatusCode::BAD_REQUEST, "username and password required").into_response();
     }
     let username = req.username.trim();
-    let role = role_from(req.role.as_deref());
+    let role = match role_from_strict(req.role.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
     if !auth.create_user(username, &req.password, role).await {
         return internal_error("could not create user");
     }

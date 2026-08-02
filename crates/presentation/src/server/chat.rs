@@ -102,6 +102,36 @@ pub(super) async fn chat_post_ep(
         .channel
         .unwrap_or_else(|| coxagent_application::GENERAL_CHANNEL.to_owned());
     if deliver_chat(&app, &p, &user, body, &channel, req.attachments).await {
+        // A human asking the TEAM in a channel deserves an answer there —
+        // until now only the Scrum box had a listener, so channel questions
+        // fell into the void. Trigger on an explicit mention or a question
+        // mark; plain chatter stays human-to-human (no engine burn).
+        let lower = body.to_lowercase();
+        let wants_team = lower.contains("@team")
+            || lower.contains("@cox")
+            || body.contains('?');
+        let from_human = !user.eq_ignore_ascii_case("system");
+        if wants_team && from_human {
+            let msg = body.to_owned();
+            let reply_channel = channel.clone();
+            let p2 = p.clone();
+            let cfg = std::fs::read_to_string(&p2.config_path)
+                .ok()
+                .and_then(|t| serde_json::from_str::<Config>(&t).ok())
+                .unwrap_or_default();
+            tokio::spawn(async move {
+                let uc = coxagent_application::use_cases::RunChatReplyUseCase::new(
+                    Arc::clone(&p2.store),
+                    Arc::clone(&p2.engine),
+                    p2.work_dir.clone(),
+                    cfg.workflow.token_saver,
+                    cfg.workflow.language,
+                )
+                .with_files(p2.files.clone())
+                .with_reply_channel(Some(reply_channel));
+                let _ = uc.execute(&msg).await;
+            });
+        }
         Json(serde_json::json!({ "ok": true })).into_response()
     } else {
         // Either persistence failed or the user isn't a member of the channel.
@@ -1053,4 +1083,38 @@ pub(super) async fn chat_reply_ep(
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => internal_error(&e.to_string()),
     }
+}
+
+/// DELETE `/api/chat/channels/:cid` — archive a channel (owner or admin).
+/// `#general` and `#agents` are permanent: a team needs one room nobody is
+/// shut out of, and the agents room is where the machine reports.
+pub(super) async fn syschat_delete_channel_ep(
+    State(app): State<AppState>,
+    Path(cid): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let user = resolve_username(&app, &headers).await;
+    let admin = user_can_manage(&app, &headers).await;
+    if cid == coxagent_application::state::GENERAL_CHANNEL
+        || cid == coxagent_application::state::AGENTS_CHANNEL
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            "#general and #agents are permanent rooms",
+        )
+            .into_response();
+    }
+    let mut sc = app.syschat.inner.lock().await;
+    let Some(existing) = sc.channels.iter().find(|c| c.id == cid) else {
+        return not_found();
+    };
+    if existing.owner != user && !admin {
+        return (StatusCode::FORBIDDEN, "only the channel owner or an admin").into_response();
+    }
+    // Sub-channels go with their parent: an orphaned child is unreachable in
+    // a tree UI.
+    sc.channels.retain(|c| c.id != cid && c.parent != cid);
+    drop(sc);
+    app.syschat.save().await;
+    Json(serde_json::json!({ "ok": true })).into_response()
 }
