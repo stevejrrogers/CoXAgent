@@ -12,10 +12,13 @@ function inboxBadge(n){
   b.textContent=n;b.style.display=n>0?"":"none";
 }
 
-function inboxCard(inner,actions){
-  return `<div class="card" style="margin-bottom:10px;padding:14px;display:flex;justify-content:space-between;gap:12px;align-items:center">
+function inboxCard(inner,actions,ticket){
+  // The whole card opens the full ticket dialog (description, AC, specs,
+  // comments) — nobody should approve from a title alone.
+  const open=ticket?`onclick="showTicket('${esc(ticket)}')" style="cursor:pointer"`:"";
+  return `<div class="card" ${open} style="margin-bottom:10px;padding:14px;display:flex;justify-content:space-between;gap:12px;align-items:center;cursor:${ticket?'pointer':'default'}">
     <div style="min-width:0">${inner}</div>
-    <div style="display:flex;gap:8px;flex-shrink:0">${actions}</div></div>`;
+    <div style="display:flex;gap:8px;flex-shrink:0" onclick="event.stopPropagation()">${actions}</div></div>`;
 }
 
 async function renderInbox(){
@@ -35,17 +38,18 @@ async function renderInbox(){
     if(it.kind==="approve_ready"){
       html+=inboxCard(
         `<b>${label[it.kind]}</b> · <span class="muted">${esc(it.ticket)}</span><br>${esc(it.title)}`,
-        `<button class="pri" onclick="inboxAct('${esc(it.ticket)}','ready')">Approve</button>
-         <button onclick="inboxAct('${esc(it.ticket)}','reject')">Reject</button>`);
+        `<button onclick="showTicket('${esc(it.ticket)}')">Review</button>
+         <button class="pri" onclick="inboxAct('${esc(it.ticket)}','ready')">Approve</button>
+         <button onclick="inboxAct('${esc(it.ticket)}','reject')">Reject</button>`,it.ticket);
     }else if(it.kind==="verify"){
       html+=inboxCard(
         `<b>${label[it.kind]}</b> · <span class="muted">${esc(it.ticket)}</span><br>${esc(it.title)}`,
-        `<button class="pri" onclick="inboxAct('${esc(it.ticket)}','verify')">Verified</button>
-         <button onclick="openTicket&&openTicket('${esc(it.ticket)}')">Evidence</button>`);
+        `<button onclick="showTicket('${esc(it.ticket)}')">Review evidence</button>
+         <button class="pri" onclick="inboxAct('${esc(it.ticket)}','verify')">Verified</button>`,it.ticket);
     }else if(it.kind==="assigned"){
       html+=inboxCard(
         `<b>${label[it.kind]}</b> · <span class="muted">${esc(it.ticket)} · ${esc(it.status||"")}</span><br>${esc(it.title)}`,
-        `<button onclick="inboxUnassign('${esc(it.ticket)}')">Return to agents</button>`);
+        `<button onclick="inboxUnassign('${esc(it.ticket)}')">Return to agents</button>`,it.ticket);
     }else if(it.kind==="question"){
       const ageMin=it.asked_at?Math.max(0,Math.round((Date.now()-new Date(it.asked_at))/60000)):null;
       const age=ageMin==null?"":(ageMin<60?` · waiting ${ageMin}m`:` · waiting ${Math.round(ageMin/60)}h`);
