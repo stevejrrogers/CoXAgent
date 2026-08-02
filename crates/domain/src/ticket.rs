@@ -130,6 +130,12 @@ pub struct Ticket {
     /// a fresh claim from one orphaned by a crashed worker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     claimed_at: Option<String>,
+    /// A HUMAN this ticket is routed to (username), or `None` for the agent
+    /// pool. Human-assigned tickets are invisible to the DEV agents' candidate
+    /// selection — the person owns it end to end; they hand it back by
+    /// clearing the assignment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    assignee: Option<String>,
 }
 
 impl Ticket {
@@ -170,6 +176,7 @@ impl Ticket {
             acceptance_criteria: Vec::new(),
             claimed_by: None,
             claimed_at: None,
+            assignee: None,
         })
     }
 
@@ -246,6 +253,18 @@ impl Ticket {
     #[must_use]
     pub fn claimed_by(&self) -> Option<&str> {
         self.claimed_by.as_deref()
+    }
+
+    /// The human this ticket is routed to, or `None` for the agent pool.
+    #[must_use]
+    pub fn assignee(&self) -> Option<&str> {
+        self.assignee.as_deref()
+    }
+
+    /// Route this ticket to a human (empty clears back to the agent pool).
+    pub fn assign_to_human(&mut self, username: &str) {
+        let u = username.trim();
+        self.assignee = if u.is_empty() { None } else { Some(u.to_owned()) };
     }
 
     /// RFC3339 time the current claim was taken, or `None` when unclaimed.

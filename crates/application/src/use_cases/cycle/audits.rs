@@ -114,3 +114,112 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
     }
 }
+
+impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
+    /// The adaptive gate: let routine designed tickets through with an undo
+    /// window, ask about the rest, and learn which is which from what humans
+    /// decided (docs/ADAPTIVE_APPROVAL.md).
+    pub(super) async fn adaptive_approval_pass(&self) {
+        let cfg = &self.config.workflow.human;
+        if !cfg.gate_ready || !cfg.adaptive.enabled {
+            return;
+        }
+        let cap = cfg.adaptive.max_auto_per_cycle();
+        let learn_after = cfg.adaptive.learn_after_samples();
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+            use crate::use_cases::approval_memory::{announce, rule_for, Rule};
+            use crate::use_cases::approval_risk::{assess, shape_key, Lane};
+            use coxagent_domain::Status;
+
+            // Prior art per shape: what already reached a good terminal state.
+            let mut shipped: std::collections::BTreeMap<String, usize> =
+                std::collections::BTreeMap::new();
+            for t in &s.tickets {
+                if matches!(
+                    t.status(),
+                    Status::Done | Status::Documented | Status::Verified
+                ) {
+                    *shipped.entry(shape_key(t)).or_insert(0) += 1;
+                }
+            }
+            let samples = s.approval_samples.clone();
+            let asked_again = s.ask_again_shapes.clone();
+            let parked: std::collections::BTreeSet<String> =
+                s.ticket_fail_attempts.keys().cloned().collect();
+
+            // Candidates: designed, waiting behind the ready gate.
+            let candidates: Vec<coxagent_domain::TicketId> = s
+                .tickets
+                .iter()
+                .filter(|t| t.status() == Status::Pending && t.design().technical.is_some())
+                .map(|t| t.id().clone())
+                .collect();
+
+            let mut announced: Vec<String> = Vec::new();
+            let mut promoted = 0usize;
+            for id in candidates {
+                if promoted >= cap {
+                    break;
+                }
+                let Some(ticket) = s.ticket(&id) else { continue };
+                let shape = shape_key(ticket);
+                if asked_again.contains(&shape) {
+                    continue; // a human overrode this shape: always ask
+                }
+                let verdict = assess(
+                    ticket,
+                    shipped.get(&shape).copied().unwrap_or(0),
+                    parked.contains(&id.to_string()),
+                );
+                let learned = rule_for(&shape, &samples, learn_after);
+                let allow = match (&verdict.lane, &learned) {
+                    // Risk says routine — proceed unless a human reversed one.
+                    (Lane::Auto, Rule::KeepAsking | Rule::AutoApprove { .. }) => {
+                        !matches!(learned, Rule::PreflightFix { .. })
+                    }
+                    // Risk says ask, but this team approves the shape every
+                    // time — trust the humans over the heuristic.
+                    (Lane::Ask, Rule::AutoApprove { .. }) => true,
+                    _ => false,
+                };
+                if !allow {
+                    continue;
+                }
+                let title = ticket.title().to_owned();
+                let Some(t) = s.ticket_mut(&id) else { continue };
+                if t.transition_to(coxagent_domain::Role::System, Status::Ready)
+                    .is_err()
+                {
+                    continue;
+                }
+                s.auto_approved_at
+                    .insert(id.to_string(), crate::state::now_rfc3339());
+                announced.push(format!(
+                    "🤖 {id} auto-approved — {} ({}). {title}. Undo within {} minutes if this \
+                     needed a person.",
+                    verdict.why,
+                    format_args!("risk {}", verdict.score),
+                    cfg_undo_minutes()
+                ));
+                promoted += 1;
+                if let Some(msg) = announce(&shape, &learned) {
+                    if !s.decisions.contains(&msg) {
+                        s.decisions.push(msg.clone());
+                        announced.push(msg);
+                    }
+                }
+            }
+            for msg in announced {
+                s.post_chat_in("SYSTEM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+            }
+            Ok(())
+        })
+        .await;
+    }
+}
+
+/// The undo window in minutes, for the announcement text. Kept as a free
+/// function so the closure above does not have to capture the whole config.
+fn cfg_undo_minutes() -> u64 {
+    30
+}

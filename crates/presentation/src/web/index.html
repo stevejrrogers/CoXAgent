@@ -84,19 +84,19 @@
     <div class="chatside" id="chat-side">
       <!-- Search sits ABOVE the rooms because that is what you reach for first
            in a workspace with more rooms than fit on a screen. -->
-      <div class="chanrail-hd"><span>Channels</span><div class="chanrail-actions"><button class="chanadd" id="btn-newchan" onclick="createChannel()" title="Create channel (leads & admins)"><i class="ti ti-plus"></i></button></div></div>
+      <div class="chanrail-hd" onclick="toggleRailSection('chan')"><i class="ti ti-chevron-down railchev" id="chev-chan"></i><span>Channels</span><span class="railcount" id="count-chan"></span><div class="chanrail-actions"><button class="chanadd" id="btn-newchan" onclick="event.stopPropagation();createChannel()" title="Create channel (leads & admins)"><i class="ti ti-plus"></i></button></div></div>
       <div class="chanlist" id="chan-list"></div>
-      <div class="chanrail-hd" style="margin-top:10px"><span>Direct messages</span></div>
+      <div class="chanrail-hd" onclick="toggleRailSection('dm')"><i class="ti ti-chevron-down railchev" id="chev-dm"></i><span>Direct messages</span><span class="railcount" id="count-dm"></span></div>
       <input id="dm-search" type="hidden" value="">
       <div class="chanlist" id="dm-list"></div>
-      <div class="chanrail-hd" style="margin-top:10px"><span>Meetings</span><div class="chanrail-actions"><button class="chanadd" onclick="openMeetModal()" title="Book a meeting"><i class="ti ti-plus"></i></button></div></div>
-      <div class="meet-cal" id="meet-cal"></div>
-      <div class="meet-daylist" id="meet-daylist"></div>
+      <div class="chanrail-hd" onclick="toggleRailSection('meet')"><i class="ti ti-chevron-down railchev" id="chev-meet"></i><span>Meetings</span><span class="railcount" id="count-meet"></span><div class="chanrail-actions"><button class="chanadd" onclick="event.stopPropagation();openMeetModal()" title="Book a meeting"><i class="ti ti-plus"></i></button></div></div>
+      <div class="meet-upnext" id="meet-upnext"></div>
     </div>
     <nav class="nav" id="ws-nav">
       <a data-v="home" id="nav-home" onclick="nav('home')"><i class="ti ti-home"></i> Home</a>
       <a data-v="overview" class="on" onclick="nav('overview')"><i class="ti ti-layout-dashboard"></i> Overview</a>
       <a data-v="team" onclick="nav('team')"><i class="ti ti-robot"></i> Agents</a>
+      <a data-v="inbox" onclick="nav('inbox')"><i class="ti ti-inbox"></i> Inbox <span id="inbox-badge" style="display:none;margin-left:auto;background:var(--red);color:#fff;border-radius:9px;font-size:10px;font-weight:700;padding:1px 6px;line-height:14px">0</span></a>
       <a data-v="board" onclick="nav('board')"><i class="ti ti-columns"></i> Work</a>
       <a data-v="roadmap" onclick="nav('roadmap')"><i class="ti ti-timeline"></i> Roadmap</a>
       <a data-v="review" onclick="nav('review')"><i class="ti ti-git-pull-request"></i> Review</a>
@@ -218,6 +218,7 @@
         <div class="sec admin-only" style="margin-top:22px">People on this project <span style="font-size:11px;color:var(--dim);font-weight:400">· humans who oversee & collaborate</span></div>
         <div class="acard admin-only" id="team-people"><div class="empty">loading…</div></div>
       </div>
+      <div class="view" id="view-inbox"><div id="inbox-body" style="max-width:820px"></div></div>
       <div class="view" id="view-board">
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
           <div class="seg" id="work-seg">
@@ -436,6 +437,7 @@
               <button class="chaninvite callbtn" id="chat-hooks" onclick="openWebhooks()" title="Incoming webhooks"><i class="ti ti-webhook"></i></button>
               <button class="chaninvite callbtn" id="chat-bell" onclick="toggleChannelMute()" title="Notifications for this channel"><i class="ti ti-bell"></i></button>
               <button class="chaninvite callbtn" onclick="toggleSearch()" title="Search messages"><i class="ti ti-search"></i></button>
+              <button class="chaninvite callbtn" id="chat-settings" onclick="openChannelSettings(getActiveChannel())" title="Channel settings — rename, privacy, members, delete"><i class="ti ti-settings"></i></button>
               <button class="chaninvite callbtn membtn" onclick="openMembers()" title="Members"><i class="ti ti-users"></i><span class="onln" id="chat-online" style="display:none"><span class="onln-dot"></span><span id="chat-online-n">0</span></span></button>
               <button class="chaninvite" id="chat-invite" onclick="inviteToChannel()" style="display:none"><i class="ti ti-user-plus"></i> Invite</button>
             </div>
@@ -774,6 +776,7 @@
 <script src="/assets/js/chat.js"></script>
 <script src="/assets/js/mcp.js"></script>
 <script src="/assets/js/docs.js"></script>
+<script src="/assets/js/inbox.js"></script>
 <script src="/assets/js/shell.js"></script>
 </body>
 </html>

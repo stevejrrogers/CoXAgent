@@ -67,6 +67,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             .await;
             return;
         }
+        let route_to = self.config.workflow.human.route_exceptions_to.clone();
         let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
             let n = {
                 let c = s.ticket_fail_attempts.entry(key.clone()).or_insert(0);
@@ -95,6 +96,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                     ),
                     Some(key.clone()),
                 );
+                // Exception routing: parked work is by definition the hardest
+                // problem on the board — hand it to the configured person, so
+                // it lands in their inbox instead of rotting in a comment.
+                if let Some(owner) = &route_to {
+                    if let Some(t) = s.ticket_mut(id) {
+                        t.assign_to_human(owner);
+                    }
+                    s.post_comment(
+                        "SYSTEM",
+                        &format!("🧑‍💻 {id} routed to @{owner} (workflow.human.route_exceptions_to)."),
+                        Some(key.clone()),
+                    );
+                }
             }
             Ok(())
         })

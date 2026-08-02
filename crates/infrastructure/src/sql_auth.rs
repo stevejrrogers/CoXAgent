@@ -559,13 +559,35 @@ impl AuthPort for SqlAuthService {
     }
 
     async fn user_for(&self, token: &str) -> Option<AuthUser> {
-        let mut sessions = self.sessions.lock().ok()?;
-        let session = sessions.get(token)?;
-        if session.expires <= Instant::now() {
-            sessions.remove(token);
-            return None;
-        }
-        Some(session.user.clone())
+        let username = {
+            let mut sessions = self.sessions.lock().ok()?;
+            let session = sessions.get(token)?;
+            if session.expires <= Instant::now() {
+                sessions.remove(token);
+                return None;
+            }
+            session.user.username.clone()
+        };
+        // Resolve the account FRESH per request (same fix as the file store):
+        // the session snapshot made role promotions and membership grants
+        // invisible until the person logged out and back in.
+        let client = self.client().await.ok()?;
+        let row = client
+            .query_opt(
+                "SELECT name, email, role FROM auth_users WHERE username = $1",
+                &[&username],
+            )
+            .await
+            .ok()
+            .flatten()?;
+        let projects = self.load_user_projects(&username).await;
+        Some(AuthUser {
+            username,
+            name: row.get::<_, String>(0),
+            email: row.get::<_, String>(1),
+            role: role_from(&row.get::<_, String>(2)),
+            projects,
+        })
     }
 
     async fn logout(&self, token: &str) {

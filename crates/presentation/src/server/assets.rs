@@ -516,7 +516,11 @@ pub(super) async fn update_user_ep(
     let Some(auth) = app.auth.clone() else {
         return (StatusCode::NOT_IMPLEMENTED, "auth not configured").into_response();
     };
-    let role = req.role.as_deref().map(|s| role_from(Some(s)));
+    let role = match req.role.as_deref().map(|s| role_from_strict(Some(s))) {
+        Some(Ok(r)) => Some(r),
+        Some(Err(e)) => return (StatusCode::BAD_REQUEST, e).into_response(),
+        None => None,
+    };
     if auth
         .update_user(&username, req.name.trim(), req.email.trim(), role)
         .await

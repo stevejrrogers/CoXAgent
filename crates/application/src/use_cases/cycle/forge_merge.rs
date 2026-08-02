@@ -21,6 +21,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             return;
         };
         let target = self.flow_base().to_owned();
+        self.sweep_stale_prs().await;
         // 1. Rebase open PRs onto the moving base.
         if let Ok(prs) = forge.list_open_prs().await {
             let mut rebased: Vec<u64> = Vec::new();
@@ -633,5 +634,77 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             }
         }
         Err("GitHub still reports the branch conflicted after the fix".to_owned())
+    }
+
+    /// Stale-PR policy: a PR that got request-changes, then sat for
+    /// `workflow.pr_stale_days` with an UNCHANGED head, gets one forced
+    /// rescue attempt; if the head still does not move by the next sweep it
+    /// is closed with a comment pointing back at the ticket — an abandoned
+    /// branch must not squat the queue (five did, for a day).
+    pub(super) async fn sweep_stale_prs(&self) {
+        let Some(forge) = &self.forge else { return };
+        let Ok(prs) = forge.list_open_prs().await else {
+            return;
+        };
+        let Ok(state) = self.store.load().await else {
+            return;
+        };
+        let stale_secs = self.config.workflow.pr_stale_days() * 86_400;
+        for pr in prs {
+            let Some(review) = state
+                .reviews
+                .iter()
+                .find(|r| r.number == pr.number && r.decision == "request_changes")
+            else {
+                continue;
+            };
+            let age = super::seconds_since(&review.at).unwrap_or(0);
+            if age < stale_secs || review.head_sha.is_empty() {
+                continue;
+            }
+            // Head moved since the verdict? Not stale — the dedup gate will
+            // re-review it.
+            let cur = self.pr_head_sha(&pr.head).await;
+            if cur != review.head_sha {
+                continue;
+            }
+            // Never touch work a human is deliberately sitting on.
+            if let Ok(diff) = forge.pr_diff(pr.number).await {
+                if crate::use_cases::merge_policy::needs_human_eyes(&diff).is_some() {
+                    continue;
+                }
+            }
+            let rescued = state
+                .pr_rescue_attempts
+                .get(&pr.number.to_string())
+                .copied()
+                .unwrap_or(0);
+            if rescued == 0 {
+                self.log_git(&format!(
+                    "stale sweep: PR #{} idle {}d — forcing one rescue",
+                    pr.number,
+                    age / 86_400
+                ))
+                .await;
+                self.sa_rescue_pr(&pr).await;
+                let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                    s.pr_rescue_attempts.insert(pr.number.to_string(), 1);
+                    Ok(())
+                })
+                .await;
+            } else {
+                let note = format!(
+                    "Closing: no new commits for {}d after request-changes and one rescue \
+                     attempt. The work is NOT lost — reopen from the ticket ({}) with a fresh \
+                     branch off current main.",
+                    age / 86_400,
+                    pr.title
+                );
+                let _ = forge.comment_pr(pr.number, &note).await;
+                let _ = forge.close_pr(pr.number).await;
+                self.log_git(&format!("stale sweep: closed idle PR #{}", pr.number))
+                    .await;
+            }
+        }
     }
 }

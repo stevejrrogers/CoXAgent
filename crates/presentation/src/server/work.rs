@@ -335,6 +335,8 @@ pub(super) async fn edit_ticket(
 pub(super) async fn reject_ticket(
     State(app): State<AppState>,
     Path((pid, id)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+    body: Option<Json<RejectReq>>,
 ) -> axum::response::Response {
     let Some(p) = app.project(&pid).await else {
         return not_found();
@@ -345,6 +347,28 @@ pub(super) async fn reject_ticket(
     let Ok(mut state) = p.store.load().await else {
         return internal_error("load failed");
     };
+    // A rejection REASON is the most valuable thing a human types: it becomes
+    // a pre-flight check so the same shape never reaches an inbox again
+    // (docs/ADAPTIVE_APPROVAL.md).
+    let reason = body.map(|Json(r)| r.reason).unwrap_or_default();
+    let me = principal_name(&app, &headers)
+        .await
+        .unwrap_or_else(|| "operator".to_owned());
+    if let Some(t) = state.tickets.iter().find(|t| t.id() == &tid) {
+        let shape = coxagent_application::use_cases::approval_risk::shape_key(t);
+        state.approval_samples.push(
+            coxagent_application::use_cases::approval_memory::ApprovalSample {
+                shape,
+                decision: "reject".to_owned(),
+                by: me.clone(),
+                reason: reason.trim().to_owned(),
+                at: coxagent_application::state::now_rfc3339(),
+            },
+        );
+    }
+    if !reason.trim().is_empty() {
+        state.post_comment("USER", &format!("🚫 Rejected: {}", reason.trim()), Some(id.clone()));
+    }
     let Some(ticket) = state.ticket_mut(&tid) else {
         return (axum::http::StatusCode::NOT_FOUND, "no such ticket").into_response();
     };
@@ -652,4 +676,11 @@ pub(super) async fn set_sprint_goal_ep(
         Ok(()) => Json(serde_json::json!({ "ok": true, "goal": goal })).into_response(),
         Err(e) => internal_error(&e.to_string()),
     }
+}
+
+/// Optional body for a rejection: the reason, which teaches the gate.
+#[derive(serde::Deserialize, Default)]
+pub(super) struct RejectReq {
+    #[serde(default)]
+    pub(super) reason: String,
 }

@@ -198,7 +198,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 // fall through — nothing changed since the last green run
             } else {
                 match tokio::time::timeout(
-                    std::time::Duration::from_secs(300),
+                    // 15 minutes, not 5: the workspace suite crossed 300s
+                    // after the July refactor and the old cap made the boot
+                    // check time out forever — DEV never reached a ticket
+                    // again (dev_feature was dead for a week before anyone
+                    // noticed the summary's quiet "(1 errors)").
+                    std::time::Duration::from_secs(1800),
                     deploy.run_tests(&self.work_dir),
                 )
                 .await
@@ -221,7 +226,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                         return Ok(None);
                     }
                     Err(_timeout) => {
-                        tracing::warn!("DEV boot check: cargo test timed out after 5 min");
+                        tracing::warn!("DEV boot check: cargo test timed out after 30 min");
                         return Ok(None);
                     }
                 }
@@ -871,7 +876,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
 
             // Verify: is the codebase green now?
             match tokio::time::timeout(
-                std::time::Duration::from_secs(300),
+                std::time::Duration::from_secs(1800),
                 deploy.run_tests(&self.work_dir),
             )
             .await

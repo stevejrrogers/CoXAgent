@@ -23,7 +23,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             state
                 .questions
                 .iter()
-                .filter(|q| q.is_open())
+                // Questions addressed to a PERSON (`@username`) are theirs —
+                // they sit in that user's inbox with an SLA, not in the agent
+                // answering queue.
+                .filter(|q| q.is_open() && !q.to.starts_with('@'))
                 .take(2)
                 .cloned()
                 .collect()
@@ -374,6 +377,43 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             };
             s.post_comment("SM", &msg, Some(id.clone()));
             s.post_chat_in("SM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+            Ok(())
+        })
+        .await;
+    }
+
+    /// Escalate questions a person has sat on past the configured SLA: post
+    /// to the agents channel and mark the question so it escalates once. A
+    /// gate must never become the place tickets go to die.
+    pub(super) async fn escalate_stale_human_questions(&self) {
+        let sla_min = self.config.workflow.human.question_sla_minutes;
+        if sla_min == 0 {
+            return;
+        }
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+            let mut escalations: Vec<String> = Vec::new();
+            for q in &mut s.questions {
+                if !(q.is_open() && q.to.starts_with('@')) || q.escalated {
+                    continue;
+                }
+                let age_min = super::seconds_since(&q.asked_at)
+                    .map_or(0, |secs| secs / 60);
+                if age_min >= sla_min {
+                    q.escalated = true;
+                    escalations.push(format!(
+                        "⏰ {} has waited {age_min}m for {} (SLA {sla_min}m) — ticket {} is \
+                         blocked on it: \"{}\"",
+                        q.id,
+                        q.to,
+                        if q.ticket.is_empty() { "-" } else { &q.ticket },
+                        q.body.chars().take(160).collect::<String>()
+                    ));
+                }
+            }
+            for msg in escalations {
+                s.post_chat_in("SM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+                s.log_activity("SM", "escalated an overdue human question", None);
+            }
             Ok(())
         })
         .await;
