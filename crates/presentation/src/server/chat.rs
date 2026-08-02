@@ -102,6 +102,36 @@ pub(super) async fn chat_post_ep(
         .channel
         .unwrap_or_else(|| coxagent_application::GENERAL_CHANNEL.to_owned());
     if deliver_chat(&app, &p, &user, body, &channel, req.attachments).await {
+        // A human asking the TEAM in a channel deserves an answer there —
+        // until now only the Scrum box had a listener, so channel questions
+        // fell into the void. Trigger on an explicit mention or a question
+        // mark; plain chatter stays human-to-human (no engine burn).
+        let lower = body.to_lowercase();
+        let wants_team = lower.contains("@team")
+            || lower.contains("@cox")
+            || body.contains('?');
+        let from_human = !user.eq_ignore_ascii_case("system");
+        if wants_team && from_human {
+            let msg = body.to_owned();
+            let reply_channel = channel.clone();
+            let p2 = p.clone();
+            let cfg = std::fs::read_to_string(&p2.config_path)
+                .ok()
+                .and_then(|t| serde_json::from_str::<Config>(&t).ok())
+                .unwrap_or_default();
+            tokio::spawn(async move {
+                let uc = coxagent_application::use_cases::RunChatReplyUseCase::new(
+                    Arc::clone(&p2.store),
+                    Arc::clone(&p2.engine),
+                    p2.work_dir.clone(),
+                    cfg.workflow.token_saver,
+                    cfg.workflow.language,
+                )
+                .with_files(p2.files.clone())
+                .with_reply_channel(Some(reply_channel));
+                let _ = uc.execute(&msg).await;
+            });
+        }
         Json(serde_json::json!({ "ok": true })).into_response()
     } else {
         // Either persistence failed or the user isn't a member of the channel.

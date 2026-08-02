@@ -37,6 +37,8 @@ pub struct RunChatReplyUseCase<S: StateStorePort + ?Sized, E: AgentEnginePort + 
     /// Callback: import an existing codebase. Returns a human-readable status message.
     import_project_fn: Option<ImportProjectFn>,
     files: Option<Arc<dyn crate::ports::outbound::WorkspaceFilesPort>>,
+    /// Channel the reply posts into; `None` keeps the Scrum/discuss thread.
+    reply_channel: Option<String>,
 }
 
 /// Common docker-compose filenames we treat as "already has a deploy setup".
@@ -68,7 +70,16 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             new_project_fn: None,
             import_project_fn: None,
             files: None,
+            reply_channel: None,
         }
+    }
+
+    /// Reply into a chat CHANNEL instead of the Scrum thread — the answer
+    /// belongs where the question was asked.
+    #[must_use]
+    pub fn with_reply_channel(mut self, channel: Option<String>) -> Self {
+        self.reply_channel = channel;
+        self
     }
 
     /// Attach the files port so chat-triggered reviews can scan the workspace.
@@ -1129,7 +1140,10 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
 
     async fn post(&self, author: &str, body: &str) {
         if let Ok(mut state) = self.store.load().await {
-            state.post_comment(author, body, None);
+            match &self.reply_channel {
+                Some(ch) => state.post_chat_in(author, body, ch, Vec::new()),
+                None => state.post_comment(author, body, None),
+            }
             let _ = self.store.save(&state).await;
         }
     }
