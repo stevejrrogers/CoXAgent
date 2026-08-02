@@ -477,7 +477,9 @@
   .chatside{display:none;flex:1;min-height:0;flex-direction:column;overflow:hidden;margin-top:4px}
   .chatside .chanrail-hd{padding:6px 4px 8px}
   .chatside .chanlist{overflow-y:auto;padding:2px 0}
-  .chatside #chan-list{flex:0 1 auto;max-height:38vh}
+  /* Superseded below: an id-scoped max-height capped the channel list while
+     `overflow:visible` kept painting it, so the DM section rendered on top.
+     The rail scrolls as one surface instead. */
   .chatside #dm-list{flex:1 1 auto;min-height:70px}
   .dmsearch{display:flex;align-items:center;gap:6px;margin:2px 0 6px;padding:6px 9px;background:var(--card2);border:1px solid var(--border2);border-radius:8px;color:var(--muted);font-size:12px}
   .dmsearch input{flex:1;min-width:0;background:transparent;border:none;color:var(--text);font-family:inherit;font-size:12.5px;outline:none}
@@ -1545,7 +1547,9 @@ textarea.np-in{resize:vertical;line-height:1.5}
      of the channels. Size to content, always. */
   .chatside{overflow-y:auto;overflow-x:hidden}
   .chatside .chanlist,
-  .chatside #dm-list{flex:none!important;height:auto;min-height:0;max-height:none;overflow:visible}
+  .chatside #chan-list,
+  .chatside #dm-list{flex:none!important;height:auto!important;min-height:0!important;
+    max-height:none!important;overflow:visible!important}
   /* Sub-channels: indented, quieter, with a hairline that ties them to the
      project above. */
   .chatside .chanitem.subchan{position:relative}

@@ -39,6 +39,16 @@ function applyRailFold(){
 }
 function railCount(id,n){const el=document.getElementById(id);if(el)el.textContent=n||"";}
 
+// Pins are a personal ordering, kept on this device — a shared "pin" would
+// be one person rearranging everyone's rail.
+function railPins(){try{return new Set(JSON.parse(localStorage.getItem("coxpins")||"[]"));}catch(e){return new Set();}}
+function togglePin_(id){
+  const p=railPins();
+  if(p.has(id))p.delete(id);else p.add(id);
+  localStorage.setItem("coxpins",JSON.stringify([...p]));
+  renderChannels();renderDMList();
+}
+
 function renderChannels(){
   const box=document.getElementById("chan-list");if(!box)return;
   // DMs live in their own section; everything else renders as a TREE so a
@@ -61,12 +71,16 @@ function renderChannels(){
         style="padding-left:${pad}px" aria-label="Channel ${label}${u?', '+u+' unread':''}"
         onkeydown="rowKey(event)" onclick="selectChannel('${esc(c.id)}')">
       ${depth?'<span class="subline"></span>':''}<i class="ti ti-${icon}"></i><span class="channm">${label}</span>${u?`<span class="chanbadge">${u>99?'99+':u}</span>`:''}
+      <button class="chansub" title="${pin.has(c.id)?'Unpin':'Pin to top'}" onclick="event.stopPropagation();togglePin_('${esc(c.id)}')"><i class="ti ti-pin${pin.has(c.id)?'-filled':''}"></i></button>
       <button class="chansub" title="New sub-channel here" onclick="event.stopPropagation();createChannel('${esc(c.id)}')"><i class="ti ti-plus"></i></button>
       <button class="chancog" title="Channel settings" onclick="event.stopPropagation();openChannelSettings('${esc(c.id)}')"><i class="ti ti-settings"></i></button></div>`
       + children.map(k=>row(k,depth+1)).join("");
   };
-  // Projects first (they carry the work), then plain rooms.
-  const order=[...roots.filter(c=>c.kind==="project"),...roots.filter(c=>c.kind!=="project")];
+  // Order: #general (the room everyone shares), then anything the user
+  // pinned, then project rooms (where the work is), then the rest.
+  const pin=railPins();
+  const rank=c=>c.id==="general"?0:(pin.has(c.id)?1:(c.kind==="project"?2:3));
+  const order=[...roots].sort((a,b)=>rank(a)-rank(b));
   box.innerHTML=order.map(c=>row(c,0)).join("");
   railCount("count-chan",all.length);
   applyRailFold();
@@ -519,7 +533,10 @@ function renderDMList(){
   // Unread first, then online, then recency of the DM, then name.
   const dmUnread=u=>{const ch=(CHANNELS||[]).find(c=>c.kind==="dm"&&(c.members||[]).includes(u.username));return ch?(UNREAD[ch.id]||0):0;};
   const dmLast=u=>{const ch=(CHANNELS||[]).find(c=>c.kind==="dm"&&(c.members||[]).includes(u.username));return ch&&ch.last_at?Date.parse(ch.last_at)||0:0;};
-  users.sort((a,b)=>(dmUnread(b)>0)-(dmUnread(a)>0)
+  const pinned=railPins();
+  const dmChanId=u=>{const ch=(CHANNELS||[]).find(c=>c.kind==="dm"&&(c.members||[]).includes(u.username));return ch?ch.id:"dm:"+u.username;};
+  users.sort((a,b)=>(pinned.has(dmChanId(b))-pinned.has(dmChanId(a)))
+    ||(dmUnread(b)>0)-(dmUnread(a)>0)
     ||(online.has(b.username)-online.has(a.username))
     ||(dmLast(b)-dmLast(a))
     ||(a.name||a.username).localeCompare(b.name||b.username));
@@ -538,7 +555,8 @@ function renderDMList(){
     const dupName=shown.filter(x=>(x.name||x.username).toLowerCase()===(u.name||u.username).toLowerCase()).length>1;
     const sub=dupName?`<span style="font-size:10.5px;color:var(--dim);margin-left:4px">@${esc(u.username)}</span>`:"";
     return `<div class="chanitem dmitem${active?' on':''}${un?' unread':''}" role="button" tabindex="0" aria-label="Direct message ${esc(u.name||u.username)}${un?', '+un+' unread':''}" onkeydown="rowKey(event)" onclick="openDM('${esc(u.username)}')" title="@${esc(u.username)}${p.status_text?' · '+esc(p.status_text):''}">
-      ${av}<span class="channm">${esc(u.name||u.username)}</span>${sub}${statusChip(u.username)}${un?`<span class="chanbadge">${un>99?'99+':un}</span>`:''}</div>`;
+      ${av}<span class="channm">${esc(u.name||u.username)}</span>${sub}${statusChip(u.username)}${un?`<span class="chanbadge">${un>99?'99+':un}</span>`:''}
+      <button class="chansub" title="${pinned.has(dmChanId(u))?'Unpin':'Pin to top'}" onclick="event.stopPropagation();togglePin_('${esc(dmChanId(u))}')"><i class="ti ti-pin${pinned.has(dmChanId(u))?'-filled':''}"></i></button></div>`;
   }).join("")+(hidden>0?`<div class="chanitem" role="button" tabindex="0" style="color:var(--dim);font-size:12px" onclick="openChatSearch()">+${hidden} more — search people</div>`:""):'<div class="dm-empty">No teammates yet</div>';
   railCount("count-dm",users.length);
   applyRailFold();
