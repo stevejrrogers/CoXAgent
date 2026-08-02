@@ -1537,8 +1537,19 @@ textarea.np-in{resize:vertical;line-height:1.5}
   /* Lists size to content and scroll only when they must — an empty DM list
      must not stretch and push Meetings to the floor. `flex:0 0 auto` beats
      the generic `.chanlist` rule that made them grow. */
+  /* ONE scroll for the whole rail: two independent scroll boxes meant the
+     channel list and the DM list each hid content behind their own bar. */
+  .chatside{overflow-y:auto;overflow-x:hidden}
   .chatside .chanlist,
-  .chatside #dm-list{flex:0 0 auto;min-height:0;max-height:34vh;overflow-y:auto}
+  .chatside #dm-list{flex:0 0 auto;min-height:0;max-height:none;overflow:visible}
+  /* Sub-channels: indented, quieter, with a hairline that ties them to the
+     project above. */
+  .chatside .chanitem.subchan{position:relative}
+  .chatside .chanitem.subchan .channm{color:var(--muted);font-size:12.5px}
+  .chatside .chanitem.subchan.on .channm,
+  .chatside .chanitem.subchan.unread .channm{color:var(--text)}
+  .chatside .subline{position:absolute;left:14px;top:0;bottom:0;width:1px;background:var(--border)}
+  .chatside .chanitem i.ti-folder{color:var(--accent2);opacity:.9}
   /* Everything sits at the top; the leftover space belongs to nobody. */
   .chatside::after{content:"";flex:1 1 auto}
   .chatside .chanrail-actions{margin-left:auto;opacity:0;transition:opacity .12s}

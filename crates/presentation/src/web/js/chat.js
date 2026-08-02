@@ -41,17 +41,34 @@ function railCount(id,n){const el=document.getElementById(id);if(el)el.textConte
 
 function renderChannels(){
   const box=document.getElementById("chan-list");if(!box)return;
-  // DMs live in the DIRECT MESSAGES section below — never in the channel list.
-  box.innerHTML=CHANNELS.filter(c=>(c.kind||"")!=="dm").map(c=>{
+  // DMs live in their own section; everything else renders as a TREE so a
+  // project's rooms read as belonging to it instead of four look-alike rows
+  // called "agents" and "approvals".
+  const all=CHANNELS.filter(c=>(c.kind||"")!=="dm");
+  const parentOf=c=>c.parent||"";
+  const kids=id=>all.filter(c=>parentOf(c)===id);
+  const roots=all.filter(c=>!parentOf(c));
+  const row=(c,depth)=>{
     const kind=c.kind||(c.id==="general"?"general":"private");
     const u=UNREAD[c.id]||0;
-    const icon=kind==="private"?"lock":"hash";
-    const sub=(c.parent||"")?' sub':'';
-    return `<div class="chanitem${c.id===CURCHAN?' on':''}${u?' unread':''}${sub}" role="button" tabindex="0" aria-label="Channel ${esc(chanDisplay(c))}${u?', '+u+' unread':''}" onkeydown="rowKey(event)" onclick="selectChannel('${esc(c.id)}')">
-      <i class="ti ti-${icon}"></i><span class="channm">${esc(chanDisplay(c))}</span>${u?`<span class="chanbadge">${u>99?'99+':u}</span>`:''}
+    // A sub-channel is a ROOM, not a folder — only the project root gets the
+    // folder glyph, its children read as ordinary channels.
+    const icon=kind==="private"?"lock":(kind==="project"&&!depth?"folder":"hash");
+    const pad=8+depth*14;
+    const children=kids(c.id);
+    const label=depth?esc(c.name||c.id):esc(chanDisplay(c));
+    return `<div class="chanitem${c.id===CURCHAN?' on':''}${u?' unread':''}${depth?' subchan':''}" role="button" tabindex="0"
+        style="padding-left:${pad}px" aria-label="Channel ${label}${u?', '+u+' unread':''}"
+        onkeydown="rowKey(event)" onclick="selectChannel('${esc(c.id)}')">
+      ${depth?'<span class="subline"></span>':''}<i class="ti ti-${icon}"></i><span class="channm">${label}</span>${u?`<span class="chanbadge">${u>99?'99+':u}</span>`:''}
       <button class="chansub" title="New sub-channel here" onclick="event.stopPropagation();createChannel('${esc(c.id)}')"><i class="ti ti-plus"></i></button>
-      <button class="chancog" title="Channel settings" onclick="event.stopPropagation();openChannelSettings('${esc(c.id)}')"><i class="ti ti-settings"></i></button></div>`;}).join("");
-  railCount("count-chan",CHANNELS.filter(c=>(c.kind||"")!=="dm").length);
+      <button class="chancog" title="Channel settings" onclick="event.stopPropagation();openChannelSettings('${esc(c.id)}')"><i class="ti ti-settings"></i></button></div>`
+      + children.map(k=>row(k,depth+1)).join("");
+  };
+  // Projects first (they carry the work), then plain rooms.
+  const order=[...roots.filter(c=>c.kind==="project"),...roots.filter(c=>c.kind!=="project")];
+  box.innerHTML=order.map(c=>row(c,0)).join("");
+  railCount("count-chan",all.length);
   applyRailFold();
   updateChannelBell();
 }
