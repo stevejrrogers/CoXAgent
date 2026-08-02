@@ -1577,3 +1577,17 @@ textarea.np-in{resize:vertical;line-height:1.5}
     box-shadow:0 0 0 3px color-mix(in srgb,var(--red) 22%,transparent)}
   .meet-up .mu-join{margin-left:auto;font-size:11px;font-weight:700;color:var(--accent2);flex-shrink:0}
   .meet-empty{padding:6px 8px;font-size:12px;color:var(--dim)}
+
+  /* Row actions FLOAT over the row instead of reserving width: three hidden
+     buttons were still stealing ~70px, so "privacy-probe2" rendered as
+     "privacy-pr…" beside an empty gutter. They fade in on hover, over a
+     short gradient so the name slides under them cleanly. */
+  .chatside .chanitem{position:relative;padding-right:10px}
+  .chatside .chanitem .chansub,
+  .chatside .chanitem .chancog{position:absolute;top:50%;transform:translateY(-50%);margin:0;z-index:2}
+  .chatside .chanitem .chancog{right:6px}
+  .chatside .chanitem .chansub{right:30px}
+  .chatside .chanitem .chansub + .chansub{right:54px}
+  .chatside .chanitem:hover::after{content:"";position:absolute;right:0;top:0;bottom:0;width:86px;
+    background:linear-gradient(90deg,transparent,var(--card2) 42%);pointer-events:none;border-radius:8px;z-index:1}
+  .chatside .chanitem .channm{max-width:100%}

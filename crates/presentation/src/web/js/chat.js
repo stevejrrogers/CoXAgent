@@ -71,8 +71,8 @@ function renderChannels(){
         style="padding-left:${pad}px" aria-label="Channel ${label}${u?', '+u+' unread':''}"
         onkeydown="rowKey(event)" onclick="selectChannel('${esc(c.id)}')">
       ${depth?'<span class="subline"></span>':''}<i class="ti ti-${icon}"></i><span class="channm">${label}</span>${u?`<span class="chanbadge">${u>99?'99+':u}</span>`:''}
-      <button class="chansub" title="${pin.has(c.id)?'Unpin':'Pin to top'}" onclick="event.stopPropagation();togglePin_('${esc(c.id)}')"><i class="ti ti-pin${pin.has(c.id)?'-filled':''}"></i></button>
       <button class="chansub" title="New sub-channel here" onclick="event.stopPropagation();createChannel('${esc(c.id)}')"><i class="ti ti-plus"></i></button>
+      <button class="chansub" title="${pin.has(c.id)?'Unpin':'Pin to top'}" onclick="event.stopPropagation();togglePin_('${esc(c.id)}')"><i class="ti ti-pin${pin.has(c.id)?'-filled':''}"></i></button>
       <button class="chancog" title="Channel settings" onclick="event.stopPropagation();openChannelSettings('${esc(c.id)}')"><i class="ti ti-settings"></i></button></div>`
       + children.map(k=>row(k,depth+1)).join("");
   };
