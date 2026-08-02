@@ -1538,10 +1538,14 @@ textarea.np-in{resize:vertical;line-height:1.5}
      must not stretch and push Meetings to the floor. `flex:0 0 auto` beats
      the generic `.chanlist` rule that made them grow. */
   /* ONE scroll for the whole rail: two independent scroll boxes meant the
-     channel list and the DM list each hid content behind their own bar. */
+     channel list and the DM list each hid content behind their own bar.
+     `flex:none` is load-bearing — the base `.chanlist` rule sets
+     `flex:1 1 0%`, which collapses the list to zero height while
+     `overflow:visible` keeps painting it, so the DM section rendered ON TOP
+     of the channels. Size to content, always. */
   .chatside{overflow-y:auto;overflow-x:hidden}
   .chatside .chanlist,
-  .chatside #dm-list{flex:0 0 auto;min-height:0;max-height:none;overflow:visible}
+  .chatside #dm-list{flex:none!important;height:auto;min-height:0;max-height:none;overflow:visible}
   /* Sub-channels: indented, quieter, with a hairline that ties them to the
      project above. */
   .chatside .chanitem.subchan{position:relative}
@@ -1551,7 +1555,7 @@ textarea.np-in{resize:vertical;line-height:1.5}
   .chatside .subline{position:absolute;left:14px;top:0;bottom:0;width:1px;background:var(--border)}
   .chatside .chanitem i.ti-folder{color:var(--accent2);opacity:.9}
   /* Everything sits at the top; the leftover space belongs to nobody. */
-  .chatside::after{content:"";flex:1 1 auto}
+  .chatside::after{content:"";flex:1 0 auto;min-height:8px}
   .chatside .chanrail-actions{margin-left:auto;opacity:0;transition:opacity .12s}
   .chatside .chanrail-hd:hover .chanrail-actions{opacity:1}
   .chatside .chanitem{border-radius:8px;padding:5px 8px}
