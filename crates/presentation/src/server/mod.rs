@@ -513,7 +513,10 @@ impl AppState {
                 .await
                 .into_iter()
                 .map(|u| UserRef {
-                    admin: u.role.as_str() == "admin",
+                    // Super counts as admin here: comparing the string to
+                    // "admin" alone hid every PROJECT channel from the hub
+                    // owner, who is the one person guaranteed to want them.
+                    admin: u.role.can_manage(),
                     username: u.username,
                     projects: u.projects,
                 })
