@@ -959,7 +959,20 @@ async fn index() -> impl IntoResponse {
     // broke whole views (Code map went blank). The version query makes every
     // build a fresh URL.
     static VERSIONED: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-        let v = env!("CARGO_PKG_VERSION");
+        // Keyed on the asset CONTENT, not the crate version: two builds of
+        // the same version ship different CSS, and a stale WebView cache
+        // painted the DM list on top of the channel tree for exactly that
+        // reason. Hash changes ⇒ URL changes ⇒ refetch.
+        let v = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            APP_CSS.hash(&mut h);
+            for (_, body) in APP_JS {
+                body.hash(&mut h);
+            }
+            INDEX_HTML.hash(&mut h);
+            format!("{:x}", h.finish())
+        };
         INDEX_HTML
             .replace("/assets/app.css", &format!("/assets/app.css?v={v}"))
             .replace(".js\"></script>", &format!(".js?v={v}\"></script>"))
