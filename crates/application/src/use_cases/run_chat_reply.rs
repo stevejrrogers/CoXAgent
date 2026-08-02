@@ -1141,6 +1141,15 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
     async fn post(&self, author: &str, body: &str) {
         if let Ok(mut state) = self.store.load().await {
             match &self.reply_channel {
+                // A channel is a conversation, not a report. Short answers
+                // stay in-channel; a deep investigation goes to Scrum where
+                // that content lives, with a two-line pointer in the channel.
+                Some(ch) if body.chars().count() > 500 => {
+                    state.post_comment(author, body, None);
+                    let head: String = body.chars().take(180).collect();
+                    let ptr = format!("{head}… — chi tiết đầy đủ bên tab Scrum 📋");
+                    state.post_chat_in(author, &ptr, ch, Vec::new());
+                }
                 Some(ch) => state.post_chat_in(author, body, ch, Vec::new()),
                 None => state.post_comment(author, body, None),
             }

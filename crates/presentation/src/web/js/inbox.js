@@ -12,14 +12,28 @@ function inboxBadge(n){
   b.textContent=n;b.style.display=n>0?"":"none";
 }
 
-function inboxCard(inner,actions,ticket){
-  // The whole card opens the full ticket dialog (description, AC, specs,
-  // comments) — nobody should approve from a title alone.
-  const open=ticket?`onclick="showTicket('${esc(ticket)}')" style="cursor:pointer"`:"";
-  return `<div class="card" ${open} style="margin-bottom:10px;padding:14px;display:flex;justify-content:space-between;gap:12px;align-items:center;cursor:${ticket?'pointer':'default'}">
-    <div style="min-width:0">${inner}</div>
+const INBOX_KIND={
+  approve_ready:{label:"Approve to Ready",ic:"ti-checks",col:"var(--accent2)"},
+  verify:{label:"Verify fix",ic:"ti-shield-check",col:"var(--green)"},
+  assigned:{label:"Assigned to you",ic:"ti-user",col:"var(--purple)"},
+  question:{label:"Question for you",ic:"ti-help-circle",col:"var(--amber)"},
+  review_pr:{label:"PR held for human",ic:"ti-git-pull-request",col:"var(--teal)"},
+};
+
+function inboxCard(kind,meta,title,actions,ticket){
+  const k=INBOX_KIND[kind]||{label:kind,ic:"ti-inbox",col:"var(--muted)"};
+  const open=ticket?`onclick="showTicket('${esc(ticket)}')"`:"";
+  return `<div class="panel" ${open} style="margin-bottom:12px;display:flex;gap:14px;align-items:center;${ticket?'cursor:pointer;':''}transition:border-color .15s" onmouseover="this.style.borderColor='${k.col}'" onmouseout="this.style.borderColor='var(--border)'">
+    <div style="width:38px;height:38px;border-radius:10px;background:color-mix(in srgb,${k.col} 14%,transparent);display:flex;align-items:center;justify-content:center;flex-shrink:0">
+      <i class="ti ${k.ic}" style="font-size:18px;color:${k.col}"></i></div>
+    <div style="min-width:0;flex:1">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <span style="font-size:11px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:${k.col}">${k.label}</span>
+        <span style="font-size:11.5px;color:var(--dim)">${meta}</span></div>
+      <div style="font-size:13.5px;font-weight:600;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${title}</div></div>
     <div style="display:flex;gap:8px;flex-shrink:0" onclick="event.stopPropagation()">${actions}</div></div>`;
 }
+const ibtn=(label,fn,pri)=>`<button class="tk-btn${pri?' go':''}" style="padding:7px 14px;font-size:12px" onclick="${fn}">${label}</button>`;
 
 async function renderInbox(){
   const el=document.getElementById("inbox-body");if(!el)return;
@@ -32,35 +46,29 @@ async function renderInbox(){
     return;
   }
   items.sort((a,b)=>(b.escalated?1:0)-(a.escalated?1:0));
-  const label={approve_ready:"⏳ Approve to Ready",verify:"🧪 Verify fix",assigned:"🧑‍💻 Assigned to you",question:"❓ Question for you",review_pr:"👀 PR held for human"};
   let html="";
   for(const it of items){
     if(it.kind==="approve_ready"){
-      html+=inboxCard(
-        `<b>${label[it.kind]}</b> · <span class="muted">${esc(it.ticket)}</span><br>${esc(it.title)}`,
-        `<button onclick="showTicket('${esc(it.ticket)}')">Review</button>
-         <button class="pri" onclick="inboxAct('${esc(it.ticket)}','ready')">Approve</button>
-         <button onclick="inboxAct('${esc(it.ticket)}','reject')">Reject</button>`,it.ticket);
+      html+=inboxCard("approve_ready",esc(it.ticket)+(it.priority?" · "+esc(it.priority):""),esc(it.title),
+        ibtn("Review",`showTicket('${esc(it.ticket)}')`)+
+        ibtn("Approve",`inboxAct('${esc(it.ticket)}','ready')`,1)+
+        ibtn("Reject",`inboxAct('${esc(it.ticket)}','reject')`),it.ticket);
     }else if(it.kind==="verify"){
-      html+=inboxCard(
-        `<b>${label[it.kind]}</b> · <span class="muted">${esc(it.ticket)}</span><br>${esc(it.title)}`,
-        `<button onclick="showTicket('${esc(it.ticket)}')">Review evidence</button>
-         <button class="pri" onclick="inboxAct('${esc(it.ticket)}','verify')">Verified</button>`,it.ticket);
+      html+=inboxCard("verify",esc(it.ticket),esc(it.title),
+        ibtn("Evidence",`showTicket('${esc(it.ticket)}')`)+
+        ibtn("Verified",`inboxAct('${esc(it.ticket)}','verify')`,1),it.ticket);
     }else if(it.kind==="assigned"){
-      html+=inboxCard(
-        `<b>${label[it.kind]}</b> · <span class="muted">${esc(it.ticket)} · ${esc(it.status||"")}</span><br>${esc(it.title)}`,
-        `<button onclick="inboxUnassign('${esc(it.ticket)}')">Return to agents</button>`,it.ticket);
+      html+=inboxCard("assigned",esc(it.ticket)+" · "+esc(it.status||""),esc(it.title),
+        ibtn("Return to agents",`inboxUnassign('${esc(it.ticket)}')`),it.ticket);
     }else if(it.kind==="question"){
       const ageMin=it.asked_at?Math.max(0,Math.round((Date.now()-new Date(it.asked_at))/60000)):null;
       const age=ageMin==null?"":(ageMin<60?` · waiting ${ageMin}m`:` · waiting ${Math.round(ageMin/60)}h`);
-      const late=it.escalated?` <span style="color:var(--red);font-weight:700">· past SLA</span>`:"";
-      html+=inboxCard(
-        `<b>${label[it.kind]}</b> · <span class="muted">${esc(it.from)}${it.ticket?" · "+esc(it.ticket):""}${age}</span>${late}<br>${esc(it.body)}`,
-        `<button class="pri" onclick="nav('discuss')">Answer in Scrum</button>`);
+      const late=it.escalated?` <span style="color:var(--red);font-weight:700">past SLA</span>`:"";
+      html+=inboxCard("question",esc(it.from)+(it.ticket?" · "+esc(it.ticket):"")+age+late,esc(it.body),
+        ibtn("Answer in Scrum",`nav('discuss')`,1));
     }else if(it.kind==="review_pr"){
-      html+=inboxCard(
-        `<b>${label[it.kind]}</b> · <span class="muted">#${it.number}</span><br>${esc(it.title)}`,
-        `<button class="pri" onclick="nav('review')">Open review</button>`);
+      html+=inboxCard("review_pr","#"+it.number,esc(it.title),
+        ibtn("Open review",`nav('review')`,1));
     }
   }
   el.innerHTML=html;
