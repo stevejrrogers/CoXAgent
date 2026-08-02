@@ -1084,3 +1084,37 @@ pub(super) async fn chat_reply_ep(
         Err(e) => internal_error(&e.to_string()),
     }
 }
+
+/// DELETE `/api/chat/channels/:cid` — archive a channel (owner or admin).
+/// `#general` and `#agents` are permanent: a team needs one room nobody is
+/// shut out of, and the agents room is where the machine reports.
+pub(super) async fn syschat_delete_channel_ep(
+    State(app): State<AppState>,
+    Path(cid): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let user = resolve_username(&app, &headers).await;
+    let admin = user_can_manage(&app, &headers).await;
+    if cid == coxagent_application::state::GENERAL_CHANNEL
+        || cid == coxagent_application::state::AGENTS_CHANNEL
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            "#general and #agents are permanent rooms",
+        )
+            .into_response();
+    }
+    let mut sc = app.syschat.inner.lock().await;
+    let Some(existing) = sc.channels.iter().find(|c| c.id == cid) else {
+        return not_found();
+    };
+    if existing.owner != user && !admin {
+        return (StatusCode::FORBIDDEN, "only the channel owner or an admin").into_response();
+    }
+    // Sub-channels go with their parent: an orphaned child is unreachable in
+    // a tree UI.
+    sc.channels.retain(|c| c.id != cid && c.parent != cid);
+    drop(sc);
+    app.syschat.save().await;
+    Json(serde_json::json!({ "ok": true })).into_response()
+}

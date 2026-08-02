@@ -84,14 +84,13 @@
     <div class="chatside" id="chat-side">
       <!-- Search sits ABOVE the rooms because that is what you reach for first
            in a workspace with more rooms than fit on a screen. -->
-      <div class="chanrail-hd"><span>Channels</span><div class="chanrail-actions"><button class="chanadd" id="btn-newchan" onclick="createChannel()" title="Create channel (leads & admins)"><i class="ti ti-plus"></i></button></div></div>
+      <div class="chanrail-hd" onclick="toggleRailSection('chan')"><i class="ti ti-chevron-down railchev" id="chev-chan"></i><span>Channels</span><span class="railcount" id="count-chan"></span><div class="chanrail-actions"><button class="chanadd" id="btn-newchan" onclick="event.stopPropagation();createChannel()" title="Create channel (leads & admins)"><i class="ti ti-plus"></i></button></div></div>
       <div class="chanlist" id="chan-list"></div>
-      <div class="chanrail-hd" style="margin-top:10px"><span>Direct messages</span></div>
+      <div class="chanrail-hd" onclick="toggleRailSection('dm')"><i class="ti ti-chevron-down railchev" id="chev-dm"></i><span>Direct messages</span><span class="railcount" id="count-dm"></span></div>
       <input id="dm-search" type="hidden" value="">
       <div class="chanlist" id="dm-list"></div>
-      <div class="chanrail-hd" style="margin-top:10px"><span>Meetings</span><div class="chanrail-actions"><button class="chanadd" onclick="openMeetModal()" title="Book a meeting"><i class="ti ti-plus"></i></button></div></div>
-      <div class="meet-cal" id="meet-cal"></div>
-      <div class="meet-daylist" id="meet-daylist"></div>
+      <div class="chanrail-hd" onclick="toggleRailSection('meet')"><i class="ti ti-chevron-down railchev" id="chev-meet"></i><span>Meetings</span><span class="railcount" id="count-meet"></span><div class="chanrail-actions"><button class="chanadd" onclick="event.stopPropagation();openMeetModal()" title="Book a meeting"><i class="ti ti-plus"></i></button></div></div>
+      <div class="meet-upnext" id="meet-upnext"></div>
     </div>
     <nav class="nav" id="ws-nav">
       <a data-v="home" id="nav-home" onclick="nav('home')"><i class="ti ti-home"></i> Home</a>

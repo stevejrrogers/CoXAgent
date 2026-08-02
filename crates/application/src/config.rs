@@ -227,6 +227,50 @@ pub struct HumanConfig {
     /// Minutes a question @mentioning a person may wait before it escalates
     /// to the SM channel and the impediment digest. 0 = never escalate.
     pub question_sla_minutes: u64,
+    /// Adaptive approval: routine work proceeds with an undo window instead of
+    /// waiting for a rubber stamp (docs/ADAPTIVE_APPROVAL.md).
+    pub adaptive: AdaptiveConfig,
+}
+
+/// See docs/ADAPTIVE_APPROVAL.md. Off by default: a project starts with the
+/// fixed gates and opts into the moving one.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AdaptiveConfig {
+    pub enabled: bool,
+    /// Minutes an auto-approved ticket can be pulled back. 0 = no auto lane.
+    pub undo_window_minutes: u64,
+    /// Consistent human decisions before a shape changes lane. 0 = default 8.
+    pub learn_after_samples: usize,
+    /// Blast-radius cap: auto-approvals per cycle. 0 = default 3.
+    pub max_auto_per_cycle: usize,
+}
+
+impl AdaptiveConfig {
+    #[must_use]
+    pub fn undo_window_minutes(&self) -> u64 {
+        if self.undo_window_minutes == 0 {
+            30
+        } else {
+            self.undo_window_minutes
+        }
+    }
+    #[must_use]
+    pub fn learn_after_samples(&self) -> usize {
+        if self.learn_after_samples == 0 {
+            8
+        } else {
+            self.learn_after_samples
+        }
+    }
+    #[must_use]
+    pub fn max_auto_per_cycle(&self) -> usize {
+        if self.max_auto_per_cycle == 0 {
+            3
+        } else {
+            self.max_auto_per_cycle
+        }
+    }
 }
 
 impl WorkflowConfig {

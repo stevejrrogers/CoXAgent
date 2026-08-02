@@ -18,6 +18,7 @@ const INBOX_KIND={
   assigned:{label:"Assigned to you",ic:"ti-user",col:"var(--purple)"},
   question:{label:"Question for you",ic:"ti-help-circle",col:"var(--amber)"},
   review_pr:{label:"PR held for human",ic:"ti-git-pull-request",col:"var(--teal)"},
+  auto_approved:{label:"Auto-approved",ic:"ti-robot",col:"var(--dim)"},
 };
 
 function inboxCard(kind,meta,title,actions,ticket){
@@ -66,6 +67,10 @@ async function renderInbox(){
       const late=it.escalated?` <span style="color:var(--red);font-weight:700">past SLA</span>`:"";
       html+=inboxCard("question",esc(it.from)+(it.ticket?" · "+esc(it.ticket):"")+age+late,esc(it.body),
         ibtn("Answer in Scrum",`nav('discuss')`,1));
+    }else if(it.kind==="auto_approved"){
+      html+=inboxCard("auto_approved",esc(it.ticket)+" · undo for "+it.minutes_left+"m",esc(it.title),
+        ibtn("Review",`showTicket('${esc(it.ticket)}')`)+
+        ibtn("Undo",`inboxUndo('${esc(it.ticket)}')`),it.ticket);
     }else if(it.kind==="review_pr"){
       html+=inboxCard("review_pr","#"+it.number,esc(it.title),
         ibtn("Open review",`nav('review')`,1));
@@ -75,12 +80,24 @@ async function renderInbox(){
 }
 
 async function inboxAct(id,action){
+  if(action==="reject"){
+    const reason=await coxModal({title:"Reject "+id,message:"Lý do? (agents học từ đây — cùng lý do 2 lần là nó tự sửa trước khi hỏi lại)",input:{placeholder:"vd: thiếu acceptance criteria"},confirmText:"Reject"});
+    if(reason===null||reason===undefined)return;
+    try{await fetch(api("/ticket/"+encodeURIComponent(id)+"/reject"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({reason:String(reason||"")})});}catch(e){}
+    renderInbox();return;
+  }
   try{
     const r=await fetch(api("/ticket/"+encodeURIComponent(id)+"/"+action),{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
     if(!r.ok){coxToast&&coxToast(await r.text());}
   }catch(e){}
   renderInbox();
 }
+
+async function inboxUndo(id){
+  try{const r=await fetch(api("/ticket/"+encodeURIComponent(id)+"/undo-approval"),{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
+    if(!r.ok)toasty(await r.text(),"err");else toasty(id+" pulled back — that shape asks again","ok");
+  }catch(e){}
+  renderInbox();}
 
 async function inboxUnassign(id){
   try{await fetch(api("/ticket/"+encodeURIComponent(id)+"/assign"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:""})});}catch(e){}

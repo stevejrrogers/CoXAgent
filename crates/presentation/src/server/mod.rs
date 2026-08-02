@@ -746,6 +746,10 @@ pub async fn serve_full(
             "/api/chat/channels",
             get(syschat_channels_ep).post(syschat_create_ep),
         )
+        .route(
+            "/api/chat/channels/:cid",
+            axum::routing::delete(syschat_delete_channel_ep),
+        )
         .route("/api/chat/channels/:cid/invite", post(syschat_invite_ep))
         .route(
             "/api/chat/channels/:cid/settings",
@@ -882,6 +886,10 @@ pub async fn serve_full(
         .route("/api/projects/:pid/ticket/:id/ready", post(human_ready_ep))
         .route("/api/projects/:pid/ticket/:id/verify", post(human_verify_ep))
         .route("/api/projects/:pid/ticket/:id/assign", post(assign_ticket_ep))
+        .route(
+            "/api/projects/:pid/ticket/:id/undo-approval",
+            post(undo_approval_ep),
+        )
         .route("/api/projects/:pid/ticket/:id/unpark", post(unpark_ticket))
         .route("/api/projects/:pid/ticket/:id/edit", post(edit_ticket))
         .route(

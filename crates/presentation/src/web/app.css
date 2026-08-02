@@ -1517,3 +1517,44 @@ textarea.np-in{resize:vertical;line-height:1.5}
 .np-sel{position:relative}
 .np-sel select{appearance:none;-webkit-appearance:none;padding-right:32px;cursor:pointer}
 .np-sel::after{content:"";position:absolute;right:13px;top:50%;width:7px;height:7px;border-right:1.5px solid var(--muted);border-bottom:1.5px solid var(--muted);transform:translateY(-70%) rotate(45deg);pointer-events:none}
+
+  /* ── Chat rail: sections that fold, counts that inform, rows that breathe ──
+     The month calendar used to eat half the rail for a grid of dead squares;
+     meetings now show only what is next. */
+  .chatside .chanrail-hd{display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;
+    font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--dim);
+    padding:8px 6px 6px;border-radius:8px}
+  .chatside .chanrail-hd:hover{color:var(--muted);background:var(--card2)}
+  .chatside .railchev{font-size:13px;transition:transform .15s;flex-shrink:0}
+  .chatside .chanrail-hd.folded .railchev{transform:rotate(-90deg)}
+  .chatside .railcount{font-size:10.5px;font-weight:600;color:var(--dim);background:var(--card2);
+    border-radius:6px;padding:1px 6px;letter-spacing:0}
+  /* An empty count is a stray pill that reads as a dash — hide it. */
+  .chatside .railcount:empty{display:none}
+  /* Sections stack top-down; only the two lists may scroll, and the rail
+     never leaves a hole between DMs and Meetings. */
+  .chatside{display:flex;flex-direction:column;min-height:0}
+  /* Lists size to content and scroll only when they must — an empty DM list
+     must not stretch and push Meetings to the floor. `flex:0 0 auto` beats
+     the generic `.chanlist` rule that made them grow. */
+  .chatside .chanlist,
+  .chatside #dm-list{flex:0 0 auto;min-height:0;max-height:34vh;overflow-y:auto}
+  /* Everything sits at the top; the leftover space belongs to nobody. */
+  .chatside::after{content:"";flex:1 1 auto}
+  .chatside .chanrail-actions{margin-left:auto;opacity:0;transition:opacity .12s}
+  .chatside .chanrail-hd:hover .chanrail-actions{opacity:1}
+  .chatside .chanitem{border-radius:8px;padding:5px 8px}
+  .chatside .chanitem.unread .channm{font-weight:700;color:var(--text)}
+  .chatside .chanitem.on{position:relative}
+  .chatside .chanitem.on::before{content:"";position:absolute;left:-2px;top:6px;bottom:6px;width:3px;
+    border-radius:2px;background:var(--accent2)}
+  .chatside .chanitem i.ti-lock{opacity:.45}
+  .meet-upnext{display:flex;flex-direction:column;gap:4px;padding:2px 2px 8px}
+  .meet-up{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px;cursor:pointer;font-size:12.5px}
+  .meet-up:hover{background:var(--card2)}
+  .meet-up .mu-time{font-variant-numeric:tabular-nums;color:var(--muted);font-size:11.5px;flex-shrink:0}
+  .meet-up .mu-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .meet-up .mu-live{width:7px;height:7px;border-radius:50%;background:var(--red);flex-shrink:0;
+    box-shadow:0 0 0 3px color-mix(in srgb,var(--red) 22%,transparent)}
+  .meet-up .mu-join{margin-left:auto;font-size:11px;font-weight:700;color:var(--accent2);flex-shrink:0}
+  .meet-empty{padding:6px 8px;font-size:12px;color:var(--dim)}
