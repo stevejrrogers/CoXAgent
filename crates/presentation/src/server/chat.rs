@@ -1102,9 +1102,10 @@ pub(super) async fn chat_reply_ep(
     if msg.is_empty() {
         return Json(serde_json::json!({ "ok": true })).into_response();
     }
-    let cfg = std::fs::read_to_string(&p.config_path)
-        .ok()
-        .and_then(|t| serde_json::from_str::<Config>(&t).ok())
+    let raw_cfg = std::fs::read_to_string(&p.config_path).ok();
+    let cfg = raw_cfg
+        .as_deref()
+        .and_then(|t| serde_json::from_str::<Config>(t).ok())
         .unwrap_or_default();
     let mut uc = coxagent_application::use_cases::RunChatReplyUseCase::new(
         Arc::clone(&p.store),
@@ -1115,9 +1116,12 @@ pub(super) async fn chat_reply_ep(
     )
     .with_files(p.files.clone());
     if let Some(d) = &p.deploy {
+        let host_port_probe = raw_cfg.as_deref().map_or(Ok(None), |t| {
+            coxagent_application::ports::outbound::parse_deploy_host_port(t)
+        });
         uc = uc
             .with_deploy(Arc::clone(d))
-            .with_host_port(cfg.deploy.host_port);
+            .with_host_port_probe(host_port_probe);
     }
     if let Some(f) = &p.forge {
         let target = if cfg.git.target_branch.trim().is_empty() {
