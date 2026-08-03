@@ -83,6 +83,23 @@ impl AuthRole {
         matches!(self, Self::Super | Self::Admin) || self.is_lead()
     }
 
+    /// Whether this role may release a designed ticket into the queue — the
+    /// hybrid Pending→Ready gate. That decision is backlog refinement: the
+    /// product/analysis call, so Admin, the lead tier, and the BA. A developer
+    /// approving their own team's next ticket is not a gate, it is a formality.
+    #[must_use]
+    pub fn can_approve_ready(self) -> bool {
+        matches!(self, Self::Super | Self::Admin | Self::Ba) || self.is_lead()
+    }
+
+    /// Whether this role may render the QA verdict on a fixed ticket — the
+    /// hybrid verify gate. Admin, the lead tier, and the legacy Reviewer, whose
+    /// entire purpose is passing judgement on finished work.
+    #[must_use]
+    pub fn can_verify(self) -> bool {
+        matches!(self, Self::Super | Self::Admin | Self::Reviewer) || self.is_lead()
+    }
+
     /// Hub-wide super admin (cross-space power).
     #[must_use]
     pub fn is_super(self) -> bool {
@@ -202,6 +219,28 @@ mod role_tests {
         assert!(!AuthRole::De.can_create_channel());
         // Legacy Viewer is read-only.
         assert!(!AuthRole::Viewer.can_write());
+    }
+
+    #[test]
+    fn the_gate_decisions_are_not_open_to_everyone() {
+        // Ready gate: product/analysis call.
+        assert!(AuthRole::Ba.can_approve_ready());
+        assert!(AuthRole::Manager.can_approve_ready());
+        assert!(AuthRole::Admin.can_approve_ready());
+        assert!(!AuthRole::Fe.can_approve_ready(), "a dev is not the PO");
+        assert!(!AuthRole::Viewer.can_approve_ready());
+
+        // Verify gate: the QA verdict.
+        assert!(AuthRole::TechLead.can_verify());
+        assert!(AuthRole::Reviewer.can_verify(), "judging finished work IS its job");
+        assert!(!AuthRole::Ba.can_verify(), "writing the ticket is not signing it off");
+        assert!(!AuthRole::Viewer.can_verify());
+
+        // A read-only account may take no gate decision at all.
+        for allowed in [AuthRole::can_approve_ready, AuthRole::can_verify] {
+            assert!(!allowed(AuthRole::Viewer));
+            assert!(allowed(AuthRole::Super), "the hub owner is never locked out");
+        }
     }
 
     #[test]

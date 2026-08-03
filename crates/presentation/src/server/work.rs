@@ -351,9 +351,21 @@ pub(super) async fn reject_ticket(
     // a pre-flight check so the same shape never reaches an inbox again
     // (docs/ADAPTIVE_APPROVAL.md).
     let reason = body.map(|Json(r)| r.reason).unwrap_or_default();
-    let me = principal_name(&app, &headers)
-        .await
-        .unwrap_or_else(|| "operator".to_owned());
+    // Rejecting is the same gate decision as approving, taken the other way —
+    // and it teaches the learner, so it needs the same qualification.
+    let Some(me) = super::inbox::gate_principal(
+        &app,
+        &headers,
+        coxagent_application::AuthRole::can_approve_ready,
+    )
+    .await
+    else {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            "your role may not take this decision",
+        )
+            .into_response();
+    };
     if let Some(t) = state.tickets.iter().find(|t| t.id() == &tid) {
         let shape = coxagent_application::use_cases::approval_risk::shape_key(t);
         state.approval_samples.push(

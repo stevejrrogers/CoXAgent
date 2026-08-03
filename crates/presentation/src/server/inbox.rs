@@ -7,6 +7,22 @@
 
 use super::*;
 
+/// Whether the signed-in caller may take a gate decision, and who they are.
+///
+/// `None` means refuse. On a hub with no accounts configured every request IS
+/// the operator — the gate cannot mean anything there, so it stands aside.
+pub(super) async fn gate_principal(
+    app: &AppState,
+    headers: &axum::http::HeaderMap,
+    allowed: fn(coxagent_application::AuthRole) -> bool,
+) -> Option<String> {
+    let Some(auth) = app.auth.clone() else {
+        return Some("operator".to_owned());
+    };
+    let user = resolve_principal(&auth, headers).await?;
+    allowed(user.role).then_some(user.username)
+}
+
 /// GET `/api/projects/:pid/inbox` — the caller's "waiting for me" queue.
 pub(super) async fn inbox_ep(
     State(app): State<AppState>,
@@ -115,7 +131,15 @@ pub(super) async fn human_ready_ep(
     Path((pid, id)): Path<(String, String)>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
-    human_transition(&app, &pid, &id, &headers, coxagent_domain::Status::Ready).await
+    human_transition(
+        &app,
+        &pid,
+        &id,
+        &headers,
+        coxagent_domain::Status::Ready,
+        coxagent_application::AuthRole::can_approve_ready,
+    )
+    .await
 }
 
 /// POST `/api/projects/:pid/ticket/:id/verify` — a person renders the QA
@@ -125,7 +149,15 @@ pub(super) async fn human_verify_ep(
     Path((pid, id)): Path<(String, String)>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
-    human_transition(&app, &pid, &id, &headers, coxagent_domain::Status::Verified).await
+    human_transition(
+        &app,
+        &pid,
+        &id,
+        &headers,
+        coxagent_domain::Status::Verified,
+        coxagent_application::AuthRole::can_verify,
+    )
+    .await
 }
 
 async fn human_transition(
@@ -134,13 +166,21 @@ async fn human_transition(
     id: &str,
     headers: &axum::http::HeaderMap,
     to: coxagent_domain::Status,
+    allowed: fn(coxagent_application::AuthRole) -> bool,
 ) -> axum::response::Response {
     let Some(p) = app.project(pid).await else {
         return not_found();
     };
-    let me = principal_name(app, headers)
-        .await
-        .unwrap_or_else(|| "operator".to_owned());
+    // The gate exists to put a QUALIFIED person in front of the decision. Any
+    // signed-in account could take it before — including a Viewer, whose whole
+    // definition is read-only.
+    let Some(me) = gate_principal(app, headers, allowed).await else {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            "your role may not take this decision",
+        )
+            .into_response();
+    };
     let Ok(mut state) = p.store.load().await else {
         return internal_error("load failed");
     };
@@ -225,9 +265,21 @@ pub(super) async fn undo_approval_ep(
     let Some(p) = app.project(&pid).await else {
         return not_found();
     };
-    let me = principal_name(&app, &headers)
-        .await
-        .unwrap_or_else(|| "operator".to_owned());
+    // Undo reverses an approval and retires the learned rule behind it — the
+    // same weight as approving, so the same qualification.
+    let Some(me) = gate_principal(
+        &app,
+        &headers,
+        coxagent_application::AuthRole::can_approve_ready,
+    )
+    .await
+    else {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            "your role may not take this decision",
+        )
+            .into_response();
+    };
     let Ok(mut state) = p.store.load().await else {
         return internal_error("load failed");
     };

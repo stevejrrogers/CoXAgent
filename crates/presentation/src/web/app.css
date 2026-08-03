@@ -1017,6 +1017,15 @@
     transition:border-color .15s,color .15s,background .15s}
   .act:hover .sp-scope{border-color:var(--accent2);color:var(--accent2)}
   .sp-scope:hover{background:var(--accentbg);border-color:var(--accent2);color:var(--accent2)}
+  /* Inbox actions: one column, right-aligned, with the primary button always
+     last and always the same width. Mixed 2- and 3-button cards used to put
+     the single cyan block at a different x on every row, so a scrolled list
+     flickered left-right. Same x, same size, every card. */
+  .ibx-acts{display:flex;gap:8px;flex-shrink:0;align-items:center;justify-content:flex-end}
+  .ibx-btn{padding:7px 14px;font-size:12px;white-space:nowrap}
+  .ibx-pri{min-width:104px;text-align:center}
+  .ibx-noright{min-width:104px;text-align:center;font-size:11px;color:var(--dim);
+    border:1px dashed var(--border2);border-radius:8px;padding:6px 12px}
   .sprintpct{text-align:right;flex:none}
   .sprintpct .v{font-size:26px;font-weight:800;color:var(--accent2);line-height:1}
   .sprintpct .k{font-size:10.5px;color:var(--dim);margin-top:2px}
