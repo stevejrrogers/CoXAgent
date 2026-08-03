@@ -77,6 +77,43 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 // a NEW branch + PR, which is how a queue explodes.
                 continue;
             }
+            // The ticket this PR names is already finished — by another PR, by
+            // a human, by anything. Three such PRs held WIP slots here for a
+            // week, blocking new dev work, for bugs that were verified days
+            // earlier. Nobody had ever asked the board whether the work was
+            // still wanted.
+            if let Some(tid) = crate::use_cases::merge_policy::ticket_id_in(&pr.title) {
+                let settled = self.store.load().await.ok().and_then(|s| {
+                    s.tickets
+                        .iter()
+                        .find(|t| t.id().as_str() == tid)
+                        .map(coxagent_domain::Ticket::status)
+                });
+                if matches!(
+                    settled,
+                    Some(
+                        coxagent_domain::Status::Verified
+                            | coxagent_domain::Status::Done
+                            | coxagent_domain::Status::Documented
+                            | coxagent_domain::Status::Rejected
+                    )
+                ) {
+                    let note = format!(
+                        "Closing: {tid} is already {:?} — this branch is superseded. Nothing is \
+                         lost; the branch stays in git if any of it is ever wanted.",
+                        settled.unwrap_or(coxagent_domain::Status::Done)
+                    );
+                    let _ = forge.comment_pr(pr.number, &note).await;
+                    if forge.close_pr(pr.number).await.is_ok() {
+                        self.log_git(&format!(
+                            "review: closed PR #{} — {tid} already settled",
+                            pr.number
+                        ))
+                        .await;
+                    }
+                    continue;
+                }
+            }
             // Scratch in the diff is wrong the moment it exists — there is no
             // staleness to wait out and no review round that fixes it. #28 was
             // ENTIRELY worktrees and state backups, claiming to fix a health

@@ -17,7 +17,8 @@ pub fn competing_pr(number: u64, title: &str, open: &[(u64, String)]) -> Option<
 }
 
 /// The ticket id a PR title refers to, e.g. `COX-B015`.
-fn ticket_id_in(title: &str) -> Option<String> {
+#[must_use]
+pub fn ticket_id_in(title: &str) -> Option<String> {
     let bytes = title.as_bytes();
     let start = title.find(|c: char| c.is_ascii_uppercase())?;
     for i in start..bytes.len() {
