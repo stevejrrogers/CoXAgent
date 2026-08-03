@@ -13,6 +13,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     var window: NSWindow!
     var web: WKWebView!
     var hub: Process?
+    /// Set while the app is shutting down, so the hub's termination handler
+    /// does not helpfully restart the very process we just asked to stop.
+    var quitting = false
     // In remote mode, the local operator processes this machine contributes to
     // the shared team (one per locally-provisioned project). They idle until the
     // user Starts them from the web, and are torn down when the app quits.
@@ -357,6 +360,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             p.standardOutput = fh
             p.standardError = fh
         }
+        // The hub is the app's whole reason to exist: if it dies — crash, or an
+        // upgrade replacing the binary underneath — bring it back and reload the
+        // window onto it. Without this, a dead hub left the window pointing at
+        // nothing and only quitting the app could recover.
+        p.terminationHandler = { [weak self] _ in
+            DispatchQueue.main.async {
+                guard let self, !self.quitting else { return }
+                self.startHub()
+                self.loadWhenReady()
+            }
+        }
         try? p.run()
         hub = p
     }
@@ -418,6 +432,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     func applicationWillTerminate(_ note: Notification) {
+        quitting = true
         hub?.terminate()
         for op in operators { op.terminate() }
     }
