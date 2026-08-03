@@ -204,6 +204,8 @@ function renderSprintPanel(s){
         <div><div class="sprintno">Sprint #${sp.number} <span class="pbadge on" style="margin-left:6px">● active</span></div>
           <div class="sprintgoal">${esc(sp.goal)}</div>${msBadge}</div>
         <div class="sp-ring" style="--p:${pct}"><div class="in"><b>${pct}%</b><span>done</span></div></div>
+        <button class="sp-close" onclick="closeSprintNow()" title="Archive this sprint now and open the next one">
+          <i class="ti ti-flag-check"></i> Close sprint</button>
       </div>
       <div class="sp-stats">
         ${stat(total,"Committed")}
@@ -257,9 +259,37 @@ function renderBacklogPanel(s){
   const rows=items.map(t=>{const col=pc[t.priority]||"var(--muted)";const inSp=committed.has(t.id);
     return `<div class="act" onclick="showTicket('${t.id}')" style="cursor:pointer"><div class="ad" style="background:${col}22;color:${col}"><i class="ti ti-${t.type==='bug'?'bug':'bulb'}" style="font-size:13px"></i></div>
       <div class="atx"><span class="tk">${esc(t.id)}</span> ${esc(t.title)} <span class="fchip" style="padding:1px 8px;font-size:10px;border:none;background:${col}22;color:${col}">${esc(t.priority||'—')}</span>${inSp?' <span class="fchip" style="padding:1px 8px;font-size:10px;border:none;background:var(--accentbg);color:var(--accent2)">in sprint</span>':''}</div>
+      <button class="sp-scope" onclick="event.stopPropagation();sprintScope('${t.id}',${inSp?"false":"true"})" title="${inSp?'Drop from the running sprint':'Pull into the running sprint'}">${inSp?'− sprint':'+ sprint'}</button>
       <span class="tm">${esc(t.status)}</span></div>`;}).join("");
   el.innerHTML=`<div class="filters"><span style="font-size:12px;color:var(--muted)">Prioritised backlog — the PO pulls from the top into each sprint.</span><div style="flex:1"></div><span class="fchip">${items.length} waiting</span></div>
     <div class="panel">${rows||'<div class="empty">backlog is clear — every ticket is in flight or shipped</div>'}</div>`;
+}
+// Pull a backlog ticket into the sprint that is already running, or drop it.
+// The automatic commit only happens at roll-over; this is how a person changes
+// their mind mid-sprint without editing the ticket.
+async function sprintScope(id,add){
+  try{
+    const r=await fetch(api("/sprint/"+(add?"commit":"drop")),
+      {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tickets:[id]})});
+    if(!r.ok){toasty((await r.text())||"Sprint update failed","err");return;}
+    toasty(add?`${id} pulled into the sprint`:`${id} dropped from the sprint`);
+    await refreshDisc();
+  }catch(e){toasty("Network error","err");}
+}
+// Close the running sprint now instead of waiting out its cycle window. The
+// sprint is archived exactly as a timed roll-over archives it.
+async function closeSprintNow(){
+  const ok=await coxModal({title:"Close sprint",
+    message:"Archive the running sprint now and open the next one? Unfinished tickets stay in the backlog and the next sprint commits from the top.",
+    confirmText:"Close sprint"});
+  if(!ok)return;
+  try{
+    const r=await fetch(api("/sprint/close"),{method:"POST"});
+    if(!r.ok){toasty((await r.text())||"Close failed","err");return;}
+    const d=await r.json();
+    toasty(`Sprint closed — #${d.sprint} is now open`);
+    await refreshDisc();
+  }catch(e){toasty("Network error","err");}
 }
 function loadComments(){if(CUR==="discuss")renderDiscuss();}
 // Show the current sprint goal as a read-only chip; set it with /sprint <goal>.

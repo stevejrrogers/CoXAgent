@@ -705,8 +705,15 @@ pub(super) async fn sprint_scope_ep(
         return (StatusCode::BAD_REQUEST, "no valid ticket ids").into_response();
     }
     let mut changed = 0usize;
+    // Ids the board has never heard of: a typo, or a stale page acting on a
+    // ticket that has since gone. Saying "ok" to that hides the mistake.
+    let mut unknown: Vec<String> = Vec::new();
     match coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
         for id in &ids {
+            if s.ticket(id).is_none() {
+                unknown.push(id.to_string());
+                continue;
+            }
             let hit = if adding {
                 coxagent_application::sprint::commit_ticket(s, id)
             } else {
@@ -720,7 +727,13 @@ pub(super) async fn sprint_scope_ep(
     })
     .await
     {
-        Ok(()) => Json(serde_json::json!({ "ok": true, "changed": changed })).into_response(),
+        Ok(()) if changed == 0 && !unknown.is_empty() => (
+            StatusCode::BAD_REQUEST,
+            format!("no such ticket: {}", unknown.join(", ")),
+        )
+            .into_response(),
+        Ok(()) => Json(serde_json::json!({ "ok": true, "changed": changed, "unknown": unknown }))
+            .into_response(),
         Err(e) => internal_error(&e.to_string()),
     }
 }
