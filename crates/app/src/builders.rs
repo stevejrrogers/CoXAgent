@@ -258,10 +258,7 @@ pub(crate) async fn build_project(
     let concurrency = config.workflow.concurrency.max(1);
     // The agent CLIs on THIS machine travel with the handle so every heartbeat
     // reports them. A hub in a container has none of its own and must be told.
-    let handle = Arc::new(RunnerHandle::new().with_capabilities(
-        detected_engines().into_iter().map(|(n, _)| n).collect(),
-        detected_models(),
-    ));
+    let handle = Arc::new(RunnerHandle::new().with_capabilities(local_caps(&config, &work_dir).await));
 
     // Leader runner: singleton phases (BA, PO, standup, etc.)
     {
@@ -466,6 +463,28 @@ pub(crate) async fn build_storage(
 /// no built-in list knows and no container can detect.
 pub(crate) fn detected_models() -> Vec<String> {
     coxagent_infrastructure::discover_opencode_models()
+}
+
+/// Everything THIS machine can do, for the worker registry: the agent CLIs on
+/// its PATH, the models its opencode reaches, and whether its git and forge
+/// credentials actually work.
+///
+/// All three are unknowable to a hub served from a container — it has no CLI,
+/// no ssh key and no checkout. The machine that has them is the only one that
+/// can answer, so it answers here and publishes through the heartbeat.
+pub(crate) async fn local_caps(
+    config: &Config,
+    work_dir: &Path,
+) -> coxagent_application::ports::outbound::WorkerCaps {
+    coxagent_application::ports::outbound::WorkerCaps {
+        engines: detected_engines().into_iter().map(|(n, _)| n).collect(),
+        models: detected_models(),
+        git: if config.git.enabled && !config.git.repo.is_empty() {
+            Some(coxagent_infrastructure::probe_git_access(&config.git.repo, &config.git.account, work_dir).await)
+        } else {
+            None
+        },
+    }
 }
 
 pub(crate) fn detected_engines() -> Vec<(String, String)> {

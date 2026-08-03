@@ -46,12 +46,9 @@ pub struct RunnerHandle {
     /// Agent CLIs found on THIS machine's PATH, injected by the composition root
     /// (detection is an infrastructure concern). Reported on every heartbeat so
     /// a hub that will never have an agent CLI of its own can still tell the
-    /// dashboard which engines the team can actually run.
-    engines: Vec<String>,
-    /// `provider/model` pairs this machine's opencode can reach. Same reasoning,
-    /// and doubly so: custom providers live in the user's own opencode config,
-    /// so no built-in list anywhere can name them.
-    models: Vec<String>,
+    /// dashboard which engines the team can actually run, which models its
+    /// opencode reaches, and whether its git/forge credentials really work.
+    caps: crate::ports::outbound::WorkerCaps,
 }
 
 impl Default for RunnerHandle {
@@ -69,8 +66,7 @@ impl Default for RunnerHandle {
                 operator: None,
                 host: None,
             }),
-            engines: Vec::new(),
-            models: Vec::new(),
+            caps: crate::ports::outbound::WorkerCaps::default(),
         }
     }
 }
@@ -84,22 +80,15 @@ impl RunnerHandle {
     /// Declare what this machine can run (composition root only): the agent CLIs
     /// on its PATH and the `provider/model` pairs its opencode can reach.
     #[must_use]
-    pub fn with_capabilities(mut self, engines: Vec<String>, models: Vec<String>) -> Self {
-        self.engines = engines;
-        self.models = models;
+    pub fn with_capabilities(mut self, caps: crate::ports::outbound::WorkerCaps) -> Self {
+        self.caps = caps;
         self
     }
 
-    /// The agent CLIs this runner can launch.
+    /// What this machine can do, as reported on every heartbeat.
     #[must_use]
-    pub fn engines(&self) -> &[String] {
-        &self.engines
-    }
-
-    /// The `provider/model` pairs this runner's opencode can reach.
-    #[must_use]
-    pub fn models(&self) -> &[String] {
-        &self.models
+    pub fn caps(&self) -> &crate::ports::outbound::WorkerCaps {
+        &self.caps
     }
 
     /// Resume continuous running.
@@ -237,14 +226,7 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
                 if role != "idle" {
                     let now = crate::state::now_rfc3339();
                     let _ = store
-                        .heartbeat_worker(
-                            &h.worker_id(),
-                            &role,
-                            &note,
-                            h.engines(),
-                            h.models(),
-                            &now,
-                        )
+                        .heartbeat_worker(&h.worker_id(), &role, &note, h.caps(), &now)
                         .await;
                 }
             }
@@ -265,11 +247,11 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
             None => h.clear_active(),
         }
         let (store, worker) = (std::sync::Arc::clone(&store), h.worker_id());
-        let (engines, models) = (h.engines().to_vec(), h.models().to_vec());
+        let caps = h.caps().clone();
         tokio::spawn(async move {
             let now = crate::state::now_rfc3339();
             let _ = store
-                .heartbeat_worker(&worker, &role, &note, &engines, &models, &now)
+                .heartbeat_worker(&worker, &role, &note, &caps, &now)
                 .await;
         });
     }));

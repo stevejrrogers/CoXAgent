@@ -2093,6 +2093,7 @@ async function testGitConnection(btn){
       ${step(d.reachable,'reachable')}
       ${step(d.push_ok,'push permission')}
       ${step(d.api_ok,'pull requests',d.api_account?` <code style="font-size:11px">${esc(d.api_account)}</code>`:'')}
+      ${d.probed_on?`<div style="color:var(--dim);margin-top:5px">checked on <code style="font-size:11px">${esc(d.probed_on)}</code> — the machine that runs the agents</div>`:''}
       ${d.detail?`<div style="color:var(--dim);margin-top:5px">${esc(d.detail)}</div>`:''}
       ${d.key_hint?`<div style="color:var(--amber);margin-top:5px"><i class="ti ti-key"></i> ${esc(d.key_hint)}</div>`:''}
       ${d.api_detail?`<div style="color:var(--amber);margin-top:5px"><i class="ti ti-alert-triangle"></i> ${esc(d.api_detail)}</div>`:''}

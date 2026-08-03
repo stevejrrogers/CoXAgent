@@ -49,7 +49,42 @@ pub(super) async fn git_test_ep(
     let Some(p) = app.project(&pid).await else {
         return not_found();
     };
-    let wd = p.work_dir.clone();
+    // A live runner's own probe wins. git, ssh keys and the forge CLI live on
+    // the machine that runs the agents; on a split deploy this endpoint is
+    // served by a container that has none of them, so probing locally would
+    // report everything broken while the operator's machine is perfectly fine.
+    if let Ok(workers) = p.store.workers().await {
+        if let Some((w, g)) = workers
+            .iter()
+            .find_map(|w| w.git.as_ref().map(|g| (w.worker.clone(), g.clone())))
+        {
+            return Json(serde_json::json!({
+                "repo": true,
+                "remote": serde_json::Value::Null,
+                "reachable": g.push_ok || g.api_ok,
+                "push_ok": g.push_ok,
+                "detail": g.detail,
+                "key_hint": "",
+                "api_ok": g.api_ok,
+                "api_account": g.account,
+                "api_detail": g.remedy,
+                "probed_on": w,
+            }))
+            .into_response();
+        }
+    }
+    local_git_probe(&app, &pid, &p.work_dir).await
+}
+
+/// Probe git from wherever this API is served. Only correct when the hub and
+/// the runner are the same machine — the fallback for when no runner has
+/// reported yet.
+async fn local_git_probe(
+    app: &AppState,
+    pid: &str,
+    work_dir: &std::path::Path,
+) -> axum::response::Response {
+    let wd = work_dir.to_path_buf();
     let is_repo = wd.join(".git").exists();
     let git = |args: &[&str]| {
         let mut c = tokio::process::Command::new("git");
@@ -139,7 +174,7 @@ pub(super) async fn git_test_ep(
     // credentials: git push rides an ssh key, a PR is an API call as whoever
     // `gh` is logged in as. A machine can push perfectly and still 404 on every
     // PR — which is silent until the first ticket finishes and cannot deliver.
-    let (api_ok, api_account, api_detail) = probe_forge_api(&app, &pid).await;
+    let (api_ok, api_account, api_detail) = probe_forge_api(app, pid).await;
 
     Json(serde_json::json!({
         "repo": is_repo,

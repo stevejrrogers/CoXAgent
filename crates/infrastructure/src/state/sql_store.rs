@@ -7,7 +7,7 @@
 //! concurrency (a monotonic `revision`) rejects lost updates from two writers.
 
 use async_trait::async_trait;
-use coxagent_application::ports::outbound::{StateStorePort, WorkerEntry};
+use coxagent_application::ports::outbound::{StateStorePort, WorkerCaps, WorkerEntry};
 use coxagent_application::state::{ProjectState, SCHEMA_VERSION};
 use coxagent_application::PortError;
 use coxagent_domain::{Role, TicketId};
@@ -42,7 +42,9 @@ ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS ticket TEXT;
 ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS engines TEXT;
 -- Worker registry: `provider/model` pairs that runner's opencode can reach,
 -- newline separated. Custom providers exist only in the user's own CLI config.
-ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS models TEXT;";
+ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS models TEXT;
+-- Worker registry: JSON result of probing git + forge access on that machine.
+ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS gitcheck TEXT;";
 
 /// Leader lease lifetime (seconds) — a runner must renew within this or another
 /// takes over. Matches the JSON store.
@@ -296,26 +298,27 @@ impl StateStorePort for SqlStateStore {
         worker: &str,
         role: &str,
         ticket: &str,
-        engines: &[String],
-        models: &[String],
+        caps: &WorkerCaps,
         now: &str,
     ) -> Result<(), PortError> {
         if let Some(r) = &self.redis {
             return r
-                .heartbeat_worker(worker, role, ticket, engines, models, now)
+                .heartbeat_worker(worker, role, ticket, caps, now)
                 .await;
         }
         let client = self.client().await?;
-        let engines_csv = engines.join(",");
-        let models_csv = models.join("\n");
+        let engines_csv = caps.engines.join(",");
+        let models_csv = caps.models.join("\n");
         client
             .execute(
                 "INSERT INTO project_coord
-                    (project_id, kind, coord_key, worker, at, role, ticket, engines, models)
-                 VALUES ($1, 'worker', $2, $2, now(), $3, $4, $5, $6)
+                    (project_id, kind, coord_key, worker, at, role, ticket,
+                     engines, models, gitcheck)
+                 VALUES ($1, 'worker', $2, $2, now(), $3, $4, $5, $6, $7)
                  ON CONFLICT (project_id, kind, coord_key) DO UPDATE
                     SET at = now(), role = EXCLUDED.role, ticket = EXCLUDED.ticket,
-                        engines = EXCLUDED.engines, models = EXCLUDED.models",
+                        engines = EXCLUDED.engines, models = EXCLUDED.models,
+                        gitcheck = EXCLUDED.gitcheck",
                 &[
                     &self.project_id,
                     &worker,
@@ -323,6 +326,11 @@ impl StateStorePort for SqlStateStore {
                     &ticket,
                     &engines_csv,
                     &models_csv,
+                    &caps
+                        .git
+                        .as_ref()
+                        .and_then(|g| serde_json::to_string(g).ok())
+                        .unwrap_or_default(),
                 ],
             )
             .await
@@ -339,7 +347,8 @@ impl StateStorePort for SqlStateStore {
             .query(
                 "SELECT worker, coalesce(role,''), coalesce(ticket,''),
                         to_char(at, 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),
-                        coalesce(engines,''), coalesce(models,'')
+                        coalesce(engines,''), coalesce(models,''),
+                        coalesce(gitcheck,'')
                    FROM project_coord
                   WHERE project_id = $1 AND kind = 'worker'
                     AND at > now() - make_interval(secs => $2)
@@ -367,6 +376,7 @@ impl StateStorePort for SqlStateStore {
                     .filter(|s| !s.is_empty())
                     .map(ToOwned::to_owned)
                     .collect(),
+                git: serde_json::from_str(&r.get::<_, String>(6)).ok(),
             })
             .collect())
     }

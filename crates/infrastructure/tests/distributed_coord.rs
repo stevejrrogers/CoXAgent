@@ -7,7 +7,7 @@
 //!   COXAGENT_TEST_REDIS_URL=redis://localhost:56379 \
 //!   cargo test -p coxagent-infrastructure --test distributed_coord -- --nocapture
 
-use coxagent_application::ports::outbound::StateStorePort;
+use coxagent_application::ports::outbound::{GitCheck, StateStorePort, WorkerCaps};
 use coxagent_application::state::ProjectState;
 use coxagent_domain::{
     Complexity, Priority, Role, Status, TechnicalDesign, Ticket, TicketId, TicketType,
@@ -108,18 +108,36 @@ async fn distributed_coordination_across_two_hubs() {
     let id2 = TicketId::new("CXC-F002").unwrap();
     assert!(hub_b.claim_ticket(&id2, "luffy@b", now).await.unwrap());
 
-    // Worker registry (Redis): both hubs heartbeat, both appear online. Each
-    // reports the agent CLIs IT has — the registry is how a hub with no CLI of
-    // its own (the container serving the dashboard) learns what the team can run.
+    worker_registry_carries_machine_capabilities(&hub_a, &hub_b, now).await;
+}
+
+/// The registry is how a hub with no CLI, no key and no checkout of its own —
+/// the container serving the dashboard — learns what each machine can do.
+async fn worker_registry_carries_machine_capabilities(
+    hub_a: &SqlStateStore,
+    hub_b: &SqlStateStore,
+    now: &str,
+) {
     hub_a
         .heartbeat_worker(
             "chopper@a",
             "leader",
             "CXC-F001",
-            &["claude".to_owned(), "opencode".to_owned()],
-            // A CUSTOM provider: it exists only in this user's opencode config,
-            // so no built-in list and no other machine can know it.
-            &["bizbrain/DeepSeek-V4-Pro".to_owned()],
+            &WorkerCaps {
+                engines: vec!["claude".to_owned(), "opencode".to_owned()],
+                // A CUSTOM provider: it exists only in this user's opencode
+                // config, so no built-in list and no other machine can know it.
+                models: vec!["bizbrain/DeepSeek-V4-Pro".to_owned()],
+                // Push works, pull requests do not — the split that a hub-side
+                // probe cannot see, because it holds neither credential.
+                git: Some(GitCheck {
+                    account: "kyroc3".to_owned(),
+                    api_ok: false,
+                    push_ok: true,
+                    remedy: "gh is signed in as 'kyroc3', which cannot see the repo".to_owned(),
+                    ..GitCheck::default()
+                }),
+            },
             now,
         )
         .await
@@ -129,8 +147,10 @@ async fn distributed_coordination_across_two_hubs() {
             "luffy@b",
             "worker",
             "CXC-F002",
-            &["gemini".to_owned()],
-            &[],
+            &WorkerCaps {
+                engines: vec!["gemini".to_owned()],
+                ..WorkerCaps::default()
+            },
             now,
         )
         .await
@@ -163,5 +183,24 @@ async fn distributed_coordination_across_two_hubs() {
             .unwrap_or_default(),
         vec!["bizbrain/DeepSeek-V4-Pro".to_owned()],
         "a custom opencode provider reaches the hub only through its own runner"
+    );
+    let git = workers
+        .iter()
+        .find(|w| w.worker == "chopper@a")
+        .and_then(|w| w.git.clone())
+        .expect("the runner's own git probe reaches the hub");
+    assert!(git.push_ok, "push works on that machine");
+    assert!(
+        !git.api_ok,
+        "and pull requests do not — the two are separate credentials"
+    );
+    assert_eq!(git.account, "kyroc3");
+    assert!(
+        workers
+            .iter()
+            .find(|w| w.worker == "luffy@b")
+            .and_then(|w| w.git.clone())
+            .is_none(),
+        "a runner that has not probed reports nothing rather than a false pass"
     );
 }

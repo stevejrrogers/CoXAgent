@@ -1043,6 +1043,9 @@ async fn run_loop(
     // Ship this operator's live logs to shared storage (MinIO) so the central
     // hub can show a remote operator's live agent log, not just local ones.
     spawn_log_uploader(state_dir, &work_dir);
+    // Captured before the use case takes ownership: the capability probe needs
+    // the same repo and git settings the agents will actually use.
+    let (caps_config, caps_work_dir) = (config.clone(), work_dir.clone());
     let mut uc = RunCycleUseCase::new(Arc::clone(&store), engine, config, work_dir, context)
         .with_meter(meter)
         .with_deploy(std::sync::Arc::new(DockerComposeDeploy::new()))
@@ -1061,11 +1064,11 @@ async fn run_loop(
     // so every dashboard shows this headless team's current agent.
     let hb_store = Arc::clone(&store);
     let hb_worker = worker.clone();
+
     // What THIS machine can actually launch. The hub serving the dashboard may
     // be a container with no agent CLI at all, so it cannot detect this for us.
-    let hb_engines: Vec<String> = detected_engines().into_iter().map(|(n, _)| n).collect();
-    let hb_models: Vec<String> = detected_models();
-    uc.set_capabilities(hb_engines.clone(), hb_models.clone());
+    let hb_caps = local_caps(&caps_config, &caps_work_dir).await;
+    uc.set_capabilities(hb_caps.clone());
     // Shared live phase + keepalive: a single engine call can run for tens of
     // minutes while the registry TTL is a few minutes, so without a mid-phase
     // refresh a busy operator would drop off the dashboard and look dead.
@@ -1073,14 +1076,14 @@ async fn run_loop(
         Arc::new(Mutex::new(("idle".to_owned(), String::new())));
     {
         let (s, w, phase) = (Arc::clone(&store), hb_worker.clone(), Arc::clone(&phase));
-        let (eng, mdl) = (hb_engines.clone(), hb_models.clone());
+        let caps = hb_caps.clone();
         tokio::spawn(async move {
             // Announce presence at once, before the first sleep: an operator that
             // took 45s to appear is one the setup wizard has already declared
             // missing.
             {
                 let now = coxagent_application::state::now_rfc3339();
-                let _ = s.heartbeat_worker(&w, "idle", "", &eng, &mdl, &now).await;
+                let _ = s.heartbeat_worker(&w, "idle", "", &caps, &now).await;
             }
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(45)).await;
@@ -1096,7 +1099,7 @@ async fn run_loop(
                 // own 15s poll regardless of Start, so advertising it does not
                 // mislead the force-merge routing.
                 let now = coxagent_application::state::now_rfc3339();
-                let _ = s.heartbeat_worker(&w, &role, &note, &eng, &mdl, &now).await;
+                let _ = s.heartbeat_worker(&w, &role, &note, &caps, &now).await;
             }
         });
     }
@@ -1110,10 +1113,10 @@ async fn run_loop(
             *p = (role.clone(), note.clone());
         }
         let (s, w) = (Arc::clone(&hb_store), hb_worker.clone());
-        let (eng, mdl) = (hb_engines.clone(), hb_models.clone());
+        let caps = hb_caps.clone();
         tokio::spawn(async move {
             let now = coxagent_application::state::now_rfc3339();
-            let _ = s.heartbeat_worker(&w, &role, &note, &eng, &mdl, &now).await;
+            let _ = s.heartbeat_worker(&w, &role, &note, &caps, &now).await;
         });
     }));
     let operator = worker.clone();

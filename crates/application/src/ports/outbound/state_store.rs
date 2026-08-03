@@ -35,6 +35,42 @@ pub struct WorkerEntry {
     /// reports them here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<String>,
+    /// What this runner's git and forge credentials can actually do, probed on
+    /// ITS machine. `None` until it has reported (or when git is disabled).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<GitCheck>,
+}
+
+/// The outcome of probing git + forge access from the machine that will run
+/// them. Push and pull requests are checked separately because they use
+/// different credentials — an ssh key and an API login — and one commonly works
+/// while the other does not.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GitCheck {
+    /// The forge login in effect (empty when the CLI is not signed in).
+    #[serde(default)]
+    pub account: String,
+    /// The API can see the configured repository — pull requests will work.
+    #[serde(default)]
+    pub api_ok: bool,
+    /// A dry-run push succeeded — the agent can deliver a branch.
+    #[serde(default)]
+    pub push_ok: bool,
+    /// Why a check failed, in the words of the tool that failed it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+    /// A concrete remedy, e.g. an ssh key that GitHub does accept.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub remedy: String,
+}
+
+/// Everything a runner advertises about what its machine can do. Grouped so the
+/// heartbeat keeps one capability argument as this list grows.
+#[derive(Debug, Clone, Default)]
+pub struct WorkerCaps {
+    pub engines: Vec<String>,
+    pub models: Vec<String>,
+    pub git: Option<GitCheck>,
 }
 
 /// Atomic read-modify-write with retry: load the state, apply `f`, and save. If
@@ -164,8 +200,7 @@ pub trait StateStorePort: Send + Sync {
         _worker: &str,
         _role: &str,
         _ticket: &str,
-        _engines: &[String],
-        _models: &[String],
+        _caps: &WorkerCaps,
         _now: &str,
     ) -> Result<(), PortError> {
         Ok(())
