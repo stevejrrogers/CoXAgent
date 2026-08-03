@@ -108,6 +108,14 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     probe: Option<Arc<dyn crate::ports::outbound::ApiProbePort>>,
     storage: Option<Arc<dyn crate::ports::outbound::StoragePort>>,
     deploy: Option<Arc<dyn DeployPort>>,
+    /// The published `host_port` to probe for the mandatory post-deploy
+    /// health gate, or `Err` when the raw `coxagent.json`'s
+    /// `deploy.host_port` is present but malformed (COX-B035). Defaults to
+    /// `Ok(config.deploy.host_port)`; callers reading the raw config
+    /// separately (to fail closed on a malformed value the `Config` parse
+    /// itself may have folded into a default) override it via
+    /// [`Self::with_host_port_probe`].
+    host_port_probe: Result<Option<u16>, ()>,
     notifier: Option<Arc<dyn crate::ports::outbound::NotifierPort>>,
     /// Live, runtime-adjustable spend caps (overrides the config caps when set).
     budget: Option<crate::config::LiveBudget>,
@@ -135,6 +143,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         work_dir: PathBuf,
         context: String,
     ) -> Self {
+        let host_port_probe = Ok(config.deploy.host_port);
         Self {
             store,
             engine,
@@ -146,6 +155,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             probe: None,
             storage: None,
             deploy: None,
+            host_port_probe,
             notifier: None,
             budget: None,
             git: None,
@@ -1325,6 +1335,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         self
     }
 
+    /// Override the post-deploy health-gate probe port (COX-B035): pass
+    /// `Err(())` when the raw `coxagent.json` names a malformed
+    /// `deploy.host_port`, so the gate fails closed instead of the default
+    /// (`Ok(config.deploy.host_port)`) treating a `Config`-parse fallback's
+    /// `None` as "nothing configured".
+    #[must_use]
+    pub fn with_host_port_probe(mut self, probe: Result<Option<u16>, ()>) -> Self {
+        self.host_port_probe = probe;
+        self
+    }
+
     /// Run one cycle. Never returns `Err`: agent failures are collected into the
     /// report so the outer loop keeps going.
     #[allow(clippy::too_many_lines)] // a linear sequence of agent phases; splitting hurts readability
@@ -1812,7 +1833,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let Some(deploy) = &self.deploy else {
             return true;
         };
-        crate::ports::outbound::verify_deploy_health(deploy, self.config.deploy.host_port).await
+        // A malformed `host_port` (COX-B035) must fail the gate, not be
+        // treated as unconfigured — see `host_port_probe`.
+        match self.host_port_probe {
+            Ok(port) => crate::ports::outbound::verify_deploy_health(deploy, port).await,
+            Err(()) => false,
+        }
     }
 
     /// Detailed post-deploy health check (COX-F005): poll the app's health
@@ -1832,8 +1858,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let Some(deploy) = &self.deploy else {
             return (true, None);
         };
-        let Some(port) = self.config.deploy.host_port else {
-            return (true, None);
+        // A malformed `host_port` (COX-B035) must fail the gate outright,
+        // not be treated as unconfigured — see `host_port_probe`.
+        let port = match self.host_port_probe {
+            Ok(Some(port)) => port,
+            Ok(None) => return (true, None),
+            Err(()) => return (false, None),
         };
         let bound = std::time::Duration::from_secs(self.config.deploy.health_check_timeout_secs);
         let result = match tokio::time::timeout(
@@ -6115,6 +6145,67 @@ mod tests {
         assert!(
             events.iter().any(|e| e.kind == "deploy_failed"),
             "the notified event must be deploy_failed, not deploy_ok: {events:?}"
+        );
+    }
+
+    /// AC (COX-B035): a malformed `deploy.host_port` in the raw
+    /// `coxagent.json` — surfaced to the use case as `host_port_probe:
+    /// Err(())`, since a full `Config` parse of a corrupt field collapses
+    /// to `Config::default()` (`host_port: None`) — must fail the mandatory
+    /// health gate, not be folded into "nothing configured". Uses a deploy
+    /// adapter that would pass any real probe, so a false "known-good" here
+    /// would mean the malformed port silently skipped the gate.
+    #[tokio::test(start_paused = true)]
+    async fn malformed_host_port_fails_the_gate_instead_of_skipping_it() {
+        let store = Arc::new(MemStore::default());
+        let deploy = Arc::new(ScriptedHealthCheckDeploy {
+            deploy_calls: AtomicUsize::new(0),
+            health_check_calls: AtomicUsize::new(0),
+            health_check_script: |_deploys| crate::state::HealthCheckResult {
+                passed: true,
+                http_status: Some(200),
+                response_time_ms: Some(45),
+            },
+            health_check_hangs: false,
+        });
+        // Models `load_config` having fallen back to `Config::default()`
+        // after the raw `coxagent.json` failed to parse as a whole — the
+        // host_port probe is derived separately from the raw text and is
+        // `Err(())`, not `None`.
+        let cfg = Config::default();
+        let notifier = Arc::new(SpyNotifier::default());
+        let uc = RunCycleUseCase::new(
+            Arc::clone(&store),
+            Arc::new(RoleAwareEngine),
+            cfg,
+            PathBuf::from("/tmp"),
+            "goal".to_owned(),
+        )
+        .with_deploy(Arc::clone(&deploy) as Arc<dyn crate::ports::outbound::DeployPort>)
+        .with_host_port_probe(Err(()))
+        .with_notifier(Arc::clone(&notifier) as Arc<dyn crate::ports::outbound::NotifierPort>);
+
+        Box::pin(uc.run_cycle(1)).await;
+
+        let state = store.load().await.expect("load");
+        assert!(
+            state.deploy.as_ref().is_some_and(|d| !d.ok),
+            "a malformed host_port must fail the deploy, not pass vacuously: {:?}",
+            state.deploy
+        );
+        assert!(
+            state.last_good_deploy.is_none(),
+            "a deploy gated by a malformed host_port must never become the auto-rollback target"
+        );
+        let events = notifier.events.lock().expect("lock");
+        assert!(
+            events.iter().any(|e| e.kind == "deploy_failed"),
+            "the notified event must be deploy_failed, not deploy_ok: {events:?}"
+        );
+        assert_eq!(
+            deploy.health_check_calls.load(Ordering::SeqCst),
+            0,
+            "a malformed host_port must fail before ever probing — there's nothing valid to probe"
         );
     }
 

@@ -6025,6 +6025,12 @@ function roleLabel(r){return ROLE_LABELS[r]||r;}
 function roleCanWrite(r){return r!=="viewer";}
 function roleCanCreateChannel(r){return r==="super"||r==="admin"||LEAD_ROLES.includes(r);}
 function canCreateChannel(){return !ME||!ME.auth||roleCanCreateChannel(ME.role);}
+// PR review actions (merge / request-changes / close / preview / force-merge)
+// are Admin + lead tier + the legacy Reviewer. Member-tier roles (ba/fe/be/…)
+// may write but auth_mw refuses these with 403 "insufficient role"
+// (COX-B038) — hiding the buttons keeps the UI from offering an action the
+// server will reject.
+function roleCanReview(r){return r==="super"||r==="admin"||r==="reviewer"||LEAD_ROLES.includes(r);}
 // Management surfaces (Settings, Users) are Admin + lead tier only.
 function roleCanManage(r){return r==="super"||r==="admin"||LEAD_ROLES.includes(r);}
 function canManage(){return !ME||!ME.auth||roleCanManage(ME.role);}
@@ -6153,7 +6159,7 @@ async function saveRename(){const name=(document.getElementById("rn-name").value
   }catch(e){msg.style.color="var(--red)";msg.textContent="Network error.";}
 }
 // ── Code review: open PRs from the forge, approve / merge / request changes ──
-function canReview(){return ME&&(ME.role==="admin"||ME.role==="reviewer");}
+function canReview(){return !ME||!ME.auth||roleCanReview(ME.role);}
 // ── Clean-base drain banner: BIG visible hold notice while a refactor waits
 // on the merge queue. Every agent of every user is paused for new work — the
 // banner says so and points at the way out (merge green PRs).

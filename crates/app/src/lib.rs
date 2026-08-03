@@ -566,11 +566,24 @@ pub fn load_coordination(base: &Path) {
     tracing::info!("coordination config loaded from {}", path.display());
 }
 
-fn load_config(state_dir: &Path) -> Config {
+/// Read `coxagent.json`'s raw text from the workspace root (parent of the
+/// state dir), if present. Split out of `load_config` so a caller that also
+/// needs the raw config for a malformed-value probe — e.g. the mandatory
+/// deploy health gate's `host_port` (COX-B035) — reads the file once and
+/// feeds the same string into both parses, rather than reading it twice or
+/// letting the two parses drift.
+fn read_config_text(state_dir: &Path) -> Option<String> {
+    let root = state_dir.parent().unwrap_or(state_dir);
+    std::fs::read_to_string(root.join("coxagent.json")).ok()
+}
+
+/// Parse `text` (already read by [`read_config_text`]) into a `Config`,
+/// falling back to defaults on a missing file or invalid JSON.
+fn parse_config(state_dir: &Path, text: Option<&str>) -> Config {
     let root = state_dir.parent().unwrap_or(state_dir);
     let path = root.join("coxagent.json");
-    match std::fs::read_to_string(&path) {
-        Ok(text) => match serde_json::from_str::<Config>(&text) {
+    match text {
+        Some(text) => match serde_json::from_str::<Config>(text) {
             Ok(mut cfg) => {
                 heal_host_port(root, &path, &mut cfg);
                 cfg
@@ -580,8 +593,14 @@ fn load_config(state_dir: &Path) -> Config {
                 Config::default()
             }
         },
-        Err(_) => Config::default(),
+        None => Config::default(),
     }
+}
+
+/// Load `coxagent.json` from the workspace root (parent of the state dir), or
+/// fall back to defaults. Config lives beside the state, written by `onboard`.
+fn load_config(state_dir: &Path) -> Config {
+    parse_config(state_dir, read_config_text(state_dir).as_deref())
 }
 
 /// Self-heal a project left without a deploy port: assign a free `host_port` and
@@ -635,7 +654,14 @@ async fn build_project(
     use coxagent_application::use_cases::{run_forever, RunCycleUseCase, RunnerHandle};
 
     let store = make_store(id, state_dir).await?;
-    let config = load_config(state_dir);
+    // One raw read feeds both the `Config` parse and the deploy health-gate's
+    // host-port probe, so a malformed `deploy.host_port` fails the gate
+    // (COX-B035) instead of drifting from whatever `Config` parsed.
+    let raw_cfg = read_config_text(state_dir);
+    let config = parse_config(state_dir, raw_cfg.as_deref());
+    let host_port_probe = raw_cfg.as_deref().map_or(Ok(None), |t| {
+        coxagent_application::ports::outbound::parse_deploy_host_port(t)
+    });
     // `auth` must be the SAME store the hub actually serves /api/mcp with —
     // NOT re-derived from state_dir here. Each project can live under a
     // different workspace root than the hub-wide auth.json (see run_hub's
@@ -711,6 +737,7 @@ async fn build_project(
         .with_meter(meter.clone())
         .with_live_budget(Arc::clone(&live_budget))
         .with_deploy(Arc::new(DockerComposeDeploy::new()))
+        .with_host_port_probe(host_port_probe)
         .with_shot(Some(Arc::new(
             coxagent_infrastructure::screenshot::ChromeScreenshot,
         )))
@@ -753,6 +780,7 @@ async fn build_project(
         .with_meter(meter.clone())
         .with_live_budget(Arc::clone(&live_budget))
         .with_deploy(Arc::new(DockerComposeDeploy::new()))
+        .with_host_port_probe(host_port_probe)
         .with_shot(Some(Arc::new(
             coxagent_infrastructure::screenshot::ChromeScreenshot,
         )))
@@ -1606,7 +1634,14 @@ async fn run_loop(
     context: String,
     max_cycles: Option<u64>,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let config = load_config(state_dir);
+    // One raw read feeds both the `Config` parse and the deploy health-gate's
+    // host-port probe, so a malformed `deploy.host_port` fails the gate
+    // (COX-B035) instead of drifting from whatever `Config` parsed.
+    let raw_cfg = read_config_text(state_dir);
+    let config = parse_config(state_dir, raw_cfg.as_deref());
+    let host_port_probe = raw_cfg.as_deref().map_or(Ok(None), |t| {
+        coxagent_application::ports::outbound::parse_deploy_host_port(t)
+    });
     // Same project-id derivation as Command::Run/operator_main: the workspace
     // dir name (e.g. `cxc`), not a fixed "default" — so this operator's MCP
     // calls target the same project the hub knows it by.
@@ -1684,6 +1719,7 @@ async fn run_loop(
     let mut uc = RunCycleUseCase::new(Arc::clone(&store), engine, config, work_dir, context)
         .with_meter(meter)
         .with_deploy(std::sync::Arc::new(DockerComposeDeploy::new()))
+        .with_host_port_probe(host_port_probe)
         .with_git(std::sync::Arc::new(
             coxagent_infrastructure::SystemGit::new(),
         ));

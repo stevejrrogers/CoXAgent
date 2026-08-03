@@ -66,7 +66,7 @@ impl AuthRole {
     /// changes on pull/merge requests): Admin, leads, and the legacy Reviewer.
     #[must_use]
     pub fn can_review(self) -> bool {
-        self.can_write() || matches!(self, Self::Reviewer)
+        matches!(self, Self::Super | Self::Admin | Self::Reviewer) || self.is_lead()
     }
 
     /// Whether this role may create chat channels: Super, Admin, and the lead tier.
@@ -202,6 +202,29 @@ mod role_tests {
         assert!(!AuthRole::De.can_create_channel());
         // Legacy Viewer is read-only.
         assert!(!AuthRole::Viewer.can_write());
+    }
+
+    #[test]
+    fn review_is_admin_leads_reviewer_only_not_every_writer() {
+        assert!(AuthRole::Super.can_review());
+        assert!(AuthRole::Admin.can_review());
+        assert!(AuthRole::TechLead.can_review());
+        assert!(AuthRole::Director.can_review());
+        assert!(AuthRole::Reviewer.can_review());
+        // Member tier can write but must not be able to review/merge/close PRs.
+        for r in [
+            AuthRole::Ba,
+            AuthRole::Fe,
+            AuthRole::Be,
+            AuthRole::Aie,
+            AuthRole::Ds,
+            AuthRole::Da,
+            AuthRole::De,
+        ] {
+            assert!(r.can_write(), "{} should still write", r.as_str());
+            assert!(!r.can_review(), "{} must not review PRs", r.as_str());
+        }
+        assert!(!AuthRole::Viewer.can_review());
     }
 
     #[test]

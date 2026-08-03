@@ -5111,28 +5111,12 @@ async fn git_pv(dir: &std::path::Path, args: &[&str]) -> Result<(), String> {
 }
 
 /// Parse `deploy.host_port` out of a project's raw `coxagent.json` for the
-/// preview health-gate probe. A missing/unreadable file, unparseable JSON, a
-/// missing `host_port` key, or an explicit `null` all mean "nothing
-/// configured" — same contract as `Option<u16>` and
-/// `verify_deploy_health`'s no-port pass. Any other JSON value that isn't a
-/// valid non-negative `u16` (negative, float, string, bool, out of range) is
-/// a corrupt config and must fail the gate rather than being folded into
-/// "nothing configured" (COX-B025/COX-B026) — `serde_json::Value::as_u64`
-/// returns `None` for all of those just as it does for a genuinely absent
-/// field, so the raw JSON value must be inspected instead of going through
-/// `as_u64` first.
+/// preview health-gate probe. Thin wrapper over the shared
+/// [`coxagent_application::ports::outbound::parse_deploy_host_port`] — every
+/// deploy call site (cycle, chat, PR preview) parses a malformed `host_port`
+/// the same way (COX-B025/COX-B026/COX-B035).
 fn parse_preview_host_port(raw_config: &str) -> Result<Option<u16>, ()> {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw_config) else {
-        return Ok(None);
-    };
-    match value.get("deploy").and_then(|d| d.get("host_port")) {
-        None | Some(serde_json::Value::Null) => Ok(None),
-        Some(v) => v
-            .as_u64()
-            .and_then(|n| u16::try_from(n).ok())
-            .map(Some)
-            .ok_or(()),
-    }
+    coxagent_application::ports::outbound::parse_deploy_host_port(raw_config)
 }
 
 /// Run the mandatory post-deploy health gate (COX-B004/COX-B009) for a probe
@@ -6356,10 +6340,18 @@ async fn chat_reply_ep(
     if msg.is_empty() {
         return Json(serde_json::json!({ "ok": true })).into_response();
     }
-    let cfg = std::fs::read_to_string(&p.config_path)
-        .ok()
-        .and_then(|t| serde_json::from_str::<Config>(&t).ok())
+    // One raw read feeds both the `Config` parse and the host-port probe, so
+    // a malformed `deploy.host_port` can't drift from what `Config` saw and
+    // fails the mandatory health gate (COX-B035) instead of silently
+    // skipping it via `Config::default()`'s `host_port: None`.
+    let raw_cfg = std::fs::read_to_string(&p.config_path).ok();
+    let cfg = raw_cfg
+        .as_deref()
+        .and_then(|t| serde_json::from_str::<Config>(t).ok())
         .unwrap_or_default();
+    let host_port_probe = raw_cfg.as_deref().map_or(Ok(None), |t| {
+        coxagent_application::ports::outbound::parse_deploy_host_port(t)
+    });
     let mut uc = coxagent_application::use_cases::RunChatReplyUseCase::new(
         Arc::clone(&p.store),
         Arc::clone(&p.engine),
@@ -6370,7 +6362,7 @@ async fn chat_reply_ep(
     if let Some(d) = &p.deploy {
         uc = uc
             .with_deploy(Arc::clone(d))
-            .with_host_port(cfg.deploy.host_port);
+            .with_host_port_probe(host_port_probe);
     }
     if let Some(f) = &p.forge {
         let target = if cfg.git.target_branch.trim().is_empty() {
