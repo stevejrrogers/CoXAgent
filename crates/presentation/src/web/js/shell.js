@@ -424,6 +424,11 @@ function canCreateChannel(){return !ME||!ME.auth||roleCanCreateChannel(ME.role);
 // Management surfaces (Settings, Users) are Admin + lead tier only.
 function roleCanManage(r){return r==="super"||r==="admin"||LEAD_ROLES.includes(r);}
 function canManage(){return !ME||!ME.auth||roleCanManage(ME.role);}
+// PR review actions (merge / request-changes / close / preview / force-merge)
+// are Super, Admin, the lead tier and the legacy Reviewer — the exact mirror of
+// AuthRole::can_review, which auth_mw enforces (COX-B038). Keep the two in step:
+// a role shown a Merge button the server refuses is a 403 the user can't act on.
+function roleCanReview(r){return r==="super"||r==="admin"||r==="reviewer"||LEAD_ROLES.includes(r);}
 // Only the legacy read-only Viewer gets a locked-down UI; every real role writes.
 function applyRole(){
   const isViewer=ME&&ME.auth&&ME.role==="viewer";
@@ -550,7 +555,9 @@ async function saveRename(){const name=(document.getElementById("rn-name").value
   }catch(e){msg.style.color="var(--red)";msg.textContent="Network error.";}
 }
 // ── Code review: open PRs from the forge, approve / merge / request changes ──
-function canReview(){return ME&&(ME.role==="admin"||ME.role==="reviewer");}
+// Open/local mode (no auth wired) passes every gate server-side, so the review
+// buttons must show there too — same `!ME||!ME.auth` shape as canManage().
+function canReview(){return !ME||!ME.auth||roleCanReview(ME.role);}
 // ── Clean-base drain banner: BIG visible hold notice while a refactor waits
 // on the merge queue. Every agent of every user is paused for new work — the
 // banner says so and points at the way out (merge green PRs).
@@ -615,9 +622,9 @@ async function renderReview(){
       </div>
       <div class="revacts">
         <button class="gc-btn" onclick="viewDiff(${p.number},'${esc(p.head)}')"><i class="ti ti-file-diff"></i> Diff</button>
-        <button class="gc-btn" title="Run THIS branch on the app port so you can see it before approving" onclick="prAction(${p.number},'preview')"><i class="ti ti-eye"></i> Preview</button>
+        ${rev?`<button class="gc-btn" title="Run THIS branch on the app port so you can see it before approving" onclick="prAction(${p.number},'preview')"><i class="ti ti-eye"></i> Preview</button>
         <button class="gc-btn" title="Stop the preview and restore the main build" onclick="prAction(${p.number},'preview-stop')"><i class="ti ti-eye-off"></i></button>
-        ${rev?`<button class="gc-btn" onclick="prAction(${p.number},'request-changes')"><i class="ti ti-arrow-back-up"></i> Changes</button>
+        <button class="gc-btn" onclick="prAction(${p.number},'request-changes')"><i class="ti ti-arrow-back-up"></i> Changes</button>
         <button class="gc-btn pri" ${p.mergeable?'':'disabled'} onclick="prAction(${p.number},'merge')"><i class="ti ti-git-merge"></i> Merge</button>
         <button class="gc-btn forcemg" title="SA gỡ conflict NGAY (nếu có) rồi merge PR này — theo dõi tiến trình trong #agents" onclick="prAction(${p.number},'force-merge')"><i class="ti ti-bolt"></i> Force</button>`:''}
       </div>
