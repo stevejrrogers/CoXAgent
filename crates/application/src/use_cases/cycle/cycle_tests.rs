@@ -1890,3 +1890,89 @@ async fn impediment_digest_once_per_day_gate_still_dedupes_both_sinks() {
         "the once-per-day gate must prevent a duplicate external notifier event: {events:?}"
     );
 }
+
+/// Engine that answers the pre-flight BA call with criteria and nothing else.
+struct CriteriaEngine;
+#[async_trait::async_trait]
+impl AgentEnginePort for CriteriaEngine {
+    fn id(&self) -> &'static str {
+        "criteria"
+    }
+    async fn run(&self, _req: AgentRequest) -> Result<AgentOutcome, PortError> {
+        Ok(AgentOutcome {
+            stdout: "[\"the audit lists every timeout with its file\", \
+                     \"each one says keep or change, with a reason\"]"
+                .to_owned(),
+            stderr: String::new(),
+            exit_code: Some(0),
+            usage: None,
+            trace: String::new(),
+            session_id: None,
+            sandbox: SandboxStatus::default(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_designed_ticket_with_no_criteria_gets_them_before_a_human_sees_it() {
+    use coxagent_domain::{Complexity, Priority, Role, TechnicalDesign, Ticket, TicketId, TicketType};
+
+    let mut t = Ticket::new(
+        TicketId::new("COX-F001").expect("id"),
+        TicketType::Feature,
+        "Audit timeout patterns".to_owned(),
+        "Look at every timeout we set and say whether it is right.".to_owned(),
+        Priority::Medium,
+        Complexity::Medium,
+        false,
+    )
+    .expect("ticket");
+    t.set_technical_design(
+        Role::Sa,
+        TechnicalDesign {
+            approach: "read them all".to_owned(),
+            files: vec![],
+            api_contract: String::new(),
+            test_plan: "n/a".to_owned(),
+            alternatives: String::new(),
+            data_changes: String::new(),
+        },
+    )
+    .expect("design");
+    assert!(t.acceptance_criteria().is_empty(), "precondition");
+
+    let store = Arc::new(MemStore::default());
+    {
+        let mut s = store.state.lock().expect("lock");
+        s.tickets.push(t);
+    }
+    let uc = RunCycleUseCase::new(
+        Arc::clone(&store),
+        Arc::new(CriteriaEngine),
+        Config::default(),
+        PathBuf::from("/tmp"),
+        "goal".to_owned(),
+    );
+    Box::pin(uc.preflight_acceptance_criteria()).await;
+
+    let s = store.load().await.expect("load");
+    let t = s.ticket(&TicketId::new("COX-F001").expect("id")).expect("ticket");
+    assert_eq!(
+        t.acceptance_criteria().len(),
+        2,
+        "the BA's criteria should be on the ticket, not in a log"
+    );
+    assert!(
+        s.comments.iter().any(|c| c.author == "BA" && c.body.contains("Acceptance criteria added")),
+        "the change is announced on the ticket, so a person can see who wrote them"
+    );
+
+    // Second run must not append a duplicate set.
+    Box::pin(uc.preflight_acceptance_criteria()).await;
+    let s = store.load().await.expect("load");
+    assert_eq!(
+        s.ticket(&TicketId::new("COX-F001").expect("id")).expect("t").acceptance_criteria().len(),
+        2,
+        "a ticket that already has criteria is left alone"
+    );
+}
