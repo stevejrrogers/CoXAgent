@@ -68,7 +68,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let Some(deploy) = &self.deploy else {
             return true;
         };
-        crate::ports::outbound::verify_deploy_health(deploy, self.config.deploy.host_port).await
+        crate::ports::outbound::verify_deploy_health_probe(deploy, self.host_port_probe).await
     }
     /// Detailed post-deploy health check (COX-F005): poll the app's health
     /// endpoint via [`crate::ports::outbound::DeployPort::wait_healthy`] for

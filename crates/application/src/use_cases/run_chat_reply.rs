@@ -29,6 +29,14 @@ pub struct RunChatReplyUseCase<S: StateStorePort + ?Sized, E: AgentEnginePort + 
     lang: Language,
     deploy: Option<Arc<dyn DeployPort>>,
     host_port: Option<u16>,
+    /// The health-gate probe port, independently parsed from `coxagent.json`'s
+    /// raw text via [`crate::ports::outbound::parse_deploy_host_port`] — kept
+    /// separate from `host_port` (used only for docker-scaffold defaults)
+    /// because a `Config`-deserialized `Option<u16>` cannot distinguish
+    /// "absent" from "malformed": once a corrupt `host_port` has collapsed
+    /// the whole config to `Config::default()`, `Err(())` here is what still
+    /// fails the gate instead of passing vacuously (COX-B035).
+    host_port_probe: Result<Option<u16>, ()>,
     /// Code host + target branch, so chat can trigger an SA merge sweep.
     forge: Option<(Arc<dyn crate::ports::outbound::ForgePort>, String, bool)>,
     context: Option<String>,
@@ -65,6 +73,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             lang,
             deploy: None,
             host_port: None,
+            host_port_probe: Ok(None),
             forge: None,
             context: None,
             new_project_fn: None,
@@ -129,10 +138,27 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         self
     }
 
-    /// The host port to publish on when scaffolding a docker setup.
+    /// The host port to publish on when scaffolding a docker setup. Also
+    /// seeds the health-gate probe as `Ok(port)`; call
+    /// [`Self::with_host_port_probe`] afterwards to replace it with a port
+    /// independently parsed from raw config text once that text is
+    /// available (COX-B035) — see that method's doc.
     #[must_use]
     pub fn with_host_port(mut self, port: Option<u16>) -> Self {
         self.host_port = port;
+        self.host_port_probe = Ok(port);
+        self
+    }
+
+    /// Override the health-gate probe port with one parsed independently
+    /// from `coxagent.json`'s raw text (see
+    /// [`crate::ports::outbound::parse_deploy_host_port`]) — see
+    /// `host_port_probe`'s field doc for why this must be separate from
+    /// [`Self::with_host_port`] (COX-B035). Call after `with_host_port` so
+    /// this wins.
+    #[must_use]
+    pub fn with_host_port_probe(mut self, probe: Result<Option<u16>, ()>) -> Self {
+        self.host_port_probe = probe;
         self
     }
 
@@ -789,8 +815,11 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             // its port — probe before telling the human it's up.
             Ok(r)
                 if r.success
-                    && crate::ports::outbound::verify_deploy_health(deploy, self.host_port)
-                        .await =>
+                    && crate::ports::outbound::verify_deploy_health_probe(
+                        deploy,
+                        self.host_port_probe,
+                    )
+                    .await =>
             {
                 if self.lang.is_vi() {
                     format!("✅ Deploy xong — {}", r.summary)

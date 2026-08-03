@@ -144,6 +144,17 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     /// Whether the `sandbox_unsupported` warning has already fired — posted
     /// once per project per process lifetime, never once per cycle.
     sandbox_warned: AtomicBool,
+    /// The health-gate probe port, independently parsed from `coxagent.json`'s
+    /// raw text via [`crate::ports::outbound::parse_deploy_host_port`] where a
+    /// caller has that text available. Kept separate from
+    /// `config.deploy.host_port` because that field cannot distinguish
+    /// "absent" from "malformed" once `Config` deserialization has already
+    /// folded a corrupt value into `Config::default()`; `Err(())` means the
+    /// raw value was present but invalid and must fail the gate rather than
+    /// pass vacuously (COX-B035). Defaults to `Ok(config.deploy.host_port)`
+    /// so callers that never independently parse the raw config keep today's
+    /// behavior.
+    host_port_probe: Result<Option<u16>, ()>,
 }
 
 impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
@@ -154,6 +165,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         work_dir: PathBuf,
         context: String,
     ) -> Self {
+        let host_port_probe = Ok(config.deploy.host_port);
         Self {
             store,
             engine,
@@ -175,7 +187,21 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             worker: String::new(),
             last_discussion_topic: Mutex::new(String::new()),
             sandbox_warned: AtomicBool::new(false),
+            host_port_probe,
         }
+    }
+
+    /// Override the health-gate probe port with one parsed independently
+    /// from `coxagent.json`'s raw text (see
+    /// [`crate::ports::outbound::parse_deploy_host_port`]) — distinguishes
+    /// "no `host_port` configured" from "`host_port` present but invalid",
+    /// which `Config::deploy.host_port` alone cannot tell apart once a
+    /// corrupt config has already collapsed to `Config::default()`
+    /// (COX-B035).
+    #[must_use]
+    pub fn with_host_port_probe(mut self, probe: Result<Option<u16>, ()>) -> Self {
+        self.host_port_probe = probe;
+        self
     }
 
     /// Set this runner's identity (`account@host`), used as the ticket claim
@@ -747,7 +773,28 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                             }
                         }
                         Ok(_) => {}
-                        Err(e) => report.errors.push(format!("DEPLOY: {e}")),
+                        // A spawn/timeout error never even produced a
+                        // DeployReport (COX-B039) — without this arm
+                        // `deploy_bad` stays false, `record_deploy` never
+                        // runs (so `state.deploy.ok` keeps reporting the
+                        // PREVIOUS deploy's status), no bug is filed, and
+                        // `attempt_rollback` never fires even though
+                        // `docker_compose::deploy()` already ran `down`
+                        // before failing — the app is left stopped. Route it
+                        // through the same success=false path as an unhealthy
+                        // deploy so all four (state, bug, notify, rollback)
+                        // happen here too.
+                        Err(e) => {
+                            deploy_bad = true;
+                            let summary = format!("deploy failed: {e}");
+                            self.record_deploy(false, &summary, attempt_sha.clone(), None)
+                                .await;
+                            self.notify("deploy_failed", summary.clone()).await;
+                            if let Some(id) = self.file_deploy_bug(&summary).await {
+                                report.bugs_filed.push(id);
+                            }
+                            report.errors.push(format!("DEPLOY: {e}"));
+                        }
                     }
                     // Hard DoD gate: run the real test suite. A red suite becomes a
                     // high-priority bug (deduped) — deterministic quality, not just

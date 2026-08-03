@@ -247,6 +247,55 @@ pub async fn verify_deploy_health(deploy: &Arc<dyn DeployPort>, host_port: Optio
     false
 }
 
+/// Parse `deploy.host_port` out of a project's raw `coxagent.json`,
+/// independent of whether the rest of the file parses as a valid [`Config`]
+/// (COX-B035: `#[serde(default)]` on `DeployConfig::host_port` only rescues
+/// an absent key, not a type/range mismatch — so once `Config` deserialization
+/// has failed and a caller has fallen back to `Config::default()`, the
+/// distinction between "no host_port configured" and "host_port present but
+/// corrupt" is already lost). A missing/unreadable file, unparseable JSON, a
+/// missing `host_port` key, or an explicit `null` all mean "nothing
+/// configured" — same contract as `Option<u16>` and `verify_deploy_health`'s
+/// no-port pass. Any other JSON value that isn't a valid non-negative `u16`
+/// (negative, float, string, bool, out of range) is a corrupt config and must
+/// fail the gate rather than being folded into "nothing configured" —
+/// `serde_json::Value::as_u64` returns `None` for all of those just as it
+/// does for a genuinely absent field, so the raw JSON value must be inspected
+/// instead of going through `as_u64` first.
+///
+/// [`Config`]: crate::config::Config
+pub fn parse_deploy_host_port(raw_config: &str) -> Result<Option<u16>, ()> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw_config) else {
+        return Ok(None);
+    };
+    match value.get("deploy").and_then(|d| d.get("host_port")) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(v) => v
+            .as_u64()
+            .and_then(|n| u16::try_from(n).ok())
+            .map(Some)
+            .ok_or(()),
+    }
+}
+
+/// Run [`verify_deploy_health`] against a probe port that may itself be
+/// invalid (COX-B025/COX-B026/COX-B035): every call site that reads
+/// `deploy.host_port` from raw config text via [`parse_deploy_host_port`]
+/// (rather than trusting `Config::deploy.host_port`, which cannot tell
+/// "absent" from "malformed" once deserialization has already defaulted it
+/// away) runs the result through this so a corrupt port fails the gate
+/// outright instead of being treated as "nothing configured" — which would
+/// pass unconditionally and report a dead app as healthy.
+pub async fn verify_deploy_health_probe(
+    deploy: &Arc<dyn DeployPort>,
+    probe: Result<Option<u16>, ()>,
+) -> bool {
+    match probe {
+        Ok(port) => verify_deploy_health(deploy, port).await,
+        Err(()) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{DeployPort, DeployReport};

@@ -980,6 +980,71 @@ async fn deploy_that_never_binds_its_port_is_treated_as_a_failure() {
     );
 }
 
+/// A `DeployPort` whose `deploy()` returns `Err` every call — models a spawn
+/// failure or the 900s `DEPLOY_TIMEOUT` in `docker_compose.rs`, where
+/// `docker compose` never even produced a `DeployReport` to judge success/
+/// failure from.
+struct DeploySpawnFails {
+    deploy_calls: AtomicUsize,
+}
+#[async_trait::async_trait]
+impl crate::ports::outbound::DeployPort for DeploySpawnFails {
+    async fn deploy(
+        &self,
+        _work_dir: &std::path::Path,
+    ) -> Result<crate::ports::outbound::DeployReport, PortError> {
+        self.deploy_calls.fetch_add(1, Ordering::SeqCst);
+        Err(PortError::Backend("docker compose timed out".to_owned()))
+    }
+}
+
+/// COX-B039: a `deploy()` spawn/timeout `Err` (not just an unhealthy-but-
+/// completed deploy) must be treated exactly like any other deploy failure —
+/// recorded state, a filed bug, and a `deploy_failed` notification — not
+/// silently swallowed into `report.errors` alone.
+#[tokio::test(start_paused = true)]
+async fn deploy_spawn_error_is_treated_as_a_failure_not_swallowed() {
+    let store = Arc::new(MemStore::default());
+    let deploy = Arc::new(DeploySpawnFails {
+        deploy_calls: AtomicUsize::new(0),
+    });
+    let notifier = Arc::new(SpyNotifier::default());
+    let uc = RunCycleUseCase::new(
+        Arc::clone(&store),
+        Arc::new(RoleAwareEngine),
+        Config::default(),
+        PathBuf::from("/tmp"),
+        "goal".to_owned(),
+    )
+    .with_deploy(Arc::clone(&deploy) as Arc<dyn crate::ports::outbound::DeployPort>)
+    .with_notifier(Arc::clone(&notifier) as Arc<dyn crate::ports::outbound::NotifierPort>);
+
+    let report = Box::pin(uc.run_cycle(1)).await;
+
+    assert!(
+        report.errors.iter().any(|e| e.starts_with("DEPLOY:")),
+        "still surfaced in the cycle report: {:?}",
+        report.errors
+    );
+    let state = store.load().await.expect("load");
+    assert!(
+        state.deploy.as_ref().is_some_and(|d| !d.ok),
+        "a spawn/timeout error must flip state.deploy.ok to false, or the \
+         self-healing retry (last_deploy_failed) never fires: {:?}",
+        state.deploy
+    );
+    assert_eq!(
+        deploy_bug_tickets(&state).len(),
+        1,
+        "a spawn/timeout error must file a bug like any other deploy failure"
+    );
+    let events = notifier.events.lock().expect("lock");
+    assert!(
+        events.iter().any(|e| e.kind == "deploy_failed"),
+        "must notify deploy_failed, not swallow the error silently: {events:?}"
+    );
+}
+
 /// Scripted deploy where only the 2nd `deploy()` call (the rollback
 /// redeploy) actually binds the port — models the forward deploy starting
 /// a container that never listens, followed by a rollback that does.

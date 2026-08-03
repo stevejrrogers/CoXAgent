@@ -966,7 +966,17 @@ async fn run_loop(
     context: String,
     max_cycles: Option<u64>,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let config = load_config(state_dir);
+    let raw_cfg = read_config_text(state_dir);
+    let config = raw_cfg
+        .as_deref()
+        .map_or_else(Config::default, |t| parse_config_text(state_dir, t));
+    // Independently parsed from the SAME raw text (COX-B035): distinguishes
+    // "no host_port configured" from "host_port present but malformed", which
+    // `config.deploy.host_port` alone cannot once a corrupt config has
+    // already collapsed to `Config::default()` above.
+    let host_port_probe = raw_cfg
+        .as_deref()
+        .map_or(Ok(None), coxagent_application::ports::outbound::parse_deploy_host_port);
     // Same project-id derivation as Command::Run/operator_main: the workspace
     // dir name (e.g. `cxc`), not a fixed "default" — so this operator's MCP
     // calls target the same project the hub knows it by.
@@ -1044,6 +1054,7 @@ async fn run_loop(
     let mut uc = RunCycleUseCase::new(Arc::clone(&store), engine, config, work_dir, context)
         .with_meter(meter)
         .with_deploy(std::sync::Arc::new(DockerComposeDeploy::new()))
+        .with_host_port_probe(host_port_probe)
         .with_git(std::sync::Arc::new(
             coxagent_infrastructure::SystemGit::new(),
         ))

@@ -1102,10 +1102,18 @@ pub(super) async fn chat_reply_ep(
     if msg.is_empty() {
         return Json(serde_json::json!({ "ok": true })).into_response();
     }
-    let cfg = std::fs::read_to_string(&p.config_path)
-        .ok()
-        .and_then(|t| serde_json::from_str::<Config>(&t).ok())
+    let raw_cfg = std::fs::read_to_string(&p.config_path).ok();
+    let cfg = raw_cfg
+        .as_deref()
+        .and_then(|t| serde_json::from_str::<Config>(t).ok())
         .unwrap_or_default();
+    // Independently parsed from the SAME raw text (COX-B035): distinguishes
+    // "no host_port configured" from "host_port present but malformed",
+    // which `cfg.deploy.host_port` alone cannot once a corrupt config has
+    // already collapsed to `Config::default()` above.
+    let host_port_probe = raw_cfg.as_deref().map_or(Ok(None), |t| {
+        coxagent_application::ports::outbound::parse_deploy_host_port(t)
+    });
     let mut uc = coxagent_application::use_cases::RunChatReplyUseCase::new(
         Arc::clone(&p.store),
         Arc::clone(&p.engine),
@@ -1117,7 +1125,8 @@ pub(super) async fn chat_reply_ep(
     if let Some(d) = &p.deploy {
         uc = uc
             .with_deploy(Arc::clone(d))
-            .with_host_port(cfg.deploy.host_port);
+            .with_host_port(cfg.deploy.host_port)
+            .with_host_port_probe(host_port_probe);
     }
     if let Some(f) = &p.forge {
         let target = if cfg.git.target_branch.trim().is_empty() {

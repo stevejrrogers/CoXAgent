@@ -122,22 +122,41 @@ pub fn load_coordination(base: &Path) {
     tracing::info!("coordination config loaded from {}", path.display());
 }
 
-pub(crate) fn load_config(state_dir: &Path) -> Config {
+/// Read `coxagent.json`'s raw text from the workspace root (parent of the
+/// state dir), or `None` if it's missing/unreadable. Split out of
+/// `load_config` (COX-B035) so a caller that also needs `deploy.host_port`
+/// parsed independently of `Config` — via
+/// `coxagent_application::ports::outbound::parse_deploy_host_port`, which can
+/// tell "absent" apart from "malformed" where `Config::deploy.host_port`
+/// alone cannot — reads the file ONCE and feeds the same string to both
+/// parses, rather than reading it twice. See `build_project` and `run_loop`.
+pub(crate) fn read_config_text(state_dir: &Path) -> Option<String> {
+    let root = state_dir.parent().unwrap_or(state_dir);
+    std::fs::read_to_string(root.join("coxagent.json")).ok()
+}
+
+/// Parse `coxagent.json`'s already-read text into a `Config`, falling back to
+/// defaults (with a warning) on invalid JSON — the parse half of the old
+/// `load_config`, kept separate so `read_config_text`'s single disk read can
+/// feed both this and `parse_deploy_host_port`.
+pub(crate) fn parse_config_text(state_dir: &Path, text: &str) -> Config {
     let root = state_dir.parent().unwrap_or(state_dir);
     let path = root.join("coxagent.json");
-    match std::fs::read_to_string(&path) {
-        Ok(text) => match serde_json::from_str::<Config>(&text) {
-            Ok(mut cfg) => {
-                heal_host_port(root, &path, &mut cfg);
-                cfg
-            }
-            Err(e) => {
-                tracing::warn!("invalid {}: {e}; using defaults", path.display());
-                Config::default()
-            }
-        },
-        Err(_) => Config::default(),
+    match serde_json::from_str::<Config>(text) {
+        Ok(mut cfg) => {
+            heal_host_port(root, &path, &mut cfg);
+            cfg
+        }
+        Err(e) => {
+            tracing::warn!("invalid {}: {e}; using defaults", path.display());
+            Config::default()
+        }
     }
+}
+
+pub(crate) fn load_config(state_dir: &Path) -> Config {
+    read_config_text(state_dir)
+        .map_or_else(Config::default, |text| parse_config_text(state_dir, &text))
 }
 
 /// Self-heal a project left without a deploy port: assign a free `host_port` and
@@ -192,7 +211,17 @@ pub(crate) async fn build_project(
     use coxagent_application::use_cases::{run_forever, RunCycleUseCase, RunnerHandle};
 
     let store = make_store(id, state_dir).await?;
-    let config = load_config(state_dir);
+    let raw_cfg = read_config_text(state_dir);
+    let config = raw_cfg
+        .as_deref()
+        .map_or_else(Config::default, |t| parse_config_text(state_dir, t));
+    // Independently parsed from the SAME raw text (COX-B035): distinguishes
+    // "no host_port configured" from "host_port present but malformed", which
+    // `config.deploy.host_port` alone cannot once a corrupt config has
+    // already collapsed to `Config::default()` above.
+    let host_port_probe = raw_cfg.as_deref().map_or(Ok(None), |t| {
+        coxagent_application::ports::outbound::parse_deploy_host_port(t)
+    });
     // `auth` must be the SAME store the hub actually serves /api/mcp with —
     // NOT re-derived from state_dir here. Each project can live under a
     // different workspace root than the hub-wide auth.json (see run_hub's
@@ -268,6 +297,7 @@ pub(crate) async fn build_project(
         .with_meter(meter.clone())
         .with_live_budget(Arc::clone(&live_budget))
         .with_deploy(Arc::new(DockerComposeDeploy::new()))
+        .with_host_port_probe(host_port_probe)
         .with_shot(Some(Arc::new(
             coxagent_infrastructure::screenshot::ChromeScreenshot,
         )))
@@ -314,6 +344,7 @@ pub(crate) async fn build_project(
         .with_meter(meter.clone())
         .with_live_budget(Arc::clone(&live_budget))
         .with_deploy(Arc::new(DockerComposeDeploy::new()))
+        .with_host_port_probe(host_port_probe)
         .with_shot(Some(Arc::new(
             coxagent_infrastructure::screenshot::ChromeScreenshot,
         )))
