@@ -34,6 +34,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // works it hard — draining the pile-up — rather than nibbling a few PRs.
         // As a suggestion-only reviewer it stays light. Bounded either way for cost.
         let batch = if auto_merge { 12 } else { 3 };
+        // Tickets whose fix ALREADY landed. A bug sits at `fixed` until someone
+        // verifies it, which is live work — so ticket status alone cannot tell
+        // a redundant PR from a real one. What settles it is the forge: if a PR
+        // for this ticket is already merged, a second branch for it is building
+        // what main has. #36 was exactly that, opened hours after #34 merged.
+        let merged: Vec<(u64, String)> = forge.recently_merged().await.unwrap_or_default();
+        let merged_tickets: std::collections::BTreeSet<String> = merged
+            .iter()
+            .filter_map(|(_, head)| crate::use_cases::merge_policy::ticket_id_in(head))
+            .collect();
         // Ticket ids visible in the open queue, for the competing-PR check.
         let open_titles: Vec<(u64, String)> =
             prs.iter().map(|p| (p.number, p.title.clone())).collect();
@@ -43,46 +53,35 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             if pr.base != target {
                 continue;
             }
-            // Skip PRs whose head has not moved since the last request-changes:
-            // the verdict cannot change and the repeat comment is pure noise.
-            let head_sha = self.pr_head_sha(&pr.head).await;
-            if self.already_reviewed_at(pr.number, &head_sha).await {
-                continue;
-            }
-            // With require_ci off (CI unavailable, e.g. Actions billing dead),
-            // CI status is ignored entirely — local test/lint gates plus the
-            // SA's diff judgement carry the review instead.
-            let require_ci = self.config.git.require_ci;
-            if require_ci && pr.ci == "pending" {
-                continue; // wait for CI before judging
-            }
-            let blocked = if require_ci && pr.ci == "failing" {
-                Some("CI is failing — fix the build/tests.".to_owned())
-            } else if !pr.mergeable {
-                Some("The branch has merge conflicts — rebase on the base branch.".to_owned())
-            } else {
-                None
-            };
-            if let Some(reason) = blocked {
-                let _ = forge.request_changes(pr.number, &reason).await;
-                self.record_review(pr.number, "request_changes", &reason, &head_sha)
-                    .await;
-                self.log_git(&format!(
-                    "SA requested changes on PR #{} ({reason})",
-                    pr.number
-                ))
-                .await;
-                // Conflicts are resolved IN PLACE on the original branch by
-                // address_pr_feedback — never filed as tickets: a ticket spawns
-                // a NEW branch + PR, which is how a queue explodes.
-                continue;
-            }
+            // These two run BEFORE the "head has not moved" guard below, and
+            // that ordering is the whole point: a PR nobody should keep open
+            // has a frozen head BY DEFINITION, so a check placed after the
+            // guard never sees the PRs it exists for. Asked first, they cost
+            // one diff read and end the queue's dead weight.
             // The ticket this PR names is already finished — by another PR, by
             // a human, by anything. Three such PRs held WIP slots here for a
             // week, blocking new dev work, for bugs that were verified days
             // earlier. Nobody had ever asked the board whether the work was
             // still wanted.
             if let Some(tid) = crate::use_cases::merge_policy::ticket_id_in(&pr.title) {
+                if merged_tickets.contains(&tid)
+                    && !merged.iter().any(|(n, _)| *n == pr.number)
+                {
+                    let note = format!(
+                        "Closing: a pull request for {tid} is already merged — this branch \
+                         rebuilds what main has. Reopen only if something here is genuinely \
+                         missing from the merged fix."
+                    );
+                    let _ = forge.comment_pr(pr.number, &note).await;
+                    if forge.close_pr(pr.number).await.is_ok() {
+                        self.log_git(&format!(
+                            "review: closed PR #{} — {tid} already merged elsewhere",
+                            pr.number
+                        ))
+                        .await;
+                    }
+                    continue;
+                }
                 let settled = self.store.load().await.ok().and_then(|s| {
                     s.tickets
                         .iter()
@@ -136,6 +135,40 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     }
                     continue;
                 }
+            }
+            // Skip PRs whose head has not moved since the last request-changes:
+            // the verdict cannot change and the repeat comment is pure noise.
+            let head_sha = self.pr_head_sha(&pr.head).await;
+            if self.already_reviewed_at(pr.number, &head_sha).await {
+                continue;
+            }
+            // With require_ci off (CI unavailable, e.g. Actions billing dead),
+            // CI status is ignored entirely — local test/lint gates plus the
+            // SA's diff judgement carry the review instead.
+            let require_ci = self.config.git.require_ci;
+            if require_ci && pr.ci == "pending" {
+                continue; // wait for CI before judging
+            }
+            let blocked = if require_ci && pr.ci == "failing" {
+                Some("CI is failing — fix the build/tests.".to_owned())
+            } else if !pr.mergeable {
+                Some("The branch has merge conflicts — rebase on the base branch.".to_owned())
+            } else {
+                None
+            };
+            if let Some(reason) = blocked {
+                let _ = forge.request_changes(pr.number, &reason).await;
+                self.record_review(pr.number, "request_changes", &reason, &head_sha)
+                    .await;
+                self.log_git(&format!(
+                    "SA requested changes on PR #{} ({reason})",
+                    pr.number
+                ))
+                .await;
+                // Conflicts are resolved IN PLACE on the original branch by
+                // address_pr_feedback — never filed as tickets: a ticket spawns
+                // a NEW branch + PR, which is how a queue explodes.
+                continue;
             }
             let Ok(diff) = forge.pr_diff(pr.number).await else {
                 continue;
