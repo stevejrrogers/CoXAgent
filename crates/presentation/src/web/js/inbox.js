@@ -75,7 +75,10 @@ async function renderInbox(){
     }else if(it.kind==="verify"){
       html+=inboxCard("verify",esc(it.ticket),esc(it.title),
         ibtn("Evidence",`showTicket('${esc(it.ticket)}')`)+
-        (canVerify()?ibtn("Verified",`inboxAct('${esc(it.ticket)}','verify')`,1):noRight()),it.ticket);
+        (canVerify()
+          ?ibtn("Send back",`inboxSendBack('${esc(it.ticket)}')`)+
+           ibtn("Verified",`inboxAct('${esc(it.ticket)}','verify')`,1)
+          :noRight()),it.ticket);
     }else if(it.kind==="assigned"){
       html+=inboxCard("assigned",esc(it.ticket)+" · "+esc(it.status||""),esc(it.title),
         ibtn("Return to agents",`inboxUnassign('${esc(it.ticket)}')`),it.ticket);
@@ -108,6 +111,22 @@ async function inboxAct(id,action){
     const r=await fetch(api("/ticket/"+encodeURIComponent(id)+"/"+action),{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
     if(!r.ok){coxToast&&coxToast(await r.text());}
   }catch(e){}
+  renderInbox();
+}
+
+// The verify gate's other answer: the fix is not demonstrated. The reason
+// goes on the ticket, which is what steers the next attempt.
+async function inboxSendBack(id){
+  const reason=await coxModal({title:"Send back "+id,
+    message:"Vì sao chưa nghiệm thu được? (lý do đi kèm ticket — agent đọc và làm lại theo đó)",
+    input:{placeholder:"vd: không có evidence cho acceptance criteria #2"},confirmText:"Send back"});
+  if(reason===null||reason===undefined)return;
+  try{
+    const r=await fetch(api("/ticket/"+encodeURIComponent(id)+"/send-back"),
+      {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({reason:String(reason||"")})});
+    if(!r.ok){toasty(await r.text()||"Send back failed","err");return;}
+    toasty(id+" sent back to the agents","ok");
+  }catch(e){toasty("Network error","err");}
   renderInbox();
 }
 

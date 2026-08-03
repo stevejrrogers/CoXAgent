@@ -1823,6 +1823,7 @@ async function showTicket(id){
     <button class="tk-btn" onclick="editTicket('${t.id}')"><i class="ti ti-edit"></i> Edit</button>
     ${canWork?`<button class="tk-btn go" onclick="workNext('${t.id}')"><i class="ti ti-player-play-filled"></i> Work on this next</button>`:''}
     ${(t.status==="pending"&&tech)?`<button class="tk-btn go" onclick="humanGate('${t.id}','ready')"><i class="ti ti-checks"></i> Approve → Ready</button>`:''}
+    ${t.status==="fixed"?`<button class="tk-btn" onclick="inboxSendBack('${t.id}')"><i class="ti ti-arrow-back-up"></i> Send back</button>`:''}
     ${t.status==="fixed"?`<button class="tk-btn go" onclick="humanGate('${t.id}','verify')"><i class="ti ti-shield-check"></i> Mark Verified</button>`:''}
     ${(t.status==="pending"||t.status==="open")?`<button class="tk-btn danger" onclick="rejectTicket('${t.id}')"><i class="ti ti-ban"></i> Reject</button>`:''}
   </div>`;
@@ -1904,7 +1905,12 @@ async function reactComment(tid,cid,emoji){
 async function postTicketComment(tid){
   const inp=document.getElementById("tkc-input");const body=(inp.value||"").trim();if(!body)return;
   inp.value="";inp.disabled=true;
-  try{await fetch(api("/comments"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({body,ticket:tid})});}catch(e){}
+  // A swallowed failure looked exactly like a posted comment: the box cleared
+  // and nothing appeared. Say so instead, and give the text back.
+  try{
+    const r=await fetch(api("/comments"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({body,ticket:tid})});
+    if(!r.ok){inp.value=body;toasty(await r.text()||"Comment failed","err");}
+  }catch(e){inp.value=body;toasty("Network error — comment not posted","err");}
   inp.disabled=false;await renderTicketComments(tid);inp.focus();
 }
 async function loadSettings(){

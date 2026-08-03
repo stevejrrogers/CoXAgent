@@ -160,6 +160,54 @@ pub(super) async fn human_verify_ep(
     .await
 }
 
+/// POST `/api/projects/:pid/ticket/:id/send-back` — the verify gate's other
+/// answer: this fix is not demonstrated, do it again.
+///
+/// Approving was the only button. A reviewer who found no evidence could
+/// comment "there is no evidence" and watch nothing happen: the ticket stayed
+/// in `Fixed`, out of the dev queue, waiting for a verdict the reviewer had
+/// already reached. The reason travels with it as a comment, which is what
+/// steers the next attempt.
+pub(super) async fn send_back_ep(
+    State(app): State<AppState>,
+    Path((pid, id)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+    body: Option<Json<super::work::RejectReq>>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Some(me) = gate_principal(&app, &headers, coxagent_application::AuthRole::can_verify).await
+    else {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            "your role may not take this decision",
+        )
+            .into_response();
+    };
+    let reason = body.map(|Json(r)| r.reason).unwrap_or_default();
+    let Ok(mut state) = p.store.load().await else {
+        return internal_error("load failed");
+    };
+    let Some(t) = state.tickets.iter_mut().find(|t| t.id().as_str() == id) else {
+        return (axum::http::StatusCode::NOT_FOUND, "no such ticket").into_response();
+    };
+    if let Err(e) = t.transition_to(coxagent_domain::Role::User, coxagent_domain::Status::Open) {
+        return (axum::http::StatusCode::CONFLICT, e.to_string()).into_response();
+    }
+    let note = if reason.trim().is_empty() {
+        format!("↩️ {id} sent back by @{me}: the fix is not demonstrated.")
+    } else {
+        format!("↩️ {id} sent back by @{me}: {}", reason.trim())
+    };
+    state.log_activity("USER", "verification refused", Some(id.clone()));
+    state.post_comment(&me, &note, Some(id));
+    match p.store.save(&state).await {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
 async fn human_transition(
     app: &AppState,
     pid: &str,

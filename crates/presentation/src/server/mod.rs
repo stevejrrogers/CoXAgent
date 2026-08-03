@@ -890,6 +890,10 @@ pub async fn serve_full(
         .route("/api/projects/:pid/inbox", get(inbox_ep))
         .route("/api/projects/:pid/ticket/:id/ready", post(human_ready_ep))
         .route("/api/projects/:pid/ticket/:id/verify", post(human_verify_ep))
+        .route(
+            "/api/projects/:pid/ticket/:id/send-back",
+            post(send_back_ep),
+        )
         .route("/api/projects/:pid/ticket/:id/assign", post(assign_ticket_ep))
         .route(
             "/api/projects/:pid/ticket/:id/undo-approval",
