@@ -258,7 +258,8 @@ pub(crate) async fn build_project(
     let concurrency = config.workflow.concurrency.max(1);
     // The agent CLIs on THIS machine travel with the handle so every heartbeat
     // reports them. A hub in a container has none of its own and must be told.
-    let handle = Arc::new(RunnerHandle::new().with_capabilities(local_caps(&config, &work_dir).await));
+    let handle =
+        Arc::new(RunnerHandle::new().with_capabilities(local_caps(&config, &work_dir).await));
 
     // Leader runner: singleton phases (BA, PO, standup, etc.)
     {
@@ -480,7 +481,14 @@ pub(crate) async fn local_caps(
         engines: detected_engines().into_iter().map(|(n, _)| n).collect(),
         models: detected_models(),
         git: if config.git.enabled && !config.git.repo.is_empty() {
-            Some(coxagent_infrastructure::probe_git_access(&config.git.repo, &config.git.account, work_dir).await)
+            Some(
+                coxagent_infrastructure::probe_git_access(
+                    &config.git.repo,
+                    &config.git.account,
+                    work_dir,
+                )
+                .await,
+            )
         } else {
             None
         },

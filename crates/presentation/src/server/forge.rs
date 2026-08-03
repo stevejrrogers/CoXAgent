@@ -201,10 +201,7 @@ async fn first_working_ssh_key() -> Option<(String, String)> {
         .map(|e| e.path())
         .filter(|p| {
             let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            name.starts_with("id_")
-                && !p
-                    .extension()
-                    .is_some_and(|e| e.eq_ignore_ascii_case("pub"))
+            name.starts_with("id_") && !p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pub"))
         })
         .collect();
     entries.sort();
@@ -295,9 +292,14 @@ async fn probe_forge_api(app: &AppState, pid: &str) -> (bool, String, String) {
         c
     };
     // Who are we?
-    let account = match run(vec!["api".into(), "user".into(), "--jq".into(), ".login".into()])
-        .output()
-        .await
+    let account = match run(vec![
+        "api".into(),
+        "user".into(),
+        "--jq".into(),
+        ".login".into(),
+    ])
+    .output()
+    .await
     {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_owned(),
         _ => String::new(),

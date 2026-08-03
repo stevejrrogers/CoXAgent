@@ -19,12 +19,12 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 mod audits;
-mod preflight;
 mod backlog;
 mod ceremonies;
+mod escalation;
+mod preflight;
 mod scrum;
 mod wiring;
-mod escalation;
 
 mod forge;
 mod forge_feedback;
@@ -929,7 +929,6 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .await;
         }
     }
-
 }
 
 /// Drop dangling index lines from the memory dir's `MEMORY.md` after a file is

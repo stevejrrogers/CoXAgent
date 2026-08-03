@@ -42,7 +42,20 @@ until the queue is back under the limit.
 project name (cox-<project>-…) and the project's ASSIGNED host port. Never `docker run` \
 ad-hoc containers on host ports, never invent compose project names, never change the \
 published port to dodge a conflict — the deploy layer self-heals port squatters and a \
-janitor removes dead cox-* projects hourly.";
+janitor removes dead cox-* projects hourly.
+- The hub and the runner are DIFFERENT MACHINES. The process serving the dashboard is \
+routinely a container with no agent CLI, no ssh key, no forge login and no checkout of \
+the code; the agents run on an operator's machine that has all four. So a feature must \
+never answer 'what can be done here?' by inspecting the process it happens to run in — \
+the machine that holds the capability reports it (worker registry) or serves it. This \
+one assumption has produced the same bug four separate times: engines shown as 'not \
+installed', a user's custom model provider missing, a git connection test that described \
+the hub instead of the runner, and an empty code map. Before adding any 'detect', \
+'discover' or 'check' that shells out, name which machine must answer it.
+- Run what you changed and read the output. A ticket is not evidence; a green unit test \
+is not evidence that the running system behaves. Curl the endpoint, read the log, inspect \
+the row, look at the rendered page — the defects that matter most are the ones no \
+acceptance criterion thought to ask about.";
 
 pub const ENGINEERING_STANDARDS: &str = "\
 ENGINEERING STANDARDS (non-negotiable house rules):\n\

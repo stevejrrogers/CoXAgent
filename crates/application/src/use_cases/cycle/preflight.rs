@@ -78,7 +78,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// One engine call: the criteria for a ticket, or `None` when the answer
     /// was not usable. Never invents a whole requirement — the ticket's own
     /// title and description are the source.
-    async fn ask_for_criteria(&self, id: &str, title: &str, description: &str) -> Option<Vec<String>> {
+    async fn ask_for_criteria(
+        &self,
+        id: &str,
+        title: &str,
+        description: &str,
+    ) -> Option<Vec<String>> {
         let request = AgentRequest {
             role: coxagent_domain::Role::Ba,
             system_prompt: crate::prompts::system_prompt(crate::prompts::BA),

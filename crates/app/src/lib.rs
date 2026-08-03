@@ -65,10 +65,10 @@ fn init_tracing() {
 /// Every single-project command must agree on this, or two of them address
 /// different rows of the same shared Postgres for the same workspace.
 fn project_id_for(state_dir: &Path) -> String {
-    state_dir
-        .parent()
-        .and_then(Path::file_name)
-        .map_or_else(|| "default".to_owned(), |n| n.to_string_lossy().into_owned())
+    state_dir.parent().and_then(Path::file_name).map_or_else(
+        || "default".to_owned(),
+        |n| n.to_string_lossy().into_owned(),
+    )
 }
 
 #[allow(clippy::too_many_lines)] // a flat CLI-command dispatch; splitting hurts readability
@@ -273,8 +273,14 @@ mod project_id_tests {
     /// two projects, neither of them right.
     #[test]
     fn the_id_is_the_workspace_directory_name() {
-        assert_eq!(project_id_for(Path::new("/Users/u/CoXAgent/cxa/state")), "cxa");
-        assert_eq!(project_id_for(Path::new("/srv/work/lynx-3/state")), "lynx-3");
+        assert_eq!(
+            project_id_for(Path::new("/Users/u/CoXAgent/cxa/state")),
+            "cxa"
+        );
+        assert_eq!(
+            project_id_for(Path::new("/srv/work/lynx-3/state")),
+            "lynx-3"
+        );
     }
 
     #[test]

@@ -247,7 +247,14 @@ impl SqlAuthService {
         let label: String = row.get(3);
         let at: String = row.get(4);
         let remaining = u64::try_from((expires_unix - now_i).max(0)).unwrap_or(0);
-        self.cache_session(token.to_owned(), username.clone(), role, label, at, remaining);
+        self.cache_session(
+            token.to_owned(),
+            username.clone(),
+            role,
+            label,
+            at,
+            remaining,
+        );
         Some(username)
     }
 

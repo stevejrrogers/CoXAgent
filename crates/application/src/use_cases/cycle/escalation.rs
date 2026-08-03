@@ -396,8 +396,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 if !(q.is_open() && q.to.starts_with('@')) || q.escalated {
                     continue;
                 }
-                let age_min = super::seconds_since(&q.asked_at)
-                    .map_or(0, |secs| secs / 60);
+                let age_min = super::seconds_since(&q.asked_at).map_or(0, |secs| secs / 60);
                 if age_min >= sla_min {
                     q.escalated = true;
                     escalations.push(format!(

@@ -28,7 +28,10 @@ pub fn discover() -> Vec<DetectedEngine> {
 /// through the worker registry with everything else this machine can do.
 #[must_use]
 pub fn discover_opencode_models() -> Vec<String> {
-    let Ok(out) = std::process::Command::new("opencode").arg("models").output() else {
+    let Ok(out) = std::process::Command::new("opencode")
+        .arg("models")
+        .output()
+    else {
         return Vec::new();
     };
     if !out.status.success() {

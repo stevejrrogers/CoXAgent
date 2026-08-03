@@ -302,9 +302,7 @@ impl StateStorePort for SqlStateStore {
         now: &str,
     ) -> Result<(), PortError> {
         if let Some(r) = &self.redis {
-            return r
-                .heartbeat_worker(worker, role, ticket, caps, now)
-                .await;
+            return r.heartbeat_worker(worker, role, ticket, caps, now).await;
         }
         let client = self.client().await?;
         let engines_csv = caps.engines.join(",");

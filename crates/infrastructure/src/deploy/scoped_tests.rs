@@ -116,7 +116,9 @@ fn go_scope(changed: &[String]) -> Option<(String, Vec<String>)> {
         {
             return None;
         }
-        let dir = c.rsplit_once('/').map_or(".".to_owned(), |(d, _)| d.to_owned());
+        let dir = c
+            .rsplit_once('/')
+            .map_or(".".to_owned(), |(d, _)| d.to_owned());
         pkgs.insert(format!("./{dir}"));
     }
     if pkgs.is_empty() || pkgs.len() > 6 {
@@ -137,7 +139,10 @@ fn python_scope(changed: &[String]) -> Option<(String, Vec<String>)> {
         {
             return None;
         }
-        dirs.insert(c.rsplit_once('/').map_or(".".to_owned(), |(d, _)| d.to_owned()));
+        dirs.insert(
+            c.rsplit_once('/')
+                .map_or(".".to_owned(), |(d, _)| d.to_owned()),
+        );
     }
     if dirs.is_empty() || dirs.len() > 6 {
         return None;
@@ -168,7 +173,11 @@ mod tests {
     fn workspace() -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tmp");
         let root = dir.path();
-        std::fs::write(root.join("Cargo.toml"), "[workspace]\nmembers=[\"crates/*\"]\n").expect("w");
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers=[\"crates/*\"]\n",
+        )
+        .expect("w");
         for (name, pkg) in [("app", "coxagent-app"), ("domain", "coxagent-domain")] {
             let d = root.join("crates").join(name).join("src");
             std::fs::create_dir_all(&d).expect("mk");
@@ -185,11 +194,8 @@ mod tests {
     #[test]
     fn rust_change_tests_only_the_crates_it_touched() {
         let ws = workspace();
-        let (cmd, args) = scoped_test_command(
-            ws.path(),
-            &["crates/app/src/lib.rs".to_owned()],
-        )
-        .expect("scoped");
+        let (cmd, args) =
+            scoped_test_command(ws.path(), &["crates/app/src/lib.rs".to_owned()]).expect("scoped");
         assert_eq!(cmd, "cargo");
         assert_eq!(
             args,
@@ -235,9 +241,7 @@ mod tests {
     fn an_empty_or_sprawling_change_runs_everything() {
         let ws = workspace();
         assert!(scoped_test_command(ws.path(), &[]).is_none());
-        let many: Vec<String> = (0..9)
-            .map(|i| format!("crates/c{i}/src/lib.rs"))
-            .collect();
+        let many: Vec<String> = (0..9).map(|i| format!("crates/c{i}/src/lib.rs")).collect();
         assert!(scoped_test_command(ws.path(), &many).is_none());
     }
 
@@ -247,7 +251,10 @@ mod tests {
         std::fs::write(dir.path().join("go.mod"), "module x\n").expect("w");
         let (cmd, args) =
             scoped_test_command(dir.path(), &["pkg/auth/token.go".to_owned()]).expect("go");
-        assert_eq!((cmd.as_str(), args.as_slice()), ("go", &["test".to_owned(), "./pkg/auth".to_owned()][..]));
+        assert_eq!(
+            (cmd.as_str(), args.as_slice()),
+            ("go", &["test".to_owned(), "./pkg/auth".to_owned()][..])
+        );
 
         let py = tempfile::tempdir().expect("tmp");
         std::fs::write(py.path().join("pyproject.toml"), "[project]\n").expect("w");
@@ -260,16 +267,18 @@ mod tests {
     #[test]
     fn node_narrows_only_when_the_project_opted_in() {
         let dir = tempfile::tempdir().expect("tmp");
-        std::fs::write(dir.path().join("package.json"), "{\"scripts\":{\"test\":\"jest\"}}")
-            .expect("w");
+        std::fs::write(
+            dir.path().join("package.json"),
+            "{\"scripts\":{\"test\":\"jest\"}}",
+        )
+        .expect("w");
         assert!(scoped_test_command(dir.path(), &["src/a.js".to_owned()]).is_none());
         std::fs::write(
             dir.path().join("package.json"),
             "{\"scripts\":{\"test\":\"jest\",\"test:related\":\"jest --findRelatedTests\"}}",
         )
         .expect("w");
-        let (cmd, args) =
-            scoped_test_command(dir.path(), &["src/a.js".to_owned()]).expect("node");
+        let (cmd, args) = scoped_test_command(dir.path(), &["src/a.js".to_owned()]).expect("node");
         assert_eq!(cmd, "npm");
         assert!(args.ends_with(&["src/a.js".to_owned()]));
     }
