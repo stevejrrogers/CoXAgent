@@ -240,12 +240,14 @@ pub(crate) async fn build_project(
             let repo = config.git.repo.clone();
             let base = config.git.base_url.clone();
             let wd = work_dir.clone();
+            // Which stored login to act as; empty = the CLI's active account.
+            let account = config.git.account.clone();
             match config.git.provider.as_str() {
                 "gitlab" => Some(Arc::new(coxagent_infrastructure::GlForge::new(
                     repo, base, wd,
                 ))),
-                "github" => Some(Arc::new(coxagent_infrastructure::GhForge::new(
-                    repo, base, wd,
+                "github" => Some(Arc::new(coxagent_infrastructure::GhForge::with_account(
+                    repo, base, wd, account,
                 ))),
                 _ => None,
             }

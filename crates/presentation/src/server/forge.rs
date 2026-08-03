@@ -123,14 +123,174 @@ pub(super) async fn git_test_ep(
             }
         }
     }
+    // Push failing does not mean there is no usable credential — the ssh config
+    // may simply be offering the wrong key first. Try each private key in
+    // ~/.ssh in turn and report one that works, so the fix is "use this key"
+    // rather than an unexplained "permission denied".
+    let mut key_hint = String::new();
+    if is_repo && remote.as_deref().is_some_and(|u| !u.starts_with("http")) && !push_ok {
+        if let Some((key, who)) = first_working_ssh_key().await {
+            push_ok = false; // still not wired up; this is a remedy, not a pass
+            key_hint = format!("{key} authenticates as {who} — point ssh at it (~/.ssh/config) or set GIT_SSH_COMMAND");
+        }
+    }
+
+    // The half this test used to skip. Pushing and opening a PR use DIFFERENT
+    // credentials: git push rides an ssh key, a PR is an API call as whoever
+    // `gh` is logged in as. A machine can push perfectly and still 404 on every
+    // PR — which is silent until the first ticket finishes and cannot deliver.
+    let (api_ok, api_account, api_detail) = probe_forge_api(&app, &pid).await;
+
     Json(serde_json::json!({
         "repo": is_repo,
         "remote": remote,
         "reachable": reachable,
         "push_ok": push_ok,
         "detail": detail,
+        "key_hint": key_hint,
+        "api_ok": api_ok,
+        "api_account": api_account,
+        "api_detail": api_detail,
     }))
     .into_response()
+}
+
+/// The first `~/.ssh` private key GitHub accepts, with the account it maps to.
+/// `None` when no key authenticates (or ssh is unavailable).
+async fn first_working_ssh_key() -> Option<(String, String)> {
+    let home = std::env::var("HOME").ok()?;
+    let dir = std::path::Path::new(&home).join(".ssh");
+    let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            name.starts_with("id_")
+                && !p
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("pub"))
+        })
+        .collect();
+    entries.sort();
+    for key in entries {
+        let Ok(Ok(out)) = tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            tokio::process::Command::new("ssh")
+                .args(["-T", "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes"])
+                .arg("-o")
+                .arg(format!("IdentityFile={}", key.display()))
+                .arg("git@github.com")
+                .stdin(std::process::Stdio::null())
+                .output(),
+        )
+        .await
+        else {
+            continue;
+        };
+        // GitHub refuses the shell but greets the account it recognised — that
+        // greeting IS the success signal (the exit status is non-zero).
+        let msg = String::from_utf8_lossy(&out.stderr);
+        if let Some(rest) = msg.trim().strip_prefix("Hi ") {
+            let who = rest.split(['!', ' ']).next().unwrap_or("").to_owned();
+            let name = key
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_owned();
+            return Some((name, who));
+        }
+    }
+    None
+}
+
+/// Can the forge CLI actually reach THIS repository? Returns
+/// `(ok, account, detail)`. A CLI logged in as the wrong account is the common
+/// failure: it reports a healthy login and 404s on the repo.
+async fn probe_forge_api(app: &AppState, pid: &str) -> (bool, String, String) {
+    let Some((provider, base)) = project_provider(app, pid).await else {
+        return (false, String::new(), "no project config".to_owned());
+    };
+    let Some(slug) = project_repo_slug(app, pid).await.filter(|s| !s.is_empty()) else {
+        return (false, String::new(), "no repo configured".to_owned());
+    };
+    let (bin, host_env) = git_cli(&provider);
+    let host = base
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_owned();
+    // Probe as the account this project is configured to act as, not merely the
+    // CLI's active one — otherwise the test passes on a machine where the real
+    // runs would 404, and vice versa.
+    let account = project_forge_account(app, pid).await.unwrap_or_default();
+    let token = if account.is_empty() {
+        None
+    } else {
+        let mut c = tokio::process::Command::new(bin);
+        c.args(["auth", "token", "--user", &account])
+            .stdin(std::process::Stdio::null());
+        if !host.is_empty() {
+            c.env(host_env, &host);
+        }
+        match c.output().await {
+            Ok(o) if o.status.success() => {
+                let t = String::from_utf8_lossy(&o.stdout).trim().to_owned();
+                (!t.is_empty()).then_some(t)
+            }
+            _ => None,
+        }
+    };
+    if !account.is_empty() && token.is_none() {
+        return (
+            false,
+            account.clone(),
+            format!("{bin} has no stored login for '{account}' — run `{bin} auth login` as it, or clear the account field to use the active one"),
+        );
+    }
+    let run = |args: Vec<String>| {
+        let mut c = tokio::process::Command::new(bin);
+        c.args(args).stdin(std::process::Stdio::null());
+        if !host.is_empty() {
+            c.env(host_env, &host);
+        }
+        if let Some(t) = &token {
+            c.env("GH_TOKEN", t);
+        }
+        c
+    };
+    // Who are we?
+    let account = match run(vec!["api".into(), "user".into(), "--jq".into(), ".login".into()])
+        .output()
+        .await
+    {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_owned(),
+        _ => String::new(),
+    };
+    let path = format!("repos/{slug}");
+    match run(vec!["api".into(), path]).output().await {
+        Ok(o) if o.status.success() => (true, account, String::new()),
+        Ok(o) => {
+            let err: String = String::from_utf8_lossy(&o.stderr)
+                .lines()
+                .last()
+                .unwrap_or("")
+                .chars()
+                .take(160)
+                .collect();
+            let detail = if account.is_empty() {
+                format!("{bin} is not logged in — run `{bin} auth login`. {err}")
+            } else {
+                format!(
+                    "{bin} is logged in as '{account}', which cannot see {slug}. \
+                     Pull requests will fail. Run `{bin} auth login` as an account \
+                     with access (or `{bin} auth switch`). {err}"
+                )
+            };
+            (false, account, detail)
+        }
+        Err(e) => (false, account, format!("{bin} not runnable: {e}")),
+    }
 }
 
 pub(super) async fn git_auth_status_ep(
