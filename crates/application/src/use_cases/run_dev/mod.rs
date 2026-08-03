@@ -194,17 +194,23 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         // tree-state serves every runner in the cycle.
         if let Some(deploy) = &self.verify {
             let fp = self.tree_fingerprint().await;
-            if crate::verify_cache::is_green(&self.work_dir, fp.as_deref()) {
+            let dirty = self.working_tree().await.changed_paths;
+            // A CLEAN tree has nothing to prove: main is whatever CI and the
+            // merge gate already blessed. The old code ran the whole suite
+            // anyway, could not finish inside the cap, therefore never
+            // recorded green — so every cycle burned the full timeout and no
+            // ticket was ever reached. An hour of "working" produced nothing.
+            if dirty.is_empty() || crate::verify_cache::is_green(&self.work_dir, fp.as_deref()) {
                 // fall through — nothing changed since the last green run
             } else {
                 match tokio::time::timeout(
-                    // 15 minutes, not 5: the workspace suite crossed 300s
-                    // after the July refactor and the old cap made the boot
-                    // check time out forever — DEV never reached a ticket
-                    // again (dev_feature was dead for a week before anyone
-                    // noticed the summary's quiet "(1 errors)").
+                    // 30 minutes, and SCOPED to the dirty paths: the boot
+                    // check exists to catch a broken working tree, not to
+                    // re-verify the whole workspace on every cycle. The full
+                    // suite still runs on the merged tree and at the sprint
+                    // boundary.
                     std::time::Duration::from_secs(1800),
-                    deploy.run_tests(&self.work_dir),
+                    deploy.run_tests_scoped(&self.work_dir, &dirty),
                 )
                 .await
                 {
