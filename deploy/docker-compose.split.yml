@@ -26,6 +26,12 @@ x-app-env: &app-env
   COXAGENT_MONGO_URL: mongodb://${MONGO_USER}:${MONGO_PASSWORD}@mongo:27017/?authSource=admin
   COXAGENT_MONGO_DB: coxagent
   COXAGENT_DB_DSN: postgres://${PG_USER}:${PG_PASSWORD}@db:5432/coxagent
+  # Shared account/session store — REQUIRED for the split: gateway issues the
+  # login cookie, realtime must validate it. Without this each container keeps
+  # file-backed sessions in its own memory and cross-service auth (e.g. the
+  # /events SSE stream on realtime) answers 401. Sessions ride Redis (native
+  # TTL) on top of this.
+  COXAGENT_AUTH_DSN: postgres://${PG_USER}:${PG_PASSWORD}@db:5432/coxagent
   COXAGENT_REDIS_URL: redis://redis:6379
   COXAGENT_TURN_URL: turn:${PUBLIC_IP}:3478
   COXAGENT_TURN_SECRET: ${TURN_SECRET}
