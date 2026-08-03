@@ -107,6 +107,34 @@ pub(super) async fn profile_avatar_ep(
     Json(serde_json::json!({ "ok": true, "url": url })).into_response()
 }
 
+/// Whether `path` addresses a pull-request review action — the
+/// `/api/projects/:pid/prs/:num/:action` route, whose actions are `merge`,
+/// `request-changes`, `close`, `preview`, `preview-stop` and `force-merge`.
+///
+/// Deliberately a substring match rather than a precise route parse: over-
+/// matching is safe (review rights are strictly stronger than write rights),
+/// whereas under-matching would silently hand a future `/prs/` route to every
+/// writer — which is exactly how COX-B038 stayed invisible.
+pub(super) fn is_pr_review_path(path: &str) -> bool {
+    path.contains("/prs/")
+}
+
+/// The write gate's decision, as a pure function of the caller's role and the
+/// request path: PR review actions demand review rights (Super, Admin, the
+/// lead tier, or the legacy Reviewer), every other write needs only ordinary
+/// write rights.
+///
+/// Kept pure and separate from [`auth_mw`] so the policy is exhaustively
+/// unit-testable per role without booting a hub or minting a session — the
+/// middleware supplies role and path, and turns `false` into a 403.
+pub(super) fn write_gate_ok(role: coxagent_application::auth::AuthRole, path: &str) -> bool {
+    if is_pr_review_path(path) {
+        role.can_review()
+    } else {
+        role.can_write()
+    }
+}
+
 /// RBAC gate. Open (pass-through) when no auth is configured. Otherwise: the
 /// SPA shell, health, and login are public; every other route needs a valid
 /// session, and mutating methods (except logout) need an admin.
@@ -234,15 +262,11 @@ pub(super) async fn auth_mw(
                 .into_response();
         }
     }
-    // PR review actions (merge / request-changes / close) are allowed for
-    // reviewers as well as admins; every other write stays admin-only.
-    let is_review_action = path.contains("/prs/");
-    let write_ok = if is_review_action {
-        user.role.can_review()
-    } else {
-        user.role.can_write()
-    };
-    if is_write && !write_ok {
+    // PR review actions (merge / request-changes / close / preview /
+    // force-merge) require review rights — Admin, the lead tier, or the legacy
+    // Reviewer. Every other write only needs ordinary write rights, so a
+    // member-tier contributor keeps working but cannot merge their own PR.
+    if is_write && !write_gate_ok(user.role, &path) {
         audit_push(
             &app.audit,
             &username,
