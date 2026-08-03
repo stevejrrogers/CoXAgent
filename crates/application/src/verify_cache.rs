@@ -74,26 +74,34 @@ static IN_FLIGHT: LazyLock<Mutex<HashMap<PathBuf, String>>> =
 /// cores, each slower for the company of the others. Only the claimant runs;
 /// the others skip and take the next cycle's cache hit.
 ///
-/// `false` means someone else holds it. Unknown states are never claimed —
-/// with no fingerprint there is nothing to compare, so every runner proceeds
-/// exactly as before.
+/// The claim is per WORK DIR, not per fingerprint. Keying it on the tree state
+/// let two runners through whenever their snapshots differed by a stray mtime —
+/// which, in a directory the agents are actively writing to, is most of the
+/// time. There is one working tree; verifying it twice at once is waste
+/// whatever the second runner thinks it saw.
+///
+/// `false` means someone else holds it.
 #[must_use]
 pub fn claim_verify(work_dir: &Path, fp: Option<&str>) -> bool {
-    let (Some(fp), Ok(mut m)) = (fp, IN_FLIGHT.lock()) else {
+    let Ok(mut m) = IN_FLIGHT.lock() else {
         return true;
     };
-    if m.get(work_dir).map(String::as_str) == Some(fp) {
+    if m.contains_key(work_dir) {
         return false;
     }
-    m.insert(work_dir.to_path_buf(), fp.to_owned());
+    m.insert(work_dir.to_path_buf(), fp.unwrap_or(UNKNOWN).to_owned());
     true
 }
+
+/// Stands in for the fingerprint when the caller could not establish one, so a
+/// claim taken without a tree state can still be released by its holder.
+const UNKNOWN: &str = "\0unknown";
 
 /// Release the claim taken by [`claim_verify`], whatever the outcome — a
 /// failed or timed-out check must not wedge the gate shut forever.
 pub fn release_verify(work_dir: &Path, fp: Option<&str>) {
-    if let (Some(fp), Ok(mut m)) = (fp, IN_FLIGHT.lock()) {
-        if m.get(work_dir).map(String::as_str) == Some(fp) {
+    if let Ok(mut m) = IN_FLIGHT.lock() {
+        if m.get(work_dir).map(String::as_str) == Some(fp.unwrap_or(UNKNOWN)) {
             m.remove(work_dir);
         }
     }
@@ -111,20 +119,37 @@ mod tests {
         assert!(!claim_verify(dir, Some(&fp)), "the others stand aside");
         release_verify(dir, Some(&fp));
         assert!(claim_verify(dir, Some(&fp)), "released, so claimable again");
-        release_verify(dir, Some(&fp));
-        // A different state is a different check.
+        // A runner whose snapshot differs by a stray mtime still waits: there
+        // is one working tree, and one check of it is enough.
         let other = fingerprint("head2", &[]);
-        assert!(claim_verify(dir, Some(&fp)));
-        assert!(claim_verify(dir, Some(&other)));
-        release_verify(dir, Some(&fp));
+        assert!(!claim_verify(dir, Some(&other)));
         release_verify(dir, Some(&other));
+        assert!(
+            !claim_verify(dir, Some(&fp)),
+            "only the holder's own release frees the claim"
+        );
+        release_verify(dir, Some(&fp));
+        assert!(claim_verify(dir, Some(&fp)));
+        release_verify(dir, Some(&fp));
     }
 
     #[test]
-    fn an_unknown_state_never_blocks_a_runner() {
+    fn a_claim_taken_without_a_fingerprint_is_still_released() {
         let dir = Path::new("/w4");
         assert!(claim_verify(dir, None));
+        assert!(!claim_verify(dir, None), "the second runner waits");
+        release_verify(dir, None);
         assert!(claim_verify(dir, None));
+        release_verify(dir, None);
+    }
+
+    #[test]
+    fn work_dirs_do_not_block_each_other() {
+        let (a, b) = (Path::new("/w5"), Path::new("/w6"));
+        assert!(claim_verify(a, None));
+        assert!(claim_verify(b, None), "a different tree is a different check");
+        release_verify(a, None);
+        release_verify(b, None);
     }
 
     #[test]
