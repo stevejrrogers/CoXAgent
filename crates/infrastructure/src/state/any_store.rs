@@ -71,11 +71,13 @@ impl StateStorePort for AnyStateStore {
         worker: &str,
         role: &str,
         ticket: &str,
+        engines: &[String],
+        models: &[String],
         now: &str,
     ) -> Result<(), PortError> {
         match self {
-            Self::Json(s) => s.heartbeat_worker(worker, role, ticket, now).await,
-            Self::Sql(s) => s.heartbeat_worker(worker, role, ticket, now).await,
+            Self::Json(s) => s.heartbeat_worker(worker, role, ticket, engines, models, now).await,
+            Self::Sql(s) => s.heartbeat_worker(worker, role, ticket, engines, models, now).await,
         }
     }
 

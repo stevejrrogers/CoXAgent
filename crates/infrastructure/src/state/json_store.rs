@@ -266,6 +266,8 @@ impl JsonStateStore {
         worker: &str,
         role: &str,
         ticket: &str,
+        engines: &[String],
+        models: &[String],
         now: &str,
     ) -> Result<(), PortError> {
         let lock = acquire_lock(&self.lock_path())?;
@@ -278,6 +280,8 @@ impl JsonStateStore {
             role: role.to_owned(),
             ticket: ticket.to_owned(),
             at: now.to_owned(),
+            engines: engines.to_vec(),
+            models: models.to_vec(),
         });
         let outcome = self.write_coord(&coord);
         drop(lock);
@@ -376,6 +380,8 @@ impl StateStorePort for JsonStateStore {
         worker: &str,
         role: &str,
         ticket: &str,
+        engines: &[String],
+        models: &[String],
         now: &str,
     ) -> Result<(), PortError> {
         let root = self.root.clone();
@@ -385,8 +391,9 @@ impl StateStorePort for JsonStateStore {
             ticket.to_owned(),
             now.to_owned(),
         );
+        let (engines, models) = (engines.to_vec(), models.to_vec());
         tokio::task::spawn_blocking(move || {
-            JsonStateStore { root }.heartbeat_blocking(&worker, &role, &ticket, &now)
+            JsonStateStore { root }.heartbeat_blocking(&worker, &role, &ticket, &engines, &models, &now)
         })
         .await
         .map_err(|e| PortError::Backend(e.to_string()))?

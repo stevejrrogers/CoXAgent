@@ -108,15 +108,60 @@ async fn distributed_coordination_across_two_hubs() {
     let id2 = TicketId::new("CXC-F002").unwrap();
     assert!(hub_b.claim_ticket(&id2, "luffy@b", now).await.unwrap());
 
-    // Worker registry (Redis): both hubs heartbeat, both appear online.
+    // Worker registry (Redis): both hubs heartbeat, both appear online. Each
+    // reports the agent CLIs IT has — the registry is how a hub with no CLI of
+    // its own (the container serving the dashboard) learns what the team can run.
     hub_a
-        .heartbeat_worker("chopper@a", "leader", "CXC-F001", now)
+        .heartbeat_worker(
+            "chopper@a",
+            "leader",
+            "CXC-F001",
+            &["claude".to_owned(), "opencode".to_owned()],
+            // A CUSTOM provider: it exists only in this user's opencode config,
+            // so no built-in list and no other machine can know it.
+            &["bizbrain/DeepSeek-V4-Pro".to_owned()],
+            now,
+        )
         .await
         .unwrap();
     hub_b
-        .heartbeat_worker("luffy@b", "worker", "CXC-F002", now)
+        .heartbeat_worker(
+            "luffy@b",
+            "worker",
+            "CXC-F002",
+            &["gemini".to_owned()],
+            &[],
+            now,
+        )
         .await
         .unwrap();
     let workers = hub_a.workers().await.unwrap();
     assert_eq!(workers.len(), 2, "both teams show online: {workers:?}");
+
+    let engines_of = |who: &str| {
+        workers
+            .iter()
+            .find(|w| w.worker == who)
+            .map(|w| w.engines.clone())
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        engines_of("chopper@a"),
+        vec!["claude".to_owned(), "opencode".to_owned()],
+        "a runner's own engines survive the round trip"
+    );
+    assert_eq!(
+        engines_of("luffy@b"),
+        vec!["gemini".to_owned()],
+        "each runner reports only what IT has, not a merged list"
+    );
+    assert_eq!(
+        workers
+            .iter()
+            .find(|w| w.worker == "chopper@a")
+            .map(|w| w.models.clone())
+            .unwrap_or_default(),
+        vec!["bizbrain/DeepSeek-V4-Pro".to_owned()],
+        "a custom opencode provider reaches the hub only through its own runner"
+    );
 }

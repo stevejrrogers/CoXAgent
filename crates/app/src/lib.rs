@@ -1059,6 +1059,11 @@ async fn run_loop(
     // so every dashboard shows this headless team's current agent.
     let hb_store = Arc::clone(&store);
     let hb_worker = worker.clone();
+    // What THIS machine can actually launch. The hub serving the dashboard may
+    // be a container with no agent CLI at all, so it cannot detect this for us.
+    let hb_engines: Vec<String> = detected_engines().into_iter().map(|(n, _)| n).collect();
+    let hb_models: Vec<String> = detected_models();
+    uc.set_capabilities(hb_engines.clone(), hb_models.clone());
     // Shared live phase + keepalive: a single engine call can run for tens of
     // minutes while the registry TTL is a few minutes, so without a mid-phase
     // refresh a busy operator would drop off the dashboard and look dead.
@@ -1066,16 +1071,30 @@ async fn run_loop(
         Arc::new(Mutex::new(("idle".to_owned(), String::new())));
     {
         let (s, w, phase) = (Arc::clone(&store), hb_worker.clone(), Arc::clone(&phase));
+        let (eng, mdl) = (hb_engines.clone(), hb_models.clone());
         tokio::spawn(async move {
+            // Announce presence at once, before the first sleep: an operator that
+            // took 45s to appear is one the setup wizard has already declared
+            // missing.
+            {
+                let now = coxagent_application::state::now_rfc3339();
+                let _ = s.heartbeat_worker(&w, "idle", "", &eng, &mdl, &now).await;
+            }
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(45)).await;
                 let (role, note) = phase
                     .lock()
                     .map_or_else(|_| ("idle".to_owned(), String::new()), |p| p.clone());
-                if role != "idle" {
-                    let now = coxagent_application::state::now_rfc3339();
-                    let _ = s.heartbeat_worker(&w, &role, &note, &now).await;
-                }
+                // Beat even while idle. This operator is a machine with agent
+                // CLIs on it, and the hub — a container that will never have
+                // one — learns what the team can run only from this registry.
+                // Skipping idle meant an operator waiting for its first Start
+                // was invisible, so the dashboard swore no agent CLI existed
+                // while one sat right here. It also drains queued jobs on its
+                // own 15s poll regardless of Start, so advertising it does not
+                // mislead the force-merge routing.
+                let now = coxagent_application::state::now_rfc3339();
+                let _ = s.heartbeat_worker(&w, &role, &note, &eng, &mdl, &now).await;
             }
         });
     }
@@ -1089,9 +1108,10 @@ async fn run_loop(
             *p = (role.clone(), note.clone());
         }
         let (s, w) = (Arc::clone(&hb_store), hb_worker.clone());
+        let (eng, mdl) = (hb_engines.clone(), hb_models.clone());
         tokio::spawn(async move {
             let now = coxagent_application::state::now_rfc3339();
-            let _ = s.heartbeat_worker(&w, &role, &note, &now).await;
+            let _ = s.heartbeat_worker(&w, &role, &note, &eng, &mdl, &now).await;
         });
     }));
     let operator = worker.clone();

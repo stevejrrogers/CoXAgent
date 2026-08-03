@@ -309,6 +309,9 @@ pub(super) async fn pr_action_ep(
         // queued for IT to execute (the control plane never runs engines when
         // it doesn't have to); the runner's 15s poll picks it up. Only when no
         // runner is alive does the hub fall back to executing inline.
+        // Registration means "a process that drains jobs": a headless operator
+        // beats even while idle, and it polls `drain_jobs` every 15s whether or
+        // not it has been Started, so an idle entry is still a safe route.
         let live_runner = p.store.workers().await.is_ok_and(|w| !w.is_empty());
         if live_runner {
             let queued =

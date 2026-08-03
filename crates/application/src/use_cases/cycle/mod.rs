@@ -140,6 +140,10 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     /// This runner's identity (`account@host`) — recorded as the ticket claim
     /// owner so concurrent runners on a shared backlog never collide.
     worker: String,
+    /// Agent CLIs on this machine (see `set_capabilities`).
+    engines: Vec<String>,
+    /// `provider/model` pairs this machine's opencode can reach.
+    models: Vec<String>,
     /// Last scrum discussion topic — skip duplicate discussions.
     last_discussion_topic: Mutex<String>,
     /// Whether the `sandbox_unsupported` warning has already fired — posted
@@ -174,6 +178,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             forge: None,
             phase: None,
             worker: String::new(),
+            engines: Vec::new(),
+            models: Vec::new(),
             last_discussion_topic: Mutex::new(String::new()),
             sandbox_warned: AtomicBool::new(false),
         }
@@ -183,6 +189,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// owner. Called by `run_forever` from the live operator each cycle.
     pub fn set_worker(&mut self, worker: impl Into<String>) {
         self.worker = worker.into();
+    }
+
+    /// Declare the agent CLIs this machine can launch, so the presence heartbeat
+    /// carries them. Both this and the runner's own heartbeat upsert the SAME
+    /// registry key — leaving it unset here would blank out what the runner
+    /// reported, and the dashboard would flicker back to "no agent CLI".
+    pub fn set_capabilities(&mut self, engines: Vec<String>, models: Vec<String>) {
+        self.engines = engines;
+        self.models = models;
     }
 
     /// Trigger the whole-system architecture review on demand (same work the
@@ -443,7 +458,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // another machine) can list this team as online.
         let _ = self
             .store
-            .heartbeat_worker(&me, if leader { "leader" } else { "worker" }, "", &now)
+            .heartbeat_worker(
+                &me,
+                if leader { "leader" } else { "worker" },
+                "",
+                &self.engines,
+                &self.models,
+                &now,
+            )
             .await;
 
         // Keep the code map fresh so `.coxagent/REPO_MAP.md` reflects the tree

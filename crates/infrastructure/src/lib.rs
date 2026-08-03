@@ -28,7 +28,8 @@ pub use auth::FileAuthService;
 pub use deploy::DockerComposeDeploy;
 pub use docs_store::MongoDocStore;
 pub use engine::{
-    discover, discover_tooling, AnyEngine, ClaudeEngine, DetectedEngine, DetectedTool, MockEngine,
+    discover, discover_opencode_models, discover_tooling, AnyEngine, ClaudeEngine,
+    DetectedEngine, DetectedTool, MockEngine,
     OpencodeEngine, Tooling,
 };
 pub use forge::{GhForge, GlForge};

@@ -110,6 +110,8 @@ impl RedisCoord {
         worker: &str,
         role: &str,
         ticket: &str,
+        engines: &[String],
+        models: &[String],
         now: &str,
     ) -> Result<(), PortError> {
         let mut c = self.conn().await?;
@@ -119,6 +121,8 @@ impl RedisCoord {
             role: role.to_owned(),
             ticket: ticket.to_owned(),
             at: now.to_owned(),
+            engines: engines.to_vec(),
+            models: models.to_vec(),
         })
         .unwrap_or_default();
         redis::cmd("SET")

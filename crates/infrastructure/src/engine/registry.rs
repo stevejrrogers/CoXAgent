@@ -19,6 +19,32 @@ pub fn discover() -> Vec<DetectedEngine> {
     discover_in(&dirs)
 }
 
+/// The `provider/model` pairs this machine's `opencode` can reach, from
+/// `opencode models`. Empty when the CLI is absent or errors.
+///
+/// Only the CLI knows these: a user's custom providers live in their own
+/// opencode config, so the built-in provider list in the settings UI can never
+/// include them, and a hub in a container has no opencode to ask. Reported
+/// through the worker registry with everything else this machine can do.
+#[must_use]
+pub fn discover_opencode_models() -> Vec<String> {
+    let Ok(out) = std::process::Command::new("opencode").arg("models").output() else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        // Every real entry is `provider/model`; anything else is chatter
+        // ("No models configured", an error banner) and must not become a
+        // provider in someone's dropdown.
+        .filter(|l| l.contains('/') && !l.contains(' '))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
 /// Discover known engines by scanning the given directories. Pure over its
 /// inputs, so tests can point it at a temp dir with fake executables.
 #[must_use]

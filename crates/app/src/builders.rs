@@ -254,7 +254,12 @@ pub(crate) async fn build_project(
         };
     let forge_for_handle = forge.clone();
     let concurrency = config.workflow.concurrency.max(1);
-    let handle = Arc::new(RunnerHandle::new());
+    // The agent CLIs on THIS machine travel with the handle so every heartbeat
+    // reports them. A hub in a container has none of its own and must be told.
+    let handle = Arc::new(RunnerHandle::new().with_capabilities(
+        detected_engines().into_iter().map(|(n, _)| n).collect(),
+        detected_models(),
+    ));
 
     // Leader runner: singleton phases (BA, PO, standup, etc.)
     {
@@ -454,6 +459,13 @@ pub(crate) async fn build_storage(
 }
 
 /// Engine CLIs found on PATH, as `(name, path)` for the dashboard.
+/// The `provider/model` pairs this machine's opencode can reach — reported to
+/// the hub so the settings dropdown can offer a user's CUSTOM providers, which
+/// no built-in list knows and no container can detect.
+pub(crate) fn detected_models() -> Vec<String> {
+    coxagent_infrastructure::discover_opencode_models()
+}
+
 pub(crate) fn detected_engines() -> Vec<(String, String)> {
     discover()
         .into_iter()
