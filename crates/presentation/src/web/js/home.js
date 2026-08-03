@@ -223,7 +223,7 @@ function renderSprintPanel(s){
       ${colHtml("In progress","var(--accent2)",prog)}
       ${colHtml("Done","var(--green)",done)}
     </div>
-    <div class="sec" style="margin-top:16px">Up next <span style="font-size:11px;color:var(--dim);font-weight:400">· top of the backlog the PO pulls into the next sprint</span></div>
+    <div class="sec" style="margin-top:16px">Up next <span style="font-size:11px;color:var(--dim);font-weight:400">· top of the backlog the PO pulls into the next sprint — use <b>+ sprint</b> on the <a onclick="setWorkTab('backlog')" style="cursor:pointer;color:var(--accent2)">Backlog tab</a> to pull one into THIS sprint</span></div>
     <div class="panel">${upnext.map(t=>tRow(t,false)).join("")||'<div class="empty">backlog clear — nothing queued</div>'}</div>
     ${velocityHtml(s.sprints||[])}`;
 }
