@@ -173,13 +173,21 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 );
                 let learned = rule_for(&shape, &samples, learn_after);
                 let allow = match (&verdict.lane, &learned) {
-                    // Risk says routine — proceed unless a human reversed one.
-                    (Lane::Auto, Rule::KeepAsking | Rule::AutoApprove { .. }) => {
-                        !matches!(learned, Rule::PreflightFix { .. })
+                    // Risk says routine; or risk says ask but this team
+                    // approves the shape every time — trust the humans over
+                    // the heuristic.
+                    (Lane::Auto, Rule::KeepAsking | Rule::AutoApprove { .. })
+                    | (Lane::Ask, Rule::AutoApprove { .. }) => true,
+                    // A shape rejected twice for the same reason waits for that
+                    // reason to be ADDRESSED — not forever. The rule used to
+                    // block the shape permanently: two rejections for "no
+                    // acceptance criteria" kept every later ticket of that
+                    // shape queued in front of a person even after the BA had
+                    // written the criteria. The pre-flight we actually run is
+                    // the acceptance criteria, so that is what re-opens it.
+                    (Lane::Auto, Rule::PreflightFix { .. }) => {
+                        !ticket.acceptance_criteria().is_empty()
                     }
-                    // Risk says ask, but this team approves the shape every
-                    // time — trust the humans over the heuristic.
-                    (Lane::Ask, Rule::AutoApprove { .. }) => true,
                     _ => false,
                 };
                 if !allow {
