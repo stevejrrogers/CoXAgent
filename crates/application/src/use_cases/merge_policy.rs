@@ -87,6 +87,42 @@ pub fn needs_human_eyes(diff: &str) -> Option<String> {
     ))
 }
 
+/// Paths that are the agents' own workings, never the product: worktrees the
+/// engine creates, state backups, build output, engine config the runner
+/// writes for itself.
+const SCRATCH: &[&str] = &[
+    ".claude/worktrees/",
+    ".claude/settings.local.json",
+    ".gitnexus/",
+    "backups/",
+    "target/",
+    "node_modules/",
+    "cox-opencode.json",
+    "cox-config.json",
+];
+
+/// Whether a diff commits the agents' own scratch, and which path proves it.
+///
+/// Such a PR is wrong by construction, not wrong on judgement: nobody wants a
+/// worktree or a state backup in the product's history, and no review round can
+/// turn it into something they do. It matters because the pollution is what
+/// pushes the diff past the size bound in [`needs_human_eyes`] — so the PR
+/// stops being auto-landable AND stops being auto-closable, and parks forever
+/// waiting for a person to decide something that was never a decision. Closing
+/// it loses nothing: the ticket goes back to the queue and the work is redone
+/// from a clean base.
+#[must_use]
+pub fn commits_scratch(diff: &str) -> Option<String> {
+    diff.lines()
+        .filter(|l| l.starts_with("+++") || l.starts_with("---") || l.starts_with("diff "))
+        .find_map(|l| {
+            SCRATCH
+                .iter()
+                .find(|p| l.contains(*p))
+                .map(|p| (*p).to_owned())
+        })
+}
+
 /// How many senior rescues one ticket may consume before the decision is a
 /// human's. Two, because the first rescue can misread the failure — a spec
 /// rewrite that turns out to hide a design dead end deserves the second look
@@ -173,7 +209,28 @@ pub fn escalation_route(history: &str, spec_gap: bool) -> EscalationRoute {
 
 #[cfg(test)]
 mod merge_guard_tests {
-    use super::{competing_pr, needs_human_eyes};
+    use super::{commits_scratch, competing_pr, needs_human_eyes};
+
+    #[test]
+    fn a_branch_that_committed_agent_scratch_is_named_for_it() {
+        // The live PR this comes from: agent worktrees and state backups
+        // committed, which blew the diff past the size bound — so it could
+        // neither land nor be closed, and sat open for days.
+        let diff = "diff --git a/.claude/worktrees/agent-a26d/x b/.claude/worktrees/agent-a26d/x\n                    +++ b/backups/2026-07-31/spaces.json\n+{}\n";
+        assert_eq!(commits_scratch(diff).as_deref(), Some(".claude/worktrees/"));
+
+        let backups_only = "+++ b/backups/2026-07-31/workspace.json\n+{}\n";
+        assert_eq!(commits_scratch(backups_only).as_deref(), Some("backups/"));
+    }
+
+    #[test]
+    fn ordinary_source_changes_are_not_scratch() {
+        let diff = "diff --git a/crates/app/src/lib.rs b/crates/app/src/lib.rs\n                    +++ b/crates/app/src/lib.rs\n+fn main() {}\n";
+        assert_eq!(commits_scratch(diff), None);
+        // A path merely MENTIONED in an added line is not a committed path.
+        let mention = "+++ b/docs/setup.md\n+ignore backups/ in your clone\n";
+        assert_eq!(commits_scratch(mention), None);
+    }
 
     #[test]
     fn two_prs_for_one_ticket_are_a_race_not_two_fixes() {
