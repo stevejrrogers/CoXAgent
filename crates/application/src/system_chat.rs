@@ -131,6 +131,25 @@ impl SystemChat {
         }
     }
 
+    /// The standing sub-channels every project gets: where the machine
+    /// reports, and where decisions wait. Synthesised like the parent channel
+    /// so a new project has them from its first minute, with the same
+    /// membership (assignment to the project IS membership).
+    pub(crate) const PROJECT_SUBS: &'static [(&'static str, &'static str)] = &[
+        ("agents", "scrum & agent activity"),
+        ("approvals", "what is waiting on a human"),
+    ];
+
+    fn project_sub_channel(p: &ProjectRef, ctx: &ChatContext, suffix: &str, topic: &str) -> Channel {
+        let parent = ChatContext::project_channel_id(p);
+        let mut ch = Self::project_channel(p, ctx);
+        ch.id = format!("{parent}-{suffix}");
+        suffix.clone_into(&mut ch.name);
+        topic.clone_into(&mut ch.topic);
+        ch.parent = parent;
+        ch
+    }
+
     /// Resolve a channel by id against the live context (general, project, or a
     /// stored private channel).
     #[must_use]
@@ -144,6 +163,14 @@ impl SystemChat {
             .find(|p| ChatContext::project_channel_id(p) == id)
         {
             return Some(Self::project_channel(p, ctx));
+        }
+        for p in &ctx.projects {
+            let parent = ChatContext::project_channel_id(p);
+            for (suffix, topic) in Self::PROJECT_SUBS {
+                if id == format!("{parent}-{suffix}") {
+                    return Some(Self::project_sub_channel(p, ctx, suffix, topic));
+                }
+            }
         }
         self.channels.iter().find(|c| c.id == id).cloned()
     }
@@ -172,6 +199,9 @@ impl SystemChat {
             let ch = Self::project_channel(p, ctx);
             if is_admin || ch.can_view(user) {
                 out.push(ch);
+                for (suffix, topic) in Self::PROJECT_SUBS {
+                    out.push(Self::project_sub_channel(p, ctx, suffix, topic));
+                }
             }
         }
         for c in &self.channels {
@@ -517,11 +547,13 @@ mod tests {
         let c = ctx();
         let alice = sc.channels_for("alice", &c);
         let ids: Vec<_> = alice.iter().map(|c| c.id.as_str()).collect();
-        assert_eq!(ids, vec!["general", "cxc"]);
+        // A project brings its standing sub-channels with it: the room, plus
+        // where the machine reports and where decisions wait.
+        assert_eq!(ids, vec!["general", "cxc", "cxc-agents", "cxc-approvals"]);
         // bob only sees general.
         assert_eq!(sc.channels_for("bob", &c).len(), 1);
-        // root (admin) sees general + cxc.
-        assert_eq!(sc.channels_for("root", &c).len(), 2);
+        // root (admin) sees general + the project and its subs.
+        assert_eq!(sc.channels_for("root", &c).len(), 4);
     }
 
     #[test]

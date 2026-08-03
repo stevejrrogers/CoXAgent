@@ -477,7 +477,9 @@
   .chatside{display:none;flex:1;min-height:0;flex-direction:column;overflow:hidden;margin-top:4px}
   .chatside .chanrail-hd{padding:6px 4px 8px}
   .chatside .chanlist{overflow-y:auto;padding:2px 0}
-  .chatside #chan-list{flex:0 1 auto;max-height:38vh}
+  /* Superseded below: an id-scoped max-height capped the channel list while
+     `overflow:visible` kept painting it, so the DM section rendered on top.
+     The rail scrolls as one surface instead. */
   .chatside #dm-list{flex:1 1 auto;min-height:70px}
   .dmsearch{display:flex;align-items:center;gap:6px;margin:2px 0 6px;padding:6px 9px;background:var(--card2);border:1px solid var(--border2);border-radius:8px;color:var(--muted);font-size:12px}
   .dmsearch input{flex:1;min-width:0;background:transparent;border:none;color:var(--text);font-family:inherit;font-size:12.5px;outline:none}
@@ -1517,3 +1519,77 @@ textarea.np-in{resize:vertical;line-height:1.5}
 .np-sel{position:relative}
 .np-sel select{appearance:none;-webkit-appearance:none;padding-right:32px;cursor:pointer}
 .np-sel::after{content:"";position:absolute;right:13px;top:50%;width:7px;height:7px;border-right:1.5px solid var(--muted);border-bottom:1.5px solid var(--muted);transform:translateY(-70%) rotate(45deg);pointer-events:none}
+
+  /* ── Chat rail: sections that fold, counts that inform, rows that breathe ──
+     The month calendar used to eat half the rail for a grid of dead squares;
+     meetings now show only what is next. */
+  .chatside .chanrail-hd{display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;
+    font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--dim);
+    padding:8px 6px 6px;border-radius:8px}
+  .chatside .chanrail-hd:hover{color:var(--muted);background:var(--card2)}
+  .chatside .railchev{font-size:13px;transition:transform .15s;flex-shrink:0}
+  .chatside .chanrail-hd.folded .railchev{transform:rotate(-90deg)}
+  .chatside .railcount{font-size:10.5px;font-weight:600;color:var(--dim);background:var(--card2);
+    border-radius:6px;padding:1px 6px;letter-spacing:0}
+  /* An empty count is a stray pill that reads as a dash — hide it. */
+  .chatside .railcount:empty{display:none}
+  /* Sections stack top-down; only the two lists may scroll, and the rail
+     never leaves a hole between DMs and Meetings. */
+  /* NO `display` here: the rail is shown only by `body.mode-chat .chatside`.
+     Forcing display:flex leaked the channel tree into Manage and Space. */
+  .chatside{flex-direction:column;min-height:0}
+  /* Lists size to content and scroll only when they must — an empty DM list
+     must not stretch and push Meetings to the floor. `flex:0 0 auto` beats
+     the generic `.chanlist` rule that made them grow. */
+  /* ONE scroll for the whole rail: two independent scroll boxes meant the
+     channel list and the DM list each hid content behind their own bar.
+     `flex:none` is load-bearing — the base `.chanlist` rule sets
+     `flex:1 1 0%`, which collapses the list to zero height while
+     `overflow:visible` keeps painting it, so the DM section rendered ON TOP
+     of the channels. Size to content, always. */
+  .chatside{overflow-y:auto;overflow-x:hidden}
+  .chatside .chanlist,
+  .chatside #chan-list,
+  .chatside #dm-list{flex:none!important;height:auto!important;min-height:0!important;
+    max-height:none!important;overflow:visible!important}
+  /* Sub-channels: indented, quieter, with a hairline that ties them to the
+     project above. */
+  .chatside .chanitem.subchan{position:relative}
+  .chatside .chanitem.subchan .channm{color:var(--muted);font-size:12.5px}
+  .chatside .chanitem.subchan.on .channm,
+  .chatside .chanitem.subchan.unread .channm{color:var(--text)}
+  .chatside .subline{position:absolute;left:14px;top:0;bottom:0;width:1px;background:var(--border)}
+  .chatside .chanitem i.ti-folder{color:var(--accent2);opacity:.9}
+  /* Everything sits at the top; the leftover space belongs to nobody. */
+  .chatside::after{content:"";flex:1 0 auto;min-height:8px}
+  .chatside .chanrail-actions{margin-left:auto;opacity:0;transition:opacity .12s}
+  .chatside .chanrail-hd:hover .chanrail-actions{opacity:1}
+  .chatside .chanitem{border-radius:8px;padding:5px 8px}
+  .chatside .chanitem.unread .channm{font-weight:700;color:var(--text)}
+  .chatside .chanitem.on{position:relative}
+  .chatside .chanitem.on::before{content:"";position:absolute;left:-2px;top:6px;bottom:6px;width:3px;
+    border-radius:2px;background:var(--accent2)}
+  .chatside .chanitem i.ti-lock{opacity:.45}
+  .meet-upnext{display:flex;flex-direction:column;gap:4px;padding:2px 2px 8px}
+  .meet-up{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px;cursor:pointer;font-size:12.5px}
+  .meet-up:hover{background:var(--card2)}
+  .meet-up .mu-time{font-variant-numeric:tabular-nums;color:var(--muted);font-size:11.5px;flex-shrink:0}
+  .meet-up .mu-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .meet-up .mu-live{width:7px;height:7px;border-radius:50%;background:var(--red);flex-shrink:0;
+    box-shadow:0 0 0 3px color-mix(in srgb,var(--red) 22%,transparent)}
+  .meet-up .mu-join{margin-left:auto;font-size:11px;font-weight:700;color:var(--accent2);flex-shrink:0}
+  .meet-empty{padding:6px 8px;font-size:12px;color:var(--dim)}
+
+  /* Row actions FLOAT over the row instead of reserving width: three hidden
+     buttons were still stealing ~70px, so "privacy-probe2" rendered as
+     "privacy-pr…" beside an empty gutter. They fade in on hover, over a
+     short gradient so the name slides under them cleanly. */
+  .chatside .chanitem{position:relative;padding-right:10px}
+  .chatside .chanitem .chansub,
+  .chatside .chanitem .chancog{position:absolute;top:50%;transform:translateY(-50%);margin:0;z-index:2}
+  .chatside .chanitem .chancog{right:6px}
+  .chatside .chanitem .chansub{right:30px}
+  .chatside .chanitem .chansub + .chansub{right:54px}
+  .chatside .chanitem:hover::after{content:"";position:absolute;right:0;top:0;bottom:0;width:86px;
+    background:linear-gradient(90deg,transparent,var(--card2) 42%);pointer-events:none;border-radius:8px;z-index:1}
+  .chatside .chanitem .channm{max-width:100%}

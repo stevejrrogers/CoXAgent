@@ -51,15 +51,38 @@ fn compose(root: &Path, args: &[&str]) -> std::process::Output {
         .unwrap_or_else(|e| panic!("`docker compose {}` failed to spawn: {e}", args.join(" ")))
 }
 
-/// Tears the stack down even when the test panics, so a failing run never
+/// Exclusive, ephemeral ownership of the stack for one run: brought up here,
+/// torn down when this value drops, even on panic, so a failing run never
 /// leaves a container holding the host port.
 struct Stack {
     root: PathBuf,
 }
 
+impl Stack {
+    /// Claims the stack, tearing down anything already up under this compose
+    /// project first.
+    ///
+    /// `Drop` only cleans up after *this* run. A stack left behind by anything
+    /// that skipped it — a `docker compose up -d --build` run by hand while
+    /// debugging, a `kill -9`'d test — keeps holding host port 8101, and the
+    /// `up` below then either fails to bind or silently reuses the stale
+    /// containers. The test would go on to probe an image built from someone
+    /// else's tree and report its health as this commit's. Teardown before
+    /// `up`, symmetric with `Drop`, makes each run start from nothing.
+    fn claim(root: PathBuf) -> Self {
+        let stack = Self { root };
+        stack.down();
+        stack
+    }
+
+    fn down(&self) {
+        let _ = compose(&self.root, &["down", "-v"]);
+    }
+}
+
 impl Drop for Stack {
     fn drop(&mut self) {
-        let _ = compose(&self.root, &["down", "-v"]);
+        self.down();
     }
 }
 
@@ -79,7 +102,7 @@ async fn probe(client: &reqwest::Client) -> Option<u16> {
 #[ignore = "builds a release image and binds host port 8101; run with --ignored"]
 async fn compose_stack_comes_up_and_answers_on_the_published_port() {
     let root = repo_root();
-    let stack = Stack { root: root.clone() };
+    let stack = Stack::claim(root.clone());
 
     // The exact command docker-compose.yml documents. A compile error in the
     // builder stage surfaces here as a non-zero exit — the original bug.

@@ -219,6 +219,22 @@ pub struct ProjectState {
     /// forever. Cleared when a human edits the ticket.
     #[serde(default)]
     pub ticket_fail_attempts: std::collections::BTreeMap<String, u32>,
+    /// Stale-PR sweep memory: PR number → rescue attempts already spent, so
+    /// the policy rescues once and closes on the second pass, never loops.
+    #[serde(default)]
+    pub pr_rescue_attempts: std::collections::BTreeMap<String, u32>,
+    /// Every human approval decision, for the adaptive gate to learn from
+    /// (docs/ADAPTIVE_APPROVAL.md).
+    #[serde(default)]
+    pub approval_samples: Vec<crate::use_cases::approval_memory::ApprovalSample>,
+    /// Auto-approved tickets still inside their undo window: ticket id → the
+    /// RFC3339 time the window opened.
+    #[serde(default)]
+    pub auto_approved_at: std::collections::BTreeMap<String, String>,
+    /// Shapes a human explicitly asked to be asked about again — a manual
+    /// override that outranks anything learned.
+    #[serde(default)]
+    pub ask_again_shapes: Vec<String>,
     /// Per-ticket work journal: what past attempts tried and where they got
     /// stuck, fed into the next attempt's prompt so a retried ticket resumes
     /// from prior findings instead of rediscovering them (bounded per ticket;
@@ -326,6 +342,10 @@ impl Default for ProjectState {
             ticket_evidence: std::collections::BTreeMap::new(),
             drain_notice_sprint: 0,
             ticket_fail_attempts: std::collections::BTreeMap::new(),
+            pr_rescue_attempts: std::collections::BTreeMap::new(),
+            approval_samples: Vec::new(),
+            auto_approved_at: std::collections::BTreeMap::new(),
+            ask_again_shapes: Vec::new(),
             ticket_journal: std::collections::BTreeMap::new(),
             ticket_failures: std::collections::BTreeMap::new(),
             questions: Vec::new(),
@@ -453,6 +473,7 @@ impl ProjectState {
             asked_at: now_rfc3339(),
             answered_at: String::new(),
             forwarded: false,
+            escalated: false,
         });
         // Keep the log bounded; answered questions age out before open ones.
         while self.questions.len() > 40 {
@@ -596,12 +617,13 @@ impl ProjectState {
     }
 
     /// Record (or replace) the SA agent's latest review verdict for a PR.
-    pub fn upsert_review(&mut self, number: u64, decision: &str, summary: &str) {
+    pub fn upsert_review(&mut self, number: u64, decision: &str, summary: &str, head_sha: &str) {
         let review = PrReview {
             number,
             decision: decision.to_owned(),
             summary: summary.to_owned(),
             at: now_rfc3339(),
+            head_sha: head_sha.to_owned(),
         };
         if let Some(r) = self.reviews.iter_mut().find(|r| r.number == number) {
             *r = review;

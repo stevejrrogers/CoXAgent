@@ -18,18 +18,72 @@ async function loadChannels(){
   if(!CHANNELS.some(c=>c.id===CURCHAN))CURCHAN="general";
   renderChannels();
 }
+// Rail sections fold and remember — a long DM list should never bury the
+// meetings below it.
+const RAIL_FOLD=JSON.parse(localStorage.getItem("coxrailfold")||"{}");
+function toggleRailSection(key){
+  RAIL_FOLD[key]=!RAIL_FOLD[key];
+  localStorage.setItem("coxrailfold",JSON.stringify(RAIL_FOLD));
+  applyRailFold();
+}
+function applyRailFold(){
+  const map={chan:["chev-chan","chan-list"],dm:["chev-dm","dm-list"],meet:["chev-meet","meet-upnext"]};
+  for(const k in map){
+    const [chev,body]=map[k];
+    const c=document.getElementById(chev),b=document.getElementById(body);
+    if(!c||!b)continue;
+    const folded=!!RAIL_FOLD[k];
+    b.style.display=folded?"none":"";
+    c.parentElement.classList.toggle("folded",folded);
+  }
+}
+function railCount(id,n){const el=document.getElementById(id);if(el)el.textContent=n||"";}
+
+// Pins are a personal ordering, kept on this device — a shared "pin" would
+// be one person rearranging everyone's rail.
+function railPins(){try{return new Set(JSON.parse(localStorage.getItem("coxpins")||"[]"));}catch(e){return new Set();}}
+function togglePin_(id){
+  const p=railPins();
+  if(p.has(id))p.delete(id);else p.add(id);
+  localStorage.setItem("coxpins",JSON.stringify([...p]));
+  renderChannels();renderDMList();
+}
+
 function renderChannels(){
   const box=document.getElementById("chan-list");if(!box)return;
-  // DMs live in the DIRECT MESSAGES section below — never in the channel list.
-  box.innerHTML=CHANNELS.filter(c=>(c.kind||"")!=="dm").map(c=>{
+  // DMs live in their own section; everything else renders as a TREE so a
+  // project's rooms read as belonging to it instead of four look-alike rows
+  // called "agents" and "approvals".
+  const all=CHANNELS.filter(c=>(c.kind||"")!=="dm");
+  const parentOf=c=>c.parent||"";
+  const kids=id=>all.filter(c=>parentOf(c)===id);
+  const roots=all.filter(c=>!parentOf(c));
+  const row=(c,depth)=>{
     const kind=c.kind||(c.id==="general"?"general":"private");
     const u=UNREAD[c.id]||0;
-    const icon=kind==="private"?"lock":"hash";
-    const sub=(c.parent||"")?' sub':'';
-    return `<div class="chanitem${c.id===CURCHAN?' on':''}${u?' unread':''}${sub}" role="button" tabindex="0" aria-label="Channel ${esc(chanDisplay(c))}${u?', '+u+' unread':''}" onkeydown="rowKey(event)" onclick="selectChannel('${esc(c.id)}')">
-      <i class="ti ti-${icon}"></i><span class="channm">${esc(chanDisplay(c))}</span>${u?`<span class="chanbadge">${u>99?'99+':u}</span>`:''}
+    // A sub-channel is a ROOM, not a folder — only the project root gets the
+    // folder glyph, its children read as ordinary channels.
+    const icon=kind==="private"?"lock":(kind==="project"&&!depth?"folder":"hash");
+    const pad=8+depth*14;
+    const children=kids(c.id);
+    const label=depth?esc(c.name||c.id):esc(chanDisplay(c));
+    return `<div class="chanitem${c.id===CURCHAN?' on':''}${u?' unread':''}${depth?' subchan':''}" role="button" tabindex="0"
+        style="padding-left:${pad}px" aria-label="Channel ${label}${u?', '+u+' unread':''}"
+        onkeydown="rowKey(event)" onclick="selectChannel('${esc(c.id)}')">
+      ${depth?'<span class="subline"></span>':''}<i class="ti ti-${icon}"></i><span class="channm">${label}</span>${u?`<span class="chanbadge">${u>99?'99+':u}</span>`:''}
       <button class="chansub" title="New sub-channel here" onclick="event.stopPropagation();createChannel('${esc(c.id)}')"><i class="ti ti-plus"></i></button>
-      <button class="chancog" title="Channel settings" onclick="event.stopPropagation();openChannelSettings('${esc(c.id)}')"><i class="ti ti-settings"></i></button></div>`;}).join("");
+      <button class="chansub" title="${pin.has(c.id)?'Unpin':'Pin to top'}" onclick="event.stopPropagation();togglePin_('${esc(c.id)}')"><i class="ti ti-pin${pin.has(c.id)?'-filled':''}"></i></button>
+      <button class="chancog" title="Channel settings" onclick="event.stopPropagation();openChannelSettings('${esc(c.id)}')"><i class="ti ti-settings"></i></button></div>`
+      + children.map(k=>row(k,depth+1)).join("");
+  };
+  // Order: #general (the room everyone shares), then anything the user
+  // pinned, then project rooms (where the work is), then the rest.
+  const pin=railPins();
+  const rank=c=>c.id==="general"?0:(pin.has(c.id)?1:(c.kind==="project"?2:3));
+  const order=[...roots].sort((a,b)=>rank(a)-rank(b));
+  box.innerHTML=order.map(c=>row(c,0)).join("");
+  railCount("count-chan",all.length);
+  applyRailFold();
   updateChannelBell();
 }
 // Keyboard activation for role="button" list rows (channels, DMs).
@@ -181,7 +235,12 @@ function renderChannelSettings(){
       ${isGeneral?'<div class="msub">#general is always open: a team needs one room nobody can be shut out of.</div>':''}
       <div class="fr" style="margin-top:14px"><span class="lbl">Topic</span>
         <input id="chset-topic" value="${esc(ch.topic||"")}" placeholder="what this channel is for" style="flex:1"
-          onchange="saveChannelSettings({topic:this.value})"></div>`;
+          onchange="saveChannelSettings({topic:this.value})"></div>
+      ${(ch.id==="general"||ch.id==="agents")?"":`
+      <div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--border)">
+        <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Deleting removes the channel and its sub-channels for everyone.</div>
+        <button class="tk-btn danger" onclick="deleteChannel('${esc(ch.id)}')"><i class="ti ti-trash"></i> Delete channel</button>
+      </div>`}`;
   } else if(CHSET.tab==="permissions"){
     box.innerHTML=`
       <label class="coxmodal-toggle">
@@ -203,6 +262,18 @@ function renderChannelSettings(){
       <button class="save pf-btn" style="margin-top:12px" onclick="inviteToSettingsChannel()"><i class="ti ti-user-plus"></i> Invite someone</button>`;
   }
 }
+async function deleteChannel(id){
+  const ok=await coxModal({title:"Delete #"+id,message:"Xoá channel này và mọi sub-channel của nó? Không hoàn tác được.",confirmText:"Delete"});
+  if(!ok)return;
+  try{
+    const r=await fetch("/api/chat/channels/"+encodeURIComponent(id),{method:"DELETE"});
+    if(!r.ok){toasty(await r.text(),"err");return;}
+    close_("ov-chset");CHSET=null;
+    if(CURCHAN===id)selectChannel("general");
+    await loadChannels();toasty("Channel deleted","ok");
+  }catch(e){toasty("Delete failed","err");}
+}
+
 async function saveChannelSettings(patch){
   if(!CHSET)return;
   try{
@@ -455,16 +526,40 @@ function renderDMList(){
   const curOther=(cur.kind==="dm")?(cur.members||[]).find(x=>x!==me):null;
   let users=(MEMBERS||[]).filter(u=>u.username!==me);
   if(q)users=users.filter(u=>u.username.toLowerCase().includes(q)||(u.name||"").toLowerCase().includes(q));
-  // Online first, then alphabetical.
-  users.sort((a,b)=>(online.has(b.username)-online.has(a.username))||(a.name||a.username).localeCompare(b.name||b.username));
-  box.innerHTML=users.length?users.map(u=>{
+  // Dedupe by username: two accounts whose DISPLAY names differ only by case
+  // ("choper" vs "Chopper") used to render as two identical-looking rows.
+  const seen=new Set();
+  users=users.filter(u=>{const k=(u.username||"").toLowerCase();if(seen.has(k))return false;seen.add(k);return true;});
+  // Unread first, then online, then recency of the DM, then name.
+  const dmUnread=u=>{const ch=(CHANNELS||[]).find(c=>c.kind==="dm"&&(c.members||[]).includes(u.username));return ch?(UNREAD[ch.id]||0):0;};
+  const dmLast=u=>{const ch=(CHANNELS||[]).find(c=>c.kind==="dm"&&(c.members||[]).includes(u.username));return ch&&ch.last_at?Date.parse(ch.last_at)||0:0;};
+  const pinned=railPins();
+  const dmChanId=u=>{const ch=(CHANNELS||[]).find(c=>c.kind==="dm"&&(c.members||[]).includes(u.username));return ch?ch.id:"dm:"+u.username;};
+  users.sort((a,b)=>(pinned.has(dmChanId(b))-pinned.has(dmChanId(a)))
+    ||(dmUnread(b)>0)-(dmUnread(a)>0)
+    ||(online.has(b.username)-online.has(a.username))
+    ||(dmLast(b)-dmLast(a))
+    ||(a.name||a.username).localeCompare(b.name||b.username));
+  // A rail is not a directory: show the people you actually talk to.
+  const RAIL_DM_MAX=8;
+  const shown=users.slice(0,RAIL_DM_MAX);
+  const hidden=users.length-shown.length;
+  box.innerHTML=shown.length?shown.map(u=>{
     const on=online.has(u.username);const active=curOther===u.username;
     const p=PROFILES[u.username]||{};
     const av=p.avatar?`<span class="dmav" style="padding:0;overflow:hidden"><img src="${esc(p.avatar)}" style="width:100%;height:100%;object-fit:cover;border-radius:inherit"><span class="dmpres${on?' on':''}"></span></span>`
       :`<span class="dmav" style="background:${userColor(u.username)}">${esc((u.name||u.username).slice(0,2).toUpperCase())}<span class="dmpres${on?' on':''}"></span></span>`;
-    return `<div class="chanitem dmitem${active?' on':''}" role="button" tabindex="0" aria-label="Direct message ${esc(u.name||u.username)}" onkeydown="rowKey(event)" onclick="openDM('${esc(u.username)}')" title="@${esc(u.username)}${p.status_text?' · '+esc(p.status_text):''}">
-      ${av}<span class="channm">${esc(u.name||u.username)}</span>${statusChip(u.username)}</div>`;
-  }).join(""):'<div class="dm-empty">No teammates yet</div>';
+    const un=dmUnread(u);
+    // Two people whose display names collide read as duplicates — show the
+    // username underneath so the rail stays unambiguous.
+    const dupName=shown.filter(x=>(x.name||x.username).toLowerCase()===(u.name||u.username).toLowerCase()).length>1;
+    const sub=dupName?`<span style="font-size:10.5px;color:var(--dim);margin-left:4px">@${esc(u.username)}</span>`:"";
+    return `<div class="chanitem dmitem${active?' on':''}${un?' unread':''}" role="button" tabindex="0" aria-label="Direct message ${esc(u.name||u.username)}${un?', '+un+' unread':''}" onkeydown="rowKey(event)" onclick="openDM('${esc(u.username)}')" title="@${esc(u.username)}${p.status_text?' · '+esc(p.status_text):''}">
+      ${av}<span class="channm">${esc(u.name||u.username)}</span>${sub}${statusChip(u.username)}${un?`<span class="chanbadge">${un>99?'99+':un}</span>`:''}
+      <button class="chansub" title="${pinned.has(dmChanId(u))?'Unpin':'Pin to top'}" onclick="event.stopPropagation();togglePin_('${esc(dmChanId(u))}')"><i class="ti ti-pin${pinned.has(dmChanId(u))?'-filled':''}"></i></button></div>`;
+  }).join("")+(hidden>0?`<div class="chanitem" role="button" tabindex="0" style="color:var(--dim);font-size:12px" onclick="openChatSearch()">+${hidden} more — search people</div>`:""):'<div class="dm-empty">No teammates yet</div>';
+  railCount("count-dm",users.length);
+  applyRailFold();
 }
 // ── @mention autocomplete ───────────────────────────────────────────────────
 let MENTION={open:false,items:[],sel:0,start:-1};
@@ -717,7 +812,7 @@ function callCurrent(video){
 let MEETINGS=[]; let MEET={id:null,pcs:{},streams:{},local:null,meta:null,screen:null};
 let MEETRING=null; // pending ring {meeting}
 let MEET_CAL={y:null,m:null,sel:null}; // selected date YYYY-MM-DD
-async function loadMeetings(){try{MEETINGS=await(await fetch("/api/meetings")).json();}catch(e){MEETINGS=[];}renderMeetCal();}
+async function loadMeetings(){try{MEETINGS=await(await fetch("/api/meetings")).json();}catch(e){MEETINGS=[];}renderMeetUpNext();try{renderMeetCal();}catch(e){}}
 function meetWhen(m){const d=new Date(m.start);const today=new Date().toDateString()===d.toDateString();
   const t=d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
   return today?t:d.toLocaleDateString([],{month:"short",day:"numeric"})+" "+t;}
@@ -726,6 +821,37 @@ function meetingCounts(){const m=new Map();MEETINGS.forEach(mt=>{
   const d=new Date(mt.start).toISOString().slice(0,10);
   if(new Date(mt.start).getTime()+mt.duration_min*60000>Date.now())m.set(d,(m.get(d)||0)+1);
 });return m;}
+// The rail shows what is NEXT, not a month of empty squares. The full month
+// lives in the Calendar view, one click away.
+function renderMeetUpNext(){
+  const el=document.getElementById("meet-upnext");if(!el)return;
+  const now=Date.now();
+  const up=(MEETINGS||[])
+    .filter(m=>!m.cancelled)
+    .map(m=>({m,start:Date.parse(m.start)||0}))
+    .filter(x=>x.start+60*60*1000>now)      // keep a meeting visible while it runs
+    .sort((a,b)=>a.start-b.start)
+    .slice(0,3);
+  railCount("count-meet",(MEETINGS||[]).filter(m=>!m.cancelled).length);
+  if(!up.length){
+    el.innerHTML='<div class="meet-empty">No meetings scheduled · <span style="color:var(--accent2);cursor:pointer" onclick="openMeetModal()">book one</span></div>';
+    applyRailFold();return;
+  }
+  el.innerHTML=up.map(({m,start})=>{
+    const d=new Date(start);
+    const today=d.toDateString()===new Date().toDateString();
+    const when=today?d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})
+                    :d.toLocaleDateString([],{weekday:"short"})+" "+d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
+    const live=meetLive(m);
+    const n=(m.participants||[]).length;
+    return `<div class="meet-up" onclick="openMeeting('${esc(m.id)}')" title="${esc(m.title)} · ${n} người">
+      ${live?'<span class="mu-live"></span>':`<span class="mu-time">${esc(when)}</span>`}
+      <span class="mu-title">${esc(m.title)}</span>
+      ${live?`<span class="mu-join" onclick="event.stopPropagation();joinMeeting('${esc(m.id)}')">Join</span>`:`<span class="mu-time">${n}👤</span>`}</div>`;
+  }).join("");
+  applyRailFold();
+}
+
 function renderMeetCal(){const el=document.getElementById("meet-cal");if(!el)return;
   const dl=document.getElementById("meet-daylist");
   const now=new Date();const counts=meetingCounts();
@@ -1677,6 +1803,14 @@ async function showTicket(id){
       <div style="display:flex;gap:6px;align-items:center">
         ${["high","medium","low"].map(p=>`<span onclick="setPriority('${t.id}','${p}')" style="cursor:pointer;font-size:11px;padding:3px 10px;border-radius:7px;font-weight:600;${t.priority===p?`background:var(--accentbg);color:var(--accent2)`:'background:var(--card2);color:var(--muted)'}">${p}</span>`).join("")}
         <span style="color:var(--dim);font-size:12px;margin-left:6px">· ${esc(t.complexity)}${t.has_ui?' · UI':''}</span></div></div>
+    <div class="mrow"><span class="lbl">Assignee</span>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        ${t.assignee?`<span class="tk" style="background:var(--accentbg);color:var(--accent2)"><i class="ti ti-user"></i> @${esc(t.assignee)}</span>
+          <button class="tk-btn" style="padding:4px 10px;font-size:11px" onclick="assignTicket('${t.id}','')"><i class="ti ti-robot"></i> Return to agents</button>`
+        :`<span style="color:var(--dim);font-size:12px">agents (pool)</span>
+          <select id="tk-assign-sel" style="background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:7px;padding:4px 8px;font-size:12px"><option value="">choose person…</option></select>
+          <button class="tk-btn" style="padding:4px 10px;font-size:11px" onclick="assignTicket('${t.id}',document.getElementById('tk-assign-sel').value)"><i class="ti ti-user-plus"></i> Assign</button>`}
+      </div></div>
     <div class="mrow"><span class="lbl">Blocked by</span>${depChips(t.depends_on)}</div>
     <div class="mrow"><span class="lbl">Blocks</span>${depChips((STATE.tickets||[]).filter(x=>(x.depends_on||[]).includes(t.id)).map(x=>x.id))}</div>
     <div class="mrow" style="display:block"><span class="lbl">Description</span><div class="doc-body md" style="margin-top:7px;color:var(--muted);line-height:1.6;font-size:13px">${t.description?mdRender(t.description):'—'}</div></div>
@@ -1688,12 +1822,30 @@ async function showTicket(id){
   h+=`<div class="tk-actions">
     <button class="tk-btn" onclick="editTicket('${t.id}')"><i class="ti ti-edit"></i> Edit</button>
     ${canWork?`<button class="tk-btn go" onclick="workNext('${t.id}')"><i class="ti ti-player-play-filled"></i> Work on this next</button>`:''}
+    ${(t.status==="pending"&&tech)?`<button class="tk-btn go" onclick="humanGate('${t.id}','ready')"><i class="ti ti-checks"></i> Approve → Ready</button>`:''}
+    ${t.status==="fixed"?`<button class="tk-btn go" onclick="humanGate('${t.id}','verify')"><i class="ti ti-shield-check"></i> Mark Verified</button>`:''}
     ${(t.status==="pending"||t.status==="open")?`<button class="tk-btn danger" onclick="rejectTicket('${t.id}')"><i class="ti ti-ban"></i> Reject</button>`:''}
   </div>`;
   h+=`<div class="mrow" style="display:block;border:none;margin-top:6px"><span class="lbl">Comments</span><div id="tk-comments" style="margin-top:8px">${'<div class="empty" style="padding:8px">loading…</div>'}</div>
     <div class="tkc-wrap">${mdToolbar('tkc-input')}<div class="tkc-compose"><input id="tkc-input" placeholder="Add a comment…  (**markdown** · Enter to post · @ to mention)" onkeydown="if(!imeEnter(event)&&event.key==='Enter')postTicketComment('${t.id}')"><button class="pri" onclick="postTicketComment('${t.id}')"><i class="ti ti-send"></i></button></div></div></div>`;
   body.innerHTML=h;
+  fillAssignSelect();
   renderTicketComments(t.id);}
+async function fillAssignSelect(){
+  const sel=document.getElementById("tk-assign-sel");if(!sel)return;
+  try{const members=await(await fetch(api("/members"))).json();
+    for(const m of (members||[])){const o=document.createElement("option");o.value=m.username||m;o.textContent="@"+(m.username||m);sel.appendChild(o);}
+  }catch(e){}}
+async function assignTicket(id,user){
+  try{const r=await fetch(api("/ticket/"+encodeURIComponent(id)+"/assign"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:user||""})});
+    if(!r.ok)toasty(await r.text(),"err");else toasty(user?("Assigned to @"+user):"Returned to agents","ok");
+  }catch(e){}
+  showTicket(id);}
+async function humanGate(id,action){
+  try{const r=await fetch(api("/ticket/"+encodeURIComponent(id)+"/"+action),{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
+    if(!r.ok)toasty(await r.text(),"err");else toasty(action==="ready"?(id+" → Ready"):(id+" verified"),"ok");
+  }catch(e){}
+  showTicket(id);}
 async function rejectTicket(id){try{await fetch(api("/ticket/"+id+"/reject"),{method:"POST"});close_("ov-ticket");}catch(e){}}
 async function approveCost(id){try{await fetch(api("/ticket/"+id+"/approve-cost"),{method:"POST"});toasty("Approved — agents may run "+id,"ok");showTicket(id);}catch(e){toasty("Approve failed","err");}}
 function editTicket(id){const t=(STATE.tickets||[]).find(x=>x.id===id);if(!t)return;

@@ -355,15 +355,32 @@ impl AuthPort for FileAuthService {
     }
 
     async fn user_for(&self, token: &str) -> Option<AuthUser> {
-        let mut sessions = self.sessions.lock().ok()?;
-        let session = sessions.get(token)?;
-        if session.expires <= now_unix() {
-            sessions.remove(token);
-            drop(sessions);
-            self.persist_sessions();
-            return None;
-        }
-        Some(session.user.clone())
+        let username = {
+            let mut sessions = self.sessions.lock().ok()?;
+            let session = sessions.get(token)?;
+            if session.expires <= now_unix() {
+                sessions.remove(token);
+                drop(sessions);
+                self.persist_sessions();
+                return None;
+            }
+            session.user.username.clone()
+        };
+        // Resolve the user FRESH from the store on every request. The session
+        // used to carry a login-time snapshot, so a role promotion or a
+        // project-membership grant only took effect after the person logged
+        // out and back in — an admin adds a member, the member still gets 403,
+        // and both stare at a correct-looking config (found live in the hybrid
+        // role-play test). Deleted users lose their sessions the same way.
+        let users = self.users.lock().ok()?;
+        let stored = users.iter().find(|u| u.username == username)?;
+        Some(AuthUser {
+            username: stored.username.clone(),
+            name: stored.name.clone(),
+            email: stored.email.clone(),
+            role: stored.role,
+            projects: stored.projects.clone(),
+        })
     }
 
     async fn logout(&self, token: &str) {

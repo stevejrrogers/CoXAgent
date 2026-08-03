@@ -234,6 +234,10 @@ pub struct AgentQuestion {
     /// A second forward would be two roles passing it back and forth.
     #[serde(default)]
     pub forwarded: bool,
+    /// Whether the SLA escalation for a human-addressed question has fired —
+    /// once: repeated escalation is just a second kind of spam.
+    #[serde(default)]
+    pub escalated: bool,
 }
 
 impl AgentQuestion {

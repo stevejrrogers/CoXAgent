@@ -167,6 +167,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
 
         // Atomic read-modify-write with retry (parallel-safe).
         let ux_design = ux_of(&ux);
+        let gate_ready = self.config.workflow.human.gate_ready;
         crate::ports::outbound::mutate_state(self.store.as_ref(), |state| {
             let ticket = state
                 .ticket_mut(&id)
@@ -175,9 +176,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
                 .set_ux_design(Role::Pd, ux_design.clone())
                 .map_err(|e| PortError::Corrupt(e.to_string()))?;
             // DoR re-checked here; passes now that both technical and UX exist.
-            ticket
-                .transition_to(Role::Pd, Status::Ready)
-                .map_err(|e| PortError::Corrupt(e.to_string()))?;
+            // With the human ready-gate on, the designed ticket waits in
+            // Pending for a person's approval instead.
+            if gate_ready {
+                let msg = format!(
+                    "🧑‍⚖️ {id} is fully designed and WAITS for a human approval to Ready — \
+                     it is in the Inbox (workflow.human.gate_ready)."
+                );
+                state.post_chat_in("SYSTEM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+            } else {
+                ticket
+                    .transition_to(Role::Pd, Status::Ready)
+                    .map_err(|e| PortError::Corrupt(e.to_string()))?;
+            }
             Ok(())
         })
         .await?;

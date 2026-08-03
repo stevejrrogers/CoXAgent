@@ -68,7 +68,11 @@ fn kill_by_pattern(pattern: &str, scope: &str, my_pid: &str) -> Result<(), std::
 }
 
 /// Minimum age before a matching process counts as leaked.
-const MIN_ORPHAN_AGE_MINUTES: u64 = 15;
+// 45, deliberately ABOVE the 30-minute DoD/boot-check window: the suite
+// legitimately runs 12-25 minutes cold, and at 15 the janitor shot every
+// sibling runner's in-flight boot check — truncated output, stray "kill:"
+// lines, and a week of DEV looking dead behind quiet cycle errors.
+const MIN_ORPHAN_AGE_MINUTES: u64 = 45;
 
 /// Whether `pid` has been alive longer than [`MIN_ORPHAN_AGE_MINUTES`],
 /// via `ps -o etime=`. Unknown/parse-failure = NOT old enough (never kill

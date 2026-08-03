@@ -37,6 +37,8 @@ pub struct RunChatReplyUseCase<S: StateStorePort + ?Sized, E: AgentEnginePort + 
     /// Callback: import an existing codebase. Returns a human-readable status message.
     import_project_fn: Option<ImportProjectFn>,
     files: Option<Arc<dyn crate::ports::outbound::WorkspaceFilesPort>>,
+    /// Channel the reply posts into; `None` keeps the Scrum/discuss thread.
+    reply_channel: Option<String>,
 }
 
 /// Common docker-compose filenames we treat as "already has a deploy setup".
@@ -68,7 +70,16 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             new_project_fn: None,
             import_project_fn: None,
             files: None,
+            reply_channel: None,
         }
+    }
+
+    /// Reply into a chat CHANNEL instead of the Scrum thread — the answer
+    /// belongs where the question was asked.
+    #[must_use]
+    pub fn with_reply_channel(mut self, channel: Option<String>) -> Self {
+        self.reply_channel = channel;
+        self
     }
 
     /// Attach the files port so chat-triggered reviews can scan the workspace.
@@ -134,6 +145,26 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         if msg.is_empty() {
             return Ok(());
         }
+        // Bare gate commands are deterministic — "approve COX-F023" needs no
+        // model in the loop. The engine path once answered it with "COX-F023
+        // does not exist" because the PROMPT's bounded backlog block didn't
+        // include the ticket: never let a context cap veto a direct command.
+        {
+            let lower = msg.to_lowercase();
+            for (kw, to) in [
+                ("approve", coxagent_domain::Status::Ready),
+                ("verify", coxagent_domain::Status::Verified),
+            ] {
+                if let Some(rest) = lower.strip_prefix(kw) {
+                    let id = rest.trim_start_matches([':', ' ']).trim();
+                    let orig = msg[msg.len() - id.len()..].trim();
+                    if !id.is_empty() && !id.contains(' ') && id.contains('-') {
+                        self.human_gate_action(orig, to).await;
+                        return Ok(());
+                    }
+                }
+            }
+        }
         let persona = route_persona(&msg.to_lowercase());
         let context = self.context().await;
         let task = format!(
@@ -155,6 +186,8 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
              ACTION: arch_review                — review the architecture, file refactor tickets\n\
              ACTION: docs_review                — fill missing Wiki docs\n\
              ACTION: sa_design: <ticket-id>     — SA designs ONE ticket (runs the SA agent now)\n\
+             ACTION: approve: <ticket-id>       — HUMAN gate: release a designed ticket to Ready\n\
+             ACTION: verify: <ticket-id>        — HUMAN gate: render the QA verdict (Fixed→Verified)\n\
              ACTION: implement: <ticket-id>     — code the ticket NOW (DEV runs, writes code, tests)\n\
              ACTION: test: <ticket-id>          — QA tests the deployed ticket, files bugs\n\
              ACTION: standup                    — run a standup\n\
@@ -268,6 +301,12 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             self.test_ticket(rest.trim()).await;
         } else if let Some(rest) = strip_kw(a, "priority") {
             self.reprioritize(rest).await;
+        } else if let Some(rest) = strip_kw(a, "approve") {
+            self.human_gate_action(rest, coxagent_domain::Status::Ready)
+                .await;
+        } else if let Some(rest) = strip_kw(a, "verify") {
+            self.human_gate_action(rest, coxagent_domain::Status::Verified)
+                .await;
         } else if lower.starts_with("deploy") {
             self.deploy_now().await;
         } else if lower.starts_with("merge_queue") || lower.starts_with("merge queue") {
@@ -283,6 +322,46 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             }
         }
         Ok(())
+    }
+
+    /// A human gate decision typed in chat: "approve F012" moves a designed
+    /// ticket to Ready, "verify B031" renders the QA verdict — the same moves
+    /// the Inbox buttons make, executed with the chat user's authority
+    /// (Role::User; the domain transition table decides legality).
+    async fn human_gate_action(&self, rest: &str, to: coxagent_domain::Status) {
+        use coxagent_domain::TicketId;
+        let tid_s = rest.trim();
+        let Ok(tid) = TicketId::new(tid_s) else {
+            let msg = if self.lang.is_vi() {
+                format!("{tid_s} không phải ticket ID hợp lệ.")
+            } else {
+                format!("{tid_s} is not a valid ticket ID.")
+            };
+            self.post("SYSTEM", &msg).await;
+            return;
+        };
+        let label = format!("{to:?}").to_lowercase();
+        let result = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+            let t = s
+                .ticket_mut(&tid)
+                .ok_or_else(|| crate::PortError::Corrupt(format!("no ticket {tid}")))?;
+            t.transition_to(coxagent_domain::Role::User, to)
+                .map_err(|e| crate::PortError::Corrupt(e.to_string()))?;
+            s.log_activity("USER", &format!("chat-approved to {label}"), Some(tid.to_string()));
+            Ok(())
+        })
+        .await;
+        let msg = match result {
+            Ok(()) => {
+                if self.lang.is_vi() {
+                    format!("✅ {tid} → {label}.")
+                } else {
+                    format!("✅ {tid} moved to {label}.")
+                }
+            }
+            Err(e) => format!("⚠️ {tid}: {e}"),
+        };
+        self.post("SYSTEM", &msg).await;
     }
 
     /// Run the DEV agent for this specific ticket. Uses the engine directly
@@ -987,7 +1066,23 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             // and reached for `deploy` on a bug report.
             escalation_level: 1,
         };
-        let outcome = self.engine.run(request).await.ok()?;
+        let outcome = match self.engine.run(request).await {
+            Ok(o) => o,
+            Err(e) => {
+                // A transport-level error (engine busy, spawn failure) used to
+                // return None silently — the person clicked send and watched
+                // nothing happen at all. Same rule as below: the failure they
+                // cannot see is worse than the failure they can.
+                let why: String = e.to_string().chars().take(200).collect();
+                tracing::warn!("chat reply engine error: {why}");
+                self.post(
+                    "SYSTEM",
+                    &format!("⚠️ I couldn't answer that: {why}. Try again in a moment."),
+                )
+                .await;
+                return None;
+            }
+        };
         if !outcome.succeeded() {
             // Silence is the worst reply. The person clicked send and watched
             // nothing happen — the failure they cannot see is worse than the
@@ -1045,7 +1140,19 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
 
     async fn post(&self, author: &str, body: &str) {
         if let Ok(mut state) = self.store.load().await {
-            state.post_comment(author, body, None);
+            match &self.reply_channel {
+                // A channel is a conversation, not a report. Short answers
+                // stay in-channel; a deep investigation goes to Scrum where
+                // that content lives, with a two-line pointer in the channel.
+                Some(ch) if body.chars().count() > 500 => {
+                    state.post_comment(author, body, None);
+                    let head: String = body.chars().take(180).collect();
+                    let ptr = format!("{head}… — chi tiết đầy đủ bên tab Scrum 📋");
+                    state.post_chat_in(author, &ptr, ch, Vec::new());
+                }
+                Some(ch) => state.post_chat_in(author, body, ch, Vec::new()),
+                None => state.post_comment(author, body, None),
+            }
             let _ = self.store.save(&state).await;
         }
     }
