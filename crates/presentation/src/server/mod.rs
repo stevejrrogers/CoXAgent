@@ -1595,3 +1595,5 @@ fn internal_error(msg: &str) -> axum::response::Response {
 mod avatar_media_security_tests;
 #[cfg(test)]
 mod pr_preview_tests;
+#[cfg(test)]
+mod pr_review_gate_tests;
