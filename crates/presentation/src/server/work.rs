@@ -678,6 +678,79 @@ pub(super) async fn set_sprint_goal_ep(
     }
 }
 
+/// Pull tickets into the sprint that is already running, or drop them from it.
+///
+/// The automatic commit is capacity-based and happens once, at roll-over. A
+/// person deciding mid-sprint that something belongs in it (or no longer does)
+/// had no way to say so — the scope was whatever the machine picked.
+pub(super) async fn sprint_scope_ep(
+    State(app): State<AppState>,
+    Path((pid, action)): Path<(String, String)>,
+    Json(req): Json<SprintScopeReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let adding = match action.as_str() {
+        "commit" => true,
+        "drop" => false,
+        _ => return (StatusCode::BAD_REQUEST, "action must be commit or drop").into_response(),
+    };
+    let ids: Vec<coxagent_domain::TicketId> = req
+        .tickets
+        .iter()
+        .filter_map(|t| coxagent_domain::TicketId::new(t.trim()).ok())
+        .collect();
+    if ids.is_empty() {
+        return (StatusCode::BAD_REQUEST, "no valid ticket ids").into_response();
+    }
+    let mut changed = 0usize;
+    match coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        for id in &ids {
+            let hit = if adding {
+                coxagent_application::sprint::commit_ticket(s, id)
+            } else {
+                coxagent_application::sprint::uncommit_ticket(s, id)
+            };
+            if hit {
+                changed += 1;
+            }
+        }
+        Ok(())
+    })
+    .await
+    {
+        Ok(()) => Json(serde_json::json!({ "ok": true, "changed": changed })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Close the running sprint NOW and open the next one, instead of waiting for
+/// the window to elapse. The closed sprint is archived exactly as a timed
+/// roll-over archives it, so the velocity history stays one shape.
+pub(super) async fn sprint_close_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let cycle = p.runner.snapshot().cycle;
+    let mut opened = None;
+    match coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        opened = coxagent_application::sprint::close_now(s, cycle);
+        Ok(())
+    })
+    .await
+    {
+        Ok(()) => match opened {
+            Some(n) => Json(serde_json::json!({ "ok": true, "sprint": n })).into_response(),
+            None => (StatusCode::BAD_REQUEST, "no sprint is running").into_response(),
+        },
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
 /// Optional body for a rejection: the reason, which teaches the gate.
 #[derive(serde::Deserialize, Default)]
 pub(super) struct RejectReq {

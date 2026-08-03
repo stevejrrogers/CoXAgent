@@ -816,6 +816,8 @@ pub async fn serve_full(
         .route("/api/projects/:pid/config", get(get_config).put(put_config))
         .route("/api/projects/:pid/control/:action", post(control_ep))
         .route("/api/projects/:pid/sprint/goal", post(set_sprint_goal_ep))
+        .route("/api/projects/:pid/sprint/close", post(sprint_close_ep))
+        .route("/api/projects/:pid/sprint/:action", post(sprint_scope_ep))
         .route("/api/projects/:pid/digest", post(digest_ep))
         .route("/api/projects/:pid/merge-sweep", post(merge_sweep_ep))
         .route(
@@ -1532,6 +1534,12 @@ fn html_escape(s: &str) -> String {
 #[derive(serde::Deserialize)]
 struct SprintGoalReq {
     goal: String,
+}
+
+/// Which tickets to pull into (or drop from) the running sprint.
+#[derive(serde::Deserialize)]
+struct SprintScopeReq {
+    tickets: Vec<String>,
 }
 
 /// Name of the session cookie.

@@ -61,9 +61,71 @@ pub fn mark_green(work_dir: &Path, fp: Option<&str>) {
     }
 }
 
+/// Tree states a boot check is running for RIGHT NOW, per work dir.
+static IN_FLIGHT: LazyLock<Mutex<HashMap<PathBuf, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Claim the boot check for this tree state, or find another runner already
+/// doing it.
+///
+/// With `concurrency: 3` every runner reached the boot check at the same
+/// moment, missed the (still empty) green cache, and started the SAME
+/// `cargo test` — three compiles of one workspace, competing for the same
+/// cores, each slower for the company of the others. Only the claimant runs;
+/// the others skip and take the next cycle's cache hit.
+///
+/// `false` means someone else holds it. Unknown states are never claimed —
+/// with no fingerprint there is nothing to compare, so every runner proceeds
+/// exactly as before.
+#[must_use]
+pub fn claim_verify(work_dir: &Path, fp: Option<&str>) -> bool {
+    let (Some(fp), Ok(mut m)) = (fp, IN_FLIGHT.lock()) else {
+        return true;
+    };
+    if m.get(work_dir).map(String::as_str) == Some(fp) {
+        return false;
+    }
+    m.insert(work_dir.to_path_buf(), fp.to_owned());
+    true
+}
+
+/// Release the claim taken by [`claim_verify`], whatever the outcome — a
+/// failed or timed-out check must not wedge the gate shut forever.
+pub fn release_verify(work_dir: &Path, fp: Option<&str>) {
+    if let (Some(fp), Ok(mut m)) = (fp, IN_FLIGHT.lock()) {
+        if m.get(work_dir).map(String::as_str) == Some(fp) {
+            m.remove(work_dir);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_one_runner_verifies_a_given_tree_state() {
+        let dir = Path::new("/w3");
+        let fp = fingerprint("head", &[]);
+        assert!(claim_verify(dir, Some(&fp)), "first runner claims it");
+        assert!(!claim_verify(dir, Some(&fp)), "the others stand aside");
+        release_verify(dir, Some(&fp));
+        assert!(claim_verify(dir, Some(&fp)), "released, so claimable again");
+        release_verify(dir, Some(&fp));
+        // A different state is a different check.
+        let other = fingerprint("head2", &[]);
+        assert!(claim_verify(dir, Some(&fp)));
+        assert!(claim_verify(dir, Some(&other)));
+        release_verify(dir, Some(&fp));
+        release_verify(dir, Some(&other));
+    }
+
+    #[test]
+    fn an_unknown_state_never_blocks_a_runner() {
+        let dir = Path::new("/w4");
+        assert!(claim_verify(dir, None));
+        assert!(claim_verify(dir, None));
+    }
 
     #[test]
     fn same_state_matches_and_any_change_invalidates() {

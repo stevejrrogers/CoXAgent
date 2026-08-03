@@ -211,7 +211,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             // anyway, could not finish inside the cap, therefore never
             // recorded green — so every cycle burned the full timeout and no
             // ticket was ever reached. An hour of "working" produced nothing.
-            if dirty.is_empty() || crate::verify_cache::is_green(&self.work_dir, fp.as_deref()) {
+            if dirty.is_empty()
+                || crate::verify_cache::is_green(&self.work_dir, fp.as_deref())
+                // Another runner is already verifying this exact tree state:
+                // three concurrent runners used to start three identical
+                // `cargo test` compiles that only slowed each other down.
+                || !crate::verify_cache::claim_verify(&self.work_dir, fp.as_deref())
+            {
                 // fall through — nothing changed since the last green run
             } else {
                 // The boot check can run for minutes. Without a phase report
@@ -223,7 +229,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                         format!("boot check: verifying {} changed file(s)", dirty.len()),
                     )));
                 }
-                match tokio::time::timeout(
+                let outcome = tokio::time::timeout(
                     // 30 minutes, and SCOPED to the dirty paths: the boot
                     // check exists to catch a broken working tree, not to
                     // re-verify the whole workspace on every cycle. The full
@@ -232,8 +238,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                     std::time::Duration::from_secs(1800),
                     deploy.run_tests_scoped(&self.work_dir, &dirty),
                 )
-                .await
-                {
+                .await;
+                // Whatever happened — green, red, spawn error, timeout — the
+                // claim is done. Holding it after a failure would wedge the
+                // boot check shut for every runner on this tree state.
+                crate::verify_cache::release_verify(&self.work_dir, fp.as_deref());
+                match outcome {
                     Ok(Ok(r)) if r.success => {
                         crate::verify_cache::mark_green(&self.work_dir, fp.as_deref());
                     }
