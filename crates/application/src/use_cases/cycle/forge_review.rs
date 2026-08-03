@@ -77,6 +77,29 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 // a NEW branch + PR, which is how a queue explodes.
                 continue;
             }
+            // Scratch in the diff is wrong the moment it exists — there is no
+            // staleness to wait out and no review round that fixes it. #28 was
+            // ENTIRELY worktrees and state backups, claiming to fix a health
+            // gate; the SA correctly refused it three times while it sat in the
+            // queue holding a WIP slot.
+            if let Ok(d) = forge.pr_diff(pr.number).await {
+                if let Some(path) = crate::use_cases::merge_policy::commits_scratch(&d) {
+                    let note = format!(
+                        "Closing: this branch commits `{path}` — agent scratch, not product \
+                         code. No review round fixes that. The ticket returns to the queue to \
+                         be redone on a fresh branch off current main."
+                    );
+                    let _ = forge.comment_pr(pr.number, &note).await;
+                    if forge.close_pr(pr.number).await.is_ok() {
+                        self.log_git(&format!(
+                            "review: closed PR #{} — commits scratch ({path})",
+                            pr.number
+                        ))
+                        .await;
+                    }
+                    continue;
+                }
+            }
             let Ok(diff) = forge.pr_diff(pr.number).await else {
                 continue;
             };
