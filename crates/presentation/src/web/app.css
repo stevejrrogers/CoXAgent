@@ -1593,3 +1593,12 @@ textarea.np-in{resize:vertical;line-height:1.5}
   .chatside .chanitem:hover::after{content:"";position:absolute;right:0;top:0;bottom:0;width:86px;
     background:linear-gradient(90deg,transparent,var(--card2) 42%);pointer-events:none;border-radius:8px;z-index:1}
   .chatside .chanitem .channm{max-width:100%}
+
+  /* The wiki tree scrolls; only the rail's own frame is clipped. Without
+     this the list was cut off at the panel edge with no way to reach the
+     pages below. */
+  .docsrail #docs-list{flex:1 1 auto;min-height:0;overflow-y:auto;padding-bottom:8px}
+  /* Section headers align left — a base `space-between` was centring the
+     DIRECT MESSAGES label between its chevron and its count. */
+  .chatside .chanrail-hd{justify-content:flex-start}
+  .chatside .chanrail-hd > span:first-of-type{margin-right:2px}

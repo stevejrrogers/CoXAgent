@@ -265,7 +265,7 @@ pub(super) async fn undo_approval_ep(
     state.post_chat_in(
         "SYSTEM",
         &note,
-        coxagent_application::state::AGENTS_CHANNEL,
+        coxagent_application::state::APPROVALS_CHANNEL,
         Vec::new(),
     );
     match p.store.save(&state).await {
