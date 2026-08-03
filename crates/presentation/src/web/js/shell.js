@@ -1172,6 +1172,38 @@ async function openAgent(role,worker){
 }
 let AGENT_LOG_TIMER=null, AGENT_LOG_ROLE=null, AGENT_LOG_WORKER="", AGENT_LOG_LAST=null;
 // Icon + colour for a tool name, so every engine's tool calls read at a glance.
+// A tool call, said in words: "Read run_chat_reply.rs:400-500" instead of a
+// truncated JSON blob. Long absolute paths collapse to the part a reader
+// recognises — the file, and where it sits in the repo.
+function wlShortPath(p){
+  const s=String(p||"").replace(/^.*?\/codebase\//,"").replace(/^.*?\.claude\/worktrees\/[^/]+\//,"");
+  const parts=s.split("/");
+  return parts.length>3?parts.slice(-3).join("/"):s;
+}
+function wlSay(name,args){
+  const n=String(name||"").toLowerCase().replace(/^mcp__[^_]*__/,"");
+  let a={};
+  try{a=JSON.parse(args||"{}");}catch(e){a={};}
+  const f=a.file_path||a.path||a.notebook_path;
+  const where=f?wlShortPath(f):"";
+  const span=(a.offset!=null)?`:${a.offset}${a.limit?"-"+(a.offset+a.limit):""}`:"";
+  if(n==="read")return {verb:"Read",detail:where?where+span:""};
+  if(n==="edit"||n==="multiedit")return {verb:"Edit",detail:where};
+  if(n==="write")return {verb:"Write",detail:where};
+  if(n==="bash"){
+    const c=String(a.command||"").replace(/\s+/g," ").trim();
+    return {verb:"Run",detail:c.length>92?c.slice(0,92)+"…":c};
+  }
+  if(n==="grep")return {verb:"Search",detail:[a.pattern,a.path?"in "+wlShortPath(a.path):""].filter(Boolean).join(" ")};
+  if(n==="glob")return {verb:"Find files",detail:a.pattern||""};
+  if(n==="webfetch")return {verb:"Fetch",detail:a.url||""};
+  if(n==="task"||n==="agent")return {verb:"Delegate",detail:a.description||""};
+  if(n==="todowrite")return {verb:"Update plan",detail:""};
+  // Unknown tool: keep the name, show the first meaningful argument.
+  const first=Object.entries(a).find(([,v])=>typeof v==="string"&&v.trim());
+  return {verb:name,detail:first?String(first[1]).slice(0,80):""};
+}
+
 // Plain-language labels for the agent-harness bookkeeping tools, so a log
 // reader doesn't mistake normal scheduling for a failure.
 function wlHarnessNote(name,args){
@@ -1243,7 +1275,8 @@ function renderWorklog(items,live){
       // {stop:true}"?!) — annotate them in plain language instead.
       const note=wlHarnessNote(it.name,it.args);
       if(note) return `<div class="wl-item wl-tool"><span class="wl-chip"><i class="ti ti-clock-pause wl-tic" style="color:var(--muted)"></i><span class="wl-tname">${esc(note)}</span></span></div>`;
-      return `<div class="wl-item wl-tool"><span class="wl-chip"><i class="ti ${m.ic} wl-tic" style="color:var(${m.col})"></i><span class="wl-tname">${esc(it.name)}</span>${it.args?`<span class="wl-targs">${esc(it.args)}</span>`:""}</span></div>`; }
+      const said=wlSay(it.name,it.args);
+      return `<div class="wl-item wl-tool"><span class="wl-chip"><i class="ti ${m.ic} wl-tic" style="color:var(${m.col})"></i><span class="wl-tname">${esc(said.verb)}</span>${said.detail?`<span class="wl-targs">${esc(said.detail)}</span>`:""}</span></div>`; }
     if(it.k==="result") return `<div class="wl-item wl-result"><span class="wl-rin"><i class="ti ti-corner-down-right"></i> ${esc(it.info)}</span></div>`;
     return `<div class="wl-item wl-msg"><span class="wl-ic"><i class="ti ti-sparkles"></i></span><div class="wl-body">${wlFmt(it.text)}</div></div>`;
   });
