@@ -19,6 +19,7 @@ const INBOX_KIND={
   question:{label:"Question for you",ic:"ti-help-circle",col:"var(--amber)"},
   review_pr:{label:"PR held for human",ic:"ti-git-pull-request",col:"var(--teal)"},
   auto_approved:{label:"Auto-approved",ic:"ti-robot",col:"var(--dim)"},
+  pr_stuck:{label:"PR stuck — needs you",ic:"ti-alert-triangle",col:"var(--red)"},
 };
 
 function inboxCard(kind,meta,title,actions,ticket){
@@ -95,6 +96,13 @@ async function renderInbox(){
     }else if(it.kind==="review_pr"){
       html+=inboxCard("review_pr","#"+it.number,esc(it.title),
         ibtn("Open review",`nav('review')`,1));
+    }else if(it.kind==="pr_stuck"){
+      // The team tried, the SA rescued it, and it is still not moving. Say what
+      // was tried and give the two moves a person actually has.
+      const why=`#${it.number} · ${it.attempts} fix rounds · ${it.mergeable?"mergeable":"CONFLICTING"} · SA rescue failed`;
+      html+=inboxCard("pr_stuck",why,esc(it.title),
+        ibtn("Open on GitHub",`window.open('${esc(it.url)}','_blank')`)+
+        ibtn("Review queue",`nav('review')`,1));
     }
   }
   el.innerHTML=html;

@@ -117,6 +117,23 @@ pub(super) async fn inbox_ep(
                         "kind": "review_pr", "number": pr.number,
                         "title": pr.title, "url": pr.url,
                     }));
+                    continue;
+                }
+                // PRs the team has given up on. The fix ladder ends at "tell a
+                // human", which fired ONE notification and then skipped the PR
+                // every cycle forever — three of them sat open for a week that
+                // way, holding the queue against the WIP limit and pausing new
+                // dev work, while nothing on any screen said so. A dead end has
+                // to be visible, and it stays visible until the PR is gone.
+                let attempts = state.pr_fix_attempts.get(&pr.number).copied().unwrap_or(0);
+                let rescued = state.pr_rescues.get(&pr.number).copied().unwrap_or(0);
+                if attempts >= 3 && rescued >= 1 {
+                    items.push(serde_json::json!({
+                        "kind": "pr_stuck", "number": pr.number,
+                        "title": pr.title, "url": pr.url,
+                        "attempts": attempts,
+                        "mergeable": pr.mergeable,
+                    }));
                 }
             }
         }
