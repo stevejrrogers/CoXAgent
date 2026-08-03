@@ -185,7 +185,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
         .await;
         let outcome = self
             .engine
-            .run(self.build_request(&id, &title, &memory, &knowledge).await)
+            .run(
+                self.build_request(
+                    &id,
+                    &title,
+                    &memory,
+                    &knowledge,
+                    &crate::prompts::human_steering_block(&state, id.as_str()),
+                )
+                .await,
+            )
             .await?;
         if !outcome.succeeded() {
             self.store.release_stage(&id, "sa", &worker).await.ok();
@@ -415,6 +424,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
         title: &str,
         memory: &str,
         knowledge: &str,
+        steering: &str,
     ) -> AgentRequest {
         let _choice = self.config.engine.resolve(Role::Sa);
         let context_block = self
@@ -428,7 +438,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             role: Role::Sa,
             system_prompt: prompts::system_prompt(prompts::SA),
             task_prompt: format!(
-                "Design feature {id}: {title}{context_block}{stack}{}{}{knowledge}{memory}",
+                "Design feature {id}: {title}{context_block}{stack}{}{}{knowledge}{memory}{steering}",
                 prompts::focus_block(self.files.as_deref(), &self.work_dir, title).await,
                 prompts::repo_map_block(
                     self.files.as_deref(),

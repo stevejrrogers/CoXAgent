@@ -147,8 +147,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         self
     }
 
-    /// Attach the live "working now" reporter; fired only after the ticket is
-    /// claimed, so a runner that loses the race never shows a false-busy card.
+    /// The dashboard name for this runner's mode.
+    fn role_name(&self) -> &'static str {
+        match self.mode {
+            DevMode::Bug => "DEV-BUG",
+            DevMode::Feature => "DEV-FEATURE",
+        }
+    }
+
+    /// Attach the live "working now" reporter.
     #[must_use]
     pub fn with_phase(mut self, phase: Option<crate::use_cases::runner::PhaseReporter>) -> Self {
         self.phase = phase;
@@ -194,16 +201,35 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         // tree-state serves every runner in the cycle.
         if let Some(deploy) = &self.verify {
             let fp = self.tree_fingerprint().await;
-            let dirty = self.working_tree().await.changed_paths;
+            // Scratch dirs (`.claude/`, `backups/`, engine config the runner
+            // writes itself) show up in `git status` but cannot break a build.
+            // Counting them made a clean tree look dirty, forced a full-suite
+            // fallback, and the timeout was then misread as a compile break.
+            let dirty = gates::build_relevant(&self.working_tree().await.changed_paths);
             // A CLEAN tree has nothing to prove: main is whatever CI and the
             // merge gate already blessed. The old code ran the whole suite
             // anyway, could not finish inside the cap, therefore never
             // recorded green — so every cycle burned the full timeout and no
             // ticket was ever reached. An hour of "working" produced nothing.
-            if dirty.is_empty() || crate::verify_cache::is_green(&self.work_dir, fp.as_deref()) {
+            if dirty.is_empty()
+                || crate::verify_cache::is_green(&self.work_dir, fp.as_deref())
+                // Another runner is already verifying this exact tree state:
+                // three concurrent runners used to start three identical
+                // `cargo test` compiles that only slowed each other down.
+                || !crate::verify_cache::claim_verify(&self.work_dir, fp.as_deref())
+            {
                 // fall through — nothing changed since the last green run
             } else {
-                match tokio::time::timeout(
+                // The boot check can run for minutes. Without a phase report
+                // the dashboard shows nobody working for the whole stretch —
+                // exactly the "agents look dead" symptom.
+                if let Some(p) = &self.phase {
+                    p(Some((
+                        self.role_name().to_owned(),
+                        format!("boot check: verifying {} changed file(s)", dirty.len()),
+                    )));
+                }
+                let outcome = tokio::time::timeout(
                     // 30 minutes, and SCOPED to the dirty paths: the boot
                     // check exists to catch a broken working tree, not to
                     // re-verify the whole workspace on every cycle. The full
@@ -212,8 +238,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                     std::time::Duration::from_secs(1800),
                     deploy.run_tests_scoped(&self.work_dir, &dirty),
                 )
-                .await
-                {
+                .await;
+                // Whatever happened — green, red, spawn error, timeout — the
+                // claim is done. Holding it after a failure would wedge the
+                // boot check shut for every runner on this tree state.
+                crate::verify_cache::release_verify(&self.work_dir, fp.as_deref());
+                match outcome {
                     Ok(Ok(r)) if r.success => {
                         crate::verify_cache::mark_green(&self.work_dir, fp.as_deref());
                     }
@@ -301,14 +331,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             .await;
         }
         let Some(id) = chosen else {
+            // Nothing claimed: drop any boot-check phase so the dashboard does
+            // not keep showing this runner as busy.
+            if let Some(p) = &self.phase {
+                p(None);
+            }
             return Ok(None);
         };
         if let Some(p) = &self.phase {
-            let role = match self.mode {
-                DevMode::Bug => "DEV-BUG",
-                DevMode::Feature => "DEV-FEATURE",
-            };
-            p(Some((role.to_owned(), id.to_string())));
+            p(Some((self.role_name().to_owned(), id.to_string())));
         }
 
         let state = self.store.load().await?;
@@ -496,7 +527,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             // Per-ticket gate: only what this change can reach. The full
             // suite still runs at the sprint boundary and on the merged tree
             // (docs/ADAPTIVE_APPROVAL.md's sibling rule for tests).
-            let changed = self.working_tree().await.changed_paths;
+            let changed = gates::build_relevant(&self.working_tree().await.changed_paths);
             let mut red = match deploy
                 .run_tests_scoped(&self.work_dir, &changed)
                 .await

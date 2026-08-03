@@ -34,6 +34,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // works it hard — draining the pile-up — rather than nibbling a few PRs.
         // As a suggestion-only reviewer it stays light. Bounded either way for cost.
         let batch = if auto_merge { 12 } else { 3 };
+        // Tickets whose fix ALREADY landed. A bug sits at `fixed` until someone
+        // verifies it, which is live work — so ticket status alone cannot tell
+        // a redundant PR from a real one. What settles it is the forge: if a PR
+        // for this ticket is already merged, a second branch for it is building
+        // what main has. #36 was exactly that, opened hours after #34 merged.
+        let merged: Vec<(u64, String)> = forge.recently_merged().await.unwrap_or_default();
+        let merged_tickets: std::collections::BTreeSet<String> = merged
+            .iter()
+            .filter_map(|(_, head)| crate::use_cases::merge_policy::ticket_id_in(head))
+            .collect();
         // Ticket ids visible in the open queue, for the competing-PR check.
         let open_titles: Vec<(u64, String)> =
             prs.iter().map(|p| (p.number, p.title.clone())).collect();
@@ -42,6 +52,89 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // elsewhere (e.g. an integration → main promotion) to humans.
             if pr.base != target {
                 continue;
+            }
+            // These two run BEFORE the "head has not moved" guard below, and
+            // that ordering is the whole point: a PR nobody should keep open
+            // has a frozen head BY DEFINITION, so a check placed after the
+            // guard never sees the PRs it exists for. Asked first, they cost
+            // one diff read and end the queue's dead weight.
+            // The ticket this PR names is already finished — by another PR, by
+            // a human, by anything. Three such PRs held WIP slots here for a
+            // week, blocking new dev work, for bugs that were verified days
+            // earlier. Nobody had ever asked the board whether the work was
+            // still wanted.
+            if let Some(tid) = crate::use_cases::merge_policy::ticket_id_in(&pr.title) {
+                if merged_tickets.contains(&tid)
+                    && !merged.iter().any(|(n, _)| *n == pr.number)
+                {
+                    let note = format!(
+                        "Closing: a pull request for {tid} is already merged — this branch \
+                         rebuilds what main has. Reopen only if something here is genuinely \
+                         missing from the merged fix."
+                    );
+                    let _ = forge.comment_pr(pr.number, &note).await;
+                    if forge.close_pr(pr.number).await.is_ok() {
+                        self.log_git(&format!(
+                            "review: closed PR #{} — {tid} already merged elsewhere",
+                            pr.number
+                        ))
+                        .await;
+                    }
+                    continue;
+                }
+                let settled = self.store.load().await.ok().and_then(|s| {
+                    s.tickets
+                        .iter()
+                        .find(|t| t.id().as_str() == tid)
+                        .map(coxagent_domain::Ticket::status)
+                });
+                if matches!(
+                    settled,
+                    Some(
+                        coxagent_domain::Status::Verified
+                            | coxagent_domain::Status::Done
+                            | coxagent_domain::Status::Documented
+                            | coxagent_domain::Status::Rejected
+                    )
+                ) {
+                    let note = format!(
+                        "Closing: {tid} is already {:?} — this branch is superseded. Nothing is \
+                         lost; the branch stays in git if any of it is ever wanted.",
+                        settled.unwrap_or(coxagent_domain::Status::Done)
+                    );
+                    let _ = forge.comment_pr(pr.number, &note).await;
+                    if forge.close_pr(pr.number).await.is_ok() {
+                        self.log_git(&format!(
+                            "review: closed PR #{} — {tid} already settled",
+                            pr.number
+                        ))
+                        .await;
+                    }
+                    continue;
+                }
+            }
+            // Scratch in the diff is wrong the moment it exists — there is no
+            // staleness to wait out and no review round that fixes it. #28 was
+            // ENTIRELY worktrees and state backups, claiming to fix a health
+            // gate; the SA correctly refused it three times while it sat in the
+            // queue holding a WIP slot.
+            if let Ok(d) = forge.pr_diff(pr.number).await {
+                if let Some(path) = crate::use_cases::merge_policy::commits_scratch(&d) {
+                    let note = format!(
+                        "Closing: this branch commits `{path}` — agent scratch, not product \
+                         code. No review round fixes that. The ticket returns to the queue to \
+                         be redone on a fresh branch off current main."
+                    );
+                    let _ = forge.comment_pr(pr.number, &note).await;
+                    if forge.close_pr(pr.number).await.is_ok() {
+                        self.log_git(&format!(
+                            "review: closed PR #{} — commits scratch ({path})",
+                            pr.number
+                        ))
+                        .await;
+                    }
+                    continue;
+                }
             }
             // Skip PRs whose head has not moved since the last request-changes:
             // the verdict cannot change and the repeat comment is pure noise.
