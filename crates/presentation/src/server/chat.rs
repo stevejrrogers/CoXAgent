@@ -341,6 +341,24 @@ pub(super) async fn syschat_invite_ep(
 }
 
 /// List a channel's messages (oldest first). Empty for channels the user can't view.
+/// Split a hub sub-channel id (`cox-approvals`) into the project it belongs
+/// to and the room inside that project's own chat (`approvals`).
+///
+/// The two chats are deliberately separate stores: a project's conversation
+/// is part of its state, which is what the agents write to. Rather than
+/// migrate that, the hub API is the door — it routes these ids through to
+/// the project store so one sidebar shows both worlds.
+fn project_sub_channel(app_projects: &[String], id: &str) -> Option<(String, String)> {
+    for suffix in ["agents", "approvals"] {
+        if let Some(prefix) = id.strip_suffix(&format!("-{suffix}")) {
+            if app_projects.iter().any(|p| p == prefix) {
+                return Some((prefix.to_owned(), suffix.to_owned()));
+            }
+        }
+    }
+    None
+}
+
 pub(super) async fn syschat_messages_ep(
     State(app): State<AppState>,
     headers: axum::http::HeaderMap,
@@ -351,6 +369,17 @@ pub(super) async fn syschat_messages_ep(
         .unwrap_or_else(|| coxagent_application::GENERAL_CHANNEL.to_owned());
     let user = resolve_username(&app, &headers).await;
     let ctx = app.chat_context().await;
+    // A project sub-channel reads from that project's own chat.
+    let ids: Vec<String> = ctx.projects.iter().map(|p| p.id.clone()).collect();
+    if let Some((pid, room)) = project_sub_channel(&ids, &channel) {
+        let Some(p) = app.project(&pid).await else {
+            return not_found();
+        };
+        let Ok(state) = p.store.load().await else {
+            return internal_error("load failed");
+        };
+        return Json(state.chat_in(&room)).into_response();
+    }
     let sc = app.syschat.inner.lock().await;
     if !sc.can_view(&channel, &user, &ctx) {
         return Json(Vec::<coxagent_application::ChatMsg>::new()).into_response();
@@ -375,6 +404,25 @@ pub(super) async fn syschat_send_ep(
     let channel = req
         .channel
         .unwrap_or_else(|| coxagent_application::GENERAL_CHANNEL.to_owned());
+    // A project sub-channel writes into that project's own chat, so a human
+    // reply lands where the agents are already talking.
+    {
+        let ctx = app.chat_context().await;
+        let ids: Vec<String> = ctx.projects.iter().map(|p| p.id.clone()).collect();
+        if let Some((pid, room)) = project_sub_channel(&ids, &channel) {
+            let Some(p) = app.project(&pid).await else {
+                return not_found();
+            };
+            let Ok(mut state) = p.store.load().await else {
+                return internal_error("load failed");
+            };
+            state.post_chat_in(&user, body, &room, req.attachments.clone());
+            return match p.store.save(&state).await {
+                Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+                Err(e) => internal_error(&e.to_string()),
+            };
+        }
+    }
     if deliver_syschat(&app, &user, body, &channel, req.attachments).await {
         Json(serde_json::json!({ "ok": true })).into_response()
     } else {

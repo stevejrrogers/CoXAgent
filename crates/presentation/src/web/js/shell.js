@@ -1182,8 +1182,14 @@ function wlShortPath(p){
 }
 function wlSay(name,args){
   const n=String(name||"").toLowerCase().replace(/^mcp__[^_]*__/,"");
+  const raw=String(args||"");
   let a={};
-  try{a=JSON.parse(args||"{}");}catch(e){a={};}
+  try{a=JSON.parse(raw||"{}");}catch(e){
+    // The log line is often TRUNCATED mid-JSON, which used to leave a bare
+    // "Run" with no command. Salvage the value we care about by hand.
+    const grab=k=>{const m=raw.match(new RegExp('"'+k+'"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)'));return m?m[1].replace(/\\"/g,'"').replace(/\\n/g," "):"";};
+    a={command:grab("command"),file_path:grab("file_path"),pattern:grab("pattern"),path:grab("path"),url:grab("url"),description:grab("description")};
+  }
   const f=a.file_path||a.path||a.notebook_path;
   const where=f?wlShortPath(f):"";
   const span=(a.offset!=null)?`:${a.offset}${a.limit?"-"+(a.offset+a.limit):""}`:"";
@@ -1191,8 +1197,9 @@ function wlSay(name,args){
   if(n==="edit"||n==="multiedit")return {verb:"Edit",detail:where};
   if(n==="write")return {verb:"Write",detail:where};
   if(n==="bash"){
-    const c=String(a.command||"").replace(/\s+/g," ").trim();
-    return {verb:"Run",detail:c.length>92?c.slice(0,92)+"…":c};
+    let c=String(a.command||"").replace(/\s+/g," ").trim();
+    if(!c)c=raw.replace(/^\{|\}$/g,"").replace(/\s+/g," ").slice(0,92);
+    return {verb:"Run",detail:c.length>92?c.slice(0,92)+"…":(c||"(command not logged)")};
   }
   if(n==="grep")return {verb:"Search",detail:[a.pattern,a.path?"in "+wlShortPath(a.path):""].filter(Boolean).join(" ")};
   if(n==="glob")return {verb:"Find files",detail:a.pattern||""};
