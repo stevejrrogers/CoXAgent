@@ -487,7 +487,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         // instead of shipping a broken build for TEST to rediscover later.
         if let Some(deploy) = &self.verify {
             let failed = |r: &crate::ports::outbound::DeployReport| !r.success;
-            let mut red = match deploy.run_tests(&self.work_dir).await {
+            // Per-ticket gate: only what this change can reach. The full
+            // suite still runs at the sprint boundary and on the merged tree
+            // (docs/ADAPTIVE_APPROVAL.md's sibling rule for tests).
+            let changed = self.working_tree().await.changed_paths;
+            let mut red = match deploy
+                .run_tests_scoped(&self.work_dir, &changed)
+                .await
+            {
                 Ok(r) if failed(&r) => Some(r.summary),
                 _ => None,
             };
@@ -527,7 +534,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                     };
                     let _ = self.engine.run(repair).await;
                 }
-                red = match deploy.run_tests(&self.work_dir).await {
+                red = match deploy.run_tests_scoped(&self.work_dir, &changed).await {
                     Ok(r) if failed(&r) => Some(r.summary),
                     _ => None,
                 };
@@ -755,7 +762,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                     .into());
                 }
                 // Suite must STILL be green with the new test in place.
-                if let Ok(r) = deploy.run_tests(&self.work_dir).await {
+                if let Ok(r) = deploy.run_tests_scoped(&self.work_dir, &changed).await {
                     if !r.success {
                         self.record_failure_at(
                             &id,

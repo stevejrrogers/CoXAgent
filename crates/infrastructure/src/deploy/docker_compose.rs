@@ -369,6 +369,21 @@ impl DeployPort for DockerComposeDeploy {
         })
     }
 
+    async fn run_tests_scoped(
+        &self,
+        work_dir: &Path,
+        changed: &[String],
+    ) -> Result<DeployReport, PortError> {
+        // Narrow when we can prove what the change can reach; otherwise this
+        // IS the full run. See deploy::scoped_tests for the rules.
+        let Some((cmd, args)) = crate::deploy::scoped_tests::scoped_test_command(work_dir, changed)
+        else {
+            return self.run_tests(work_dir).await;
+        };
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        self.run_test_command(work_dir, &cmd, &refs).await
+    }
+
     async fn run_tests(&self, work_dir: &Path) -> Result<DeployReport, PortError> {
         let Some((cmd, args)) = test_command(work_dir) else {
             return Ok(DeployReport {
@@ -377,56 +392,7 @@ impl DeployPort for DockerComposeDeploy {
                 summary: "no recognised test runner".to_owned(),
             });
         };
-        // Host-wide gate + nice: at most COXAGENT_MAX_PARALLEL_HEAVY test
-        // suites run at once across ALL projects, and each runs at background
-        // priority — N projects can no longer freeze the machine together.
-        let _slot = crate::proc::heavy_slot().await;
-        let child = crate::proc::low_priority(cmd)
-            .args(&args)
-            .current_dir(work_dir)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| PortError::Backend(format!("spawn {cmd}: {e}")))?;
-        let leader = child.id();
-        let Ok(output) =
-            // 30 minutes: a cold target dir (fresh agent branch) compiles the
-            // whole workspace before a single test runs — 15 was not enough.
-            tokio::time::timeout(Duration::from_secs(1800), child.wait_with_output()).await
-        else {
-            // Kill the whole test-runner tree, not just `nice`.
-            if let Some(pid) = leader {
-                crate::proc::kill_group(pid);
-            }
-            return Err(PortError::Backend("test run timed out".to_owned()));
-        };
-        let output = output.map_err(|e| PortError::Backend(format!("{cmd} wait: {e}")))?;
-        let success = output.status.success();
-        let tail = |b: &[u8]| -> String {
-            String::from_utf8_lossy(b)
-                .lines()
-                .rev()
-                .take(12)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-        let summary = if success {
-            format!("{cmd} {} passed", args.join(" "))
-        } else {
-            let out = tail(&output.stdout);
-            let err = tail(&output.stderr);
-            format!("{cmd} tests failed:\n{err}\n{out}")
-        };
-        Ok(DeployReport {
-            success,
-            deployed: true,
-            summary,
-        })
+        self.run_test_command(work_dir, cmd, &args).await
     }
 
     async fn down(&self, work_dir: &Path) -> Result<(), PortError> {
@@ -885,5 +851,68 @@ mod cross_check_tests {
         );
         assert!(check.errors.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+impl DockerComposeDeploy {
+    /// Run one test command and read its verdict. Shared by the full and the
+    /// scoped paths so both inherit the heavy-slot gate, the nice priority,
+    /// the kill-the-tree timeout and the output summarising.
+    async fn run_test_command(
+        &self,
+        work_dir: &Path,
+        cmd: &str,
+        args: &[&str],
+    ) -> Result<DeployReport, PortError> {
+        // Host-wide gate + nice: at most COXAGENT_MAX_PARALLEL_HEAVY test
+        // suites run at once across ALL projects, and each runs at background
+        // priority — N projects can no longer freeze the machine together.
+        let _slot = crate::proc::heavy_slot().await;
+        let child = crate::proc::low_priority(cmd)
+            .args(args)
+            .current_dir(work_dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| PortError::Backend(format!("spawn {cmd}: {e}")))?;
+        let leader = child.id();
+        let Ok(output) =
+            // 30 minutes: a cold target dir (fresh agent branch) compiles the
+            // whole workspace before a single test runs — 15 was not enough.
+            tokio::time::timeout(Duration::from_secs(1800), child.wait_with_output()).await
+        else {
+            // Kill the whole test-runner tree, not just `nice`.
+            if let Some(pid) = leader {
+                crate::proc::kill_group(pid);
+            }
+            return Err(PortError::Backend("test run timed out".to_owned()));
+        };
+        let output = output.map_err(|e| PortError::Backend(format!("{cmd} wait: {e}")))?;
+        let success = output.status.success();
+        let tail = |b: &[u8]| -> String {
+            String::from_utf8_lossy(b)
+                .lines()
+                .rev()
+                .take(12)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let summary = if success {
+            format!("{cmd} {} passed", args.join(" "))
+        } else {
+            let out = tail(&output.stdout);
+            let err = tail(&output.stderr);
+            format!("{cmd} tests failed:\n{err}\n{out}")
+        };
+        Ok(DeployReport {
+            success,
+            deployed: true,
+            summary,
+        })
     }
 }

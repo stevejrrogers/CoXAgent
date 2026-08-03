@@ -277,7 +277,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
                     "🧑‍⚖️ {id} is designed and WAITS for a human approval to Ready — \
                      it is in the Inbox (workflow.human.gate_ready)."
                 );
-                state.post_chat_in("SYSTEM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+                state.post_chat_in("SYSTEM", &msg, crate::state::APPROVALS_CHANNEL, Vec::new());
             }
             Ok(())
         })
