@@ -86,6 +86,11 @@ pub fn assess(ticket: &Ticket, shipped_similar: usize, previously_parked: bool) 
         notes.push("test/docs/chore".to_owned());
     }
 
+    if files_are_all_tests(&files) {
+        score -= 20;
+        notes.push("test files only".to_owned());
+    }
+
     if previously_parked {
         score += 30;
         notes.push("previously parked".to_owned());
@@ -103,7 +108,10 @@ pub fn assess(ticket: &Ticket, shipped_similar: usize, previously_parked: bool) 
     // Hard floors: no amount of history auto-approves large or sensitive work.
     let hard_ask = ticket.complexity() == Complexity::Large
         || files.iter().any(|f| SENSITIVE.iter().any(|s| f.contains(s)));
-    let lane = if !hard_ask && score <= 25 {
+    // 35, not 25: the first live round showed a human approving every
+    // test-only ticket in the queue while the score sat just above the line.
+    // The hard floors below (large, build/deploy paths) do the real guarding.
+    let lane = if !hard_ask && score <= 35 {
         Lane::Auto
     } else {
         Lane::Ask
@@ -117,8 +125,27 @@ pub fn assess(ticket: &Ticket, shipped_similar: usize, previously_parked: bool) 
 }
 
 fn title_is_testish(t: &str) -> bool {
+    // Any ticket whose SUBJECT is testing — the earlier phrase list missed
+    // "Add compress+content-retrieval integration test", which a human then
+    // approved without a second thought.
     let t = t.to_lowercase();
-    t.contains("test coverage") || t.contains("add test") || t.contains("regression test")
+    t.split(|c: char| !c.is_alphanumeric())
+        .any(|w| w == "test" || w == "tests" || w == "testing")
+}
+
+/// Whether every file the design touches lives in test code. Such a change
+/// cannot alter runtime behaviour: the strongest routine signal there is.
+fn files_are_all_tests(files: &[&str]) -> bool {
+    !files.is_empty()
+        && files.iter().all(|f| {
+            let f = f.to_lowercase();
+            f.contains("/tests/")
+                || f.starts_with("tests/")
+                || f.ends_with("_test.rs")
+                || f.ends_with("_tests.rs")
+                || f.contains(".test.")
+                || f.contains("/e2e/")
+        })
 }
 
 fn title_is_docish(t: &str) -> bool {
@@ -222,6 +249,19 @@ mod tests {
         design(&mut t, vec!["src/w.rs"]);
         assert_eq!(assess(&t, 0, false).lane, Lane::Ask);
         assert_eq!(assess(&t, 0, true).lane, Lane::Ask);
+    }
+
+    #[test]
+    fn a_test_only_change_is_routine_even_without_the_magic_words() {
+        // The exact ticket a human waved through while the gate held it.
+        let mut t = ticket(
+            "Add compress+content-retrieval integration test",
+            TicketType::Feature,
+            Complexity::Medium,
+            false,
+        );
+        design(&mut t, vec!["crates/app/tests/compress_integration.rs"]);
+        assert_eq!(assess(&t, 0, false).lane, Lane::Auto);
     }
 
     #[test]
