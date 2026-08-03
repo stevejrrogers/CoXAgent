@@ -147,8 +147,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         self
     }
 
-    /// Attach the live "working now" reporter; fired only after the ticket is
-    /// claimed, so a runner that loses the race never shows a false-busy card.
+    /// The dashboard name for this runner's mode.
+    fn role_name(&self) -> &'static str {
+        match self.mode {
+            DevMode::Bug => "DEV-BUG",
+            DevMode::Feature => "DEV-FEATURE",
+        }
+    }
+
+    /// Attach the live "working now" reporter.
     #[must_use]
     pub fn with_phase(mut self, phase: Option<crate::use_cases::runner::PhaseReporter>) -> Self {
         self.phase = phase;
@@ -203,6 +210,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             if dirty.is_empty() || crate::verify_cache::is_green(&self.work_dir, fp.as_deref()) {
                 // fall through — nothing changed since the last green run
             } else {
+                // The boot check can run for minutes. Without a phase report
+                // the dashboard shows nobody working for the whole stretch —
+                // exactly the "agents look dead" symptom.
+                if let Some(p) = &self.phase {
+                    p(Some((
+                        self.role_name().to_owned(),
+                        format!("boot check: verifying {} changed file(s)", dirty.len()),
+                    )));
+                }
                 match tokio::time::timeout(
                     // 30 minutes, and SCOPED to the dirty paths: the boot
                     // check exists to catch a broken working tree, not to
@@ -301,14 +317,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             .await;
         }
         let Some(id) = chosen else {
+            // Nothing claimed: drop any boot-check phase so the dashboard does
+            // not keep showing this runner as busy.
+            if let Some(p) = &self.phase {
+                p(None);
+            }
             return Ok(None);
         };
         if let Some(p) = &self.phase {
-            let role = match self.mode {
-                DevMode::Bug => "DEV-BUG",
-                DevMode::Feature => "DEV-FEATURE",
-            };
-            p(Some((role.to_owned(), id.to_string())));
+            p(Some((self.role_name().to_owned(), id.to_string())));
         }
 
         let state = self.store.load().await?;
