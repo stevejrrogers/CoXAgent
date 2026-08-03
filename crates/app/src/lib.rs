@@ -59,13 +59,33 @@ fn init_tracing() {
     let _ = fmt().with_env_filter(filter).with_target(false).try_init();
 }
 
+/// The project id a `--state-dir` belongs to: the workspace directory name
+/// (`~/CoXAgent/cxa/state` -> `cxa`), falling back to `default`.
+///
+/// Every single-project command must agree on this, or two of them address
+/// different rows of the same shared Postgres for the same workspace.
+fn project_id_for(state_dir: &Path) -> String {
+    state_dir
+        .parent()
+        .and_then(Path::file_name)
+        .map_or_else(|| "default".to_owned(), |n| n.to_string_lossy().into_owned())
+}
+
 #[allow(clippy::too_many_lines)] // a flat CLI-command dispatch; splitting hurts readability
 async fn run() -> Result<String, Box<dyn std::error::Error>> {
     let args = cli::parse();
     // The single-project store is built lazily: `serve`/`hub`/`discover` don't
     // use it, so we must not create it eagerly — the default `./state` would
     // resolve against a read-only cwd (e.g. a GUI-launched app runs in `/`).
-    let store = || make_store("default", &args.state_dir);
+    //
+    // The id is the workspace directory name, the SAME derivation `run` uses.
+    // It was hardcoded "default" here, so on a shared Postgres `onboard
+    // --state-dir ~/CoXAgent/cxa/state` wrote the new project into the `default`
+    // row while the operator for that very workspace read `cxa`: one dashboard
+    // entry holding the real project under the wrong name, and a second, empty
+    // one that looked like a duplicate.
+    let pid = project_id_for(&args.state_dir);
+    let store = || make_store(&pid, &args.state_dir);
 
     match args.command {
         Command::Report => {
@@ -162,17 +182,6 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
                     .and_then(Path::parent)
                     .unwrap_or(&args.state_dir),
             );
-            // The project id is the workspace dir name (e.g. `cxc`), NOT a fixed
-            // "default" — so a headless worker shares the SAME Postgres project as
-            // the hub and other operators (distributed coordination).
-            let pid = args
-                .state_dir
-                .parent()
-                .and_then(Path::file_name)
-                .map_or_else(
-                    || "default".to_owned(),
-                    |n| n.to_string_lossy().into_owned(),
-                );
             Box::pin(run_loop(
                 make_store(&pid, &args.state_dir).await?,
                 &args.state_dir,
@@ -251,6 +260,30 @@ const SHIM_CMDS: &[&str] = &[
 /// of truth instead of being re-implemented in shell. Only these pay the extra
 /// process; every other shim keeps the plain pipeline.
 const EXACT_AWARE_CMDS: &[&str] = &["git"];
+
+#[cfg(test)]
+mod project_id_tests {
+    use super::project_id_for;
+    use std::path::Path;
+
+    /// Every single-project command must land on the SAME Postgres row for a
+    /// given workspace. `onboard` hardcoded "default" while `run` derived the
+    /// name, so onboarding `~/CoXAgent/cxa` wrote the project into `default`
+    /// and the operator for it then read an empty `cxa` — the dashboard showed
+    /// two projects, neither of them right.
+    #[test]
+    fn the_id_is_the_workspace_directory_name() {
+        assert_eq!(project_id_for(Path::new("/Users/u/CoXAgent/cxa/state")), "cxa");
+        assert_eq!(project_id_for(Path::new("/srv/work/lynx-3/state")), "lynx-3");
+    }
+
+    #[test]
+    fn a_bare_state_dir_falls_back_to_default() {
+        // `coxagent --state-dir state` from a workspace root: no parent name to
+        // take, and "default" is the id a single-project install already uses.
+        assert_eq!(project_id_for(Path::new("state")), "default");
+    }
+}
 
 #[cfg(test)]
 mod shim_script_tests {
