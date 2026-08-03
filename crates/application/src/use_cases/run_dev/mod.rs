@@ -201,7 +201,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         // tree-state serves every runner in the cycle.
         if let Some(deploy) = &self.verify {
             let fp = self.tree_fingerprint().await;
-            let dirty = self.working_tree().await.changed_paths;
+            // Scratch dirs (`.claude/`, `backups/`, engine config the runner
+            // writes itself) show up in `git status` but cannot break a build.
+            // Counting them made a clean tree look dirty, forced a full-suite
+            // fallback, and the timeout was then misread as a compile break.
+            let dirty = gates::build_relevant(&self.working_tree().await.changed_paths);
             // A CLEAN tree has nothing to prove: main is whatever CI and the
             // merge gate already blessed. The old code ran the whole suite
             // anyway, could not finish inside the cap, therefore never
@@ -513,7 +517,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             // Per-ticket gate: only what this change can reach. The full
             // suite still runs at the sprint boundary and on the merged tree
             // (docs/ADAPTIVE_APPROVAL.md's sibling rule for tests).
-            let changed = self.working_tree().await.changed_paths;
+            let changed = gates::build_relevant(&self.working_tree().await.changed_paths);
             let mut red = match deploy
                 .run_tests_scoped(&self.work_dir, &changed)
                 .await
