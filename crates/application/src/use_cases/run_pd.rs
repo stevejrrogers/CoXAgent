@@ -118,6 +118,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
             .to_owned();
 
         let memory = prompts::team_memory_block(&state.decisions, &state.lessons);
+        let steering = prompts::human_steering_block(&state, id.as_str());
         // The product's existing look and its earlier UX decisions live in the
         // team's own pages; designing without them is how a second design
         // language gets born.
@@ -137,7 +138,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
         .await;
         let outcome = self
             .engine
-            .run(self.build_request(&id, &title, &memory, &knowledge).await)
+            .run(self.build_request(&id, &title, &memory, &knowledge, &steering).await)
             .await?;
         if !outcome.succeeded() {
             self.store.release_stage(&id, "pd", &worker).await.ok();
@@ -204,6 +205,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
         title: &str,
         memory: &str,
         knowledge: &str,
+        steering: &str,
     ) -> AgentRequest {
         let _choice = self.config.engine.resolve(Role::Pd);
         let context_block = self
@@ -216,7 +218,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
             role: Role::Pd,
             system_prompt: prompts::system_prompt(prompts::PD),
             task_prompt: format!(
-                "Design the UX for feature {id}: {title}{context_block}{knowledge}{memory}{}{}",
+                "Design the UX for feature {id}: {title}{context_block}{knowledge}{memory}{steering}{}{}",
                 prompts::focus_block(self.files.as_deref(), &self.work_dir, title).await,
                 prompts::repo_map_block(
                     self.files.as_deref(),

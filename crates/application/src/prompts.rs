@@ -562,6 +562,34 @@ pub async fn test_surface_block(
 /// does not know what the product already does asks the SA to read the code and
 /// report back. Guessing is the expensive option — it fails a gate three
 /// attempts later, having taught nobody anything.
+/// What the humans said on this ticket, as instructions.
+///
+/// A person who reads a design or a proposal and thinks "not what I meant"
+/// reaches for the comment box. That only steered DEV: SA kept designing and
+/// BA kept proposing without ever seeing the note, so the correction had to be
+/// re-typed as a rejection reason or lost. Every role that writes something a
+/// human reviews now reads the comments on it first.
+///
+/// Newest first, capped — a long thread should not crowd out the ticket.
+#[must_use]
+pub fn human_steering_block(state: &crate::state::ProjectState, ticket: &str) -> String {
+    let notes: Vec<String> = state
+        .comments
+        .iter()
+        .filter(|c| c.author == "USER" && c.ticket.as_deref() == Some(ticket))
+        .rev()
+        .take(3)
+        .map(|c| c.body.chars().take(400).collect::<String>())
+        .collect();
+    if notes.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n\nHUMAN STEERING on this ticket (newest first — follow it):\n- {}",
+        notes.join("\n- ")
+    )
+}
+
 #[must_use]
 pub fn ask_protocol_block(state: &crate::state::ProjectState, ticket: &str) -> String {
     use std::fmt::Write as _;
@@ -1049,6 +1077,24 @@ mod tests {
     use super::{deploy_constraints, design_constraints, repo_map_block};
     use crate::config::DeployConfig;
     use crate::state::DesignSystem;
+
+    #[test]
+    fn human_steering_carries_only_this_ticket_s_human_notes() {
+        let mut state = crate::state::ProjectState::default();
+        state.post_comment("USER", "use the existing auth port", Some("F001".to_owned()));
+        state.post_comment("SA", "designed it", Some("F001".to_owned()));
+        state.post_comment("USER", "different ticket", Some("F002".to_owned()));
+
+        let out = super::human_steering_block(&state, "F001");
+        assert!(out.contains("existing auth port"));
+        assert!(!out.contains("designed it"), "agent chatter is not steering");
+        assert!(!out.contains("different ticket"), "other tickets stay out");
+
+        assert!(
+            super::human_steering_block(&state, "F404").is_empty(),
+            "no notes means no block at all, not an empty heading"
+        );
+    }
 
     #[tokio::test]
     async fn repo_map_block_gated_and_present() {
