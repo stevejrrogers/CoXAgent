@@ -68,7 +68,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let Some(deploy) = &self.deploy else {
             return true;
         };
-        crate::ports::outbound::verify_deploy_health(deploy, self.config.deploy.host_port).await
+        // A malformed `host_port` (COX-B035) must fail the gate, not be
+        // treated as unconfigured — see `host_port_probe`.
+        match self.host_port_probe {
+            Ok(port) => crate::ports::outbound::verify_deploy_health(deploy, port).await,
+            Err(()) => false,
+        }
     }
     /// Detailed post-deploy health check (COX-F005): poll the app's health
     /// endpoint via [`crate::ports::outbound::DeployPort::wait_healthy`] for
@@ -87,8 +92,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let Some(deploy) = &self.deploy else {
             return (true, None);
         };
-        let Some(port) = self.config.deploy.host_port else {
-            return (true, None);
+        // A malformed `host_port` (COX-B035) must fail the gate outright,
+        // not be treated as unconfigured — see `host_port_probe`.
+        let port = match self.host_port_probe {
+            Ok(Some(port)) => port,
+            Ok(None) => return (true, None),
+            Err(()) => return (false, None),
         };
         let bound = std::time::Duration::from_secs(self.config.deploy.health_check_timeout_secs);
         let result = match tokio::time::timeout(

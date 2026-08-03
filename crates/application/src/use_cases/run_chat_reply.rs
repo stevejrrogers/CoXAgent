@@ -28,7 +28,11 @@ pub struct RunChatReplyUseCase<S: StateStorePort + ?Sized, E: AgentEnginePort + 
     token_saver: bool,
     lang: Language,
     deploy: Option<Arc<dyn DeployPort>>,
-    host_port: Option<u16>,
+    /// The published `host_port`, or `Err` when the raw config's
+    /// `deploy.host_port` is present but malformed (COX-B035) — an `Err`
+    /// fails the mandatory post-deploy health gate rather than being folded
+    /// into "nothing configured".
+    host_port_probe: Result<Option<u16>, ()>,
     /// Code host + target branch, so chat can trigger an SA merge sweep.
     forge: Option<(Arc<dyn crate::ports::outbound::ForgePort>, String, bool)>,
     context: Option<String>,
@@ -64,7 +68,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             token_saver,
             lang,
             deploy: None,
-            host_port: None,
+            host_port_probe: Ok(None),
             forge: None,
             context: None,
             new_project_fn: None,
@@ -129,10 +133,13 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         self
     }
 
-    /// The host port to publish on when scaffolding a docker setup.
+    /// The host port to publish on when scaffolding a docker setup, and to
+    /// probe for the mandatory post-deploy health gate. `Err(())` means the
+    /// raw config's `deploy.host_port` was present but malformed — the gate
+    /// must fail rather than treat it as unconfigured (COX-B035).
     #[must_use]
-    pub fn with_host_port(mut self, port: Option<u16>) -> Self {
-        self.host_port = port;
+    pub fn with_host_port_probe(mut self, probe: Result<Option<u16>, ()>) -> Self {
+        self.host_port_probe = probe;
         self
     }
 
@@ -737,6 +744,17 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         }
     }
 
+    /// Mandatory post-deploy health gate (COX-B004/COX-B009), fail-closed on
+    /// a malformed `host_port` (COX-B035): a corrupt config must not be
+    /// treated as "nothing to probe", which would report a dead deploy as
+    /// healthy.
+    async fn deploy_health_gate(&self, deploy: &Arc<dyn DeployPort>) -> bool {
+        match self.host_port_probe {
+            Ok(port) => crate::ports::outbound::verify_deploy_health(deploy, port).await,
+            Err(()) => false,
+        }
+    }
+
     /// Deploy/run the app on request (docker compose in the codebase), reporting
     /// the result back into the channel.
     async fn deploy_now(&self) {
@@ -787,11 +805,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             // Mandatory health gate (COX-B004/COX-B009): a compose exit-0 only
             // proves the containers started, not that the app inside bound
             // its port — probe before telling the human it's up.
-            Ok(r)
-                if r.success
-                    && crate::ports::outbound::verify_deploy_health(deploy, self.host_port)
-                        .await =>
-            {
+            Ok(r) if r.success && self.deploy_health_gate(deploy).await => {
                 if self.lang.is_vi() {
                     format!("✅ Deploy xong — {}", r.summary)
                 } else {
@@ -926,7 +940,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
     /// Have a DEV agent inspect the codebase and write a minimal, working
     /// Dockerfile + docker-compose so the app can run locally. Best-effort.
     async fn scaffold_docker(&self) {
-        let port = self.host_port.unwrap_or(8080);
+        let port = self.host_port_probe.unwrap_or_default().unwrap_or(8080);
         let task = format!(
             "The project in the working directory has NO docker setup. Inspect the code — detect \
              the language, how it builds, and its entrypoint/served port — then CREATE a minimal \
@@ -1341,7 +1355,7 @@ mod tests {
             Language::En,
         )
         .with_deploy(Arc::new(DeployWithDeadPort) as Arc<dyn DeployPort>)
-        .with_host_port(Some(8101));
+        .with_host_port_probe(Ok(Some(8101)));
 
         uc.deploy_now().await;
 
@@ -1370,10 +1384,40 @@ mod tests {
             Language::En,
         )
         .with_deploy(Arc::new(HealthyDeploy) as Arc<dyn DeployPort>)
-        .with_host_port(Some(8101));
+        .with_host_port_probe(Ok(Some(8101)));
 
         uc.deploy_now().await;
 
         assert!(last_comment(&store).contains("Deploy OK"));
+    }
+
+    /// AC (COX-B035): a malformed `deploy.host_port` in the project's
+    /// `coxagent.json` must fail the chat "deploy" command's health gate —
+    /// not be folded into "nothing configured" (which would pass
+    /// vacuously and report a possibly-dead deploy as OK), matching the
+    /// PR-preview endpoint's COX-B025/COX-B026 fix. Uses a deploy adapter
+    /// that would pass any real probe, so a false "Deploy OK" here would
+    /// mean the malformed port silently skipped the gate.
+    #[tokio::test(start_paused = true)]
+    async fn chat_deploy_reports_failure_when_host_port_is_malformed() {
+        let store = Arc::new(MemStore::default());
+        let dir = work_dir_with_compose();
+        let uc = RunChatReplyUseCase::new(
+            Arc::clone(&store),
+            Arc::new(UnusedEngine),
+            dir.path().to_path_buf(),
+            false,
+            Language::En,
+        )
+        .with_deploy(Arc::new(HealthyDeploy) as Arc<dyn DeployPort>)
+        .with_host_port_probe(Err(()));
+
+        uc.deploy_now().await;
+
+        let body = last_comment(&store);
+        assert!(
+            !body.contains("Deploy OK"),
+            "a malformed host_port must not skip the health gate: {body}"
+        );
     }
 }
