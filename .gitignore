@@ -27,6 +27,8 @@ sessions.json
 .env.*.bak
 # Any local-only note (credentials, host-specific ports) never belongs in git.
 *.local.md
+# Host-specific compose overlay: absolute paths that exist on one machine only.
+*.local.yml
 
 # Runtime state of the compose deploy's mounted volume: nightly backups and the
 # hand-edited copies left beside a file before changing it. Per-install data.

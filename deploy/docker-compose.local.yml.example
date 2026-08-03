@@ -1,0 +1,34 @@
+# Host-specific overlay — NOT committed (see .gitignore: *.local.yml).
+#
+# Self-host shape: the hub runs in Docker, but the projects and the codebases
+# they point at live on this machine. The container is given the host's OWN
+# absolute paths, so nothing has to be translated:
+#
+#   - the workspace at its host path, so hub and operator read one registry,
+#     one config, one set of state files rather than two copies that drift;
+#   - the code root at its host path, because a project's `codebase` is a
+#     symlink to something like /Users/me/Projects/foo and a symlink resolves
+#     only if that exact path also exists inside the container.
+#
+# Code is read-only here: agents write through the runner on the host. The
+# dashboard only reads, for Code map and Files.
+#
+# Enabled by COMPOSE_FILE in .env, so a plain `docker compose up -d` loads it.
+x-local-mounts: &local-mounts
+  - ${COX_WORKSPACE}:${COX_WORKSPACE}
+  - ${COX_WORKSPACE}:/root/CoXAgent
+  - ${COX_CODE_ROOT}:${COX_CODE_ROOT}:ro
+
+x-local-env: &local-env
+  COXAGENT_REGISTRY: ${COX_WORKSPACE}/registry.json
+
+services:
+  gateway:
+    volumes: *local-mounts
+    environment: *local-env
+  realtime:
+    volumes: *local-mounts
+    environment: *local-env
+  knowledge:
+    volumes: *local-mounts
+    environment: *local-env
