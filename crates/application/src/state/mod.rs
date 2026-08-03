@@ -44,6 +44,9 @@ pub const GENERAL_CHANNEL: &str = "general";
 /// The system feed channel: agent/bot notifications (PRs, deploys, digest,
 /// previews) land here instead of spamming `#general`. Open to everyone.
 pub const AGENTS_CHANNEL: &str = "agents";
+/// Where work waiting on a PERSON is announced. Separate from `agents` so a
+/// human can watch decisions without reading the whole machine's chatter.
+pub const APPROVALS_CHANNEL: &str = "approvals";
 
 fn general_channel() -> String {
     GENERAL_CHANNEL.to_owned()
@@ -665,6 +668,16 @@ impl ProjectState {
     /// Append a `#general` message with attachments.
     pub fn post_chat_att(&mut self, user: &str, body: &str, attachments: Vec<Attachment>) {
         self.post_chat_in(user, body, GENERAL_CHANNEL, attachments);
+    }
+
+    /// Messages in one room of this project's chat, oldest first.
+    #[must_use]
+    pub fn chat_in(&self, channel: &str) -> Vec<ChatMsg> {
+        self.chat
+            .iter()
+            .filter(|m| m.channel == channel)
+            .cloned()
+            .collect()
     }
 
     /// Append a message to `channel`, trimming the oldest beyond [`MAX_CHAT`].

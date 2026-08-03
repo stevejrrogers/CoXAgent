@@ -210,7 +210,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 }
             }
             for msg in announced {
-                s.post_chat_in("SYSTEM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+                s.post_chat_in("SYSTEM", &msg, crate::state::APPROVALS_CHANNEL, Vec::new());
             }
             Ok(())
         })
