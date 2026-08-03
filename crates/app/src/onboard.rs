@@ -98,7 +98,12 @@ fn parse_compose(path: &Path) -> ParsedCompose {
                         let parts: Vec<&str> = port_str.split(':').collect();
                         if parts.len() >= 2 {
                             let host = parts[0].parse::<u16>().unwrap_or(0);
-                            let container = parts.last().unwrap().parse::<u16>().unwrap_or(0);
+                            let container = parts
+                                .last()
+                                .copied()
+                                .unwrap_or("")
+                                .parse::<u16>()
+                                .unwrap_or(0);
                             if host > 0 && container > 0 {
                                 cs.ports.push((container, host));
                             }
@@ -257,6 +262,7 @@ fn smart_comprehension_context(
     stack_lines: &[String],
     docker: &DockerAnalysis,
 ) -> String {
+    use std::fmt::Write as _;
     let stack = if stack_lines.is_empty() {
         "_No stack auto-detected — describe it here._".to_owned()
     } else {
@@ -268,7 +274,7 @@ fn smart_comprehension_context(
         extra.push_str("## Infrastructure (reusable — already running)\n");
         extra.push_str("The following services are running on docker. The team should **reuse** them (connect, don't deploy duplicates):\n\n");
         for (svc, port) in &docker.reusable {
-            extra.push_str(&format!("- **{svc}** — port :{port}\n"));
+            let _ = writeln!(extra, "- **{svc}** — port :{port}");
         }
         extra.push('\n');
     }
@@ -279,16 +285,18 @@ fn smart_comprehension_context(
             "The compose file declares services that conflict with running containers:\n\n",
         );
         for c in &docker.clashes {
-            extra.push_str(&format!("- {c}\n"));
+            let _ = writeln!(extra, "- {c}");
         }
-        extra.push_str("\n**Action:** remove the conflicting services from compose and connect to the running ones.\n\n");
+        extra.push_str(
+            "\n**Action:** remove the conflicting services from compose and connect to the running ones.\n\n",
+        );
     }
 
     if !docker.missing_known.is_empty() && !docker.has_compose {
         extra.push_str("## Recommended infra to add\n");
         extra.push_str("Consider adding these services to docker-compose:\n\n");
         for s in &docker.missing_known {
-            extra.push_str(&format!("- **{s}**\n"));
+            let _ = writeln!(extra, "- **{s}**");
         }
         extra.push('\n');
     }
@@ -473,6 +481,7 @@ pub async fn greenfield<S: StateStorePort + 'static>(
 /// makes the codebase a git repo (required for branch-per-ticket and audit) and
 /// seeds a Dockerize chore when there is no compose file, so the deploy step has
 /// something to make the app verifiable. The human gate is the same.
+#[allow(clippy::too_many_lines)] // one linear pass; splitting hurts readability
 pub async fn brownfield<S: StateStorePort + 'static>(
     store: &Arc<S>,
     state_dir: &Path,
@@ -504,7 +513,7 @@ pub async fn brownfield<S: StateStorePort + 'static>(
     // blind. Index the code into a REPO_MAP the agents read first, and detect the
     // stack to (a) seed governance rules that match reality and (b) draft a real
     // project_context.md instead of an empty template.
-    let repo_stats = build_repo_map(codebase);
+    let repo_stats = build_repo_map(codebase).await;
     let (rules, stack_lines) = detect_stack(codebase);
 
     // ── Docker smarts: parse compose, detect running services, avoid clashes ─
@@ -527,14 +536,17 @@ pub async fn brownfield<S: StateStorePort + 'static>(
         let mut cfg = Config::default();
         cfg.architecture.clone_from(&rules);
         // Prefer opencode as default engine (supports any provider) if detected.
-        let engine = coxagent_infrastructure::discover()
+        let has_opencode = coxagent_infrastructure::discover()
             .iter()
-            .find(|d| d.kind == coxagent_application::config::EngineKind::Opencode)
-            .map(|_| coxagent_application::config::EngineKind::Opencode)
-            .unwrap_or(coxagent_application::config::EngineKind::Claude);
+            .any(|d| d.kind == coxagent_application::config::EngineKind::Opencode);
+        let engine = if has_opencode {
+            coxagent_application::config::EngineKind::Opencode
+        } else {
+            coxagent_application::config::EngineKind::Claude
+        };
         cfg.engine.default.engine = engine;
-        if engine == coxagent_application::config::EngineKind::Opencode {
-            cfg.engine.default.model = "bizbrain/DeepSeek-V4-Pro".to_owned();
+        if has_opencode {
+            "bizbrain/DeepSeek-V4-Pro".clone_into(&mut cfg.engine.default.model);
         }
         cfg.engine.auto_fallback = false;
         // Save consumed ports so assign_host_port skips them
@@ -580,7 +592,9 @@ pub async fn brownfield<S: StateStorePort + 'static>(
             rules.len()
         )
     };
-    let docker_note = if !docker.reusable.is_empty() {
+    let docker_note = if docker.reusable.is_empty() {
+        "Running infra: none detected".to_owned()
+    } else {
         format!(
             "Running infra (reuse): {}",
             docker
@@ -590,8 +604,6 @@ pub async fn brownfield<S: StateStorePort + 'static>(
                 .collect::<Vec<_>>()
                 .join(", ")
         )
-    } else {
-        "Running infra: none detected".to_owned()
     };
     Ok(format!(
         "Adopted existing project '{name}' (alias {alias}) at {}.\n\
@@ -613,15 +625,12 @@ pub async fn brownfield<S: StateStorePort + 'static>(
 
 /// Index the codebase into a graph + write `.coxagent/REPO_MAP.md` (the map the
 /// agents read first to orient). Returns a one-line stat summary; best-effort.
-fn build_repo_map(codebase: &Path) -> String {
+async fn build_repo_map(codebase: &Path) -> String {
     use coxagent_application::codegraph::CodeGraph;
-    let g = CodeGraph::index(codebase);
-    let _ = g.save(codebase);
-    let _ = std::fs::create_dir_all(codebase.join(".coxagent"));
-    let _ = std::fs::write(
-        codebase.join(".coxagent").join("REPO_MAP.md"),
-        g.repo_map(40_000),
-    );
+    let files = coxagent_infrastructure::FsWorkspaceFiles::new();
+    let g = CodeGraph::index(&files, codebase).await;
+    // save() also writes REPO_MAP.md — one producer, both artifacts.
+    let _ = g.save(&files, codebase).await;
     format!(
         "indexed {} files, {} symbols, {} calls",
         g.files.len(),
@@ -853,7 +862,7 @@ networks:
         assert_eq!(db.ports, vec![(5432, 5432)]);
         assert_eq!(db.image.as_deref(), Some("postgres:16"));
         assert_eq!(
-            db.env.get("POSTGRES_USER").map(|s| s.as_str()),
+            db.env.get("POSTGRES_USER").map(String::as_str),
             Some("test")
         );
 

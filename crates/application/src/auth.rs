@@ -62,8 +62,11 @@ impl AuthRole {
         !matches!(self, Self::Viewer)
     }
 
-    /// Whether this role may act on code review (approve / merge / request
-    /// changes on pull/merge requests): Admin, leads, and the legacy Reviewer.
+    /// Whether this role may act on code review (approve / merge / close /
+    /// preview pull requests): Super, Admin, the lead tier, and the legacy
+    /// Reviewer. Deliberately NARROWER than [`Self::can_write`] — a member-tier
+    /// contributor may write project data but must not sign off on, merge, or
+    /// force-merge a pull request (COX-B038).
     #[must_use]
     pub fn can_review(self) -> bool {
         matches!(self, Self::Super | Self::Admin | Self::Reviewer) || self.is_lead()
@@ -202,6 +205,60 @@ mod role_tests {
         assert!(!AuthRole::De.can_create_channel());
         // Legacy Viewer is read-only.
         assert!(!AuthRole::Viewer.can_write());
+    }
+
+    /// Regression for COX-B038: `can_review` had been written as
+    /// `can_write() || matches!(self, Reviewer)`, which is mathematically
+    /// identical to `can_write()` — so the PR-action gate granted nothing
+    /// beyond ordinary write access and any non-Viewer could force-merge.
+    #[test]
+    fn review_is_admin_leads_reviewer_only_not_every_writer() {
+        assert!(AuthRole::Super.can_review());
+        assert!(AuthRole::Admin.can_review());
+        assert!(AuthRole::Reviewer.can_review());
+        // The whole lead tier reviews.
+        assert!(AuthRole::Director.can_review());
+        assert!(AuthRole::Manager.can_review());
+        assert!(AuthRole::TechLead.can_review());
+        assert!(AuthRole::DsLead.can_review());
+        assert!(AuthRole::DaLead.can_review());
+        // Member tier can write but must NOT merge/close/preview a PR.
+        for r in [
+            AuthRole::Ba,
+            AuthRole::Fe,
+            AuthRole::Be,
+            AuthRole::Aie,
+            AuthRole::Ds,
+            AuthRole::Da,
+            AuthRole::De,
+        ] {
+            assert!(r.can_write(), "{} should still write", r.as_str());
+            assert!(!r.can_review(), "{} must not review PRs", r.as_str());
+        }
+        assert!(!AuthRole::Viewer.can_review());
+    }
+
+    /// The guard that makes the bug un-reintroducible: review must stay a
+    /// STRICT subset of write. If someone re-widens `can_review` to every
+    /// writer, the "strictly narrower" assertion fails.
+    #[test]
+    fn review_is_a_strict_subset_of_write() {
+        let mut narrower_somewhere = false;
+        for r in AuthRole::all() {
+            if r.can_review() {
+                assert!(
+                    r.can_write(),
+                    "{} reviews but cannot write — review must imply write",
+                    r.as_str()
+                );
+            } else if r.can_write() {
+                narrower_somewhere = true;
+            }
+        }
+        assert!(
+            narrower_somewhere,
+            "can_review() grants nothing beyond can_write() — the PR gate is a no-op"
+        );
     }
 
     #[test]

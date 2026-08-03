@@ -183,6 +183,24 @@ pub trait DeployPort: Send + Sync {
         })
     }
 
+    /// Run only the tests that could be affected by `changed` (paths relative
+    /// to `work_dir`). A per-ticket gate does not need the whole suite: on
+    /// this workspace the full run costs 7-8 minutes and the scoped one
+    /// seconds, and the full suite still runs at the sprint boundary and on
+    /// the merged tree. Default: fall back to everything, so an adapter that
+    /// cannot scope stays correct.
+    ///
+    /// # Errors
+    /// [`PortError`] when the runner cannot be started or times out.
+    async fn run_tests_scoped(
+        &self,
+        work_dir: &Path,
+        changed: &[String],
+    ) -> Result<DeployReport, PortError> {
+        let _ = changed;
+        self.run_tests(work_dir).await
+    }
+
     async fn run_tests(&self, work_dir: &Path) -> Result<DeployReport, PortError> {
         let _ = work_dir;
         Ok(DeployReport {

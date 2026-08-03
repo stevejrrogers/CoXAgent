@@ -20,6 +20,7 @@ pub struct RunArchitectureAuditUseCase<S: StateStorePort + ?Sized, E: AgentEngin
     work_dir: PathBuf,
     token_saver: bool,
     lang: Language,
+    files: Option<Arc<dyn crate::ports::outbound::WorkspaceFilesPort>>,
 }
 
 impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunArchitectureAuditUseCase<S, E> {
@@ -36,7 +37,19 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunArchitectureAud
             work_dir,
             token_saver,
             lang,
+            files: None,
         }
+    }
+
+    /// Attach the files port so the evidence pass can scan manifests and the
+    /// directory layout. Without it the review runs on prompt knowledge alone.
+    #[must_use]
+    pub fn with_files(
+        mut self,
+        files: Option<Arc<dyn crate::ports::outbound::WorkspaceFilesPort>>,
+    ) -> Self {
+        self.files = files;
+        self
     }
 
     /// Review the architecture and file refactor chores. Returns the count filed.
@@ -46,7 +59,10 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunArchitectureAud
     /// swallowed (best-effort review).
     pub async fn execute(&self, sprint: u32) -> Result<usize, AppError> {
         let vi = self.lang.is_vi();
-        let evidence = gather_evidence(&self.work_dir);
+        let evidence = match &self.files {
+            Some(files) => gather_evidence(files.as_ref(), &self.work_dir).await,
+            None => String::new(),
+        };
         let task = format!(
             "You are a Staff Solution Architect doing a WHOLE-SYSTEM architecture review. You have \
              FULL read access to the working directory — actually OPEN and READ the code, don't \
@@ -84,7 +100,8 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunArchitectureAud
              high/critical and continuing to add features would make it worse. `refactors` names \
              concrete work (files + target design); [] only if genuinely solid.{}{}",
             self.lang.reply_directive(),
-            crate::prompts::repo_map_block(&self.work_dir, self.token_saver)
+            crate::prompts::repo_map_block(self.files.as_deref(), &self.work_dir, self.token_saver)
+                .await
         );
         let request = AgentRequest {
             role: Role::Sa,
@@ -496,10 +513,14 @@ fn render_assessment(
     }
 }
 
-/// Collect real architecture evidence for the SA: dependency manifests (which
+/// Gather grounding evidence for the review: dependency manifests (which
 /// reveal the DB/cache/framework) and the top folder layout (which reveals the
-/// layering). Bounded so it never blows the prompt.
-fn gather_evidence(work_dir: &std::path::Path) -> String {
+/// layering). Bounded so it never blows the prompt. All reads go through the
+/// files port — the ratchet forbids `std::fs` here.
+async fn gather_evidence(
+    files: &dyn crate::ports::outbound::WorkspaceFilesPort,
+    work_dir: &std::path::Path,
+) -> String {
     use std::fmt::Write as _;
     const MANIFESTS: &[&str] = &[
         "Cargo.toml",
@@ -514,35 +535,36 @@ fn gather_evidence(work_dir: &std::path::Path) -> String {
         "docker-compose.yml",
         "compose.yml",
     ];
-    let ignore = |n: &str| n.starts_with('.') || n == "target" || n == "node_modules";
+    let ignore = |p: &std::path::Path| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .map_or(true, |n| n.starts_with('.') || n == "target" || n == "node_modules")
+    };
 
-    // Manifest files at the root and one/two levels down (workspace members).
-    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    // Manifest files at the root and one/two levels down (workspace members),
+    // read as we find them so one port call per candidate suffices.
+    let mut found: Vec<(std::path::PathBuf, String)> = Vec::new();
     for m in MANIFESTS {
-        let p = work_dir.join(m);
-        if p.exists() {
-            files.push(p);
+        if let Some(text) = files.read(&work_dir.join(m)).await {
+            found.push((work_dir.join(m), text));
         }
     }
-    if let Ok(rd) = std::fs::read_dir(work_dir) {
-        for e in rd.flatten().filter(|e| e.path().is_dir()) {
-            if e.file_name().to_str().is_some_and(ignore) {
-                continue;
+    let top_dirs: Vec<std::path::PathBuf> = files
+        .list_dirs(work_dir)
+        .await
+        .into_iter()
+        .filter(|d| !ignore(d))
+        .collect();
+    for d in &top_dirs {
+        for m in ["Cargo.toml", "package.json", "go.mod"] {
+            if let Some(text) = files.read(&d.join(m)).await {
+                found.push((d.join(m), text));
             }
-            for m in ["Cargo.toml", "package.json", "go.mod"] {
-                let p = e.path().join(m);
-                if p.exists() {
-                    files.push(p);
-                }
-            }
-            if let Ok(rd2) = std::fs::read_dir(e.path()) {
-                for e2 in rd2.flatten().filter(|e| e.path().is_dir()) {
-                    for m in ["Cargo.toml", "package.json"] {
-                        let p = e2.path().join(m);
-                        if p.exists() {
-                            files.push(p);
-                        }
-                    }
+        }
+        for d2 in files.list_dirs(d).await.into_iter().filter(|d| !ignore(d)) {
+            for m in ["Cargo.toml", "package.json"] {
+                if let Some(text) = files.read(&d2.join(m)).await {
+                    found.push((d2.join(m), text));
                 }
             }
         }
@@ -550,41 +572,29 @@ fn gather_evidence(work_dir: &std::path::Path) -> String {
 
     let mut out = String::from("## Dependency manifests\n");
     let mut budget: usize = 6000;
-    for f in files.iter().take(24) {
+    for (f, text) in found.iter().take(24) {
         if budget == 0 {
             break;
         }
-        if let Ok(text) = std::fs::read_to_string(f) {
-            let rel = f.strip_prefix(work_dir).unwrap_or(f);
-            let snippet: String = text.chars().take(budget.min(1200)).collect();
-            budget = budget.saturating_sub(snippet.len());
-            let _ = writeln!(out, "\n### {}\n```\n{snippet}\n```", rel.display());
-        }
+        let rel = f.strip_prefix(work_dir).unwrap_or(f);
+        let snippet: String = text.chars().take(budget.min(1200)).collect();
+        budget = budget.saturating_sub(snippet.len());
+        let _ = writeln!(out, "\n### {}\n```\n{snippet}\n```", rel.display());
     }
 
     out.push_str("\n## Directory layout (folders, depth 2)\n");
-    if let Ok(rd) = std::fs::read_dir(work_dir) {
-        let mut dirs: Vec<String> = rd
-            .flatten()
-            .filter(|e| e.path().is_dir())
-            .filter_map(|e| e.file_name().into_string().ok())
-            .filter(|n| !ignore(n))
-            .collect();
-        dirs.sort();
-        for d in dirs.iter().take(40) {
-            let _ = writeln!(out, "- {d}/");
-            if let Ok(rd2) = std::fs::read_dir(work_dir.join(d)) {
-                let mut subs: Vec<String> = rd2
-                    .flatten()
-                    .filter(|e| e.path().is_dir())
-                    .filter_map(|e| e.file_name().into_string().ok())
-                    .filter(|n| !ignore(n))
-                    .collect();
-                subs.sort();
-                for s in subs.iter().take(20) {
-                    let _ = writeln!(out, "  - {s}/");
-                }
-            }
+    for d in top_dirs.iter().take(40) {
+        let name = d.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        let _ = writeln!(out, "- {name}/");
+        for sub in files
+            .list_dirs(d)
+            .await
+            .into_iter()
+            .filter(|d| !ignore(d))
+            .take(20)
+        {
+            let sub = sub.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            let _ = writeln!(out, "  - {sub}/");
         }
     }
     out

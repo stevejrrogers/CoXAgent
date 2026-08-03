@@ -7,7 +7,6 @@
 //! answer to architecture drift.
 
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 
 /// A rule for one area (subdirectory) of the codebase.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,20 +38,29 @@ impl Violation {
     }
 }
 
+use std::collections::BTreeMap;
+
 /// Directories never scanned for conformance.
 const SKIP_DIRS: &[&str] = &["node_modules", ".git", "target", "dist", "build", ".vite"];
 
-/// Check the codebase at `root` against `rules`. Areas that don't exist yet are
-/// skipped (nothing built there). Returns one violation per broken rule.
+/// Check `rules` against a per-area file listing (relative or absolute paths —
+/// matching is by suffix). Areas absent from the map, or listed empty, are
+/// skipped: nothing built there yet. Pure function — the caller gathers the
+/// listing through the workspace files port.
 #[must_use]
-pub fn check(root: &Path, rules: &[StackRule]) -> Vec<Violation> {
+pub fn check(files_by_area: &BTreeMap<String, Vec<String>>, rules: &[StackRule]) -> Vec<Violation> {
     let mut out = Vec::new();
     for rule in rules {
-        let dir = root.join(&rule.area);
-        if !dir.is_dir() {
+        let Some(files) = files_by_area.get(&rule.area).filter(|f| !f.is_empty()) else {
             continue;
-        }
-        let files = list_files(&dir);
+        };
+        let files: Vec<&String> = files
+            .iter()
+            .filter(|f| {
+                !f.split(['/', '\\'])
+                    .any(|seg| SKIP_DIRS.contains(&seg))
+            })
+            .collect();
 
         if !rule.require_any.is_empty()
             && !rule
@@ -92,57 +100,32 @@ pub fn check(root: &Path, rules: &[StackRule]) -> Vec<Violation> {
     out
 }
 
-/// Recursively list file paths (as strings) under `dir`, skipping vendor dirs.
-fn list_files(dir: &Path) -> Vec<String> {
-    let mut out = Vec::new();
-    walk(dir, &mut out);
-    out
-}
-
-fn walk(dir: &Path, out: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if path.is_dir() {
-            if !SKIP_DIRS.contains(&name.as_ref()) {
-                walk(&path, out);
-            }
-        } else {
-            out.push(path.to_string_lossy().into_owned());
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn write(root: &Path, rel: &str) {
-        let p = root.join(rel);
-        std::fs::create_dir_all(p.parent().expect("parent")).expect("mkdir");
-        std::fs::write(p, "x").expect("write");
+    fn area(name: &str, files: &[&str]) -> BTreeMap<String, Vec<String>> {
+        let mut m = BTreeMap::new();
+        m.insert(
+            name.to_owned(),
+            files.iter().map(|f| (*f).to_owned()).collect(),
+        );
+        m
+    }
+
+    fn rule(require: &[&str], forbid: &[&str]) -> StackRule {
+        StackRule {
+            area: "server".to_owned(),
+            language: "Rust".to_owned(),
+            require_any: require.iter().map(|s| (*s).to_owned()).collect(),
+            forbid_ext: forbid.iter().map(|s| (*s).to_owned()).collect(),
+        }
     }
 
     #[test]
-    fn flags_forbidden_extension_and_missing_marker() {
-        let dir = tempfile::tempdir().expect("tmp");
-        let root = dir.path();
-        // server built in TypeScript when it should be Rust.
-        write(root, "server/src/index.ts");
-        write(root, "server/package.json");
-
-        let rules = vec![StackRule {
-            area: "server".to_owned(),
-            language: "Rust".to_owned(),
-            require_any: vec!["Cargo.toml".to_owned()],
-            forbid_ext: vec![".ts".to_owned(), ".tsx".to_owned()],
-        }];
-        let v = check(root, &rules);
-        // Two violations: missing Cargo.toml AND forbidden .ts files.
+    fn missing_marker_and_forbidden_files_both_flag() {
+        let files = area("server", &["server/index.ts", "server/package.json"]);
+        let v = check(&files, &[rule(&["Cargo.toml"], &[".ts", ".tsx"])]);
         assert_eq!(v.len(), 2, "{v:?}");
         assert!(v.iter().any(|x| x.message.contains("Cargo.toml")));
         assert!(v.iter().any(|x| x.message.contains("forbidden")));
@@ -150,28 +133,21 @@ mod tests {
 
     #[test]
     fn conformant_rust_server_passes() {
-        let dir = tempfile::tempdir().expect("tmp");
-        let root = dir.path();
-        write(root, "server/Cargo.toml");
-        write(root, "server/src/main.rs");
-        let rules = vec![StackRule {
-            area: "server".to_owned(),
-            language: "Rust".to_owned(),
-            require_any: vec!["Cargo.toml".to_owned()],
-            forbid_ext: vec![".ts".to_owned()],
-        }];
-        assert!(check(root, &rules).is_empty());
+        let files = area("server", &["server/Cargo.toml", "server/src/main.rs"]);
+        assert!(check(&files, &[rule(&["Cargo.toml"], &[".ts"])]).is_empty());
     }
 
     #[test]
-    fn missing_area_is_skipped() {
-        let dir = tempfile::tempdir().expect("tmp");
-        let rules = vec![StackRule {
-            area: "server".to_owned(),
-            language: "Rust".to_owned(),
-            require_any: vec!["Cargo.toml".to_owned()],
-            forbid_ext: vec![],
-        }];
-        assert!(check(dir.path(), &rules).is_empty());
+    fn missing_or_empty_area_is_skipped() {
+        assert!(check(&BTreeMap::new(), &[rule(&["Cargo.toml"], &[])]).is_empty());
+        assert!(check(&area("server", &[]), &[rule(&["Cargo.toml"], &[])]).is_empty());
+    }
+
+    #[test]
+    fn vendor_directories_do_not_count_as_evidence() {
+        // A Cargo.toml buried in node_modules must not satisfy the marker rule.
+        let files = area("server", &["server/node_modules/x/Cargo.toml"]);
+        let v = check(&files, &[rule(&["Cargo.toml"], &[])]);
+        assert_eq!(v.len(), 1, "{v:?}");
     }
 }

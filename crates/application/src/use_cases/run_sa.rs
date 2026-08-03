@@ -39,6 +39,7 @@ pub struct RunSaUseCase<S: StateStorePort, E: AgentEnginePort> {
     worker: String,
     phase: Option<crate::use_cases::runner::PhaseReporter>,
     context: Option<String>,
+    files: Option<Arc<dyn crate::ports::outbound::WorkspaceFilesPort>>,
 }
 
 impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
@@ -51,7 +52,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             worker: String::new(),
             phase: None,
             context: None,
+            files: None,
         }
+    }
+
+    /// Attach workspace file access for prompt context blocks; `None` (tests)
+    /// reads as no context.
+    #[must_use]
+    pub fn with_files(
+        mut self,
+        files: Option<Arc<dyn crate::ports::outbound::WorkspaceFilesPort>>,
+    ) -> Self {
+        self.files = files;
+        self
     }
 
     /// Attach the project context (`project_context.md`) so the SA understands
@@ -84,6 +97,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
     ///
     /// # Errors
     /// [`AppError`] on engine failure, unparseable output, or a DoR violation.
+    #[allow(clippy::too_many_lines)] // one linear pass; splitting hurts readability
     pub async fn execute(&self) -> Result<Option<TicketId>, AppError> {
         let state = self.store.load().await?;
         // Walk the SA queue best-first and claim the first ticket no other runner
@@ -98,13 +112,35 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
         // of runway; past that the SA stands down this cycle.
         {
             use coxagent_domain::Status;
-            let ready = state
+            // Runway = tickets DEV can pull (Ready) PLUS designs already done
+            // and parked behind the human ready-gate. Counting only Ready
+            // starved design forever on a hybrid board: 16 pre-gate Ready
+            // tickets meant the SA never designed the tickets humans were
+            // actually waiting to approve.
+            let runway = state
                 .tickets
                 .iter()
-                .filter(|t| t.status() == Status::Ready)
+                .filter(|t| {
+                    t.status() == Status::Ready
+                        || (t.status() == Status::Pending && t.design().technical.is_some())
+                })
                 .count();
-            if ready >= 6 {
+            if runway >= 6 && !self.config.workflow.human.gate_ready {
                 return Ok(None);
+            }
+            // With the gate on, cap the APPROVAL queue instead — six designs
+            // awaiting a human is plenty; more just floods their inbox.
+            if self.config.workflow.human.gate_ready {
+                let awaiting = state
+                    .tickets
+                    .iter()
+                    .filter(|t| {
+                        t.status() == Status::Pending && t.design().technical.is_some()
+                    })
+                    .count();
+                if awaiting >= 6 {
+                    return Ok(None);
+                }
             }
         }
         let now = crate::state::now_rfc3339();
@@ -134,6 +170,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
         // design for a product whose own wiki, docs and solved tickets it has
         // never been shown.
         let knowledge = crate::prompts::knowledge_block(
+            self.files.as_deref(),
             &state.docs,
             &state.tickets,
             &self.work_dir,
@@ -144,10 +181,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
                     .map_or("", coxagent_domain::Ticket::description)
             ),
             &id.to_string(),
-        );
+        )
+        .await;
         let outcome = self
             .engine
-            .run(self.build_request(&id, &title, &memory, &knowledge))
+            .run(self.build_request(&id, &title, &memory, &knowledge).await)
             .await?;
         if !outcome.succeeded() {
             self.store.release_stage(&id, "sa", &worker).await.ok();
@@ -167,13 +205,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
                     &self.work_dir,
                 )
                 .await;
-                match fixed.as_deref().map(parse_design) {
-                    Some(Ok(d)) => d,
-                    _ => {
-                        self.store.release_stage(&id, "sa", &worker).await.ok();
-                        return Err(PortError::Corrupt(format!("SA output: {first}")).into());
-                    }
-                }
+                let Some(Ok(repaired)) = fixed.as_deref().map(parse_design) else {
+                    self.store.release_stage(&id, "sa", &worker).await.ok();
+                    return Err(PortError::Corrupt(format!("SA output: {first}")).into());
+                };
+                repaired
             }
         };
 
@@ -220,6 +256,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
         // Atomic read-modify-write with retry, so a concurrent operator can't
         // clobber this SA design or lose the transition (parallel-safe).
         let td = technical_of(&design);
+        let gate_ready = self.config.workflow.human.gate_ready;
         crate::ports::outbound::mutate_state(self.store.as_ref(), |state| {
             let ticket = state
                 .ticket_mut(&id)
@@ -228,11 +265,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
                 .set_technical_design(Role::Sa, td.clone())
                 .map_err(|e| PortError::Corrupt(e.to_string()))?;
             // SA owns the technical design only. A non-UI ticket is ready now;
-            // a UI ticket stays pending for PD to author UX.
-            if !has_ui {
+            // a UI ticket stays pending for PD to author UX. With the human
+            // ready-gate on, designed tickets WAIT in Pending for a person's
+            // approval (their inbox) instead of flowing straight to DEV.
+            if !has_ui && !gate_ready {
                 ticket
                     .transition_to(Role::Sa, Status::Ready)
                     .map_err(|e| PortError::Corrupt(e.to_string()))?;
+            } else if !has_ui {
+                let msg = format!(
+                    "🧑‍⚖️ {id} is designed and WAITS for a human approval to Ready — \
+                     it is in the Inbox (workflow.human.gate_ready)."
+                );
+                state.post_chat_in("SYSTEM", &msg, crate::state::APPROVALS_CHANNEL, Vec::new());
             }
             Ok(())
         })
@@ -364,7 +409,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
         }
     }
 
-    fn build_request(
+    async fn build_request(
         &self,
         id: &TicketId,
         title: &str,
@@ -376,11 +421,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             .context
             .as_deref()
             .filter(|c| !c.trim().is_empty())
-            .map(|c| {
-                format!(
-                    "\n\n## Project context (goal, stack, scope, constraints — design within this):\n{c}\n"
-                )
-            })
+            .map(|c| format!("\n\n## Project context (goal, stack, scope, constraints — design within this):\n{c}\n"))
             .unwrap_or_default();
         let stack = prompts::stack_constraints(&self.config.architecture);
         AgentRequest {
@@ -388,8 +429,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             system_prompt: prompts::system_prompt(prompts::SA),
             task_prompt: format!(
                 "Design feature {id}: {title}{context_block}{stack}{}{}{knowledge}{memory}",
-                prompts::focus_block(&self.work_dir, title),
-                prompts::repo_map_block(&self.work_dir, self.config.workflow.token_saver),
+                prompts::focus_block(self.files.as_deref(), &self.work_dir, title).await,
+                prompts::repo_map_block(
+                    self.files.as_deref(),
+                    &self.work_dir,
+                    self.config.workflow.token_saver,
+                )
+                .await,
             ),
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(1200),

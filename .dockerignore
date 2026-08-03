@@ -1,7 +1,20 @@
+# Build artefacts. `target/` alone is rooted at the context root, so it misses
+# the per-agent git worktrees under .claude/, whose own target/ dirs run to
+# tens of GB — enough context to exhaust the builder and fail `cargo build`
+# with exit 101 and no rustc diagnostic (COX-B030's linux-build gate).
 target/
+**/target/
+.claude/
 desktop/build/
 .git/
 .github/
 **/*.dmg
 benchmark-reports/
 scripts/harness/
+
+# Never bake filled-in secrets into an image layer (COX-B030). `.env` holds the
+# admin password and every backing-service credential; only the committed
+# `.env.example` template belongs in the build context.
+**/.env
+!**/.env.example
+admin-password
