@@ -81,6 +81,7 @@ function verGt(a,b){const pa=String(a).split(".").map(Number),pb=String(b).split
 async function checkAppUpdate(){
   let d=null;try{d=await(await fetch("/api/app/latest")).json();}catch(e){return;}
   window._appLatest=d;
+  hubUpgradeReload(d.hub_version);
   const newer=!!(d.latest_version&&d.hub_version&&verGt(d.latest_version,d.hub_version));
   // The get-app button transforms while an update exists: rocket icon, accent
   // pulse + amber dot — visible even after the toast was dismissed.
@@ -93,6 +94,22 @@ async function checkAppUpdate(){
     const ver=document.getElementById("getapp-ver");
     if(ver){ver.hidden=!newer;ver.textContent=newer?("v"+d.latest_version):"";}
   }
+}
+// The hub upgraded under a window that is already open: reload so the page
+// matches the server it is talking to.
+//
+// The desktop shell loads the dashboard ONCE, at launch, and offers no reload
+// — so every hub upgrade left the window showing the previous build's UI while
+// the API underneath had moved on. A shipped fix that no window can see is not
+// shipped. The page is stateless (state lives on the hub), so reloading costs
+// nothing but the paint.
+function hubUpgradeReload(version){
+  if(!version)return;
+  if(!window._hubVersion){window._hubVersion=version;return;}
+  if(window._hubVersion===version||window._hubReloading)return;
+  window._hubReloading=true;
+  toasty(`Hub upgraded to v${version} — reloading`,"ok");
+  setTimeout(()=>location.reload(),900);
 }
 function coxSelfUpdate(url){
   try{

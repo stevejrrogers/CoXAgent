@@ -337,7 +337,13 @@ function startApp(){
   ensureNotifPermission();
   checkAppUpdate();setInterval(checkAppUpdate,5*60*1000);
   window.addEventListener("focus",()=>checkAppUpdate());
-  fetch("/api/health").then(r=>r.json()).then(h=>{const b=document.getElementById("brand-ver");if(b&&h.version)b.textContent="v"+h.version;}).catch(()=>{});
+  // Health is one cheap JSON with the hub's version in it: poll it, keep the
+  // brand chip honest, and reload the window when the hub upgrades under it.
+  const pollHealth=()=>fetch("/api/health").then(r=>r.json()).then(h=>{
+    const b=document.getElementById("brand-ver");if(b&&h.version)b.textContent="v"+h.version;
+    hubUpgradeReload(h.version);
+  }).catch(()=>{});
+  pollHealth();setInterval(pollHealth,30*1000);
   setTimeout(centerContent,200);
 }
 const AGENT_CLIS={claude:{label:"Claude Code",desc:"Anthropic's coding agent",install:"curl -fsSL https://claude.ai/install.sh | bash",docs:"https://claude.com/claude-code"},

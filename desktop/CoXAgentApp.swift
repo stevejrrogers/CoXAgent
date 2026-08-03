@@ -86,7 +86,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
+        installMenu()
         loadWhenReady()
+    }
+
+    /// A minimal menu bar. Without one there is no ⌘R, and the dashboard is
+    /// loaded exactly once per launch — so an upgraded hub kept serving a new
+    /// API to a window still painting the previous build. ⌘Q was likewise only
+    /// available through the Dock.
+    func installMenu() {
+        let main = NSMenu()
+
+        let appItem = NSMenuItem()
+        let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "Hide CoXAgent", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        appMenu.addItem(NSMenuItem.separator())
+        appMenu.addItem(withTitle: "Quit CoXAgent", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appItem.submenu = appMenu
+        main.addItem(appItem)
+
+        let viewItem = NSMenuItem()
+        let viewMenu = NSMenu(title: "View")
+        viewMenu.addItem(withTitle: "Reload", action: #selector(reloadDashboard), keyEquivalent: "r")
+        viewItem.submenu = viewMenu
+        main.addItem(viewItem)
+
+        let editItem = NSMenuItem()
+        let editMenu = NSMenu(title: "Edit")
+        for (title, sel, key) in [
+            ("Cut", #selector(NSText.cut(_:)), "x"),
+            ("Copy", #selector(NSText.copy(_:)), "c"),
+            ("Paste", #selector(NSText.paste(_:)), "v"),
+            ("Select All", #selector(NSText.selectAll(_:)), "a"),
+        ] {
+            editMenu.addItem(withTitle: title, action: sel, keyEquivalent: key)
+        }
+        editItem.submenu = editMenu
+        main.addItem(editItem)
+
+        NSApp.mainMenu = main
+    }
+
+    /// ⌘R: fetch the dashboard again, ignoring every cache, so the window picks
+    /// up whatever the hub is serving now.
+    @objc func reloadDashboard() {
+        var req = URLRequest(url: URL(string: "\(base)/")!)
+        req.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        web.load(req)
     }
 
     // The bundled server binary sits next to this executable. It is named
