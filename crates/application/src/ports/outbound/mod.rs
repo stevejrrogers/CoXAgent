@@ -17,8 +17,7 @@ pub mod workspace;
 
 pub use audit::{AuditPort, AuditRecord};
 pub use deploy::{
-    parse_deploy_host_port, verify_deploy_health, CrossCheck, DeployPort, DeployReport,
-    LintReport,
+    parse_deploy_host_port, verify_deploy_health, CrossCheck, DeployPort, DeployReport, LintReport,
 };
 pub use doc_store::DocStorePort;
 pub use engine::{AgentEnginePort, AgentOutcome, AgentRequest, SandboxStatus, Usage};

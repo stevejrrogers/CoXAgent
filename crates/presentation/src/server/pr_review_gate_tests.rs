@@ -99,7 +99,10 @@ fn member_tier_still_writes_everything_that_is_not_a_pr_action() {
 #[test]
 fn viewer_is_refused_both_review_actions_and_ordinary_writes() {
     assert!(!write_gate_ok(AuthRole::Viewer, &pr_path("merge")));
-    assert!(!write_gate_ok(AuthRole::Viewer, "/api/projects/acme/tickets"));
+    assert!(!write_gate_ok(
+        AuthRole::Viewer,
+        "/api/projects/acme/tickets"
+    ));
 }
 
 /// Every role is on exactly one side of the PR gate, and the two sides

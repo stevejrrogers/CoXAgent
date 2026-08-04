@@ -407,7 +407,10 @@ pub async fn focus_block(
             .iter()
             .position(|(f, _)| *f == s.file)
             .unwrap_or({
-                let content = files.read(&work_dir.join(&s.file)).await.unwrap_or_default();
+                let content = files
+                    .read(&work_dir.join(&s.file))
+                    .await
+                    .unwrap_or_default();
                 file_cache.push((s.file.clone(), content.lines().map(str::to_owned).collect()));
                 file_cache.len() - 1
             });
@@ -584,7 +587,18 @@ pub async fn test_surface_block(
 /// was stored, shown in the dialog, and never once read by an agent — the
 /// feature looked present and did nothing.
 const AGENT_AUTHORS: &[&str] = &[
-    "BA", "SA", "PD", "DEV", "DEV-BUG", "DEV-FEATURE", "DOCS", "TEST", "QA", "SM", "PO", "SYSTEM",
+    "BA",
+    "SA",
+    "PD",
+    "DEV",
+    "DEV-BUG",
+    "DEV-FEATURE",
+    "DOCS",
+    "TEST",
+    "QA",
+    "SM",
+    "PO",
+    "SYSTEM",
 ];
 
 /// Whether `author` is a person rather than one of the agents.
@@ -810,7 +824,12 @@ pub async fn repo_docs_block(
         .map(|n| work_dir.join(n))
         .collect();
     // One level of docs/ is enough; deep trees are the code graph's job.
-    for meta in files.list(&work_dir.join("docs")).await.into_iter().take(40) {
+    for meta in files
+        .list(&work_dir.join("docs"))
+        .await
+        .into_iter()
+        .take(40)
+    {
         if meta.path.extension().is_some_and(|x| x == "md") {
             candidates.push(meta.path);
         }
@@ -1130,19 +1149,29 @@ mod tests {
         assert!(super::is_human_author("USER"));
         assert!(super::is_human_author("luffy"));
         assert!(!super::is_human_author("BA"));
-        assert!(!super::is_human_author("dev-feature"), "case must not matter");
+        assert!(
+            !super::is_human_author("dev-feature"),
+            "case must not matter"
+        );
     }
 
     #[test]
     fn human_steering_carries_only_this_ticket_s_human_notes() {
         let mut state = crate::state::ProjectState::default();
-        state.post_comment("USER", "use the existing auth port", Some("F001".to_owned()));
+        state.post_comment(
+            "USER",
+            "use the existing auth port",
+            Some("F001".to_owned()),
+        );
         state.post_comment("SA", "designed it", Some("F001".to_owned()));
         state.post_comment("USER", "different ticket", Some("F002".to_owned()));
 
         let out = super::human_steering_block(&state, "F001");
         assert!(out.contains("existing auth port"));
-        assert!(!out.contains("designed it"), "agent chatter is not steering");
+        assert!(
+            !out.contains("designed it"),
+            "agent chatter is not steering"
+        );
         assert!(!out.contains("different ticket"), "other tickets stay out");
 
         assert!(

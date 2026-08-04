@@ -34,22 +34,22 @@ use tokio_stream::{Stream, StreamExt};
 mod assets;
 mod auth;
 mod background;
-mod hub_docs;
-mod inbox;
-mod requests;
 mod channels;
 mod chat;
 mod comments;
 mod docs;
 mod engines;
 mod forge;
+mod hub_docs;
+mod inbox;
 mod manage;
 mod meetings;
 mod people;
 mod projects;
-mod transcripts;
 mod realtime;
+mod requests;
 mod status;
+mod transcripts;
 mod work;
 
 use assets::*;
@@ -57,20 +57,20 @@ use auth::*;
 use background::*;
 use channels::*;
 use chat::*;
-use hub_docs::*;
-use inbox::*;
-use requests::*;
 use comments::*;
 use docs::*;
 use engines::*;
 use forge::*;
+use hub_docs::*;
+use inbox::*;
 use manage::*;
-use people::*;
-use transcripts::*;
 use meetings::*;
+use people::*;
 use projects::*;
 use realtime::*;
+use requests::*;
 use status::*;
+use transcripts::*;
 use work::*;
 
 /// The embedded single-page dashboard.
@@ -889,12 +889,18 @@ pub async fn serve_full(
         )
         .route("/api/projects/:pid/inbox", get(inbox_ep))
         .route("/api/projects/:pid/ticket/:id/ready", post(human_ready_ep))
-        .route("/api/projects/:pid/ticket/:id/verify", post(human_verify_ep))
+        .route(
+            "/api/projects/:pid/ticket/:id/verify",
+            post(human_verify_ep),
+        )
         .route(
             "/api/projects/:pid/ticket/:id/send-back",
             post(send_back_ep),
         )
-        .route("/api/projects/:pid/ticket/:id/assign", post(assign_ticket_ep))
+        .route(
+            "/api/projects/:pid/ticket/:id/assign",
+            post(assign_ticket_ep),
+        )
         .route(
             "/api/projects/:pid/ticket/:id/undo-approval",
             post(undo_approval_ep),

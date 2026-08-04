@@ -354,7 +354,11 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
                 .ok_or_else(|| crate::PortError::Corrupt(format!("no ticket {tid}")))?;
             t.transition_to(coxagent_domain::Role::User, to)
                 .map_err(|e| crate::PortError::Corrupt(e.to_string()))?;
-            s.log_activity("USER", &format!("chat-approved to {label}"), Some(tid.to_string()));
+            s.log_activity(
+                "USER",
+                &format!("chat-approved to {label}"),
+                Some(tid.to_string()),
+            );
             Ok(())
         })
         .await;
@@ -500,8 +504,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         };
         self.post("SA", &announce).await;
 
-        let fp =
-            crate::prompts::focus_block(self.files.as_deref(), &self.work_dir, &title).await;
+        let fp = crate::prompts::focus_block(self.files.as_deref(), &self.work_dir, &title).await;
         let rp =
             crate::prompts::repo_map_block(self.files.as_deref(), &self.work_dir, self.token_saver)
                 .await;

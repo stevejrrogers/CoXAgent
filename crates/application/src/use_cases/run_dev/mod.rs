@@ -528,10 +528,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             // suite still runs at the sprint boundary and on the merged tree
             // (docs/ADAPTIVE_APPROVAL.md's sibling rule for tests).
             let changed = gates::build_relevant(&self.working_tree().await.changed_paths);
-            let mut red = match deploy
-                .run_tests_scoped(&self.work_dir, &changed)
-                .await
-            {
+            let mut red = match deploy.run_tests_scoped(&self.work_dir, &changed).await {
                 Ok(r) if failed(&r) => Some(r.summary),
                 _ => None,
             };

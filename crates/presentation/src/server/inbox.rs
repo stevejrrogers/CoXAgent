@@ -94,8 +94,7 @@ pub(super) async fn inbox_ep(
     // Questions addressed to me (`@username`, or my bare username).
     for q in &state.questions {
         if q.answer.is_empty()
-            && (q.to.eq_ignore_ascii_case(&me)
-                || q.to.eq_ignore_ascii_case(&format!("@{me}")))
+            && (q.to.eq_ignore_ascii_case(&me) || q.to.eq_ignore_ascii_case(&format!("@{me}")))
         {
             items.push(serde_json::json!({
                 "kind": "question", "id": q.id, "ticket": q.ticket,
@@ -271,7 +270,11 @@ async fn human_transition(
         );
     }
     state.auto_approved_at.remove(id);
-    state.log_activity("USER", &format!("{me} moved ticket to {label}"), Some(id.to_owned()));
+    state.log_activity(
+        "USER",
+        &format!("{me} moved ticket to {label}"),
+        Some(id.to_owned()),
+    );
     state.post_comment(
         "USER",
         &format!("🧑‍⚖️ @{me} approved {id} → {label}."),
@@ -359,7 +362,10 @@ pub(super) async fn undo_approval_ep(
         return (axum::http::StatusCode::NOT_FOUND, "no such ticket").into_response();
     };
     let shape = coxagent_application::use_cases::approval_risk::shape_key(t);
-    if let Err(e) = t.transition_to(coxagent_domain::Role::User, coxagent_domain::Status::Pending) {
+    if let Err(e) = t.transition_to(
+        coxagent_domain::Role::User,
+        coxagent_domain::Status::Pending,
+    ) {
         return (axum::http::StatusCode::CONFLICT, e.to_string()).into_response();
     }
     state.approval_samples.push(

@@ -340,8 +340,7 @@ async fn an_unset_host_port_leaves_the_gate_nothing_to_probe() {
 /// gate is probing a port that was never configured.
 #[tokio::test(start_paused = true)]
 async fn an_explicit_null_host_port_leaves_the_gate_nothing_to_probe() {
-    let (_dir, handle) =
-        project_handle_with_raw_host_port(Arc::new(DeployWithDeadPort), "null");
+    let (_dir, handle) = project_handle_with_raw_host_port(Arc::new(DeployWithDeadPort), "null");
     let forge: Arc<dyn ForgePort> = Arc::new(UnusedForge);
 
     let resp = pr_preview(&handle, &forge, 1, false).await;

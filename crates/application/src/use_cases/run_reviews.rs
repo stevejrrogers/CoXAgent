@@ -536,9 +536,9 @@ async fn gather_evidence(
         "compose.yml",
     ];
     let ignore = |p: &std::path::Path| {
-        p.file_name()
-            .and_then(|n| n.to_str())
-            .map_or(true, |n| n.starts_with('.') || n == "target" || n == "node_modules")
+        p.file_name().and_then(|n| n.to_str()).map_or(true, |n| {
+            n.starts_with('.') || n == "target" || n == "node_modules"
+        })
     };
 
     // Manifest files at the root and one/two levels down (workspace members),

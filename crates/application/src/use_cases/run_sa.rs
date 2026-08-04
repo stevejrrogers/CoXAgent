@@ -134,9 +134,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
                 let awaiting = state
                     .tickets
                     .iter()
-                    .filter(|t| {
-                        t.status() == Status::Pending && t.design().technical.is_some()
-                    })
+                    .filter(|t| t.status() == Status::Pending && t.design().technical.is_some())
                     .count();
                 if awaiting >= 6 {
                     return Ok(None);

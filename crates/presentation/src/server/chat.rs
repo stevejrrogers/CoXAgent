@@ -107,9 +107,7 @@ pub(super) async fn chat_post_ep(
         // fell into the void. Trigger on an explicit mention or a question
         // mark; plain chatter stays human-to-human (no engine burn).
         let lower = body.to_lowercase();
-        let wants_team = lower.contains("@team")
-            || lower.contains("@cox")
-            || body.contains('?');
+        let wants_team = lower.contains("@team") || lower.contains("@cox") || body.contains('?');
         let from_human = !user.eq_ignore_ascii_case("system");
         if wants_team && from_human {
             let msg = body.to_owned();

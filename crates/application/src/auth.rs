@@ -289,14 +289,23 @@ mod role_tests {
 
         // Verify gate: the QA verdict.
         assert!(AuthRole::TechLead.can_verify());
-        assert!(AuthRole::Reviewer.can_verify(), "judging finished work IS its job");
-        assert!(!AuthRole::Ba.can_verify(), "writing the ticket is not signing it off");
+        assert!(
+            AuthRole::Reviewer.can_verify(),
+            "judging finished work IS its job"
+        );
+        assert!(
+            !AuthRole::Ba.can_verify(),
+            "writing the ticket is not signing it off"
+        );
         assert!(!AuthRole::Viewer.can_verify());
 
         // A read-only account may take no gate decision at all.
         for allowed in [AuthRole::can_approve_ready, AuthRole::can_verify] {
             assert!(!allowed(AuthRole::Viewer));
-            assert!(allowed(AuthRole::Super), "the hub owner is never locked out");
+            assert!(
+                allowed(AuthRole::Super),
+                "the hub owner is never locked out"
+            );
         }
     }
 

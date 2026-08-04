@@ -62,7 +62,10 @@ pub fn assess(ticket: &Ticket, shipped_similar: usize, previously_parked: bool) 
         .as_ref()
         .map(|d| d.files.iter().map(String::as_str).collect())
         .unwrap_or_default();
-    if files.iter().any(|f| SENSITIVE.iter().any(|s| f.contains(s))) {
+    if files
+        .iter()
+        .any(|f| SENSITIVE.iter().any(|s| f.contains(s)))
+    {
         score += 60;
         notes.push("touches build/deploy config".to_owned());
     }
@@ -107,7 +110,9 @@ pub fn assess(ticket: &Ticket, shipped_similar: usize, previously_parked: bool) 
     let score = u8::try_from(score.clamp(0, 100)).unwrap_or(100);
     // Hard floors: no amount of history auto-approves large or sensitive work.
     let hard_ask = ticket.complexity() == Complexity::Large
-        || files.iter().any(|f| SENSITIVE.iter().any(|s| f.contains(s)));
+        || files
+            .iter()
+            .any(|f| SENSITIVE.iter().any(|s| f.contains(s)));
     // 35, not 25: the first live round showed a human approving every
     // test-only ticket in the queue while the score sat just above the line.
     // The hard floors below (large, build/deploy paths) do the real guarding.
@@ -224,7 +229,12 @@ mod tests {
 
     #[test]
     fn large_work_always_asks_however_much_prior_art() {
-        let mut t = ticket("Rewrite the scheduler", TicketType::Feature, Complexity::Large, true);
+        let mut t = ticket(
+            "Rewrite the scheduler",
+            TicketType::Feature,
+            Complexity::Large,
+            true,
+        );
         design(&mut t, vec!["crates/app/src/lib.rs"]);
         assert_eq!(assess(&t, 50, false).lane, Lane::Ask);
     }
@@ -245,7 +255,12 @@ mod tests {
 
     #[test]
     fn missing_acceptance_criteria_and_parking_push_toward_asking() {
-        let mut t = ticket("Add a widget", TicketType::Feature, Complexity::Small, false);
+        let mut t = ticket(
+            "Add a widget",
+            TicketType::Feature,
+            Complexity::Small,
+            false,
+        );
         design(&mut t, vec!["src/w.rs"]);
         assert_eq!(assess(&t, 0, false).lane, Lane::Ask);
         assert_eq!(assess(&t, 0, true).lane, Lane::Ask);
@@ -269,19 +284,44 @@ mod tests {
         // The live pile-up: six medium features, no acceptance criteria, all
         // scored 60 and queued. The BA writing criteria is what makes them
         // judgeable — and judgeable routine work should not need a person.
-        let mut without = ticket("Bug triage and burndown", TicketType::Feature, Complexity::Medium, false);
+        let mut without = ticket(
+            "Bug triage and burndown",
+            TicketType::Feature,
+            Complexity::Medium,
+            false,
+        );
         design(&mut without, vec!["docs/triage.md"]);
         assert_eq!(assess(&without, 0, false).lane, Lane::Ask);
 
-        let mut with = ticket("Bug triage and burndown", TicketType::Feature, Complexity::Medium, true);
+        let mut with = ticket(
+            "Bug triage and burndown",
+            TicketType::Feature,
+            Complexity::Medium,
+            true,
+        );
         design(&mut with, vec!["docs/triage.md"]);
-        assert_eq!(assess(&with, 0, false).lane, Lane::Auto, "{:?}", assess(&with, 0, false));
+        assert_eq!(
+            assess(&with, 0, false).lane,
+            Lane::Auto,
+            "{:?}",
+            assess(&with, 0, false)
+        );
     }
 
     #[test]
     fn shape_key_groups_like_with_like() {
-        let a = ticket("Test coverage: x", TicketType::Chore, Complexity::Small, true);
-        let b = ticket("Add test for y", TicketType::Feature, Complexity::Small, true);
+        let a = ticket(
+            "Test coverage: x",
+            TicketType::Chore,
+            Complexity::Small,
+            true,
+        );
+        let b = ticket(
+            "Add test for y",
+            TicketType::Feature,
+            Complexity::Small,
+            true,
+        );
         assert_eq!(shape_key(&a), shape_key(&b), "both are small test work");
     }
 }

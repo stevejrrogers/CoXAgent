@@ -379,7 +379,11 @@ pub(super) async fn reject_ticket(
         );
     }
     if !reason.trim().is_empty() {
-        state.post_comment("USER", &format!("🚫 Rejected: {}", reason.trim()), Some(id.clone()));
+        state.post_comment(
+            "USER",
+            &format!("🚫 Rejected: {}", reason.trim()),
+            Some(id.clone()),
+        );
     }
     let Some(ticket) = state.ticket_mut(&tid) else {
         return (axum::http::StatusCode::NOT_FOUND, "no such ticket").into_response();

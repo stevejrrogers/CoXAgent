@@ -206,7 +206,12 @@ mod tests {
             !commit_ticket(&mut state, &id),
             "committing twice must not duplicate the id"
         );
-        assert!(state.sprint.as_ref().expect("sprint").committed.contains(&id));
+        assert!(state
+            .sprint
+            .as_ref()
+            .expect("sprint")
+            .committed
+            .contains(&id));
         assert!(
             !commit_ticket(&mut state, &TicketId::new("F404").expect("id")),
             "a ticket that does not exist cannot be committed"

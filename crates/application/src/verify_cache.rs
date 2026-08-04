@@ -147,7 +147,10 @@ mod tests {
     fn work_dirs_do_not_block_each_other() {
         let (a, b) = (Path::new("/w5"), Path::new("/w6"));
         assert!(claim_verify(a, None));
-        assert!(claim_verify(b, None), "a different tree is a different check");
+        assert!(
+            claim_verify(b, None),
+            "a different tree is a different check"
+        );
         release_verify(a, None);
         release_verify(b, None);
     }
@@ -183,14 +186,8 @@ mod tests {
         // dirty line. The fingerprint must still change because callers now
         // pass per-file metadata (size, mtime) gathered with
         // `--untracked-files=all`, one DirtyEntry per file inside the dir.
-        let before = fingerprint(
-            "abc",
-            &[("?? newdir/a.rs".to_owned(), Some((10, 100)))],
-        );
-        let after = fingerprint(
-            "abc",
-            &[("?? newdir/a.rs".to_owned(), Some((25, 200)))],
-        );
+        let before = fingerprint("abc", &[("?? newdir/a.rs".to_owned(), Some((10, 100)))]);
+        let after = fingerprint("abc", &[("?? newdir/a.rs".to_owned(), Some((25, 200)))]);
         assert_ne!(before, after);
     }
 }
