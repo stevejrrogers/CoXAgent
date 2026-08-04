@@ -56,7 +56,22 @@ pub async fn probe_git_access(
         "not a git checkout".clone_into(&mut out.detail);
     }
 
-    // --- API half: can we see the repo as the account we will act as? ---
+    out.merge_with(probe_forge_pr_access(repo, account).await);
+    out
+}
+
+/// Whether the forge credential can OPEN a pull request for `repo`, acting as
+/// the named stored login (empty = the CLI's active one).
+///
+/// Kept apart from the push check because they are different credentials: a push
+/// rides an ssh key, a PR is an API call. One works without the other far more
+/// often than not.
+async fn probe_forge_pr_access(
+    repo: &str,
+    account: &str,
+) -> coxagent_application::ports::outbound::GitCheck {
+    use coxagent_application::ports::outbound::GitCheck;
+    let mut out = GitCheck::default();
     let token = if account.is_empty() {
         None
     } else {
@@ -89,27 +104,66 @@ pub async fn probe_git_access(
     if repo.is_empty() {
         return out;
     }
+    // Probe the operation that actually matters: CREATING a pull request.
+    //
+    // Reading `repos/{repo}` only proves the account can SEE the repository, and
+    // a token scoped `pull_requests: read` passes that happily — then the first
+    // finished ticket fails at delivery. A POST with deliberately empty fields
+    // separates the two without creating anything: 403 means the credential may
+    // not open PRs at all, while 422 means it may and only this input was
+    // invalid, which is the answer we want.
     let mut api = tokio::process::Command::new("gh");
-    api.args(["api", &format!("repos/{repo}")])
-        .stdin(std::process::Stdio::null());
+    api.args([
+        "api",
+        &format!("repos/{repo}/pulls"),
+        "-X",
+        "POST",
+        "-f",
+        "head=",
+        "-f",
+        "base=",
+    ])
+    .stdin(std::process::Stdio::null());
     if let Some(t) = &token {
         api.env("GH_TOKEN", t);
     }
-    match api.output().await {
-        Ok(o) if o.status.success() => out.api_ok = true,
-        Ok(_) => {
-            out.remedy = if out.account.is_empty() {
-                "gh is not signed in — run `gh auth login`. Pull requests will fail.".to_owned()
-            } else {
-                format!(
-                    "gh is signed in as '{}', which cannot see {repo}. Pull requests will fail — \
-                     run `gh auth login` as an account with access, then set it as this \
-                     project's git account.",
-                    out.account
-                )
-            };
+    let (allowed, stderr) = match api.output().await {
+        Ok(o) => {
+            let err = String::from_utf8_lossy(&o.stderr).to_string();
+            // Anything that is not a permission refusal means the credential is
+            // accepted for this operation.
+            (
+                !err.contains("Resource not accessible") && !err.contains("(HTTP 403)"),
+                err,
+            )
         }
-        Err(e) => out.remedy = format!("gh not runnable here: {e}"),
+        Err(e) => {
+            out.remedy = format!("gh not runnable here: {e}");
+            return out;
+        }
+    };
+    out.api_ok = allowed;
+    if !allowed {
+        out.remedy = if out.account.is_empty() {
+            "gh is not signed in — run `gh auth login`. Pull requests will fail.".to_owned()
+        } else {
+            format!(
+                "'{}' cannot OPEN pull requests on {repo} — it can read them, which is why a \
+                 repo-visibility check passes and the first finished ticket still fails to \
+                 deliver. Grant the token `Pull requests: Read and write` (fine-grained PAT: \
+                 Repository permissions), or sign in with one that has it.",
+                out.account
+            )
+        };
+        if !stderr.trim().is_empty() {
+            out.detail = stderr
+                .lines()
+                .last()
+                .unwrap_or("")
+                .chars()
+                .take(160)
+                .collect();
+        }
     }
     out
 }

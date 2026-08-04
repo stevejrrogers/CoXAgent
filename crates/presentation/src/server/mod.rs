@@ -1046,24 +1046,83 @@ async fn run_cli_env(bin: &str, args: &[&str], key: &str, val: &str) -> (bool, S
     }
 }
 
-/// Pull the signed-in account out of `gh`/`glab auth status` output.
-fn parse_account(out: &str) -> Option<String> {
-    for marker in ["account ", " as ", "Logged in to "] {
-        if let Some(i) = out.find(marker) {
-            let rest = &out[i + marker.len()..];
-            // Skip a leading host token for the "Logged in to" case.
-            let name: String = rest
-                .split_whitespace()
-                .find(|w| !w.contains('.') && *w != "as")
-                .unwrap_or("")
-                .trim_matches(|c: char| c == '@' || c == '(' || c == ')' || c == '.')
-                .to_owned();
-            if !name.is_empty() {
-                return Some(name);
+/// All signed-in accounts parsed from `gh`/`glab auth status` output, with the
+/// active one flagged. Returns `(name, is_active)` pairs in the order the CLI
+/// lists them. Empty when no account can be parsed.
+///
+/// `gh auth status` (multi-account) looks like:
+/// ```text
+/// github.com
+///   ✓ Logged in to github.com account alice (keyring)
+///   - Active account: true
+///   ✓ Logged in to github.com account bob (keyring)
+///   - Active account: false
+/// ```
+/// `glab auth status` (single account) looks like:
+/// ```text
+/// - Logged in to gitlab.com as alice using token
+/// ```
+/// — no "Active account" line, so the lone entry is marked active here.
+fn parse_accounts(out: &str) -> Vec<(String, bool)> {
+    let mut accounts: Vec<(String, bool)> = Vec::new();
+    for line in out.lines() {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed
+            .find("Logged in to ")
+            .map(|i| &trimmed[i + "Logged in to ".len()..])
+        else {
+            // The line right after a "Logged in" entry tells us if it's the
+            // active account (gh multi-account form only).
+            if trimmed.starts_with("- Active account:") || trimmed.starts_with("Active account:") {
+                if let Some(idx) = accounts.len().checked_sub(1) {
+                    accounts[idx].1 = trimmed.contains("true");
+                }
+            }
+            continue;
+        };
+        // Skip the host token, then the marker (`account` or `as`), then the
+        // username is the next whitespace-separated word.
+        let mut parts = rest.split_whitespace();
+        let _host = parts.next();
+        let marker_or_user = parts.next().unwrap_or("");
+        let user = if marker_or_user == "account" || marker_or_user == "as" {
+            parts.next().unwrap_or("")
+        } else {
+            marker_or_user
+        };
+        let name = user
+            .trim_matches(|c: char| c == '@' || c == '(' || c == ')' || c == '.')
+            .to_owned();
+        if !name.is_empty() {
+            // Dedupe: `gh auth status` may list the same login twice across
+            // hosts; keep the first occurrence.
+            if !accounts.iter().any(|(n, _)| n == &name) {
+                accounts.push((name, false));
             }
         }
     }
-    None
+    // Single-account output (notably glab) has no "Active account" line — the
+    // one account is the active one.
+    if accounts.len() == 1 && !accounts[0].1 {
+        accounts[0].1 = true;
+    }
+    // If none was flagged active (single-section multi-account edge case),
+    // fall back to the first — matching the historical `parse_account` pick.
+    if !accounts.is_empty() && !accounts.iter().any(|(_, a)| *a) {
+        accounts[0].1 = true;
+    }
+    accounts
+}
+
+/// Pull the signed-in account out of `gh`/`glab auth status` output — the
+/// active one, falling back to the first listed. Used by callers that only
+/// need one account (e.g. the post-`connect` verifier).
+fn parse_account(out: &str) -> Option<String> {
+    let all = parse_accounts(out);
+    all.iter()
+        .find(|(_, a)| *a)
+        .or_else(|| all.first())
+        .map(|(n, _)| n.clone())
 }
 
 /// Whether the caller holds admin/super authority, which outranks channel
@@ -1615,3 +1674,76 @@ mod avatar_media_security_tests;
 mod pr_preview_tests;
 #[cfg(test)]
 mod pr_review_gate_tests;
+
+#[cfg(test)]
+mod parse_accounts_tests {
+    use super::{parse_account, parse_accounts};
+
+    #[test]
+    fn gh_multi_account_picks_active() {
+        let out = "\
+github.com
+  ✓ Logged in to github.com account stevejrrogers (keyring)
+  - Active account: true
+  - Git operations protocol: ssh
+
+  ✓ Logged in to github.com account kyroc3 (keyring)
+  - Active account: false
+  - Git operations protocol: ssh
+";
+        let all = parse_accounts(out);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0], ("stevejrrogers".to_owned(), true));
+        assert_eq!(all[1], ("kyroc3".to_owned(), false));
+        assert_eq!(parse_account(out).as_deref(), Some("stevejrrogers"));
+    }
+
+    #[test]
+    fn gh_single_account_legacy_as_form() {
+        let out = "github.com\n  ✓ Logged in to github.com as alice (oauth_token)\n";
+        let all = parse_accounts(out);
+        assert_eq!(all, vec![("alice".to_owned(), true)]);
+        assert_eq!(parse_account(out).as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn glab_single_account_no_active_line_is_active() {
+        let out = "- Logged in to gitlab.com as alice using token\n";
+        let all = parse_accounts(out);
+        assert_eq!(all, vec![("alice".to_owned(), true)]);
+        assert_eq!(parse_account(out).as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn empty_output_yields_empty() {
+        assert!(parse_accounts("").is_empty());
+        assert!(parse_account("").is_none());
+    }
+
+    #[test]
+    fn duplicate_account_across_hosts_is_deduped() {
+        let out = "\
+github.com
+  ✓ Logged in to github.com account alice (keyring)
+  - Active account: true
+ghe.example.com
+  ✓ Logged in to ghe.example.com account alice (keyring)
+  - Active account: false
+";
+        let all = parse_accounts(out);
+        assert_eq!(all, vec![("alice".to_owned(), true)]);
+    }
+
+    #[test]
+    fn no_active_marker_falls_back_to_first() {
+        let out = "\
+github.com
+  ✓ Logged in to github.com account alice (keyring)
+  ✓ Logged in to github.com account bob (keyring)
+";
+        let all = parse_accounts(out);
+        assert_eq!(all[0], ("alice".to_owned(), true));
+        assert_eq!(all[1], ("bob".to_owned(), false));
+        assert_eq!(parse_account(out).as_deref(), Some("alice"));
+    }
+}

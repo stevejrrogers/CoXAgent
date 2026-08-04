@@ -74,6 +74,20 @@ pub struct GitCheck {
     pub remedy: String,
 }
 
+impl GitCheck {
+    /// Fold the forge half of a probe into the push half. `push_ok` and its
+    /// `detail` belong to the ssh side and are kept; everything else describes
+    /// the API side and comes from `other`.
+    pub fn merge_with(&mut self, other: Self) {
+        self.account = other.account;
+        self.api_ok = other.api_ok;
+        self.remedy = other.remedy;
+        if !other.detail.is_empty() {
+            self.detail = other.detail;
+        }
+    }
+}
+
 /// Everything a runner advertises about what its machine can do. Grouped so the
 /// heartbeat keeps one capability argument as this list grows.
 #[derive(Debug, Clone, Default)]

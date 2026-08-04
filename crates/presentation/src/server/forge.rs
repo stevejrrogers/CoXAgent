@@ -304,24 +304,36 @@ async fn probe_forge_api(app: &AppState, pid: &str) -> (bool, String, String) {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_owned(),
         _ => String::new(),
     };
-    let path = format!("repos/{slug}");
-    match run(vec!["api".into(), path]).output().await {
-        Ok(o) if o.status.success() => (true, account, String::new()),
+    // Probe CREATING a pull request, not merely reading the repo: a token scoped
+    // `pull_requests: read` passes a visibility check and then fails at the
+    // first delivery. An empty-field POST distinguishes 403 (not allowed at all)
+    // from 422 (allowed, bad input) without creating anything.
+    let args = vec![
+        "api".to_owned(),
+        format!("repos/{slug}/pulls"),
+        "-X".to_owned(),
+        "POST".to_owned(),
+        "-f".to_owned(),
+        "head=".to_owned(),
+        "-f".to_owned(),
+        "base=".to_owned(),
+    ];
+    match run(args).output().await {
         Ok(o) => {
-            let err: String = String::from_utf8_lossy(&o.stderr)
-                .lines()
-                .last()
-                .unwrap_or("")
-                .chars()
-                .take(160)
-                .collect();
+            let err = String::from_utf8_lossy(&o.stderr).to_string();
+            let refused = err.contains("Resource not accessible") || err.contains("(HTTP 403)");
+            if !refused {
+                return (true, account, String::new());
+            }
+            let tail: String = err.lines().last().unwrap_or("").chars().take(160).collect();
             let detail = if account.is_empty() {
-                format!("{bin} is not logged in — run `{bin} auth login`. {err}")
+                format!("{bin} is not logged in — run `{bin} auth login`. {tail}")
             } else {
                 format!(
-                    "{bin} is logged in as '{account}', which cannot see {slug}. \
-                     Pull requests will fail. Run `{bin} auth login` as an account \
-                     with access (or `{bin} auth switch`). {err}"
+                    "'{account}' cannot OPEN pull requests on {slug} — reading them is \
+                     allowed, which is why a repo-visibility check passes and the first \
+                     finished ticket still fails to deliver. Grant the token \
+                     `Pull requests: Read and write`. {tail}"
                 )
             };
             (false, account, detail)
@@ -351,19 +363,28 @@ pub(super) async fn git_auth_status_ep(
     if !host.is_empty() {
         cmd.env(host_env, &host);
     }
-    let (present, authed, account) = match cmd.output().await {
+    let (present, authed, account, accounts) = match cmd.output().await {
         Ok(out) => {
             let combined = format!(
                 "{}{}",
                 String::from_utf8_lossy(&out.stdout),
                 String::from_utf8_lossy(&out.stderr)
             );
-            (true, out.status.success(), parse_account(&combined))
+            let all = parse_accounts(&combined);
+            let active = all
+                .iter()
+                .find(|(_, a)| *a)
+                .or_else(|| all.first())
+                .map(|(n, _)| n.clone());
+            (true, out.status.success(), active, all)
         }
-        Err(_) => (false, false, None),
+        Err(_) => (false, false, None, Vec::new()),
     };
     Json(serde_json::json!({
         "tool": bin, "present": present, "authenticated": authed, "account": account,
+        "accounts": accounts.iter().map(|(n, a)| serde_json::json!({
+            "name": n, "active": a,
+        })).collect::<Vec<_>>(),
     }))
     .into_response()
 }
