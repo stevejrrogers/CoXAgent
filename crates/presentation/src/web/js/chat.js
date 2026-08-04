@@ -2031,7 +2031,7 @@ async function loadSettings(){
         <div class="fr"><span class="lbl">Target branch</span><input id="git-tb" value="${esc(git.target_branch||'')}" placeholder="blank = default" style="width:140px"/><span class="hint">agent PRs open into &amp; auto-merge here (e.g. <code>develop</code>)</span></div>
         <div class="fr"><span class="lbl">Branch prefix</span><input id="git-bp" value="${esc(git.branch_prefix||'feat/')}" style="width:120px"/><span class="hint">→ ${esc(git.branch_prefix||'feat/')}CXC-123</span></div>
         <div class="fr"><span class="lbl">Commit email</span><input id="git-em" value="${esc(git.commit_email||'')}" placeholder="…@users.noreply.github.com" style="width:280px"/><span class="hint">use a noreply email to avoid privacy blocks</span></div>
-        <div class="fr"><span class="lbl">Act as account</span><input id="git-acct" value="${esc(git.account||'')}" placeholder="blank = the CLI's active login" style="width:280px"/><span class="hint">sign in twice (<code>gh auth login</code>) and name the one this project uses — two projects can then be two different users at once</span></div>
+        <div class="fr"><span class="lbl">Act as account</span>${gitAccountControl(ga, git.account||'')}<span class="hint" id="git-acct-hint">sign in twice (<code>gh auth login</code>) and pick the one this project uses — two projects can then be two different users at once</span></div>
         <div class="fr"><span class="lbl">Open PR/MR</span><select id="git-pr"><option value="true" ${git.auto_pr!==false?'selected':''}>automatically after push</option><option value="false" ${git.auto_pr===false?'selected':''}>manual</option></select></div>
         <div class="fr"><span class="lbl">Auto-review</span><select id="git-ar"><option value="true" ${git.auto_review!==false?'selected':''}>on — the SA agent reviews every PR &amp; suggests</option><option value="false" ${git.auto_review===false?'selected':''}>off — no automatic review</option></select><span class="hint">SA deep-dives each PR and posts approve / request-changes as a suggestion</span></div>
         <div class="fr"><span class="lbl">Auto-merge</span><select id="git-am"><option value="false" ${!git.auto_merge?'selected':''}>off — you merge from the Review tab</option><option value="true" ${git.auto_merge?'selected':''}>on — SA approves &amp; merges automatically</option></select><span class="hint">On: SA merges on approve (never on failing CI). Off: approval is only a suggestion; request-changes still loops back to the agent to fix.</span></div>
@@ -2081,6 +2081,29 @@ async function loadSettings(){
   setSetTab(window._setTab==="workspace"?"engines":(window._setTab||"engines"));}
 function copyText(btn,text){navigator.clipboard&&navigator.clipboard.writeText(text);
   const old=btn.innerHTML;btn.innerHTML='<i class="ti ti-check"></i>';setTimeout(()=>{btn.innerHTML=old;},1200);}
+// "Act as account" — a <select> of detected `gh auth status` accounts when
+// the CLI is present and signed in (with a "Default = active login" option),
+// falling back to a free-text input when nothing was detected. A configured
+// account that isn't in the detected list stays as an extra option so saving
+// never silently drops it.
+function gitAccountControl(ga, current){
+  const accts = (ga && Array.isArray(ga.accounts)) ? ga.accounts : [];
+  if(!ga || !ga.present || accts.length === 0){
+    return `<input id="git-acct" value="${esc(current||'')}" placeholder="blank = the CLI's active login" style="width:280px"/>`;
+  }
+  const cur = current||'';
+  const names = accts.map(a => a.name);
+  const hasCur = !cur || names.includes(cur);
+  const opts = [`<option value="" ${cur===''?'selected':''}>Default — the CLI's active login</option>`];
+  accts.forEach(a => {
+    const tag = a.active ? ' (active)' : '';
+    opts.push(`<option value="${esc(a.name)}" ${cur===a.name?'selected':''}>${esc(a.name)}${tag}</option>`);
+  });
+  if(!hasCur){
+    opts.push(`<option value="${esc(cur)}" selected>${esc(cur)} (not detected)</option>`);
+  }
+  return `<select id="git-acct" style="max-width:280px">${opts.join('')}</select>`;
+}
 async function testGitConnection(btn){
   const o=btn.innerHTML;btn.innerHTML='<i class="ti ti-loader-2 att-spin"></i> Testing…';btn.disabled=true;
   const box=document.getElementById("git-test-result");

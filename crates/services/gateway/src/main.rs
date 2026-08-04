@@ -7,6 +7,7 @@ use std::process::ExitCode;
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    coxagent_app::init_tracing();
     std::env::set_var("COXAGENT_ROLE", "gateway");
     // The control plane never spawns shells or engines.
     std::env::set_var("COXAGENT_NO_INLINE_EXEC", "1");
