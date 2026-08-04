@@ -211,6 +211,41 @@ pub trait DeployPort: Send + Sync {
     }
 }
 
+/// Parse `deploy.host_port` out of a project's raw `coxagent.json` text for
+/// the mandatory post-deploy health-gate probe. A missing/unreadable file,
+/// unparseable JSON, a missing `host_port` key, or an explicit `null` all
+/// mean "nothing configured" — same contract as `Option<u16>` and
+/// [`verify_deploy_health`]'s no-port pass. Any other JSON value that isn't a
+/// valid non-negative `u16` (negative, float, string, bool, out of range) is
+/// a corrupt config and must fail the gate rather than being folded into
+/// "nothing configured" (COX-B025/COX-B026/COX-B035) — `serde_json::Value::as_u64`
+/// returns `None` for all of those just as it does for a genuinely absent
+/// field, so the raw JSON value must be inspected instead of going through
+/// `as_u64` first.
+///
+/// Shared by every call site that deploys (cycle, chat, PR preview) so a
+/// malformed `host_port` fails the gate the same way everywhere, rather than
+/// each site re-deriving (and potentially drifting on) the same parse.
+///
+/// # Errors
+/// `Err(())` when `deploy.host_port` is present but isn't a valid `u16` —
+/// the caller's only correct response is to fail the health gate, so no
+/// richer error is worth carrying.
+#[allow(clippy::result_unit_err)]
+pub fn parse_deploy_host_port(raw_config: &str) -> Result<Option<u16>, ()> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw_config) else {
+        return Ok(None);
+    };
+    match value.get("deploy").and_then(|d| d.get("host_port")) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(v) => v
+            .as_u64()
+            .and_then(|n| u16::try_from(n).ok())
+            .map(Some)
+            .ok_or(()),
+    }
+}
+
 /// Mandatory post-deploy health probe (COX-B004/COX-B009): a `docker compose
 /// up` exit 0 only proves the containers started — it says nothing about
 /// whether the app inside actually bound its configured port. This polls

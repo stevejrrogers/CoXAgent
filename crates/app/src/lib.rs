@@ -1005,7 +1005,14 @@ async fn run_loop(
     context: String,
     max_cycles: Option<u64>,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let config = load_config(state_dir);
+    // One raw read feeds both the `Config` parse and the deploy health-gate's
+    // host-port probe, so a malformed `deploy.host_port` fails the gate
+    // (COX-B035) instead of drifting from whatever `Config` parsed.
+    let raw_cfg = read_config_text(state_dir);
+    let config = parse_config(state_dir, raw_cfg.as_deref());
+    let host_port_probe = raw_cfg.as_deref().map_or(Ok(None), |t| {
+        coxagent_application::ports::outbound::parse_deploy_host_port(t)
+    });
     // Same project-id derivation as Command::Run/operator_main: the workspace
     // dir name (e.g. `cxc`), not a fixed "default" — so this operator's MCP
     // calls target the same project the hub knows it by.
@@ -1088,6 +1095,7 @@ async fn run_loop(
     let mut uc = RunCycleUseCase::new(Arc::clone(&store), engine, config, work_dir, context)
         .with_meter(meter)
         .with_deploy(std::sync::Arc::new(DockerComposeDeploy::new()))
+        .with_host_port_probe(host_port_probe)
         .with_git(std::sync::Arc::new(
             coxagent_infrastructure::SystemGit::new(),
         ))

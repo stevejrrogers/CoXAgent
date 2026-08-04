@@ -1102,10 +1102,18 @@ pub(super) async fn chat_reply_ep(
     if msg.is_empty() {
         return Json(serde_json::json!({ "ok": true })).into_response();
     }
-    let cfg = std::fs::read_to_string(&p.config_path)
-        .ok()
-        .and_then(|t| serde_json::from_str::<Config>(&t).ok())
+    // One raw read feeds both the `Config` parse and the host-port probe, so
+    // a malformed `deploy.host_port` can't drift from what `Config` saw and
+    // fails the mandatory health gate (COX-B035) instead of silently
+    // skipping it via `Config::default()`'s `host_port: None`.
+    let raw_cfg = std::fs::read_to_string(&p.config_path).ok();
+    let cfg = raw_cfg
+        .as_deref()
+        .and_then(|t| serde_json::from_str::<Config>(t).ok())
         .unwrap_or_default();
+    let host_port_probe = raw_cfg.as_deref().map_or(Ok(None), |t| {
+        coxagent_application::ports::outbound::parse_deploy_host_port(t)
+    });
     let mut uc = coxagent_application::use_cases::RunChatReplyUseCase::new(
         Arc::clone(&p.store),
         Arc::clone(&p.engine),
@@ -1117,7 +1125,7 @@ pub(super) async fn chat_reply_ep(
     if let Some(d) = &p.deploy {
         uc = uc
             .with_deploy(Arc::clone(d))
-            .with_host_port(cfg.deploy.host_port);
+            .with_host_port_probe(host_port_probe);
     }
     if let Some(f) = &p.forge {
         let target = if cfg.git.target_branch.trim().is_empty() {

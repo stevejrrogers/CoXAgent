@@ -174,4 +174,23 @@ mod tests {
         assert!(!is_green(dir, None));
         assert!(!is_green(dir, Some("anything")));
     }
+
+    #[test]
+    fn editing_a_file_inside_a_new_untracked_directory_changes_the_fingerprint() {
+        // Regression for COX-B031: `git status --porcelain` (without
+        // `--untracked-files=all`) collapses a new directory to one
+        // `?? newdir/` line, so editing a file inside it produced the same
+        // dirty line. The fingerprint must still change because callers now
+        // pass per-file metadata (size, mtime) gathered with
+        // `--untracked-files=all`, one DirtyEntry per file inside the dir.
+        let before = fingerprint(
+            "abc",
+            &[("?? newdir/a.rs".to_owned(), Some((10, 100)))],
+        );
+        let after = fingerprint(
+            "abc",
+            &[("?? newdir/a.rs".to_owned(), Some((25, 200)))],
+        );
+        assert_ne!(before, after);
+    }
 }

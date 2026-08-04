@@ -123,6 +123,14 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     probe: Option<Arc<dyn crate::ports::outbound::ApiProbePort>>,
     storage: Option<Arc<dyn crate::ports::outbound::StoragePort>>,
     deploy: Option<Arc<dyn DeployPort>>,
+    /// The published `host_port` to probe for the mandatory post-deploy
+    /// health gate, or `Err` when the raw `coxagent.json`'s
+    /// `deploy.host_port` is present but malformed (COX-B035). Defaults to
+    /// `Ok(config.deploy.host_port)`; callers reading the raw config
+    /// separately (to fail closed on a malformed value the `Config` parse
+    /// itself may have folded into a default) override it via
+    /// [`Self::with_host_port_probe`].
+    host_port_probe: Result<Option<u16>, ()>,
     notifier: Option<Arc<dyn crate::ports::outbound::NotifierPort>>,
     /// Live, runtime-adjustable spend caps (overrides the config caps when set).
     budget: Option<crate::config::LiveBudget>,
@@ -157,6 +165,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         work_dir: PathBuf,
         context: String,
     ) -> Self {
+        let host_port_probe = Ok(config.deploy.host_port);
         Self {
             store,
             engine,
@@ -168,6 +177,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             probe: None,
             storage: None,
             deploy: None,
+            host_port_probe,
             notifier: None,
             budget: None,
             git: None,
@@ -411,6 +421,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     #[must_use]
     pub fn with_deploy(mut self, deploy: Arc<dyn DeployPort>) -> Self {
         self.deploy = Some(deploy);
+        self
+    }
+
+    /// Override the post-deploy health-gate probe port (COX-B035): pass
+    /// `Err(())` when the raw `coxagent.json` names a malformed
+    /// `deploy.host_port`, so the gate fails closed instead of the default
+    /// (`Ok(config.deploy.host_port)`) treating a `Config`-parse fallback's
+    /// `None` as "nothing configured".
+    #[must_use]
+    pub fn with_host_port_probe(mut self, probe: Result<Option<u16>, ()>) -> Self {
+        self.host_port_probe = probe;
         self
     }
 
