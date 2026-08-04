@@ -504,6 +504,7 @@ dependencies = [
 name = "coxagent-app"
 version = "2.21.0"
 dependencies = [
+ "async-trait",
  "coxagent-application",
  "coxagent-domain",
  "coxagent-infrastructure",

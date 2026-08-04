@@ -35,6 +35,9 @@ sessions.json
 deploy/volume/**/backups/
 *.bak
 
+# An MCP client config carries a live Bearer token for this install.
+cox-opencode.json
+
 # Per-install desktop admin password, generated on first launch (0600).
 admin-password
 
