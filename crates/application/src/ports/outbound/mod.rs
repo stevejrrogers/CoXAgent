@@ -26,6 +26,6 @@ pub use kv_doc::KvDocPort;
 pub use notify::{ChatNotifier, FanoutNotifier, NotifierPort, NotifyEvent, NullNotifier};
 pub use probe::{ApiProbePort, ApiProof};
 pub use screenshot::ScreenshotPort;
-pub use state_store::{mutate_state, StateStorePort, WorkerEntry};
+pub use state_store::{mutate_state, GitCheck, StateStorePort, WorkerCaps, WorkerEntry};
 pub use storage::StoragePort;
 pub use workspace::{FileMeta, WorkspaceFilesPort};

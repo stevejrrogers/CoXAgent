@@ -64,9 +64,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // earlier. Nobody had ever asked the board whether the work was
             // still wanted.
             if let Some(tid) = crate::use_cases::merge_policy::ticket_id_in(&pr.title) {
-                if merged_tickets.contains(&tid)
-                    && !merged.iter().any(|(n, _)| *n == pr.number)
-                {
+                if merged_tickets.contains(&tid) && !merged.iter().any(|(n, _)| *n == pr.number) {
                     let note = format!(
                         "Closing: a pull request for {tid} is already merged — this branch \
                          rebuilds what main has. Reopen only if something here is genuinely \
@@ -211,7 +209,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             }
             match self.sa_review(&pr.title, &pr.head, &diff).await {
                 Some((true, summary)) => {
-                    self.record_review(pr.number, "approve", &summary, &head_sha).await;
+                    self.record_review(pr.number, "approve", &summary, &head_sha)
+                        .await;
                     if auto_merge {
                         // Size and blast radius the machine should not decide
                         // alone: a change this large, or one that edits how the
@@ -241,7 +240,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                                  {why}. Rebase on {target} and fix it there — nothing lands red."
                             );
                             let _ = forge.request_changes(pr.number, &msg).await;
-                            self.record_review(pr.number, "request_changes", &msg, &head_sha).await;
+                            self.record_review(pr.number, "request_changes", &msg, &head_sha)
+                                .await;
                             self.log_git(&format!(
                                 "PR #{} held: merged result failed verification",
                                 pr.number
@@ -312,7 +312,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         })
     }
 
-    pub(super) async fn record_review(&self, number: u64, decision: &str, summary: &str, head_sha: &str) {
+    pub(super) async fn record_review(
+        &self,
+        number: u64,
+        decision: &str,
+        summary: &str,
+        head_sha: &str,
+    ) {
         if let Ok(mut s) = self.store.load().await {
             s.upsert_review(number, decision, summary, head_sha);
             let _ = self.store.save(&s).await;

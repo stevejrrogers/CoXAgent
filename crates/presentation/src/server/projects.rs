@@ -14,6 +14,26 @@ pub(super) async fn project_provider(app: &AppState, pid: &str) -> Option<(Strin
     Some((cfg.git.provider, cfg.git.base_url))
 }
 
+/// The configured `owner/name` slug for a project, or `None` when unset.
+pub(super) async fn project_repo_slug(app: &AppState, pid: &str) -> Option<String> {
+    let p = app.project(pid).await?;
+    let cfg = std::fs::read_to_string(&p.config_path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Config>(&t).ok())
+        .unwrap_or_default();
+    Some(cfg.git.repo)
+}
+
+/// The forge login this project acts as (empty = the CLI's active account).
+pub(super) async fn project_forge_account(app: &AppState, pid: &str) -> Option<String> {
+    let p = app.project(pid).await?;
+    let cfg = std::fs::read_to_string(&p.config_path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Config>(&t).ok())
+        .unwrap_or_default();
+    Some(cfg.git.account)
+}
+
 /// List projects (id, name, alias, version, ticket count) in registration order.
 pub(super) async fn list_projects(State(app): State<AppState>) -> impl IntoResponse {
     let order = app.order.read().await.clone();

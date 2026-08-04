@@ -161,7 +161,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 if promoted >= cap {
                     break;
                 }
-                let Some(ticket) = s.ticket(&id) else { continue };
+                let Some(ticket) = s.ticket(&id) else {
+                    continue;
+                };
                 let shape = shape_key(ticket);
                 if asked_again.contains(&shape) {
                     continue; // a human overrode this shape: always ask

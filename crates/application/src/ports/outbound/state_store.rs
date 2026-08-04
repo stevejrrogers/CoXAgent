@@ -18,6 +18,59 @@ pub struct WorkerEntry {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub ticket: String,
     pub at: String,
+    /// Agent CLIs this runner found on ITS OWN PATH (`claude`, `opencode`, …).
+    ///
+    /// The hub cannot infer this: in a split deploy the dashboard is served by a
+    /// container that will never have an agent CLI, while the agents run on an
+    /// operator's machine. Detecting locally there made the dashboard report "no
+    /// agent CLI detected" and mark every engine "(not installed)" while those
+    /// engines were in fact running the team. Each runner reports what it has,
+    /// and the entry expires with the heartbeat — so the list tracks who is
+    /// actually online rather than what was once installed somewhere.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub engines: Vec<String>,
+    /// `provider/model` pairs this runner's opencode can reach. A user's custom
+    /// providers exist only in their own opencode config, so no built-in list
+    /// can name them and the hub has no CLI to ask — the machine that has one
+    /// reports them here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<String>,
+    /// What this runner's git and forge credentials can actually do, probed on
+    /// ITS machine. `None` until it has reported (or when git is disabled).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<GitCheck>,
+}
+
+/// The outcome of probing git + forge access from the machine that will run
+/// them. Push and pull requests are checked separately because they use
+/// different credentials — an ssh key and an API login — and one commonly works
+/// while the other does not.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GitCheck {
+    /// The forge login in effect (empty when the CLI is not signed in).
+    #[serde(default)]
+    pub account: String,
+    /// The API can see the configured repository — pull requests will work.
+    #[serde(default)]
+    pub api_ok: bool,
+    /// A dry-run push succeeded — the agent can deliver a branch.
+    #[serde(default)]
+    pub push_ok: bool,
+    /// Why a check failed, in the words of the tool that failed it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+    /// A concrete remedy, e.g. an ssh key that GitHub does accept.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub remedy: String,
+}
+
+/// Everything a runner advertises about what its machine can do. Grouped so the
+/// heartbeat keeps one capability argument as this list grows.
+#[derive(Debug, Clone, Default)]
+pub struct WorkerCaps {
+    pub engines: Vec<String>,
+    pub models: Vec<String>,
+    pub git: Option<GitCheck>,
 }
 
 /// Atomic read-modify-write with retry: load the state, apply `f`, and save. If
@@ -136,8 +189,9 @@ pub trait StateStorePort: Send + Sync {
     }
 
     /// Record this runner's live presence (`account@host`, current role, current
-    /// ticket) in the shared worker registry, so every dashboard can show all
-    /// teams. Best-effort; the default is a no-op (single-runner needs none).
+    /// ticket, the agent CLIs it can actually run) in the shared worker registry,
+    /// so every dashboard can show all teams. Best-effort; the default is a no-op
+    /// (single-runner needs none).
     ///
     /// # Errors
     /// [`PortError`] on a coordination-store failure.
@@ -146,6 +200,7 @@ pub trait StateStorePort: Send + Sync {
         _worker: &str,
         _role: &str,
         _ticket: &str,
+        _caps: &WorkerCaps,
         _now: &str,
     ) -> Result<(), PortError> {
         Ok(())

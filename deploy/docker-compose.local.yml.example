@@ -1,0 +1,42 @@
+# Host-specific overlay — copy to docker-compose.local.yml (gitignored) and
+# edit the paths. Enable with COMPOSE_FILE in .env:
+#   COMPOSE_FILE=docker-compose.split.yml:docker-compose.local.yml
+#
+# WHY THIS EXISTS
+# The hub runs in Docker; the projects it manages live on this machine. A
+# brownfield project's `codebase` is a SYMLINK to the real repo, and a symlink
+# resolves only if its target path also exists inside the container. Without
+# that, Code map, Files and the indexer see an empty directory while the runner
+# on the host is working the real tree.
+#
+# Greenfield projects need nothing extra: their codebase is a real directory
+# INSIDE the workspace, which is mounted below.
+#
+# ADDING ANOTHER CODE LOCATION
+# One line per root, always `path:path:ro` so the path is identical on both
+# sides. Mounting all of $HOME would cover every case in one line, but it also
+# hands the hub container your ~/.ssh, ~/.aws and browser profiles — name the
+# few directories you actually keep code in instead.
+x-local-mounts: &local-mounts
+  # The workspace: registry.json, per-project state and config. One set of
+  # files for hub and operator, rather than two copies that drift apart.
+  - ${COX_WORKSPACE}:${COX_WORKSPACE}
+  - ${COX_WORKSPACE}:/root/CoXAgent
+  # Code roots — read-only: agents write through the runner, never the hub.
+  - ${COX_CODE_ROOT}:${COX_CODE_ROOT}:ro
+  # - /Volumes/work:/Volumes/work:ro
+  # - ${HOME}/dev:${HOME}/dev:ro
+
+x-local-env: &local-env
+  COXAGENT_REGISTRY: ${COX_WORKSPACE}/registry.json
+
+services:
+  gateway:
+    volumes: *local-mounts
+    environment: *local-env
+  realtime:
+    volumes: *local-mounts
+    environment: *local-env
+  knowledge:
+    volumes: *local-mounts
+    environment: *local-env

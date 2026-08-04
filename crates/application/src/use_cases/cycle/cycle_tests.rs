@@ -279,13 +279,7 @@ struct SpyForge {
 }
 #[async_trait::async_trait]
 impl ForgePort for SpyForge {
-    async fn open_pr(
-        &self,
-        _: &str,
-        _: &str,
-        _: &str,
-        _: &str,
-    ) -> Result<PullRequest, PortError> {
+    async fn open_pr(&self, _: &str, _: &str, _: &str, _: &str) -> Result<PullRequest, PortError> {
         unimplemented!()
     }
     async fn list_open_prs(&self) -> Result<Vec<PullRequest>, PortError> {
@@ -1862,8 +1856,7 @@ async fn impediment_digest_is_delivered_via_the_external_notifier_when_configure
          NotifierPort when one is configured: {all:?}"
     );
     assert!(
-        digest[0].message.contains("Impediment watch")
-            && digest[0].message.contains("RECOVERY"),
+        digest[0].message.contains("Impediment watch") && digest[0].message.contains("RECOVERY"),
         "the notified message must carry the digest body: {:?}",
         digest[0].message
     );
@@ -2042,7 +2035,9 @@ impl AgentEnginePort for CriteriaEngine {
 
 #[tokio::test]
 async fn a_designed_ticket_with_no_criteria_gets_them_before_a_human_sees_it() {
-    use coxagent_domain::{Complexity, Priority, Role, TechnicalDesign, Ticket, TicketId, TicketType};
+    use coxagent_domain::{
+        Complexity, Priority, Role, TechnicalDesign, Ticket, TicketId, TicketType,
+    };
 
     let mut t = Ticket::new(
         TicketId::new("COX-F001").expect("id"),
@@ -2083,14 +2078,18 @@ async fn a_designed_ticket_with_no_criteria_gets_them_before_a_human_sees_it() {
     Box::pin(uc.preflight_acceptance_criteria()).await;
 
     let s = store.load().await.expect("load");
-    let t = s.ticket(&TicketId::new("COX-F001").expect("id")).expect("ticket");
+    let t = s
+        .ticket(&TicketId::new("COX-F001").expect("id"))
+        .expect("ticket");
     assert_eq!(
         t.acceptance_criteria().len(),
         2,
         "the BA's criteria should be on the ticket, not in a log"
     );
     assert!(
-        s.comments.iter().any(|c| c.author == "BA" && c.body.contains("Acceptance criteria added")),
+        s.comments
+            .iter()
+            .any(|c| c.author == "BA" && c.body.contains("Acceptance criteria added")),
         "the change is announced on the ticket, so a person can see who wrote them"
     );
 
@@ -2098,7 +2097,10 @@ async fn a_designed_ticket_with_no_criteria_gets_them_before_a_human_sees_it() {
     Box::pin(uc.preflight_acceptance_criteria()).await;
     let s = store.load().await.expect("load");
     assert_eq!(
-        s.ticket(&TicketId::new("COX-F001").expect("id")).expect("t").acceptance_criteria().len(),
+        s.ticket(&TicketId::new("COX-F001").expect("id"))
+            .expect("t")
+            .acceptance_criteria()
+            .len(),
         2,
         "a ticket that already has criteria is left alone"
     );

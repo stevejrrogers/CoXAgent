@@ -348,29 +348,58 @@ function startApp(){
 }
 const AGENT_CLIS={claude:{label:"Claude Code",desc:"Anthropic's coding agent",install:"curl -fsSL https://claude.ai/install.sh | bash",docs:"https://claude.com/claude-code"},
   opencode:{label:"opencode",desc:"open-source multi-model agent",install:"curl -fsSL https://opencode.ai/install | bash",docs:"https://opencode.ai"}};
+// Which machine each engine was found on: "hub" for the server's own PATH, else
+// the runner that reported it. Lets the wizard say "installed · luton@mac"
+// instead of implying it sits on the machine you are reading this from.
+function engineHosts(list){
+  const m={};
+  for(const e of (list||[])){ if(e&&e.name) m[String(e.name).toLowerCase()]=e.where||"hub"; }
+  return m;
+}
 async function checkAgentSetup(force){
   let list=[];try{list=await(await fetch("/api/engines")).json();}catch(e){}
   const have=new Set((list||[]).map(e=>e.name.toLowerCase()));
-  window._engines=have;
+  window._engines=have; window._engineHosts=engineHosts(list);
   const dismissed=localStorage.getItem("coxSetupDone")==="1";
   const runnable=[...have].some(n=>n==="claude"||n==="opencode");
   if(runnable)localStorage.setItem("coxSetupDone","1");
-  // If engines list is empty (Docker/no CLI), auto-dismiss so dashboard works
-  // without showing the setup wizard on every login.
-  if(have.size===0){localStorage.setItem("coxSetupDone","1");}
+  // An empty list used to be auto-dismissed, because a hub in a container
+  // detected nothing and nagged every login. /api/engines now also reports what
+  // each live runner found on ITS machine, so empty finally means what it says:
+  // no agent CLI anywhere on this team. That is precisely when the guide helps.
   if(!force&&(runnable||dismissed))return;
   renderSetupWizard(have);
   document.getElementById("ov-setup").classList.add("open");
 }
+// Which OS is reading this page. The shell one-liners below are macOS/Linux
+// only; on Windows they are worse than useless — they look like something you
+// could paste. There the download page is the honest primary path.
+function setupPlatform(){
+  const s=(navigator.userAgentData&&navigator.userAgentData.platform)||navigator.platform||"";
+  if(/win/i.test(s))return "windows";
+  if(/mac/i.test(s))return "macos";
+  return "linux";
+}
 function renderSetupWizard(have){
+  const win=setupPlatform()==="windows";
   const rows=Object.entries(AGENT_CLIS).map(([k,c])=>{
     const ok=have.has(k);
+    // Where an engine was found matters once runners are remote: "installed"
+    // on someone else's machine is not something to install again here.
+    const on=(window._engineHosts&&window._engineHosts[k])||"";
+    const pill=ok
+      ?`<span class="setpill on">installed${on&&on!=="hub"?" · "+esc(workerLabel(on,Object.values(window._engineHosts||{}))):""}</span>`
+      :'<span class="setpill">not found</span>';
+    const dl=`<a href="${c.docs}" target="_blank" rel="noopener" class="setlink"><i class="ti ti-download" style="font-size:12px"></i> Download for ${win?"Windows":setupPlatform()==="macos"?"macOS":"Linux"}</a>`;
     return `<div class="setrow ${ok?'ok':''}">
       <div class="setmk">${ok?'<i class="ti ti-check"></i>':'<i class="ti ti-download"></i>'}</div>
-      <div style="flex:1;min-width:0"><div class="setname">${esc(c.label)} ${ok?'<span class="setpill on">installed</span>':'<span class="setpill">not found</span>'}</div>
+      <div style="flex:1;min-width:0"><div class="setname">${esc(c.label)} ${pill}</div>
         <div class="setdesc">${esc(c.desc)}</div>
-        ${ok?'':`<div class="setcmd"><code id="cmd-${k}">${esc(c.install)}</code><button onclick="copyCmd('${k}')" title="Copy"><i class="ti ti-copy"></i></button></div>
-          <a href="${c.docs}" target="_blank" rel="noopener" class="setlink">Installation guide <i class="ti ti-external-link" style="font-size:12px"></i></a>`}</div></div>`;
+        ${ok?'':(win
+          ?`${dl}<div class="setdesc" style="margin-top:6px">The one-line installer is macOS/Linux only.</div>`
+          :`<div class="setcmd"><code id="cmd-${k}">${esc(c.install)}</code><button onclick="copyCmd('${k}')" title="Copy"><i class="ti ti-copy"></i></button></div>
+            <div style="display:flex;gap:12px;flex-wrap:wrap">${dl}
+            <a href="${c.docs}" target="_blank" rel="noopener" class="setlink">Installation guide <i class="ti ti-external-link" style="font-size:12px"></i></a></div>`)}</div></div>`;
   }).join("");
   const anyOk=[...have].some(n=>n==="claude"||n==="opencode");
   document.getElementById("setup-body").innerHTML=`
@@ -389,6 +418,7 @@ async function recheckAgents(){
   const btn=document.getElementById("set-recheck");const old=btn.innerHTML;btn.innerHTML='<i class="ti ti-loader-2"></i> Checking…';
   let list=[];try{list=await(await fetch("/api/engines")).json();}catch(e){}
   const have=new Set((list||[]).map(e=>e.name.toLowerCase()));window._engines=have;
+  window._engineHosts=engineHosts(list);
   renderSetupWizard(have);btn.innerHTML=old;
   if([...have].some(n=>n==="claude"||n==="opencode")){localStorage.setItem("coxSetupDone","1");}
 }

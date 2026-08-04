@@ -43,6 +43,12 @@ pub struct RunnerHandle {
     step: AtomicBool,
     resume: Notify,
     status: Mutex<RunnerSnapshot>,
+    /// Agent CLIs found on THIS machine's PATH, injected by the composition root
+    /// (detection is an infrastructure concern). Reported on every heartbeat so
+    /// a hub that will never have an agent CLI of its own can still tell the
+    /// dashboard which engines the team can actually run, which models its
+    /// opencode reaches, and whether its git/forge credentials really work.
+    caps: crate::ports::outbound::WorkerCaps,
 }
 
 impl Default for RunnerHandle {
@@ -60,6 +66,7 @@ impl Default for RunnerHandle {
                 operator: None,
                 host: None,
             }),
+            caps: crate::ports::outbound::WorkerCaps::default(),
         }
     }
 }
@@ -68,6 +75,20 @@ impl RunnerHandle {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Declare what this machine can run (composition root only): the agent CLIs
+    /// on its PATH and the `provider/model` pairs its opencode can reach.
+    #[must_use]
+    pub fn with_capabilities(mut self, caps: crate::ports::outbound::WorkerCaps) -> Self {
+        self.caps = caps;
+        self
+    }
+
+    /// What this machine can do, as reported on every heartbeat.
+    #[must_use]
+    pub fn caps(&self) -> &crate::ports::outbound::WorkerCaps {
+        &self.caps
     }
 
     /// Resume continuous running.
@@ -196,10 +217,16 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
                 let (role, note) = phase
                     .lock()
                     .map_or_else(|_| ("idle".to_owned(), String::new()), |p| p.clone());
+                // Only a runner actually mid-phase belongs in the registry from
+                // here. This loop also backs the hub's own built-in runner,
+                // which sits paused by default — beating while idle filled the
+                // registry with a phantom worker (no engines, no work) on every
+                // hub. A headless operator advertises itself from `run_loop`
+                // instead, which is the process that really has the agent CLIs.
                 if role != "idle" {
                     let now = crate::state::now_rfc3339();
                     let _ = store
-                        .heartbeat_worker(&h.worker_id(), &role, &note, &now)
+                        .heartbeat_worker(&h.worker_id(), &role, &note, h.caps(), &now)
                         .await;
                 }
             }
@@ -220,9 +247,12 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
             None => h.clear_active(),
         }
         let (store, worker) = (std::sync::Arc::clone(&store), h.worker_id());
+        let caps = h.caps().clone();
         tokio::spawn(async move {
             let now = crate::state::now_rfc3339();
-            let _ = store.heartbeat_worker(&worker, &role, &note, &now).await;
+            let _ = store
+                .heartbeat_worker(&worker, &role, &note, &caps, &now)
+                .await;
         });
     }));
     let breaker_store = cycle_uc.store();

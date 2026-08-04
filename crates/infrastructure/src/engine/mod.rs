@@ -20,7 +20,8 @@ pub use metering::{Meter, MeteringEngine};
 pub use mock::MockEngine;
 pub use opencode::OpencodeEngine;
 pub use registry::{
-    discover, discover_in, discover_tooling, DetectedEngine, DetectedTool, Tooling,
+    discover, discover_in, discover_opencode_models, discover_tooling, DetectedEngine,
+    DetectedTool, Tooling,
 };
 pub use routing::RoutingEngine;
 pub use scripted::ScriptedEngine;
