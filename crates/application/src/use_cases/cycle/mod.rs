@@ -769,7 +769,28 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                             }
                         }
                         Ok(_) => {}
-                        Err(e) => report.errors.push(format!("DEPLOY: {e}")),
+                        // A spawn/timeout error never even produced a
+                        // DeployReport (COX-B039) — without this arm
+                        // `deploy_bad` stays false, `record_deploy` never
+                        // runs (so `state.deploy.ok` keeps reporting the
+                        // PREVIOUS deploy's status), no bug is filed, and
+                        // `attempt_rollback` never fires even though
+                        // `docker_compose::deploy()` already ran `down`
+                        // before failing — the app is left stopped. Route it
+                        // through the same success=false path as an unhealthy
+                        // deploy so all four (state, bug, notify, rollback)
+                        // happen here too.
+                        Err(e) => {
+                            deploy_bad = true;
+                            let summary = format!("deploy failed: {e}");
+                            self.record_deploy(false, &summary, attempt_sha.clone(), None)
+                                .await;
+                            self.notify("deploy_failed", summary.clone()).await;
+                            if let Some(id) = self.file_deploy_bug(&summary).await {
+                                report.bugs_filed.push(id);
+                            }
+                            report.errors.push(format!("DEPLOY: {e}"));
+                        }
                     }
                     // Hard DoD gate: run the real test suite. A red suite becomes a
                     // high-priority bug (deduped) — deterministic quality, not just
