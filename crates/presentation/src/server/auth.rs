@@ -210,7 +210,8 @@ pub(super) async fn auth_mw(
         && path != "/api/chat/dm" // open a DM: any signed-in user
         && !path.starts_with("/api/engines/opencode") // opencode model list: any signed-in user
         && !path.contains("/channels") // create/invite channels: any signed-in user
-        && !path.ends_with("/upload"); // uploads are open to any signed-in user
+        && !path.ends_with("/upload") // uploads are open to any signed-in user
+        && path != "/api/mcp"; // MCP dispatch: role check based on JSON-RPC method, not HTTP verb
     let method = req.method().clone();
     let username = user.username.clone();
     // Management surfaces — user administration, project Settings, and API
@@ -234,6 +235,16 @@ pub(super) async fn auth_mw(
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({ "error": "management role required" })),
+        )
+            .into_response();
+    }
+    // MCP dispatch requires write access, even for read-only JSON-RPC methods,
+    // because the HTTP verb alone can't distinguish read from write operations.
+    if path == "/api/mcp" && !user.role.can_write() {
+        audit_push(&app.audit, &username, format!("{method} {path}"), 403).await;
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "insufficient role" })),
         )
             .into_response();
     }

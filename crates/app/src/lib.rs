@@ -1485,7 +1485,16 @@ mod mcp_auth_tests {
             .expect("mint Viewer token");
         let auth: Arc<dyn AuthPort> = Arc::new(svc);
 
-        let port = 47_654;
+        // Ephemeral port, not a fixed one: a fixed port collides with any
+        // other hub already listening (a leftover dev hub, a second concurrent
+        // `cargo test`), and the test then talks to a STRANGER's server whose
+        // auth store never minted these tokens — which shows up as a baffling
+        // 401 on the assertion below instead of a bind error.
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .expect("reserve a free port")
+            .local_addr()
+            .expect("local addr")
+            .port();
         let extras = coxagent_presentation::HubExtras {
             auth: Some(auth),
             hub_dir: Some(dir.path().to_path_buf()),
@@ -1517,9 +1526,8 @@ mod mcp_auth_tests {
         serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" })
     }
 
-    // These three tests share one hub instance on a fixed port (real TCP
-    // bind), so they run as one #[tokio::test] rather than three parallel
-    // ones that would race on the same port.
+    // These three checks share one hub instance (real TCP bind), so they run
+    // as one #[tokio::test] rather than three that would each boot a hub.
     #[tokio::test]
     async fn api_mcp_auth_gate_matches_can_write_not_viewer() {
         let (port, be_token, viewer_token, _dir) = boot_hub_with_tokens().await;
