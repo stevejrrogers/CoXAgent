@@ -7,7 +7,7 @@
 //! concurrency (a monotonic `revision`) rejects lost updates from two writers.
 
 use async_trait::async_trait;
-use coxagent_application::ports::outbound::{StateStorePort, WorkerEntry};
+use coxagent_application::ports::outbound::{StateStorePort, WorkerCaps, WorkerEntry};
 use coxagent_application::state::{ProjectState, SCHEMA_VERSION};
 use coxagent_application::PortError;
 use coxagent_domain::{Role, TicketId};
@@ -36,7 +36,15 @@ CREATE TABLE IF NOT EXISTS project_coord (
     PRIMARY KEY (project_id, kind, coord_key)
 );
 ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS role TEXT;
-ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS ticket TEXT;";
+ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS ticket TEXT;
+-- Worker registry: the agent CLIs that runner found on its own PATH, comma
+-- separated. The hub cannot detect these for a remote runner.
+ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS engines TEXT;
+-- Worker registry: `provider/model` pairs that runner's opencode can reach,
+-- newline separated. Custom providers exist only in the user's own CLI config.
+ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS models TEXT;
+-- Worker registry: JSON result of probing git + forge access on that machine.
+ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS gitcheck TEXT;";
 
 /// Leader lease lifetime (seconds) — a runner must renew within this or another
 /// takes over. Matches the JSON store.
@@ -290,19 +298,38 @@ impl StateStorePort for SqlStateStore {
         worker: &str,
         role: &str,
         ticket: &str,
+        caps: &WorkerCaps,
         now: &str,
     ) -> Result<(), PortError> {
         if let Some(r) = &self.redis {
-            return r.heartbeat_worker(worker, role, ticket, now).await;
+            return r.heartbeat_worker(worker, role, ticket, caps, now).await;
         }
         let client = self.client().await?;
+        let engines_csv = caps.engines.join(",");
+        let models_csv = caps.models.join("\n");
         client
             .execute(
-                "INSERT INTO project_coord (project_id, kind, coord_key, worker, at, role, ticket)
-                 VALUES ($1, 'worker', $2, $2, now(), $3, $4)
+                "INSERT INTO project_coord
+                    (project_id, kind, coord_key, worker, at, role, ticket,
+                     engines, models, gitcheck)
+                 VALUES ($1, 'worker', $2, $2, now(), $3, $4, $5, $6, $7)
                  ON CONFLICT (project_id, kind, coord_key) DO UPDATE
-                    SET at = now(), role = EXCLUDED.role, ticket = EXCLUDED.ticket",
-                &[&self.project_id, &worker, &role, &ticket],
+                    SET at = now(), role = EXCLUDED.role, ticket = EXCLUDED.ticket,
+                        engines = EXCLUDED.engines, models = EXCLUDED.models,
+                        gitcheck = EXCLUDED.gitcheck",
+                &[
+                    &self.project_id,
+                    &worker,
+                    &role,
+                    &ticket,
+                    &engines_csv,
+                    &models_csv,
+                    &caps
+                        .git
+                        .as_ref()
+                        .and_then(|g| serde_json::to_string(g).ok())
+                        .unwrap_or_default(),
+                ],
             )
             .await
             .map_err(|e| PortError::Backend(format!("heartbeat: {e}")))?;
@@ -317,7 +344,9 @@ impl StateStorePort for SqlStateStore {
         let rows = client
             .query(
                 "SELECT worker, coalesce(role,''), coalesce(ticket,''),
-                        to_char(at, 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')
+                        to_char(at, 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),
+                        coalesce(engines,''), coalesce(models,''),
+                        coalesce(gitcheck,'')
                    FROM project_coord
                   WHERE project_id = $1 AND kind = 'worker'
                     AND at > now() - make_interval(secs => $2)
@@ -333,6 +362,19 @@ impl StateStorePort for SqlStateStore {
                 role: r.get(1),
                 ticket: r.get(2),
                 at: r.get(3),
+                engines: r
+                    .get::<_, String>(4)
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect(),
+                models: r
+                    .get::<_, String>(5)
+                    .lines()
+                    .filter(|s| !s.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect(),
+                git: serde_json::from_str(&r.get::<_, String>(6)).ok(),
             })
             .collect())
     }

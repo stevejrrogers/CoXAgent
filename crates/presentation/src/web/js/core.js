@@ -99,6 +99,27 @@ function nav(v){
    if(v==="settings")loadSettings(); else if(v==="calendar"){if(!Array.isArray(MEETINGS))MEETINGS=[];loadMeetings().then(renderCalendar).catch(()=>{MEETINGS=[];renderCalendar();});} else if(v==="discuss"){loadComments();} else if(v==="docs"){loadDocs();} else if(v==="people"){renderPeople();} else if(v==="audit"){renderAudit();} else if(v==="access"){renderAccess();} else if(v==="roadmap"){renderRoadmap();} else if(v==="review"){renderReview();} else if(v==="inbox"){renderInbox();} else if(v==="codemap"){renderCodeMap();} else if(v==="team"){loadAgentEvals();renderActive();} else if(v==="terminal"){openTerminal();} else renderActive();
    setTimeout(centerContent,50);}
 function initials(r){return r.replace("DEV-","").slice(0,2);}
+// A hostname as a person would say it: "Lutons-MacBook-Pro.local" -> "MacBook
+// Pro". Drops the mDNS suffix, the dashes, and the owner's own name, which the
+// account beside it already said.
+function prettyHost(h,account){
+  let s=String(h||"").replace(/\.local\.?$/i,"").replace(/[-_]+/g," ").trim();
+  const a=String(account||"").trim();
+  if(a){const own=new RegExp("^"+a.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")+"(?:'?s)?\\s+","i");s=s.replace(own,"");}
+  return s.trim()||String(h||"");
+}
+// Label a worker id (`account@host`) for display. The machine is named only
+// when it actually tells two workers apart — always printing it makes every row
+// longer in the common case (one person, one machine) while saying nothing.
+function workerLabel(who,all){
+  const s=String(who||""); const at=s.indexOf("@");
+  if(at<0)return s;
+  const account=s.slice(0,at), host=s.slice(at+1);
+  const hosts=new Set((all||[]).map(String)
+    .filter(w=>w.slice(0,w.indexOf("@"))===account&&w.includes("@"))
+    .map(w=>w.slice(w.indexOf("@")+1)));
+  return hosts.size>1?account+" · "+prettyHost(host,account):account;
+}
 function metricsFrom(s){const t=s.tickets||[],h=s.history||[],isF=x=>x.type!=="bug";
   return {shipped:t.filter(x=>isF(x)&&(x.status==="done"||x.status==="documented")).length,
     inflight:t.filter(x=>isF(x)&&(x.status==="ready"||x.status==="in_progress")).length,
@@ -453,7 +474,9 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
       let cur=null,live=working;
       if(r==="DEV-FEATURE"||r==="DEV-BUG"){const w=inProg.find(t=>r==="DEV-BUG"?t.type==="bug":t.type!=="bug");if(w){cur=w.id;}}
       if(!cur&&st.last&&st.last.ticket)cur=st.last.ticket;
-      const short=w=>(w||'').split('@')[0];
+      // Name the machine only when this account runs on more than one.
+      const allWho=runners.map(x=>x.who);
+      const short=w=>workerLabel(w,allWho);
       const taskChip=(note,tid,cls)=>`<span class="ag-task ${cls}"${tid?` onclick="event.stopPropagation();showTicket('${tid}')" style="cursor:pointer"`:''}>${note?esc(note):''}${tid?`<span class="tid">${esc(tid)}</span>`:''}</span>`;
       let statusHtml;
       if(working){

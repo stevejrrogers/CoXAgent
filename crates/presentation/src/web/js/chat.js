@@ -1823,6 +1823,7 @@ async function showTicket(id){
     <button class="tk-btn" onclick="editTicket('${t.id}')"><i class="ti ti-edit"></i> Edit</button>
     ${canWork?`<button class="tk-btn go" onclick="workNext('${t.id}')"><i class="ti ti-player-play-filled"></i> Work on this next</button>`:''}
     ${(t.status==="pending"&&tech)?`<button class="tk-btn go" onclick="humanGate('${t.id}','ready')"><i class="ti ti-checks"></i> Approve → Ready</button>`:''}
+    ${t.status==="fixed"?`<button class="tk-btn" onclick="inboxSendBack('${t.id}')"><i class="ti ti-arrow-back-up"></i> Send back</button>`:''}
     ${t.status==="fixed"?`<button class="tk-btn go" onclick="humanGate('${t.id}','verify')"><i class="ti ti-shield-check"></i> Mark Verified</button>`:''}
     ${(t.status==="pending"||t.status==="open")?`<button class="tk-btn danger" onclick="rejectTicket('${t.id}')"><i class="ti ti-ban"></i> Reject</button>`:''}
   </div>`;
@@ -1904,7 +1905,12 @@ async function reactComment(tid,cid,emoji){
 async function postTicketComment(tid){
   const inp=document.getElementById("tkc-input");const body=(inp.value||"").trim();if(!body)return;
   inp.value="";inp.disabled=true;
-  try{await fetch(api("/comments"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({body,ticket:tid})});}catch(e){}
+  // A swallowed failure looked exactly like a posted comment: the box cleared
+  // and nothing appeared. Say so instead, and give the text back.
+  try{
+    const r=await fetch(api("/comments"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({body,ticket:tid})});
+    if(!r.ok){inp.value=body;toasty(await r.text()||"Comment failed","err");}
+  }catch(e){inp.value=body;toasty("Network error — comment not posted","err");}
   inp.disabled=false;await renderTicketComments(tid);inp.focus();
 }
 async function loadSettings(){
@@ -1924,7 +1930,7 @@ async function loadSettings(){
     <i class="ti ti-${ga.authenticated?'user-check':'user-x'}" style="color:${ga.authenticated?'var(--green)':'var(--amber)'};font-size:17px"></i>
     <div class="toolinfo"><div><b>${esc(ga.tool||gprov)} sign-in</b> <span class="tooldim">· ${ga.authenticated?('connected as '+esc(ga.account||'?')):'not signed in'}</span></div></div>
     ${ga.authenticated?'<span class="toolok">connected</span>':`<button class="gc-btn pri" onclick="openConnect('${gprov}')"><i class="ti ti-plug"></i> Connect</button>`}
-    <button class="gc-btn" onclick="testGitConnection(this)" title="repo → remote → reachable → push permission"><i class="ti ti-antenna-bars-5"></i> Test connection</button>
+    <button class="gc-btn" onclick="testGitConnection(this)" title="repo → remote → reachable → push permission → pull requests (push and PRs use different credentials)"><i class="ti ti-antenna-bars-5"></i> Test connection</button>
   </div><div id="git-test-result"></div>`:'';
   const brewBanner=(td.os==="macos"&&!td.has_brew)
     ? `<div class="toolrow toolbrew"><i class="ti ti-alert-triangle" style="color:var(--amber);font-size:17px"></i>
@@ -2025,6 +2031,7 @@ async function loadSettings(){
         <div class="fr"><span class="lbl">Target branch</span><input id="git-tb" value="${esc(git.target_branch||'')}" placeholder="blank = default" style="width:140px"/><span class="hint">agent PRs open into &amp; auto-merge here (e.g. <code>develop</code>)</span></div>
         <div class="fr"><span class="lbl">Branch prefix</span><input id="git-bp" value="${esc(git.branch_prefix||'feat/')}" style="width:120px"/><span class="hint">→ ${esc(git.branch_prefix||'feat/')}CXC-123</span></div>
         <div class="fr"><span class="lbl">Commit email</span><input id="git-em" value="${esc(git.commit_email||'')}" placeholder="…@users.noreply.github.com" style="width:280px"/><span class="hint">use a noreply email to avoid privacy blocks</span></div>
+        <div class="fr"><span class="lbl">Act as account</span><input id="git-acct" value="${esc(git.account||'')}" placeholder="blank = the CLI's active login" style="width:280px"/><span class="hint">sign in twice (<code>gh auth login</code>) and name the one this project uses — two projects can then be two different users at once</span></div>
         <div class="fr"><span class="lbl">Open PR/MR</span><select id="git-pr"><option value="true" ${git.auto_pr!==false?'selected':''}>automatically after push</option><option value="false" ${git.auto_pr===false?'selected':''}>manual</option></select></div>
         <div class="fr"><span class="lbl">Auto-review</span><select id="git-ar"><option value="true" ${git.auto_review!==false?'selected':''}>on — the SA agent reviews every PR &amp; suggests</option><option value="false" ${git.auto_review===false?'selected':''}>off — no automatic review</option></select><span class="hint">SA deep-dives each PR and posts approve / request-changes as a suggestion</span></div>
         <div class="fr"><span class="lbl">Auto-merge</span><select id="git-am"><option value="false" ${!git.auto_merge?'selected':''}>off — you merge from the Review tab</option><option value="true" ${git.auto_merge?'selected':''}>on — SA approves &amp; merges automatically</option></select><span class="hint">On: SA merges on approve (never on failing CI). Off: approval is only a suggestion; request-changes still loops back to the agent to fix.</span></div>
@@ -2085,7 +2092,11 @@ async function testGitConnection(btn){
       ${step(!!d.remote,'remote',d.remote?` <code style="font-size:11px">${esc(d.remote)}</code>`:' — none: agents cannot push; add one (git remote add origin …) or reconnect')}
       ${step(d.reachable,'reachable')}
       ${step(d.push_ok,'push permission')}
+      ${step(d.api_ok,'pull requests',d.api_account?` <code style="font-size:11px">${esc(d.api_account)}</code>`:'')}
+      ${d.probed_on?`<div style="color:var(--dim);margin-top:5px">checked on <code style="font-size:11px">${esc(d.probed_on)}</code> — the machine that runs the agents</div>`:''}
       ${d.detail?`<div style="color:var(--dim);margin-top:5px">${esc(d.detail)}</div>`:''}
+      ${d.key_hint?`<div style="color:var(--amber);margin-top:5px"><i class="ti ti-key"></i> ${esc(d.key_hint)}</div>`:''}
+      ${d.api_detail?`<div style="color:var(--amber);margin-top:5px"><i class="ti ti-alert-triangle"></i> ${esc(d.api_detail)}</div>`:''}
     </div>`;
   }catch(e){box.innerHTML='<div class="empty">test failed</div>';}
   btn.innerHTML=o;btn.disabled=false;

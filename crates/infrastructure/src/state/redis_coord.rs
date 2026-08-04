@@ -7,7 +7,7 @@
 //! PX` semantics shine. This is the "combine Postgres + Redis" split: durable
 //! data in Postgres, fast concurrency primitives in Redis.
 
-use coxagent_application::ports::outbound::WorkerEntry;
+use coxagent_application::ports::outbound::{WorkerCaps, WorkerEntry};
 use coxagent_application::PortError;
 
 /// Leader lease (ms) — a runner must renew within this or another takes over.
@@ -110,6 +110,7 @@ impl RedisCoord {
         worker: &str,
         role: &str,
         ticket: &str,
+        caps: &WorkerCaps,
         now: &str,
     ) -> Result<(), PortError> {
         let mut c = self.conn().await?;
@@ -119,6 +120,9 @@ impl RedisCoord {
             role: role.to_owned(),
             ticket: ticket.to_owned(),
             at: now.to_owned(),
+            engines: caps.engines.clone(),
+            models: caps.models.clone(),
+            git: caps.git.clone(),
         })
         .unwrap_or_default();
         redis::cmd("SET")

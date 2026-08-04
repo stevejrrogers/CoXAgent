@@ -123,9 +123,68 @@ fn diff_touches_inline_test_module(tree: &WorkingTreeDiff) -> bool {
     false
 }
 
+/// Directories and files that appear in `git status` but cannot change what
+/// the build produces: agent scratch space, backups, per-engine config the
+/// runner writes itself, vendored/build output.
+///
+/// This matters more than it looks. A workspace with only these dirty made the
+/// boot check believe the tree was modified; nothing mapped to a package, so
+/// the scoped run fell back to the FULL suite, timed out, and the failure was
+/// then read as "the project does not compile" — spawning a self-heal on a
+/// tree where not one source file had changed.
+const BUILD_IRRELEVANT: &[&str] = &[
+    ".claude/",
+    ".gitnexus/",
+    "backups/",
+    "node_modules/",
+    "target/",
+    "cox-opencode.json",
+    "cox-config.json",
+    ".DS_Store",
+];
+
+/// The changed paths that could actually affect a build or its tests.
+#[must_use]
+pub(super) fn build_relevant(changed: &[String]) -> Vec<String> {
+    changed
+        .iter()
+        .filter(|p| {
+            let p = p.trim_start_matches("./");
+            !BUILD_IRRELEVANT
+                .iter()
+                .any(|skip| p.starts_with(skip) || p.contains(&format!("/{skip}")) || p == *skip)
+        })
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_scratch_never_counts_as_a_build_change() {
+        let changed: Vec<String> = [
+            ".claude/worktrees/",
+            "backups/",
+            "cox-opencode.json",
+            "target/debug/foo",
+            "crates/app/src/lib.rs",
+        ]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+        assert_eq!(build_relevant(&changed), vec!["crates/app/src/lib.rs"]);
+    }
+
+    #[test]
+    fn a_tree_dirty_only_with_scratch_is_effectively_clean() {
+        let changed: Vec<String> = [".claude/worktrees/", "backups/db.sql"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        assert!(build_relevant(&changed).is_empty());
+    }
 
     fn tree(paths: &[&str]) -> WorkingTreeDiff {
         WorkingTreeDiff {

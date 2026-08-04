@@ -17,11 +17,27 @@ pub struct GhForge {
     host: String,
     /// The codebase directory — `gh` runs here so its remote checks resolve.
     work_dir: PathBuf,
+    /// Act as this login rather than whichever account `gh` has active. Its
+    /// token is read from gh's own store per call and passed as `GH_TOKEN`, so
+    /// two projects can be two different users at the same time and nothing
+    /// secret is kept here.
+    account: String,
 }
 
 impl GhForge {
     #[must_use]
     pub fn new(repo: impl Into<String>, base_url: impl Into<String>, work_dir: PathBuf) -> Self {
+        Self::with_account(repo, base_url, work_dir, String::new())
+    }
+
+    /// As [`GhForge::new`], acting as the named `gh` login (empty = active one).
+    #[must_use]
+    pub fn with_account(
+        repo: impl Into<String>,
+        base_url: impl Into<String>,
+        work_dir: PathBuf,
+        account: impl Into<String>,
+    ) -> Self {
         // gh takes a bare hostname; strip any scheme from a configured base URL.
         let base = base_url.into();
         let host = base
@@ -34,19 +50,48 @@ impl GhForge {
             repo: repo.into(),
             host,
             work_dir,
+            account: account.into(),
         }
     }
 
     async fn gh(&self, args: &[&str]) -> Result<String, PortError> {
-        gh(&self.host, &self.work_dir, args).await
+        gh_as(&self.host, &self.work_dir, &self.account, args).await
     }
+}
+
+/// The stored token for a named `gh` login, or `None` when it has none.
+async fn token_for(host: &str, account: &str) -> Option<String> {
+    if account.is_empty() {
+        return None;
+    }
+    let mut cmd = Command::new("gh");
+    cmd.args(["auth", "token", "--user", account])
+        .stdin(Stdio::null());
+    if !host.is_empty() {
+        cmd.env("GH_HOST", host);
+    }
+    let out = cmd.output().await.ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let t = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    (!t.is_empty()).then_some(t)
 }
 
 /// Run `gh <args>` in `work_dir`, returning trimmed stdout, or a `Backend`
 /// error with stderr.
-async fn gh(host: &str, work_dir: &std::path::Path, args: &[&str]) -> Result<String, PortError> {
+/// Run `gh <args>`, optionally as a specific stored login.
+async fn gh_as(
+    host: &str,
+    work_dir: &std::path::Path,
+    account: &str,
+    args: &[&str],
+) -> Result<String, PortError> {
     let mut cmd = Command::new("gh");
     cmd.args(args).stdin(Stdio::null());
+    if let Some(tok) = token_for(host, account).await {
+        cmd.env("GH_TOKEN", tok);
+    }
     if work_dir.is_dir() {
         cmd.current_dir(work_dir);
     }

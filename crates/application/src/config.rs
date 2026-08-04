@@ -482,6 +482,16 @@ pub struct GitConfig {
     /// address to avoid email-privacy push rejections.
     #[serde(default)]
     pub commit_email: String,
+    /// Which forge account to act as, when the CLI holds more than one login
+    /// (`gh auth login` twice). Empty = whichever account is currently active.
+    ///
+    /// Naming the account per project is what lets two projects push and open
+    /// PRs as DIFFERENT users at the same time: the token is fetched from the
+    /// CLI's own credential store on each call, so no secret is stored here —
+    /// only the login name. Without it, a machine whose CLI is signed in as the
+    /// wrong user pushes fine over ssh and then 404s on every pull request.
+    #[serde(default)]
+    pub account: String,
     /// Open a PR/MR automatically after pushing a ticket branch.
     #[serde(default)]
     pub auto_pr: bool,
@@ -532,6 +542,7 @@ impl Default for GitConfig {
             target_branch: String::new(),
             branch_prefix: default_branch_prefix(),
             commit_email: String::new(),
+            account: String::new(),
             auto_pr: false,
             auto_review: true,
             auto_merge: false,

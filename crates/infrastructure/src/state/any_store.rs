@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 use coxagent_application::ports::outbound::StateStorePort;
-use coxagent_application::ports::outbound::WorkerEntry;
+use coxagent_application::ports::outbound::{WorkerCaps, WorkerEntry};
 use coxagent_application::state::ProjectState;
 use coxagent_application::PortError;
 use coxagent_domain::TicketId;
@@ -71,11 +71,12 @@ impl StateStorePort for AnyStateStore {
         worker: &str,
         role: &str,
         ticket: &str,
+        caps: &WorkerCaps,
         now: &str,
     ) -> Result<(), PortError> {
         match self {
-            Self::Json(s) => s.heartbeat_worker(worker, role, ticket, now).await,
-            Self::Sql(s) => s.heartbeat_worker(worker, role, ticket, now).await,
+            Self::Json(s) => s.heartbeat_worker(worker, role, ticket, caps, now).await,
+            Self::Sql(s) => s.heartbeat_worker(worker, role, ticket, caps, now).await,
         }
     }
 

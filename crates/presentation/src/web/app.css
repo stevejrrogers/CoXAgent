@@ -1002,6 +1002,30 @@
   .sprinthead{display:flex;justify-content:space-between;align-items:flex-start;gap:14px}
   .sprintno{font-size:15px;font-weight:700;display:flex;align-items:center}
   .sprintgoal{font-size:13px;color:var(--muted);margin-top:3px}
+  /* Close-sprint sits with the ring, not in the flow of the goal text. */
+  .sp-close{align-self:center;flex:none;display:inline-flex;align-items:center;gap:5px;
+    background:var(--card2);border:1px solid var(--border2);color:var(--muted);
+    border-radius:8px;padding:6px 11px;font-size:11.5px;font-weight:600;cursor:pointer;
+    font-family:inherit;transition:border-color .15s,color .15s}
+  .sp-close:hover{border-color:var(--amber);color:var(--amber)}
+  /* Per-row sprint scope toggle. Hidden-until-hover read as "not there at
+     all" — a control nobody can find is a control that does not exist. Muted
+     but always visible; the row hover brightens it. */
+  .sp-scope{flex:none;background:var(--card2);border:1px solid var(--border2);
+    color:var(--muted);border-radius:7px;padding:3px 9px;font-size:10.5px;font-weight:600;
+    cursor:pointer;font-family:inherit;white-space:nowrap;
+    transition:border-color .15s,color .15s,background .15s}
+  .act:hover .sp-scope{border-color:var(--accent2);color:var(--accent2)}
+  .sp-scope:hover{background:var(--accentbg);border-color:var(--accent2);color:var(--accent2)}
+  /* Inbox actions: one column, right-aligned, with the primary button always
+     last and always the same width. Mixed 2- and 3-button cards used to put
+     the single cyan block at a different x on every row, so a scrolled list
+     flickered left-right. Same x, same size, every card. */
+  .ibx-acts{display:flex;gap:8px;flex-shrink:0;align-items:center;justify-content:flex-end}
+  .ibx-btn{padding:7px 14px;font-size:12px;white-space:nowrap}
+  .ibx-pri{min-width:104px;text-align:center}
+  .ibx-noright{min-width:104px;text-align:center;font-size:11px;color:var(--dim);
+    border:1px dashed var(--border2);border-radius:8px;padding:6px 12px}
   .sprintpct{text-align:right;flex:none}
   .sprintpct .v{font-size:26px;font-weight:800;color:var(--accent2);line-height:1}
   .sprintpct .k{font-size:10.5px;color:var(--dim);margin-top:2px}

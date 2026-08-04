@@ -668,8 +668,30 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             if cur != review.head_sha {
                 continue;
             }
-            // Never touch work a human is deliberately sitting on.
+            // A PR that committed the agents' own scratch is wrong by
+            // construction — and the pollution is exactly what pushes it past
+            // the size bound below, so it stops being auto-landable AND
+            // auto-closable and parks forever. Close it first: the ticket goes
+            // back to the queue and is redone from a clean base.
             if let Ok(diff) = forge.pr_diff(pr.number).await {
+                if let Some(path) = crate::use_cases::merge_policy::commits_scratch(&diff) {
+                    let note = format!(
+                        "Closing: this branch commits `{path}` — agent scratch that does not \
+                         belong in the product's history. No review round fixes that. The work \
+                         is not lost: the ticket returns to the queue and is redone on a fresh \
+                         branch off current main."
+                    );
+                    let _ = forge.comment_pr(pr.number, &note).await;
+                    if forge.close_pr(pr.number).await.is_ok() {
+                        self.log_git(&format!(
+                            "stale sweep: closed PR #{} — commits scratch ({path})",
+                            pr.number
+                        ))
+                        .await;
+                    }
+                    continue;
+                }
+                // Never touch work a human is deliberately sitting on.
                 if crate::use_cases::merge_policy::needs_human_eyes(&diff).is_some() {
                     continue;
                 }

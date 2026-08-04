@@ -16,6 +16,13 @@ pub fn advance(state: &mut ProjectState, cycle: u64, length: u64) -> Option<u32>
     if !need_open {
         return None;
     }
+    Some(roll_over(state, cycle, length))
+}
+
+/// Archive whatever sprint is running and open the next one. The single place
+/// a sprint boundary is written — the timed rollover and an early close must
+/// leave identical history, or the velocity chart compares different shapes.
+fn roll_over(state: &mut ProjectState, cycle: u64, length: u64) -> u32 {
     // Archive the closing sprint's outcome for the velocity history.
     if let Some(closing) = &state.sprint {
         let done = done_count(state);
@@ -43,7 +50,48 @@ pub fn advance(state: &mut ProjectState, cycle: u64, length: u64) -> Option<u32>
         length_cycles: length,
         committed,
     });
-    Some(number)
+    number
+}
+
+/// Pull a ticket into the sprint that is already running.
+///
+/// The automatic commit is capacity-based and happens once, at rollover; a
+/// person who decides mid-sprint that something belongs in it had no way to
+/// say so. Returns whether the sprint changed — a ticket already committed, a
+/// ticket that does not exist, or no open sprint all mean "nothing to do".
+pub fn commit_ticket(state: &mut ProjectState, id: &TicketId) -> bool {
+    if state.ticket(id).is_none() {
+        return false;
+    }
+    let Some(sprint) = &mut state.sprint else {
+        return false;
+    };
+    if sprint.committed.contains(id) {
+        return false;
+    }
+    sprint.committed.push(id.clone());
+    true
+}
+
+/// Drop a ticket from the running sprint — scope a sprint DOWN mid-flight
+/// without deleting the ticket.
+pub fn uncommit_ticket(state: &mut ProjectState, id: &TicketId) -> bool {
+    let Some(sprint) = &mut state.sprint else {
+        return false;
+    };
+    let before = sprint.committed.len();
+    sprint.committed.retain(|c| c != id);
+    sprint.committed.len() != before
+}
+
+/// Close the running sprint NOW and open the next one, instead of waiting for
+/// the window to elapse. The archived record keeps the velocity history
+/// honest: what was committed and what actually shipped, same as a rollover.
+///
+/// Returns the new sprint number, or `None` when no sprint was running.
+pub fn close_now(state: &mut ProjectState, cycle: u64) -> Option<u32> {
+    let length = state.sprint.as_ref()?.length_cycles.max(1);
+    Some(roll_over(state, cycle, length))
 }
 
 /// A readable goal from the first few committed ticket titles.
@@ -142,6 +190,51 @@ mod tests {
         let s = state.sprint.as_ref().expect("sprint");
         assert_eq!(s.number, 1);
         assert_eq!(s.committed.len(), 2);
+    }
+
+    #[test]
+    fn a_person_can_pull_a_ticket_into_the_running_sprint() {
+        let mut state = ProjectState {
+            tickets: vec![feature("F001")],
+            ..ProjectState::default()
+        };
+        advance(&mut state, 1, 10);
+        state.tickets.push(feature("F002"));
+        let id = TicketId::new("F002").expect("id");
+        assert!(commit_ticket(&mut state, &id));
+        assert!(
+            !commit_ticket(&mut state, &id),
+            "committing twice must not duplicate the id"
+        );
+        assert!(state.sprint.as_ref().expect("sprint").committed.contains(&id));
+        assert!(
+            !commit_ticket(&mut state, &TicketId::new("F404").expect("id")),
+            "a ticket that does not exist cannot be committed"
+        );
+        assert!(uncommit_ticket(&mut state, &id));
+        assert!(!uncommit_ticket(&mut state, &id));
+    }
+
+    #[test]
+    fn closing_early_archives_the_sprint_and_opens_the_next() {
+        let mut state = ProjectState {
+            tickets: vec![feature("F001")],
+            ..ProjectState::default()
+        };
+        advance(&mut state, 1, 10);
+        // Cycle 3 of a 10-cycle window: nothing would roll over on its own.
+        assert_eq!(advance(&mut state, 3, 10), None);
+        assert_eq!(close_now(&mut state, 3), Some(2));
+        assert_eq!(state.sprints.len(), 1, "the closed sprint is in history");
+        assert_eq!(state.sprints[0].number, 1);
+        assert_eq!(state.sprint.as_ref().expect("sprint").number, 2);
+    }
+
+    #[test]
+    fn closing_with_no_sprint_running_is_a_no_op() {
+        let mut state = ProjectState::default();
+        assert_eq!(close_now(&mut state, 1), None);
+        assert!(state.sprint.is_none());
     }
 
     #[test]

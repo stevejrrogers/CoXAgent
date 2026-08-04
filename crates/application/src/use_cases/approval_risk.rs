@@ -265,6 +265,20 @@ mod tests {
     }
 
     #[test]
+    fn criteria_alone_move_a_medium_feature_into_the_auto_lane() {
+        // The live pile-up: six medium features, no acceptance criteria, all
+        // scored 60 and queued. The BA writing criteria is what makes them
+        // judgeable — and judgeable routine work should not need a person.
+        let mut without = ticket("Bug triage and burndown", TicketType::Feature, Complexity::Medium, false);
+        design(&mut without, vec!["docs/triage.md"]);
+        assert_eq!(assess(&without, 0, false).lane, Lane::Ask);
+
+        let mut with = ticket("Bug triage and burndown", TicketType::Feature, Complexity::Medium, true);
+        design(&mut with, vec!["docs/triage.md"]);
+        assert_eq!(assess(&with, 0, false).lane, Lane::Auto, "{:?}", assess(&with, 0, false));
+    }
+
+    #[test]
     fn shape_key_groups_like_with_like() {
         let a = ticket("Test coverage: x", TicketType::Chore, Complexity::Small, true);
         let b = ticket("Add test for y", TicketType::Feature, Complexity::Small, true);

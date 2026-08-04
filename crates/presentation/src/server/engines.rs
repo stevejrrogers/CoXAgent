@@ -185,40 +185,90 @@ pub(super) async fn mcp_call(
     }
 }
 
-/// Agent CLIs detected on this machine's PATH — so the dashboard can show what
-/// can actually run locally, not just the known engine types.
+/// Agent CLIs the team can actually run: this machine's PATH plus whatever every
+/// live runner reports it has.
+///
+/// The local scan alone is wrong for any split deploy. There the dashboard is
+/// served by a container that will never hold an agent CLI, while the agents run
+/// on operators' machines — so the page announced "no agent CLI detected" and
+/// marked every engine "(not installed)" while those very engines were running
+/// the team. Runners publish their own detection on each heartbeat; entries
+/// expire with it, so this reflects who is online now, not what was once
+/// installed somewhere.
 pub(super) async fn engines_ep(State(app): State<AppState>) -> impl IntoResponse {
-    let list: Vec<_> = app
-        .engines
-        .iter()
-        .map(|(name, path)| serde_json::json!({ "name": name, "path": path }))
-        .collect();
+    let mut list: Vec<serde_json::Value> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (name, path) in app.engines.iter() {
+        if seen.insert(name.clone()) {
+            list.push(serde_json::json!({ "name": name, "path": path, "where": "hub" }));
+        }
+    }
+    // Clone the handles out so the lock is not held across the store awaits.
+    let projects = app.projects.read().await.clone();
+    for p in projects.values() {
+        let Ok(workers) = p.store.workers().await else {
+            continue;
+        };
+        for w in workers {
+            for name in w.engines {
+                if seen.insert(name.clone()) {
+                    // No path: it is a path on someone else's filesystem, which
+                    // would only mislead. Name the host that has it instead.
+                    list.push(serde_json::json!({ "name": name, "where": w.worker }));
+                }
+            }
+        }
+    }
     Json(list)
 }
 
-/// Detect opencode models from the live CLI: runs `opencode models`, parses
-/// output into provider/model pairs. Returns empty list on any failure.
-pub(super) async fn opencode_models_ep() -> impl IntoResponse {
-    let output = tokio::process::Command::new("opencode")
+/// The opencode `provider/model` pairs the team can reach: this machine's own
+/// `opencode models` plus whatever every live runner reported.
+///
+/// Asking only the local CLI is wrong twice over. A hub in a container has no
+/// opencode at all, so the list came back empty and the settings dropdown fell
+/// back to its eight built-in providers — which can never include a user's
+/// CUSTOM provider, because that exists only in their own opencode config on
+/// their own machine. The machine that has the CLI is the only one that knows.
+pub(super) async fn opencode_models_ep(State(app): State<AppState>) -> impl IntoResponse {
+    let mut full: Vec<String> = Vec::new();
+    if let Ok(o) = tokio::process::Command::new("opencode")
         .arg("models")
         .output()
-        .await;
-    let stdout = match output {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
-        _ => return Json(Vec::<serde_json::Value>::new()).into_response(),
-    };
-    let mut models = Vec::new();
-    for line in stdout.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.contains("No models") || line.contains("Error") {
-            continue;
-        }
-        let parts: Vec<&str> = line.splitn(2, '/').collect();
-        if parts.len() == 2 {
-            models
-                .push(serde_json::json!({ "provider": parts[0], "model": parts[1], "full": line }));
+        .await
+    {
+        if o.status.success() {
+            full.extend(
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .map(str::trim)
+                    // Every real entry is `provider/model`; anything else is
+                    // chatter ("No models configured", an error banner) that
+                    // must not become a provider in someone's dropdown.
+                    .filter(|l| l.contains('/') && !l.contains(' '))
+                    .map(ToOwned::to_owned),
+            );
         }
     }
+    let projects = app.projects.read().await.clone();
+    for p in projects.values() {
+        if let Ok(workers) = p.store.workers().await {
+            for w in workers {
+                full.extend(w.models);
+            }
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    let models: Vec<serde_json::Value> = full
+        .into_iter()
+        .filter(|l| seen.insert(l.clone()))
+        .filter_map(|l| {
+            let (provider, model) = l.split_once('/')?;
+            Some(serde_json::json!({
+                "provider": provider, "model": model, "full": l
+            }))
+        })
+        .collect();
     Json(models).into_response()
 }
 
