@@ -1949,7 +1949,28 @@ async function loadSettings(){
   let detected=[];try{detected=await(await fetch("/api/engines")).json();}catch(e){}
   if(!Array.isArray(detected))detected=[];
   const detNames=new Set(detected.map(d=>d.name));window._detected=detNames;
-  if(detNames.has("opencode"))loadOpencodeModels(); // refresh opencode providers
+  if(detNames.has("opencode"))await loadOpencodeModels(); // refresh opencode providers (must finish BEFORE modelControl renders the datalist)
+  // Re-render hook: after loadOpencodeModels populates OC_MODELS_BY_PROVIDER,
+  // any model control already on the page needs its datalist refreshed. We
+  // cannot re-run loadSettings (it would clobber the user's in-progress
+  // edits), so expose a targeted refresh that only touches the model spans.
+  window.refreshModelControls=function(){
+    const sids=["default",...ROLES];
+    for(const sid of sids){
+      const span=document.getElementById("mc-"+sid);
+      if(!span)continue;
+      const eng=document.getElementById("eng-"+sid)?.value||"";
+      // Preserve the current model selection across the re-render.
+      const provEl=document.getElementById("mdl-prov-"+sid);
+      const modelEl=document.getElementById("mdl-"+sid);
+      let cur="";
+      if(provEl&&modelEl){
+        const p=provEl.value, m=modelEl.value;
+        cur=m?(p+"/"+m):"";
+      }
+      span.innerHTML=modelControl(eng,cur,sid);
+    }
+  };
   const def=cfg.engine&&cfg.engine.default||{engine:"claude",model:"sonnet"},per=cfg.engine&&cfg.engine.per_role||{},wf=cfg.workflow||{},pol=cfg.policy||{},git=cfg.git||{};
   // Real agent CLIs only. `scripted`/`mock` are offline test engines (no real
   // LLM) — only shown if a project is already pinned to one, never offered new.
@@ -1972,6 +1993,7 @@ async function loadSettings(){
     <datalist id="opencode-models">${OC_MODELS.map(m=>`<option value="${m}">`).join("")}</datalist>
     <div class="settabs">
       <button class="settab-btn" data-t="engines" onclick="setSetTab('engines')"><i class="ti ti-cpu"></i> Engines</button>
+      <button class="settab-btn" data-t="prompts" onclick="setSetTab('prompts')"><i class="ti ti-file-text"></i> Prompts</button>
       <button class="settab-btn" data-t="workflow" onclick="setSetTab('workflow')"><i class="ti ti-adjustments"></i> Workflow</button>
       <button class="settab-btn" data-t="git" onclick="setSetTab('git')"><i class="ti ti-git-branch"></i> Git</button>
       <button class="settab-btn" data-t="profile" onclick="setSetTab('profile')"><i class="ti ti-user-circle"></i> Profile</button>
@@ -1993,6 +2015,26 @@ async function loadSettings(){
           <span class="hint">tried in order when the primary hits a quota/rate-limit wall or stalls (timeout). Same CLI, cheaper model works too, e.g. <code>claude haiku</code></span></div>
         <button type="button" class="set-expand ${anyOverride?'open':''}" onclick="toggleRoleOverrides(this)"><i class="ti ti-chevron-right"></i> Per-agent model overrides <span style="color:var(--dim);font-weight:400">· optional — give any agent a different model</span></button>
         <div class="role-overrides" ${anyOverride?'':'hidden'}>${roleRows}</div>
+      </div>
+    </div>
+    <div class="settab" data-p="prompts" hidden>
+      <div class="panel frm">
+        <div class="fr" style="align-items:flex-start"><span class="lbl">Agent role prompt</span>
+          <select id="prp-role" onchange="loadPrompts()" style="flex:1;max-width:280px">
+            <option value="po">Product Owner (po)</option>
+            <option value="sm">Scrum Master (sm)</option>
+            <option value="ba">Business Analyst (ba)</option>
+            <option value="sa">Solutions Architect (sa)</option>
+            <option value="pd">Product Designer (pd)</option>
+            <option value="dev">Developer (dev)</option>
+            <option value="test">QA / Tester (test)</option>
+            <option value="docs">Docs (docs)</option>
+          </select>
+          <span class="hint">edits the project-local <code>prompts/&lt;role&gt;.md</code>; leave a project untouched and the embedded default is used</span></div>
+        <div class="fr" style="align-items:flex-start"><span class="lbl">Content</span>
+          <textarea id="prp-content" rows="14" spellcheck="false" style="flex:1;min-width:0;background:var(--card);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:10px 12px;font-size:12.5px;font-family:ui-monospace,Menlo,monospace"></textarea></div>
+        <button class="gc-btn pri" onclick="savePrompt()" style="margin-top:8px"><i class="ti ti-device-floppy"></i> Save prompt</button>
+        <div id="prp-note" style="margin-top:6px;font-size:12px"></div>
       </div>
     </div>
     <div class="settab" data-p="workflow" hidden>
@@ -2081,6 +2123,30 @@ async function loadSettings(){
   setSetTab(window._setTab==="workspace"?"engines":(window._setTab||"engines"));}
 function copyText(btn,text){navigator.clipboard&&navigator.clipboard.writeText(text);
   const old=btn.innerHTML;btn.innerHTML='<i class="ti ti-check"></i>';setTimeout(()=>{btn.innerHTML=old;},1200);}
+// CXA-F001 — per-role prompt editor. Loads the current prompt (project-local
+// override, else the embedded default) and saves edits back to
+// `prompts/<role>.md` via POST /api/projects/:pid/prompt.
+async function loadPrompts(){
+  const role=(document.getElementById("prp-role")||{}).value||"po";
+  const ta=document.getElementById("prp-content");if(ta)ta.value="…";
+  const note=document.getElementById("prp-note");if(note)note.textContent="";
+  try{
+    const r=await fetch(`/api/projects/${encodeURIComponent(PID)}/prompt/${role}`);
+    const d=await r.json();
+    if(ta)ta.value=(d&&d.content)||"";
+  }catch(e){if(note)note.textContent="could not load prompt";}
+}
+async function savePrompt(){
+  const role=(document.getElementById("prp-role")||{}).value||"po";
+  const ta=document.getElementById("prp-content");
+  const note=document.getElementById("prp-note");if(note)note.textContent="";
+  if(!ta)return;
+  try{
+    const r=await fetch(`/api/projects/${encodeURIComponent(PID)}/prompt`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({role,content:ta.value})});
+    const d=await r.json();
+    if(note)note.textContent=d&&d.ok?`saved → ${d.path}`:"save failed";
+  }catch(e){if(note)note.textContent="save failed";}
+}
 // "Act as account" — a <select> of detected `gh auth status` accounts when
 // the CLI is present and signed in (with a "Default = active login" option),
 // falling back to a free-text input when nothing was detected. A configured
@@ -2148,4 +2214,5 @@ function setSetTab(name){window._setTab=name;
   document.querySelectorAll(".settab-btn").forEach(b=>b.classList.toggle("on",b.dataset.t===name));
   document.querySelectorAll(".settab").forEach(p=>{p.hidden=p.dataset.p!==name;});
   if(name==="mcp")renderMcpPanel();
+  if(name==="prompts")loadPrompts();
 }

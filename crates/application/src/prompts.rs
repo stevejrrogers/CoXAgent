@@ -344,6 +344,111 @@ pub fn system_prompt(role_section: &str) -> String {
     format!("{BASE}\n\n{ENGINEERING_STANDARDS}\n\n{role_section}")
 }
 
+// ---------------------------------------------------------------------------
+// CXA-F001 — per-project prompt override.
+//
+// The embedded constants above are the baseline. A workspace may override any
+// of them with project-local `prompts/<role>.md` files (scaffolded by
+// `coxagent init`); `resolve_prompt` consults those files first and falls back
+// to the embedded default, so a project that never touches `prompts/` runs
+// byte-identical to before. `PROMPT_DEFAULT_FILES` is the single manifest of
+// every file the scaffold materialises and the resolver understands.
+// ---------------------------------------------------------------------------
+
+/// Manifest of every prompt file a project-local `prompts/` tree may carry.
+///
+/// The gate (AC5) requires each whole-agent role to have a discoverable source
+/// here, and `coxagent init` scaffolds exactly these files. Add a NEW role to a
+/// `run_*` use case together with its `<role>.md` here, or the prompts gate
+/// fails.
+pub const PROMPT_DEFAULT_FILES: &[&str] = &[
+    "_base.md",
+    "ba.md",
+    "po.md",
+    "sm.md",
+    "sa.md",
+    "pd.md",
+    "dev.md",
+    "test.md",
+    "docs.md",
+    "onboard/po_interview.md",
+    "onboard/sa_archaeology.md",
+    "discussion.md",
+];
+
+/// Onboarding prompt: the one-on-one with the human product owner to elicit the
+/// project brief (greenfield) / confirm the existing setup (brownfield). Loaded
+/// ONLY during onboard, never as a standard-cycle agent role.
+pub const PO_INTERVIEW: &str = "\
+You are running the CXA onboarding interview. Payload file: onboard/po_interview.md.\
+\n\
+Interview the product owner about WHAT and WHY before any engineering:\n\
+- The one user-visible outcome this project must hit, and how we would know it worked.\n\
+- The minimum shippable first slice (walking skeleton), not the whole vision.\n\
+- What is NOT in scope now, and why.\n\
+Turn the answers into a short project brief + a prioritised first few tickets.";
+
+/// Onboarding prompt: the codebase archaeology pass (brownfield). Loaded ONLY
+/// during onboard, never as a standard-cycle agent role.
+pub const SA_ARCHAEOLOGY: &str = "\
+You are running the CXA onboarding archaeology pass. Payload file: onboard/sa_archaeology.md.\n\
+\
+Read the existing codebase before any design:\n\
+- Detect the real stack, service boundaries, and the repo layout that predates us.\n\
+- Find the seams: what is already well separated vs what is one coupled blob.\n\
+- Produce a short comprehension brief the team will use as its starting map.\n\
+Do not propose a rewrite; describe what is actually there.";
+
+/// Resolve the embedded default content for one `prompts/` file name, if it is
+/// one of the embedded defaults. Used by the scaffold and the server so a
+/// project-local file always starts from (or is seeded by) the same baseline.
+///
+/// The embedded soliloquies are assembled from the role/base constants above;
+/// onboarding prompts come from their own constants so they never leak into a
+/// standard-cycle role.
+#[must_use]
+pub fn default_prompt_file(name: &str) -> Option<String> {
+    let content = match name {
+        "_base.md" => BASE,
+        "ba.md" => BA,
+        "po.md" => PO,
+        "sm.md" => SM,
+        "sa.md" => SA,
+        "pd.md" => PD,
+        "dev.md" => DEV,
+        "test.md" => TEST,
+        "docs.md" => DOCS,
+        "discussion.md" => PROCESS_INVARIANTS,
+        "onboard/po_interview.md" => PO_INTERVIEW,
+        "onboard/sa_archaeology.md" => SA_ARCHAEOLOGY,
+        _ => return None,
+    };
+    Some(format!("{BASE}\n\n{ENGINEERING_STANDARDS}\n\n{content}"))
+}
+
+/// Resolve a role's system prompt as `local prompts/<role_file>.md` first, then
+/// the embedded default — a project that never touches `prompts/` falls through
+/// to `embedded` and runs byte-identical to today.
+///
+/// `files` is the workspace file port (the adapter owns all IO); `root` is the
+/// project working directory. The decision — "is there a local override?" — is a
+/// pure function of the port's answer.
+pub async fn resolve_prompt(
+    files: Option<&dyn crate::ports::outbound::WorkspaceFilesPort>,
+    root: &std::path::Path,
+    role_file: &str,
+    embedded: &str,
+) -> String {
+    let Some(files) = files else {
+        return embedded.to_owned();
+    };
+    let path = root.join("prompts").join(role_file);
+    files
+        .read(&path)
+        .await
+        .unwrap_or_else(|| embedded.to_owned())
+}
+
 /// A compact repo-map context block for code-touching agents: the file/symbol
 /// layout so they locate code without exploring blind (fewer tool calls / tokens).
 /// Empty when the token-saver is off or no map has been built yet.
@@ -1286,6 +1391,102 @@ mod tests {
     #[test]
     fn relevant_memory_empty_when_no_memory() {
         assert!(super::team_memory_block_relevant(&[], &[], "anything").is_empty());
+    }
+}
+
+// CXA-F001 — functional behaviour of the per-project prompt resolver. These
+// complement the source-scanning gates (prompts_gate.rs) by proving the DECISION
+// itself: a local `prompts/<role>.md` wins, and a project with no file silently
+// falls back to the embedded default (zero regression).
+#[cfg(test)]
+mod prompt_resolver_tests {
+    use super::{default_prompt_file, resolve_prompt, PROMPT_DEFAULT_FILES};
+    use crate::test_fs::StdFsFiles;
+    use std::path::PathBuf;
+
+    fn temp_root(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("cxa-resolve-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("prompts")).expect("mk prompts");
+        dir
+    }
+
+    #[tokio::test]
+    async fn resolve_prompt_prefers_the_local_override() {
+        let fs = StdFsFiles;
+        let root = temp_root("local");
+        std::fs::write(root.join("prompts/ba.md"), "LOCAL BA OVERRIDE").expect("write override");
+        let got = resolve_prompt(Some(&fs), &root, "ba.md", "EMBEDDED BA").await;
+        assert_eq!(got, "LOCAL BA OVERRIDE", "local `prompts/ba.md` must win");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn resolve_prompt_falls_back_to_embedded_without_a_local_file() {
+        let fs = StdFsFiles;
+        let root = temp_root("fallback");
+        // No `ba.md` written — only the directory exists.
+        let got = resolve_prompt(Some(&fs), &root, "ba.md", "EMBEDDED BA").await;
+        assert_eq!(
+            got, "EMBEDDED BA",
+            "absent override must fall back silently"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn resolve_prompt_with_no_port_returns_embedded() {
+        // A use case that has no files adapter optimistically falls through.
+        let root = temp_root("noport");
+        let got = resolve_prompt(None, &root, "ba.md", "EMBEDDED BA").await;
+        assert_eq!(got, "EMBEDDED BA");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn nested_onboard_override_wins_over_its_embedded_default() {
+        let fs = StdFsFiles;
+        let root = temp_root("onboard");
+        std::fs::create_dir_all(root.join("prompts/onboard")).expect("mk onboard");
+        std::fs::write(
+            root.join("prompts/onboard/po_interview.md"),
+            "LOCAL PO INTERVIEW",
+        )
+        .expect("write");
+        let embedded = default_prompt_file("onboard/po_interview.md")
+            .expect("embedded onboarding prompt exists");
+        let got = resolve_prompt(Some(&fs), &root, "onboard/po_interview.md", &embedded).await;
+        assert_eq!(got, "LOCAL PO INTERVIEW");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn every_manifest_file_has_an_embedded_default() {
+        // The single manifest drives both the scaffold and the server editor;
+        // every entry must resolve to real content so neither falls through to
+        // the placeholder branch.
+        for f in PROMPT_DEFAULT_FILES {
+            assert!(
+                default_prompt_file(f).is_some(),
+                "manifest entry `{f}` has no embedded default"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_prompt_file_has_no_default() {
+        assert!(default_prompt_file("nope.md").is_none());
+    }
+
+    #[test]
+    fn embedded_defaults_are_stable_assembly_of_base_plus_role() {
+        // The scaffold seeds each role file from the same composition the
+        // engine resolves at runtime, so a scaffolded-then-unchanged project
+        // reproduces the embedded default byte-for-byte (zero regression AC2).
+        let dev = default_prompt_file("dev.md").unwrap();
+        assert!(dev.starts_with(super::BASE), "base preamble comes first");
+        assert!(dev.contains(super::ENGINEERING_STANDARDS));
+        assert!(dev.contains(super::DEV));
     }
 }
 

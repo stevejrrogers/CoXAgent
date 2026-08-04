@@ -98,7 +98,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
 
         let request = AgentRequest {
             role: Role::Test,
-            system_prompt: prompts::system_prompt(prompts::TEST),
+            system_prompt: prompts::resolve_prompt(
+                self.files.as_deref(),
+                &self.work_dir,
+                "test.md",
+                &prompts::system_prompt(prompts::TEST),
+            )
+            .await,
             task_prompt: format!(
                 "Test the current build and report new bugs.{context_block}{shipped}{memory}\
                  {repo_map}{surface}{knowledge}"

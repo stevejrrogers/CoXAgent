@@ -63,49 +63,16 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunArchitectureAud
             Some(files) => gather_evidence(files.as_ref(), &self.work_dir).await,
             None => String::new(),
         };
-        let task = format!(
-            "You are a Staff Solution Architect doing a WHOLE-SYSTEM architecture review. You have \
-             FULL read access to the working directory — actually OPEN and READ the code, don't \
-             guess. Investigate and ground EVERY statement in specific files you found:\n\
-             - Architecture & clean/hexagonal layering: domain/application/adapter layers, and the \
-             dependency rule (edges → core). Layered, or a big ball of mud?\n\
-             - Persistence: which datastore(s) are ACTUALLY used, the driver/ORM, schema/migrations, \
-             indexing, and where the repository/adapter lives. If there's no real DB, say so.\n\
-             - Caching: any (in-memory / Redis / HTTP)? where — and what's missing.\n\
-             - Concurrency & consistency: async model, locks, transactions, atomic writes, races.\n\
-             - Scalability & performance: stateless or not, shared/in-proc state, N-instance \
-             readiness, obvious bottlenecks (N+1, unbounded work).\n\
-             - Reliability & resilience: failure modes, retries/timeouts/idempotency, health checks, \
-             backups/DR, graceful degradation.\n\
-             - Security: authN/authZ, secrets handling, encryption in transit/at rest, input \
-             validation, OWASP issues, vulnerable deps, audit logging.\n\
-             - Observability: logging, metrics, tracing, alerting — enough to operate it?\n\
-             - API & integration: contract clarity, versioning/backward-compat, error handling, \
-             coupling to third parties / lock-in.\n\
-             - Testability & quality: test strategy & coverage of critical paths, CI/CD gates.\n\
-             - Cost & tech choices: stack fit, build-vs-buy, licensing/cloud cost risks.\n\n\
-             Then judge the LONG-TERM risk: if the foundation is weak, building more features on it \
-             just compounds the mess — in that case recommend HALTING new features for a hardening \
-             sprint.\n\nEvidence to start from (read further as needed):\n{evidence}\n\n\
-             Respond with ONLY a JSON object, no prose:\n{{\"assessment\": {{\"architecture\": \
-             string, \"persistence\": string, \"caching\": string, \"concurrency\": string, \
-             \"scalability\": string, \"reliability\": string, \"security\": string, \
-             \"observability\": string, \"api\": string, \"testability\": string, \"cost\": string, \
-             \"verdict\": string}}, \"risk\": \"low\"|\"medium\"|\"high\"|\"critical\", \
-             \"halt_for_refactor\": boolean, \"refactors\": [{{\"title\": string, \"description\": \
-             string, \"priority\": \"low\"|\"medium\"|\"high\", \"complexity\": \
-             \"small\"|\"medium\"|\"large\"}}]}}\n\
-             Each assessment field: 1-3 concrete sentences citing real files/modules (write \
-             \"n/a\" if truly not applicable). Set halt_for_refactor=true only when the risk is \
-             high/critical and continuing to add features would make it worse. `refactors` names \
-             concrete work (files + target design); [] only if genuinely solid.{}{}",
-            self.lang.reply_directive(),
-            crate::prompts::repo_map_block(self.files.as_deref(), &self.work_dir, self.token_saver)
-                .await
-        );
+        let task = self.arch_review_task(evidence).await;
         let request = AgentRequest {
             role: Role::Sa,
-            system_prompt: crate::prompts::system_prompt(crate::prompts::SA),
+            system_prompt: crate::prompts::resolve_prompt(
+                self.files.as_deref(),
+                &self.work_dir,
+                "sa.md",
+                &crate::prompts::system_prompt(crate::prompts::SA),
+            )
+            .await,
             task_prompt: task,
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(1200),
@@ -157,6 +124,50 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunArchitectureAud
             self.call_refactor_sprint(vi).await;
         }
         Ok(filed)
+    }
+
+    /// Compose the whole-system architecture-review task prompt.
+    async fn arch_review_task(&self, evidence: String) -> String {
+        format!(
+            "You are a Staff Solution Architect doing a WHOLE-SYSTEM architecture review. You have \
+             FULL read access to the working directory — actually OPEN and READ the code, don't \
+             guess. Investigate and ground EVERY statement in specific files you found:\n\
+             - Architecture & clean/hexagonal layering: domain/application/adapter layers, and the \
+             dependency rule (edges → core). Layered, or a big ball of mud?\n\
+             - Persistence: which datastore(s) are ACTUALLY used, the driver/ORM, schema/migrations, \
+             indexing, and where the repository/adapter lives. If there's no real DB, say so.\n\
+             - Caching: any (in-memory / Redis / HTTP)? where — and what's missing.\n\
+             - Concurrency & consistency: async model, locks, transactions, atomic writes, races.\n\
+             - Scalability & performance: stateless or not, shared/in-proc state, N-instance \
+             readiness, obvious bottlenecks (N+1, unbounded work).\n\
+             - Reliability & resilience: failure modes, retries/timeouts/idempotency, health checks, \
+             backups/DR, graceful degradation.\n\
+             - Security: authN/authZ, secrets handling, encryption in transit/at rest, input \
+             validation, OWASP issues, vulnerable deps, audit logging.\n\
+             - Observability: logging, metrics, tracing, alerting — enough to operate it?\n\
+             - API & integration: contract clarity, versioning/backward-compat, error handling, \
+             coupling to third parties / lock-in.\n\
+             - Testability & quality: test strategy & coverage of critical paths, CI/CD gates.\n\
+             - Cost & tech choices: stack fit, build-vs-buy, licensing/cloud cost risks.\n\n\
+             Then judge the LONG-TERM risk: if the foundation is weak, building more features on it \
+             just compounds the mess — in that case recommend HALTING new features for a hardening \
+             sprint.\n\nEvidence to start from (read further as needed):\n{evidence}\n\n\
+             Respond with ONLY a JSON object, no prose:\n{{\"assessment\": {{\"architecture\": \
+             string, \"persistence\": string, \"caching\": string, \"concurrency\": string, \
+             \"scalability\": string, \"reliability\": string, \"security\": string, \
+             \"observability\": string, \"api\": string, \"testability\": string, \"cost\": string, \
+             \"verdict\": string}}, \"risk\": \"low\"|\"medium\"|\"high\"|\"critical\", \
+             \"halt_for_refactor\": boolean, \"refactors\": [{{\"title\": string, \"description\": \
+             string, \"priority\": \"low\"|\"medium\"|\"high\", \"complexity\": \
+             \"small\"|\"medium\"|\"large\"}}]}}\n\
+             Each assessment field: 1-3 concrete sentences citing real files/modules (write \
+             \"n/a\" if truly not applicable). Set halt_for_refactor=true only when the risk is \
+             high/critical and continuing to add features would make it worse. `refactors` names \
+             concrete work (files + target design); [] only if genuinely solid.{}{}",
+            self.lang.reply_directive(),
+            crate::prompts::repo_map_block(self.files.as_deref(), &self.work_dir, self.token_saver)
+                .await
+        )
     }
 
     /// Bank the architecture verdict as a durable team decision so every agent
@@ -346,53 +357,8 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunDocsAuditUseCas
         }
         let mut written: Vec<String> = Vec::new();
         for (id, title, ttype) in targets.iter().take(5) {
-            let request = AgentRequest {
-                role: Role::Docs,
-                system_prompt: crate::prompts::system_prompt(crate::prompts::DOCS),
-                // One prompt for both routes into the wiki: this path used to
-                // ask for "documentation" with no shape at all, and got 300
-                // characters back.
-                task_prompt: crate::use_cases::run_docs::build_docs_prompt(
-                    id,
-                    title,
-                    crate::state::standard_doc_folder(*ttype),
-                    &[],
-                    None,
-                ),
-                work_dir: self.work_dir.clone(),
-                timeout: Duration::from_secs(900),
-                escalation_level: 0,
-            };
-            let body = match self.engine.run(request).await {
-                Ok(o) if o.succeeded() => o.stdout.trim().to_owned(),
-                _ => continue,
-            };
-            // The same structure gate the per-ticket writer enforces. Without
-            // it this path filled the wiki with 300-character stubs hours after
-            // the gate shipped — pages the next agent cannot navigate and the
-            // refresher then has to rewrite one per idle cycle.
-            if let Some(missing) =
-                crate::use_cases::run_docs::docs_gate_failures(&body, &self.work_dir)
-            {
-                tracing::warn!(
-                    "docs review: page for {id} rejected by the structure gate: {missing}"
-                );
-                continue;
-            }
-            let folder = crate::state::standard_doc_folder(*ttype);
-            let category = crate::state::doc_category_of(folder);
-            if let Ok(mut s) = self.store.load().await {
-                s.ensure_standard_folders();
-                s.upsert_doc(
-                    &format!("feat-{id}"),
-                    folder,
-                    category,
-                    title,
-                    &body,
-                    "DOCS",
-                );
-                let _ = self.store.save(&s).await;
-                written.push(id.to_string());
+            if let Some(w) = self.write_docs_page(id, title, *ttype).await {
+                written.push(w);
             }
         }
         let msg = if vi {
@@ -420,6 +386,69 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunDocsAuditUseCas
         if let Ok(mut s) = self.store.load().await {
             s.post_comment(author, body, None);
             let _ = self.store.save(&s).await;
+        }
+    }
+
+    /// Run one DOCS agent round-trip for a missing Wiki page, persist it, and
+    /// return the ticket id (None when the run failed or the gate rejected it).
+    async fn write_docs_page(
+        &self,
+        id: &TicketId,
+        title: &str,
+        ttype: TicketType,
+    ) -> Option<String> {
+        let request = AgentRequest {
+            role: Role::Docs,
+            system_prompt: crate::prompts::resolve_prompt(
+                None,
+                &self.work_dir,
+                "docs.md",
+                &crate::prompts::system_prompt(crate::prompts::DOCS),
+            )
+            .await,
+            // One prompt for both routes into the wiki: this path used to ask
+            // for "documentation" with no shape at all, and got 300 characters
+            // back.
+            task_prompt: crate::use_cases::run_docs::build_docs_prompt(
+                id,
+                title,
+                crate::state::standard_doc_folder(ttype),
+                &[],
+                None,
+            ),
+            work_dir: self.work_dir.clone(),
+            timeout: Duration::from_secs(900),
+            escalation_level: 0,
+        };
+        let body = match self.engine.run(request).await {
+            Ok(o) if o.succeeded() => o.stdout.trim().to_owned(),
+            _ => return None,
+        };
+        // The same structure gate the per-ticket writer enforces. Without it
+        // this path filled the wiki with 300-character stubs hours after the
+        // gate shipped — pages the next agent cannot navigate and the refresher
+        // then has to rewrite one per idle cycle.
+        if let Some(missing) = crate::use_cases::run_docs::docs_gate_failures(&body, &self.work_dir)
+        {
+            tracing::warn!("docs review: page for {id} rejected by the structure gate: {missing}");
+            return None;
+        }
+        let folder = crate::state::standard_doc_folder(ttype);
+        let category = crate::state::doc_category_of(folder);
+        if let Ok(mut s) = self.store.load().await {
+            s.ensure_standard_folders();
+            s.upsert_doc(
+                &format!("feat-{id}"),
+                folder,
+                category,
+                title,
+                &body,
+                "DOCS",
+            );
+            let _ = self.store.save(&s).await;
+            Some(id.to_string())
+        } else {
+            None
         }
     }
 }

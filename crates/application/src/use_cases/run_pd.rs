@@ -234,7 +234,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
             .unwrap_or_default();
         AgentRequest {
             role: Role::Pd,
-            system_prompt: prompts::system_prompt(prompts::PD),
+            system_prompt: prompts::resolve_prompt(
+                self.files.as_deref(),
+                &self.work_dir,
+                "pd.md",
+                &prompts::system_prompt(prompts::PD),
+            )
+            .await,
             task_prompt: format!(
                 "Design the UX for feature {id}: {title}{context_block}{knowledge}{memory}{steering}{}{}",
                 prompts::focus_block(self.files.as_deref(), &self.work_dir, title).await,

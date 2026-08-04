@@ -47,7 +47,7 @@ pub(super) async fn list_projects(State(app): State<AppState>) -> impl IntoRespo
             out.push(serde_json::json!({
                 "id": p.id, "name": p.name, "alias": p.alias,
                 "version": version, "tickets": tickets,
-                "mode": p.runner.snapshot().mode,
+                "mode": super::work::effective_runner_snapshot(&p).await.mode,
             }));
         }
     }

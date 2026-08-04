@@ -47,7 +47,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         );
         let request = AgentRequest {
             role: coxagent_domain::Role::DevBug,
-            system_prompt: crate::prompts::system_prompt(crate::prompts::DEV),
+            system_prompt: crate::prompts::resolve_prompt(
+                self.files.as_deref(),
+                &self.work_dir,
+                "dev.md",
+                &crate::prompts::system_prompt(crate::prompts::DEV),
+            )
+            .await,
             task_prompt: task,
             work_dir: self.work_dir.clone(),
             timeout: std::time::Duration::from_secs(1200),

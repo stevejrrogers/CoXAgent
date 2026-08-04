@@ -413,7 +413,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         );
         let request = AgentRequest {
             role: Role::Sa,
-            system_prompt: crate::prompts::system_prompt(crate::prompts::SA),
+            system_prompt: crate::prompts::resolve_prompt(
+                self.files.as_deref(),
+                &self.work_dir,
+                "sa.md",
+                &crate::prompts::system_prompt(crate::prompts::SA),
+            )
+            .await,
             task_prompt: task,
             work_dir: self.work_dir.clone(),
             timeout: std::time::Duration::from_secs(600),

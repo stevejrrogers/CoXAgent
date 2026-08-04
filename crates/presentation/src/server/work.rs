@@ -5,6 +5,8 @@
 
 use super::*;
 
+use coxagent_application::use_cases::RunnerSnapshot;
+
 /// Refine a rough project goal into a project brief (goal, stack, scope,
 /// constraints) via the hub engine — for review before creating the project.
 pub(super) async fn analyze_goal_ep(
@@ -88,7 +90,62 @@ pub(super) async fn runner_ep(
     let Some(p) = app.project(&pid).await else {
         return not_found();
     };
-    Json(p.runner.snapshot()).into_response()
+    Json(effective_runner_snapshot(&p).await).into_response()
+}
+
+/// The runner status the dashboard should show. In a split deploy (gateway in a
+/// container, operators on desktops/runner boxes), the gateway's own
+/// `RunnerHandle` never runs a cycle — its snapshot always reads
+/// `mode="paused", cycle=0` — so emitting that to SSE made the dashboard's
+/// Start button flip straight back to "play" the moment it was clicked, and
+/// the live "working now" indicator never lit up.
+///
+/// This resolves the REAL operator's state from the heartbeat registry (any
+/// worker with engines) and the per-operator desired flag, and folds it into
+/// the gateway's local snapshot so:
+/// - `mode` reflects the user's Start/Pause intent (or the live worker's
+///   presence), not the gateway's idle handle.
+/// - `operator`/`host`/`active_role` come from the worker that's actually
+///   running the cycle right now.
+///
+/// Single-machine (no workers registry, or hub with its own runner) falls back
+/// to the local snapshot unchanged.
+pub(super) async fn effective_runner_snapshot(p: &ProjectHandle) -> RunnerSnapshot {
+    let mut snap = p.runner.snapshot();
+    let Ok(list) = p.store.workers().await else {
+        return snap;
+    };
+    // Prefer a worker with engines (a real operator). Fall back to any worker.
+    let live = list
+        .iter()
+        .find(|w| !w.engines.is_empty())
+        .or_else(|| list.first());
+    let Some(w) = live else {
+        return snap;
+    };
+    // Reflect the user's Start/Pause intent for this operator.
+    match p.store.get_desired(&w.worker).await.unwrap_or(None) {
+        Some(true) => snap.mode = "running",
+        Some(false) => snap.mode = "paused",
+        None => {} // never started/stopped explicitly — leave the local handle's mode
+    }
+    // Surface who is actually running, on which host, doing what.
+    if let Some((acct, host)) = w.worker.rsplit_once('@') {
+        snap.operator = Some(acct.to_owned());
+        snap.host = Some(host.to_owned());
+    }
+    if !w.role.is_empty() && w.role != "idle" {
+        snap.active_role = Some(w.role.clone());
+        if !w.ticket.is_empty() {
+            snap.active_note = Some(w.ticket.clone());
+        }
+    } else {
+        // Worker heartbeat says idle — clear any stale active marker so the
+        // "working now" pill goes dim between phases / when paused.
+        snap.active_role = None;
+        snap.active_note = None;
+    }
+    snap
 }
 
 /// Facilitate a multi-agent discussion on a topic: PO and SA weigh in, SM
@@ -142,7 +199,13 @@ pub(super) async fn ba_analyze(
     }
     let request = AgentRequest {
         role: coxagent_domain::Role::Ba,
-        system_prompt: prompts::system_prompt(prompts::BA),
+        system_prompt: prompts::resolve_prompt(
+            p.files.as_deref(),
+            &p.work_dir,
+            "ba.md",
+            &prompts::system_prompt(prompts::BA),
+        )
+        .await,
         task_prompt: format!(
             "A stakeholder proposes this idea. Refine it into ONE well-formed \
              feature ticket (crisp title, clear description, sensible priority / \
@@ -587,13 +650,53 @@ pub(super) async fn control_ep(
         Ok(o) if !o.is_empty() => o,
         _ => resolve_username(&app, &headers).await,
     };
-    let operator = format!("{account}@{}", machine_host());
+    // In a split deploy (gateway in a container, operators on desktops/runner
+    // boxes), `machine_host()` is the GATEWAY's host — but the operator that
+    // actually runs cycles lives elsewhere. Setting `desired` for
+    // `account@gateway-host` would never reach the live operator, so Start/Pause
+    // in the dashboard would silently no-op. Resolve the live worker id from
+    // the heartbeat registry instead: prefer a worker whose account (the part
+    // before `@`) matches this user; if none matches (the dashboard admin is
+    // "root" but the operator runs as the macOS user "luton"), fall back to any
+    // worker with detected engines — the real cycle runner.
+    let local_host = machine_host();
+    let operator = match p.store.workers().await {
+        Ok(list) if !list.is_empty() => {
+            // First pass: account match (case-insensitive) with engines.
+            let by_account = list.iter().find(|w| {
+                w.worker
+                    .split('@')
+                    .next()
+                    .unwrap_or("")
+                    .eq_ignore_ascii_case(&account)
+                    && !w.engines.is_empty()
+            });
+            // Second pass: account match, any engines (hub entry under this account).
+            let by_account_any = list.iter().find(|w| {
+                w.worker
+                    .split('@')
+                    .next()
+                    .unwrap_or("")
+                    .eq_ignore_ascii_case(&account)
+            });
+            // Third pass: any worker with engines (the real operator, regardless
+            // of which account launched it — the admin's Start must reach it).
+            let any_with_engines = list.iter().find(|w| !w.engines.is_empty());
+            by_account
+                .or(by_account_any)
+                .or(any_with_engines)
+                .map_or_else(|| format!("{account}@{local_host}"), |w| w.worker.clone())
+        }
+        _ => format!("{account}@{local_host}"),
+    };
     match action.as_str() {
         "resume" => {
-            p.runner.set_operator(&account, &machine_host());
+            // Tell the live operator's process (if any) to resume now, and
+            // persist this user's intent for that operator — never anyone else's.
+            if let Some((op_acct, op_host)) = operator.rsplit_once('@') {
+                p.runner.set_operator(op_acct, op_host);
+            }
             p.runner.resume();
-            // Persist this operator's intent so reopening the app auto-resumes
-            // for THIS user only — never starts anyone else's operator.
             let _ = p.store.set_desired(&operator, true).await;
         }
         // Pause/stop are local to this operator and persist the stopped intent,
@@ -615,7 +718,12 @@ pub(super) async fn control_ep(
                 .into_response()
         }
     }
-    Json(p.runner.snapshot()).into_response()
+    // Reflect the action we just took. `effective_runner_snapshot` reads the
+    // desired flag we persisted above and the live worker registry, so the
+    // dashboard's Start/Pause button stays in sync with the action — instead
+    // of flipping back to "play" the moment SSE re-renders from the gateway's
+    // idle local handle.
+    Json(effective_runner_snapshot(&p).await).into_response()
 }
 
 /// Control any operator (by `account@host`) from the dashboard: set its desired

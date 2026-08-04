@@ -101,7 +101,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 .engine
                 .run(crate::ports::outbound::AgentRequest {
                     role,
-                    system_prompt: crate::prompts::system_prompt(persona),
+                    system_prompt: crate::prompts::resolve_prompt(
+                        self.files.as_deref(),
+                        &self.work_dir,
+                        match role {
+                            coxagent_domain::Role::Ba => "ba.md",
+                            _ => "sa.md",
+                        },
+                        &crate::prompts::system_prompt(persona),
+                    )
+                    .await,
                     task_prompt: brief,
                     work_dir: self.work_dir.clone(),
                     timeout: std::time::Duration::from_secs(900),
@@ -144,7 +153,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     .engine
                     .run(crate::ports::outbound::AgentRequest {
                         role,
-                        system_prompt: crate::prompts::system_prompt(persona),
+                        system_prompt: crate::prompts::resolve_prompt(
+                            self.files.as_deref(),
+                            &self.work_dir,
+                            match role {
+                                coxagent_domain::Role::Ba => "ba.md",
+                                _ => "sa.md",
+                            },
+                            &crate::prompts::system_prompt(persona),
+                        )
+                        .await,
                         task_prompt: format!(
                             "Your answer below has no decision in it. Repeat it unchanged, then \
                              add a final line `ACTION: <the concrete next step for {}>`.\n\n{answer}",
@@ -326,7 +344,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             } else {
                 coxagent_domain::Role::Sa
             },
-            system_prompt: crate::prompts::system_prompt(persona),
+            system_prompt: crate::prompts::resolve_prompt(
+                self.files.as_deref(),
+                &self.work_dir,
+                if who == "BA" { "ba.md" } else { "sa.md" },
+                &crate::prompts::system_prompt(persona),
+            )
+            .await,
             task_prompt: brief,
             work_dir: self.work_dir.clone(),
             timeout: std::time::Duration::from_secs(900),

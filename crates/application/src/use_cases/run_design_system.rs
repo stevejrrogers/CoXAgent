@@ -61,7 +61,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDesignSystemUseCase<S, E> {
             return Ok(false);
         }
 
-        let outcome = self.engine.run(self.build_request()).await?;
+        let outcome = self.engine.run(self.build_request().await).await?;
         if !outcome.succeeded() {
             return Err(PortError::Backend(format!(
                 "PD design-system engine failed: {}",
@@ -87,11 +87,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDesignSystemUseCase<S, E> {
         Ok(true)
     }
 
-    fn build_request(&self) -> AgentRequest {
+    async fn build_request(&self) -> AgentRequest {
         let _choice = self.config.engine.resolve(Role::Pd);
         AgentRequest {
             role: Role::Pd,
-            system_prompt: prompts::system_prompt(prompts::DESIGN_SYSTEM),
+            system_prompt: prompts::resolve_prompt(
+                None,
+                &self.work_dir,
+                "pd.md",
+                &prompts::system_prompt(prompts::DESIGN_SYSTEM),
+            )
+            .await,
             task_prompt: "Establish the design system for this product.".to_owned(),
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(1200),

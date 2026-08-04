@@ -41,6 +41,14 @@ pub struct Spend {
     /// surfaced on the dashboard.
     #[serde(default)]
     pub last_sandbox_status: String,
+    /// Input tokens saved by the token-saver (rtk-style `proxy_compress` on
+    /// tool output before the agent reads it). The shim writes a `before after`
+    /// byte sample per compressed tool call to `<shim_dir>/savings.log`; the
+    /// cycle leader aggregates that into this counter so the dashboard's Cost
+    /// view can show "Actual: X | Without saver: X+Y | Saved: Y (Z%)" — the
+    /// effectiveness of the token-saver is otherwise invisible.
+    #[serde(default)]
+    pub saved_input_tokens: u64,
 }
 
 impl Spend {

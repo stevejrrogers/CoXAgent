@@ -165,6 +165,72 @@ pub(super) async fn put_config(
     }
 }
 
+/// Save an edited prompt (from the dashboard Settings prompt editor) to the
+/// project-local `prompts/<role>.md`, so per-project overrides take effect
+/// without touching the embedded defaults (CXA-F001). The role name is
+/// validated against the manifest to avoid writing arbitrary paths.
+pub(super) async fn save_prompt(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    Json(req): Json<PromptSaveReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let role = req.role.trim();
+    if role.is_empty() || !is_valid_prompt_role(role) {
+        return (axum::http::StatusCode::BAD_REQUEST, "unknown prompt role").into_response();
+    }
+    let path = p.work_dir.join("prompts").join(format!("{role}.md"));
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match std::fs::write(&path, req.content) {
+        Ok(()) => Json(serde_json::json!({
+            "ok": true,
+            "path": format!("prompts/{role}.md"),
+        }))
+        .into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Request body for [`save_prompt`].
+#[derive(serde::Deserialize)]
+pub(super) struct PromptSaveReq {
+    role: String,
+    content: String,
+}
+
+/// Current content of a role prompt for the Settings editor: the project-local
+/// `prompts/<role>.md` when present, else the embedded default — the same
+/// resolution the engine uses, so the editor always shows what the agent would
+/// actually receive (CXA-F001).
+pub(super) async fn get_prompt(
+    State(app): State<AppState>,
+    Path((pid, role)): Path<(String, String)>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    if !is_valid_prompt_role(&role) {
+        return (axum::http::StatusCode::BAD_REQUEST, "unknown prompt role").into_response();
+    }
+    let path = p.work_dir.join("prompts").join(format!("{role}.md"));
+    let content = std::fs::read_to_string(&path)
+        .ok()
+        .or_else(|| coxagent_application::prompts::default_prompt_file(&format!("{role}.md")))
+        .unwrap_or_default();
+    Json(serde_json::json!({ "role": role, "content": content })).into_response()
+}
+
+fn is_valid_prompt_role(role: &str) -> bool {
+    matches!(
+        role,
+        "ba" | "po" | "sm" | "sa" | "pd" | "dev" | "test" | "docs"
+    )
+}
+
 pub(super) async fn set_priority(
     State(app): State<AppState>,
     Path((pid, id)): Path<(String, String)>,

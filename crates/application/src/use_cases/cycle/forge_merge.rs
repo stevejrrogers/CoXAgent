@@ -351,7 +351,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .collect();
         let request = crate::ports::outbound::AgentRequest {
             role: coxagent_domain::Role::Sa,
-            system_prompt: crate::prompts::system_prompt(crate::prompts::SA),
+            system_prompt: crate::prompts::resolve_prompt(
+                self.files.as_deref(),
+                &self.work_dir,
+                "sa.md",
+                &crate::prompts::system_prompt(crate::prompts::SA),
+            )
+            .await,
             task_prompt: format!(
                 "PR #{n} (`{h}`) has failed TWO fix rounds and is blocking the merge queue. \
                  You are the architect deciding its fate — no more blind retries.\n\n\
@@ -557,7 +563,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .await;
             let request = crate::ports::outbound::AgentRequest {
                 role: coxagent_domain::Role::DevBug,
-                system_prompt: crate::prompts::system_prompt(crate::prompts::DEV),
+                system_prompt: crate::prompts::resolve_prompt(
+                    self.files.as_deref(),
+                    &self.work_dir,
+                    "dev.md",
+                    &crate::prompts::system_prompt(crate::prompts::DEV),
+                )
+                .await,
                 task_prompt: format!(
                     "URGENT: a human ordered PR #{num} (branch `{h}`) force-merged. It has merge \
                      conflicts with `{b}`.\n\

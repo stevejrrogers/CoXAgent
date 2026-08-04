@@ -167,6 +167,14 @@ pub struct ProjectState {
     /// measured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clippy_baseline: Option<u64>,
+    /// Snapshot of the cross-target (`x86_64-unknown-linux-gnu`) build error
+    /// count on a clean tree, so a ticket is only held for Linux-build
+    /// failures IT introduces — not pre-existing ones (e.g. a native dep like
+    /// `tree-sitter` whose build script needs a cross-compiler the host lacks,
+    /// which has nothing to do with the ticket's diff and would otherwise
+    /// block every DEV run on every ticket forever).
+    #[serde(default)]
+    pub cross_target_baseline: Option<u64>,
     /// Merged PR numbers already synced into ticket state (human merges on
     /// the forge must reflect back exactly once).
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
@@ -338,6 +346,7 @@ impl Default for ProjectState {
             pr_sessions: std::collections::BTreeMap::new(),
             cost_holds: std::collections::BTreeMap::new(),
             clippy_baseline: None,
+            cross_target_baseline: None,
             seen_merged_prs: std::collections::BTreeSet::new(),
             seen_closed_prs: std::collections::BTreeSet::new(),
             cost_approved: std::collections::BTreeSet::new(),

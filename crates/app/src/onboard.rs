@@ -451,6 +451,9 @@ pub async fn greenfield<S: StateStorePort + 'static>(
         std::fs::write(&context_path, context_template(name))?;
     }
 
+    // CXA-F001: scaffold the editable per-project `prompts/` tree.
+    scaffold_prompts(root)?;
+
     let adder = AddTicketUseCase::new(Arc::clone(store));
     let skeleton = adder
         .execute(AddTicketInput {
@@ -582,6 +585,9 @@ pub async fn brownfield<S: StateStorePort + 'static>(
             smart_comprehension_context(name, &repo_stats, &stack_lines, &docker),
         )?;
     }
+
+    // CXA-F001: scaffold the editable per-project `prompts/` tree.
+    scaffold_prompts(root)?;
 
     // Seed tickets based on docker analysis (replaces simple has_compose check)
     let seeded = seed_smart_tickets(store, &docker).await?;
@@ -822,6 +828,64 @@ fn context_template(name: &str) -> String {
     )
 }
 
+// ── CXA-F001: scaffold the project-local `prompts/` tree ────────────────
+//
+// `coxagent init` must materialise every embedded default as an editable
+// `prompts/<role>.md` file. The engine resolves a role's prompt from here
+// first (see `crates/application/src/prompts.rs::resolve_prompt`), falling
+// back to the embedded default, so a workspace that never edits these files
+// behaves exactly as before. The paths are kept as literals below so the
+// prompts gate can prove every planned file has a scaffold write.
+
+const SCAFFOLD_PROMPT_FILES: &[&str] = &[
+    "prompts/_base.md",
+    "prompts/ba.md",
+    "prompts/po.md",
+    "prompts/sm.md",
+    "prompts/sa.md",
+    "prompts/pd.md",
+    "prompts/dev.md",
+    "prompts/test.md",
+    "prompts/docs.md",
+    "prompts/onboard/po_interview.md",
+    "prompts/onboard/sa_archaeology.md",
+    "prompts/discussion.md",
+];
+
+/// Write the full default `prompts/` tree under `root`, from the embedded
+/// defaults, so the user has editable per-role files (per-project override).
+/// Existing files are left untouched so user edits survive re-onboard.
+fn scaffold_prompts(root: &Path) -> std::io::Result<()> {
+    for rel in SCAFFOLD_PROMPT_FILES {
+        let dst = root.join(rel);
+        if dst.exists() {
+            continue;
+        }
+        let (Some(content), Some(_base)) = (
+            coxagent_application::prompts::default_prompt_file(rel.trim_start_matches("prompts/")),
+            rel.rsplit('/').next(),
+        ) else {
+            // Never skip a planned file: a missing source here breaks the seam
+            // the engine resolves against. Write a placeholder only as a last
+            // resort — and the gate makes an unresolvable file a hard failure.
+            std::fs::create_dir_all(
+                rel.rsplit_once('/')
+                    .map_or_else(|| root.to_path_buf(), |(d, _)| root.join(d)),
+            )?;
+            std::fs::write(
+                &dst,
+                "# <embedded default missing — see the application crate>\n",
+            )?;
+            continue;
+        };
+        if let Some((dir, _)) = rel.rsplit_once('/') {
+            std::fs::create_dir_all(root.join(dir))?;
+        }
+        std::fs::write(&dst, content)?;
+    }
+    Ok(())
+}
+
 // ── tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1044,7 +1108,8 @@ fn parse_semver(raw: &str) -> Option<SemVer> {
 
 #[cfg(test)]
 mod version_adoption_tests {
-    use super::{detect_codebase_version, parse_semver};
+    use super::{detect_codebase_version, parse_semver, scaffold_prompts, SCAFFOLD_PROMPT_FILES};
+    use coxagent_application::prompts::default_prompt_file;
 
     #[test]
     fn a_manifest_version_is_adopted_over_the_newest_tag() {
@@ -1084,5 +1149,44 @@ mod version_adoption_tests {
         for bad in ["release-summer", "2026-08-04", "", "v"] {
             assert!(parse_semver(bad).is_none(), "{bad:?} must not parse");
         }
+    }
+
+    #[test]
+    fn scaffold_prompts_materialises_every_planned_file_from_the_embedded_default() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let root = dir.path();
+        scaffold_prompts(root).expect("scaffold succeeds");
+
+        for rel in SCAFFOLD_PROMPT_FILES {
+            let name = rel.trim_start_matches("prompts/");
+            let path = root.join(rel);
+            let body = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("CXA-F001 AC1: {rel} was not scaffolded ({e})"));
+            assert!(
+                default_prompt_file(name).is_some(),
+                "{rel} scaffolding did not come from an embedded default"
+            );
+            assert!(
+                !body.trim().is_empty(),
+                "{rel} was scaffolded but holds no content"
+            );
+        }
+    }
+
+    #[test]
+    fn scaffold_prompts_never_overwrites_an_existing_prompt_file() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let root = dir.path();
+        let custom = "MY CUSTOM BA PROMPT — do not clobber me";
+        std::fs::create_dir_all(root.join("prompts")).expect("mkdir");
+        std::fs::write(root.join("prompts/ba.md"), custom).expect("write");
+
+        scaffold_prompts(root).expect("scaffold succeeds over an existing file");
+
+        let body = std::fs::read_to_string(root.join("prompts/ba.md")).expect("read");
+        assert_eq!(
+            body, custom,
+            "CXA-F001 AC1: user edits to prompts/ba.md must survive re-onboard"
+        );
     }
 }

@@ -128,7 +128,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
         .await;
         let request = AgentRequest {
             role: Role::Ba,
-            system_prompt: prompts::system_prompt(prompts::BA),
+            system_prompt: prompts::resolve_prompt(
+                self.files.as_deref(),
+                &self.work_dir,
+                "ba.md",
+                &prompts::system_prompt(prompts::BA),
+            )
+            .await,
             task_prompt: format!(
                 "Product goal:\n{}\n{}\nEXISTING BACKLOG — do NOT re-propose anything already \
                  here (same or similar title/scope):\n{}\n\nPropose only genuinely NEW features \
@@ -236,7 +242,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
             .join("\n");
         let request = AgentRequest {
             role: Role::Po,
-            system_prompt: prompts::system_prompt(prompts::PO),
+            system_prompt: prompts::resolve_prompt(
+                self.files.as_deref(),
+                &self.work_dir,
+                "po.md",
+                &prompts::system_prompt(prompts::PO),
+            )
+            .await,
             task_prompt: format!(
                 "GOAL GATE. The product goal/direction is:\n{goal}\n\nProposed tickets:\n{listing}\n\n\
                  For each index, does it DIRECTLY serve the stated goal (not merely 'generally \

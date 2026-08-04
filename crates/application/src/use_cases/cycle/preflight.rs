@@ -86,7 +86,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     ) -> Option<Vec<String>> {
         let request = AgentRequest {
             role: coxagent_domain::Role::Ba,
-            system_prompt: crate::prompts::system_prompt(crate::prompts::BA),
+            system_prompt: crate::prompts::resolve_prompt(
+                self.files.as_deref(),
+                &self.work_dir,
+                "ba.md",
+                &crate::prompts::system_prompt(crate::prompts::BA),
+            )
+            .await,
             task_prompt: format!(
                 "Ticket {id} ('{title}') has no acceptance criteria, so nobody can tell when it \
                  is done. Write 3-5 criteria that are OBSERVABLE and CHECKABLE — each one a \

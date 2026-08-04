@@ -117,7 +117,13 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RefineTicketUseCas
         );
         let request = AgentRequest {
             role: Role::Ba,
-            system_prompt: prompts::system_prompt(prompts::BA),
+            system_prompt: prompts::resolve_prompt(
+                None,
+                &self.work_dir,
+                "ba.md",
+                &prompts::system_prompt(prompts::BA),
+            )
+            .await,
             task_prompt: task,
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(150),
@@ -167,7 +173,13 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RefineTicketUseCas
         );
         let request = AgentRequest {
             role,
-            system_prompt: prompts::system_prompt(prompts::BASE),
+            system_prompt: prompts::resolve_prompt(
+                None,
+                &self.work_dir,
+                "_base.md",
+                &prompts::system_prompt(prompts::BASE),
+            )
+            .await,
             task_prompt: task,
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(120),

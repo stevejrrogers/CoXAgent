@@ -213,6 +213,10 @@ Real LLM agents need a CLI (`claude`/`opencode`) on PATH inside the container;
 the base image ships the offline `scripted`/`mock` engines — install a CLI in a
 derived image to run real agents in the container.
 
+**Health check.** Every run shape (single project, hub, Docker) serves
+`GET /health`, which answers `200` with `{"status":"ok", "version":"…"}` —
+poll it to verify the service is up before relying on it.
+
 ### Enterprise: distributed hub (Postgres + Redis + Mongo + MinIO)
 
 ```sh

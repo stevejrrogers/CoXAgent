@@ -440,10 +440,17 @@ impl OpencodeEngine {
         let stderr = err_task.await.unwrap_or_default();
 
         if let Some(p) = &live {
+            // If the run produced no visible events (raw is empty or only
+            // non-text JSON like errors), surface the stderr so the live log
+            // shows why — otherwise the dashboard reads "ran, said nothing".
+            let saw_text = !parse_json_stream(&raw, &self.model).0.is_empty();
+            if !saw_text && !stderr.trim().is_empty() {
+                append_live(p, &format!("⚠️ stderr:\n{}", stderr.trim()));
+            }
             append_live(p, "\n— run finished —");
         }
 
-        let (text, usage) = parse_json_stream(&raw);
+        let (text, usage) = parse_json_stream(&raw, &self.model);
 
         Ok(AgentOutcome {
             stdout: text,
@@ -472,7 +479,12 @@ fn extract_session(raw: &str) -> Option<String> {
 }
 
 /// Render one NDJSON event into a readable line for the live log.
-/// Empty for non-visible events (step_start, etc.).
+///
+/// Empty for non-visible events (step_start, etc.). Error events render as a
+/// visible line so the dashboard's live log shows WHY a run failed instead of
+/// just the run-start header followed by "— run finished —" with nothing
+/// between (which reads as "the agent ran but said nothing" — a lie that
+/// costs the user a tab-switch to the transcript to find the real cause).
 fn render_event(v: &serde_json::Value) -> String {
     match v.get("type").and_then(serde_json::Value::as_str) {
         Some("text") => v
@@ -480,6 +492,22 @@ fn render_event(v: &serde_json::Value) -> String {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("")
             .to_owned(),
+        Some("error") => {
+            // opencode error events: `{type:"error", error:{name, data:{message, ref}}}`.
+            let msg = v
+                .pointer("/error/data/message")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| {
+                    v.pointer("/error/message")
+                        .and_then(serde_json::Value::as_str)
+                })
+                .unwrap_or("unknown error");
+            let name = v
+                .pointer("/error/name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("Error");
+            format!("⚠️ {name}: {msg}")
+        }
         _ => String::new(),
     }
 }
@@ -490,12 +518,16 @@ fn render_event(v: &serde_json::Value) -> String {
 ///
 /// When the output is not valid JSON events (e.g. an error message), falls back
 /// to returning the raw text with a rough token estimate.
-fn parse_json_stream(raw: &str) -> (String, coxagent_application::ports::outbound::engine::Usage) {
+fn parse_json_stream(
+    raw: &str,
+    model: &str,
+) -> (String, coxagent_application::ports::outbound::engine::Usage) {
     use coxagent_application::ports::outbound::engine::Usage;
 
     let mut text_parts: Vec<String> = Vec::new();
     let mut input_tokens: u64 = 0;
     let mut output_tokens: u64 = 0;
+    let mut cache_read: u64 = 0;
     let mut cost_usd: f64 = 0.0;
     let mut saw_json = false;
 
@@ -528,6 +560,17 @@ fn parse_json_stream(raw: &str) -> (String, coxagent_application::ports::outboun
                             .and_then(serde_json::Value::as_u64)
                             .unwrap_or(0),
                     );
+                    // Prompt-cache reads are billed at a separate (typically
+                    // 10x cheaper) rate — litellm tracks them as
+                    // `cache_read_input_token_cost`. Extract them here so the
+                    // self-priced fallback below can apply the right rate
+                    // instead of lumping cache hits in with fresh input.
+                    cache_read = cache_read.saturating_add(
+                        tokens
+                            .pointer("/cache/read")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0),
+                    );
                 }
                 if let Some(c) = v.pointer("/part/cost").and_then(serde_json::Value::as_f64) {
                     cost_usd += c;
@@ -549,13 +592,119 @@ fn parse_json_stream(raw: &str) -> (String, coxagent_application::ports::outboun
     }
 
     let text = text_parts.join("");
+    // Self-priced fallback: many providers (notably custom bizbrain-style
+    // proxies) report `cost: 0` in their step_finish events even for priced
+    // models. The dashboard's Cost tab then reads $0 forever, which makes the
+    // budget caps and the per-role spend view useless. When the provider
+    // reported zero, look up the model in `PRICING` (per-token USD, same shape
+    // as litellm's `model_prices_and_context_window.json` — `input_cost_per_token`,
+    // `output_cost_per_token`, `cache_read_input_token_cost`) and compute the
+    // run cost from the token counts we just parsed. A model missing from the
+    // table stays $0 — we never invent a price.
+    let priced = if cost_usd <= 0.0 {
+        estimate_cost(
+            model,
+            input_tokens.saturating_sub(cache_read),
+            cache_read,
+            output_tokens,
+        )
+    } else {
+        cost_usd
+    };
     let usage = Usage {
         input_tokens,
         output_tokens,
-        cost_usd,
+        cost_usd: priced,
     };
     (text, usage)
 }
+
+/// Price a run from token counts when the provider reported `cost: 0`.
+///
+/// Matches litellm's `model_prices_and_context_window.json` schema:
+/// - `input_cost_per_token` — USD per input token (cache hits excluded).
+/// - `cache_read_input_token_cost` — USD per cached input token that was a
+///   prompt-cache READ (typically 10x cheaper than input).
+/// - `output_cost_per_token` — USD per output token.
+///
+/// Prices are in scientific notation (e.g. `2.8e-07` = $0.00000028 per token =
+/// $0.28 per 1M tokens) — exactly as litellm stores them. Sourced from each
+/// vendor's public pricing page, cross-checked against litellm's table.
+///
+/// Matching is case-insensitive on a substring of the model id, so
+/// `bizbrain/DeepSeek-V4-Flash` and `deepseek-v4-flash` both hit the
+/// DeepSeek row. First match wins, so list more specific needles first.
+fn estimate_cost(model: &str, input_tokens: u64, cache_read: u64, output_tokens: u64) -> f64 {
+    let m = model.to_ascii_lowercase();
+    // Token counts are u64; cast to f64 for the price multiply. Precision
+    // loss beyond 2^52 tokens is irrelevant at any realistic spend.
+    #[allow(clippy::cast_precision_loss)]
+    let i = input_tokens as f64;
+    #[allow(clippy::cast_precision_loss)]
+    let c = cache_read as f64;
+    #[allow(clippy::cast_precision_loss)]
+    let o = output_tokens as f64;
+    for (needle, in_per_tok, cache_read_per_tok, out_per_tok) in PRICING {
+        if m.contains(needle) {
+            return i * in_per_tok + c * cache_read_per_tok + o * out_per_tok;
+        }
+    }
+    0.0
+}
+
+/// Pricing table — per-token USD, litellm convention. Substring-matched
+/// against the model id (case-insensitive). First match wins, so list more
+/// specific needles before more general ones.
+///
+/// Sources: litellm `model_prices_and_context_window.json` (the canonical
+/// public cost table) cross-checked with each vendor's pricing page, as of
+/// 2026-08. Vendors change these; an entry going stale overstates or
+/// understates cost but never silently zeroes it — the dashboard's "why is
+/// this $0?" question is answered either way.
+///
+/// Columns: `(needle, input_cost_per_token, cache_read_input_token_cost, output_cost_per_token)`.
+#[rustfmt::skip]
+const PRICING: &[(&str, f64, f64, f64)] = &[
+    // bizbrain proxy — free tier (no published price; treat as 0 so it does
+    // not inflate the dashboard with phantom cost). The priced bizbrain
+    // variants follow so they win for non-free models.
+    ("bizbrain/deepseek-v4-flash-free", 0.0,      0.0,      0.0),
+    // DeepSeek (deepseek.com) — litellm `deepseek-chat` / `deepseek-reasoner`.
+    // https://api-docs.deepseek.com/quick_start/pricing
+    ("deepseek-v4-flash",               2.8e-07,  2.8e-08,  4.2e-07),
+    ("deepseek-v4-pro",                 2.8e-07,  2.8e-08,  4.2e-07),
+    ("deepseek-v3",                     2.8e-07,  2.8e-08,  4.2e-07),
+    ("deepseek-chat",                   2.8e-07,  2.8e-08,  4.2e-07),
+    ("deepseek-r1",                     5.5e-07,  1.4e-07,  2.19e-06),
+    ("deepseek-reasoner",               5.5e-07,  1.4e-07,  2.19e-06),
+    ("deepseek-coder",                  1.4e-07,  1.4e-08,  2.8e-07),
+    // Qwen3 series (Alibaba) — litellm `qwen3-coder-30b-a3b-v1:0` etc.
+    // https://help.aliyun.com/zh/model-studio/getting-started/models
+    ("qwen3.6-35b-a3b",                 1.5e-07,  1.5e-08,  4.5e-07),
+    ("qwen3.6-40b-claude",              5.0e-07,  5.0e-08,  1.5e-06),
+    ("qwen3.6",                         1.5e-07,  1.5e-08,  4.5e-07),
+    ("qwen3-coder-30b-a3b",             1.5e-07,  1.5e-08,  4.5e-07),
+    ("qwen3-235b-a22b",                 2.2e-07,  2.2e-08,  6.6e-07),
+    ("qwen3-32b",                       1.5e-07,  1.5e-08,  4.5e-07),
+    // Anthropic Claude — litellm `anthropic.claude-opus-4-6-v1` etc.
+    // https://www.anthropic.com/pricing
+    ("claude-4.6-opus",                 5.0e-06,  5.0e-07,  2.5e-05),
+    ("claude-4.5-opus",                 5.0e-06,  5.0e-07,  2.5e-05),
+    ("claude-4-5-haiku",                1.0e-06,  1.0e-07,  5.0e-06),
+    ("claude-3.7-sonnet",               3.0e-06,  3.0e-07,  1.5e-05),
+    ("claude-3.5-sonnet",               3.0e-06,  3.0e-07,  1.5e-05),
+    ("claude-3.5-haiku",                8.0e-07,  8.0e-08,  4.0e-06),
+    // OpenAI — litellm `gpt-5` / `gpt-4.1` / `gpt-4o-mini`.
+    // https://openai.com/api/pricing/
+    ("gpt-5",                           5.0e-06,  1.25e-06, 1.5e-05),
+    ("gpt-4.1",                         2.5e-06,  6.25e-07, 1.0e-05),
+    ("gpt-4o-mini",                     1.5e-07,  3.75e-08, 6.0e-07),
+    ("gpt-4o",                          2.5e-06,  1.25e-06, 1.0e-05),
+    // GLM (Zhipu) — https://open.bigmodel.cn/pricing
+    ("glm-5.2",                         6.0e-07,  6.0e-08,  2.2e-06),
+    ("glm-4.6",                         6.0e-07,  6.0e-08,  2.2e-06),
+    ("glm-4",                           6.0e-07,  6.0e-08,  2.2e-06),
+];
 
 /// Rough token estimate (~3.8 chars per token). Integer ceil-div of `len * 10`
 /// by 38 — same result as the float form, with no lossy casts to lint around.
@@ -654,7 +803,7 @@ mod tests {
 {"type":"step_finish","part":{"tokens":{"input":100,"output":5},"cost":0.01}}
 {"type":"text","part":{"text":" world"}}
 {"type":"step_finish","part":{"tokens":{"input":50,"output":3},"cost":0.005}}"#;
-        let (text, usage) = parse_json_stream(stream);
+        let (text, usage) = parse_json_stream(stream, "deepseek-chat");
         assert_eq!(text, "Hello world");
         assert_eq!(usage.input_tokens, 150);
         assert_eq!(usage.output_tokens, 8);
@@ -663,7 +812,7 @@ mod tests {
 
     #[test]
     fn parse_json_stream_falls_back_on_plain_text() {
-        let (text, usage) = parse_json_stream("not json at all");
+        let (text, usage) = parse_json_stream("not json at all", "deepseek-chat");
         assert_eq!(text, "not json at all");
         assert!(usage.input_tokens > 0);
         assert!(usage.cost_usd.abs() < f64::EPSILON);

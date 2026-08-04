@@ -132,7 +132,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // BA answers by generating concrete criteria.
         let request = AgentRequest {
             role: coxagent_domain::Role::Ba,
-            system_prompt: crate::prompts::system_prompt(crate::prompts::BA),
+            system_prompt: crate::prompts::resolve_prompt(
+                self.files.as_deref(),
+                &self.work_dir,
+                "ba.md",
+                &crate::prompts::system_prompt(crate::prompts::BA),
+            )
+            .await,
             task_prompt: format!(
                 "A developer flagged that ticket {id} (\"{title}\") has no acceptance criteria \
                  and won't start without them. Write 2-5 concrete, testable acceptance criteria \
@@ -177,6 +183,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// Append a human-readable activity trail plus drain the spend meter into
     /// state. Returns whether accumulated spend has crossed the budget cap.
     /// Best-effort: a failure here never fails a cycle.
+    #[allow(clippy::too_many_lines)]
     pub(super) async fn record_activity(&self, report: &CycleReport) -> bool {
         let Ok(mut state) = self.store.load().await else {
             return false;
@@ -208,6 +215,28 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
 
         // Drain the spend meter (deltas since last cycle) into persistent state.
         let mut cycle_cost = 0.0;
+        // Refresh the token-saver counter from the shim's savings.log (one
+        // sample per compressed tool call: `before after` bytes). The shim runs
+        // in a subprocess and cannot share memory, so we re-read the cumulative
+        // log each cycle and replace the saved counter (the log only grows) —
+        // the dashboard's Cost view can then show "Actual: X | Without saver:
+        // X+Y | Saved: Y". Read before taking the spend lock: the file read
+        // awaits, and the guard is not `Send` across the boundary.
+        let saved_tokens = if let Ok(shim) = std::env::var("COXAGENT_SHIM_DIR") {
+            if let Some(files) = &self.files {
+                let path = std::path::Path::new(&shim).join("savings.log");
+                if let Some(text) = files.read(&path).await {
+                    let (_, before, after) = crate::tokens::parse_savings_log(&text);
+                    Some(crate::tokens::estimate_tokens(before.saturating_sub(after)))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         if let Some(meter) = &self.meter {
             if let Ok(mut m) = meter.lock() {
                 cycle_cost = m.total_cost_usd;
@@ -215,6 +244,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 state.spend.input_tokens += m.input_tokens;
                 state.spend.output_tokens += m.output_tokens;
                 state.spend.runs += m.runs;
+                if let Some(tokens) = saved_tokens {
+                    state.spend.saved_input_tokens = tokens;
+                }
                 for (role, cost) in std::mem::take(&mut m.by_role) {
                     *state.spend.by_role.entry(role).or_default() += cost;
                 }

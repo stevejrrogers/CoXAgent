@@ -175,7 +175,7 @@ pub(super) async fn events_ep(
             let payload = match handle {
                 Some(p) => serde_json::json!({
                     "state": p.store.load().await.ok().as_ref().map(lite_state_value),
-                    "runner": p.runner.snapshot(),
+                    "runner": super::work::effective_runner_snapshot(&p).await,
                     "viewers": count,
                     "online": online,
                 }),

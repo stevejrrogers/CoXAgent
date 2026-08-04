@@ -79,9 +79,18 @@ pub(crate) fn setup_command_shims() -> Option<PathBuf> {
 /// with `COX_COMPRESS=0`. Best-effort — never fatal.
 pub(crate) fn enable_command_shims() {
     if std::env::var("COX_COMPRESS").as_deref() == Ok("0") {
+        tracing::info!("command shims disabled by COX_COMPRESS=0");
         return;
     }
-    if let Some(dir) = setup_command_shims() {
-        std::env::set_var("COXAGENT_SHIM_DIR", dir);
+    match setup_command_shims() {
+        Some(dir) => {
+            tracing::info!("command shims installed at {}", dir.display());
+            std::env::set_var("COXAGENT_SHIM_DIR", dir);
+        }
+        None => {
+            tracing::warn!(
+                "command shims could not be installed (setup_command_shims returned None)"
+            );
+        }
     }
 }

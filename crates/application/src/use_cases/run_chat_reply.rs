@@ -409,38 +409,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         };
         self.post("DEV-FEATURE", &announce).await;
 
-        // Build the DEV prompt manually — same as RunDevUseCase but without the
-        // full state-machine cycle (claim/release handled inline).
-        let memory = crate::prompts::team_memory_block(&state.decisions, &state.lessons);
-        let title = ticket.title().to_owned();
-        let brief = super::run_dev::ticket_brief(Some(ticket));
-        let fp = crate::prompts::focus_block(
-            self.files.as_deref(),
-            &self.work_dir,
-            &format!(
-                "{title} {}",
-                ticket
-                    .design()
-                    .technical
-                    .as_ref()
-                    .map_or("", |d| d.approach.as_str())
-            ),
-        )
-        .await;
-        let rp =
-            crate::prompts::repo_map_block(self.files.as_deref(), &self.work_dir, self.token_saver)
-                .await;
-
-        let request = crate::ports::outbound::AgentRequest {
-            role: coxagent_domain::Role::DevFeature,
-            system_prompt: crate::prompts::system_prompt(crate::prompts::DEV),
-            task_prompt: format!(
-                "Ticket {tid}: {title}\n{brief}\nImplement it now.{fp}{rp}{memory}"
-            ),
-            work_dir: self.work_dir.clone(),
-            timeout: std::time::Duration::from_secs(3600),
-            escalation_level: 0,
-        };
+        let request = self.chat_dev_request(&state, ticket, &tid).await;
         match self.engine.run(request).await {
             Ok(outcome) if outcome.succeeded() => {
                 // Mark the ticket as done if possible
@@ -481,6 +450,55 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         }
     }
 
+    /// Build the DEV agent request for one chat-demanded ticket, resolving the
+    /// role prompt local-first (`prompts/dev.md` → embedded) like every other
+    /// whole-agent run.
+    async fn chat_dev_request(
+        &self,
+        state: &crate::state::ProjectState,
+        ticket: &coxagent_domain::Ticket,
+        tid: &coxagent_domain::TicketId,
+    ) -> crate::ports::outbound::AgentRequest {
+        // Build the DEV prompt manually — same as RunDevUseCase but without the
+        // full state-machine cycle (claim/release handled inline).
+        let memory = crate::prompts::team_memory_block(&state.decisions, &state.lessons);
+        let title = ticket.title().to_owned();
+        let brief = super::run_dev::ticket_brief(Some(ticket));
+        let fp = crate::prompts::focus_block(
+            self.files.as_deref(),
+            &self.work_dir,
+            &format!(
+                "{title} {}",
+                ticket
+                    .design()
+                    .technical
+                    .as_ref()
+                    .map_or("", |d| d.approach.as_str())
+            ),
+        )
+        .await;
+        let rp =
+            crate::prompts::repo_map_block(self.files.as_deref(), &self.work_dir, self.token_saver)
+                .await;
+
+        crate::ports::outbound::AgentRequest {
+            role: coxagent_domain::Role::DevFeature,
+            system_prompt: crate::prompts::resolve_prompt(
+                self.files.as_deref(),
+                &self.work_dir,
+                "dev.md",
+                &crate::prompts::system_prompt(crate::prompts::DEV),
+            )
+            .await,
+            task_prompt: format!(
+                "Ticket {tid}: {title}\n{brief}\nImplement it now.{fp}{rp}{memory}"
+            ),
+            work_dir: self.work_dir.clone(),
+            timeout: std::time::Duration::from_secs(3600),
+            escalation_level: 0,
+        }
+    }
+
     /// SA designs a single ticket from chat.
     async fn design_ticket(&self, rest: &str) {
         use coxagent_domain::TicketId;
@@ -510,7 +528,13 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
                 .await;
         let request = crate::ports::outbound::AgentRequest {
             role: coxagent_domain::Role::Sa,
-            system_prompt: crate::prompts::system_prompt(crate::prompts::SA),
+            system_prompt: crate::prompts::resolve_prompt(
+                self.files.as_deref(),
+                &self.work_dir,
+                "sa.md",
+                &crate::prompts::system_prompt(crate::prompts::SA),
+            )
+            .await,
             task_prompt: format!("Design feature {tid}: {title}{fp}{rp}{memory}"),
             work_dir: self.work_dir.clone(),
             timeout: std::time::Duration::from_secs(1200),
@@ -593,7 +617,13 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         });
         let request = crate::ports::outbound::AgentRequest {
             role: coxagent_domain::Role::Test,
-            system_prompt: crate::prompts::system_prompt(crate::prompts::TEST),
+            system_prompt: crate::prompts::resolve_prompt(
+                self.files.as_deref(),
+                &self.work_dir,
+                "test.md",
+                &crate::prompts::system_prompt(crate::prompts::TEST),
+            )
+            .await,
             task_prompt: format!(
                 "Test ticket {tid} and report bugs. Focus on this ticket's acceptance criteria first, then risk-based testing.{shipped}{memory}"
             ),
@@ -954,7 +984,13 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         );
         let request = AgentRequest {
             role: Role::DevFeature,
-            system_prompt: crate::prompts::system_prompt(crate::prompts::DEV),
+            system_prompt: crate::prompts::resolve_prompt(
+                self.files.as_deref(),
+                &self.work_dir,
+                "dev.md",
+                &crate::prompts::system_prompt(crate::prompts::DEV),
+            )
+            .await,
             task_prompt: task,
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(600),

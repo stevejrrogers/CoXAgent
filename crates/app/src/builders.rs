@@ -288,7 +288,17 @@ pub(crate) async fn build_project(
         Arc::new(RunnerHandle::new().with_capabilities(local_caps(&config, &work_dir).await));
 
     // Leader runner: singleton phases (BA, PO, standup, etc.)
-    {
+    //
+    // In a split deploy (gateway/realtime/knowledge), the hub process must NOT
+    // run cycles — it has no agent CLIs and no work tree, so a leader elected
+    // from it fails every phase. Cycles belong to the runner service
+    // (cox-runner) or the all-in-one (cox-all / desktop app). Skip spawning the
+    // built-in leader runner for any role other than `All`.
+    let is_split_deploy = !matches!(
+        std::env::var("COXAGENT_ROLE").unwrap_or_default().as_str(),
+        "" | "all"
+    );
+    if !is_split_deploy {
         let leader = RunCycleUseCase::new(
             Arc::clone(&store),
             engine.clone(),
@@ -330,52 +340,58 @@ pub(crate) async fn build_project(
         tokio::spawn(async move { run_forever(wh, leader, sleep).await });
     }
 
-    tracing::info!(
-        "[{id}] spawning {} worker runner(s) (total {} runners)",
-        concurrency.saturating_sub(1),
-        concurrency
-    );
-    for _ in 1..concurrency {
-        let worker = RunCycleUseCase::new(
-            Arc::clone(&store),
-            engine.clone(),
-            config.clone(),
-            work_dir.clone(),
-            context.clone(),
-        )
-        .with_meter(meter.clone())
-        .with_live_budget(Arc::clone(&live_budget))
-        .with_deploy(Arc::new(DockerComposeDeploy::new()))
-        .with_host_port_probe(host_port_probe)
-        .with_shot(Some(Arc::new(
-            coxagent_infrastructure::screenshot::ChromeScreenshot,
-        )))
-        .with_probe(Some(Arc::new(coxagent_infrastructure::probe::HttpProbe)))
-        // Evidence blobs go where the hub serves media from: S3/MinIO when
-        // configured, else the default hub's local blob dir (~/CoXAgent/blobs).
-        .with_storage(Some(build_storage().await.unwrap_or_else(|| {
-            Arc::new(coxagent_infrastructure::storage::LocalStorage::new(
-                std::env::var_os("HOME")
-                    .map(std::path::PathBuf::from)
-                    .unwrap_or_default()
-                    .join("CoXAgent")
-                    .join("blobs"),
-            ))
-        })))
-        .with_git(Arc::new(coxagent_infrastructure::SystemGit::new()))
-        .with_files(Some(Arc::new(
-            coxagent_infrastructure::FsWorkspaceFiles::new(),
-        )))
-        .with_janitor(Some(Arc::new(coxagent_infrastructure::OsProcessJanitor)));
-        let worker = if let Some(ref f) = forge {
-            worker.with_forge(Arc::clone(f))
-        } else {
-            worker
-        };
-        let worker = worker.with_notifier(build_notifier(Arc::clone(&store), webhook.clone()));
-        let wh = Arc::clone(&handle);
-        tokio::spawn(async move { run_forever(wh, worker, Duration::from_secs(5)).await });
-    }
+    if is_split_deploy {
+        tracing::info!(
+            "[{id}] split-deploy role — no built-in runners (cycles belong to cox-runner)"
+        );
+    } else {
+        tracing::info!(
+            "[{id}] spawning {} worker runner(s) (total {} runners)",
+            concurrency.saturating_sub(1),
+            concurrency
+        );
+        for _ in 1..concurrency {
+            let worker = RunCycleUseCase::new(
+                Arc::clone(&store),
+                engine.clone(),
+                config.clone(),
+                work_dir.clone(),
+                context.clone(),
+            )
+            .with_meter(meter.clone())
+            .with_live_budget(Arc::clone(&live_budget))
+            .with_deploy(Arc::new(DockerComposeDeploy::new()))
+            .with_host_port_probe(host_port_probe)
+            .with_shot(Some(Arc::new(
+                coxagent_infrastructure::screenshot::ChromeScreenshot,
+            )))
+            .with_probe(Some(Arc::new(coxagent_infrastructure::probe::HttpProbe)))
+            // Evidence blobs go where the hub serves media from: S3/MinIO when
+            // configured, else the default hub's local blob dir (~/CoXAgent/blobs).
+            .with_storage(Some(build_storage().await.unwrap_or_else(|| {
+                Arc::new(coxagent_infrastructure::storage::LocalStorage::new(
+                    std::env::var_os("HOME")
+                        .map(std::path::PathBuf::from)
+                        .unwrap_or_default()
+                        .join("CoXAgent")
+                        .join("blobs"),
+                ))
+            })))
+            .with_git(Arc::new(coxagent_infrastructure::SystemGit::new()))
+            .with_files(Some(Arc::new(
+                coxagent_infrastructure::FsWorkspaceFiles::new(),
+            )))
+            .with_janitor(Some(Arc::new(coxagent_infrastructure::OsProcessJanitor)));
+            let worker = if let Some(ref f) = forge {
+                worker.with_forge(Arc::clone(f))
+            } else {
+                worker
+            };
+            let worker = worker.with_notifier(build_notifier(Arc::clone(&store), webhook.clone()));
+            let wh = Arc::clone(&handle);
+            tokio::spawn(async move { run_forever(wh, worker, Duration::from_secs(5)).await });
+        }
+    } // end else (not split-deploy)
 
     // Auto-resume this machine's operator if the user left it running last time
     // (per-operator desired state). This restores only THIS user's operator —

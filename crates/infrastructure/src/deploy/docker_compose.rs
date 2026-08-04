@@ -629,6 +629,37 @@ impl DeployPort for DockerComposeDeploy {
     }
 }
 
+/// Extract every `error[...]` / `error:` line plus a few lines of context
+/// from a build/test output stream, so the DEV self-heal agent sees the root
+/// cause (missing imports, type mismatches) instead of just the last
+/// symptom. Capped at ~6 KB so a pathological log does not blow the prompt
+/// budget — the same cap `proxy_compress` uses for tool output.
+fn extract_errors(b: &[u8]) -> String {
+    let text = String::from_utf8_lossy(b);
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let l = lines[i];
+        let is_error = l.starts_with("error[") || l.starts_with("error:");
+        if !is_error {
+            i += 1;
+            continue;
+        }
+        let end = (i + 9).min(lines.len());
+        for l in &lines[i..end] {
+            out.push_str(l);
+            out.push('\n');
+        }
+        out.push('\n');
+        i = end;
+        if out.len() > 6000 {
+            out.push_str("… [additional errors elided]\n");
+            break;
+        }
+    }
+    out
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -905,9 +936,37 @@ impl DockerComposeDeploy {
         let summary = if success {
             format!("{cmd} {} passed", args.join(" "))
         } else {
-            let out = tail(&output.stdout);
-            let err = tail(&output.stderr);
-            format!("{cmd} tests failed:\n{err}\n{out}")
+            // Self-heal feeds this summary to the DEV agent as the task
+            // prompt. A naive tail(12) loses the FIRST errors — for a compile
+            // failure, the missing-import errors at the top are the root
+            // cause and the type-inference error at the bottom is just the
+            // symptom. The agent then fixes the symptom, recompiles, and
+            // loops on the same root cause forever. Extract every `error`
+            // line with a few lines of context so the agent sees the whole
+            // picture, capped so a pathological build log does not blow the
+            // prompt budget.
+            let out = extract_errors(&output.stdout);
+            let err = extract_errors(&output.stderr);
+            let mut parts = String::new();
+            if !err.is_empty() {
+                parts.push_str(&err);
+            }
+            if !out.is_empty() {
+                if !parts.is_empty() {
+                    parts.push('\n');
+                }
+                parts.push_str(&out);
+            }
+            if parts.is_empty() {
+                // No `error` lines parsed — fall back to the tail so the
+                // agent has SOMETHING to go on (a timeout, an OOM, etc.).
+                parts = format!(
+                    "{cmd} tests failed (no error lines parsed):\n{}\n{}",
+                    tail(&output.stderr),
+                    tail(&output.stdout)
+                );
+            }
+            parts
         };
         Ok(DeployReport {
             success,

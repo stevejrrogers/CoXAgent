@@ -303,7 +303,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
     async fn decompose_large(&self, id: &TicketId, title: &str) -> Option<Vec<String>> {
         let request = AgentRequest {
             role: Role::Sa,
-            system_prompt: crate::prompts::system_prompt(crate::prompts::SA),
+            system_prompt: crate::prompts::resolve_prompt(
+                self.files.as_deref(),
+                &self.work_dir,
+                "sa.md",
+                &crate::prompts::system_prompt(crate::prompts::SA),
+            )
+            .await,
             task_prompt: format!(
                 "Ticket {id} ('{title}') is LARGE. Split it into 2-3 INDEPENDENT, \
                  individually shippable sub-tickets (small or medium each) that together \
@@ -376,14 +382,20 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
         let design_json = serde_json::to_string(&design).unwrap_or_default();
         let critique_req = AgentRequest {
             role: coxagent_domain::Role::Sa,
-            system_prompt: crate::prompts::system_prompt(
-                "You are a principal engineer REVIEWING another architect's design. \
-                 Judge only architecture-level risk: wrong decomposition, missing \
-                 failure modes, scaling traps, security gaps — and REJECT any design \
-                 whose `alternatives` field is empty or hand-wavy: no alternatives \
-                 considered means no design happened. If sound, reply exactly \
-                 APPROVED. Otherwise list ONLY must-fix items, one per line, no praise.",
-            ),
+            system_prompt: crate::prompts::resolve_prompt(
+                self.files.as_deref(),
+                &self.work_dir,
+                "sa.md",
+                &crate::prompts::system_prompt(
+                    "You are a principal engineer REVIEWING another architect's design. \
+                     Judge only architecture-level risk: wrong decomposition, missing \
+                     failure modes, scaling traps, security gaps — and REJECT any design \
+                     whose `alternatives` field is empty or hand-wavy: no alternatives \
+                     considered means no design happened. If sound, reply exactly \
+                     APPROVED. Otherwise list ONLY must-fix items, one per line, no praise.",
+                ),
+            )
+            .await,
             task_prompt: format!(
                 "Ticket {id}: {title} (complexity: large)\nProposed design JSON:\n{design_json}"
             ),
@@ -400,7 +412,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
         }
         let revise_req = AgentRequest {
             role: coxagent_domain::Role::Sa,
-            system_prompt: crate::prompts::system_prompt(crate::prompts::SA),
+            system_prompt: crate::prompts::resolve_prompt(
+                self.files.as_deref(),
+                &self.work_dir,
+                "sa.md",
+                &crate::prompts::system_prompt(crate::prompts::SA),
+            )
+            .await,
             task_prompt: format!(
                 "Your design for ticket {id} ({title}) got review feedback. Address \
                  EVERY must-fix item and output the FULL corrected design JSON only.\n\
@@ -434,7 +452,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
         let stack = prompts::stack_constraints(&self.config.architecture);
         AgentRequest {
             role: Role::Sa,
-            system_prompt: prompts::system_prompt(prompts::SA),
+            system_prompt: prompts::resolve_prompt(
+                self.files.as_deref(),
+                &self.work_dir,
+                "sa.md",
+                &prompts::system_prompt(prompts::SA),
+            )
+            .await,
             task_prompt: format!(
                 "Design feature {id}: {title}{context_block}{stack}{}{}{knowledge}{memory}{steering}",
                 prompts::focus_block(self.files.as_deref(), &self.work_dir, title).await,

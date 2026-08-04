@@ -176,6 +176,12 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
             context,
             max_cycles,
         } => {
+            // The operator runs agent CLIs as subprocesses — install the
+            // rtk-style command shims so tool output is compressed
+            // (proxy_compress) before the agent reads it. Without this the
+            // token-saver's "Saved" counter on the dashboard stays 0: no
+            // compression runs, no savings.log is written.
+            enable_command_shims();
             load_coordination(
                 args.state_dir
                     .parent()
@@ -471,6 +477,13 @@ pub async fn operator_main(
     work_dir: std::path::PathBuf,
     max_cycles: Option<u64>,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    // The operator runs agent CLIs as subprocesses — install the rtk-style
+    // command shims so tool output is compressed (proxy_compress) before the
+    // agent reads it. Without this, the token-saver's "Saved" counter on the
+    // dashboard stays 0 forever: the hub has shims but the operator (the
+    // process that actually spawns `opencode run`/`claude`) does not, so no
+    // compression ever runs.
+    enable_command_shims();
     load_coordination(
         state_dir
             .parent()

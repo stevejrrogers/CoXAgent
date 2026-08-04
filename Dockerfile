@@ -2,8 +2,11 @@
 # Multi-stage: compile the release binary, then a slim runtime.
 FROM rust:1-slim-bookworm AS builder
 WORKDIR /build
-# rustls means no OpenSSL; git is handy for brownfield onboarding at runtime.
+# rustls means no OpenSSL. `build-essential` provides a C compiler (gcc/cc):
+# the tree-sitter grammars (codegraph, via coxagent-application) compile C at
+# build time, and rust:1-slim ships no toolchain to build them with.
 RUN apt-get update && apt-get install -y --no-install-recommends pkg-config \
+        build-essential \
     && rm -rf /var/lib/apt/lists/*
 COPY . .
 RUN cargo build --release --bin coxagent

@@ -682,6 +682,7 @@ pub async fn serve_full(
             "/assets/xterm-addon-fit.min.js",
             get(|| async { ([("content-type", "application/javascript")], XTERM_FIT_JS) }),
         )
+        .route("/health", get(health))
         .route("/api/health", get(health))
         .route("/api/mcp", post(mcp_ep))
         .route("/api/app/latest", get(app_latest_ep))
@@ -814,6 +815,8 @@ pub async fn serve_full(
         .route("/api/token-saver", get(token_saver_ep))
         .route("/api/projects/:pid/audit", get(audit_ep))
         .route("/api/projects/:pid/config", get(get_config).put(put_config))
+        .route("/api/projects/:pid/prompt", post(save_prompt))
+        .route("/api/projects/:pid/prompt/:role", get(get_prompt))
         .route("/api/projects/:pid/control/:action", post(control_ep))
         .route("/api/projects/:pid/sprint/goal", post(set_sprint_goal_ep))
         .route("/api/projects/:pid/sprint/close", post(sprint_close_ep))

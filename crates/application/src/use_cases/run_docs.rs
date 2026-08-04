@@ -110,15 +110,23 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
         // the first attempt at a 12k-character page came back missing two
         // required sections.
         let level = u8::from(page.body.chars().count() > 4000);
-        let run = |task: String| {
-            self.engine.run(AgentRequest {
-                role: Role::Docs,
-                system_prompt: prompts::system_prompt(prompts::DOCS),
-                task_prompt: task,
-                work_dir: self.work_dir.clone(),
-                timeout: Duration::from_secs(900),
-                escalation_level: level,
-            })
+        let run = |task: String| async {
+            self.engine
+                .run(AgentRequest {
+                    role: Role::Docs,
+                    system_prompt: prompts::resolve_prompt(
+                        self.files.as_deref(),
+                        &self.work_dir,
+                        "docs.md",
+                        &prompts::system_prompt(prompts::DOCS),
+                    )
+                    .await,
+                    task_prompt: task,
+                    work_dir: self.work_dir.clone(),
+                    timeout: Duration::from_secs(900),
+                    escalation_level: level,
+                })
+                .await
         };
         let Ok(out) = run(task).await else { return };
         let mut raw = out.stdout;
@@ -247,7 +255,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
             .engine
             .run(AgentRequest {
                 role: Role::Docs,
-                system_prompt: prompts::system_prompt(prompts::DOCS),
+                system_prompt: prompts::resolve_prompt(
+                    self.files.as_deref(),
+                    &self.work_dir,
+                    "docs.md",
+                    &prompts::system_prompt(prompts::DOCS),
+                )
+                .await,
                 task_prompt: format!(
                     "{}{context_block}{focus}{repo_map}",
                     build_docs_prompt(
@@ -289,7 +303,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
                 .engine
                 .run(AgentRequest {
                     role: Role::Docs,
-                    system_prompt: prompts::system_prompt(prompts::DOCS),
+                    system_prompt: prompts::resolve_prompt(
+                        self.files.as_deref(),
+                        &self.work_dir,
+                        "docs.md",
+                        &prompts::system_prompt(prompts::DOCS),
+                    )
+                    .await,
                     task_prompt: fixup,
                     work_dir: self.work_dir.clone(),
                     timeout: Duration::from_secs(900),

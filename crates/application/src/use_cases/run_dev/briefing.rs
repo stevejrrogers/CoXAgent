@@ -156,7 +156,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             // prefix means cache READ pricing on back-to-back runs. Anything
             // per-ticket (stack/deploy/design blocks included — the design one
             // exists only for UI tickets) belongs in the task prompt below.
-            system_prompt: prompts::system_prompt(prompts::DEV),
+            system_prompt: prompts::resolve_prompt(
+                self.files.as_deref(),
+                &self.work_dir,
+                "dev.md",
+                &prompts::system_prompt(prompts::DEV),
+            )
+            .await,
             task_prompt: format!(
                 "Ticket {id}: {title}\n{}{stale_design}\nImplement it now.{stack}{deploy}{design}{context_block}{}{history}{knowledge}{}{}{}{steering}{journal}{asking}",
                 ticket_brief(ticket),

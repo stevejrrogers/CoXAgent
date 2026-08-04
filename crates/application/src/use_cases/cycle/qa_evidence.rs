@@ -226,7 +226,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         self.report("PD", "visual QA on the deployed UI");
         let request = crate::ports::outbound::AgentRequest {
             role: coxagent_domain::Role::Pd,
-            system_prompt: crate::prompts::system_prompt(crate::prompts::PD),
+            system_prompt: crate::prompts::resolve_prompt(
+                self.files.as_deref(),
+                &self.work_dir,
+                "pd.md",
+                &crate::prompts::system_prompt(crate::prompts::PD),
+            )
+            .await,
             task_prompt: format!(
                 "Visual QA. A screenshot of the app as ACTUALLY deployed (after \
                  shipping ticket {ticket}) is at `.coxagent/ui-shot.png` — open and \

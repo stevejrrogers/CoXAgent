@@ -162,6 +162,45 @@ pub fn proxy_compress(text: &str) -> String {
     )
 }
 
+/// Parse the shim's `savings.log` contents (`before after` bytes per
+/// compressed tool call) and return `(samples, total_before_bytes,
+/// total_after_bytes)` so the cycle leader can estimate input tokens saved by
+/// the token-saver.
+///
+/// Best-effort: an unparseable line just contributes nothing, so a malformed
+/// or empty log yields `(0, 0, 0)`. The file itself is read through a
+/// [`crate::ports::outbound::WorkspaceFilesPort`] by the caller — this stays a
+/// pure function of the text so the hexagonal ratchet is satisfied.
+#[must_use]
+pub fn parse_savings_log(text: &str) -> (u64, u64, u64) {
+    let mut samples = 0u64;
+    let mut total_before = 0u64;
+    let mut total_after = 0u64;
+    for line in text.lines() {
+        let mut it = line.split_whitespace();
+        let (Some(b), Some(a)) = (it.next(), it.next()) else {
+            continue;
+        };
+        if let (Ok(b), Ok(a)) = (b.parse::<u64>(), a.parse::<u64>()) {
+            if a < b {
+                samples += 1;
+                total_before += b;
+                total_after += a;
+            }
+        }
+    }
+    (samples, total_before, total_after)
+}
+
+/// Rough token estimate (~3.8 chars per token) for a byte count — same ratio
+/// `proxy_compress`-style compressors approximate. Used to convert the shim's
+/// byte savings into the spend's token counter so the dashboard shows the
+/// saving in the same unit as `input_tokens`.
+#[must_use]
+pub fn estimate_tokens(bytes: u64) -> u64 {
+    bytes.saturating_mul(10).saturating_add(37) / 38
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

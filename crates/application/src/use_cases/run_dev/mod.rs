@@ -358,7 +358,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 let title = state.ticket(&id).map_or("", |t| t.title());
                 let tdd_req = AgentRequest {
                     role: Role::Test,
-                    system_prompt: prompts::system_prompt(prompts::TEST),
+                    system_prompt: prompts::resolve_prompt(
+                        self.files.as_deref(),
+                        &self.work_dir,
+                        "test.md",
+                        &prompts::system_prompt(prompts::TEST),
+                    )
+                    .await,
                     task_prompt: format!(
                         "TDD: ticket {id} ({title}) is about to be implemented. Write \
                          FAILING tests that encode EXACTLY these acceptance criteria — \
@@ -560,7 +566,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 if !resumed {
                     let repair = AgentRequest {
                         role: self.mode.role(),
-                        system_prompt: prompts::system_prompt(prompts::DEV),
+                        system_prompt: prompts::resolve_prompt(
+                            self.files.as_deref(),
+                            &self.work_dir,
+                            "dev.md",
+                            &prompts::system_prompt(prompts::DEV),
+                        )
+                        .await,
                         task_prompt: follow_up,
                         work_dir: self.work_dir.clone(),
                         timeout: Duration::from_secs(1800),
@@ -621,7 +633,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                         } else {
                             let repair = AgentRequest {
                                 role: self.mode.role(),
-                                system_prompt: prompts::system_prompt(prompts::DEV),
+                                system_prompt: prompts::resolve_prompt(
+                                    self.files.as_deref(),
+                                    &self.work_dir,
+                                    "dev.md",
+                                    &prompts::system_prompt(prompts::DEV),
+                                )
+                                .await,
                                 task_prompt: fixup,
                                 work_dir: self.work_dir.clone(),
                                 timeout: Duration::from_secs(900),
@@ -723,24 +741,58 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             // different ticket numbers. The check provisions what it needs and
             // falls back to the Docker build, so an unavailable answer is a
             // real gap, not laziness, and it is stated rather than skipped.
+            //
+            // Baseline-aware: a pre-existing cross-target failure (e.g. a
+            // native dep like tree-sitter whose build script needs a cross-
+            // compiler the host lacks) blocks EVERY ticket, not just the one
+            // that introduced it. Snapshot the error count on a clean tree
+            // and only hold the ticket if THIS run added errors beyond it.
             match deploy.cross_target_check(&self.work_dir).await {
                 Ok(check) if check.available && !check.errors.is_empty() => {
-                    let detail = check.errors.join("; ");
-                    let short: String = detail.chars().take(200).collect();
-                    self.record_failure_at(
-                        &id,
-                        &format!("does not compile for the deploy platform: {short}"),
-                        crate::state::FailureLayer::Gate,
-                        "linux-build",
-                        Vec::new(),
-                    )
-                    .await;
-                    self.release_claim(&id).await;
-                    return Err(PortError::Backend(format!(
-                        "{:?} broke the Linux build on {id} — ticket returned to the queue",
-                        self.mode
-                    ))
-                    .into());
+                    let count = u64::try_from(check.errors.len()).unwrap_or(u64::MAX);
+                    let baseline = state.cross_target_baseline;
+                    // First time we see cross-target errors at all: treat as
+                    // the baseline (pre-existing) and record it, so we don't
+                    // pin the ticket for something that was already broken.
+                    if baseline.is_none() {
+                        let _ =
+                            crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+                                s.cross_target_baseline = Some(count);
+                                Ok(())
+                            })
+                            .await;
+                        tracing::warn!(
+                            "cross-target baseline set to {count} pre-existing error(s) — \
+                             not blocking {id}. Future runs block only if errors INCREASE."
+                        );
+                    } else if let Some(base) = baseline {
+                        if count <= base {
+                            // No new errors vs the baseline — the ticket did
+                            // not break the Linux build. Let it through.
+                            tracing::info!(
+                                "cross-target: {count} errors ≤ baseline {base} — \
+                                 pre-existing, not blocking {id}"
+                            );
+                        } else {
+                            // THIS ticket added cross-target errors.
+                            let detail = check.errors.join("; ");
+                            let short: String = detail.chars().take(200).collect();
+                            self.record_failure_at(
+                                &id,
+                                &format!("does not compile for the deploy platform: {short}"),
+                                crate::state::FailureLayer::Gate,
+                                "linux-build",
+                                Vec::new(),
+                            )
+                            .await;
+                            self.release_claim(&id).await;
+                            return Err(PortError::Backend(format!(
+                                "{:?} broke the Linux build on {id} — ticket returned to the queue",
+                                self.mode
+                            ))
+                            .into());
+                        }
+                    }
                 }
                 Ok(check) if !check.available => {
                     tracing::warn!("platform verification unavailable — {}", check.reason);
@@ -771,7 +823,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 } else {
                     let repair = AgentRequest {
                         role: self.mode.role(),
-                        system_prompt: prompts::system_prompt(prompts::DEV),
+                        system_prompt: prompts::resolve_prompt(
+                            self.files.as_deref(),
+                            &self.work_dir,
+                            "dev.md",
+                            &prompts::system_prompt(prompts::DEV),
+                        )
+                        .await,
                         task_prompt: fixup,
                         work_dir: self.work_dir.clone(),
                         timeout: Duration::from_secs(900),
@@ -891,7 +949,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 role: Role::DevBug,
                 // Through the house wrapper: BASE + engineering standards +
                 // process law ride along, and the prefix stays cache-stable.
-                system_prompt: prompts::system_prompt(prompts::DEV_HEAL),
+                system_prompt: prompts::resolve_prompt(
+                    self.files.as_deref(),
+                    &self.work_dir,
+                    "dev.md",
+                    &prompts::system_prompt(prompts::DEV_HEAL),
+                )
+                .await,
                 task_prompt: task,
                 work_dir: self.work_dir.clone(),
                 timeout: std::time::Duration::from_secs(600),

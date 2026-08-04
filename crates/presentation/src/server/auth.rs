@@ -156,9 +156,13 @@ pub(super) async fn auth_mw(
         HubRole::All => true,
         HubRole::Gateway => !realtime_path,
         HubRole::Realtime => {
-            realtime_path || path == "/api/health" || path == "/api/auth/me" || path == "/"
+            realtime_path
+                || path == "/health"
+                || path == "/api/health"
+                || path == "/api/auth/me"
+                || path == "/"
         }
-        HubRole::Knowledge => path == "/api/health",
+        HubRole::Knowledge => path == "/health" || path == "/api/health",
     };
     if !role_ok {
         return (
@@ -173,6 +177,7 @@ pub(super) async fn auth_mw(
     // Public routes: the SPA shell, health, login, and incoming webhooks (the
     // webhook token is the credential, so no session is required).
     if path == "/"
+        || path == "/health"
         || path == "/api/health"
         || path == "/api/auth/login"
         // Embedded static assets (vendored JS/CSS) — same trust level as "/".

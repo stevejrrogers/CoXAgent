@@ -19,32 +19,58 @@ const MODELS={claude:["sonnet","opus","haiku"],scripted:["n/a"],mock:["n/a"],ope
 const OPENCODE_PROVIDERS=[{id:"anthropic",label:"Anthropic"},{id:"openai",label:"OpenAI"},{id:"google",label:"Google"},{id:"openrouter",label:"OpenRouter"},{id:"groq",label:"Groq"},{id:"deepseek",label:"DeepSeek"},{id:"ollama",label:"Ollama (local)"},{id:"mistral",label:"Mistral"}];
 let OC_MODELS=["claude-sonnet-4-5","claude-opus-4-1","gpt-5","gpt-4o","gemini-2.5-pro","gemini-2.5-flash","llama3.1","qwen2.5-coder","mixtral-8x7b","deepseek-v3","deepseek-r1"];
 let OC_PROVIDERS=OPENCODE_PROVIDERS.map(p=>({...p}));
+// Models keyed by provider id, so the model datalist can filter to the
+// selected provider instead of showing every model from every provider at
+// once. Populated by loadOpencodeModels() from /api/engines/opencode/models.
+let OC_MODELS_BY_PROVIDER={};
 async function loadOpencodeModels(){
-  if(!ME?.auth)return;
-  try{const r=await fetch("/api/engines/opencode/models");const list=await r.json();
+  // NOTE: do NOT gate on ME?.auth — the settings page can render before the
+  // auth bootstrap finishes, and then the model datalist stays empty even
+  // after login resolves. The endpoint is auth-protected server-side, so an
+  // unauthenticated fetch 401s and we fall through to the catch — safe.
+  try{const r=await fetch("/api/engines/opencode/models");
+    if(!r.ok)return;
+    const list=await r.json();
     if(Array.isArray(list)&&list.length){
-      const provs=new Map(); const models=new Set();
+      const provs=new Map(); const byProv={};
       list.forEach(m=>{
         if(m.provider&&m.model){
           provs.set(m.provider,{id:m.provider,label:m.provider.charAt(0).toUpperCase()+m.provider.slice(1)});
-          models.add(m.model);
+          (byProv[m.provider]=byProv[m.provider]||[]).push(m.model);
         }
       });
       if(provs.size>0){
         OC_PROVIDERS=[...provs.values()];
-        OC_MODELS=[...models];
+        OC_MODELS_BY_PROVIDER=byProv;
+        OC_MODELS=Object.values(byProv).flat();
         console.log("Detected "+OC_PROVIDERS.length+" opencode providers with "+OC_MODELS.length+" models");
+        // If the settings panel is already open, re-render each model control
+        // so the datalist picks up the freshly-loaded models — otherwise the
+        // user sees an empty suggestion list until they close and reopen
+        // Settings. The model controls live in <span id="mc-<sid>"> elements
+        // (one per role + "default"); re-reading the current <input> value
+        // preserves what the user already typed.
+        if(document.getElementById("mc-default")&&typeof window.refreshModelControls==="function"){
+          window.refreshModelControls();
+        }
       }
   }}catch(e){/* will retry on settings load */}
 }
 setTimeout(()=>{if(ME?.auth)loadOpencodeModels();},2000);
+function opencodeModelsFor(provider){
+  // Models for one provider, falling back to the flat list if we never
+  // received the keyed data (e.g. the fetch failed or returned empty).
+  const keyed=OC_MODELS_BY_PROVIDER[provider];
+  if(keyed&&keyed.length) return keyed;
+  return OC_MODELS.length?OC_MODELS:["sonnet","opus","gpt-4o"];
+}
 function modelControl(eng,cur,sid){
   if(!eng)return `<input id="mdl-${sid}" value="" placeholder="uses default model" disabled style="flex:1;opacity:.45"/>`;
   const list=MODELS[eng];
   if(!list){ // opencode: provider picker + model with datalist
     const providers=OC_PROVIDERS.length?OC_PROVIDERS:OPENCODE_PROVIDERS;
-    const models=OC_MODELS.length?OC_MODELS:["sonnet","opus","gpt-4o"];
-    const [curProv,curModel]=(cur||"").includes("/")?cur.split("/",2):[providers[0].id,(cur||models[0])];
+    const [curProv,curModel]=(cur||"").includes("/")?cur.split("/",2):[providers[0].id,(opencodeModelsFor(providers[0].id)[0]||"")];
+    const models=opencodeModelsFor(curProv);
     return `<select id="mdl-prov-${sid}" onchange="opencodeModelChange('${sid}')" style="width:140px;flex:none">`+
       providers.map(p=>`<option value="${p.id}" ${p.id===curProv?'selected':''}>${p.label}</option>`).join("")+
       `</select>
@@ -57,9 +83,25 @@ function modelControl(eng,cur,sid){
 }
 function opencodeModelChange(sid){
   const prov=document.getElementById("mdl-prov-"+sid)?.value;
-  const model=document.getElementById("mdl-"+sid)?.value||"";
+  const modelEl=document.getElementById("mdl-"+sid);
+  const model=modelEl?.value||"";
+  // Refresh the datalist to this provider's models, so picking "bizbrain"
+  // shows DeepSeek-V4-Flash / GLM-5.2 / Qwen3.6-... instead of the flat
+  // list of every model from every provider.
+  const datalist=document.getElementById("opencode-models-"+sid);
+  if(datalist){
+    const models=opencodeModelsFor(prov||"");
+    datalist.innerHTML=models.map(m=>`<option value="${esc(m)}">`).join("");
+  }
+  // Clear the model field if it does not exist in the newly-selected
+  // provider's list — otherwise the hint shows a stale "bizbrain/gpt-4o"
+  // that looks valid but would 404 at run time.
+  if(model&&prov){
+    const valid=opencodeModelsFor(prov).includes(model);
+    if(!valid&&modelEl) modelEl.value="";
+  }
   const hint=document.querySelector("#mc-"+sid+" span");
-  if(hint)hint.textContent="= "+prov+"/"+model;
+  if(hint)hint.textContent="= "+(prov||"")+"/"+(modelEl?.value||"");
 }
 function onEngine(sid){const eng=document.getElementById("eng-"+sid).value;
   const list=MODELS[eng];const def=(list&&list.length)?list[0]:(OC_PROVIDERS[0]?.id||"anthropic")+"/"+(OC_MODELS[0]||"sonnet");
@@ -522,24 +564,24 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
     renderTranscripts();
   }else if(CUR==="insights"){
     const sp=s.spend||{by_role:{}};const tok=(sp.input_tokens||0)+(sp.output_tokens||0);
-    // Counterfactual (what it would cost WITHOUT the token-saver) comes from a
-    // cached fetch — cards render in ONE pass, no flash-then-replace.
+    // Token-saver effectiveness: "Actual: X | Without saver: X+Y | Saved: Y".
+    // `saved_input_tokens` is aggregated from the operator's shim savings.log
+    // into the persistent spend each cycle — the gateway cannot read the
+    // operator's shim dir (it's on a different machine in split-deploy), so
+    // the old `/api/token-saver` fetch always returned 0 there.
     const drawKpis=()=>{
       let subTok="",subCost="";
-      const ts=window._tsCache;
-      if(ts&&ts.saved>0&&tok>0){
-        const wouldTok=tok+Math.round(ts.saved/4);
-        subTok="không nén: ~"+fmtK(wouldTok);
-        subCost="không nén: ~"+money((sp.total_cost_usd||0)*(wouldTok/tok));
+      const saved=sp.saved_input_tokens||0;
+      if(saved>0&&tok>0){
+        const wouldTok=tok+saved;
+        const pct=Math.round(saved/wouldTok*100);
+        subTok=`without saver: ~${fmtK(wouldTok)} (saved ${fmtK(saved)}, ${pct}%)`;
+        subCost=`without saver: ~${money((sp.total_cost_usd||0)*(wouldTok/tok))}`;
       }
       setHTML(document.getElementById("cost-kpis"),
         [kpi("Total spend",money(sp.total_cost_usd),subCost),kpi("Tokens",fmtK(tok),subTok),kpi("Runs",sp.runs||0)].join(""));
     };
     drawKpis();
-    if(!window._tsCacheAt||Date.now()-window._tsCacheAt>60000){
-      window._tsCacheAt=Date.now();
-      fetch("/api/token-saver").then(r=>r.json()).then(ts=>{window._tsCache=ts;if(CUR==="insights")drawKpis();}).catch(()=>{});
-    }
     const roles=Object.entries(sp.by_role||{}).sort((a,b)=>b[1]-a[1]);
     const max=roles.length?roles[0][1]:1;
     setHTML(document.getElementById("cost-roles"),roles.length?roles.map(([r,c])=>{

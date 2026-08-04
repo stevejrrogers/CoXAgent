@@ -131,7 +131,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunMilestonesUseCase<S, E> {
         };
         let request = AgentRequest {
             role: Role::Po,
-            system_prompt: prompt_system(),
+            system_prompt: self.prompt_system().await,
             task_prompt,
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(300),
@@ -197,6 +197,20 @@ impl<S: StateStorePort, E: AgentEnginePort> RunMilestonesUseCase<S, E> {
         self.store.save(&state).await?;
         Ok(true)
     }
+
+    /// Resolve the PO milestone system prompt as `local prompts/po.md` first,
+    /// then the embedded default — so a project overriding its PO prompt sees
+    /// it on milestone runs too, not just on the standard PO cycle
+    /// (CXA-F001 AC2).
+    async fn prompt_system(&self) -> String {
+        crate::prompts::resolve_prompt(
+            self.files.as_deref(),
+            &self.work_dir,
+            "po.md",
+            &crate::prompts::system_prompt(crate::prompts::PO),
+        )
+        .await
+    }
 }
 
 /// Whether every milestone target has been released. Unparseable targets are
@@ -205,10 +219,6 @@ fn roadmap_reached(milestones: &[Milestone], current: &SemVer) -> bool {
     milestones
         .iter()
         .all(|m| SemVer::parse(&m.target_version).is_ok_and(|target| *current >= target))
-}
-
-fn prompt_system() -> String {
-    crate::prompts::system_prompt(crate::prompts::PO)
 }
 
 fn parse(raw: &str) -> Result<Vec<MilestoneOut>, String> {
@@ -223,10 +233,12 @@ fn parse(raw: &str) -> Result<Vec<MilestoneOut>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ports::outbound::{AgentOutcome, SandboxStatus};
+    use crate::ports::outbound::{AgentOutcome, FileMeta, SandboxStatus, WorkspaceFilesPort};
     use crate::state::ProjectState;
     use async_trait::async_trait;
     use coxagent_domain::{Complexity, Priority, Ticket, TicketId, TicketType};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
     use std::sync::Mutex;
 
     #[derive(Default)]
@@ -249,6 +261,7 @@ mod tests {
     struct CannedEngine {
         stdout: String,
         seen: Mutex<Vec<String>>,
+        prompts: Mutex<Vec<String>>,
     }
 
     #[async_trait]
@@ -258,6 +271,7 @@ mod tests {
         }
         async fn run(&self, req: AgentRequest) -> Result<AgentOutcome, PortError> {
             self.seen.lock().expect("lock").push(req.task_prompt);
+            self.prompts.lock().expect("lock").push(req.system_prompt);
             Ok(AgentOutcome {
                 stdout: self.stdout.clone(),
                 stderr: String::new(),
@@ -267,6 +281,56 @@ mod tests {
                 session_id: None,
                 sandbox: SandboxStatus::default(),
             })
+        }
+    }
+
+    /// In-memory workspace files double: `prompts/<role>.md` overrides keyed by
+    /// absolute path, so a test can prove a local override reaches the engine
+    /// without any disk IO.
+    #[derive(Default)]
+    struct ParamFiles {
+        files: Mutex<HashMap<PathBuf, String>>,
+    }
+
+    impl ParamFiles {
+        fn put(&self, rel: &str, content: &str) {
+            self.files
+                .lock()
+                .expect("lock")
+                .insert(PathBuf::from(rel), content.to_owned());
+        }
+    }
+
+    #[async_trait]
+    impl WorkspaceFilesPort for ParamFiles {
+        async fn read(&self, path: &std::path::Path) -> Option<String> {
+            self.files.lock().expect("lock").get(path).cloned()
+        }
+        async fn write(&self, path: &std::path::Path, content: &str) -> bool {
+            self.put(&path.to_string_lossy(), content);
+            true
+        }
+        async fn write_bytes(&self, _path: &std::path::Path, _bytes: &[u8]) -> bool {
+            true
+        }
+        async fn delete(&self, _path: &std::path::Path) -> bool {
+            true
+        }
+        async fn stat(&self, path: &std::path::Path) -> Option<FileMeta> {
+            self.read(path).await.map(|c| FileMeta {
+                path: path.to_path_buf(),
+                modified_epoch: 0,
+                size: c.len() as u64,
+            })
+        }
+        async fn list(&self, _dir: &std::path::Path) -> Vec<FileMeta> {
+            Vec::new()
+        }
+        async fn list_recursive(&self, _dir: &std::path::Path) -> Vec<PathBuf> {
+            Vec::new()
+        }
+        async fn list_dirs(&self, _dir: &std::path::Path) -> Vec<PathBuf> {
+            Vec::new()
         }
     }
 
@@ -321,6 +385,7 @@ mod tests {
                         {"name":"GA","goal":"g","target_version":"1.0.0"}]"#
                 .to_owned(),
             seen: Mutex::new(Vec::new()),
+            prompts: Mutex::new(Vec::new()),
         });
         assert!(uc(Arc::clone(&store), Arc::clone(&engine))
             .execute()
@@ -348,6 +413,7 @@ mod tests {
         let engine = Arc::new(CannedEngine {
             stdout: r#"[{"name":"Nope","goal":"g","target_version":"2.0.0"}]"#.to_owned(),
             seen: Mutex::new(Vec::new()),
+            prompts: Mutex::new(Vec::new()),
         });
         assert!(!uc(Arc::clone(&store), Arc::clone(&engine))
             .execute()
@@ -366,6 +432,7 @@ mod tests {
                         {"name":"Real","goal":"g","target_version":"0.9.0"}]"#
                 .to_owned(),
             seen: Mutex::new(Vec::new()),
+            prompts: Mutex::new(Vec::new()),
         });
         assert!(uc(Arc::clone(&store), Arc::clone(&engine))
             .execute()
@@ -380,5 +447,43 @@ mod tests {
             .map(|m| m.name.clone())
             .collect();
         assert_eq!(names, ["Budget caps", "Real"]);
+    }
+
+    /// CXA-F001 AC2 regression: the PO milestone run must honour a project-local
+    /// `prompts/po.md` override (not just the embedded constant). Without this,
+    /// a workspace that edits its PO prompt sees it everywhere except milestone
+    /// runs.
+    #[tokio::test]
+    async fn pomilestones_honours_a_project_local_po_md_override() {
+        let root = PathBuf::from("/root");
+        let files = ParamFiles::default();
+        files.put("/root/prompts/po.md", "CUSTOM PO MILESTONE SYSTEM PROMPT");
+
+        let store = seeded("0.0.0", vec![]);
+        let engine = Arc::new(CannedEngine {
+            stdout: r#"[{"name":"First","goal":"g","target_version":"0.1.0"}]"#.to_owned(),
+            seen: Mutex::new(Vec::new()),
+            prompts: Mutex::new(Vec::new()),
+        });
+        let uc = RunMilestonesUseCase::new(
+            Arc::clone(&store),
+            Arc::clone(&engine),
+            Config::default(),
+            root.clone(),
+            "ship it".to_owned(),
+        )
+        .with_files(Some(Arc::new(files)));
+
+        assert!(uc.execute().await.expect("run"));
+
+        let sys = engine.prompts.lock().expect("lock")[0].clone();
+        assert!(
+            sys.contains("CUSTOM PO MILESTONE SYSTEM PROMPT"),
+            "the project-local prompts/po.md must reach the PO milestone engine: {sys}"
+        );
+        assert!(
+            !sys.contains("world-class Product Owner"),
+            "the embedded PO default must be replaced, not concatenated: {sys}"
+        );
     }
 }

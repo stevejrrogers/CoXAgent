@@ -627,9 +627,13 @@ pub(super) async fn force_merge(p: ProjectHandle, num: u64) {
         .await;
         let request = coxagent_application::ports::outbound::AgentRequest {
             role: coxagent_domain::Role::DevBug,
-            system_prompt: coxagent_application::prompts::system_prompt(
-                coxagent_application::prompts::DEV,
-            ),
+            system_prompt: coxagent_application::prompts::resolve_prompt(
+                p.files.as_deref(),
+                &p.work_dir,
+                "dev.md",
+                &coxagent_application::prompts::system_prompt(coxagent_application::prompts::DEV),
+            )
+            .await,
             task_prompt: format!(
                 "URGENT: a human ordered PR #{num} (branch `{h}`) force-merged. It has merge \
                  conflicts with `{b}`.\n\
