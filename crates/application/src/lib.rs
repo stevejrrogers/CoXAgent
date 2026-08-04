@@ -28,6 +28,7 @@ pub use config::{
     BudgetCaps, Config, DeployConfig, EngineChoice, EngineKind, EngineMapping, LiveBudget, Mode,
     PolicyConfig, WorkflowConfig,
 };
+pub use codegraph::{BAChoreTicketProposal, CoverageGapAnalysis};
 pub use error::{AppError, PortError};
 pub use state::{
     Attachment, Channel, ChatMsg, Comment, DesignSystem, DocPage, HealthCheckResult, Milestone,

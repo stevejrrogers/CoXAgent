@@ -670,6 +670,284 @@ fn extract_symbol(lang: &str, line: &str) -> Option<(&'static str, String)> {
     }
 }
 
+// ─── Coverage gap detection API — public surface for tests (CXA-F007) ────────
+
+/// Analysis result: uncovered functions grouped by module.
+///
+/// ```
+/// use coxagent_application::codegraph::CoverageGapAnalysis;
+/// let analysis = CoverageGapAnalysis {
+///     modules: std::collections::BTreeMap::new(),
+/// };
+/// ```
+#[allow(clippy::missing_docs_in_private_items)]
+pub struct CoverageGapAnalysis {
+    /// Module name → list of uncovered function names.
+    pub modules: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+impl CoverageGapAnalysis {
+    /// Scan the codebase and identify uncovered top-level functions.
+    ///
+    /// # Arguments
+    /// * `graph` - The indexed code graph
+    /// * `files` - Files port for reading source
+    /// * `source_root` - Root of production source
+    /// * `test_root` - Root of test source (same as source_root if tests
+    ///   colocated)
+    #[allow(clippy::unused_async)]
+    pub async fn scan(
+        graph: &CodeGraph,
+        files: &dyn crate::ports::outbound::WorkspaceFilesPort,
+        source_root: &Path,
+        _test_root: &Path,
+    ) -> Self {
+        // Static coverage-gap detection: an AST pass over the tree the tests
+        // will run against. A top-level production function is a GAP when no
+        // test context references it — nothing is compiled, nothing executes.
+        //
+        // AC1: report uncovered top-level functions, grouped by module.
+        // AC4: a function referenced by a test context is covered — a test file
+        //      that imports/calls it (whole-file region), or an inline
+        //      `#[cfg(test)]` module in the same file (tail-of-file region).
+        // AC2: a function cfg-gated to a platform we are NOT on is excluded —
+        //      it is not a gap for the runner that cannot reach it.
+        let os = current_os();
+
+        // Re-read the tree through the port: the test-region and cfg-gate scans
+        // need the text, which the index does not carry.
+        let sources = walk_sources(files, source_root).await;
+        let text_of: std::collections::HashMap<&str, (&str, &'static str)> = sources
+            .iter()
+            .map(|(rel, lang, text)| (rel.as_str(), (text.as_str(), *lang)))
+            .collect();
+
+        // Candidates: top-level `fn`s in non-test files — the things that need
+        // tests. Methods inside impls/types are out of MVP scope.
+        let mut prod_fns: Vec<(&Symbol, &str, &'static str)> = Vec::new();
+        for s in &graph.symbols {
+            if s.kind == "fn" && s.scope.is_none() && !is_test_path(&s.file) {
+                if let Some((text, lang)) = text_of.get(s.file.as_str()).copied() {
+                    prod_fns.push((s, text, lang));
+                }
+            }
+        }
+
+        // Every production function a test region references is covered.
+        let mut covered: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (rel, lang, text) in &sources {
+            // The test region of this file: the whole file for a test-path
+            // file, or the tail below a `#[cfg(test)]` marker otherwise.
+            let start = if is_test_path(rel.as_str()) {
+                Some(1)
+            } else {
+                cfg_test_start(text.as_str())
+            };
+            let Some(start) = start else { continue };
+            for (s, _, _) in &prod_fns {
+                if covered.contains(&s.name) || !text.as_str().contains(s.name.as_str()) {
+                    continue;
+                }
+                if named_in_test_region(lang, text.as_str(), start, &s.name) {
+                    covered.insert(s.name.clone());
+                }
+            }
+        }
+
+        // Uncovered, on-platform functions are the gaps, grouped by module.
+        let mut modules: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for (s, text, _lang) in &prod_fns {
+            if let Some(cfg_os) = cfg_target_os(text, s.line) {
+                if cfg_os != os {
+                    continue; // gated to another platform — not a gap on this host
+                }
+            }
+            if covered.contains(&s.name) {
+                continue;
+            }
+            modules
+                .entry(module_of(&s.file))
+                .or_default()
+                .push(s.name.clone());
+        }
+        for names in modules.values_mut() {
+            names.sort();
+            names.dedup();
+        }
+        Self { modules }
+    }
+}
+
+/// Proposed BA chore tickets for uncovered modules.
+pub struct BAChoreTicketProposal {
+    /// Proposed chore tickets.
+    pub tickets: Vec<BATicket>,
+}
+
+/// The default threshold for proposing a ticket: any module with more than
+/// `DEFAULT_UNCOVERED_THRESHOLD` uncovered functions triggers a proposal.
+pub const DEFAULT_UNCOVERED_THRESHOLD: usize = 3;
+
+impl BAChoreTicketProposal {
+    /// Propose chores for modules exceeding the default threshold
+    /// ([`DEFAULT_UNCOVERED_THRESHOLD`]).
+    ///
+    /// # Arguments
+    /// * `analysis` - The coverage gap analysis results
+    #[must_use]
+    pub fn new(analysis: &CoverageGapAnalysis) -> Self {
+        Self::with_threshold(analysis, DEFAULT_UNCOVERED_THRESHOLD)
+    }
+
+    /// Propose chores for modules with more than `threshold` uncovered
+    /// functions. Lets a project tune how eager the BA is about coverage.
+    ///
+    /// # Arguments
+    /// * `analysis` - The coverage gap analysis results
+    /// * `threshold` - Only modules with strictly more uncovered functions than
+    ///   this get a proposed chore ticket
+    #[must_use]
+    pub fn with_threshold(analysis: &CoverageGapAnalysis, threshold: usize) -> Self {
+        // AC3: propose one chore ticket per module whose uncovered count
+        // exceeds the threshold. Below threshold the gaps are noise — the BA
+        // is not sold a ticket for a one-function blind spot.
+        let mut tickets = Vec::new();
+        for (module, fns) in &analysis.modules {
+            if fns.len() > threshold {
+                let listed = fns
+                    .iter()
+                    .map(|f| format!("- `{f}`"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                tickets.push(BATicket {
+                    title: format!("Add tests for uncovered functions in {module}"),
+                    description: format!(
+                        "Module `{module}` has {} top-level function(s) with no test \
+                         referencing them:\n{listed}\n\nAdd tests that exercise each so \
+                         regressions there are caught.",
+                        fns.len()
+                    ),
+                });
+            }
+        }
+        Self { tickets }
+    }
+}
+
+/// A proposed BA chore ticket for test coverage gaps.
+pub struct BATicket {
+    /// Ticket title, e.g. "Add tests for uncovered functions in module_x"
+    pub title: String,
+    /// Description listing the uncovered functions.
+    pub description: String,
+}
+
+/// Whether a repo-relative path names a test file. Mirrors the run_dev gate
+/// (`run_dev/gates.rs`) so the coverage view and the DoD view agree on what
+/// "a test" is.
+fn is_test_path(rel: &str) -> bool {
+    let f = rel.to_lowercase();
+    f.contains("/tests/")
+        || f.starts_with("tests/")
+        || f.ends_with("_test.rs")
+        || f.ends_with("_test.go")
+        || f.ends_with(".test.ts")
+        || f.ends_with(".test.js")
+        || f.contains("test_")
+}
+
+/// 1-based line of a file's first `#[cfg(test)]` module marker, if any. Code
+/// at or below it is the inline test region (the same boundary the run_dev
+/// gate uses).
+fn cfg_test_start(text: &str) -> Option<usize> {
+    text.lines()
+        .position(|l| l.trim() == "#[cfg(test)]")
+        .map(|idx| idx + 1)
+}
+
+/// The module a production file belongs to — its immediate parent directory —
+/// used to group coverage gaps into BA-sized units.
+fn module_of(rel: &str) -> String {
+    Path::new(rel)
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "root".to_owned())
+}
+
+/// The target OS the test runner builds for, from cargo's
+/// `CARGO_CFG_TARGET_OS`. It keys the platform gate: a function gated to a
+/// DIFFERENT os is excluded, and when the target is unknown (empty — not under
+/// cargo) no platform-specific function is presumed reachable. Consistently
+/// reading the same variable the callers use keeps the gate and its report in
+/// agreement whatever the host.
+fn current_os() -> String {
+    std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default()
+}
+
+/// The `target_os` a function is gated behind by a preceding
+/// `#[cfg(target_os = "...")]`, if any. Walks upward from the fn's line,
+/// skipping comments and unrelated attributes, and stops at the first real
+/// item or a non-target_os cfg.
+fn cfg_target_os(text: &str, fn_line: usize) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    // `fn_line` is 1-based; the attribute chain sits directly above it.
+    let mut i = fn_line.checked_sub(2)?;
+    let mut budget = 6usize;
+    while budget > 0 {
+        budget -= 1;
+        let raw = match lines.get(i) {
+            Some(l) => *l,
+            None => break,
+        };
+        let l = raw.trim();
+        if l.is_empty() || l.starts_with("//") || l.starts_with("///") || l.starts_with("//!") {
+            i = i.saturating_sub(1);
+            continue;
+        }
+        if let Some(cfg) = l.strip_prefix("#[cfg") {
+            return target_os_from(cfg);
+        }
+        if l.starts_with('#') && l.ends_with(']') {
+            i = i.saturating_sub(1); // #[derive] / #[allow] / #[doc] etc — keep going
+            continue;
+        }
+        return None;
+    }
+    None
+}
+
+/// Pull the OS out of the body of `#[cfg(target_os = "...")]`.
+fn target_os_from(cfg: &str) -> Option<String> {
+    let i = cfg.find("target_os")?;
+    let rest = &cfg[i + "target_os".len()..];
+    let quoted = rest.split('=').nth(1)?.trim().trim_start_matches('"');
+    let val = quoted.split('"').next()?;
+    Some(val.to_owned())
+}
+
+/// Whether `name` is referenced inside the test region that starts at 1-based
+/// `start_line` of `text` (whole file when `start_line == 1`).
+fn named_in_test_region(lang: &'static str, text: &str, start_line: usize, name: &str) -> bool {
+    if start_line <= 1 {
+        return crate::ts::reference_lines(lang, text, name)
+            .map_or_else(|| region_contains_word(text, 1, name), |lines| !lines.is_empty());
+    }
+    match crate::ts::reference_lines(lang, text, name) {
+        Some(lines) => lines.iter().any(|l| *l >= start_line),
+        None => region_contains_word(text, start_line, name),
+    }
+}
+
+/// Word-boundary scan fallback for languages tree-sitter does not index.
+fn region_contains_word(text: &str, start_line: usize, name: &str) -> bool {
+    text.lines()
+        .skip(start_line.saturating_sub(1))
+        .any(|l| word_matches(l, name))
+}
+
 fn now_rfc3339() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
@@ -679,6 +957,7 @@ fn now_rfc3339() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn rust_symbols_and_imports() {
@@ -974,5 +1253,276 @@ mod tests {
             .await
             .is_some());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ─── Coverage gap detection tests (CXA-F007) ────────────────────────────
+
+    fn build_coverage_fixture() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("covfx-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Production code in module_a — has inline test module covering some functions
+        std::fs::create_dir_all(dir.join("src/module_a")).expect("mk");
+        std::fs::write(
+            dir.join("src/module_a/funcs.rs"),
+            "
+/// Covers AC4: inline test modules satisfy coverage for their host file
+pub fn covered_by_inline() { }
+pub fn also_covered_by_inline() { }
+pub fn uncovered_one() { }
+pub fn uncovered_two() { }
+pub fn uncovered_three() { }
+
+// Inline #[cfg(test)] module covers the first two
+#[cfg(test)]
+mod inline_tests {
+    use super::*;
+
+    #[test]
+    fn tests_covered_functions() {
+        covered_by_inline();
+        also_covered_by_inline();
+    }
+}
+",
+        )
+        .expect("w");
+
+        // Production code in module_b — no inline tests, one function is cfg-gated
+        std::fs::create_dir_all(dir.join("src/module_b")).expect("mk2");
+        std::fs::write(
+            dir.join("src/module_b/funcs.rs"),
+            r#"
+pub fn b_func_a() { }
+pub fn b_func_b() { }
+pub fn b_func_c() { }
+pub fn b_func_d() { }
+
+// Platform-gated: macOS only
+#[cfg(target_os = "macos")]
+pub fn macos_only_helper() { }
+
+// Platform-gated: Linux only (for testing exclusion)
+#[cfg(target_os = "linux")]
+pub fn linux_only_helper() { }
+"#,
+        )
+        .expect("w2");
+
+        // Separate test file for module_b — covers one function by calling it
+        std::fs::create_dir_all(dir.join("src/tests")).expect("mk3");
+        std::fs::write(
+            dir.join("src/tests/module_b_tests.rs"),
+            r"
+use crate::module_b::funcs::*;
+
+#[test]
+fn tests_b_func_a() {
+    b_func_a();
+}
+",
+        )
+        .expect("w3");
+
+        dir
+    }
+
+    /// Test AC1: coverage analysis identifies uncovered top-level functions
+    /// and reports them grouped by module.
+    #[tokio::test]
+    async fn coverage_identifies_uncovered_functions_grouped_by_module() {
+        let fixture = build_coverage_fixture();
+        let root = Path::new(&fixture);
+
+        // Build the code graph
+        let graph = CodeGraph::index(&crate::test_fs::StdFsFiles, root).await;
+
+        // The coverage gate should identify uncovered functions
+        let gaps = CoverageGapAnalysis::scan(&graph, &crate::test_fs::StdFsFiles, root, root).await;
+
+        // module_a has 3 uncovered functions (uncovered_one, uncovered_two,
+        // uncovered_three)
+        assert!(
+            gaps.modules.contains_key("module_a"),
+            "module_a should be in the gap report"
+        );
+        let module_a_gaps = &gaps.modules["module_a"];
+        assert_eq!(
+            module_a_gaps.len(),
+            3,
+            "module_a should have 3 uncovered functions"
+        );
+        assert!(module_a_gaps.contains(&"uncovered_one".to_owned()));
+        assert!(module_a_gaps.contains(&"uncovered_two".to_owned()));
+        assert!(module_a_gaps.contains(&"uncovered_three".to_owned()));
+
+        // module_b functions are NOT uncovered by inline tests or test files
+        // b_func_a is covered by the external test file
+        // But b_func_b, b_func_c, b_func_d should be uncovered
+        assert!(
+            gaps.modules.contains_key("module_b"),
+            "module_b should be in the gap report"
+        );
+        let b_gaps = &gaps.modules["module_b"];
+        assert!(
+            !b_gaps.contains(&"b_func_a".to_owned()),
+            "b_func_a should be covered by external test file"
+        );
+        assert!(b_gaps.contains(&"b_func_b".to_owned()));
+        assert!(
+            !module_a_gaps.contains(&"covered_by_inline".to_owned()),
+            "covered_by_inline should NOT appear — inline test satisfies coverage"
+        );
+
+        std::fs::remove_dir_all(&fixture).ok();
+    }
+
+    /// Test AC2: platform-gated functions are excluded from coverage gaps
+    /// when the test runner is not on that platform.
+    #[tokio::test]
+    async fn platform_gated_functions_excluded_for_mismatched_platform() {
+        let fixture = build_coverage_fixture();
+        let root = Path::new(&fixture);
+
+        let graph = CodeGraph::index(&crate::test_fs::StdFsFiles, root).await;
+        let gaps = CoverageGapAnalysis::scan(&graph, &crate::test_fs::StdFsFiles, root, root).await;
+
+        let current = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+
+        // The function for the OTHER platform should be excluded
+        if current == "macos" {
+            // linux_only_helper should NOT appear in gaps
+            for gap_list in gaps.modules.values() {
+                assert!(
+                    !gap_list.contains(&"linux_only_helper".to_owned()),
+                    "linux_only_helper should be excluded on macOS platform"
+                );
+            }
+        } else {
+            // macos_only_helper should NOT appear in gaps
+            for gap_list in gaps.modules.values() {
+                assert!(
+                    !gap_list.contains(&"macos_only_helper".to_owned()),
+                    "macos_only_helper should be excluded on non-macOS platforms"
+                );
+            }
+        }
+
+        std::fs::remove_dir_all(&fixture).ok();
+    }
+
+    /// Test AC3: BA auto-proposes chore tickets when threshold exceeded
+    /// (default: >3 uncovered functions in a module).
+    #[tokio::test]
+    async fn ba_tickets_proposed_when_uncovered_module_exceeds_threshold() {
+        let fixture = build_coverage_fixture();
+        let root = Path::new(&fixture);
+
+        // Create a module with more than the default threshold (3) uncovered
+        std::fs::create_dir_all(root.join("src/huge_module")).expect("mk");
+        std::fs::write(
+            root.join("src/huge_module/big.rs"),
+            r"
+pub fn missing_test_1() { }
+pub fn missing_test_2() { }
+pub fn missing_test_3() { }
+pub fn missing_test_4() { }  // This one exceeds threshold at >3
+",
+        )
+        .expect("w");
+
+        let graph = CodeGraph::index(&crate::test_fs::StdFsFiles, root).await;
+
+        // Scan with default threshold
+        let gaps = CoverageGapAnalysis::scan(&graph, &crate::test_fs::StdFsFiles, root, root).await;
+
+        // BA should propose tickets
+        let proposal = BAChoreTicketProposal::new(&gaps);
+
+        // huge_module has 4 uncovered functions, exceeds threshold
+        assert!(
+            !proposal.tickets.is_empty(),
+            "Should propose at least one chore ticket for huge_module"
+        );
+
+        // Verify the ticket references the right module and functions
+        let tickets_for_huge: Vec<_> = proposal
+            .tickets
+            .iter()
+            .filter(|t| t.title.contains("huge_module"))
+            .collect();
+        assert_eq!(
+            tickets_for_huge.len(),
+            1,
+            "Should have exactly one chore ticket for huge_module"
+        );
+        let ticket = &tickets_for_huge[0];
+        assert!(ticket.description.contains("missing_test_1"));
+        assert!(ticket.description.contains("missing_test_4"));
+
+        std::fs::remove_dir_all(&fixture).ok();
+    }
+
+    /// Test AC3 (alternate): modules below threshold do not trigger tickets.
+    #[tokio::test]
+    async fn ba_tickets_not_proposed_when_under_threshold() {
+        let gap_analysis = CoverageGapAnalysis {
+            modules: {
+                let mut m = std::collections::BTreeMap::new();
+                // Only 2 uncovered functions — below >3 threshold
+                m.insert(
+                    "small_module".to_owned(),
+                    vec!["func_a".to_owned(), "func_b".to_owned()],
+                );
+                m
+            },
+        };
+
+        let proposal = BAChoreTicketProposal::new(&gap_analysis);
+        assert!(
+            proposal.tickets.is_empty(),
+            "No tickets when all modules are under threshold"
+        );
+    }
+
+    /// Test AC4: inline #[cfg(test)] modules satisfy coverage for their host file.
+    #[tokio::test]
+    async fn inline_test_modules_satisfy_coverage_for_host_file() {
+        let fixture = build_coverage_fixture();
+        let root = Path::new(&fixture);
+
+        let graph = CodeGraph::index(&crate::test_fs::StdFsFiles, root).await;
+        let gaps = CoverageGapAnalysis::scan(&graph, &crate::test_fs::StdFsFiles, root, root).await;
+
+        // Functions covered by inline test should NOT appear
+        let module_a_gaps = gaps.modules.get("module_a").cloned().unwrap_or_default();
+
+        assert!(
+            !module_a_gaps.contains(&"covered_by_inline".to_owned()),
+            "covered_by_inline should not be a gap — inline test covers it"
+        );
+        assert!(
+            !module_a_gaps.contains(&"also_covered_by_inline".to_owned()),
+            "also_covered_by_inline should not be a gap — inline test covers it"
+        );
+    }
+
+    /// Test AC4: test files that import production symbols mark them as covered.
+    #[tokio::test]
+    async fn external_test_file_imports_satisfy_coverage() {
+        let fixture = build_coverage_fixture();
+        let root = Path::new(&fixture);
+
+        let graph = CodeGraph::index(&crate::test_fs::StdFsFiles, root).await;
+        let gaps = CoverageGapAnalysis::scan(&graph, &crate::test_fs::StdFsFiles, root, root).await;
+
+        // b_func_a has an external test file that imports and calls it, so it
+        // should NOT appear as uncovered
+        let b_gaps = gaps.modules.get("module_b").cloned().unwrap_or_default();
+
+        assert!(
+            !b_gaps.contains(&"b_func_a".to_owned()),
+            "b_func_a should be covered by external test file import"
+        );
     }
 }

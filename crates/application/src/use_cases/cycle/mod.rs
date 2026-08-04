@@ -64,6 +64,8 @@ pub struct CycleReport {
     pub feature_done: Option<TicketId>,
     pub documented: Option<TicketId>,
     pub bugs_filed: Vec<TicketId>,
+    /// Chore tickets the coverage-gap step proposed this cycle (CXA-F007).
+    pub coverage_chores: Vec<TicketId>,
     pub errors: Vec<String>,
     /// True when accumulated spend has crossed the configured budget cap.
     pub over_budget: bool,
@@ -82,6 +84,7 @@ impl CycleReport {
             || self.feature_done.is_some()
             || self.documented.is_some()
             || !self.bugs_filed.is_empty()
+            || !self.coverage_chores.is_empty()
     }
 
     #[must_use]
@@ -104,6 +107,9 @@ impl CycleReport {
             let _ = write!(s, " docs {d}");
         }
         let _ = write!(s, " bugs+{}", self.bugs_filed.len());
+        if !self.coverage_chores.is_empty() {
+            let _ = write!(s, " coverage+{}", self.coverage_chores.len());
+        }
         if !self.errors.is_empty() {
             let _ = write!(s, " ({} errors)", self.errors.len());
         }
@@ -874,6 +880,18 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     Ok(mut ids) => report.bugs_filed.append(&mut ids),
                     Err(e) => report.errors.push(format!("CONFORMANCE: {e}")),
                 }
+            }
+
+            // Coverage-gap detection (CXA-F007): after DEV ships, the team learns
+            // where its tests are thin. A deterministic static scan proposes a
+            // low-priority CHORE per module whose uncovered functions clear the
+            // configured threshold (deduped, so it is idempotent across cycles).
+            // It runs on any leader cycle — coverage drifts as code lands, not
+            // only on the cycle that shipped something.
+            self.report("BA", "finding coverage gaps");
+            match self.coverage().execute().await {
+                Ok(ids) => report.coverage_chores = ids,
+                Err(e) => report.errors.push(format!("COVERAGE: {e}")),
             }
 
             // Auto-merge: SA deep-dives open PRs and merges or requests changes.

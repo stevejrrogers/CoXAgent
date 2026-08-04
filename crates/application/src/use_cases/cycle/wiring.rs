@@ -112,4 +112,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         )
         .with_files(self.files.clone())
     }
+
+    /// The coverage-gap detection step (CXA-F007) — runs after DEV ships so the
+    /// team learns where its untested code lives and the BA gets structured
+    /// data to propose test-improvement chores.
+    pub(super) fn coverage(&self) -> crate::use_cases::RunCoverageUseCase<S> {
+        crate::use_cases::RunCoverageUseCase::new(
+            Arc::clone(&self.store),
+            self.work_dir.clone(),
+            self.config.clone(),
+        )
+        .with_files(self.files.clone())
+    }
 }

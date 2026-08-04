@@ -385,6 +385,43 @@ impl Default for PolicyConfig {
     }
 }
 
+/// Test-coverage gap detection (CXA-F007). A deterministic static pass, run
+/// after DEV ships code, that proposes low-priority chore tickets for the
+/// modules with the most untested top-level functions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CoverageConfig {
+    /// Whether the coverage-gap step files chore tickets at all. Default on —
+    /// a project opting out turns it off explicitly.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// A module must have MORE than this many uncovered functions before a
+    /// chore ticket is proposed. `0` = the default (3).
+    #[serde(default)]
+    pub threshold: usize,
+}
+
+impl Default for CoverageConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            threshold: 0,
+        }
+    }
+}
+
+impl CoverageConfig {
+    /// The effective threshold — `0` falls back to the default of 3 uncovered
+    /// functions per module.
+    #[must_use]
+    pub fn threshold(&self) -> usize {
+        if self.threshold == 0 {
+            3
+        } else {
+            self.threshold
+        }
+    }
+}
+
 /// Deploy configuration. `host_port` is assigned per project at onboard so two
 /// projects deploying with `docker compose` on one host do not fight over the
 /// same published port — agents are told which port to bind.
@@ -567,6 +604,9 @@ pub struct Config {
     /// Governance policy (model allowlist, forbidden paths, daily budget).
     #[serde(default)]
     pub policy: PolicyConfig,
+    /// Test-coverage gap detection (CXA-F007) — post-ship chore proposals.
+    #[serde(default)]
+    pub coverage: CoverageConfig,
     /// Deploy settings (per-project host port allocation).
     #[serde(default)]
     pub deploy: DeployConfig,
@@ -589,6 +629,7 @@ impl Default for Config {
             workflow: WorkflowConfig::default(),
             architecture: Vec::new(),
             policy: PolicyConfig::default(),
+            coverage: CoverageConfig::default(),
             deploy: DeployConfig::default(),
         }
     }
