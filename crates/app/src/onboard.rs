@@ -6,7 +6,7 @@
 use coxagent_application::config::Config;
 use coxagent_application::ports::outbound::StateStorePort;
 use coxagent_application::use_cases::{AddTicketInput, AddTicketUseCase};
-use coxagent_domain::{Complexity, Priority, TicketType};
+use coxagent_domain::{Complexity, Priority, SemVer, TicketType};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process::Command;
@@ -503,6 +503,13 @@ pub async fn brownfield<S: StateStorePort + 'static>(
     );
     state.alias = alias.clone();
     state.display_name = Some(name.to_owned());
+    // Adopt the version the codebase already declares. Starting an adopted
+    // project at 0.0.0 is not merely cosmetic: the release step bumps from
+    // whatever this says, so a repo sitting at 2.21.0 would be handed 0.0.1 and
+    // then ship version numbers that collide with the ones already published.
+    if let Some(v) = detect_codebase_version(codebase) {
+        state.current_version = v;
+    }
     store.save(&state).await?;
 
     // Git is mandatory (branch-per-ticket, audit trail). Initialise + baseline
@@ -969,5 +976,113 @@ services:
         );
         assert_eq!(parse_remote("not-a-url"), None);
         assert_eq!(parse_remote("git@github.com:justname"), None);
+    }
+}
+
+/// The version an existing codebase already declares, for adoption.
+///
+/// The manifest wins over the newest git tag. A tag says what last shipped,
+/// which is routinely BEHIND the working version — anchoring to it would make
+/// the next release land on a number the manifest already claims.
+fn detect_codebase_version(codebase: &Path) -> Option<SemVer> {
+    /// A manifest filename and how to pull the version string out of it.
+    type Manifest = (&'static str, fn(&str) -> Option<String>);
+    let manifests: [Manifest; 3] = [
+        ("Cargo.toml", |t| {
+            // `[workspace.package]` or `[package]`; the first bare `version =`
+            // is the crate's own, not a dependency's (those are inline tables).
+            t.lines()
+                .map(str::trim)
+                .find(|l| l.starts_with("version") && l.contains('"'))
+                .and_then(|l| l.split('"').nth(1).map(ToOwned::to_owned))
+        }),
+        ("package.json", |t| {
+            serde_json::from_str::<serde_json::Value>(t)
+                .ok()?
+                .get("version")?
+                .as_str()
+                .map(ToOwned::to_owned)
+        }),
+        ("pyproject.toml", |t| {
+            t.lines()
+                .map(str::trim)
+                .find(|l| l.starts_with("version") && l.contains('"'))
+                .and_then(|l| l.split('"').nth(1).map(ToOwned::to_owned))
+        }),
+    ];
+    for (file, parse) in manifests {
+        if let Ok(text) = std::fs::read_to_string(codebase.join(file)) {
+            if let Some(v) = parse(&text).as_deref().and_then(parse_semver) {
+                return Some(v);
+            }
+        }
+    }
+    // No manifest we read: fall back to the newest tag.
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(codebase)
+        .args(["describe", "--tags", "--abbrev=0"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_semver(String::from_utf8_lossy(&out.stdout).trim())
+}
+
+/// `1.2.3` or `v1.2.3` as a [`SemVer`]; `None` for anything else (a date tag, a
+/// release name) rather than a wrong guess.
+fn parse_semver(raw: &str) -> Option<SemVer> {
+    let s = raw.trim().trim_start_matches('v');
+    let mut parts = s.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    // Tolerate a pre-release/build suffix on the patch: `3-rc1` -> 3.
+    let patch = parts.next()?.split(['-', '+']).next()?.parse().ok()?;
+    Some(SemVer::new(major, minor, patch))
+}
+
+#[cfg(test)]
+mod version_adoption_tests {
+    use super::{detect_codebase_version, parse_semver};
+
+    #[test]
+    fn a_manifest_version_is_adopted_over_the_newest_tag() {
+        let dir = tempfile::tempdir().expect("tmp");
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nversion = \"2.21.0\"\n",
+        )
+        .expect("write");
+        assert_eq!(
+            detect_codebase_version(dir.path()).map(|v| v.to_string()),
+            Some("2.21.0".to_owned()),
+            "the manifest is the working version; a tag is what last shipped"
+        );
+    }
+
+    #[test]
+    fn a_tag_like_version_parses_with_or_without_the_v() {
+        assert_eq!(
+            parse_semver("v2.12.0").map(|v| v.to_string()),
+            Some("2.12.0".to_owned())
+        );
+        assert_eq!(
+            parse_semver("2.12.0").map(|v| v.to_string()),
+            Some("2.12.0".to_owned())
+        );
+        assert_eq!(
+            parse_semver("1.0.0-rc1").map(|v| v.to_string()),
+            Some("1.0.0".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_name_that_is_not_a_version_is_refused_rather_than_guessed() {
+        // Adopting a wrong version is worse than adopting none: the release
+        // step would bump from it and publish colliding numbers.
+        for bad in ["release-summer", "2026-08-04", "", "v"] {
+            assert!(parse_semver(bad).is_none(), "{bad:?} must not parse");
+        }
     }
 }
