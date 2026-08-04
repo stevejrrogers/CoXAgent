@@ -39,6 +39,16 @@ pub struct WorkerEntry {
     /// ITS machine. `None` until it has reported (or when git is disabled).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git: Option<GitCheck>,
+    /// The developer tooling (git/gh/glab/docker) present on THIS runner's
+    /// machine, and that machine's OS — serialized `Tooling`.
+    ///
+    /// The hub cannot answer either: `std::env::consts::OS` is the OS of
+    /// whatever process asks, so a container reported `linux` and offered
+    /// `apt-get install` to someone on a Mac, then marked git, gh and docker
+    /// missing while all three sat installed and signed in on the machine the
+    /// agents actually run on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tooling: Option<serde_json::Value>,
 }
 
 /// The outcome of probing git + forge access from the machine that will run
@@ -71,6 +81,7 @@ pub struct WorkerCaps {
     pub engines: Vec<String>,
     pub models: Vec<String>,
     pub git: Option<GitCheck>,
+    pub tooling: Option<serde_json::Value>,
 }
 
 /// Atomic read-modify-write with retry: load the state, apply `f`, and save. If

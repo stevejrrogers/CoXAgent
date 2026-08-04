@@ -44,7 +44,9 @@ ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS engines TEXT;
 -- newline separated. Custom providers exist only in the user's own CLI config.
 ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS models TEXT;
 -- Worker registry: JSON result of probing git + forge access on that machine.
-ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS gitcheck TEXT;";
+ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS gitcheck TEXT;
+-- Worker registry: that machine's OS + developer tooling, as JSON.
+ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS tooling TEXT;";
 
 /// Leader lease lifetime (seconds) — a runner must renew within this or another
 /// takes over. Matches the JSON store.
@@ -311,12 +313,12 @@ impl StateStorePort for SqlStateStore {
             .execute(
                 "INSERT INTO project_coord
                     (project_id, kind, coord_key, worker, at, role, ticket,
-                     engines, models, gitcheck)
-                 VALUES ($1, 'worker', $2, $2, now(), $3, $4, $5, $6, $7)
+                     engines, models, gitcheck, tooling)
+                 VALUES ($1, 'worker', $2, $2, now(), $3, $4, $5, $6, $7, $8)
                  ON CONFLICT (project_id, kind, coord_key) DO UPDATE
                     SET at = now(), role = EXCLUDED.role, ticket = EXCLUDED.ticket,
                         engines = EXCLUDED.engines, models = EXCLUDED.models,
-                        gitcheck = EXCLUDED.gitcheck",
+                        gitcheck = EXCLUDED.gitcheck, tooling = EXCLUDED.tooling",
                 &[
                     &self.project_id,
                     &worker,
@@ -328,6 +330,11 @@ impl StateStorePort for SqlStateStore {
                         .git
                         .as_ref()
                         .and_then(|g| serde_json::to_string(g).ok())
+                        .unwrap_or_default(),
+                    &caps
+                        .tooling
+                        .as_ref()
+                        .and_then(|t| serde_json::to_string(t).ok())
                         .unwrap_or_default(),
                 ],
             )
@@ -346,7 +353,7 @@ impl StateStorePort for SqlStateStore {
                 "SELECT worker, coalesce(role,''), coalesce(ticket,''),
                         to_char(at, 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),
                         coalesce(engines,''), coalesce(models,''),
-                        coalesce(gitcheck,'')
+                        coalesce(gitcheck,''), coalesce(tooling,'')
                    FROM project_coord
                   WHERE project_id = $1 AND kind = 'worker'
                     AND at > now() - make_interval(secs => $2)
@@ -375,6 +382,7 @@ impl StateStorePort for SqlStateStore {
                     .map(ToOwned::to_owned)
                     .collect(),
                 git: serde_json::from_str(&r.get::<_, String>(6)).ok(),
+                tooling: serde_json::from_str(&r.get::<_, String>(7)).ok(),
             })
             .collect())
     }

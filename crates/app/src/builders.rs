@@ -508,6 +508,7 @@ pub(crate) async fn local_caps(
     coxagent_application::ports::outbound::WorkerCaps {
         engines: detected_engines().into_iter().map(|(n, _)| n).collect(),
         models: detected_models(),
+        tooling: Some(detected_tooling()),
         git: if config.git.enabled && !config.git.repo.is_empty() {
             Some(
                 coxagent_infrastructure::probe_git_access(

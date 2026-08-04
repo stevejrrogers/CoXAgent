@@ -137,6 +137,9 @@ async fn worker_registry_carries_machine_capabilities(
                     remedy: "gh is signed in as 'kyroc3', which cannot see the repo".to_owned(),
                     ..GitCheck::default()
                 }),
+                // The machine's OS, which the hub cannot infer: asking itself
+                // would answer with the container's.
+                tooling: Some(serde_json::json!({ "os": "macos", "has_brew": true })),
             },
             now,
         )
@@ -195,6 +198,15 @@ async fn worker_registry_carries_machine_capabilities(
         "and pull requests do not — the two are separate credentials"
     );
     assert_eq!(git.account, "kyroc3");
+    assert_eq!(
+        workers
+            .iter()
+            .find(|w| w.worker == "chopper@a")
+            .and_then(|w| w.tooling.clone())
+            .and_then(|t| t.get("os").and_then(|o| o.as_str().map(ToOwned::to_owned))),
+        Some("macos".to_owned()),
+        "the OS comes from the machine that has the tools, not from whoever asks"
+    );
     assert!(
         workers
             .iter()
