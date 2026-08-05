@@ -552,6 +552,19 @@ impl Default for GitConfig {
     }
 }
 
+/// Per-project release settings. Drives the automated release pipeline that
+/// tags a milestone once its target version is shipped and files the Release
+/// chore. `enabled` is off by default: creating a git tag mutates the managed
+/// codebase's history, so an existing project's release history is never
+/// touched until an operator opts in — the same convention as `GitConfig`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ReleasesConfig {
+    /// Master switch. When false, the cycle never tags or files releases,
+    /// no matter how many milestones have been reached.
+    #[serde(default)]
+    pub enabled: bool,
+}
+
 /// Top-level configuration persisted as `coxagent.json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
@@ -570,6 +583,9 @@ pub struct Config {
     /// Deploy settings (per-project host port allocation).
     #[serde(default)]
     pub deploy: DeployConfig,
+    /// Release pipeline settings (automated tag + Release chore per milestone).
+    #[serde(default)]
+    pub releases: ReleasesConfig,
 }
 
 impl Default for Config {
@@ -590,6 +606,7 @@ impl Default for Config {
             architecture: Vec::new(),
             policy: PolicyConfig::default(),
             deploy: DeployConfig::default(),
+            releases: ReleasesConfig::default(),
         }
     }
 }

@@ -59,3 +59,6 @@ pub use run_sa::RunSaUseCase;
 pub use run_standup::RunStandupUseCase;
 pub use run_test::RunTestUseCase;
 pub use runner::{run_forever, RunnerHandle, RunnerSnapshot};
+
+#[cfg(test)]
+mod run_releases_tests;
