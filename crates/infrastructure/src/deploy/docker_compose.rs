@@ -19,7 +19,7 @@ const DEPLOY_TIMEOUT: Duration = Duration::from_secs(900);
 
 /// Names of currently-running compose services (best-effort; empty on error).
 /// Pull the host port out of a compose bind error like
-/// `Bind for 0.0.0.0:8100 failed: port is already allocated`.
+/// `Bind for 0.0.0.0:8101 failed: port is already allocated`.
 fn extract_bind_port(err: &str) -> Option<String> {
     let idx = err.find("Bind for ")?;
     let rest = &err[idx + "Bind for ".len()..];
@@ -27,9 +27,19 @@ fn extract_bind_port(err: &str) -> Option<String> {
     Some(addr.rsplit(':').next()?.trim().to_owned())
 }
 
+/// May the deploy evict the compose `project` squatting this deploy's port?
+/// Mirrors the docker janitor's rule (docs.rs): only *agent-deployed* `cox-*`
+/// projects are ever reclaimed — never `cox-infra`, and never a running
+/// non-preview deploy such as the live CoXAgent hub, whose project
+/// (`coxagent`) carries no `cox-` prefix. A deploy of this very repo collides
+/// with its own live hub on 8101, and a heedless `down` on that project would
+/// take the whole control-plane down while trying to bring it back up.
+fn evictable_project(project: &str) -> bool {
+    project.starts_with("cox-") && project != "cox-infra"
+}
+
 /// The compose project name of whatever container currently publishes `port`
-/// on this host, or `None` when the squatter isn't compose-managed (we never
-/// evict arbitrary containers).
+/// on this host, or `None` when the squatter isn't compose-managed.
 async fn compose_project_on_port(port: &str) -> Option<String> {
     let out = Command::new("docker")
         .args([
@@ -556,6 +566,13 @@ impl DeployPort for DockerComposeDeploy {
                 break;
             };
             if let Some(project) = compose_project_on_port(&port).await {
+                // Only ever evict an agent-deployed `cox-*` project. The
+                // squatter may be the live CoXAgent hub on this host (its own
+                // 8101) — downing that is a self-inflicted outage, so refuse
+                // and report the collision instead of destroying it.
+                if !evictable_project(&project) {
+                    break;
+                }
                 let _ = Command::new("docker")
                     .args(["compose", "-p", &project, "down", "--remove-orphans"])
                     .stdin(std::process::Stdio::null())
@@ -632,6 +649,23 @@ impl DeployPort for DockerComposeDeploy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression (CXA-B001): the deploy's port-eviction must never `down` the
+    /// live CoXAgent hub when its own self-deploy collides with it on 8101.
+    /// Only agent-deployed `cox-*` projects are evictable; `cox-infra` and the
+    /// live hub (`coxagent`, no `cox-` prefix) are protected — the same rule
+    /// the docker janitor already enforces.
+    #[test]
+    fn deploy_only_evicts_agent_deployed_cox_projects_never_the_live_hub() {
+        assert!(evictable_project("cox-ot-codebase-backend"));
+        assert!(evictable_project("cox--preview-pr-12"));
+        assert!(!evictable_project("cox-infra"), "backing services are protected");
+        assert!(
+            !evictable_project("coxagent"),
+            "the live hub project must never be evicted off its own port"
+        );
+        assert!(!evictable_project("other-app"), "unrelated deploys are protected");
+    }
 
     /// AC (COX-F005): a health endpoint that's unreachable (nothing
     /// listening — connection refused) must be treated as a failed check,
