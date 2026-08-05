@@ -117,6 +117,16 @@ pub struct Milestone {
     pub goal: String,
     /// Release version that completes this milestone, e.g. "0.5.0".
     pub target_version: String,
+    /// Whether the milestone's scope is done and the release can proceed.
+    /// Set by the PO or a human — not derived, because the code version alone
+    /// does not mean the work is shippable.
+    #[serde(default)]
+    pub goal_complete: bool,
+    /// True after the release pipeline has tagged and documented the milestone.
+    /// Prevents re-releasing the same milestone when the runner restarts or
+    /// retries.
+    #[serde(default)]
+    pub fulfilled: bool,
 }
 
 /// Why one attempt at a ticket failed, in a form later agents can reason over

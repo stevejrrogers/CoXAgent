@@ -111,6 +111,35 @@ impl CycleReport {
     }
 }
 
+/// Extract the `version = "MAJOR.MINOR.PATCH"` from a Cargo.toml body, or
+/// `None` when absent/unparseable.
+fn parse_cargo_version(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("version") {
+            if let Some(rhs) = rest.trim_start().strip_prefix('=') {
+                let v = rhs.trim().trim_matches('"').trim();
+                if coxagent_domain::SemVer::parse(v).is_ok() {
+                    return Some(v.to_owned());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The version to reconcile `state_ver` down to, or `None` when there is no
+/// drift to correct. Returns `repo_ver` when state has optimistically bumped
+/// ahead of what the tree declares; `None` when state is at or behind reality
+/// or `repo_ver` is unparseable.
+fn reconcile_target(
+    state_ver: &coxagent_domain::SemVer,
+    repo_ver: &str,
+) -> Option<coxagent_domain::SemVer> {
+    let repo = coxagent_domain::SemVer::parse(repo_ver).ok()?;
+    (state_ver > &repo).then_some(repo)
+}
+
 /// Runs the sequential agent cycle over shared adapters.
 pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     store: Arc<S>,
@@ -323,6 +352,60 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         .await;
     }
 
+    /// Reconcile the state's `current_version` against the version the checked-out
+    /// tree actually declares. The version is bumped optimistically when a DEV
+    /// ticket completes locally — *before* its PR merges. If that PR is later
+    /// rejected or closed, `state.current_version` stays a phantom release no
+    /// build carries. This pass pulls it back to reality, but only when it is
+    /// provably safe: no ticket is mid-flight (in-progress/claimed/fixed pending
+    /// PR), so nothing is actively bumping the version.
+    async fn reconcile_version(&self) {
+        let Some(files) = self.files.clone() else {
+            return;
+        };
+        let cargo = self.work_dir.join("Cargo.toml");
+        let Some(text) = files.read(&cargo).await else {
+            return;
+        };
+        let Some(repo_ver) = parse_cargo_version(&text) else {
+            return;
+        };
+
+        let Ok(mut state) = self.store.load().await else {
+            return;
+        };
+        // Never stomp active work: if a ticket is claimed/in-flight it may be
+        // mid-bump; wait for it to resolve.
+        let ticket_in_flight = state.tickets.iter().any(|t| {
+            matches!(
+                t.status(),
+                coxagent_domain::ticket::Status::InProgress
+                    | coxagent_domain::ticket::Status::Fixed
+            )
+        });
+        if ticket_in_flight {
+            return;
+        }
+        let state_ver = state.current_version.clone();
+        // What version should state be reconciled to, or None when no drift.
+        // Purely a function of (state version, repo version) — the in-flight
+        // guard above already ruled out active work.
+        if let Some(target) = reconcile_target(&state_ver, &repo_ver) {
+            tracing::warn!(
+                "reconcile: state version {} ahead of repo {} with no work in flight — reverting",
+                state_ver,
+                repo_ver
+            );
+            state.current_version = target.clone();
+            state.log_activity(
+                "SYSTEM",
+                &format!("reconciled version {state_ver} → {target} (phantom bump, no PR merged)"),
+                None,
+            );
+            let _ = self.store.save(&state).await;
+        }
+    }
+
     /// Attach a notifier fired on significant events (deploy, budget, policy).
     #[must_use]
     pub fn with_notifier(
@@ -489,6 +572,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // Leader-only: it writes shared files under the repo.
         if leader {
             self.refresh_codegraph(cycle).await;
+            // Drift-check: if the state's version has been bumped ahead of what
+            // the checked-out tree actually declares, and no ticket is mid-flight
+            // to justify it, pull it back to reality. This closes the "version
+            // bumped but the PR never merged" drift (PR rejected/closed) that
+            // otherwise leaves a phantom release version that no build carries.
+            self.reconcile_version().await;
             // Seed the standard Wiki spaces and re-file any legacy pages that
             // were dumped under the wrong space (once, on the first cycle).
             if cycle == 1 {
@@ -590,6 +679,21 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 if let Err(e) = self.milestones().execute().await {
                     report.errors.push(format!("PO milestones: {e}"));
                 }
+            }
+            // Release pipeline: tag + file a Release chore for every milestone
+            // whose target version is reached and whose goal is complete. Cheap
+            // and idempotent (skips unfulfilled/not-yet-reached milestones and
+            // already-tagged releases), so it runs each leader cycle rather than
+            // waiting for a daily slot — releasing the moment a milestone ships.
+            match self.releases().execute().await {
+                Ok(released) if !released.is_empty() => {
+                    self.report(
+                        "RELEASE",
+                        &format!("released milestone(s): {}", released.join(", ")),
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => report.errors.push(format!("RELEASE: {e}")),
             }
             if self.claim_daily("pd-design-system").await {
                 self.report("PD", "designing UX");
@@ -1096,6 +1200,54 @@ mod marker_tests {
         // ======= alone is ambiguous (markdown underline) — not a trigger.
         assert!(!diff_has_conflict_markers("+=======\n+Title\n"));
         assert!(!diff_has_conflict_markers("+normal code line\n context\n"));
+    }
+}
+
+#[cfg(test)]
+mod version_reconcile_tests {
+    use super::{parse_cargo_version, reconcile_target};
+    use coxagent_domain::SemVer;
+
+    #[test]
+    fn parses_top_level_version() {
+        let out = parse_cargo_version("[package]\nname = \"x\"\nversion = \"2.22.0\"\n");
+        assert_eq!(out.as_deref(), Some("2.22.0"));
+    }
+
+    #[test]
+    fn ignores_dependency_versions() {
+        // A dependency `serde = { version = "1.x" }` is NOT at line start, so it
+        // is skipped. Cargo's own `[package] version` is the intended target.
+        let out = parse_cargo_version(
+            "[package]\nname = \"x\"\nversion = \"2.22.0\"\n[dependencies]\nserde = { version = \"1.0.0\" }\n",
+        );
+        assert_eq!(out.as_deref(), Some("2.22.0"));
+    }
+
+    #[test]
+    fn missing_or_garbage_version_is_none() {
+        assert_eq!(parse_cargo_version("[package]\nname=\"x\"\n"), None);
+        assert_eq!(parse_cargo_version("version = \"not-a-version\"\n"), None);
+    }
+
+    #[test]
+    fn reconciles_only_when_state_is_ahead() {
+        // State ahead of repo → reconcile DOWN to repo.
+        assert_eq!(
+            reconcile_target(&SemVer::new(2, 23, 0), "2.22.0"),
+            Some(SemVer::new(2, 22, 0))
+        );
+        // State at or behind reality → no-op.
+        assert_eq!(reconcile_target(&SemVer::new(2, 22, 0), "2.22.0"), None);
+        assert_eq!(reconcile_target(&SemVer::new(2, 21, 0), "2.22.0"), None);
+        // Unparseable repo version → no-op (cannot guess).
+        assert_eq!(reconcile_target(&SemVer::new(2, 23, 0), "garbage"), None);
+    }
+
+    #[test]
+    fn semver_ordering_is_not_lexicographic() {
+        // 2.9.0 < 2.10.0 must hold so we never wrongly treat 2.9 as "ahead".
+        assert!(SemVer::new(2, 9, 0) < SemVer::new(2, 10, 0));
     }
 }
 

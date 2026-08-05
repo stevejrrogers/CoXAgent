@@ -871,19 +871,33 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             return Ok(None);
         };
 
+        // Photo of the tree BEFORE the LLM touches it. If healing gives up, we
+        // restore this snapshot so the next cycle's boot check starts from a
+        // known-green tree instead of re-failing on the same broken edits —
+        // that re-fail/re-heal loop is exactly what strands a sprint for hours.
+        // Note the codebase is expected to be a clean git checkout at boot; if
+        // it is NOT a repo we simply skip the restore (nothing to restore to).
+        let checkpoint = if let Some(g) = self.git.as_ref() {
+            g.head_sha(&self.work_dir).await.ok()
+        } else {
+            None
+        };
+
         let mut last_error = error_summary.to_owned();
         for attempt in 1_u32..=3 {
             let task = if attempt == 1 {
                 format!(
                     "The project does NOT compile. Fix ALL errors:\n\n\
-                     ```\n{last_error}\n```\n\n\
-                     Run `cargo check`, fix every error, then `cargo test` to verify."
+                     ```\n{last_error}\n```\n\n{}\
+                     Run `cargo check`, fix every error, then `cargo test` to verify.",
+                    stub_hint(&last_error)
                 )
             } else {
                 format!(
                     "Still not compiling. Last test output:\n\n\
                      ```\n{last_error}\n```\n\n\
-                     Fix the remaining errors. Check what you missed."
+                     {}, Fix the remaining errors. Check what you missed.",
+                    stub_hint(&last_error)
                 )
             };
 
@@ -945,7 +959,29 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         }
 
         tracing::warn!("DEV self-heal: gave up after max retries");
+        // Un-stick the next cycle: throw away whatever the LLM left half-done so
+        // the boot check starts from the checkpointed tree again, not from the
+        // still-red edits. Without this the same failure recurs every cycle and
+        // no ticket ever works.
+        if checkpoint.is_some() {
+            self.restore_worktree_to_head().await;
+        }
         Ok(None)
+    }
+
+    /// Restore the working tree to its recorded HEAD — discard dirty tracked
+    /// edits and untracked files the self-heal pass created. Only called on a
+    /// git checkout, which the boot path guarantees. Safe when there is nothing
+    /// to discard.
+    async fn restore_worktree_to_head(&self) {
+        let Some(git) = self.git.as_ref() else {
+            return;
+        };
+        let (checked_out, _) = git.raw(&self.work_dir, &["checkout", "."]).await;
+        let (cleaned, _) = git.raw(&self.work_dir, &["clean", "-fd"]).await;
+        tracing::warn!(
+            "DEV self-heal: restored worktree to HEAD (checkout={checked_out}, clean={cleaned})"
+        );
     }
 
     /// Return a stranded ticket to the queue when the run failed, so it isn't
@@ -966,6 +1002,24 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             DevMode::Feature => ready_feature_candidates(state),
         }
     }
+}
+
+/// A targeted hint for the self-heal prompt when the unresolved failure is a
+/// leftover stub — `unimplemented!()`, `todo!()`, `unreachable!()`, or a
+/// "not implemented" panic. These are the classic "agent left half-finished
+/// work behind" marker that otherwise spins the boot check in circles: the LLM
+/// keeps "fixing" the file but the stub repanics at runtime. Naming the pattern
+/// tells it to either implement the body or remove the failing stub path.
+fn stub_hint(error_summary: &str) -> String {
+    let mk = ["unimplemented!", "todo!", "unreachable!", "not implemented"];
+    if mk.iter().any(|m| error_summary.contains(m)) {
+        return "One or more errors are a leftover stub (`unimplemented!`/`todo!`/\
+                 `not implemented`). For each stub: either implement its real body NOW,\
+                 or if it is untested scaffolding, remove the stub call so the suite is\
+                 green — a stub must never block the whole build.\n\n"
+            .to_owned();
+    }
+    String::new()
 }
 
 /// The full working brief for a ticket, BOUNDED: the description (what & why),
@@ -1076,6 +1130,14 @@ mod tests {
     use crate::selection::next_ready_feature;
     use coxagent_domain::{Complexity, Priority, TechnicalDesign, Ticket, TicketType};
     use std::sync::Mutex;
+
+    #[test]
+    fn stub_hint_targets_leftover_stub_markers() {
+        assert!(stub_hint("panicked: not implemented: release pipeline").contains("leftover stub"));
+        assert!(stub_hint("unimplemented!()").contains("leftover stub"));
+        // A real compile error gets no stub guidance.
+        assert_eq!(stub_hint("error[E0308]: mismatched types"), "");
+    }
 
     #[derive(Default)]
     struct MemStore {

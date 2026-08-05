@@ -1,6 +1,10 @@
 # Build the CoXAgent server binary and run it in a slim image.
 # Context is the repo root: `docker build -f deploy/Dockerfile .`
-FROM rust:1-bookworm AS build
+# Use the slim-bookworm variant: the full `rust:1-bookworm` tag can stall during
+# Docker Hub metadata fetch on slow networks (seen as `DeadlineExceeded` in the
+# deploy gate). The slim image carries the same rustc/cargo toolchain and builds
+# this workspace fine — just leaner.
+FROM rust:1-slim-bookworm AS build
 WORKDIR /src
 COPY . .
 RUN cargo build --release --locked -p coxagent-app -p cox-gateway -p cox-runner -p cox-realtime -p cox-knowledge

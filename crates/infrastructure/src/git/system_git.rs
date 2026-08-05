@@ -240,6 +240,27 @@ impl GitPort for SystemGit {
         let out = git(work_dir, &["diff", "--name-only", &range]).await?;
         Ok(out.lines().map(str::to_owned).collect())
     }
+
+    async fn create_tag(
+        &self,
+        work_dir: &Path,
+        name: &str,
+        ref_target: &str,
+    ) -> Result<(), PortError> {
+        // Annotated tag (carries a message) marking the release point.
+        git(work_dir, &["tag", "-a", name, ref_target, "-m", name])
+            .await
+            .map(|_| ())
+    }
+
+    async fn tag_exists(&self, work_dir: &Path, name: &str) -> bool {
+        let refname = format!("refs/tags/{name}");
+        // `rev-parse --verify --quiet` exits 0 iff the ref resolves, so the
+        // `git` helper's Ok-on-success is exactly "tag exists".
+        git(work_dir, &["rev-parse", "--verify", "--quiet", &refname])
+            .await
+            .is_ok()
+    }
 }
 
 #[cfg(test)]
@@ -331,6 +352,33 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resolved, head, "ref now points at the given sha");
+    }
+
+    #[tokio::test]
+    async fn create_tag_then_tag_exists_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let g = SystemGit::new();
+        init_repo(tmp.path()).await;
+        fs::write(tmp.path().join("a.txt"), "x").unwrap();
+        let sha = g
+            .commit_all(tmp.path(), "feat: base", &author())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(
+            !g.tag_exists(tmp.path(), "v1.0.0").await,
+            "no tag before creation"
+        );
+        g.create_tag(tmp.path(), "v1.0.0", &sha).await.unwrap();
+        assert!(
+            g.tag_exists(tmp.path(), "v1.0.0").await,
+            "tag exists after creation"
+        );
+        assert!(
+            !g.tag_exists(tmp.path(), "v9.9.9").await,
+            "unknown tag stays absent"
+        );
     }
 
     #[tokio::test]
