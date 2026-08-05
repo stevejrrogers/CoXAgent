@@ -779,14 +779,12 @@ pub fn parse_remote(url: &str) -> Option<(String, String)> {
     let (host, path) = if let Some(rest) = url.strip_prefix("git@") {
         let (h, p) = rest.split_once(':')?;
         (h.to_owned(), p.to_owned())
-    } else if let Some(rest) = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-    {
+    } else {
+        let rest = url
+            .strip_prefix("https://")
+            .or_else(|| url.strip_prefix("http://"))?;
         let (h, p) = rest.split_once('/')?;
         (h.to_owned(), p.to_owned())
-    } else {
-        return None;
     };
     let repo = path
         .trim_end_matches('/')
