@@ -326,6 +326,11 @@ pub(crate) async fn build_project(
             leader
         };
         let leader = leader.with_notifier(build_notifier(Arc::clone(&store), webhook.clone()));
+        let leader = if let Some(r) = build_pr_reporter(&config, auth, id, id).await {
+            leader.with_reporter(r)
+        } else {
+            leader
+        };
         let wh = Arc::clone(&handle);
         tokio::spawn(async move { run_forever(wh, leader, sleep).await });
     }
@@ -373,6 +378,11 @@ pub(crate) async fn build_project(
             worker
         };
         let worker = worker.with_notifier(build_notifier(Arc::clone(&store), webhook.clone()));
+        let worker = if let Some(r) = build_pr_reporter(&config, auth, id, id).await {
+            worker.with_reporter(r)
+        } else {
+            worker
+        };
         let wh = Arc::clone(&handle);
         tokio::spawn(async move { run_forever(wh, worker, Duration::from_secs(5)).await });
     }
@@ -682,6 +692,48 @@ pub(crate) async fn build_mcp_access(
         token,
         project: project.to_owned(),
     })
+}
+
+/// Mint (and revoke the previous) an internal bearer token the runner presents
+/// when reporting PR/review activity to the hub. Same idea as the MCP token —
+/// plumbing, not a human credential — but labelled separately so the two kinds
+/// of internal traffic stay distinguishable in the token store. `None` when
+/// auth is disabled (loopback then needs no token).
+pub(crate) async fn ensure_internal_pr_token(
+    auth: &Arc<dyn coxagent_application::auth::AuthPort>,
+    identity: &str,
+) -> Option<String> {
+    use coxagent_application::auth::AuthRole;
+    let label = format!("internal:pr-report:{identity}");
+    auth.revoke_token(&label).await; // drop stale before re-minting
+    let secret = auth.create_token(&label, AuthRole::Be).await;
+    if secret.is_none() {
+        tracing::warn!("could not mint internal PR-report token for {identity}");
+    }
+    secret
+}
+
+/// Build the runner's PR reporter when the project opts into reporting (sets
+/// `git.server_url`). The runner presents an internally-minted bearer token —
+/// no forge secret or user-facing token in config — and posts PR/review events
+/// to the hub over HTTP, so the web dashboard on any machine can show them.
+pub(crate) async fn build_pr_reporter(
+    config: &Config,
+    auth: Option<&Arc<dyn coxagent_application::auth::AuthPort>>,
+    project: &str,
+    identity: &str,
+) -> Option<Arc<dyn coxagent_application::ports::outbound::PrReporterPort>> {
+    let server_url = config.git.server_url.trim();
+    if server_url.is_empty() {
+        return None;
+    }
+    let token = match auth {
+        Some(auth) => ensure_internal_pr_token(auth, identity).await?,
+        None => return None, // open mode still needs a hub URL + token to report
+    };
+    Some(Arc::new(coxagent_infrastructure::HttpPrReporter::new(
+        project, server_url, token,
+    )))
 }
 
 /// The event notifier for a runner: always the project's own team chat (with a

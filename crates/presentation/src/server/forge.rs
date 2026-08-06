@@ -903,3 +903,78 @@ pub(super) async fn merge_sweep_ep(
     Json(serde_json::json!({ "ok": true, "merged": out.merged, "skipped": out.skipped }))
         .into_response()
 }
+
+/// The runner reports a newly opened/refreshed PR or an SA review verdict,
+/// carried in the body (`{ project, pr }` or `{ project, review }`). The runner
+/// owns the forge credentials, so this is how the shared dashboard learns about
+/// PRs without the hub ever holding a forge token. Authenticated by an internal
+/// bearer token (the same pattern as `/api/mcp`); the path deliberately avoids
+/// `/prs/` and a project path segment so it clears the PR-review and
+/// per-project membership gates.
+pub(super) async fn pr_report_ep(
+    State(app): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    use coxagent_application::ports::outbound::mutate_state;
+    let project = body
+        .get("project")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned();
+    let Some(p) = app.project(&project).await else {
+        return not_found();
+    };
+    if let Some(pr) = body.get("pr") {
+        match serde_json::from_value::<coxagent_application::ports::outbound::PrOpen>(
+            pr.clone(),
+        ) {
+            Ok(pr) => {
+                if mutate_state(p.store.as_ref(), |s| {
+                    s.upsert_open_pr(pr.clone());
+                    Ok(())
+                })
+                .await
+                .is_err()
+                {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "store write failed")
+                        .into_response();
+                }
+                return Json(serde_json::json!({ "ok": true, "pr": pr.number })).into_response();
+            }
+            Err(e) => {
+                return (StatusCode::BAD_REQUEST, format!("bad pr: {e}")).into_response();
+            }
+        }
+    }
+    if let Some(rv) = body.get("review") {
+        let number = rv.get("number").and_then(serde_json::Value::as_u64).unwrap_or(0);
+        let decision = rv.get("decision").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+        let summary = rv.get("summary").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+        let head_sha = rv.get("head_sha").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+        if mutate_state(p.store.as_ref(), |s| {
+            s.upsert_review(number, &decision, &summary, &head_sha);
+            Ok(())
+        })
+        .await
+        .is_err()
+        {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "store write failed").into_response();
+        }
+        return Json(serde_json::json!({ "ok": true, "review": number })).into_response();
+    }
+    (StatusCode::BAD_REQUEST, "expected {project, pr} or {project, review}").into_response()
+}
+
+/// Read back the persisted SA review verdicts for `project` — the runner calls
+/// this to avoid re-reviewing a head it already marked `request_changes`.
+pub(super) async fn pr_reviews_ep(
+    State(app): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    let project = params.get("project").cloned().unwrap_or_default();
+    let Some(p) = app.project(&project).await else {
+        return not_found();
+    };
+    let reviews = p.store.load().await.map(|s| s.reviews).unwrap_or_default();
+    Json(reviews).into_response()
+}

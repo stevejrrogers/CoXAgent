@@ -299,17 +299,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     }
 
     /// Whether this PR already got a request-changes at exactly this head —
-    /// nothing new to judge until the DEV pushes.
+    /// nothing new to judge until the DEV pushes. Reads the persisted reviews
+    /// from the hub over HTTP (the runner never writes the shared DB directly).
     pub(super) async fn already_reviewed_at(&self, number: u64, head_sha: &str) -> bool {
         if head_sha.is_empty() {
             return false;
         }
-        let Ok(state) = self.store.load().await else {
-            return false;
-        };
-        state.reviews.iter().any(|r| {
-            r.number == number && r.decision == "request_changes" && r.head_sha == head_sha
-        })
+        self.reporter()
+            .fetch_reviews()
+            .await
+            .iter()
+            .any(|r| r.number == number && r.decision == "request_changes" && r.head_sha == head_sha)
     }
 
     pub(super) async fn record_review(
@@ -319,10 +319,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         summary: &str,
         head_sha: &str,
     ) {
-        if let Ok(mut s) = self.store.load().await {
-            s.upsert_review(number, decision, summary, head_sha);
-            let _ = self.store.save(&s).await;
-        }
+        self.reporter()
+            .report_review(number, decision, summary, head_sha)
+            .await;
     }
     /// From a unified diff, list the functions it touches and who calls them
     /// (from the code graph). Empty when no graph or nothing recognised — a

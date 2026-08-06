@@ -515,6 +515,12 @@ pub struct GitConfig {
     /// the brake that prevents cascade merge conflicts. 0 = unlimited.
     #[serde(default = "default_max_open_prs")]
     pub max_open_prs: u32,
+    /// Absolute URL of the hub the runner reports PR/review activity to, e.g.
+    /// `http://localhost:4000`. Empty = the runner uses the loopback URL on
+    /// `deploy.host_port` (the same hub it serves). The runner authenticates
+    /// with an internally-minted token, so no forge secret lives in config.
+    #[serde(default)]
+    pub server_url: String,
 }
 
 fn default_true() -> bool {
@@ -548,6 +554,7 @@ impl Default for GitConfig {
             auto_merge: false,
             require_ci: true,
             max_open_prs: default_max_open_prs(),
+            server_url: String::new(),
         }
     }
 }

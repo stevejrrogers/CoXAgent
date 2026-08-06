@@ -178,7 +178,9 @@ pub trait GitPort: Send + Sync {
     }
 
     /// Create a lightweight or annotated tag on `ref_target` (sha or branch).
-    /// Default: unsupported.
+    /// `author` supplies the committer identity for the annotated tag, so the
+    /// call never depends on a machine's ambient `git config user.name/email`
+    /// (mirrors `commit_all`). Default: unsupported.
     ///
     /// # Errors
     /// [`PortError::Backend`] on a git failure.
@@ -187,8 +189,9 @@ pub trait GitPort: Send + Sync {
         work_dir: &Path,
         name: &str,
         ref_target: &str,
+        author: &GitAuthor,
     ) -> Result<(), PortError> {
-        let _ = (work_dir, name, ref_target);
+        let _ = (work_dir, name, ref_target, author);
         Err(PortError::Backend("create_tag: not supported".to_owned()))
     }
 

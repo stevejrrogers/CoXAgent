@@ -649,10 +649,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let Ok(state) = self.store.load().await else {
             return;
         };
+        let reviews = self.reporter().fetch_reviews().await;
         let stale_secs = self.config.workflow.pr_stale_days() * 86_400;
         for pr in prs {
-            let Some(review) = state
-                .reviews
+            let Some(review) = reviews
                 .iter()
                 .find(|r| r.number == pr.number && r.decision == "request_changes")
             else {

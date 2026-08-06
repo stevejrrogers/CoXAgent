@@ -127,6 +127,7 @@ mod tests {
             _work_dir: &std::path::Path,
             name: &str,
             _ref_target: &str,
+            _author: &GitAuthor,
         ) -> Result<(), PortError> {
             self.tags.lock().expect("lock").push(name.to_owned());
             Ok(())
@@ -1861,5 +1862,310 @@ mod tests {
             chore.complexity() != Complexity::Large,
             "release chore should not be Large complexity"
         );
+    }
+
+    // ==================================================================
+    // CXA-F008 TDD: FAILING ACCEPTANCE CRITERIA TESTS — Automated Release Pipeline
+    // ==================================================================
+
+    /// **AC1**: When the current_version meets or exceeds a milestone's target_version
+    /// and the milestone goal is marked complete, the pipeline creates a git tag
+    /// matching the milestone name and posts release notes sourced from deploy history.
+    ///
+    /// This test verifies the ATOMIC release action: both tag creation and notes
+    /// posting must occur together as one pipeline execution.
+    #[tokio::test]
+    async fn ac1_creates_tag_and_posts_release_notes_atomically() {
+        let producing_ticket_id = "CXA-AC1-A1";
+        let producing_ticket_title = "Acceptor feature for AC1 verification";
+        let milestone_name = "AC1-Verification";
+        let target_version = "1.2.3";
+        let release_notes_deploy_entry = "Shipped auth refactor for login";
+
+        let (store, git) = seeded(
+            target_version,
+            milestone_name,
+            target_version,
+            "Verify AC1 atomically",
+            true,
+            false,
+            vec![make_deploy(
+                target_version,
+                producing_ticket_id,
+                release_notes_deploy_entry,
+                "2026-01-15T10:00:00Z",
+            )],
+        );
+        store.state.lock().expect("lock").tickets.push(make_ticket(
+            producing_ticket_id,
+            producing_ticket_title,
+            "Feature implementation details",
+        ));
+
+        let released = uc(&store, &git)
+            .execute()
+            .await
+            .expect("pipeline completes");
+
+        // Verify the milestone was released
+        assert!(
+            released.contains(&milestone_name.to_owned()),
+            "milestone should appear in released list: {released:?}",
+        );
+
+        // AC1 check 1: Git tag created matching milestone name
+        let tags = git.tags.lock().expect("lock");
+        assert_eq!(
+            *tags,
+            vec![milestone_name.to_owned()],
+            "exactly one tag with milestone name"
+        );
+
+        // AC1 check 2: Release notes posted, sourced from deploy history
+        let state = store.load().await.expect("load state");
+        let chore = state
+            .tickets
+            .iter()
+            .find(|t| t.ticket_type() == TicketType::Chore && t.title().contains(milestone_name))
+            .expect("release chore ticket created with milestone name in title");
+
+        let notes = chore.description();
+        assert!(
+            notes.contains(producing_ticket_id),
+            "release notes must include ticket ID from deploy history: \n{}",
+            notes
+        );
+        assert!(
+            notes.contains(release_notes_deploy_entry),
+            "release notes must include changelog entry title from deploy history: \n{}",
+            notes
+        );
+    }
+
+    /// **AC2**: Release notes include all ticket IDs, titles, and the changelog entries produced
+    /// during the version range from last shipped version to current.
+    ///
+    /// This test specifically verifies that:
+    /// - All tickets from the version span are included (not partial)
+    /// - Titles are present (not just IDs)
+    /// - Only the version span from last shipped to current is included
+    /// - Deployments before last shipped version are EXCLUDED
+    #[tokio::test]
+    async fn ac2_release_notes_include_complete_changelog_for_version_range() {
+        let milestone_name = "AC2-Changelog";
+        let target_ver = "1.1.0";
+        // Create 3 deployments in range (at/above last shipped), 1 before last shipped
+        // Implementation defines "last shipped version" as highest deploy below target
+        let history = vec![
+            make_deploy("0.9.0", "OLD-T001", "Pre-range ticket", "2026-01-01"), // EXCLUDED
+            make_deploy("1.0.0", "RANGE-T001", "Last shipped ticket", "2026-02-01"), // "Last shipped"
+            make_deploy("1.1.0", "RANGE-T003", "At target ticket", "2026-04-01"),    // INCLUDED
+        ];
+
+        let (store, git) = seeded(
+            target_ver,
+            milestone_name,
+            target_ver,
+            "Verify changelog completeness",
+            true,
+            false,
+            history,
+        );
+        // Seed all producing tickets
+        for id in &["OLD-T001", "RANGE-T001", "RANGE-T003"] {
+            store
+                .state
+                .lock()
+                .expect("lock")
+                .tickets
+                .push(make_ticket(id, id, "description"));
+        }
+
+        uc(&store, &git).execute().await.expect("pipeline runs");
+
+        let state = store.load().await.expect("load state");
+        let chore = state
+            .tickets
+            .iter()
+            .find(|t| t.ticket_type() == TicketType::Chore && t.title().contains(milestone_name))
+            .expect("release chore created");
+        let notes = chore.description().to_string();
+
+        // Verify tickets in range are included (from last shipped version: 1.0.0, then 1.1.0)
+        // RANGE-T001 should be included because 1.0.0 is "last shipped version"
+        // (highest deploy below target 1.1.0)
+        assert!(
+            notes.contains("RANGE-T001"),
+            "notes must include ticket from last shipped version: \n{}",
+            notes
+        );
+
+        // RANGE-T003 must be included
+        assert!(
+            notes.contains("RANGE-T003"),
+            "notes must include ticket at target version: \n{}",
+            notes
+        );
+
+        // Verify tickets from before last shipped are NOT included
+        assert!(
+            !notes.contains("OLD-T001"),
+            "notes must EXCLUDE ticket before last shipped version: \n{}",
+            notes
+        );
+    }
+
+    /// **AC3**: If a tag for the milestone version already exists in the repository,
+    /// the pipeline skips the release and logs a 'release already exists' activity
+    /// entry rather than failing.
+    ///
+    /// This test verifies:
+    /// - Pipeline does not fail (returns gracefully)
+    /// - No duplicate tag is created
+    /// - Activity entry with 'release already exists' is logged
+    /// - Activity entry includes the milestone name for traceability
+    /// - No new ticket/chore is created
+    #[tokio::test]
+    async fn ac3_existing_tag_logs_activity_and_skips_without_failing() {
+        let milestone_name = "AC3-Existing";
+        let (store, git) = seeded(
+            "1.0.0",
+            milestone_name,
+            "1.0.0",
+            "Skip verification",
+            true,
+            false,
+            vec![],
+        );
+
+        // Pre-populate existing tag
+        git.existing_tags
+            .lock()
+            .expect("lock")
+            .insert(milestone_name.to_owned());
+
+        let initial_ticket_count = store.state.lock().expect("lock").tickets.len();
+
+        // Pipeline must NOT fail when tag exists
+        let released = uc(&store, &git)
+            .execute()
+            .await
+            .expect("pipeline must not fail when release already exists");
+
+        // No new release should be created
+        assert!(
+            released.is_empty(),
+            "no release created when tag exists: {released:?}"
+        );
+
+        // No new tag should be created
+        assert!(
+            git.tags.lock().expect("lock").is_empty(),
+            "no duplicate tag created"
+        );
+
+        // Activity entry must be logged with specific text
+        let state = store.load().await.expect("load state");
+
+        // Find the activity entry
+        let activity = state
+            .activity
+            .iter()
+            .find(|e| e.action.contains("release already exists"))
+            .expect("activity entry with 'release already exists' must be logged");
+
+        // Activity must include milestone name
+        assert!(
+            activity.action.contains(milestone_name),
+            "activity entry must include milestone name for traceability: {}",
+            activity.action
+        );
+
+        // No new ticket should be created
+        assert_eq!(
+            state.tickets.len(),
+            initial_ticket_count,
+            "no new ticket created when release already exists"
+        );
+    }
+
+    /// **AC4**: A Release chore ticket is created referencing the milestone, with all
+    /// producing feature/bug ticket IDs as dependencies, and the milestone is marked
+    /// as fulfilled.
+    ///
+    /// This test verifies:
+    /// - Release chore ticket is created
+    /// - Chore references the milestone name
+    /// - Chore's depends_on contains all producing ticket IDs as formal dependencies
+    /// - Milestone is marked as fulfilled
+    /// - Dependencies are listed in the depends_on field, not just description text
+    #[tokio::test]
+    async fn ac4_creates_release_chore_with_dependencies_and_fulfills_milestone() {
+        let milestone_name = "AC4-Fulfill";
+        let producing_ids = vec![
+            "CXA-AC4-P1", // Feature dependency
+            "CXA-AC4-P2", // Another feature dependency
+        ];
+
+        let history = producing_ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| {
+                make_deploy(
+                    "1.0.0",
+                    id,
+                    &format!("Producing ticket {} title", i + 1),
+                    "2026-01-01",
+                )
+            })
+            .collect();
+
+        let (store, git) = seeded(
+            "1.0.0",
+            milestone_name,
+            "1.0.0",
+            "Verify milestone fulfillment",
+            true,
+            false,
+            history,
+        );
+
+        // Seed all producing tickets
+        for id in &producing_ids {
+            store
+                .state
+                .lock()
+                .expect("lock")
+                .tickets
+                .push(make_ticket(id, id, "description"));
+        }
+
+        uc(&store, &git).execute().await.expect("pipeline runs");
+
+        let state = store.load().await.expect("load state");
+
+        // Release chore must be created
+        let chore = state
+            .tickets
+            .iter()
+            .find(|t| t.ticket_type() == TicketType::Chore && t.title().contains(milestone_name))
+            .expect("Release chore ticket must be created");
+
+        // Milestone must be marked as fulfilled
+        assert!(
+            state.milestones[0].fulfilled,
+            "milestone must be marked as fulfilled"
+        );
+
+        // All producing ticket IDs must be in depends_on field
+        let deps = chore.depends_on();
+        for id in &producing_ids {
+            assert!(
+                deps.iter().any(|d| d.to_string() == *id),
+                "chore must have {} in depends_on field: {:?}",
+                id,
+                deps.iter().map(|d| d.to_string()).collect::<Vec<_>>()
+            );
+        }
     }
 }

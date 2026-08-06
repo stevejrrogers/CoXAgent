@@ -246,11 +246,32 @@ impl GitPort for SystemGit {
         work_dir: &Path,
         name: &str,
         ref_target: &str,
+        author: &GitAuthor,
     ) -> Result<(), PortError> {
-        // Annotated tag (carries a message) marking the release point.
-        git(work_dir, &["tag", "-a", name, ref_target, "-m", name])
-            .await
-            .map(|_| ())
+        // Annotated tag (carries a message) marking the release point. The
+        // identity is supplied inline (`git -c user.name/email`) like
+        // `commit_all`, so an annotated tag never depends on ambient git
+        // config — a fresh CI runner or unconfigured repo must not block the
+        // release tag.
+        let name_cfg = format!("user.name={}", author.name);
+        let email_cfg = format!("user.email={}", author.email);
+        git(
+            work_dir,
+            &[
+                "-c",
+                &name_cfg,
+                "-c",
+                &email_cfg,
+                "tag",
+                "-a",
+                name,
+                ref_target,
+                "-m",
+                name,
+            ],
+        )
+        .await
+        .map(|_| ())
     }
 
     async fn tag_exists(&self, work_dir: &Path, name: &str) -> bool {
@@ -370,7 +391,7 @@ mod tests {
             !g.tag_exists(tmp.path(), "v1.0.0").await,
             "no tag before creation"
         );
-        g.create_tag(tmp.path(), "v1.0.0", &sha).await.unwrap();
+        g.create_tag(tmp.path(), "v1.0.0", &sha, &author()).await.unwrap();
         assert!(
             g.tag_exists(tmp.path(), "v1.0.0").await,
             "tag exists after creation"

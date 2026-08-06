@@ -7,7 +7,7 @@
 
 use crate::config::Config;
 use crate::error::AppError;
-use crate::ports::outbound::{GitPort, StateStorePort};
+use crate::ports::outbound::{GitAuthor, GitPort, StateStorePort};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -44,6 +44,23 @@ impl<S: StateStorePort> RunReleasesUseCase<S> {
     pub fn with_config(mut self, config: Config) -> Self {
         self.config = config;
         self
+    }
+
+    /// The committed identity release tags are created under. Prefers the
+    /// project's configured `git.commit_email` when set, else the shared bot
+    /// address — same convention as the forge commit path. Supplies the
+    /// committer inline at tag-creation time, so the release never depends on a
+    /// machine's ambient git config.
+    fn release_author(&self) -> GitAuthor {
+        let email = if self.config.git.commit_email.trim().is_empty() {
+            "coxagent-bot@users.noreply.github.com".to_owned()
+        } else {
+            self.config.git.commit_email.clone()
+        };
+        GitAuthor {
+            name: "coxagent-bot".to_owned(),
+            email,
+        }
     }
 
     /// Execute the release pipeline: check milestones, tag releases, and
@@ -100,7 +117,7 @@ impl<S: StateStorePort> RunReleasesUseCase<S> {
             }
 
             // Create the annotated tag on the current tree.
-            git.create_tag(&self.work_dir, &m.name, "HEAD")
+            git.create_tag(&self.work_dir, &m.name, "HEAD", &self.release_author())
                 .await
                 .map_err(|e| {
                     AppError::from(PortError::Backend(format!(

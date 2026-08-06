@@ -96,6 +96,11 @@ pub struct ProjectState {
     /// The SA agent's latest review verdict per open PR (by number).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reviews: Vec<PrReview>,
+    /// Open pull requests as reported by the runner over HTTP. The runner owns
+    /// the forge credentials, so the hub only ever reads this list back for the
+    /// Review tab — it never lists PRs itself.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub open_prs: Vec<crate::ports::outbound::PrOpen>,
     /// Team chat: human-to-human messages among the people on the project.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chat: Vec<ChatMsg>,
@@ -322,6 +327,7 @@ impl Default for ProjectState {
             deploy: None,
             comments: Vec::new(),
             reviews: Vec::new(),
+            open_prs: Vec::new(),
             chat: Vec::new(),
             channels: Vec::new(),
             design_system: None,
@@ -638,6 +644,26 @@ impl ProjectState {
         if overflow > 0 {
             self.reviews.drain(0..overflow);
         }
+    }
+
+    /// Insert or replace a reported open PR, keeping the list to recent entries.
+    pub fn upsert_open_pr(&mut self, pr: crate::ports::outbound::PrOpen) {
+        if let Some(existing) = self.open_prs.iter_mut().find(|p| p.number == pr.number) {
+            *existing = pr;
+        } else {
+            self.open_prs.push(pr);
+        }
+        let overflow = self.open_prs.len().saturating_sub(50);
+        if overflow > 0 {
+            self.open_prs.drain(0..overflow);
+        }
+    }
+
+    /// Replace the whole reported open-PR list (e.g. a runner refresh).
+    pub fn set_open_prs(&mut self, prs: Vec<crate::ports::outbound::PrOpen>) {
+        let mut v = prs;
+        v.truncate(50);
+        self.open_prs = v;
     }
 
     /// Toggle `user`'s `emoji` reaction on comment `id`; returns the updated

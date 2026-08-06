@@ -161,6 +161,10 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     /// [`Self::with_host_port_probe`].
     host_port_probe: Result<Option<u16>, ()>,
     notifier: Option<Arc<dyn crate::ports::outbound::NotifierPort>>,
+    /// Reporter that pushes PR/review activity to the hub over HTTP. The runner
+    /// is the sole holder of forge credentials, so the hub must be told what it
+    /// learned rather than listing PRs itself.
+    reporter: Option<Arc<dyn crate::ports::outbound::PrReporterPort>>,
     /// Live, runtime-adjustable spend caps (overrides the config caps when set).
     budget: Option<crate::config::LiveBudget>,
     /// Local git, used for branch + commit per ticket when `config.git.enabled`.
@@ -208,6 +212,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             deploy: None,
             host_port_probe,
             notifier: None,
+            reporter: None,
             budget: None,
             git: None,
             files: None,
@@ -414,6 +419,27 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     ) -> Self {
         self.notifier = Some(notifier);
         self
+    }
+
+    /// Attach the reporter that pushes PR/review activity to the hub over HTTP.
+    ///
+    /// The runner is the only holder of forge credentials, so without this it
+    /// keeps working (git/forge operations are unaffected) but never publishes
+    /// what it opened or reviewed to the shared dashboard.
+    #[must_use]
+    pub fn with_reporter(
+        mut self,
+        reporter: Arc<dyn crate::ports::outbound::PrReporterPort>,
+    ) -> Self {
+        self.reporter = Some(reporter);
+        self
+    }
+
+    /// The runner's PR reporter, or a no-op when none was configured.
+    pub(crate) fn reporter(&self) -> Arc<dyn crate::ports::outbound::PrReporterPort> {
+        self.reporter.clone().unwrap_or_else(|| {
+            Arc::new(crate::ports::outbound::NullPrReporter)
+        })
     }
 
     /// Model-allowlist gate. When the configured model is disallowed, record the
