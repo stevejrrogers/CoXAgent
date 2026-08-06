@@ -26,12 +26,6 @@ deadpool-postgres.workspace = true
 redis.workspace = true
 mongodb.workspace = true
 
-[features]
-# Gateway-backed state adapter (RestStateStore). Off by default so an
-# in-progress transport never breaks a workspace build; enabled by consumers
-# that want the runner to reach state through REST instead of direct DB.
-rest-store = []
-
 [dev-dependencies]
 tempfile.workspace = true
 

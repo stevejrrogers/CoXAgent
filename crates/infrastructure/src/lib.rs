@@ -39,6 +39,6 @@ pub use kv_doc::PgKvDoc;
 pub use notifier::WebhookNotifier;
 pub use pr_report::HttpPrReporter;
 pub use sql_auth::SqlAuthService;
-pub use state::{AnyStateStore, JsonStateStore, SqlStateStore};
+pub use state::{AnyStateStore, JsonStateStore, RestConfig, RestStateStore, SqlStateStore};
 pub use storage::{LocalStorage, S3Storage};
 pub use workspace_files::FsWorkspaceFiles;

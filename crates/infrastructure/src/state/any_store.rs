@@ -10,12 +10,13 @@ use coxagent_application::state::ProjectState;
 use coxagent_application::PortError;
 use coxagent_domain::TicketId;
 
-use super::{JsonStateStore, SqlStateStore};
+use super::{JsonStateStore, RestStateStore, SqlStateStore};
 
 /// Runtime-selected state store backend.
 pub enum AnyStateStore {
     Json(JsonStateStore),
     Sql(SqlStateStore),
+    Rest(RestStateStore),
 }
 
 #[async_trait]
@@ -24,6 +25,7 @@ impl StateStorePort for AnyStateStore {
         match self {
             Self::Json(s) => s.load().await,
             Self::Sql(s) => s.load().await,
+            Self::Rest(s) => s.load().await,
         }
     }
 
@@ -31,6 +33,7 @@ impl StateStorePort for AnyStateStore {
         match self {
             Self::Json(s) => s.save(state).await,
             Self::Sql(s) => s.save(state).await,
+            Self::Rest(s) => s.save(state).await,
         }
     }
 
@@ -43,6 +46,7 @@ impl StateStorePort for AnyStateStore {
         match self {
             Self::Json(s) => s.claim_ticket(id, worker, now).await,
             Self::Sql(s) => s.claim_ticket(id, worker, now).await,
+            Self::Rest(s) => s.claim_ticket(id, worker, now).await,
         }
     }
 
@@ -50,6 +54,7 @@ impl StateStorePort for AnyStateStore {
         match self {
             Self::Json(s) => s.acquire_leader(worker, now).await,
             Self::Sql(s) => s.acquire_leader(worker, now).await,
+            Self::Rest(s) => s.acquire_leader(worker, now).await,
         }
     }
 
@@ -63,6 +68,7 @@ impl StateStorePort for AnyStateStore {
         match self {
             Self::Json(s) => s.claim_stage(id, stage, worker, now).await,
             Self::Sql(s) => s.claim_stage(id, stage, worker, now).await,
+            Self::Rest(s) => s.claim_stage(id, stage, worker, now).await,
         }
     }
 
@@ -77,6 +83,7 @@ impl StateStorePort for AnyStateStore {
         match self {
             Self::Json(s) => s.heartbeat_worker(worker, role, ticket, caps, now).await,
             Self::Sql(s) => s.heartbeat_worker(worker, role, ticket, caps, now).await,
+            Self::Rest(s) => s.heartbeat_worker(worker, role, ticket, caps, now).await,
         }
     }
 
@@ -84,6 +91,7 @@ impl StateStorePort for AnyStateStore {
         match self {
             Self::Json(s) => s.workers().await,
             Self::Sql(s) => s.workers().await,
+            Self::Rest(s) => s.workers().await,
         }
     }
 
@@ -91,6 +99,7 @@ impl StateStorePort for AnyStateStore {
         match self {
             Self::Json(s) => s.set_desired(operator, running).await,
             Self::Sql(s) => s.set_desired(operator, running).await,
+            Self::Rest(s) => s.set_desired(operator, running).await,
         }
     }
 
@@ -98,6 +107,7 @@ impl StateStorePort for AnyStateStore {
         match self {
             Self::Json(s) => s.get_desired(operator).await,
             Self::Sql(s) => s.get_desired(operator).await,
+            Self::Rest(s) => s.get_desired(operator).await,
         }
     }
 
@@ -105,6 +115,7 @@ impl StateStorePort for AnyStateStore {
         match self {
             Self::Json(s) => s.acquire_operator(operator, instance).await,
             Self::Sql(s) => s.acquire_operator(operator, instance).await,
+            Self::Rest(s) => s.acquire_operator(operator, instance).await,
         }
     }
 }
