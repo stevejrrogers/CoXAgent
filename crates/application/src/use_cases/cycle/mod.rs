@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 mod audits;
 mod backlog;
 mod ceremonies;
+mod debt_sweep;
 mod escalation;
 mod preflight;
 mod scrum;

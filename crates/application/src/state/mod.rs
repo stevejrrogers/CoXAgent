@@ -3,7 +3,7 @@
 //! Kept in the application layer because `schema_version` is a persistence
 //! concern; the domain stays free of it.
 
-use coxagent_domain::{SemVer, Ticket, TicketId};
+use coxagent_domain::{DebtSignal, SemVer, Ticket, TicketId};
 use serde::{Deserialize, Serialize};
 
 mod chat;
@@ -172,6 +172,14 @@ pub struct ProjectState {
     /// measured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clippy_baseline: Option<u64>,
+    /// Debt findings from the most recent debt-sweep run, persisted so a sweep
+    /// and its outcomes are auditable across cycles.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub debt_signals: Vec<DebtSignal>,
+    /// Cycle numbers on which a debt-sweep was already filed, so a sweep is not
+    /// re-filed for the same cycle after a restart.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sweeps_done: Vec<u64>,
     /// Merged PR numbers already synced into ticket state (human merges on
     /// the forge must reflect back exactly once).
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
@@ -344,6 +352,8 @@ impl Default for ProjectState {
             pr_sessions: std::collections::BTreeMap::new(),
             cost_holds: std::collections::BTreeMap::new(),
             clippy_baseline: None,
+            debt_signals: Vec::new(),
+            sweeps_done: Vec::new(),
             seen_merged_prs: std::collections::BTreeSet::new(),
             seen_closed_prs: std::collections::BTreeSet::new(),
             cost_approved: std::collections::BTreeSet::new(),
