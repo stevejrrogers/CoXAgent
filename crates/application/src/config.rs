@@ -515,6 +515,12 @@ pub struct GitConfig {
     /// the brake that prevents cascade merge conflicts. 0 = unlimited.
     #[serde(default = "default_max_open_prs")]
     pub max_open_prs: u32,
+    /// Absolute URL of the hub the runner reports PR/review activity to, e.g.
+    /// `http://localhost:4000`. Empty = the runner uses the loopback URL on
+    /// `deploy.host_port` (the same hub it serves). The runner authenticates
+    /// with an internally-minted token, so no forge secret lives in config.
+    #[serde(default)]
+    pub server_url: String,
 }
 
 fn default_true() -> bool {
@@ -548,8 +554,22 @@ impl Default for GitConfig {
             auto_merge: false,
             require_ci: true,
             max_open_prs: default_max_open_prs(),
+            server_url: String::new(),
         }
     }
+}
+
+/// Per-project release settings. Drives the automated release pipeline that
+/// tags a milestone once its target version is shipped and files the Release
+/// chore. `enabled` is off by default: creating a git tag mutates the managed
+/// codebase's history, so an existing project's release history is never
+/// touched until an operator opts in — the same convention as `GitConfig`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ReleasesConfig {
+    /// Master switch. When false, the cycle never tags or files releases,
+    /// no matter how many milestones have been reached.
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 /// Top-level configuration persisted as `coxagent.json`.
@@ -570,6 +590,9 @@ pub struct Config {
     /// Deploy settings (per-project host port allocation).
     #[serde(default)]
     pub deploy: DeployConfig,
+    /// Release pipeline settings (automated tag + Release chore per milestone).
+    #[serde(default)]
+    pub releases: ReleasesConfig,
 }
 
 impl Default for Config {
@@ -590,6 +613,7 @@ impl Default for Config {
             architecture: Vec::new(),
             policy: PolicyConfig::default(),
             deploy: DeployConfig::default(),
+            releases: ReleasesConfig::default(),
         }
     }
 }

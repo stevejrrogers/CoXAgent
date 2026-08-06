@@ -203,6 +203,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                             ),
                         )
                         .await;
+                        // Publish the opened PR to the hub so every dashboard
+                        // (any machine, any user) can show it — the runner owns
+                        // the forge credentials, the hub just persists.
+                        self.reporter()
+                            .report_pr(crate::ports::outbound::PrOpen::from(pr))
+                            .await;
                     }
                     Err(e) => self.log_git(&format!("open PR for {id} failed: {e}")).await,
                 }

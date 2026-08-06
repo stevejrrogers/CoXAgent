@@ -110,11 +110,11 @@ fn only_platform_calling(
         if scopes[i].iter().any(|g| g.contains("test")) {
             continue;
         }
-        match scopes[i].iter().rev().find(|g| !targets_in(g).is_empty()) {
-            Some(gate) => targets.extend(targets_in(gate)),
+        let Some(gate) = scopes[i].iter().rev().find(|g| !targets_in(g).is_empty()) else {
             // Called from unconditional code: alive on every platform.
-            None => return None,
-        }
+            return None;
+        };
+        targets.extend(targets_in(gate));
     }
     targets.sort_unstable();
     targets.dedup();

@@ -946,6 +946,8 @@ pub async fn serve_full(
         .route("/api/projects/:pid/git/connect", post(git_connect_ep))
         .route("/api/projects/:pid/git/test", post(git_test_ep))
         .route("/api/projects/:pid/prs", get(list_prs_ep))
+        .route("/api/pr-report", post(pr_report_ep))
+        .route("/api/pr-report/reviews", get(pr_reviews_ep))
         .route("/api/projects/:pid/prs/:num/diff", get(pr_diff_ep))
         .route("/api/projects/:pid/prs/:num/:action", post(pr_action_ep))
         .route("/api/projects/:pid/agent-log", get(agent_log_ep))
@@ -1176,6 +1178,12 @@ struct CodeGraphQuery {
 }
 
 /// List open pull/merge requests for a project's repository.
+///
+/// The list is supplied by the runner over HTTP (the runner holds the forge
+/// credentials), so this reads what was reported and persisted rather than
+/// asking a forge the hub may not be able to reach (a container serving the
+/// dashboard has no token). Falls back to an empty list when no PRs have been
+/// reported yet.
 async fn list_prs_ep(
     State(app): State<AppState>,
     Path(pid): Path<String>,
@@ -1183,39 +1191,31 @@ async fn list_prs_ep(
     let Some(p) = app.project(&pid).await else {
         return not_found();
     };
-    let Some(forge) = &p.forge else {
+    let Ok(state) = p.store.load().await else {
         return Json(serde_json::json!({ "configured": false, "prs": [] })).into_response();
     };
-    // The SA's stored review verdict per PR, so the UI can show the suggestion.
-    let reviews = p.store.load().await.map(|s| s.reviews).unwrap_or_default();
     let auto_merge = std::fs::read_to_string(&p.config_path)
         .ok()
         .and_then(|t| serde_json::from_str::<Config>(&t).ok())
         .is_some_and(|c| c.git.auto_merge);
-    match forge.list_open_prs().await {
-        Ok(prs) => {
-            let enriched: Vec<serde_json::Value> = prs
-                .iter()
-                .map(|pr| {
-                    let mut v = serde_json::to_value(pr).unwrap_or_default();
-                    if let Some(r) = reviews.iter().find(|r| r.number == pr.number) {
-                        v["review"] = serde_json::json!({
-                            "decision": r.decision, "summary": r.summary, "at": r.at,
-                        });
-                    }
-                    v
-                })
-                .collect();
-            Json(serde_json::json!({
-                "configured": true, "auto_merge": auto_merge, "prs": enriched
-            }))
-            .into_response()
-        }
-        Err(e) => {
-            Json(serde_json::json!({ "configured": true, "error": e.to_string(), "prs": [] }))
-                .into_response()
-        }
-    }
+    let enriched: Vec<serde_json::Value> = state
+        .open_prs
+        .iter()
+        .map(|pr| {
+            let mut v = serde_json::to_value(pr).unwrap_or_default();
+            if let Some(r) = state.reviews.iter().find(|r| r.number == pr.number) {
+                v["review"] = serde_json::json!({
+                    "decision": r.decision, "summary": r.summary, "at": r.at,
+                });
+            }
+            v
+        })
+        .collect();
+    let configured = p.forge.is_some();
+    Json(serde_json::json!({
+        "configured": configured, "auto_merge": auto_merge, "prs": enriched
+    }))
+    .into_response()
 }
 
 /// Force-merge one PR on the human's order: if it's already green, merge now;
