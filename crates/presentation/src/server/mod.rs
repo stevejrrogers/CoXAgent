@@ -49,6 +49,7 @@ mod projects;
 mod realtime;
 mod requests;
 mod status;
+mod store_rpc;
 mod transcripts;
 mod work;
 
@@ -806,6 +807,7 @@ pub async fn serve_full(
             "/api/projects/:pid",
             axum::routing::delete(delete_project_ep).patch(rename_project_ep),
         )
+        .route("/api/projects/:pid/store", post(store_rpc::store_rpc_ep))
         .route("/api/projects/:pid/state", get(state_ep))
         .route("/api/projects/:pid/metrics", get(metrics_ep))
         .route("/api/projects/:pid/agent-evals", get(agent_evals_ep))
