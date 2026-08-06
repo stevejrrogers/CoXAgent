@@ -437,9 +437,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
 
     /// The runner's PR reporter, or a no-op when none was configured.
     pub(crate) fn reporter(&self) -> Arc<dyn crate::ports::outbound::PrReporterPort> {
-        self.reporter.clone().unwrap_or_else(|| {
-            Arc::new(crate::ports::outbound::NullPrReporter)
-        })
+        self.reporter
+            .clone()
+            .unwrap_or_else(|| Arc::new(crate::ports::outbound::NullPrReporter))
     }
 
     /// Model-allowlist gate. When the configured model is disallowed, record the

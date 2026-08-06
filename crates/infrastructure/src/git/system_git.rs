@@ -258,16 +258,7 @@ impl GitPort for SystemGit {
         git(
             work_dir,
             &[
-                "-c",
-                &name_cfg,
-                "-c",
-                &email_cfg,
-                "tag",
-                "-a",
-                name,
-                ref_target,
-                "-m",
-                name,
+                "-c", &name_cfg, "-c", &email_cfg, "tag", "-a", name, ref_target, "-m", name,
             ],
         )
         .await
@@ -391,7 +382,9 @@ mod tests {
             !g.tag_exists(tmp.path(), "v1.0.0").await,
             "no tag before creation"
         );
-        g.create_tag(tmp.path(), "v1.0.0", &sha, &author()).await.unwrap();
+        g.create_tag(tmp.path(), "v1.0.0", &sha, &author())
+            .await
+            .unwrap();
         assert!(
             g.tag_exists(tmp.path(), "v1.0.0").await,
             "tag exists after creation"

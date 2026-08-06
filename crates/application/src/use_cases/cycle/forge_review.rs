@@ -305,11 +305,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         if head_sha.is_empty() {
             return false;
         }
-        self.reporter()
-            .fetch_reviews()
-            .await
-            .iter()
-            .any(|r| r.number == number && r.decision == "request_changes" && r.head_sha == head_sha)
+        self.reporter().fetch_reviews().await.iter().any(|r| {
+            r.number == number && r.decision == "request_changes" && r.head_sha == head_sha
+        })
     }
 
     pub(super) async fn record_review(

@@ -925,9 +925,7 @@ pub(super) async fn pr_report_ep(
         return not_found();
     };
     if let Some(pr) = body.get("pr") {
-        match serde_json::from_value::<coxagent_application::ports::outbound::PrOpen>(
-            pr.clone(),
-        ) {
+        match serde_json::from_value::<coxagent_application::ports::outbound::PrOpen>(pr.clone()) {
             Ok(pr) => {
                 if mutate_state(p.store.as_ref(), |s| {
                     s.upsert_open_pr(pr.clone());
@@ -947,10 +945,25 @@ pub(super) async fn pr_report_ep(
         }
     }
     if let Some(rv) = body.get("review") {
-        let number = rv.get("number").and_then(serde_json::Value::as_u64).unwrap_or(0);
-        let decision = rv.get("decision").and_then(|v| v.as_str()).unwrap_or("").to_owned();
-        let summary = rv.get("summary").and_then(|v| v.as_str()).unwrap_or("").to_owned();
-        let head_sha = rv.get("head_sha").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+        let number = rv
+            .get("number")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let decision = rv
+            .get("decision")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned();
+        let summary = rv
+            .get("summary")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned();
+        let head_sha = rv
+            .get("head_sha")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned();
         if mutate_state(p.store.as_ref(), |s| {
             s.upsert_review(number, &decision, &summary, &head_sha);
             Ok(())
@@ -962,7 +975,11 @@ pub(super) async fn pr_report_ep(
         }
         return Json(serde_json::json!({ "ok": true, "review": number })).into_response();
     }
-    (StatusCode::BAD_REQUEST, "expected {project, pr} or {project, review}").into_response()
+    (
+        StatusCode::BAD_REQUEST,
+        "expected {project, pr} or {project, review}",
+    )
+        .into_response()
 }
 
 /// Read back the persisted SA review verdicts for `project` — the runner calls

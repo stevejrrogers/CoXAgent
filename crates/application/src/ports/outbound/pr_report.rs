@@ -16,8 +16,8 @@
 //! Implementations are HTTP adapters (see `crates/infrastructure/src/pr_report.rs`).
 //! This port lives in `application` and never performs I/O itself.
 
-use async_trait::async_trait;
 use crate::state::PrReview;
+use async_trait::async_trait;
 
 /// A pull request as reported by the runner, for persistence on the hub.
 ///
