@@ -13,6 +13,19 @@ pub(crate) async fn make_store(
     id: &str,
     state_dir: &Path,
 ) -> Result<Arc<AnyStateStore>, Box<dyn std::error::Error>> {
+    // Opt-in remote mode : front-end a gateway over REST instead of direct DB .
+    if let Ok(url) = std::env::var("COXAGENT_REMOTE_STORE_URL") {
+        if !url.is_empty() {
+            let cfg = RestConfig {
+                base_url: url,
+                project_id: id.to_string(),
+                token: None,
+            };
+            let store = RestStateStore::new(cfg)?;
+            tracing::info!("[{id}] state store: REMOTE gateway");
+            return Ok(Arc::new(AnyStateStore::Rest(store)));
+        }
+    }
     match std::env::var("COXAGENT_DB_DSN") {
         Ok(dsn) if !dsn.is_empty() => {
             let mut store = SqlStateStore::connect(&dsn, id).await?;

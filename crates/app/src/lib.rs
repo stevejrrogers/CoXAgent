@@ -18,7 +18,8 @@ use coxagent_infrastructure::engine::{
     AnyEngine, FailoverEngine, Meter, MeteringEngine, RoutingEngine, TranscriptEngine,
 };
 use coxagent_infrastructure::{
-    discover, AnyStateStore, DockerComposeDeploy, JsonStateStore, SqlStateStore, WebhookNotifier,
+    discover, AnyStateStore, DockerComposeDeploy, JsonStateStore, RestConfig, RestStateStore,
+    SqlStateStore, WebhookNotifier,
 };
 use coxagent_presentation::{cli, render_changelog, render_report, Command};
 use std::fmt::Write as _;
