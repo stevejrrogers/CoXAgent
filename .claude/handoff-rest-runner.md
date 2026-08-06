@@ -36,3 +36,31 @@ Leave COXAGENT_DB_DSN / COXAGENT_REDIS_URL unset for that process to use REST.
              nothing outside the gateway touches Postgres/Redis; currently opt-in
              only, default still direct-DB for untouched operators.
 - Run full workspace test suite + e2e before merging to main.
+
+
+## P5a recipe : enforce auth on /store (not yet applied)
+Goal : mirror existing endpoints so /store requires a principal ONLY when the
+gateway has auth enabled (open modes stay open).
+File : crates/presentation/src/server/store_rpc.rs , fn store_rpc_ep .
+1 ) Add a Headers extractor to the signature (order fine last):
+       headers: axum::http::HeaderMap,
+2 ) After resolving the project and before `match q.op.as_str()`, insert:
+       match &app.auth {
+           Some(auth) => {
+               if super::resolve_principal(auth, &headers).await.is_none() {
+                   return (
+                       axum :: http :: StatusCode :: UNAUTHORIZED ,
+                       "sign in first",
+                   ) .into_response();
+               }
+           }
+           None => {}
+       }
+3 ) Verify: cargo fmt -p coxagent-presentation && cargo check --workspace
+    && cargo clippy --workspace --all-targets .
+Notes :
+- resolve_principal is defined in server/mod.rs and reachable via super.
+- Imports IntoResponse/Response already exist in store_rpc.rs.
+- Runner token source: personal API token minted by my_tokens_ep /
+  create_my_token_ep (prefix user:<name>:); harvest at login into env
+  COXAGENT_REMOTE_TOKEN fed to RestStateStore cfg.token.
