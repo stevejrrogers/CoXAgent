@@ -124,6 +124,9 @@ mod tdd_tests {
         }
     }
 
+    // Test-fixture builder intentionally passes mock state/git by value so
+    // each scenario starts from an owned clone mirroring a fresh deployment.
+    #[allow(clippy::needless_pass_by_value)]
     fn uk(store: Arc<MemStore>, git: Arc<SpyGit>) -> RunReleasesUseCase<MemStore> {
         RunReleasesUseCase::new(Arc::clone(&store), PathBuf::from("/tmp"))
             .with_git(Some(git as Arc<dyn GitPort>))

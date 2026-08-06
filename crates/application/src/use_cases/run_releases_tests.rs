@@ -1913,13 +1913,17 @@ mod tests {
             "milestone should appear in released list: {released:?}",
         );
 
-        // AC1 check 1: Git tag created matching milestone name
-        let tags = git.tags.lock().expect("lock");
-        assert_eq!(
-            *tags,
-            vec![milestone_name.to_owned()],
-            "exactly one tag with milestone name"
-        );
+        // AC1 check 1: Git tag created matching milestone name. The lock is
+        // taken and dropped inside a block so it is never held across the
+        // `store.load().await` below.
+        {
+            let tags = git.tags.lock().expect("lock");
+            assert_eq!(
+                *tags,
+                vec![milestone_name.to_owned()],
+                "exactly one tag with milestone name"
+            );
+        }
 
         // AC1 check 2: Release notes posted, sourced from deploy history
         let state = store.load().await.expect("load state");
@@ -1932,13 +1936,11 @@ mod tests {
         let notes = chore.description();
         assert!(
             notes.contains(producing_ticket_id),
-            "release notes must include ticket ID from deploy history: \n{}",
-            notes
+            "release notes must include ticket ID from deploy history:\n{notes}"
         );
         assert!(
             notes.contains(release_notes_deploy_entry),
-            "release notes must include changelog entry title from deploy history: \n{}",
-            notes
+            "release notes must include changelog entry title from deploy history:\n{notes}"
         );
     }
 
@@ -1996,22 +1998,19 @@ mod tests {
         // (highest deploy below target 1.1.0)
         assert!(
             notes.contains("RANGE-T001"),
-            "notes must include ticket from last shipped version: \n{}",
-            notes
+            "notes must include ticket from last shipped version:\n{notes}"
         );
 
         // RANGE-T003 must be included
         assert!(
             notes.contains("RANGE-T003"),
-            "notes must include ticket at target version: \n{}",
-            notes
+            "notes must include ticket at target version:\n{notes}"
         );
 
         // Verify tickets from before last shipped are NOT included
         assert!(
             !notes.contains("OLD-T001"),
-            "notes must EXCLUDE ticket before last shipped version: \n{}",
-            notes
+            "notes must EXCLUDE ticket before last shipped version:\n{notes}"
         );
     }
 
@@ -2164,7 +2163,7 @@ mod tests {
                 deps.iter().any(|d| d.to_string() == *id),
                 "chore must have {} in depends_on field: {:?}",
                 id,
-                deps.iter().map(|d| d.to_string()).collect::<Vec<_>>()
+                deps.iter().map(ToString::to_string).collect::<Vec<_>>()
             );
         }
     }
