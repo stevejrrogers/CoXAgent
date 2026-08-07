@@ -370,6 +370,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                     work_dir: self.work_dir.clone(),
                     timeout: Duration::from_secs(900),
                     escalation_level: 0,
+                    label: Some(id.to_string()),
                 };
                 let _ = self.engine.run(tdd_req).await;
             }
@@ -565,6 +566,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                         work_dir: self.work_dir.clone(),
                         timeout: Duration::from_secs(1800),
                         escalation_level: 0,
+                        label: Some(id.to_string()),
                     };
                     let _ = self.engine.run(repair).await;
                 }
@@ -626,6 +628,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                                 work_dir: self.work_dir.clone(),
                                 timeout: Duration::from_secs(900),
                                 escalation_level: 0,
+                                label: Some(id.to_string()),
                             };
                             let _ = self.engine.run(repair).await;
                         }
@@ -776,6 +779,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                         work_dir: self.work_dir.clone(),
                         timeout: Duration::from_secs(900),
                         escalation_level: 0,
+                        label: Some(id.to_string()),
                     };
                     let _ = self.engine.run(repair).await;
                 }
@@ -910,6 +914,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 work_dir: self.work_dir.clone(),
                 timeout: std::time::Duration::from_secs(600),
                 escalation_level: u8::try_from(attempt.saturating_sub(1)).unwrap_or(3),
+                label: None,
             };
 
             match self.engine.run(req).await {

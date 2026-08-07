@@ -373,6 +373,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             work_dir: self.work_dir.clone(),
             timeout: std::time::Duration::from_secs(900),
             escalation_level: 0,
+            label: None,
         };
         let out = match self.engine.run(request).await {
             Ok(o) if o.succeeded() => o.stdout.trim().to_owned(),
@@ -573,6 +574,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 work_dir: self.work_dir.clone(),
                 timeout: std::time::Duration::from_secs(1800),
                 escalation_level: 0,
+                label: None,
             };
             let ok = matches!(self.engine.run(request).await, Ok(o) if o.succeeded());
             if let Some(git) = &self.git {

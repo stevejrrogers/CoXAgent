@@ -440,6 +440,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             work_dir: self.work_dir.clone(),
             timeout: std::time::Duration::from_secs(3600),
             escalation_level: 0,
+            label: Some(tid.to_string()),
         };
         match self.engine.run(request).await {
             Ok(outcome) if outcome.succeeded() => {
@@ -515,6 +516,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             work_dir: self.work_dir.clone(),
             timeout: std::time::Duration::from_secs(1200),
             escalation_level: 0,
+            label: Some(tid.to_string()),
         };
         match self.engine.run(request).await {
             Ok(o) if o.succeeded() => {
@@ -600,6 +602,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             work_dir: self.work_dir.clone(),
             timeout: std::time::Duration::from_secs(1800),
             escalation_level: 0,
+            label: Some(tid.to_string()),
         };
         match self.engine.run(request).await {
             Ok(o) if o.succeeded() => {
@@ -959,6 +962,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(600),
             escalation_level: 0,
+            label: None,
         };
         let _ = self.engine.run(request).await;
     }
@@ -1082,6 +1086,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             // cheapest model. The first answers this produced were off-topic
             // and reached for `deploy` on a bug report.
             escalation_level: 1,
+            label: None,
         };
         let outcome = match self.engine.run(request).await {
             Ok(o) => o,

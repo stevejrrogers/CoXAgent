@@ -145,6 +145,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(600),
             escalation_level: 0,
+            label: None,
         };
 
         let outcome = self.engine.run(request).await?;
@@ -270,6 +271,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(180),
             escalation_level: 0,
+            label: None,
         };
         let Ok(o) = self.engine.run(request).await else {
             return proposals;

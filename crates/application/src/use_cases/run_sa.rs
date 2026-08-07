@@ -314,6 +314,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             work_dir: self.work_dir.clone(),
             timeout: std::time::Duration::from_secs(600),
             escalation_level: 1,
+            label: Some(id.to_string()),
         };
         let out = self.engine.run(request).await.ok()?;
         if !out.succeeded() {
@@ -390,6 +391,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             work_dir: self.work_dir.clone(),
             timeout: std::time::Duration::from_secs(300),
             escalation_level: 1, // the critic runs on the stronger ladder model
+            label: Some(id.to_string()),
         };
         let critique = match self.engine.run(critique_req).await {
             Ok(o) if o.succeeded() => o.stdout.trim().to_owned(),
@@ -409,6 +411,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             work_dir: self.work_dir.clone(),
             timeout: std::time::Duration::from_secs(600),
             escalation_level: 0,
+            label: Some(id.to_string()),
         };
         match self.engine.run(revise_req).await {
             Ok(o) if o.succeeded() => parse_design(&o.stdout).unwrap_or(design),
@@ -448,6 +451,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(1200),
             escalation_level: 0,
+            label: Some(id.to_string()),
         }
     }
 }

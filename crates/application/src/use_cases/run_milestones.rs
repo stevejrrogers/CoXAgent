@@ -136,6 +136,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunMilestonesUseCase<S, E> {
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(300),
             escalation_level: 0,
+            label: None,
         };
 
         let outcome = self.engine.run(request).await?;

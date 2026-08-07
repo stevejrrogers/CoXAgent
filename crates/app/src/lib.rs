@@ -1668,6 +1668,7 @@ mod live_claude_mcp_test {
                 work_dir: std::path::PathBuf::from("/Users/steverogers/Projects/CoXAgent"),
                 timeout: Duration::from_secs(120),
                 escalation_level: 0,
+                label: None,
             })
             .await
             .expect("claude run");

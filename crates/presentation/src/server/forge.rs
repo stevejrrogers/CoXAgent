@@ -645,6 +645,7 @@ pub(super) async fn force_merge(p: ProjectHandle, num: u64) {
             work_dir: p.work_dir.clone(),
             timeout: std::time::Duration::from_secs(1800),
             escalation_level: 0,
+            label: None,
         };
         match p.engine.run(request).await {
             Ok(o) if o.succeeded() => {}

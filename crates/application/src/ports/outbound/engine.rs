@@ -21,6 +21,10 @@ pub struct AgentRequest {
     /// run a STRONGER model from its escalation ladder. Engines without a
     /// ladder ignore it.
     pub escalation_level: u8,
+    /// Optional human-readable tag naming what this run is for (typically a
+    /// TicketId like "CXA-F004"). Threaded into harness session/live-log naming
+    /// so runs are chaseable per ticket.
+    pub label: Option<String>,
 }
 
 /// Token/cost usage reported by an engine, when it exposes it.

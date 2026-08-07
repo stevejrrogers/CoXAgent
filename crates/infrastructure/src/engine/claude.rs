@@ -16,13 +16,19 @@ use tokio::process::Command;
 
 /// The live-log file for a run: `<workspace>/logs/live/<role>.log`, derived from
 /// the codebase work-dir (`<workspace>/codebase`). Streamed to during the run so
-/// the UI can tail it live.
-fn live_path(work_dir: &Path, role: &str) -> Option<PathBuf> {
+/// the UI can tail it live. When a per-run [`AgentRequest::label`] is present it
+/// lands between role and operator so runs are chaseable per ticket:
+/// `<role>__<label>__<operator>.log`.
+fn live_path(work_dir: &Path, role: &str, label: Option<&str>) -> Option<PathBuf> {
     let dir = work_dir.parent()?.join("logs").join("live");
     std::fs::create_dir_all(&dir).ok()?;
     // Key the file by operator when this process runs as a named headless worker
     // (COXAGENT_OPERATOR), so two operators working the same role don't clobber
     // each other's live log and each can be tailed separately in the dashboard.
+    let label_part = label
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map_or_else(String::new, |l| format!("__{l}"));
     let suffix = std::env::var("COXAGENT_OPERATOR")
         .ok()
         .map(|o| {
@@ -32,7 +38,7 @@ fn live_path(work_dir: &Path, role: &str) -> Option<PathBuf> {
         })
         .filter(|s| !s.is_empty())
         .map_or_else(String::new, |s| format!("__{s}"));
-    Some(dir.join(format!("{role}{suffix}.log")))
+    Some(dir.join(format!("{role}{label_part}{suffix}.log")))
 }
 
 fn append_live(path: &Path, line: &str) {
@@ -239,7 +245,14 @@ impl AgentEnginePort for ClaudeEngine {
         let role = crate::engine::role_key(request.role);
         // _mcp_config_file must outlive the child process (deleted on drop).
         let outcome = self
-            .exec(cmd, &role, &request.work_dir, request.timeout, sandbox)
+            .exec(
+                cmd,
+                &role,
+                request.label.as_deref(),
+                &request.work_dir,
+                request.timeout,
+                sandbox,
+            )
             .await;
         drop(_mcp_config_file);
         outcome
@@ -267,7 +280,8 @@ impl AgentEnginePort for ClaudeEngine {
             .stdin(std::process::Stdio::null())
             .kill_on_drop(true);
         crate::engine::apply_shim_path(&mut cmd);
-        self.exec(cmd, "resume", work_dir, timeout, sandbox).await
+        self.exec(cmd, "resume", None, work_dir, timeout, sandbox)
+            .await
     }
 }
 
@@ -279,6 +293,7 @@ impl ClaudeEngine {
         &self,
         mut cmd: Command,
         role: &str,
+        label: Option<&str>,
         work_dir: &std::path::Path,
         timeout: std::time::Duration,
         sandbox: SandboxStatus,
@@ -286,7 +301,7 @@ impl ClaudeEngine {
         // Stream stdout line-by-line: render each event to the live log as it
         // arrives (so the UI can tail it), while accumulating the raw NDJSON for
         // the final parse. Reset the live file at the start of the run.
-        let live = live_path(work_dir, role);
+        let live = live_path(work_dir, role, label);
         if let Some(p) = &live {
             let _ = std::fs::write(p, format!("# {role} — live @ run start\n"));
         }
@@ -621,6 +636,7 @@ mod tests {
                 work_dir: dir.clone(),
                 timeout: std::time::Duration::from_secs(10),
                 escalation_level: 0,
+                label: None,
             })
             .await
             .expect("fake binary run succeeds");

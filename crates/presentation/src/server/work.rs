@@ -33,6 +33,7 @@ pub(super) async fn analyze_goal_ep(
         work_dir,
         timeout: std::time::Duration::from_secs(120),
         escalation_level: 0,
+        label: None,
     };
     match engine.run(request).await {
         Ok(o) if o.succeeded() => {
@@ -151,6 +152,7 @@ pub(super) async fn ba_analyze(
         work_dir: p.work_dir.clone(),
         timeout: std::time::Duration::from_secs(120),
         escalation_level: 0,
+        label: None,
     };
     let outcome = match p.engine.run(request).await {
         Ok(o) if o.succeeded() => o,

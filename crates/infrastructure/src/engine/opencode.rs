@@ -243,10 +243,17 @@ fn mcp_prompt_hint(mcp: &crate::engine::McpAccess) -> String {
 
 /// The live-log file for a run: `<workspace>/logs/live/<role>.log`, derived
 /// from the codebase work-dir (`<workspace>/codebase`). Same layout as the
-/// claude engine so the dashboard's `agent-log` endpoint finds it.
-fn live_path(work_dir: &Path, role: &str) -> Option<PathBuf> {
+/// claude engine so the dashboard's `agent-log` endpoint finds it. When a
+/// per-run [`AgentRequest::label`] is present it lands between role and
+/// operator so runs are chaseable per ticket:
+/// `<role>__<label>__<operator>.log`.
+fn live_path(work_dir: &Path, role: &str, label: Option<&str>) -> Option<PathBuf> {
     let dir = work_dir.parent()?.join("logs").join("live");
     std::fs::create_dir_all(&dir).ok()?;
+    let label_part = label
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map_or_else(String::new, |l| format!("__{l}"));
     let suffix = std::env::var("COXAGENT_OPERATOR")
         .ok()
         .map(|o| {
@@ -256,7 +263,7 @@ fn live_path(work_dir: &Path, role: &str) -> Option<PathBuf> {
         })
         .filter(|s| !s.is_empty())
         .map_or_else(String::new, |s| format!("__{s}"));
-    Some(dir.join(format!("{role}{suffix}.log")))
+    Some(dir.join(format!("{role}{label_part}{suffix}.log")))
 }
 
 fn append_live(path: &Path, line: &str) {
@@ -298,7 +305,7 @@ impl AgentEnginePort for OpencodeEngine {
         };
 
         let role = crate::engine::role_key(request.role);
-        let live = live_path(&request.work_dir, &role);
+        let live = live_path(&request.work_dir, &role, request.label.as_deref());
         if let Some(p) = &live {
             let _ = std::fs::write(p, format!("# {role} — live @ run start\n"));
         }
@@ -346,7 +353,7 @@ impl AgentEnginePort for OpencodeEngine {
         work_dir: &std::path::Path,
         timeout: std::time::Duration,
     ) -> Result<AgentOutcome, PortError> {
-        let live = live_path(work_dir, "resume");
+        let live = live_path(work_dir, "resume", None);
         let (mut cmd, sandbox) = crate::proc::agent_command(&self.binary, work_dir, self.sandbox);
         cmd.arg("run")
             .arg("--model")
@@ -901,6 +908,7 @@ mod tests {
                 work_dir: dir.clone(),
                 timeout: std::time::Duration::from_secs(20),
                 escalation_level: 0,
+                label: None,
             })
             .await
             .expect("run");

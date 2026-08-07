@@ -36,6 +36,7 @@ pub async fn repair_json<E: AgentEnginePort + ?Sized>(
         work_dir: work_dir.to_path_buf(),
         timeout: Duration::from_secs(120),
         escalation_level: 0,
+        label: None,
     };
     let out = engine.run(request).await.ok()?;
     if !out.succeeded() {

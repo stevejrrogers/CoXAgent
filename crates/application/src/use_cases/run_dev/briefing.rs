@@ -206,6 +206,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 }));
                 u8::try_from(attempts.max(floor)).unwrap_or(3)
             },
+            label: Some(id.to_string()),
         }
     }
 }
