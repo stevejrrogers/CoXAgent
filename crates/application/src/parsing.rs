@@ -20,17 +20,81 @@ pub struct ProposedItem {
 }
 
 /// Extract the outermost JSON array from engine output, tolerating surrounding
-/// prose, and parse it into proposed items.
+/// prose and markdown code fences, and parse it into proposed items.
+///
+/// Strategy: find the first `[`, then scan forward through every subsequent
+/// `]`, attempting to parse each candidate slice as a complete document. The
+/// first candidate that parses in full wins — this naturally handles nested
+/// arrays (e.g. `acceptance_criteria` inside each item object) as well as
+/// trailing prose after the real array.
 ///
 /// # Errors
-/// Returns a message when no array is present or the JSON is malformed.
+/// Returns a message when no array is present or no candidate slice parses.
 pub fn parse_items(raw: &str) -> Result<Vec<ProposedItem>, String> {
-    let start = raw.find('[').ok_or("no JSON array found")?;
-    let end = raw.rfind(']').ok_or("no closing bracket")?;
-    if end < start {
-        return Err("malformed array bounds".to_owned());
+    let stripped = strip_code_fences(raw);
+    // Prefer the prose-trimmed body; fall back to the full stripped text in case
+    // trailing-trimming discarded content.
+    for body in [trim_trailing_prose(&stripped), stripped] {
+        if !body.contains('[') || !body.contains(']') {
+            continue;
+        }
+        if let Some(candidate) = first_valid_slice(&body) {
+            return serde_json::from_str::<Vec<ProposedItem>>(&candidate)
+                .map_err(|e| e.to_string());
+        }
     }
-    serde_json::from_str(&raw[start..=end]).map_err(|e| e.to_string())
+    Err("no JSON array found".to_owned())
+}
+
+/// If `raw` is wrapped in a markdown fenced code block (```json … ``` or a bare
+/// ```), strip just the fence marker lines so bracketed content can be scanned.
+fn strip_code_fences(raw: &str) -> String {
+    let lines: Vec<&str> = raw.lines().collect();
+    if lines.len() < 2 {
+        return raw.to_owned();
+    }
+    let head_is_fence = lines[0].trim_start().starts_with("```");
+    let tail_is_fence = lines.last().is_some_and(|l| l.trim().ends_with("```"));
+    if head_is_fence && tail_is_fence {
+        lines[1..lines.len() - 1].join("\n")
+    } else {
+        raw.to_owned()
+    }
+}
+
+/// Drop non-JSON prose that trails a complete JSON document. Only text after the
+/// final closing brace/bracket of a structurally valid suffix is removed; we
+/// never touch interior content.
+fn trim_trailing_prose(s: &str) -> String {
+    match (s.rfind(']'), s.rfind('}')) {
+        (Some(ab), Some(cb)) => s[..=ab.max(cb)].to_owned(),
+        (Some(ab), None) => s[..=ab].to_owned(),
+        (None, Some(cb)) => s[..=cb].to_owned(),
+        (None, None) => s.to_owned(),
+    }
+}
+
+/// Scan `s` from its first `[`, and for every subsequent `]` try parsing the
+/// whole slice as a JSON array. Returns the first candidate whose full slice is
+/// valid — handling nested arrays and trailing prose. Returns `None` when no
+/// candidate parses.
+fn first_valid_slice(s: &str) -> Option<String> {
+    let start = s.find('[')?;
+    // Walk forward from the first '[', and at every ']' try parsing the whole
+    // slice up to and including it as an array. The first full parse wins; this
+    // skips nested arrays (e.g. acceptance_criteria) and stops before trailing
+    // prose, because those candidates fail a whole-document parse.
+    for end in s
+        .char_indices()
+        .filter(|(i, c)| *c == ']' && *i > start)
+        .map(|(i, _)| i)
+    {
+        let candidate = &s[start..=end];
+        if serde_json::from_str::<serde_json::Value>(candidate).is_ok_and(|v| v.is_array()) {
+            return Some(candidate.to_owned());
+        }
+    }
+    None
 }
 
 /// Normalise a ticket title for duplicate detection: lowercase, keep only
@@ -139,5 +203,34 @@ mod tests {
     #[test]
     fn no_array_errors() {
         assert!(parse_items("nope").is_err());
+    }
+
+    #[test]
+    fn parses_fenced_json_block() {
+        let raw = "```json\n[\n  {\"title\":\"Login\",\"priority\":\"high\",\"complexity\":\"medium\"}\n]\n```";
+        let items = parse_items(raw).expect("parse fenced block");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "Login");
+    }
+
+    #[test]
+    fn balanced_close_bracket_when_trailing_prose_follows() {
+        // Inner item object closes with '}' then the outer array with ']', and
+        // prose trails both — the parser must stop at the real outer bracket.
+        let raw = r#"Here is my analysis. [{"title":"X","priority":"low","complexity":"small","acceptance_criteria":["a","b"]}] And that's all."#;
+        let items = parse_items(raw).expect("parse with trailing prose");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "X");
+    }
+
+    #[test]
+    fn nested_acceptance_criteria_arrays_still_parse() {
+        let raw = r#"[{"title":"Export","priority":"high","complexity":"large","acceptance_criteria":["csv downloads","headers correct"]}]"#;
+        let items = parse_items(raw).expect("parse nested arrays");
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].acceptance_criteria,
+            vec!["csv downloads".to_owned(), "headers correct".to_owned()]
+        );
     }
 }

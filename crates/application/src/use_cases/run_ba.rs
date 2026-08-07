@@ -158,10 +158,24 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
         }
 
         // One cheap repair pass instead of discarding the whole call on a
-        // malformed bracket.
+        // malformed bracket. But a truly empty stdout (the opencode timeout
+        // case) has nothing worth repairing — skip the 120s SM call entirely.
         let proposals = match parse_items(&outcome.stdout) {
             Ok(p) => p,
             Err(first) => {
+                let stdout_is_blank = outcome.stdout.trim().is_empty()
+                    || outcome
+                        .stdout
+                        .chars()
+                        .filter(|c| !c.is_whitespace())
+                        .count()
+                        == 0;
+                if stdout_is_blank {
+                    return Err(crate::error::PortError::Corrupt(
+                        "BA produced no output".to_owned(),
+                    )
+                    .into());
+                }
                 let fixed = crate::use_cases::repair_json(
                     self.engine.as_ref(),
                     &outcome.stdout,
@@ -421,5 +435,47 @@ mod tests {
             code: 0,
         });
         assert!(run(store, engine).execute().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn ba_skips_repair_when_stdout_is_blank() {
+        // Blank stdout (the opencode timeout case) must NOT trigger an SM repair
+        // call — it returns a clear Corrupt error instead.
+        struct BlankEngine;
+        #[async_trait]
+        impl AgentEnginePort for BlankEngine {
+            fn id(&self) -> &'static str {
+                "blank"
+            }
+            async fn run(&self, req: AgentRequest) -> Result<AgentOutcome, PortError> {
+                // The only call allowed is the BA proposal; any SM repair attempt
+                // would carry a different role and fail this assertion.
+                assert_eq!(req.role, Role::Ba);
+                Ok(AgentOutcome {
+                    stdout: "   \n  ".to_owned(),
+                    stderr: String::new(),
+                    exit_code: Some(0),
+                    usage: None,
+                    trace: String::new(),
+                    session_id: None,
+                    sandbox: SandboxStatus::default(),
+                })
+            }
+        }
+        let store = Arc::new(MemStore::default());
+        let engine = Arc::new(BlankEngine);
+        let uc = RunBaUseCase::new(
+            store,
+            engine,
+            Config::default(),
+            PathBuf::from("/tmp"),
+            "goal: a todo app".to_owned(),
+        );
+        match uc.execute().await {
+            Err(crate::error::AppError::Port(crate::error::PortError::Corrupt(msg))) => {
+                assert!(msg.contains("no output"), "unexpected message: {msg}");
+            }
+            other => panic!("expected Corrupt error for blank stdout, got {other:?}"),
+        }
     }
 }
