@@ -46,8 +46,84 @@ pub fn parse_items(raw: &str) -> Result<Vec<ProposedItem>, String> {
     Err("no JSON array found".to_owned())
 }
 
-/// If `raw` is wrapped in a markdown fenced code block (```json … ``` or a bare
-/// ```), strip just the fence marker lines so bracketed content can be scanned.
+/// Partially salvage corrupt agent output: extract every VALID top-level object
+/// individually instead of discarding everything because one bad segment broke
+/// an otherwise-good array's whole-document parse.
+///
+/// LLM output frequently mixes genuinely good items with hallucinated garbage —
+/// extra arrays nested between objects, malformed escapes like `{\"...\"}`, token
+/// noise — which makes serde reject <i>all</i> of it at once even though most of
+/// it is perfectly fine. This scans for every top-level JSON object using balanced-
+/// brace matching that respects quoted strings and escape sequences (`\"`, `\\`),
+/// keeps each one that deserializes on its own, and drops only what truly breaks.
+///
+/// # Errors
+/// Returns a message when no candidate object parses anywhere in `raw`.
+pub fn parse_items_lenient(raw: &str) -> Result<Vec<ProposedItem>, String> {
+    let stripped = strip_code_fences(raw);
+    let mut valid = Vec::new();
+    for obj in top_level_objects(&stripped) {
+        if let Ok(item) = serde_json::from_str::<ProposedItem>(&obj) {
+            valid.push(item);
+        }
+    }
+    if valid.is_empty() {
+        Err("no valid feature items found".to_owned())
+    } else {
+        Ok(valid)
+    }
+}
+
+/// Scan `s` and return each TOP-LEVEL JSON object substring (a balanced run of
+/// braces at depth zero), never descending into nested arrays or objects. Braces
+/// inside quoted string values are ignored, as are escape sequences (`\"`, `\\`)
+/// so a backslash-quote never prematurely closes a string. Sibling garbage —
+/// stray brackets, tokens, extra malformed segments — simply falls between the
+/// returned slices.
+fn top_level_objects(s: &str) -> Vec<String> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::new();
+    let mut depth: i32 = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut start: Option<usize> = None;
+
+    for (i, b) in bytes.iter().enumerate() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if *b == b'\\' {
+                escaped = true;
+            } else if *b == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' => {
+                if depth == 0 && start.is_none() {
+                    start = Some(i);
+                }
+                depth += 1;
+            }
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    if let Some(st) = start.take() {
+                        out.push(s[st..=i].to_owned());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// If `raw` is wrapped in a markdown fenced code block (a json-tagged or bare
+/// triple-backtick fence), strip just the fence marker lines so bracketed
+/// content can be scanned.
 fn strip_code_fences(raw: &str) -> String {
     let lines: Vec<&str> = raw.lines().collect();
     if lines.len() < 2 {
@@ -232,5 +308,58 @@ mod tests {
             items[0].acceptance_criteria,
             vec!["csv downloads".to_owned(), "headers correct".to_owned()]
         );
+    }
+
+    #[test]
+    fn lenient_salvages_good_when_one_neighbor_is_garbage() {
+        // One good object followed by malformed garbage that would break a
+        // whole-array parse; only the valid item must survive.
+        let raw = r#"[
+          {"title":"Login","priority":"high","complexity":"medium"},
+          {"title":
+        "#;
+        let items = parse_items_lenient(raw).expect("salvage good item");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "Login");
+    }
+
+    #[test]
+    fn lenient_nested_acceptance_criteria_not_mis_split() {
+        // The nested array inside acceptance_criteria must not be treated as a
+        // sibling top-level object; only one item should come out.
+        let raw = r#"[{"title":"Export","priority":"high","complexity":"large","acceptance_criteria":["a","b"]}]"#;
+        let items = parse_items_lenient(raw).expect("parse nested arrays");
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].acceptance_criteria,
+            vec!["a".to_owned(), "b".to_owned()]
+        );
+    }
+
+    #[test]
+    fn lenient_handles_braces_and_escaped_quotes_in_strings() {
+        // Braces inside a description and an escaped quote must not break the
+        // object's brace balancing.
+        let raw = r#"[{"title":"A","priority":"low","complexity":"small","description": "has {json} and \"quote\" here"}, {"title":"B","priority":"high","complexity":"large"}]"#;
+        let items = parse_items_lenient(raw).expect("parse braces in strings");
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn lenient_fenced_block_still_works() {
+        let raw =
+            "```json\n[{\"title\":\"Login\",\"priority\":\"high\",\"complexity\":\"medium\"}]\n```";
+        let items = parse_items_lenient(raw).expect("parse fenced block");
+        assert_eq!(items.len(), 1);
+    }
+
+    #[test]
+    fn lenient_fully_garbage_is_err() {
+        for raw in ["", "nope", "[{", "{broken"] {
+            assert!(
+                parse_items_lenient(raw).is_err(),
+                "expected Err for {raw:?}"
+            );
+        }
     }
 }

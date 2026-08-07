@@ -4,7 +4,7 @@
 
 use crate::config::Config;
 use crate::error::AppError;
-use crate::parsing::{normalize_title, parse_items};
+use crate::parsing::{normalize_title, parse_items, parse_items_lenient};
 use crate::ports::outbound::{AgentEnginePort, AgentRequest, StateStorePort};
 use crate::prompts;
 use crate::use_cases::{AddTicketInput, AddTicketUseCase};
@@ -186,9 +186,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
                 match fixed.as_deref().map(parse_items) {
                     Some(Ok(p)) => p,
                     _ => {
-                        return Err(
-                            crate::error::PortError::Corrupt(format!("BA output: {first}")).into(),
-                        )
+                        // Repair gave nothing usable. Try partial salvage: keep
+                        // every object that parses on its own rather than throwing
+                        // the whole (mostly-good) array away because one segment
+                        // is corrupt.
+                        match parse_items_lenient(&outcome.stdout) {
+                            Ok(partial) if !partial.is_empty() => partial,
+                            _ => {
+                                return Err(crate::error::PortError::Corrupt(format!(
+                                    "BA output: {first}"
+                                ))
+                                .into())
+                            }
+                        }
                     }
                 }
             }
@@ -435,6 +445,55 @@ mod tests {
             code: 0,
         });
         assert!(run(store, engine).execute().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn ba_salvages_partial_good_items_when_no_repair() {
+        // One valid feature plus one garbage segment; repair offers no help, so
+        // partial salvage must keep ONLY the valid item end-to-end.
+        struct SalvageEngine {
+            proposals: String,
+        }
+        #[async_trait]
+        impl AgentEnginePort for SalvageEngine {
+            fn id(&self) -> &'static str {
+                "salvage"
+            }
+            async fn run(&self, req: AgentRequest) -> Result<AgentOutcome, PortError> {
+                match req.role {
+                    Role::Ba => Ok(AgentOutcome {
+                        stdout: self.proposals.clone(),
+                        stderr: String::new(),
+                        exit_code: Some(0),
+                        usage: None,
+                        trace: String::new(),
+                        session_id: None,
+                        sandbox: SandboxStatus::default(),
+                    }),
+                    // No repair available: any SM call fails outright, so
+                    // repair_json yields None and we fall through to salvage.
+                    _ => Err(PortError::Corrupt("no repair available".to_owned())),
+                }
+            }
+        }
+        let store = Arc::new(MemStore::default());
+        let engine = Arc::new(SalvageEngine {
+            proposals:
+                "[{\"title\":\"Login\",\"priority\":\"high\",\"complexity\":\"medium\",\"has_ui\":true}, {\"title\":"
+                    .to_owned(),
+        });
+        let uc = RunBaUseCase::new(
+            Arc::clone(&store),
+            engine,
+            Config::default(),
+            PathBuf::from("/tmp"),
+            "goal: a todo app".to_owned(),
+        );
+        let created = uc.execute().await.expect("partial salvage should succeed");
+        assert_eq!(created.len(), 1);
+        let state = store.load().await.expect("load");
+        assert_eq!(state.tickets.len(), 1);
+        assert_eq!(state.tickets[0].title(), "Login");
     }
 
     #[tokio::test]
