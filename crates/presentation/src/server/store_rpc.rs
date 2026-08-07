@@ -18,7 +18,6 @@ pub(super) struct OpQ {
 /// Optional arguments carried for each operation.
 #[derive(Default, serde::Deserialize)]
 pub(super) struct Args {
-    #[expect(dead_code)]
     revision: Option<i64>,
     data: Option<String>,
     id: Option<String>,
@@ -57,6 +56,16 @@ async fn op_load(p: &ProjectHandle) -> Response {
     }
 }
 
+/// The current optimistic-concurrency revision, so a REST-fronted runner can
+/// capture what it saw and hand it back on [`op_save`] to get stale-write
+/// protection (`Some(rev)`), or learn none is tracked (`None`).
+async fn op_version(p: &ProjectHandle) -> Response {
+    match p.store.current_version().await {
+        Ok(rev) => ok(serde_json::json!({ "revision": rev })),
+        Err(e) => err(e),
+    }
+}
+
 /// Persist a full state snapshot on behalf of a REST-fronted runner.
 async fn op_save(p: &ProjectHandle, args: &Args) -> Response {
     let Some(Ok(state)) = args
@@ -68,7 +77,10 @@ async fn op_save(p: &ProjectHandle, args: &Args) -> Response {
             "save needs data".into(),
         ));
     };
-    match p.store.save(&state).await {
+    // Forward the caller-captured revision so a stale write is rejected with a
+    // Conflict instead of silently clobbering newer data. Older clients omitting
+    // the field pass None and keep today's behaviour.
+    match p.store.save_expecting(&state, args.revision).await {
         Ok(()) => ok(serde_json::json!({ "ok": true })),
         Err(e) => err(e),
     }
@@ -261,6 +273,7 @@ pub(super) async fn store_rpc_ep(
     };
     match q.op.as_str() {
         "load" => op_load(&p).await,
+        "version" => op_version(&p).await,
         "save" => op_save(&p, &args).await,
         "claim_ticket" => op_claim_ticket(&p, &args).await,
         "acquire_leader" => op_acquire_leader(&p, &args).await,

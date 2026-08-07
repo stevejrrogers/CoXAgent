@@ -37,6 +37,26 @@ impl StateStorePort for AnyStateStore {
         }
     }
 
+    async fn save_expecting(
+        &self,
+        state: &ProjectState,
+        expected_revision: Option<i64>,
+    ) -> Result<(), PortError> {
+        match self {
+            Self::Json(s) => s.save_expecting(state, expected_revision).await,
+            Self::Sql(s) => s.save_expecting(state, expected_revision).await,
+            Self::Rest(s) => s.save_expecting(state, expected_revision).await,
+        }
+    }
+
+    async fn current_version(&self) -> Result<Option<i64>, PortError> {
+        match self {
+            Self::Json(s) => s.current_version().await,
+            Self::Sql(s) => s.current_version().await,
+            Self::Rest(s) => s.current_version().await,
+        }
+    }
+
     async fn claim_ticket(
         &self,
         id: &TicketId,

@@ -124,6 +124,41 @@ impl StateStorePort for RestStateStore {
         Ok(())
     }
 
+    async fn save_expecting(
+        &self,
+        state: &ProjectState,
+        expected_revision: Option<i64>,
+    ) -> Result<(), PortError> {
+        // Carry the caller-captured revision so the gateway rejects a stale
+        // write with a 409 Conflict instead of silently overwriting newer data.
+        // `None` (older clients, or backends without version tracking) omits the
+        // field and keeps today's behaviour.
+        let data = serde_json::to_string(state)
+            .map_err(|e| PortError::Backend(format!("encode state: {e}")))?;
+        let mut body = Body::new();
+        body.data = Some(data);
+        if expected_revision.is_some() {
+            body.revision = expected_revision;
+            self.post("save", body).await?;
+            return Ok(());
+        }
+        self.save(state).await
+    }
+
+    async fn current_version(&self) -> Result<Option<i64>, PortError> {
+        #[derive(Deserialize)]
+        struct Versioned {
+            #[serde(default)]
+            revision: Option<i64>,
+        }
+        let r = self.post("version", Body::new()).await?;
+        let v: Versioned = r
+            .json()
+            .await
+            .map_err(|e| PortError::Backend(e.to_string()))?;
+        Ok(v.revision)
+    }
+
     async fn claim_ticket(
         &self,
         id: &TicketId,

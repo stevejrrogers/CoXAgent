@@ -138,6 +138,39 @@ pub trait StateStorePort: Send + Sync {
     /// Persist the full state atomically after validating it.
     async fn save(&self, state: &ProjectState) -> Result<(), PortError>;
 
+    /// Persist expecting that no other writer advanced past `expected_revision`
+    /// since this caller captured it from its own load.
+    ///
+    /// Optimistic concurrency control carried across an adapter boundary such as
+    /// REST. [`Self::save`] re-reads-and-CASes at write time inside its own
+    /// connection or process, so two concurrent writers can both succeed and
+    /// silently clobber each other — exactly what lost-update protection should
+    /// stop. Passing back the same revision this caller saw when it loaded lets
+    /// the server reject a stale write with a conflict before it overwrites newer
+    /// data. Backends without revision tracking leave this at the default, which
+    /// falls through to [`Self::save`] and preserves today's behaviour.
+    async fn save_expecting(
+        &self,
+        state: &ProjectState,
+        _expected_revision: Option<i64>,
+    ) -> Result<(), PortError> {
+        self.save(state).await
+    }
+
+    /// The store's current optimistic-concurrency version token for this
+    /// project aggregate, if the backend tracks one (`None` otherwise).
+    ///
+    /// Lets an adapter surfacing its read-modify-write boundary hand back what
+    /// value [`Self::save_expecting`] should be told this caller saw when it
+    /// loaded — so optimistic concurrency survives across process boundaries
+    /// instead of being defeated by each writer re-reading at write time.
+    ///
+    /// Backends without revision tracking leave this at `None`, preserving
+    /// today's behaviour; callers treat `None` as "no guard available".
+    async fn current_version(&self) -> Result<Option<i64>, PortError> {
+        Ok(None)
+    }
+
     /// Atomically claim `id` for `worker` (`account@host`), stamping `now` as the
     /// lease time. Returns `true` if this caller won the claim, `false` if the
     /// ticket is missing, already claimed, or not in a claimable state.
