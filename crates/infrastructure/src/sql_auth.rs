@@ -715,6 +715,44 @@ impl AuthPort for SqlAuthService {
         Some(secret)
     }
 
+    /// Harvest a personal bearer token at login time on the same self-service
+    /// path as `/my/tokens` (`user:{name}:{...}` prefix), bound to the user's OWN
+    /// role. Idempotent per user: once one exists we neither re-mint nor re-issue
+    /// the plaintext (only its hash is stored), so `Some` comes back exactly on
+    /// first harvest and `None` thereafter without erroring — matching how every
+    /// other token secret in this store is returned only once.
+    async fn auto_issue_personal_token(&self, username: &str) -> Option<String> {
+        let prefix = format!("user:{}:", username.to_ascii_lowercase());
+        let client = self.client().await.ok()?;
+        // Idempotent: an existing personal token for this user wins; do not mint a duplicate.
+        if client
+            .query_opt(
+                "SELECT 1 FROM auth_tokens WHERE label LIKE $1",
+                &[&format!("{prefix}%")],
+            )
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            return None;
+        }
+        // Bind to the caller's own stored role — never an elevation.
+        let role_str = client
+            .query_opt(
+                "SELECT role FROM auth_users WHERE username = $1",
+                &[&username],
+            )
+            .await
+            .ok()
+            .flatten()?
+            .get::<_, Option<String>>(0)?;
+        // Same path as create_my_token_ep(): mint via create_token under the
+        // user-prefixed label; a deterministic label keeps re-login idempotent.
+        self.create_token(&format!("{prefix}remote-store"), role_from(&role_str))
+            .await
+    }
+
     async fn list_tokens(&self) -> Vec<TokenInfo> {
         let Ok(client) = self.client().await else {
             return Vec::new();

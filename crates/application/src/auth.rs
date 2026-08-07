@@ -438,6 +438,21 @@ pub trait AuthPort: Send + Sync {
     /// Returns `None` if the label is taken or persistence fails.
     async fn create_token(&self, label: &str, role: AuthRole) -> Option<String>;
 
+    /// Harvest a personal bearer token for `username` at login time — mint-or-
+    /// reuse on the self-service path used by `/my/tokens`
+    /// (`user:{name}:{...}` prefix), bound to that user's own role (never an
+    /// elevation). Idempotent: when one already exists for that user no
+    /// duplicate is minted and no secret is re-issued — secrets are stored only
+    /// as hashes, so the plaintext can be returned exactly once, on first issue.
+    ///
+    /// The returned secret feeds `COXAGENT_REMOTE_TOKEN`, authenticating a
+    /// remote-state runner against this server's `/store`. Default returns
+    /// `None` so non-SQL / loopback auth stores opt out cleanly; a store that
+    /// backs RBAC bearer validation may override to provide real harvesting.
+    async fn auto_issue_personal_token(&self, _username: &str) -> Option<String> {
+        None
+    }
+
     /// List minted tokens (metadata only, never the secret).
     async fn list_tokens(&self) -> Vec<TokenInfo>;
 

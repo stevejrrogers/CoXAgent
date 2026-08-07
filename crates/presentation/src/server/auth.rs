@@ -434,6 +434,13 @@ pub(super) async fn login_ep(
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("");
             auth.attach_device(&token, &device_label(ua)).await;
+            // CXA-F002: harvest a personal bearer token for remote-state runners
+            // (fed into make_store's COXAGENT_REMOTE_TOKEN so /store calls are
+            // authenticated under P5a). Idempotent per user — first login mints,
+            // later logins reuse without re-issuing the secret.
+            if let Some(secret) = auth.auto_issue_personal_token(&req.username).await {
+                std::env::set_var("COXAGENT_REMOTE_TOKEN", secret);
+            }
             token
         }
         LoginResult::TotpRequired => {

@@ -19,7 +19,12 @@ pub(crate) async fn make_store(
             let cfg = RestConfig {
                 base_url: url,
                 project_id: id.to_string(),
-                token: None,
+                // P5a: a runner reaching a gateway that enforces RBAC on /store
+                // must present a bearer. Fed by the login-time harvest
+                // (AuthPort::auto_issue_personal_token) or set manually.
+                token: std::env::var("COXAGENT_REMOTE_TOKEN")
+                    .ok()
+                    .filter(|t| !t.is_empty()),
             };
             let store = RestStateStore::new(cfg)?;
             tracing::info!("[{id}] state store: REMOTE gateway");
