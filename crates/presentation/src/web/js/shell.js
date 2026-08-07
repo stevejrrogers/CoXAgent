@@ -320,9 +320,26 @@ async function deleteProject(id){
   }catch(e){toasty("Network error","err");}
 }
 let ME=null;
+const NEXT_KEY="cox_next";
+// Where the guest was trying to go when the auth gate intercepted them. The
+// explicit ?next=<path> query param wins; otherwise we keep whatever hash or
+// search the URL already carried. Saved so a successful login can return them
+// there even when the redirect reloads (fresh location.hash) in between.
+function rememberDestination(){
+  try{
+    const q=new URLSearchParams(location.search);
+    const next=q.get("next"); // already percent-decoded by URLSearchParams
+    // Accept either /path or #fragment form; otherwise keep whatever hash/search
+    // the URL already carries so a reload between gate and login still returns.
+    const target=(typeof next==="string"&&(next.startsWith("/")||next.startsWith("#")))
+      ?next
+      :((location.hash+location.search)||"/");
+    if(target&&target!=="/")sessionStorage.setItem(NEXT_KEY,target);
+  }catch(e){}
+}
 async function boot(){
-  let r;try{r=await fetch("/api/auth/me");}catch(e){showLogin();return;}
-  if(r.status===401){showLogin();return;}
+  let r;try{r=await fetch("/api/auth/me");}catch(e){rememberDestination();showLogin();return;}
+  if(r.status===401){rememberDestination();showLogin();return;}
   try{ME=await r.json();}catch(e){ME={auth:false};}
   try{updateSegments();}catch(e){}
   startApp();
@@ -446,7 +463,17 @@ async function doLogin(){
     }
     document.getElementById("lg-pass").value="";document.getElementById("lg-totp").value="";
     document.getElementById("lg-totp-row").style.display="none";
+    // Return a guest to where they were headed before the gate intercepted
+    // them (see rememberDestination): navigate there once auth succeeds.
+    const next=sessionStorage.getItem(NEXT_KEY);
+    sessionStorage.removeItem(NEXT_KEY);
     await boot();
+    // A guest who asked for ?next=<hash> lands back on that view once signed
+    // in; an invalid/nonexistent fragment safely falls through to overview.
+    if(next){
+      const frag=(next.indexOf("#")>=0)?next.slice(next.indexOf("#")+1).split("?")[0]:"";
+      if(frag&&TITLES[frag])nav(frag);
+    }
   }catch(e){err.textContent="Network error.";}
 }
 async function doLogout(){try{await fetch("/api/auth/logout",{method:"POST"});}catch(e){}location.reload();}
