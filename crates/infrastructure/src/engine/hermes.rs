@@ -17,7 +17,7 @@ impl HermesEngine {
     pub fn new(model: impl Into<String>) -> Self {
         Self {
             model: model.into(),
-            binary: "hermes".to_owned(),
+            binary: crate::engine::resolve_engine_binary("hermes"),
             sandbox: false,
         }
     }

@@ -66,7 +66,7 @@ impl ClaudeEngine {
     pub fn new(model: impl Into<String>) -> Self {
         Self {
             model: model.into(),
-            binary: "claude".to_owned(),
+            binary: crate::engine::resolve_engine_binary("claude"),
             mcp: None,
             escalation: vec!["opus".to_owned()],
             sandbox: false,

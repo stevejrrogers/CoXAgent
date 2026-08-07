@@ -33,7 +33,7 @@ impl OpencodeEngine {
     pub fn new(model: impl Into<String>) -> Self {
         Self {
             model: model.into(),
-            binary: "opencode".to_owned(),
+            binary: crate::engine::resolve_engine_binary("opencode"),
             mcp: None,
             escalation: Vec::new(),
             sandbox: false,

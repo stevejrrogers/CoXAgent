@@ -174,7 +174,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     func richEnv() -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let extra = ["\(home)/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+        // ~/.opencode/bin must come first: opencode installs there and is not
+        // symlinked anywhere else, so without it app-spawned operators fail with
+        // `nice: 'opencode': No such file or directory` and every agent run dies.
+        let extra = [
+            "\(home)/.opencode/bin",
+            "\(home)/.local/bin",
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+        ]
         env["PATH"] = extra.joined(separator: ":") + ":" + (env["PATH"] ?? "")
         return env
     }

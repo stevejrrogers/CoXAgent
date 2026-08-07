@@ -64,3 +64,99 @@ pub(crate) fn apply_shim_path(cmd: &mut tokio::process::Command) {
         }
     }
 }
+
+/// Resolve an agent-CLI binary (`opencode`, `claude`, `hermes`, ...) to an
+/// absolute path. Prefer whatever `PATH` already resolves (a caller may set a
+/// rich PATH), then fall back to the common install locations keyed off
+/// `$HOME` — this keeps app-spawned operators working even when their inherited
+/// PATH omits e.g. `~/.opencode/bin`. Returns the bare name only when nothing
+/// is found anywhere, so resolution failures degrade exactly as before.
+pub(crate) fn resolve_engine_binary(name: &str) -> String {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    for dir in std::env::split_paths(&path) {
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        if is_executable(&dir.join(name)) {
+            return dir.join(name).display().to_string();
+        }
+    }
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default();
+    for dir in [
+        home.join(".local/bin"),
+        home.join(format!(".{name}/bin")),
+        home.join(".opencode/bin"),
+        std::path::PathBuf::from("/opt/homebrew/bin"),
+        std::path::PathBuf::from("/usr/local/bin"),
+    ] {
+        if is_executable(&dir.join(name)) {
+            return dir.join(name).display().to_string();
+        }
+    }
+    name.to_owned()
+}
+
+fn is_executable(p: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let Ok(meta) = p.metadata() else { return false };
+        meta.is_file() && meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = p;
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_engine_binary_returns_absolute_path_when_installed() {
+        // At least one agent CLI is installed on this machine; the resolver must
+        // return an absolute path to an executable file, never a bare name.
+        for name in ["opencode", "claude", "hermes"] {
+            let bin = resolve_engine_binary(name);
+            if bin == name {
+                continue; // not installed here — nothing to assert
+            }
+            let p = std::path::Path::new(&bin);
+            assert!(
+                p.is_absolute(),
+                "expected absolute path for {name}, got {bin}"
+            );
+            assert!(
+                is_executable(p),
+                "resolved {name} should be executable: {bin}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_executable_rejects_dirs_and_non_exec_files() {
+        let td = std::env::temp_dir();
+        assert!(!is_executable(&td)); // a directory is not an executable file
+
+        let non_exec = td.join("cox_not_exec");
+        std::fs::write(&non_exec, "x").unwrap();
+        assert!(!is_executable(&non_exec));
+        drop(std::fs::remove_file(&non_exec));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let exec = td.join("cox_is_exec");
+            std::fs::write(&exec, "#!/bin/sh\n").unwrap();
+            let mut perms = std::fs::metadata(&exec).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&exec, perms).unwrap();
+            assert!(is_executable(&exec));
+            drop(std::fs::remove_file(&exec));
+        }
+    }
+}
