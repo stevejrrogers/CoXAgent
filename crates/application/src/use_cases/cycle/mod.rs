@@ -1014,6 +1014,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // PR, a DEV agent addresses the feedback and pushes to the branch.
             self.address_pr_feedback().await;
 
+            // "Agents don't sleep": if finished work is sitting UNCOMMITTED in
+            // the tree — DEV completed & verified a ticket but its ship path
+            // (commit_for_ticket) was interrupted by a crash or transient
+            // failure before it ran — sweep it up into a per-ticket branch +
+            // PR now instead of leaving it stranded on main cycle after cycle.
+            self.sweep_unshipped_work().await;
+
             // Scrum comes alive: when there's a real tension (deploy failure, a
             // bug pile-up, or a periodic check-in), the team actually discusses
             // it — PO & SA weigh in, SM decides, and a decision can spawn a
