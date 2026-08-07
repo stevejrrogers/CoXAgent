@@ -219,6 +219,63 @@ fn test_command(work_dir: &Path) -> Option<(&'static str, Vec<&'static str>)> {
     }
 }
 
+/// Whether a Linux C/C++ cross toolchain that can actually link native crates
+/// (tree-sitter, ring build C in build.rs) exists on this host. Having a rustup
+/// *target* installed is not enough — without a C compiler for that target,
+/// `cargo check --target x86_64-unknown-linux-gnu` can only ever report those
+/// crates' build-tool failure, never whether *this ticket* broke Linux.
+/// Considers common glibc/musl names in PATH plus `/opt/homebrew/bin` and
+/// `/usr/local/bin`, and explicit rust-style env overrides.
+fn linux_c_toolchain_present() -> bool {
+    use std::{
+        os::unix::fs::PermissionsExt as _,
+        path::{Path, PathBuf},
+    };
+
+    const NAMES: &[&str] = &[
+        "x86_64-linux-gnu-gcc",
+        "x86_64-linux-gnu-cc",
+        "aarch64-linux-gnu-gcc",
+        "x86_64-unknown-linux-musl-gcc",
+        "musl-clang",
+        "zig", // zig cc can drive a configured cross build when present
+    ];
+    if std::env::var("CARGO_BUILD_TARGET")
+        .ok()
+        .is_some_and(|v| v.contains("linux"))
+    {
+        return true;
+    }
+    let overrides = [
+        "CC_x86_64_UNKNOWN_LINUX_GNU",
+        "CC_aarch64_UNKNOWN_LINUX_GNU",
+    ];
+    if overrides.iter().any(|k| std::env::var(k).is_ok()) {
+        return true;
+    }
+    let mut dirs: Vec<String> = std::env::var("PATH")
+        .unwrap_or_default()
+        .split(':')
+        .filter(|d| !d.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    dirs.push("/opt/homebrew/bin".to_string());
+    dirs.push("/usr/local/bin".to_string());
+    for dir in &dirs {
+        for name in NAMES.iter().copied() {
+            let probe: PathBuf = Path::new(dir).join(name);
+            if probe.exists()
+                && probe
+                    .metadata()
+                    .is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 #[async_trait]
 impl DeployPort for DockerComposeDeploy {
     async fn lint(&self, work_dir: &Path) -> Result<Option<u64>, PortError> {
@@ -354,6 +411,27 @@ impl DeployPort for DockerComposeDeploy {
                      succeed (rustup may be absent) and no Docker build is available here. Until \
                      one of them exists, a symbol that is dead code on Linux compiles clean on \
                      this host and only breaks in Docker/CI."
+                ),
+                errors: Vec::new(),
+            });
+        }
+        // The rustup *target* is installed, but that is not enough to verify
+        // this ticket's code against native crates: tree-sitter/ring build C in
+        // build.rs and need a real Linux C cross toolchain, which this macOS
+        // host does not have. Running cargo check here would fail on those
+        // crates' tool-not-found every single time — an infra gap, not evidence
+        // about this ticket. Prefer a Docker answer; otherwise degrade honestly
+        // to unavailable so run_dev warns instead of hard-blocking every ticket.
+        if !linux_c_toolchain_present() {
+            if let Some(check) = compose_build_check(work_dir).await {
+                return Ok(check);
+            }
+            return Ok(CrossCheck {
+                available: false,
+                reason: format!(
+                    "cannot verify {TARGET}: rustup target present but no Linux C/cross \
+                     toolchain (x86_64-linux-gnu-gcc / x86_64-unknown-linux-musl-gcc / \
+                     musl-clang) on this host — native crates cannot build without it"
                 ),
                 errors: Vec::new(),
             });
