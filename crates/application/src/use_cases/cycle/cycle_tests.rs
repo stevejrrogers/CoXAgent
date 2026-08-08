@@ -498,11 +498,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// unexpected, so an over-eager retry loop shows up in assertions instead
 /// of silently blending in.
 struct ScriptedDeploy {
-    script: Mutex<VecDeque<crate::ports::outbound::DeployReport>>,
+    script: Mutex<VecDeque<Result<crate::ports::outbound::DeployReport, PortError>>>,
     deploy_calls: AtomicUsize,
 }
 impl ScriptedDeploy {
     fn new(script: Vec<crate::ports::outbound::DeployReport>) -> Self {
+        Self::scripted(script.into_iter().map(Ok).collect())
+    }
+    /// Script that may include `Err` results — a `deploy()` that never
+    /// produced a `DeployReport` at all (spawn failure, or the 900s
+    /// `DEPLOY_TIMEOUT` in `docker_compose.rs`). COX-B039.
+    fn scripted(script: Vec<Result<crate::ports::outbound::DeployReport, PortError>>) -> Self {
         Self {
             script: Mutex::new(script.into_iter().collect()),
             deploy_calls: AtomicUsize::new(0),
@@ -520,7 +526,7 @@ impl crate::ports::outbound::DeployPort for ScriptedDeploy {
     ) -> Result<crate::ports::outbound::DeployReport, PortError> {
         self.deploy_calls.fetch_add(1, Ordering::SeqCst);
         let next = self.script.lock().expect("lock").pop_front();
-        Ok(next.unwrap_or(crate::ports::outbound::DeployReport {
+        next.unwrap_or(Ok(crate::ports::outbound::DeployReport {
             success: true,
             deployed: true,
             summary: "UNSCRIPTED EXTRA DEPLOY CALL".to_owned(),
@@ -1042,6 +1048,58 @@ async fn deploy_spawn_error_is_treated_as_a_failure_not_swallowed() {
     assert!(
         events.iter().any(|e| e.kind == "deploy_failed"),
         "must notify deploy_failed, not swallow the error silently: {events:?}"
+    );
+}
+
+/// COX-B039: `docker_compose::deploy()` runs `down --remove-orphans` BEFORE
+/// `up -d --build`, so a spawn/timeout `Err` leaves the app stopped — the
+/// worst possible moment to skip the rollback. The `Err` arm must reach
+/// `attempt_rollback` exactly like an unhealthy deploy does.
+#[tokio::test]
+async fn a_deploy_spawn_error_rolls_back_to_the_last_known_good_deploy() {
+    let deploy = Arc::new(ScriptedDeploy::scripted(vec![
+        Err(PortError::Backend("docker compose timed out".to_owned())),
+        Ok(crate::ports::outbound::DeployReport {
+            success: true,
+            deployed: true,
+            summary: "rollback redeploy ok".to_owned(),
+        }),
+    ]));
+    let notifier = Arc::new(SpyNotifier::default());
+    let (store, git, uc) = rollback_uc(true, &deploy, &notifier);
+
+    Box::pin(uc.run_cycle(1)).await;
+
+    assert_eq!(
+        deploy.calls(),
+        2,
+        "a deploy that errored out left the app stopped by `down` — it must be \
+         followed by exactly one automatic redeploy of the last known-good version"
+    );
+    let adds = git.worktree_adds.lock().expect("lock");
+    assert_eq!(
+        adds.first().map(|a| a.1.as_str()),
+        Some(GOOD_SHA),
+        "the rollback checks out the known-good sha: {adds:?}"
+    );
+    let state = store.load().await.expect("load");
+    assert!(
+        state.deploy.as_ref().is_some_and(|d| d.ok),
+        "after a successful rollback the recorded deploy status is healthy again: {:?}",
+        state.deploy
+    );
+    assert_eq!(
+        deploy_bug_tickets(&state).len(),
+        1,
+        "the root cause still becomes tracked work, rollback or not"
+    );
+    let events = notifier.events.lock().expect("lock");
+    assert!(
+        events
+            .iter()
+            .any(|e| e.kind.to_lowercase().contains("rollback")
+                || e.message.to_lowercase().contains("rollback")),
+        "a rollback notification must be sent for an errored deploy too: {events:?}"
     );
 }
 

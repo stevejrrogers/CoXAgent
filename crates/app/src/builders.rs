@@ -1,9 +1,11 @@
 // Part of the composition root split by concern — see lib.rs.
 #![allow(clippy::wildcard_imports)]
 //! Wiring: everything that turns config into live adapters — stores, auth,
-//! engines, storage, MCP access, and the config self-healing.
+//! engines, storage, MCP access. Config loading/self-heal lives in
+//! `config_load.rs`.
 
 use super::*;
+use crate::config_load::{parse_config_text, read_config_text};
 
 /// Build the state store for one project, honoring `COXAGENT_DB_DSN`: when set,
 /// a shared Postgres store keyed by `id` (multi-tenant); otherwise the local
@@ -51,8 +53,6 @@ pub(crate) async fn make_store(
     }
 }
 
-/// Load `coxagent.json` from the workspace root (parent of the state dir), or
-/// fall back to defaults. Config lives beside the state, written by `onboard`.
 /// Load the shared coordination backend (Postgres state DSN + Redis URL) from
 /// `<base>/coordination.json` into the environment, unless already set. Lets the
 /// Finder-launched app join the distributed backend without env plumbing.
@@ -120,83 +120,6 @@ pub fn load_coordination(base: &Path) {
         std::env::set_var("COXAGENT_AUTH_DSN", adsn);
     }
     tracing::info!("coordination config loaded from {}", path.display());
-}
-
-/// Read `coxagent.json`'s raw text from the workspace root (parent of the
-/// state dir), or `None` if it's missing/unreadable. Split out of
-/// `load_config` (COX-B035) so a caller that also needs `deploy.host_port`
-/// parsed independently of `Config` — via
-/// `coxagent_application::ports::outbound::parse_deploy_host_port`, which can
-/// tell "absent" apart from "malformed" where `Config::deploy.host_port`
-/// alone cannot — reads the file ONCE and feeds the same string to both
-/// parses, rather than reading it twice. See `build_project` and `run_loop`.
-pub(crate) fn read_config_text(state_dir: &Path) -> Option<String> {
-    let root = state_dir.parent().unwrap_or(state_dir);
-    std::fs::read_to_string(root.join("coxagent.json")).ok()
-}
-
-/// Parse `coxagent.json`'s already-read text into a `Config`, falling back to
-/// defaults (with a warning) on invalid JSON — the parse half of the old
-/// `load_config`, kept separate so `read_config_text`'s single disk read can
-/// feed both this and `parse_deploy_host_port`.
-pub(crate) fn parse_config_text(state_dir: &Path, text: &str) -> Config {
-    let root = state_dir.parent().unwrap_or(state_dir);
-    let path = root.join("coxagent.json");
-    match serde_json::from_str::<Config>(text) {
-        Ok(mut cfg) => {
-            heal_host_port(root, &path, &mut cfg);
-            cfg
-        }
-        Err(e) => {
-            tracing::warn!("invalid {}: {e}; using defaults", path.display());
-            Config::default()
-        }
-    }
-}
-
-pub(crate) fn load_config(state_dir: &Path) -> Config {
-    read_config_text(state_dir)
-        .map_or_else(Config::default, |text| parse_config_text(state_dir, &text))
-}
-
-/// Self-heal a project left without a deploy port: assign a free `host_port` and
-/// persist it, so a project onboarded before per-project ports (or with the field
-/// cleared) stops colliding on the shared default port. Picks the lowest port in
-/// range that no sibling project claims and that is currently bindable, so two
-/// null-port projects on one host land on different ports. Best-effort.
-pub(crate) fn heal_host_port(root: &Path, cfg_path: &Path, cfg: &mut Config) {
-    if cfg.deploy.host_port.is_some() {
-        return;
-    }
-    // Ports already claimed by sibling projects under the same base dir.
-    let mut used: std::collections::HashSet<u16> = std::collections::HashSet::new();
-    if let Some(base) = root.parent() {
-        if let Ok(entries) = std::fs::read_dir(base) {
-            for e in entries.flatten() {
-                let sib = e.path().join("coxagent.json");
-                if sib == *cfg_path {
-                    continue;
-                }
-                if let Ok(text) = std::fs::read_to_string(&sib) {
-                    if let Ok(c) = serde_json::from_str::<Config>(&text) {
-                        if let Some(p) = c.deploy.host_port {
-                            used.insert(p);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    let bindable = |p: u16| std::net::TcpListener::bind(("127.0.0.1", p)).is_ok();
-    let Some(port) = (PORT_BASE..PORT_BASE + 500).find(|p| !used.contains(p) && bindable(*p))
-    else {
-        return;
-    };
-    cfg.deploy.host_port = Some(port);
-    if let Ok(text) = serde_json::to_string_pretty(cfg) {
-        let _ = std::fs::write(cfg_path, text);
-        tracing::info!("self-healed host port {port} for {}", cfg_path.display());
-    }
 }
 
 /// Build one project: store, engine stack, runner (spawned, paused), returned as

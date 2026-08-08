@@ -401,6 +401,19 @@ async fn a_boolean_host_port_is_rejected_rather_than_skipping_the_gate() {
     assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }
 
+/// AC (COX-B042): `0` is in `u16` range — `as_u64`/`try_from` both accept
+/// it — but it is not a connectable TCP port, so it must fail the gate the
+/// same as a negative/float/out-of-range value, not be probed forever.
+#[tokio::test(start_paused = true)]
+async fn a_zero_host_port_is_rejected_rather_than_skipping_the_gate() {
+    let (_dir, handle) = project_handle_with_raw_host_port(Arc::new(HealthyDeploy), "0");
+    let forge: Arc<dyn ForgePort> = Arc::new(UnusedForge);
+
+    let resp = pr_preview(&handle, &forge, 1, false).await;
+
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
 /// AC (COX-B025 regression guard): an out-of-`u16`-range positive
 /// `host_port` must still fail the gate, not silently skip it.
 #[tokio::test(start_paused = true)]

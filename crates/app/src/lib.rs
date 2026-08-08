@@ -27,11 +27,13 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 mod builders;
+mod config_load;
 mod shims;
 
 pub use builders::load_coordination;
 #[allow(clippy::wildcard_imports)] // one module, many files — see builders.rs
 use builders::*;
+use config_load::{load_config, parse_config_text, read_config_text, PORT_BASE};
 pub use shims::shim_script;
 #[allow(clippy::wildcard_imports)] // one module, many files — see shims.rs
 use shims::*;
@@ -721,9 +723,6 @@ async fn onboard_project(
         .await
         .map_err(|e| e.to_string())
 }
-
-/// First host port for auto-allocation.
-const PORT_BASE: u16 = 8100;
 
 /// Write a free `deploy.host_port` into the new project's `coxagent.json`,
 /// picking the lowest port from [`PORT_BASE`] not already used by a registered
