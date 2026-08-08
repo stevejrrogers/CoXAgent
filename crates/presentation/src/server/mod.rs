@@ -1200,8 +1200,26 @@ async fn list_prs_ep(
         .ok()
         .and_then(|t| serde_json::from_str::<Config>(&t).ok())
         .is_some_and(|c| c.git.auto_merge);
-    let enriched: Vec<serde_json::Value> = state
-        .open_prs
+    // Prefer the live forge when one is configured so CI/mergeable are fresh;
+    // fall back to whatever was last persisted (the runner's report) when there
+    // is no forge or the live query fails.
+    let (raw_prs, error): (
+        Vec<coxagent_application::ports::outbound::PrOpen>,
+        Option<String>,
+    ) = match &p.forge {
+        Some(forge) => match forge.list_open_prs().await {
+            Ok(prs) => (
+                prs.into_iter().map(std::convert::Into::into).collect(),
+                None,
+            ),
+            Err(e) => (
+                state.open_prs.clone(),
+                Some(format!("live refresh failed: {e}")),
+            ),
+        },
+        None => (state.open_prs.clone(), None),
+    };
+    let enriched: Vec<serde_json::Value> = raw_prs
         .iter()
         .map(|pr| {
             let mut v = serde_json::to_value(pr).unwrap_or_default();
@@ -1215,7 +1233,7 @@ async fn list_prs_ep(
         .collect();
     let configured = p.forge.is_some();
     Json(serde_json::json!({
-        "configured": configured, "auto_merge": auto_merge, "prs": enriched
+        "configured": configured, "auto_merge": auto_merge, "error": error, "prs": enriched
     }))
     .into_response()
 }

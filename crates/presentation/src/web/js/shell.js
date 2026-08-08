@@ -354,6 +354,8 @@ function startApp(){
   ensureNotifPermission();
   checkAppUpdate();setInterval(checkAppUpdate,5*60*1000);
   window.addEventListener("focus",()=>checkAppUpdate());
+  // Refresh live review data when the tab regains focus, only if that view is up.
+  window.addEventListener("focus",()=>{if(CUR==="review")renderReview();});
   // Health is one cheap JSON with the hub's version in it: poll it, keep the
   // brand chip honest, and reload the window when the hub upgrades under it.
   const pollHealth=()=>fetch("/api/health").then(r=>r.json()).then(h=>{
@@ -657,9 +659,18 @@ async function mergeSweep(){
     if(CUR==="review")renderReview(); if(CUR==="overview")drainBanner("ov-drain");
   }catch(e){toasty("Network error","err");}
 }
+let reviewPollStarted=false;
+function reviewPollTick(){
+  // Only re-render while the Review tab is active AND the page is visible; never
+  // while another review action modal may be open (the guard just skips).
+  if(CUR!=="review")return;
+  if(document.hidden)return;
+  renderReview();
+}
 async function renderReview(){
   drainBanner("rv-drain");
   const el=document.getElementById("review-body");if(!el)return;
+  if(!reviewPollStarted){reviewPollStarted=true;setInterval(reviewPollTick,20*1000);}
   el.innerHTML='<div class="empty">loading pull requests…</div>';
   let d={};try{d=await(await fetch(api("/prs"))).json();}catch(e){el.innerHTML='<div class="empty">unable to load</div>';return;}
   if(!d.configured){el.innerHTML=`<div class="rev-empty"><i class="ti ti-git-pull-request"></i><div>Git review isn't set up</div><span>Configure a repository in <a onclick="nav('settings')">Settings → Git &amp; version control</a> to open and review pull requests here.</span></div>`;return;}
@@ -679,6 +690,7 @@ async function renderReview(){
         <div class="revtitle"><a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.title)}</a> <span class="revnum">#${p.number}</span></div>
         <div class="revmeta"><span class="revbranch"><i class="ti ti-git-branch"></i> ${esc(p.head)} → ${esc(p.base)}</span>
           ${ciBadge(p.ci)}
+          ${(p.review&&p.review.decision)?'':'<span class="rev-pending" style="display:inline-flex;align-items:center;gap:4px;color:var(--dim)"><i class="ti ti-clock"></i> awaiting review</span>'}
           ${p.mergeable?'':'<span class="rev-conflict"><i class="ti ti-alert-triangle"></i> conflicts</span>'}
           <span class="revby">by ${esc(p.author||'—')}</span></div>
         ${reviewBanner(p.review)}
