@@ -179,12 +179,16 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
             context,
             max_cycles,
         } => {
-            load_coordination(
-                args.state_dir
-                    .parent()
-                    .and_then(Path::parent)
-                    .unwrap_or(&args.state_dir),
-            );
+            let co_base = args
+                .state_dir
+                .parent()
+                .and_then(Path::parent)
+                .unwrap_or(&args.state_dir);
+            // Shared coordination backend from a persistent file next to state
+            // (Finder launch needs no env); then feed any locally-persisted
+            // remote-store bearer so /store calls authenticate without hand-copy.
+            load_coordination(co_base);
+            provision_local_token(co_base);
             Box::pin(run_loop(
                 make_store(&pid, &args.state_dir).await?,
                 &args.state_dir,

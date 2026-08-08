@@ -180,8 +180,61 @@ pub fn load_coordination(base: &Path) {
     tracing::info!("coordination config loaded from {}", path.display());
 }
 
-/// Read `coxagent.json`'s raw text from the workspace root (parent of the
-/// state dir), if present. Split out of `load_config` so a caller that also
+/// Provision a locally-persisted remote-store bearer token for this machine.
+///
+/// On login, the web dashboard writes this user's personal API token (see
+/// `AuthPort::auto_issue_personal_token`) to `<base>/operator.token`, owner-only
+/// (0600), so separately-spawned operator processes that have no access to the
+/// hub server's process env can still authenticate their `/store` calls. This is
+/// the runner-side counterpart: read that file and feed it into
+/// `COXAGENT_REMOTE_TOKEN` before [`make_store`] decides on a backend.
+///
+/// Precedence mirrors [`load_coordination`]: an externally-set non-empty
+/// `COXAGENT_REMOTE_TOKEN` always wins — whether handed down by config, exported
+/// by the user, or already harvested into this process's env by login — so a
+/// caller never clobbers a value someone set on purpose. A missing file, an
+/// unreadable one, or one not locked down to this user is skipped silently.
+pub fn provision_local_token(base: &Path) {
+    // An explicit token in the environment always wins over a stale file.
+    if std::env::var("COXAGENT_REMOTE_TOKEN").is_ok_and(|v| !v.trim().is_empty()) {
+        return;
+    }
+    let path = base.join("operator.token");
+    // Owner-only: refuse a file whose group/world bits are set — whoever wrote
+    // it with looser perms may not be us, so don't hand its secret to /store.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(&path) {
+            let mode = meta.permissions().mode() & 0o777;
+            if mode & 0o077 != 0 {
+                tracing::warn!(
+                    "operator.token is group/world-readable ({mode:o}) — refusing to use it"
+                );
+                return;
+            }
+        } else {
+            return;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        if !path.is_file() {
+            return;
+        }
+    }
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let token = text.trim();
+    if token.is_empty() {
+        return;
+    }
+    tracing::debug!("provisioned COXAGENT_REMOTE_TOKEN from {}", path.display());
+    std::env::set_var("COXAGENT_REMOTE_TOKEN", token);
+}
+
+/// Read `coxagent.json`'s raw text from the workspace root (parent of the Split out of `load_config` so a caller that also
 /// needs the raw config for a malformed-value probe — e.g. the mandatory
 /// deploy health gate's `host_port` (COX-B035) — reads the file once and
 /// feeds the same string into both parses, rather than reading it twice or
@@ -836,12 +889,80 @@ pub(crate) fn port_holder(port: u16) -> Option<String> {
 
 #[cfg(test)]
 mod builders_tests {
-    use super::load_coordination;
+    use super::{load_coordination, provision_local_token};
     use std::path::PathBuf;
 
     #[test]
+    fn provision_local_token_sets_env_and_respects_preexisting() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let base: PathBuf = dir.path().to_path_buf();
+        std::fs::write(base.join("operator.token"), "secret-abc\n").unwrap();
+        // Owner-only (0600) — see the permission test for the mode check.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                base.join("operator.token"),
+                std::fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+        }
+
+        // Case A — fresh env: the file's token lands on COXAGENT_REMOTE_TOKEN.
+        std::env::remove_var("COXAGENT_REMOTE_TOKEN");
+        provision_local_token(&base);
+        assert_eq!(
+            std::env::var("COXAGENT_REMOTE_TOKEN").unwrap(),
+            "secret-abc",
+            "a persisted operator token should populate COXAGENT_REMOTE_TOKEN"
+        );
+
+        // Case B — an externally-set non-empty value must NOT be overwritten.
+        std::env::set_var("COXAGENT_REMOTE_TOKEN", "external-token");
+        provision_local_token(&base);
+        assert_eq!(
+            std::env::var("COXAGENT_REMOTE_TOKEN").unwrap(),
+            "external-token",
+            "a pre-existing non-empty COXAGENT_REMOTE_TOKEN must win over the file"
+        );
+
+        // Leave no trace behind for parallel tests.
+        std::env::remove_var("COXAGENT_REMOTE_TOKEN");
+    }
+
+    #[test]
+    fn provision_local_token_skips_absent_empty_and_locked_files() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let base: PathBuf = dir.path().to_path_buf();
+
+        // Absent file: no env set, no panic.
+        std::env::remove_var("COXAGENT_REMOTE_TOKEN");
+        provision_local_token(&base);
+        assert_eq!(std::env::var_os("COXAGENT_REMOTE_TOKEN"), None);
+
+        // Empty (whitespace-only) file: skipped gracefully.
+        std::fs::write(base.join("operator.token"), "   \n").unwrap();
+        provision_local_token(&base);
+        assert_eq!(std::env::var_os("COXAGENT_REMOTE_TOKEN"), None);
+
+        // Group/world-readable file is refused — we won't hand a loose secret
+        // to /store on behalf of whoever wrote it. On non-unix there's no mode
+        // check, so guard the assertion.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                base.join("operator.token"),
+                std::fs::Permissions::from_mode(0o644),
+            )
+            .unwrap();
+        }
+        provision_local_token(&base);
+        assert_eq!(std::env::var_os("COXAGENT_REMOTE_TOKEN"), None);
+    }
+
+    #[test]
     fn load_coordination_sets_all_five_keys_and_respects_preexisting() {
-        // All env vars the loader may set, keyed by their coordination.json key.
         let cases = [
             ("db_dsn", "COXAGENT_DB_DSN", "postgres://db"),
             ("redis_url", "COXAGENT_REDIS_URL", "redis://cache"),
