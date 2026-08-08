@@ -136,3 +136,30 @@ fn only_the_pr_route_is_treated_as_a_review_action() {
     assert!(!is_pr_review_path("/api/projects/acme/prs"));
     assert!(!is_pr_review_path("/api/health"));
 }
+
+#[test]
+fn the_raw_store_rpc_is_not_an_ordinary_write() {
+    use coxagent_application::auth::AuthRole;
+    let store = "/api/projects/cox/store";
+    assert!(is_store_rpc_path(store));
+    assert!(
+        !is_store_rpc_path("/api/projects/cox/store/x"),
+        "only the exact RPC path gets the stricter gate"
+    );
+    // A member may write project data through the shaped endpoints, but a raw
+    // whole-state save would let them forge any gate decision.
+    for role in [AuthRole::Fe, AuthRole::Be, AuthRole::Ba, AuthRole::De] {
+        assert!(role.can_write(), "{role:?} still writes normally");
+        assert!(
+            !write_gate_ok(role, store),
+            "{role:?} must not save raw state"
+        );
+    }
+    for role in [AuthRole::Super, AuthRole::Admin, AuthRole::TechLead] {
+        assert!(write_gate_ok(role, store));
+    }
+    // Same bar for the runner's PR-report sibling, whose project id travels in
+    // the body where the URL membership check cannot see it.
+    assert!(!write_gate_ok(AuthRole::Fe, "/api/pr-report"));
+    assert!(write_gate_ok(AuthRole::Admin, "/api/pr-report"));
+}
