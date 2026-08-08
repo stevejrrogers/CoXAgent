@@ -266,11 +266,17 @@ pub(super) async fn store_rpc_ep(
     axum::extract::State(app): axum::extract::State<super::AppState>,
     Path(pid): Path<String>,
     Query(q): Query<OpQ>,
+    headers: axum::http::HeaderMap,
     axum::Json(args): axum::Json<Args>,
 ) -> Response {
     let Some(p) = app.project(&pid).await else {
         return super::not_found();
     };
+    if let Some(auth) = &app.auth {
+        if super::resolve_principal(auth, &headers).await.is_none() {
+            return (axum::http::StatusCode::UNAUTHORIZED, "sign in first").into_response();
+        }
+    }
     match q.op.as_str() {
         "load" => op_load(&p).await,
         "version" => op_version(&p).await,
