@@ -673,13 +673,18 @@ async function renderReview(){
   if(!reviewPollStarted){reviewPollStarted=true;setInterval(reviewPollTick,20*1000);}
   el.innerHTML='<div class="empty">loading pull requests…</div>';
   let d={};try{d=await(await fetch(api("/prs"))).json();}catch(e){el.innerHTML='<div class="empty">unable to load</div>';return;}
-  if(!d.configured){el.innerHTML=`<div class="rev-empty"><i class="ti ti-git-pull-request"></i><div>Git review isn't set up</div><span>Configure a repository in <a onclick="nav('settings')">Settings → Git &amp; version control</a> to open and review pull requests here.</span></div>`;return;}
   const prs=d.prs||[];
-  const head=`<div class="sec">Pull requests <span style="font-size:11px;color:var(--dim);font-weight:400">· ${prs.length} open${d.error?' · <span style="color:var(--red)">'+esc(d.error)+'</span>':''}</span></div>`;
+  if(!d.configured&&!prs.length){el.innerHTML=`<div class="rev-empty"><i class="ti ti-git-pull-request"></i><div>Git review isn't set up</div><span>Configure a repository in <a onclick="nav('settings')">Settings → Git &amp; version control</a> to open and review pull requests here.</span></div>`;return;}
+  const roNote=!d.configured?' · <b class="rev-ro-note"><i class="ti ti-lock"></i> read-only — configure git in Settings for actions</b>':'';
+  const head=`<div class="sec">Pull requests <span style="font-size:11px;color:var(--dim);font-weight:400">· ${prs.length} open${roNote}${d.error?' · <span style=\"color:var(--red)\">'+esc(d.error)+'</span>':''}</span></div>`;
   if(!prs.length){el.innerHTML=head+`<div class="rev-empty"><i class="ti ti-check"></i><div>No open pull requests</div><span>Agent-shipped tickets will appear here for review.</span></div>`;return;}
   const ciBadge=c=>{const m={passing:["passing","var(--green)","circle-check"],failing:["failing","var(--red)","circle-x"],pending:["CI running","var(--amber)","loader"],none:["no CI","var(--dim)","minus"]}[c]||["",""];
     return `<span class="rev-ci" style="color:${m[1]}"><i class="ti ti-${m[2]}"></i> ${m[0]}</span>`;};
-  const rev=canReview();
+  const configured=!!d.configured;
+  const rev=canReview()&&configured;
+  // When git is not configured we run read-only: hide every action control
+  // (including Diff) for every card.
+  const actsEnabled=configured;
   // The SA's review verdict (a suggestion when auto-merge is off).
   const reviewBanner=r=>{if(!r)return"";const ok=r.decision==="approve";
     return `<div class="rev-verdict ${ok?'ok':'chg'}"><i class="ti ti-${ok?'circle-check':'arrow-back-up'}"></i>
@@ -696,7 +701,7 @@ async function renderReview(){
         ${reviewBanner(p.review)}
       </div>
       <div class="revacts">
-        <button class="gc-btn" onclick="viewDiff(${p.number},'${esc(p.head)}')"><i class="ti ti-file-diff"></i> Diff</button>
+        ${actsEnabled?`<button class="gc-btn" onclick="viewDiff(${p.number},'${esc(p.head)}')"><i class="ti ti-file-diff"></i> Diff</button>`:''}
         ${rev?`<button class="gc-btn" title="Run THIS branch on the app port so you can see it before approving" onclick="prAction(${p.number},'preview')"><i class="ti ti-eye"></i> Preview</button>
         <button class="gc-btn" title="Stop the preview and restore the main build" onclick="prAction(${p.number},'preview-stop')"><i class="ti ti-eye-off"></i></button>
         <button class="gc-btn" onclick="prAction(${p.number},'request-changes')"><i class="ti ti-arrow-back-up"></i> Changes</button>
