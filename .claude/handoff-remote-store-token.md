@@ -64,11 +64,15 @@ byte-exact Rust fragments from existing source files (builders.rs operator_
 token_path, claude.rs create_dir_all/set_permissions idiom, status.rs fs::write)
 and assembling via Python string ops — NOT typing the Rust by hand.
 
-### Follow-up not yet done (desirable)
-- Unit test(s) for the writer (persist to canonical path + owner-only mode).
-  Skipped this round because composing multi-line Rust test blocks degenerated;
-  add when model isn't degenerating. Use tempfile TempDir + ENV_LOCK like the
-  builders_tests in crates/app/src/builders.rs.
+### Follow-up — DONE
+Unit tests for the writer landed in auth.rs:
+- `persist_local_operator_token_writes_secret_at_env_path` — writes verbatim to
+  canonical location + enforces owner-only 0600 on unix.
+- `persist_local_operator_token_creates_parent_dir_and_overwrites` — creates
+  missing parent dirs and overwrites in place.
+Uses tempfile TempDir + ENV_LOCK serialization (mirrors builders_tests). Note:
+the landing agent wrote these from scratch after repeated model degeneration in
+my own output; transcription of multi-line Rust remained unreliable this session.
 
 ## CRITICAL BLOCKER THIS SESSION — model degeneration on multi-line Rust edits
 Repeatedly (~10+ attempts incl subagents), producing ANY non-trivial multi-line Rust with cfg/traits/inline imports caused output corruption into garbage tokens (e.g. wrote fake fns like std_env_nonempty(), home_dir_optional(), persist_write(); subagent degenerated into incoherent word-soup). This happened specifically under sustained/complex editing load.

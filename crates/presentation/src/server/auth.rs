@@ -538,3 +538,67 @@ pub(super) async fn logout_ep(
     )
         .into_response()
 }
+
+#[cfg(test)]
+mod operator_token_writer_tests {
+    use super::persist_local_operator_token;
+    use std::path::PathBuf;
+
+    /// These tests read/write process-global env vars; serialize them so they
+    /// cannot clobber one another's values when Rust runs them on many threads.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn persist_local_operator_token_writes_secret_at_env_path() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let base: PathBuf = dir.path().to_path_buf();
+        let target = base.join("operator.token");
+        // Point the canonical location at a throwaway path so we never touch a
+        // real ~/CoXAgent token while testing.
+        std::env::set_var("COXAGENT_TOKEN_FILE", &target);
+
+        persist_local_operator_token("super-secret");
+
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "super-secret",
+            "the secret should be persisted verbatim at the canonical location"
+        );
+
+        // Owner-only (0600) on unix — never a world-readable secret file.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = std::fs::metadata(&target).unwrap();
+            assert_eq!(
+                meta.permissions().mode() & 0o777,
+                0o600,
+                "the token file must be owner-only (0600)"
+            );
+            assert!(meta.is_file(), "a regular file should be written");
+        }
+
+        std::env::remove_var("COXAGENT_TOKEN_FILE");
+    }
+
+    #[test]
+    fn persist_local_operator_token_creates_parent_dir_and_overwrites() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        // Nest under a directory that does not exist yet.
+        let target: PathBuf = dir.path().join("nested/deeply").join("operator.token");
+        std::env::set_var("COXAGENT_TOKEN_FILE", &target);
+
+        persist_local_operator_token("first");
+        persist_local_operator_token("second");
+
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "second",
+            "re-persisting should overwrite the previous secret in place"
+        );
+
+        std::env::remove_var("COXAGENT_TOKEN_FILE");
+    }
+}
