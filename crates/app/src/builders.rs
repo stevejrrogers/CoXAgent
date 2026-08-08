@@ -180,6 +180,22 @@ pub fn load_coordination(base: &Path) {
     tracing::info!("coordination config loaded from {}", path.display());
 }
 
+/// Canonical machine-local location of the persisted remote-store bearer token.
+///
+/// One fixed anchor shared by BOTH sides regardless of how each process derived
+/// its state dir: the login writer (`server/auth.rs`) and this runner-side reader
+/// both resolve it identically so they can never disagree about where the secret
+/// lives. Env override `COXAGENT_TOKEN_FILE` wins; else `<home>/CoXAgent/operator.token`.
+pub fn operator_token_path() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("COXAGENT_TOKEN_FILE") {
+        let p = p.trim();
+        if !p.is_empty() {
+            return Some(PathBuf::from(p));
+        }
+    }
+    std::env::home_dir().map(|h| h.join("CoXAgent").join("operator.token"))
+}
+
 /// Provision a locally-persisted remote-store bearer token for this machine.
 ///
 /// On login, the web dashboard writes this user's personal API token (see
@@ -194,12 +210,14 @@ pub fn load_coordination(base: &Path) {
 /// by the user, or already harvested into this process's env by login — so a
 /// caller never clobbers a value someone set on purpose. A missing file, an
 /// unreadable one, or one not locked down to this user is skipped silently.
-pub fn provision_local_token(base: &Path) {
+pub fn provision_local_token(_base: &Path) {
     // An explicit token in the environment always wins over a stale file.
     if std::env::var("COXAGENT_REMOTE_TOKEN").is_ok_and(|v| !v.trim().is_empty()) {
         return;
     }
-    let path = base.join("operator.token");
+    let Some(path) = operator_token_path() else {
+        return;
+    };
     // Owner-only: refuse a file whose group/world bits are set — whoever wrote
     // it with looser perms may not be us, so don't hand its secret to /store.
     #[cfg(unix)]
@@ -892,10 +910,19 @@ mod builders_tests {
     use super::{load_coordination, provision_local_token};
     use std::path::PathBuf;
 
+    /// These tests read/write process-global env vars; serialize them so they
+    /// cannot clobber one another's values when Rust runs them on many threads.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn provision_local_token_sets_env_and_respects_preexisting() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // Point the canonical location at a throwaway path so we never touch a
+        // real ~/CoXAgent token while testing.
+
         let dir = tempfile::TempDir::new().unwrap();
         let base: PathBuf = dir.path().to_path_buf();
+        std::env::set_var("COXAGENT_TOKEN_FILE", base.join("operator.token"));
         std::fs::write(base.join("operator.token"), "secret-abc\n").unwrap();
         // Owner-only (0600) — see the permission test for the mode check.
         #[cfg(unix)]
@@ -932,8 +959,11 @@ mod builders_tests {
 
     #[test]
     fn provision_local_token_skips_absent_empty_and_locked_files() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let dir = tempfile::TempDir::new().unwrap();
         let base: PathBuf = dir.path().to_path_buf();
+        // Isolate the canonical location from any real ~/CoXAgent token.
+        std::env::set_var("COXAGENT_TOKEN_FILE", base.join("operator.token"));
 
         // Absent file: no env set, no panic.
         std::env::remove_var("COXAGENT_REMOTE_TOKEN");
@@ -963,6 +993,7 @@ mod builders_tests {
 
     #[test]
     fn load_coordination_sets_all_five_keys_and_respects_preexisting() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let cases = [
             ("db_dsn", "COXAGENT_DB_DSN", "postgres://db"),
             ("redis_url", "COXAGENT_REDIS_URL", "redis://cache"),
