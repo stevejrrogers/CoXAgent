@@ -5,10 +5,24 @@
 
 use super::*;
 
-/// Build the state store for one project, honoring `COXAGENT_DB_DSN`: when set,
-/// a shared Postgres store keyed by `id` (multi-tenant); otherwise the local
-/// JSON file store rooted at `state_dir`. This is the ports adapter swap — use
-/// cases never see which backend they got.
+/// Build the state store for one project. Backend selection is ordered,
+/// REMOTE-first:
+///
+/// 1. When `COXAGENT_REMOTE_STORE_URL` is set (non-empty), front shared state
+///    through this hub's REST gateway (`/store`, RBAC bearer-authed) via a
+///    [`RestStateStore`] keyed by `id`. A non-empty `COXAGENT_REMOTE_TOKEN` is
+///    presented as the bearer when provided.
+/// 2. Else when `COXAGENT_DB_DSN` is set (non-empty), a shared Postgres store
+///    keyed by `id` (multi-tenant), with ephemeral leases routed through Redis
+///    when `COXAGENT_REDIS_URL` is configured.
+/// 3. Else the local JSON file store rooted at `state_dir`.
+///
+/// This precedence matters: because step 1 runs first, REMOTE wins over DB even
+/// if both are somehow set — coordination.json carrying both keys therefore lands
+/// on the gateway, not on direct Postgres/Redis access. Setups that configure no
+/// remote URL keep today's direct-DB default path unchanged.
+///
+/// This is the ports adapter swap — use cases never see which backend they got.
 pub(crate) async fn make_store(
     id: &str,
     state_dir: &Path,
@@ -137,6 +151,32 @@ pub fn load_coordination(base: &Path) {
     {
         std::env::set_var("COXAGENT_AUTH_DSN", adsn);
     }
+    // Remote REST gateway: when present, operators reach shared state through
+    // `/store` instead of direct Postgres/Redis. `make_store` reads these and,
+    // being checked first, lets REMOTE win over DB even when both are set.
+    // Each is applied only when not already set non-empty in the environment —
+    // a value handed down by config or login never clobbers one a user exported.
+    let set_if_absent = |env_key: &str, value: &str| {
+        let already = std::env::var(env_key).is_ok_and(|existing| !existing.trim().is_empty());
+        if !already {
+            std::env::set_var(env_key, value);
+        }
+    };
+    if let Some(url) = v
+        .get("remote_store_url")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        set_if_absent("COXAGENT_REMOTE_STORE_URL", url);
+    }
+    if let Some(token) = v
+        .get("remote_token")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        set_if_absent("COXAGENT_REMOTE_TOKEN", token);
+    }
+
     tracing::info!("coordination config loaded from {}", path.display());
 }
 
@@ -792,4 +832,81 @@ pub(crate) fn port_holder(port: u16) -> Option<String> {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "an unknown process".to_owned());
     Some(format!("{name} (pid {pid})"))
+}
+
+#[cfg(test)]
+mod builders_tests {
+    use super::load_coordination;
+    use std::path::PathBuf;
+
+    #[test]
+    fn load_coordination_sets_all_five_keys_and_respects_preexisting() {
+        // All env vars the loader may set, keyed by their coordination.json key.
+        let cases = [
+            ("db_dsn", "COXAGENT_DB_DSN", "postgres://db"),
+            ("redis_url", "COXAGENT_REDIS_URL", "redis://cache"),
+            ("auth_dsn", "COXAGENT_AUTH_DSN", "postgres://auth"),
+            (
+                "remote_store_url",
+                "COXAGENT_REMOTE_STORE_URL",
+                "http://127.0.0.1:8101",
+            ),
+            ("remote_token", "COXAGENT_REMOTE_TOKEN", "t0k"),
+        ];
+        for (_, env_key, _) in &cases {
+            std::env::remove_var(env_key);
+        }
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let base: PathBuf = dir.path().to_path_buf();
+        let json: Vec<String> = cases
+            .iter()
+            .map(|(k, _, v)| format!("\"{k}\": \"{v}\""))
+            .collect();
+        std::fs::write(
+            base.join("coordination.json"),
+            format!("{{{}}}", json.join(",")),
+        )
+        .unwrap();
+
+        // Case A — fresh environment: all five keys land on their env vars,
+        // including the new remote-store pair.
+        load_coordination(&base);
+        for (_, env_key, expected) in &cases {
+            assert_eq!(
+                std::env::var(env_key).ok(),
+                Some((*expected).to_string()),
+                "{env_key} should be set from coordination.json"
+            );
+        }
+        // Case A's remote pair landed — confirmed above.
+
+        // Case B — a pre-existing non-empty value must NOT be clobbered.
+        for (_, env_key, _) in &cases {
+            std::env::remove_var(env_key);
+        }
+        std::env::set_var("COXAGENT_REMOTE_STORE_URL", "http://already-set");
+        load_coordination(&base);
+        assert_eq!(
+            std::env::var("COXAGENT_REMOTE_STORE_URL").unwrap(),
+            "http://already-set",
+            "a pre-existing remote_store_url must not be overwritten"
+        );
+        // The sibling keys are still populated despite the preset one.
+        assert_eq!(std::env::var("COXAGENT_DB_DSN").unwrap(), "postgres://db");
+        assert_eq!(
+            std::env::var("COXAGENT_REDIS_URL").unwrap(),
+            "redis://cache"
+        );
+        assert_eq!(
+            std::env::var("COXAGENT_AUTH_DSN").unwrap(),
+            "postgres://auth"
+        );
+        assert_eq!(std::env::var("COXAGENT_REMOTE_TOKEN").unwrap(), "t0k");
+
+        // Leave no trace behind for parallel tests.
+        for (_, env_key, _) in &cases {
+            std::env::remove_var(env_key);
+        }
+    }
 }
