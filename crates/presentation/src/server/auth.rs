@@ -414,6 +414,45 @@ pub(super) async fn disable_2fa_ep(
     Json(serde_json::json!({ "ok": true })).into_response()
 }
 
+/// Canonical machine-local location of the persisted remote-store bearer token.
+///
+/// Mirrors `coxagent_app::builders::operator_token_path` exactly so the login
+/// writer (here) and the runner-side reader can never disagree about where the
+/// secret lives. Env override `COXAGENT_TOKEN_FILE` wins; else
+/// `<home>/CoXAgent/operator.token`. Inlined because coxagent-presentation must
+/// not import from coxagent-app (dependency cycle app -> presentation).
+fn operator_token_path() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("COXAGENT_TOKEN_FILE") {
+        let p = p.trim();
+        if !p.is_empty() {
+            return Some(PathBuf::from(p));
+        }
+    }
+    std::env::home_dir().map(|h| h.join("CoXAgent").join("operator.token"))
+}
+
+/// Persist a harvested personal API token to [`operator_token_path`], owner-only
+/// (0600), so separately-spawned operator processes can read it for `/store`
+/// auth. Silently no-ops when no path resolves or the write fails -- a missing
+/// token file only degrades remote-store provisioning, never login itself.
+fn persist_local_operator_token(secret: &str) {
+    let Some(path) = operator_token_path() else {
+        return;
+    };
+
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).ok();
+    }
+
+    std::fs::write(&path, secret.as_bytes()).ok();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+}
+
 pub(super) async fn login_ep(
     State(app): State<AppState>,
     headers: axum::http::HeaderMap,
@@ -439,7 +478,8 @@ pub(super) async fn login_ep(
             // authenticated under P5a). Idempotent per user — first login mints,
             // later logins reuse without re-issuing the secret.
             if let Some(secret) = auth.auto_issue_personal_token(&req.username).await {
-                std::env::set_var("COXAGENT_REMOTE_TOKEN", secret);
+                std::env::set_var("COXAGENT_REMOTE_TOKEN", secret.clone());
+                persist_local_operator_token(&secret);
             }
             token
         }
