@@ -32,11 +32,12 @@ pub const WHOLE_DOCUMENT: &str = "<document>";
 
 /// Parse a `coxagent.json` document into a [`Config`].
 ///
-/// Every section but `engine` is `#[serde(default)]`, so a config written by an
-/// older version still loads with the defaults for whatever it omits. A field
-/// that IS present but unrepresentable is refused instead: callers must not fall
-/// back to [`Config::default`], which would silently drop the project's
-/// governance policy (COX-B043).
+/// Every section is `#[serde(default)]`, so a config written by an older
+/// version — or by hand, mentioning only what it cares about — still loads with
+/// the defaults for whatever it omits. A field that IS present but
+/// unrepresentable is refused instead: callers must not fall back to
+/// [`Config::default`], which would silently drop the project's governance
+/// policy (COX-B043).
 ///
 /// # Errors
 ///
@@ -125,5 +126,31 @@ mod tests {
         assert!(cfg.policy.model_allowlist.is_empty());
         assert_eq!(cfg.deploy.host_port, None);
         assert!(cfg.deploy.enabled);
+    }
+
+    /// Fail-closed is about VALUES the schema cannot represent, not about
+    /// sections a document never mentions. A hand-written config that only sets
+    /// a policy and a port must load — refusing it would discard exactly the
+    /// governance rules this ticket exists to protect.
+    #[test]
+    fn a_hand_written_document_without_an_engine_section_loads() {
+        let cfg = parse_config(
+            r#"{"policy":{"model_allowlist":["claude/sonnet"]},"deploy":{"host_port":8101}}"#,
+        )
+        .expect("an omitted engine section is not a corrupt config");
+
+        assert_eq!(cfg.policy.model_allowlist, ["claude/sonnet"]);
+        assert_eq!(cfg.deploy.host_port, Some(8101));
+        assert_eq!(cfg.engine.default.model, "sonnet");
+    }
+
+    /// The other side of the same line: a section that IS present but holds a
+    /// value the schema cannot represent still fails, naming the field.
+    #[test]
+    fn an_engine_section_with_an_unknown_engine_is_still_refused() {
+        let err = parse_config(r#"{"engine":{"default":{"engine":"gpt5","model":"x"}}}"#)
+            .expect_err("gpt5 is not an EngineKind");
+
+        assert_eq!(err.field, "engine.default.engine");
     }
 }

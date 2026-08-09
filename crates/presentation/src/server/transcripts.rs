@@ -93,8 +93,7 @@ pub(super) async fn agent_log_ep(
         })
         // Operator-matched files win; then newest mtime.
         .max_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)))
-        .map(|(_, _, path)| path)
-        .unwrap_or_else(|| live_dir.join(format!("{role}.log")));
+        .map_or_else(|| live_dir.join(format!("{role}.log")), |(_, _, path)| path);
     // Local live file first (this machine's operators). If empty/absent, try
     // shared storage (MinIO) where remote operators mirror their live logs, so
     // the central hub can show an operator running on another machine.
