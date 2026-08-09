@@ -63,12 +63,38 @@ pub(super) async fn agent_log_ep(
         .collect();
     let base = p.config_path.parent().unwrap_or(&p.config_path);
     let live_dir = base.join("logs").join("live");
-    let per_op = live_dir.join(format!("{role}__{account}.log"));
-    let live = if !account.is_empty() && per_op.exists() {
-        per_op
-    } else {
-        live_dir.join(format!("{role}.log"))
-    };
+    // The writer keys a live file `<role_key>__<ticket>__<operator>.log`
+    // (role_key is lowercase snake, e.g. `dev_bug`; the ticket/operator
+    // suffixes vary per run). The old read path guessed `<role>__<account>.log`
+    // and never matched — so the fresh per-ticket log was orphaned and a stale
+    // `<role>.log` was served instead (its results had no output preview).
+    // Match by the role PREFIX, case-insensitively, and serve the newest.
+    let want = role.to_ascii_lowercase().replace('-', "_");
+    let want_op = account.to_ascii_lowercase();
+    let live = std::fs::read_dir(&live_dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_ascii_lowercase();
+            let stem = name.strip_suffix(".log")?;
+            // `dev_bug`, `dev_bug__cox-b043`, `dev_bug__cox-b043__root` all match
+            // role `dev_bug`; `dev_feature` must NOT match `dev` — require the
+            // next char after the prefix to be `_` or end of stem.
+            let after = stem.strip_prefix(&want)?;
+            if !after.is_empty() && !after.starts_with('_') {
+                return None;
+            }
+            // When an operator is named, prefer that operator's own log.
+            let op_ok = want_op.is_empty() || after.contains(&want_op);
+            let mtime = e.metadata().and_then(|m| m.modified()).ok()?;
+            Some((op_ok, mtime, e.path()))
+        })
+        // Operator-matched files win; then newest mtime.
+        .max_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)))
+        .map(|(_, _, path)| path)
+        .unwrap_or_else(|| live_dir.join(format!("{role}.log")));
     // Local live file first (this machine's operators). If empty/absent, try
     // shared storage (MinIO) where remote operators mirror their live logs, so
     // the central hub can show an operator running on another machine.
