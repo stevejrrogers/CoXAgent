@@ -170,6 +170,10 @@
   .wl-msg .wl-body{flex:1;min-width:0;font-size:13px;line-height:1.62;color:var(--text);white-space:pre-wrap;word-break:break-word}
   .wl-msg .wl-body code{background:var(--card);border:1px solid var(--border);border-radius:5px;padding:1px 5px;font-family:ui-monospace,monospace;font-size:11.5px;color:var(--accent2)}
   .wl-msg .wl-body b{font-weight:700}
+  /* Review verdict rendered as a badge + prose, not raw JSON. */
+  .wl-verdict{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.3px;
+    text-transform:uppercase;padding:2px 9px;border-radius:7px;margin-bottom:4px}
+  .wl-verdict-sum{font-size:13px;line-height:1.6;color:var(--text)}
   /* tool call + result share a subtle vertical rail under the message column */
   .wl-tool{padding:5px 0 5px 38px;position:relative}
   .wl-tool::before,.wl-result::before{content:"";position:absolute;left:13px;top:0;bottom:0;width:1.5px;background:var(--border)}
