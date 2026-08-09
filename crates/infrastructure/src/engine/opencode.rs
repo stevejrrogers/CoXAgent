@@ -10,7 +10,6 @@ use coxagent_application::ports::outbound::{
     AgentEnginePort, AgentOutcome, AgentRequest, SandboxStatus,
 };
 use coxagent_application::PortError;
-use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 
@@ -241,41 +240,7 @@ fn mcp_prompt_hint(mcp: &crate::engine::McpAccess) -> String {
     )
 }
 
-/// The live-log file for a run: `<workspace>/logs/live/<role>.log`, derived
-/// from the codebase work-dir (`<workspace>/codebase`). Same layout as the
-/// claude engine so the dashboard's `agent-log` endpoint finds it. When a
-/// per-run [`AgentRequest::label`] is present it lands between role and
-/// operator so runs are chaseable per ticket:
-/// `<role>__<label>__<operator>.log`.
-fn live_path(work_dir: &Path, role: &str, label: Option<&str>) -> Option<PathBuf> {
-    let dir = work_dir.parent()?.join("logs").join("live");
-    std::fs::create_dir_all(&dir).ok()?;
-    let label_part = label
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map_or_else(String::new, |l| format!("__{l}"));
-    let suffix = std::env::var("COXAGENT_OPERATOR")
-        .ok()
-        .map(|o| {
-            o.chars()
-                .filter(char::is_ascii_alphanumeric)
-                .collect::<String>()
-        })
-        .filter(|s| !s.is_empty())
-        .map_or_else(String::new, |s| format!("__{s}"));
-    Some(dir.join(format!("{role}{label_part}{suffix}.log")))
-}
-
-fn append_live(path: &Path, line: &str) {
-    use std::io::Write as _;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        let _ = writeln!(f, "{}", line.trim_end());
-    }
-}
+use crate::engine::live::{append_live, live_path};
 
 #[async_trait]
 impl AgentEnginePort for OpencodeEngine {

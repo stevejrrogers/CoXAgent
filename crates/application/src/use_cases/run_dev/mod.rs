@@ -433,6 +433,21 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         // just read and wrote in context instead of rediscovering it cold.
         let session = match initial {
             Ok(o) if o.succeeded() => {
+                // Persist any BRIEF: notes the agent left for the next
+                // role/engine on this ticket — durable memory that outlives the
+                // engine session (Tầng 2 of per-ticket context reuse).
+                let briefs = crate::prompts::extract_brief_notes(&o.stdout);
+                if !briefs.is_empty() {
+                    let (key, role_tag, briefs) =
+                        (id.to_string(), self.role_name().to_owned(), briefs);
+                    let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+                        for b in &briefs {
+                            s.journal_note(&key, &format!("{role_tag}: {b}"));
+                        }
+                        Ok(())
+                    })
+                    .await;
+                }
                 // The engine answered: whatever outage was raised against it is
                 // over. Closing it out loud matters as much as raising it — an
                 // alert that never clears is one people stop reading.

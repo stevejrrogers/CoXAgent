@@ -158,7 +158,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             // exists only for UI tickets) belongs in the task prompt below.
             system_prompt: prompts::system_prompt(prompts::DEV),
             task_prompt: format!(
-                "Ticket {id}: {title}\n{}{stale_design}\nImplement it now.{stack}{deploy}{design}{context_block}{}{history}{knowledge}{}{}{}{steering}{journal}{asking}",
+                "Ticket {id}: {title}\n{}{stale_design}\nImplement it now.{stack}{deploy}{design}{context_block}{}{history}{knowledge}{}{}{}{steering}{journal}{asking}{}",
                 ticket_brief(ticket),
                 prompts::focus_block(
                     self.files.as_deref(),
@@ -188,6 +188,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                     ),
                 ),
                 prompts::hub_lessons_block(self.files.as_deref()).await,
+                prompts::BRIEF_PROTOCOL,
             ),
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(3600),

@@ -17,6 +17,9 @@ use coxagent_application::ports::outbound::engine::{
     AgentEnginePort, AgentOutcome, AgentRequest, SandboxStatus, Usage,
 };
 use coxagent_application::PortError;
+use std::path::PathBuf;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::process::Command;
 
 /// Adapter over the `copilot` binary for one model selection.
 pub struct CopilotEngine {
@@ -47,6 +50,126 @@ impl CopilotEngine {
         self.sandbox = sandbox;
         self
     }
+
+    /// Spawn `cmd`, stream its JSONL stdout to the live log line-by-line, and
+    /// return the raw stdout, exit code, and stderr. Same shape as the opencode
+    /// adapter's exec so both feed the dashboard's live view identically.
+    async fn exec(
+        &self,
+        mut cmd: Command,
+        live: Option<PathBuf>,
+        timeout: std::time::Duration,
+        sandbox: SandboxStatus,
+    ) -> Result<(String, Option<i32>, String), PortError> {
+        let mut child = crate::proc::spawn_confined(&mut cmd, sandbox)
+            .await
+            .map_err(|e| PortError::Backend(format!("spawn copilot: {e}")))?;
+        let out = child
+            .stdout
+            .take()
+            .ok_or_else(|| PortError::Backend("no stdout".to_owned()))?;
+        let mut err = child.stderr.take();
+        let child_pid = child.id();
+        let err_task = tokio::spawn(async move {
+            let mut s = String::new();
+            if let Some(e) = err.as_mut() {
+                let _ = BufReader::new(e).read_to_string(&mut s).await;
+            }
+            s
+        });
+
+        let live2 = live.clone();
+        let read = async move {
+            let mut raw = String::new();
+            let mut lines = BufReader::new(out).lines();
+            while let Some(line) = lines
+                .next_line()
+                .await
+                .map_err(|e| PortError::Backend(format!("read copilot: {e}")))?
+            {
+                raw.push_str(&line);
+                raw.push('\n');
+                if let Some(p) = &live2 {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) {
+                        let step = render_event(&v);
+                        if !step.is_empty() {
+                            crate::engine::live::append_live(p, &step);
+                        }
+                    }
+                }
+            }
+            let status = child
+                .wait()
+                .await
+                .map_err(|e| PortError::Backend(format!("copilot wait: {e}")))?;
+            Ok::<_, PortError>((raw, status))
+        };
+
+        let Ok(read) = tokio::time::timeout(timeout, read).await else {
+            if let Some(pid) = child_pid {
+                crate::proc::kill_group(pid);
+            }
+            return Err(PortError::Backend("copilot timed out".to_owned()));
+        };
+        let (raw, status) = read?;
+        let stderr = err_task.await.unwrap_or_default();
+        if let Some(p) = &live {
+            crate::engine::live::append_live(p, "\n— run finished —");
+        }
+        Ok((raw, status.code(), stderr))
+    }
+}
+
+/// Render ONE Copilot JSONL event as a work-log line for the live view — the
+/// streaming twin of `parse_jsonl`'s trace (which needs the whole stream to
+/// settle the answer and token count). Unknown events render empty.
+fn render_event(v: &serde_json::Value) -> String {
+    use std::fmt::Write as _;
+    let ty = v.get("type").and_then(serde_json::Value::as_str).unwrap_or("");
+    let data = v.get("data");
+    let mut out = String::new();
+    match ty {
+        "session.auto_mode_resolved" => {
+            if let Some(m) = data
+                .and_then(|d| d.get("chosenModel"))
+                .and_then(serde_json::Value::as_str)
+            {
+                let _ = write!(out, "# model: {m} (auto)");
+            }
+        }
+        "assistant.message" => {
+            if let Some(d) = data {
+                if let Some(c) = d.get("content").and_then(serde_json::Value::as_str) {
+                    let c = c.trim();
+                    if !c.is_empty() {
+                        let _ = write!(out, "💬 {c}");
+                    }
+                }
+                if let Some(reqs) = d.get("toolRequests").and_then(serde_json::Value::as_array) {
+                    for r in reqs {
+                        let name = r
+                            .get("name")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("tool");
+                        let arg = r
+                            .get("arguments")
+                            .map(std::string::ToString::to_string)
+                            .unwrap_or_default();
+                        let arg: String = arg.chars().take(160).collect();
+                        if !out.is_empty() {
+                            out.push('\n');
+                        }
+                        let _ = write!(out, "🔧 {name}({arg})");
+                    }
+                }
+            }
+        }
+        "result" => {
+            let _ = write!(out, "— run finished");
+        }
+        _ => {}
+    }
+    out
 }
 
 #[async_trait]
@@ -79,18 +202,17 @@ impl AgentEnginePort for CopilotEngine {
             .arg("--no-color")
             .current_dir(&request.work_dir)
             .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
         crate::engine::apply_shim_path(&mut cmd);
 
-        let output = tokio::time::timeout(
-            request.timeout,
-            crate::proc::output_confined(&mut cmd, sandbox),
-        )
-        .await
-        .map_err(|_| PortError::Backend("copilot timed out".to_owned()))?
-        .map_err(|e| PortError::Backend(format!("spawn copilot: {e}")))?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        // Stream the JSONL to the live log as it arrives, so the dashboard shows
+        // this agent working in real time instead of a blank pane until the end.
+        let role = crate::engine::role_key(request.role);
+        let live =
+            crate::engine::live::live_path(&request.work_dir, &role, request.label.as_deref());
+        let (stdout, code, stderr) = self.exec(cmd, live, request.timeout, sandbox).await?;
         let parsed = parse_jsonl(&stdout);
         Ok(AgentOutcome {
             stdout: if parsed.answer.is_empty() {
@@ -98,8 +220,8 @@ impl AgentEnginePort for CopilotEngine {
             } else {
                 parsed.answer
             },
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-            exit_code: output.status.code(),
+            stderr,
+            exit_code: code,
             usage: Some(Usage {
                 input_tokens: 0,
                 output_tokens: parsed.output_tokens,
@@ -118,7 +240,7 @@ impl AgentEnginePort for CopilotEngine {
     /// already carries the role framing from its first turn.
     async fn resume_run(
         &self,
-        _role: coxagent_domain::Role,
+        role: coxagent_domain::Role,
         session_id: &str,
         follow_up: &str,
         work_dir: &std::path::Path,
@@ -141,16 +263,13 @@ impl AgentEnginePort for CopilotEngine {
             .arg("--no-color")
             .current_dir(work_dir)
             .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
         crate::engine::apply_shim_path(&mut cmd);
 
-        let output =
-            tokio::time::timeout(timeout, crate::proc::output_confined(&mut cmd, sandbox))
-                .await
-                .map_err(|_| PortError::Backend("copilot resume timed out".to_owned()))?
-                .map_err(|e| PortError::Backend(format!("spawn copilot: {e}")))?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let live = crate::engine::live::live_path(work_dir, &crate::engine::role_key(role), None);
+        let (stdout, code, stderr) = self.exec(cmd, live, timeout, sandbox).await?;
         let parsed = parse_jsonl(&stdout);
         Ok(AgentOutcome {
             stdout: if parsed.answer.is_empty() {
@@ -158,8 +277,8 @@ impl AgentEnginePort for CopilotEngine {
             } else {
                 parsed.answer
             },
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-            exit_code: output.status.code(),
+            stderr,
+            exit_code: code,
             usage: Some(Usage {
                 input_tokens: 0,
                 output_tokens: parsed.output_tokens,
