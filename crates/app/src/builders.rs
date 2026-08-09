@@ -324,9 +324,7 @@ pub(crate) async fn build_project(
                 "gitlab" => Some(Arc::new(coxagent_infrastructure::GlForge::new(
                     repo, base, wd,
                 ))),
-                "github" => Some(Arc::new(coxagent_infrastructure::GhForge::with_account(
-                    repo, base, wd, account,
-                ))),
+                "github" => Some(coxagent_infrastructure::github_forge(repo, base, wd, account)),
                 _ => None,
             }
         } else {
