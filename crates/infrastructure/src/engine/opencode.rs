@@ -313,13 +313,17 @@ impl AgentEnginePort for OpencodeEngine {
 
     async fn resume_run(
         &self,
-        _role: coxagent_domain::Role,
+        role: coxagent_domain::Role,
         session_id: &str,
         follow_up: &str,
         work_dir: &std::path::Path,
         timeout: std::time::Duration,
     ) -> Result<AgentOutcome, PortError> {
-        let live = live_path(work_dir, "resume", None);
+        // Stream under the ROLE's live file, not a shared "resume" one — the
+        // implement/repair passes of a run resume the session, and writing them
+        // to `resume.log` left the agent's own card frozen at the planning
+        // output while the real work streamed somewhere no card reads.
+        let live = live_path(work_dir, &crate::engine::role_key(role), None);
         let (mut cmd, sandbox) = crate::proc::agent_command(&self.binary, work_dir, self.sandbox);
         cmd.arg("run")
             .arg("--model")
