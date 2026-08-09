@@ -50,6 +50,11 @@ pub(crate) fn read_config_text(state_dir: &Path) -> Option<String> {
 /// `deploy.host_port` unconditionally afterward. A single malformed top-level
 /// section falls back to defaults for THAT section only, via
 /// [`parse_config_lenient`] — not the whole document (COX-B043).
+///
+/// Test-only: exercises [`parse_config_lenient`] directly without needing a
+/// full [`load_config_with_probe`] workspace layout. Production code goes
+/// through `load_config_with_probe`, which also derives the health-gate probe.
+#[cfg(test)]
 pub(crate) fn parse_config_text(state_dir: &Path, text: &str) -> Config {
     let root = state_dir.parent().unwrap_or(state_dir);
     let path = root.join("coxagent.json");
@@ -92,6 +97,7 @@ fn parse_config_lenient(path: &Path, text: &str) -> Config {
         architecture: field_or_default(&map, "architecture", defaults.architecture, path),
         policy: field_or_default(&map, "policy", defaults.policy, path),
         deploy: field_or_default(&map, "deploy", defaults.deploy, path),
+        releases: field_or_default(&map, "releases", defaults.releases, path),
     }
 }
 

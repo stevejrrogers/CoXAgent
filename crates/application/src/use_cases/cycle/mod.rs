@@ -189,17 +189,6 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     /// Whether the `sandbox_unsupported` warning has already fired — posted
     /// once per project per process lifetime, never once per cycle.
     sandbox_warned: AtomicBool,
-    /// The health-gate probe port, independently parsed from `coxagent.json`'s
-    /// raw text via [`crate::ports::outbound::parse_deploy_host_port`] where a
-    /// caller has that text available. Kept separate from
-    /// `config.deploy.host_port` because that field cannot distinguish
-    /// "absent" from "malformed" once `Config` deserialization has already
-    /// folded a corrupt value into `Config::default()`; `Err(())` means the
-    /// raw value was present but invalid and must fail the gate rather than
-    /// pass vacuously (COX-B035). Defaults to `Ok(config.deploy.host_port)`
-    /// so callers that never independently parse the raw config keep today's
-    /// behavior.
-    host_port_probe: Result<Option<u16>, ()>,
 }
 
 impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
@@ -235,7 +224,6 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             caps: crate::ports::outbound::WorkerCaps::default(),
             last_discussion_topic: Mutex::new(String::new()),
             sandbox_warned: AtomicBool::new(false),
-            host_port_probe,
         }
     }
 
@@ -556,17 +544,6 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     #[must_use]
     pub fn with_deploy(mut self, deploy: Arc<dyn DeployPort>) -> Self {
         self.deploy = Some(deploy);
-        self
-    }
-
-    /// Override the post-deploy health-gate probe port (COX-B035): pass
-    /// `Err(())` when the raw `coxagent.json` names a malformed
-    /// `deploy.host_port`, so the gate fails closed instead of the default
-    /// (`Ok(config.deploy.host_port)`) treating a `Config`-parse fallback's
-    /// `None` as "nothing configured".
-    #[must_use]
-    pub fn with_host_port_probe(mut self, probe: Result<Option<u16>, ()>) -> Self {
-        self.host_port_probe = probe;
         self
     }
 
