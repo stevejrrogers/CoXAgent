@@ -2,7 +2,13 @@
 # Desktop shows a tidy "cox-infra" group instead of loose containers.
 # Reuses the EXISTING named volumes — migrating from the old `docker run`
 # containers loses no data. Bring up with:
+#   source deploy/local-infra/.env.example   # or export the vars yourself
 #   docker compose -f deploy/local-infra/docker-compose.yml up -d
+#
+# All vars are REQUIRED — compose fails fast with a clear message if any are
+# unset. Copy deploy/local-infra/.env.example to deploy/local-infra/.env,
+# fill in real values, and `source` it (or use `--env-file`) before bringing
+# the stack up. Never commit the filled-in .env.
 name: cox-infra
 
 services:
@@ -11,16 +17,21 @@ services:
     container_name: cox-pg
     environment:
       POSTGRES_DB: coxagent
-      POSTGRES_USER: coxagent
-      POSTGRES_PASSWORD: cox_13946
-    ports: ["5432:5432"]
+      POSTGRES_USER: ${PG_USER:?PG_USER is required — copy .env.example to .env and fill it in}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?PG_PASSWORD is required — copy .env.example to .env and fill it in}
+    ports:
+      # Bound to 127.0.0.1 so the port is reachable only from this host, not
+      # from other machines on the LAN. Containers reach each other by service
+      # name over the compose network, so this restriction is transparent to them.
+      - "127.0.0.1:5432:5432"
     volumes: ["cox_pgdata:/var/lib/postgresql/data"]
     restart: unless-stopped
 
   redis:
     image: redis:7-alpine
     container_name: cox-redis
-    ports: ["6379:6379"]
+    ports:
+      - "127.0.0.1:6379:6379"
     restart: unless-stopped
 
   minio:
@@ -28,16 +39,19 @@ services:
     container_name: coxagent-minio
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: coxagent
-      MINIO_ROOT_PASSWORD: coxagent123
-    ports: ["9000:9000", "9001:9001"]
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER is required — copy .env.example to .env and fill it in}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required — copy .env.example to .env and fill it in}
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
     volumes: ["coxagent-minio:/data"]
     restart: unless-stopped
 
   mongo:
     image: mongo:7
     container_name: cox-mongo
-    ports: ["27017:27017"]
+    ports:
+      - "127.0.0.1:27017:27017"
     volumes: ["coxagent_mongo:/data/db"]
     restart: unless-stopped
 

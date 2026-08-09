@@ -45,6 +45,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"
 clap = { version = "4", features = ["derive"] }
 axum = { version = "0.7", features = ["ws", "multipart"] }
+tower-http = { version = "0.5", features = ["cors"] }
 tokio-stream = "0.1"
 argon2 = "0.5"
 rand = "0.8"

@@ -252,17 +252,32 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                             "DEV boot check: cargo test failed — self-healing. {}",
                             &r.summary[..r.summary.len().min(200)]
                         );
-                        return self.self_heal_compile(&r.summary).await;
+                        // One clear point for every self-heal outcome, so the
+                        // "boot check" phase note can never outlive the run.
+                        let healed = self.self_heal_compile(&r.summary).await;
+                        if let Some(p) = &self.phase {
+                            p(None);
+                        }
+                        return healed;
                     }
                     Ok(Err(e)) => {
                         // Spawn errors and timeouts are INFRASTRUCTURE, not compile
                         // breakage — healing on them tells the LLM "the project
-                        // doesn't compile" with no compile error to fix.
+                        // doesn't compile" with no compile error to fix. Clear the
+                        // phase note on the way out: leaving it set froze the card
+                        // at "boot check: verifying N files" long after this run
+                        // gave up, which reads as a hung agent.
                         tracing::warn!("DEV boot check: cargo test spawn error — {e}");
+                        if let Some(p) = &self.phase {
+                            p(None);
+                        }
                         return Ok(None);
                     }
                     Err(_timeout) => {
                         tracing::warn!("DEV boot check: cargo test timed out after 30 min");
+                        if let Some(p) = &self.phase {
+                            p(None);
+                        }
                         return Ok(None);
                     }
                 }

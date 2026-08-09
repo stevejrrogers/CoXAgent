@@ -29,6 +29,15 @@ impl coxagent_application::ports::outbound::ProcessJanitorPort for OsProcessJani
 
 static ORPHAN_PATTERNS: &[&str] = &["tl_driver", "cargo test", "pytest", "go test", "npm test"];
 
+/// Agent engine CLIs whose command line names the workspace (`--dir`/
+/// `--add-dir`). A running hub restart does NOT take its in-flight engine
+/// children with it — they reparent to PID 1 and keep editing the codebase
+/// while the new hub claims the same tickets, so two agents trample one
+/// working tree. Reparenting IS the proof of orphanhood, so these are killed
+/// on `ppid == 1` alone (no age gate): a sibling operator's live engine still
+/// has its living parent and is never touched.
+static ENGINE_PATTERNS: &[&str] = &["opencode", "copilot"];
+
 pub fn kill_orphaned_drivers(work_dir: &Path) {
     let Some(scope) = work_dir.to_str().filter(|s| !s.trim().is_empty()) else {
         return; // no scope, no kills — never fall back to machine-wide
@@ -37,6 +46,43 @@ pub fn kill_orphaned_drivers(work_dir: &Path) {
     for pattern in ORPHAN_PATTERNS {
         let _ = kill_by_pattern(pattern, scope, &my_pid);
     }
+    for pattern in ENGINE_PATTERNS {
+        let _ = kill_reparented_engines(pattern, scope, &my_pid);
+    }
+}
+
+/// Kill engine processes matching `pattern` whose command line mentions the
+/// workspace AND whose parent is PID 1 — i.e. their spawning runner is gone.
+fn kill_reparented_engines(pattern: &str, scope: &str, my_pid: &str) -> Result<(), std::io::Error> {
+    let output = Command::new("pgrep").arg("-fl").arg(pattern).output()?;
+    if !output.status.success() {
+        return Ok(());
+    }
+    for pid in select_pids(&String::from_utf8_lossy(&output.stdout), scope) {
+        if pid == my_pid {
+            continue;
+        }
+        let Ok(pid_num) = pid.parse::<i32>() else {
+            continue;
+        };
+        if pid_num < 100 || !is_reparented(pid_num) {
+            continue;
+        }
+        let _ = Command::new("kill").arg(&pid).output();
+    }
+    Ok(())
+}
+
+/// Whether `pid`'s parent is PID 1 (launchd/init) — the spawner died. Unknown
+/// = NOT reparented (never kill on uncertainty).
+fn is_reparented(pid: i32) -> bool {
+    let Ok(out) = Command::new("ps")
+        .args(["-o", "ppid=", "-p", &pid.to_string()])
+        .output()
+    else {
+        return false;
+    };
+    String::from_utf8_lossy(&out.stdout).trim() == "1"
 }
 
 /// Kill processes matching `pattern` whose full command line ALSO mentions

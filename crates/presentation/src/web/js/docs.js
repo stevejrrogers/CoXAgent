@@ -239,6 +239,9 @@ function mdRender(md){
 function startPoll(){if(poll)return;poll=setInterval(async()=>{try{const s=await(await fetch(api("/state"))).json();const rn=await(await fetch(api("/runner"))).json();render(s);renderRunner(rn);setConn(false);}catch(e){}},3000);}
 function connect(){if(ES)ES.close();if(poll){clearInterval(poll);poll=null;}
   ES=new EventSource(api("/events"));ES.onmessage=e=>{try{handle(JSON.parse(e.data));if(poll){clearInterval(poll);poll=null;}}catch(_){}};ES.onerror=()=>{setConn(false);startPoll();};}
-function loadBudget(){fetch(api("/config")).then(r=>r.json()).then(c=>{window._budget=(c.workflow&&c.workflow.budget_usd)||null;if(CUR==="insights")renderActive();}).catch(()=>{});}
+function loadBudget(){fetch(api("/config")).then(r=>r.json()).then(c=>{window._budget=(c.workflow&&c.workflow.budget_usd)||null;
+  // Cache the whole config: the agent cards read engine.per_role for the
+  // engine badge before any run of a role has finished (see core.js).
+  window._cfg=c;if(CUR==="insights"||CUR==="team")renderActive();}).catch(()=>{});}
 let PROJECTS=[];
 function projInitial(p){return (p.alias||p.name||"P").trim().charAt(0).toUpperCase()||"P";}
