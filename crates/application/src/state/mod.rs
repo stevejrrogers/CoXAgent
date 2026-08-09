@@ -163,6 +163,15 @@ pub struct ProjectState {
     /// `pr_fix_attempts` when the PR closes.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub pr_sessions: std::collections::BTreeMap<u64, String>,
+    /// Engine conversation id per ticket work-session, keyed `"<ticket>/<role>"`
+    /// (e.g. `COX-B002/dev_bug`). When a DEV agent RE-ENTERS a ticket it already
+    /// worked (a retry, or after a parked question is answered), it resumes this
+    /// conversation instead of re-reading the code cold. Resume routes to the
+    /// role's configured engine; a session minted by a different engine (a prior
+    /// failover) simply fails to resume and falls back to a cold run — a session
+    /// id is engine-native, so this is safe, just a missed optimization.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub ticket_sessions: std::collections::BTreeMap<String, String>,
     /// Tickets held for HUMAN cost approval: estimated run cost exceeded
     /// `workflow.approve_over_usd`. Value = the estimate shown to the human.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -350,6 +359,7 @@ impl Default for ProjectState {
             last_digest_day: String::new(),
             pr_fix_attempts: std::collections::BTreeMap::new(),
             pr_sessions: std::collections::BTreeMap::new(),
+            ticket_sessions: std::collections::BTreeMap::new(),
             cost_holds: std::collections::BTreeMap::new(),
             clippy_baseline: None,
             debt_signals: Vec::new(),

@@ -309,7 +309,10 @@ mod tests {
     #[test]
     fn genuinely_different_features_are_not_dupes() {
         let board = vec!["Bug triage and burn-down sprint".to_owned()];
-        assert!(!duplicates_existing("Add CORS + rate-limiting middleware", &board));
+        assert!(!duplicates_existing(
+            "Add CORS + rate-limiting middleware",
+            &board
+        ));
         assert!(!duplicates_existing("Per-engine cost leaderboard", &board));
         // A real feature that merely mentions "bug" is not a ceremony ticket.
         assert!(!is_backlog_meta("Fix the avatar upload bug"));

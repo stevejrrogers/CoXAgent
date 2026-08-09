@@ -148,14 +148,18 @@ pub trait AgentEnginePort: Send + Sync {
     /// # Errors
     /// [`PortError::Backend`] when the engine has no session support, on
     /// spawn failure, or on timeout.
+    /// `role` names the agent whose session this is, so a routing engine can
+    /// resume on the SAME per-role engine that minted the session id — a session
+    /// id is engine-native, so resuming it anywhere else just fails to a cold run.
     async fn resume_run(
         &self,
+        role: Role,
         session_id: &str,
         follow_up: &str,
         work_dir: &std::path::Path,
         timeout: Duration,
     ) -> Result<AgentOutcome, PortError> {
-        let _ = (session_id, follow_up, work_dir, timeout);
+        let _ = (role, session_id, follow_up, work_dir, timeout);
         Err(PortError::Backend(format!(
             "engine {} does not support session resume",
             self.id()
@@ -176,6 +180,7 @@ mod tests {
             trace: String::new(),
             session_id: None,
             sandbox: SandboxStatus::default(),
+            engine: String::new(),
         }
     }
 

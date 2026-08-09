@@ -348,6 +348,7 @@ impl AgentEnginePort for OpencodeEngine {
 
     async fn resume_run(
         &self,
+        _role: coxagent_domain::Role,
         session_id: &str,
         follow_up: &str,
         work_dir: &std::path::Path,
