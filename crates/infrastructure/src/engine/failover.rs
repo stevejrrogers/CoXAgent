@@ -35,7 +35,19 @@ pub fn is_quota_wall(msg: &str) -> bool {
         "401",
         "403",
         "unauthorized",
+        // Both noun and verb forms: the Claude CLI says "Failed to
+        // authenticate", which the noun "authentication" does not cover.
         "authentication",
+        "authenticate",
+        // OAuth session death: "OAuth access token has been revoked" and
+        // "OAuth session expired and could not be refreshed" — neither carried
+        // a 401 on the direct CLI path, so failover never fired and the whole
+        // team stalled on a dead engine while a live one sat idle.
+        "revoked",
+        "oauth",
+        "session expired",
+        "token expired",
+        "expired token",
         "api key",
     ]
     .iter()
@@ -155,6 +167,10 @@ mod tests {
         assert!(is_quota_wall("Error 429: rate limit exceeded"));
         assert!(is_quota_wall("usage limit reached for your plan"));
         assert!(is_quota_wall("401 Unauthorized: invalid api key"));
+        // The exact CLI strings that stalled the whole team on a dead engine
+        // while a live one sat idle — none carried a 401 on the direct path.
+        assert!(is_quota_wall("Failed to authenticate. API Error: 401 OAuth access token has been revoked."));
+        assert!(is_quota_wall("Failed to authenticate: OAuth session expired and could not be refreshed"));
         assert!(!is_quota_wall("compile error: missing semicolon"));
     }
 

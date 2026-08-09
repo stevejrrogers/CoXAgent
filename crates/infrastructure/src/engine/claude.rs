@@ -492,14 +492,23 @@ fn parse_stream(raw: &str) -> Option<(String, Option<Usage>, String)> {
     result.map(|r| (r, usage, trace.trim().to_owned()))
 }
 
+/// Sum every input-side token field claude reports. With prompt caching on —
+/// which it is, by default — the bulk of the prompt lands in
+/// `cache_read_input_tokens` / `cache_creation_input_tokens`, and only the
+/// uncached delta in `input_tokens`. Counting just the last field made the
+/// Cost tab report a fraction of the real input (223K in vs 10.5M out — the
+/// wrong way round). Cost itself is unaffected: `total_cost_usd` from the CLI
+/// already prices every tier.
+fn input_tokens_all(u: &serde_json::Value) -> u64 {
+    let get = |k: &str| u.get(k).and_then(serde_json::Value::as_u64).unwrap_or(0);
+    get("input_tokens") + get("cache_read_input_tokens") + get("cache_creation_input_tokens")
+}
+
 /// Extract usage/cost from a stream `result` event.
 fn parse_usage(v: &serde_json::Value) -> Option<Usage> {
     let u = v.get("usage")?;
     Some(Usage {
-        input_tokens: u
-            .get("input_tokens")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0),
+        input_tokens: input_tokens_all(u),
         output_tokens: u
             .get("output_tokens")
             .and_then(serde_json::Value::as_u64)
@@ -524,10 +533,7 @@ fn parse_json_output(raw: &str) -> (String, Option<Usage>) {
         .unwrap_or(raw)
         .to_owned();
     let usage = v.get("usage").map(|u| Usage {
-        input_tokens: u
-            .get("input_tokens")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0),
+        input_tokens: input_tokens_all(u),
         output_tokens: u
             .get("output_tokens")
             .and_then(serde_json::Value::as_u64)
@@ -544,6 +550,18 @@ fn parse_json_output(raw: &str) -> (String, Option<Usage>) {
 mod tests {
     use super::*;
     use crate::engine::McpAccess;
+
+    #[test]
+    fn input_tokens_include_the_cached_tiers() {
+        // With caching on, most of the prompt is billed as cache reads. The
+        // Cost tab was undercounting input by ignoring the two cache fields.
+        let raw = r#"{"result":"ok","total_cost_usd":0.5,"usage":{"input_tokens":100,"cache_read_input_tokens":9000,"cache_creation_input_tokens":900,"output_tokens":50}}"#;
+        let (_text, usage) = parse_json_output(raw);
+        let u = usage.expect("usage");
+        assert_eq!(u.input_tokens, 10_000, "100 + 9000 + 900");
+        assert_eq!(u.output_tokens, 50);
+        assert!((u.cost_usd - 0.5).abs() < 1e-9);
+    }
 
     #[test]
     fn mcp_config_json_includes_auth_header_when_token_present() {
