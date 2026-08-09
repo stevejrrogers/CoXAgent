@@ -64,6 +64,7 @@ impl<E: AgentEnginePort> AgentEnginePort for MeteringEngine<E> {
 
     async fn resume_run(
         &self,
+        role: coxagent_domain::Role,
         session_id: &str,
         follow_up: &str,
         work_dir: &std::path::Path,
@@ -71,7 +72,7 @@ impl<E: AgentEnginePort> AgentEnginePort for MeteringEngine<E> {
     ) -> Result<AgentOutcome, PortError> {
         let outcome = self
             .inner
-            .resume_run(session_id, follow_up, work_dir, timeout)
+            .resume_run(role, session_id, follow_up, work_dir, timeout)
             .await?;
         if let Some(u) = outcome.usage {
             if let Ok(mut m) = self.meter.lock() {

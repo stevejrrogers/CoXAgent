@@ -446,6 +446,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                         let exec = self
                             .engine
                             .resume_run(
+                                self.mode.role(),
                                 sid_v,
                                 "Plan accepted. Now IMPLEMENT it exactly: follow your steps, \
                                  write the tests you named, and flag (don't silently absorb) \
@@ -508,6 +509,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             let _ = self
                 .engine
                 .resume_run(
+                    self.mode.role(),
                     sid,
                     "Before handing off: run `git diff` and review YOUR OWN change like a \
                      principal engineer reviewing a stranger's PR. Fix what you find — dead \
@@ -553,7 +555,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 let resumed = match &session {
                     Some(sid) => self
                         .engine
-                        .resume_run(sid, &follow_up, &self.work_dir, Duration::from_secs(1800))
+                        .resume_run(self.mode.role(), sid, &follow_up, &self.work_dir, Duration::from_secs(1800))
                         .await
                         .is_ok(),
                     None => false,
@@ -618,7 +620,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                         if let Some(sid) = &session {
                             let _ = self
                                 .engine
-                                .resume_run(sid, &fixup, &self.work_dir, Duration::from_secs(900))
+                                .resume_run(self.mode.role(), sid, &fixup, &self.work_dir, Duration::from_secs(900))
                                 .await;
                         } else {
                             let repair = AgentRequest {
@@ -769,7 +771,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 if let Some(sid) = &session {
                     let _ = self
                         .engine
-                        .resume_run(sid, &fixup, &self.work_dir, Duration::from_secs(900))
+                        .resume_run(self.mode.role(), sid, &fixup, &self.work_dir, Duration::from_secs(900))
                         .await;
                 } else {
                     let repair = AgentRequest {

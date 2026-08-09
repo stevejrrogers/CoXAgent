@@ -148,13 +148,17 @@ impl<E: AgentEnginePort> AgentEnginePort for FailoverEngine<E> {
     /// session. Callers fall back to a full fresh run on error.
     async fn resume_run(
         &self,
+        role: coxagent_domain::Role,
         session_id: &str,
         follow_up: &str,
         work_dir: &std::path::Path,
         timeout: std::time::Duration,
     ) -> Result<AgentOutcome, PortError> {
         match self.engines.first() {
-            Some(e) => e.resume_run(session_id, follow_up, work_dir, timeout).await,
+            Some(e) => {
+                e.resume_run(role, session_id, follow_up, work_dir, timeout)
+                    .await
+            }
             None => Err(PortError::Backend("failover: no engines".to_owned())),
         }
     }
