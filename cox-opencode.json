@@ -1,0 +1,12 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "coxagent": {
+      "type": "remote",
+      "url": "http://127.0.0.1:8101/api/mcp",
+      "headers": {
+        "Authorization": "Bearer f2869d927d7d04dfbab733f3c29dec9f66c6121df8663f9c2f93eb5fe7d3eff3"
+      }
+    }
+  }
+}

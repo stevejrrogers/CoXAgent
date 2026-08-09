@@ -81,3 +81,9 @@ one snapshot of the outside world; the decision is a pure function of the
 snapshot, testable with a struct literal. `crates/app/tests/hexagonal_gate.rs`
 fails any NEW application file that does direct IO, and its grandfather list
 may only shrink — fixing a file without delisting it also fails.
+- Linux-build gate exit 101 with empty diagnostic is environmental (OOM, network), not source code. Reproduce with `docker run --rm rust:1-slim-bookworm cargo check --bin coxagent` before changing code. If it passes, merge latest origin/main into your branch and re-push — stale local main commonly causes phantom failures. Add to CLAUDE.md under build troubleshooting.
+- ** Before implementing any ticket, check `gh pr list --state all --search "<TICKET-ID>"` for existing in-flight work. If found, check out the branch, diff it, add only what's missing — don't recreate on stale local main. Stash local changes first. This is durable team knowledge and belongs in CLAUDE.md as a pre-work checklist, not per-machine memory.
+
+---
+
+**Why:** Point 6 of the process law says durable team knowledge belongs in working_agreements.md / architecture.md / CLAUDE.md (shared, versioned) — NOT in per-machine engine memory. This memory captures a real, team-wide workflow practice worth keeping, but the law forbids its storage here. Moving it to CLAUDE.md makes it discoverable for all agents on all machines.
