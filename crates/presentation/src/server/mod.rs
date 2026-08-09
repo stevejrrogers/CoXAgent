@@ -34,22 +34,23 @@ use tokio_stream::{Stream, StreamExt};
 mod assets;
 mod auth;
 mod background;
-mod hub_docs;
-mod inbox;
-mod requests;
 mod channels;
 mod chat;
 mod comments;
 mod docs;
 mod engines;
 mod forge;
+mod hub_docs;
+mod inbox;
 mod manage;
 mod meetings;
 mod people;
 mod projects;
-mod transcripts;
 mod realtime;
+mod requests;
 mod status;
+mod store_rpc;
+mod transcripts;
 mod work;
 
 use assets::*;
@@ -57,20 +58,20 @@ use auth::*;
 use background::*;
 use channels::*;
 use chat::*;
-use hub_docs::*;
-use inbox::*;
-use requests::*;
 use comments::*;
 use docs::*;
 use engines::*;
 use forge::*;
+use hub_docs::*;
+use inbox::*;
 use manage::*;
-use people::*;
-use transcripts::*;
 use meetings::*;
+use people::*;
 use projects::*;
 use realtime::*;
+use requests::*;
 use status::*;
+use transcripts::*;
 use work::*;
 
 /// The embedded single-page dashboard.
@@ -806,6 +807,7 @@ pub async fn serve_full(
             "/api/projects/:pid",
             axum::routing::delete(delete_project_ep).patch(rename_project_ep),
         )
+        .route("/api/projects/:pid/store", post(store_rpc::store_rpc_ep))
         .route("/api/projects/:pid/state", get(state_ep))
         .route("/api/projects/:pid/metrics", get(metrics_ep))
         .route("/api/projects/:pid/agent-evals", get(agent_evals_ep))
@@ -816,6 +818,8 @@ pub async fn serve_full(
         .route("/api/projects/:pid/config", get(get_config).put(put_config))
         .route("/api/projects/:pid/control/:action", post(control_ep))
         .route("/api/projects/:pid/sprint/goal", post(set_sprint_goal_ep))
+        .route("/api/projects/:pid/sprint/close", post(sprint_close_ep))
+        .route("/api/projects/:pid/sprint/:action", post(sprint_scope_ep))
         .route("/api/projects/:pid/digest", post(digest_ep))
         .route("/api/projects/:pid/merge-sweep", post(merge_sweep_ep))
         .route(
@@ -887,8 +891,18 @@ pub async fn serve_full(
         )
         .route("/api/projects/:pid/inbox", get(inbox_ep))
         .route("/api/projects/:pid/ticket/:id/ready", post(human_ready_ep))
-        .route("/api/projects/:pid/ticket/:id/verify", post(human_verify_ep))
-        .route("/api/projects/:pid/ticket/:id/assign", post(assign_ticket_ep))
+        .route(
+            "/api/projects/:pid/ticket/:id/verify",
+            post(human_verify_ep),
+        )
+        .route(
+            "/api/projects/:pid/ticket/:id/send-back",
+            post(send_back_ep),
+        )
+        .route(
+            "/api/projects/:pid/ticket/:id/assign",
+            post(assign_ticket_ep),
+        )
         .route(
             "/api/projects/:pid/ticket/:id/undo-approval",
             post(undo_approval_ep),
@@ -934,6 +948,8 @@ pub async fn serve_full(
         .route("/api/projects/:pid/git/connect", post(git_connect_ep))
         .route("/api/projects/:pid/git/test", post(git_test_ep))
         .route("/api/projects/:pid/prs", get(list_prs_ep))
+        .route("/api/pr-report", post(pr_report_ep))
+        .route("/api/pr-report/reviews", get(pr_reviews_ep))
         .route("/api/projects/:pid/prs/:num/diff", get(pr_diff_ep))
         .route("/api/projects/:pid/prs/:num/:action", post(pr_action_ep))
         .route("/api/projects/:pid/agent-log", get(agent_log_ep))
@@ -1034,24 +1050,83 @@ async fn run_cli_env(bin: &str, args: &[&str], key: &str, val: &str) -> (bool, S
     }
 }
 
-/// Pull the signed-in account out of `gh`/`glab auth status` output.
-fn parse_account(out: &str) -> Option<String> {
-    for marker in ["account ", " as ", "Logged in to "] {
-        if let Some(i) = out.find(marker) {
-            let rest = &out[i + marker.len()..];
-            // Skip a leading host token for the "Logged in to" case.
-            let name: String = rest
-                .split_whitespace()
-                .find(|w| !w.contains('.') && *w != "as")
-                .unwrap_or("")
-                .trim_matches(|c: char| c == '@' || c == '(' || c == ')' || c == '.')
-                .to_owned();
-            if !name.is_empty() {
-                return Some(name);
+/// All signed-in accounts parsed from `gh`/`glab auth status` output, with the
+/// active one flagged. Returns `(name, is_active)` pairs in the order the CLI
+/// lists them. Empty when no account can be parsed.
+///
+/// `gh auth status` (multi-account) looks like:
+/// ```text
+/// github.com
+///   ✓ Logged in to github.com account alice (keyring)
+///   - Active account: true
+///   ✓ Logged in to github.com account bob (keyring)
+///   - Active account: false
+/// ```
+/// `glab auth status` (single account) looks like:
+/// ```text
+/// - Logged in to gitlab.com as alice using token
+/// ```
+/// — no "Active account" line, so the lone entry is marked active here.
+fn parse_accounts(out: &str) -> Vec<(String, bool)> {
+    let mut accounts: Vec<(String, bool)> = Vec::new();
+    for line in out.lines() {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed
+            .find("Logged in to ")
+            .map(|i| &trimmed[i + "Logged in to ".len()..])
+        else {
+            // The line right after a "Logged in" entry tells us if it's the
+            // active account (gh multi-account form only).
+            if trimmed.starts_with("- Active account:") || trimmed.starts_with("Active account:") {
+                if let Some(idx) = accounts.len().checked_sub(1) {
+                    accounts[idx].1 = trimmed.contains("true");
+                }
+            }
+            continue;
+        };
+        // Skip the host token, then the marker (`account` or `as`), then the
+        // username is the next whitespace-separated word.
+        let mut parts = rest.split_whitespace();
+        let _host = parts.next();
+        let marker_or_user = parts.next().unwrap_or("");
+        let user = if marker_or_user == "account" || marker_or_user == "as" {
+            parts.next().unwrap_or("")
+        } else {
+            marker_or_user
+        };
+        let name = user
+            .trim_matches(|c: char| c == '@' || c == '(' || c == ')' || c == '.')
+            .to_owned();
+        if !name.is_empty() {
+            // Dedupe: `gh auth status` may list the same login twice across
+            // hosts; keep the first occurrence.
+            if !accounts.iter().any(|(n, _)| n == &name) {
+                accounts.push((name, false));
             }
         }
     }
-    None
+    // Single-account output (notably glab) has no "Active account" line — the
+    // one account is the active one.
+    if accounts.len() == 1 && !accounts[0].1 {
+        accounts[0].1 = true;
+    }
+    // If none was flagged active (single-section multi-account edge case),
+    // fall back to the first — matching the historical `parse_account` pick.
+    if !accounts.is_empty() && !accounts.iter().any(|(_, a)| *a) {
+        accounts[0].1 = true;
+    }
+    accounts
+}
+
+/// Pull the signed-in account out of `gh`/`glab auth status` output — the
+/// active one, falling back to the first listed. Used by callers that only
+/// need one account (e.g. the post-`connect` verifier).
+fn parse_account(out: &str) -> Option<String> {
+    let all = parse_accounts(out);
+    all.iter()
+        .find(|(_, a)| *a)
+        .or_else(|| all.first())
+        .map(|(n, _)| n.clone())
 }
 
 /// Whether the caller holds admin/super authority, which outranks channel
@@ -1105,6 +1180,12 @@ struct CodeGraphQuery {
 }
 
 /// List open pull/merge requests for a project's repository.
+///
+/// The list is supplied by the runner over HTTP (the runner holds the forge
+/// credentials), so this reads what was reported and persisted rather than
+/// asking a forge the hub may not be able to reach (a container serving the
+/// dashboard has no token). Falls back to an empty list when no PRs have been
+/// reported yet.
 async fn list_prs_ep(
     State(app): State<AppState>,
     Path(pid): Path<String>,
@@ -1112,39 +1193,31 @@ async fn list_prs_ep(
     let Some(p) = app.project(&pid).await else {
         return not_found();
     };
-    let Some(forge) = &p.forge else {
+    let Ok(state) = p.store.load().await else {
         return Json(serde_json::json!({ "configured": false, "prs": [] })).into_response();
     };
-    // The SA's stored review verdict per PR, so the UI can show the suggestion.
-    let reviews = p.store.load().await.map(|s| s.reviews).unwrap_or_default();
     let auto_merge = std::fs::read_to_string(&p.config_path)
         .ok()
         .and_then(|t| serde_json::from_str::<Config>(&t).ok())
         .is_some_and(|c| c.git.auto_merge);
-    match forge.list_open_prs().await {
-        Ok(prs) => {
-            let enriched: Vec<serde_json::Value> = prs
-                .iter()
-                .map(|pr| {
-                    let mut v = serde_json::to_value(pr).unwrap_or_default();
-                    if let Some(r) = reviews.iter().find(|r| r.number == pr.number) {
-                        v["review"] = serde_json::json!({
-                            "decision": r.decision, "summary": r.summary, "at": r.at,
-                        });
-                    }
-                    v
-                })
-                .collect();
-            Json(serde_json::json!({
-                "configured": true, "auto_merge": auto_merge, "prs": enriched
-            }))
-            .into_response()
-        }
-        Err(e) => {
-            Json(serde_json::json!({ "configured": true, "error": e.to_string(), "prs": [] }))
-                .into_response()
-        }
-    }
+    let enriched: Vec<serde_json::Value> = state
+        .open_prs
+        .iter()
+        .map(|pr| {
+            let mut v = serde_json::to_value(pr).unwrap_or_default();
+            if let Some(r) = state.reviews.iter().find(|r| r.number == pr.number) {
+                v["review"] = serde_json::json!({
+                    "decision": r.decision, "summary": r.summary, "at": r.at,
+                });
+            }
+            v
+        })
+        .collect();
+    let configured = p.forge.is_some();
+    Json(serde_json::json!({
+        "configured": configured, "auto_merge": auto_merge, "prs": enriched
+    }))
+    .into_response()
 }
 
 /// Force-merge one PR on the human's order: if it's already green, merge now;
@@ -1534,6 +1607,12 @@ struct SprintGoalReq {
     goal: String,
 }
 
+/// Which tickets to pull into (or drop from) the running sprint.
+#[derive(serde::Deserialize)]
+struct SprintScopeReq {
+    tickets: Vec<String>,
+}
+
 /// Name of the session cookie.
 const SESSION_COOKIE: &str = "cox_session";
 
@@ -1597,3 +1676,76 @@ mod avatar_media_security_tests;
 mod pr_preview_tests;
 #[cfg(test)]
 mod pr_review_gate_tests;
+
+#[cfg(test)]
+mod parse_accounts_tests {
+    use super::{parse_account, parse_accounts};
+
+    #[test]
+    fn gh_multi_account_picks_active() {
+        let out = "\
+github.com
+  ✓ Logged in to github.com account stevejrrogers (keyring)
+  - Active account: true
+  - Git operations protocol: ssh
+
+  ✓ Logged in to github.com account kyroc3 (keyring)
+  - Active account: false
+  - Git operations protocol: ssh
+";
+        let all = parse_accounts(out);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0], ("stevejrrogers".to_owned(), true));
+        assert_eq!(all[1], ("kyroc3".to_owned(), false));
+        assert_eq!(parse_account(out).as_deref(), Some("stevejrrogers"));
+    }
+
+    #[test]
+    fn gh_single_account_legacy_as_form() {
+        let out = "github.com\n  ✓ Logged in to github.com as alice (oauth_token)\n";
+        let all = parse_accounts(out);
+        assert_eq!(all, vec![("alice".to_owned(), true)]);
+        assert_eq!(parse_account(out).as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn glab_single_account_no_active_line_is_active() {
+        let out = "- Logged in to gitlab.com as alice using token\n";
+        let all = parse_accounts(out);
+        assert_eq!(all, vec![("alice".to_owned(), true)]);
+        assert_eq!(parse_account(out).as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn empty_output_yields_empty() {
+        assert!(parse_accounts("").is_empty());
+        assert!(parse_account("").is_none());
+    }
+
+    #[test]
+    fn duplicate_account_across_hosts_is_deduped() {
+        let out = "\
+github.com
+  ✓ Logged in to github.com account alice (keyring)
+  - Active account: true
+ghe.example.com
+  ✓ Logged in to ghe.example.com account alice (keyring)
+  - Active account: false
+";
+        let all = parse_accounts(out);
+        assert_eq!(all, vec![("alice".to_owned(), true)]);
+    }
+
+    #[test]
+    fn no_active_marker_falls_back_to_first() {
+        let out = "\
+github.com
+  ✓ Logged in to github.com account alice (keyring)
+  ✓ Logged in to github.com account bob (keyring)
+";
+        let all = parse_accounts(out);
+        assert_eq!(all[0], ("alice".to_owned(), true));
+        assert_eq!(all[1], ("bob".to_owned(), false));
+        assert_eq!(parse_account(out).as_deref(), Some("alice"));
+    }
+}

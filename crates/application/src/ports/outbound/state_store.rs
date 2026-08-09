@@ -18,6 +18,84 @@ pub struct WorkerEntry {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub ticket: String,
     pub at: String,
+    /// Agent CLIs this runner found on ITS OWN PATH (`claude`, `opencode`, …).
+    ///
+    /// The hub cannot infer this: in a split deploy the dashboard is served by a
+    /// container that will never have an agent CLI, while the agents run on an
+    /// operator's machine. Detecting locally there made the dashboard report "no
+    /// agent CLI detected" and mark every engine "(not installed)" while those
+    /// engines were in fact running the team. Each runner reports what it has,
+    /// and the entry expires with the heartbeat — so the list tracks who is
+    /// actually online rather than what was once installed somewhere.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub engines: Vec<String>,
+    /// `provider/model` pairs this runner's opencode can reach. A user's custom
+    /// providers exist only in their own opencode config, so no built-in list
+    /// can name them and the hub has no CLI to ask — the machine that has one
+    /// reports them here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<String>,
+    /// What this runner's git and forge credentials can actually do, probed on
+    /// ITS machine. `None` until it has reported (or when git is disabled).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<GitCheck>,
+    /// The developer tooling (git/gh/glab/docker) present on THIS runner's
+    /// machine, and that machine's OS — serialized `Tooling`.
+    ///
+    /// The hub cannot answer either: `std::env::consts::OS` is the OS of
+    /// whatever process asks, so a container reported `linux` and offered
+    /// `apt-get install` to someone on a Mac, then marked git, gh and docker
+    /// missing while all three sat installed and signed in on the machine the
+    /// agents actually run on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tooling: Option<serde_json::Value>,
+}
+
+/// The outcome of probing git + forge access from the machine that will run
+/// them. Push and pull requests are checked separately because they use
+/// different credentials — an ssh key and an API login — and one commonly works
+/// while the other does not.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GitCheck {
+    /// The forge login in effect (empty when the CLI is not signed in).
+    #[serde(default)]
+    pub account: String,
+    /// The API can see the configured repository — pull requests will work.
+    #[serde(default)]
+    pub api_ok: bool,
+    /// A dry-run push succeeded — the agent can deliver a branch.
+    #[serde(default)]
+    pub push_ok: bool,
+    /// Why a check failed, in the words of the tool that failed it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+    /// A concrete remedy, e.g. an ssh key that GitHub does accept.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub remedy: String,
+}
+
+impl GitCheck {
+    /// Fold the forge half of a probe into the push half. `push_ok` and its
+    /// `detail` belong to the ssh side and are kept; everything else describes
+    /// the API side and comes from `other`.
+    pub fn merge_with(&mut self, other: Self) {
+        self.account = other.account;
+        self.api_ok = other.api_ok;
+        self.remedy = other.remedy;
+        if !other.detail.is_empty() {
+            self.detail = other.detail;
+        }
+    }
+}
+
+/// Everything a runner advertises about what its machine can do. Grouped so the
+/// heartbeat keeps one capability argument as this list grows.
+#[derive(Debug, Clone, Default)]
+pub struct WorkerCaps {
+    pub engines: Vec<String>,
+    pub models: Vec<String>,
+    pub git: Option<GitCheck>,
+    pub tooling: Option<serde_json::Value>,
 }
 
 /// Atomic read-modify-write with retry: load the state, apply `f`, and save. If
@@ -59,6 +137,39 @@ pub trait StateStorePort: Send + Sync {
 
     /// Persist the full state atomically after validating it.
     async fn save(&self, state: &ProjectState) -> Result<(), PortError>;
+
+    /// Persist expecting that no other writer advanced past `expected_revision`
+    /// since this caller captured it from its own load.
+    ///
+    /// Optimistic concurrency control carried across an adapter boundary such as
+    /// REST. [`Self::save`] re-reads-and-CASes at write time inside its own
+    /// connection or process, so two concurrent writers can both succeed and
+    /// silently clobber each other — exactly what lost-update protection should
+    /// stop. Passing back the same revision this caller saw when it loaded lets
+    /// the server reject a stale write with a conflict before it overwrites newer
+    /// data. Backends without revision tracking leave this at the default, which
+    /// falls through to [`Self::save`] and preserves today's behaviour.
+    async fn save_expecting(
+        &self,
+        state: &ProjectState,
+        _expected_revision: Option<i64>,
+    ) -> Result<(), PortError> {
+        self.save(state).await
+    }
+
+    /// The store's current optimistic-concurrency version token for this
+    /// project aggregate, if the backend tracks one (`None` otherwise).
+    ///
+    /// Lets an adapter surfacing its read-modify-write boundary hand back what
+    /// value [`Self::save_expecting`] should be told this caller saw when it
+    /// loaded — so optimistic concurrency survives across process boundaries
+    /// instead of being defeated by each writer re-reading at write time.
+    ///
+    /// Backends without revision tracking leave this at `None`, preserving
+    /// today's behaviour; callers treat `None` as "no guard available".
+    async fn current_version(&self) -> Result<Option<i64>, PortError> {
+        Ok(None)
+    }
 
     /// Atomically claim `id` for `worker` (`account@host`), stamping `now` as the
     /// lease time. Returns `true` if this caller won the claim, `false` if the
@@ -136,8 +247,9 @@ pub trait StateStorePort: Send + Sync {
     }
 
     /// Record this runner's live presence (`account@host`, current role, current
-    /// ticket) in the shared worker registry, so every dashboard can show all
-    /// teams. Best-effort; the default is a no-op (single-runner needs none).
+    /// ticket, the agent CLIs it can actually run) in the shared worker registry,
+    /// so every dashboard can show all teams. Best-effort; the default is a no-op
+    /// (single-runner needs none).
     ///
     /// # Errors
     /// [`PortError`] on a coordination-store failure.
@@ -146,6 +258,7 @@ pub trait StateStorePort: Send + Sync {
         _worker: &str,
         _role: &str,
         _ticket: &str,
+        _caps: &WorkerCaps,
         _now: &str,
     ) -> Result<(), PortError> {
         Ok(())

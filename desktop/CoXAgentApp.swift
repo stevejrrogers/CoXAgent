@@ -13,6 +13,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     var window: NSWindow!
     var web: WKWebView!
     var hub: Process?
+    /// Set while the app is shutting down, so the hub's termination handler
+    /// does not helpfully restart the very process we just asked to stop.
+    var quitting = false
     // In remote mode, the local operator processes this machine contributes to
     // the shared team (one per locally-provisioned project). They idle until the
     // user Starts them from the web, and are torn down when the app quits.
@@ -86,7 +89,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
+        installMenu()
         loadWhenReady()
+    }
+
+    /// A minimal menu bar. Without one there is no ⌘R, and the dashboard is
+    /// loaded exactly once per launch — so an upgraded hub kept serving a new
+    /// API to a window still painting the previous build. ⌘Q was likewise only
+    /// available through the Dock.
+    func installMenu() {
+        let main = NSMenu()
+
+        let appItem = NSMenuItem()
+        let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "Hide CoXAgent", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        appMenu.addItem(NSMenuItem.separator())
+        appMenu.addItem(withTitle: "Quit CoXAgent", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appItem.submenu = appMenu
+        main.addItem(appItem)
+
+        let viewItem = NSMenuItem()
+        let viewMenu = NSMenu(title: "View")
+        viewMenu.addItem(withTitle: "Reload", action: #selector(reloadDashboard), keyEquivalent: "r")
+        viewItem.submenu = viewMenu
+        main.addItem(viewItem)
+
+        let editItem = NSMenuItem()
+        let editMenu = NSMenu(title: "Edit")
+        for (title, sel, key) in [
+            ("Cut", #selector(NSText.cut(_:)), "x"),
+            ("Copy", #selector(NSText.copy(_:)), "c"),
+            ("Paste", #selector(NSText.paste(_:)), "v"),
+            ("Select All", #selector(NSText.selectAll(_:)), "a"),
+        ] {
+            editMenu.addItem(withTitle: title, action: sel, keyEquivalent: key)
+        }
+        editItem.submenu = editMenu
+        main.addItem(editItem)
+
+        NSApp.mainMenu = main
+    }
+
+    /// ⌘R: fetch the dashboard again, ignoring every cache, so the window picks
+    /// up whatever the hub is serving now.
+    @objc func reloadDashboard() {
+        var req = URLRequest(url: URL(string: "\(base)/")!)
+        req.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        web.load(req)
     }
 
     // The bundled server binary sits next to this executable. It is named
@@ -125,7 +174,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     func richEnv() -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let extra = ["\(home)/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+        // ~/.opencode/bin must come first: opencode installs there and is not
+        // symlinked anywhere else, so without it app-spawned operators fail with
+        // `nice: 'opencode': No such file or directory` and every agent run dies.
+        let extra = [
+            "\(home)/.opencode/bin",
+            "\(home)/.local/bin",
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+        ]
         env["PATH"] = extra.joined(separator: ":") + ":" + (env["PATH"] ?? "")
         return env
     }
@@ -311,6 +370,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             p.standardOutput = fh
             p.standardError = fh
         }
+        // The hub is the app's whole reason to exist: if it dies — crash, or an
+        // upgrade replacing the binary underneath — bring it back and reload the
+        // window onto it. Without this, a dead hub left the window pointing at
+        // nothing and only quitting the app could recover.
+        p.terminationHandler = { [weak self] _ in
+            DispatchQueue.main.async {
+                guard let self, !self.quitting else { return }
+                self.startHub()
+                self.loadWhenReady()
+            }
+        }
         try? p.run()
         hub = p
     }
@@ -372,6 +442,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     func applicationWillTerminate(_ note: Notification) {
+        quitting = true
         hub?.terminate()
         for op in operators { op.terminate() }
     }

@@ -102,24 +102,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         // Human steering: recent USER comments on this ticket become explicit
         // instructions — commenting on an in-progress ticket steers the agent
         // on its next run instead of shouting into the void.
-        let steering = {
-            let notes: Vec<String> = state
-                .comments
-                .iter()
-                .filter(|c| c.author == "USER" && c.ticket.as_deref() == Some(id.as_str()))
-                .rev()
-                .take(3)
-                .map(|c| c.body.chars().take(400).collect::<String>())
-                .collect();
-            if notes.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    "\n\nHUMAN STEERING on this ticket (newest first — follow it):\n- {}",
-                    notes.join("\n- ")
-                )
-            }
-        };
+        let steering = prompts::human_steering_block(state, id.as_str());
         let journal = Self::attempts_brief(state, id);
         // What was already done to this code. A human opens the file's history
         // before editing it; nothing in the ticket text carries that.
@@ -223,6 +206,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 }));
                 u8::try_from(attempts.max(floor)).unwrap_or(3)
             },
+            label: Some(id.to_string()),
         }
     }
 }

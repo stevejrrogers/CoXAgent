@@ -106,6 +106,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(1800),
             escalation_level: 0,
+            label: None,
         };
 
         let outcome = self.engine.run(request).await?;

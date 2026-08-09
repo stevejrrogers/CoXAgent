@@ -107,9 +107,7 @@ pub(super) async fn chat_post_ep(
         // fell into the void. Trigger on an explicit mention or a question
         // mark; plain chatter stays human-to-human (no engine burn).
         let lower = body.to_lowercase();
-        let wants_team = lower.contains("@team")
-            || lower.contains("@cox")
-            || body.contains('?');
+        let wants_team = lower.contains("@team") || lower.contains("@cox") || body.contains('?');
         let from_human = !user.eq_ignore_ascii_case("system");
         if wants_team && from_human {
             let msg = body.to_owned();
@@ -1102,15 +1100,15 @@ pub(super) async fn chat_reply_ep(
     if msg.is_empty() {
         return Json(serde_json::json!({ "ok": true })).into_response();
     }
+    // One raw read feeds both the `Config` parse and the host-port probe, so
+    // a malformed `deploy.host_port` can't drift from what `Config` saw and
+    // fails the mandatory health gate (COX-B035) instead of silently
+    // skipping it via `Config::default()`'s `host_port: None`.
     let raw_cfg = std::fs::read_to_string(&p.config_path).ok();
     let cfg = raw_cfg
         .as_deref()
         .and_then(|t| serde_json::from_str::<Config>(t).ok())
         .unwrap_or_default();
-    // Independently parsed from the SAME raw text (COX-B035): distinguishes
-    // "no host_port configured" from "host_port present but malformed",
-    // which `cfg.deploy.host_port` alone cannot once a corrupt config has
-    // already collapsed to `Config::default()` above.
     let host_port_probe = raw_cfg.as_deref().map_or(Ok(None), |t| {
         coxagent_application::ports::outbound::parse_deploy_host_port(t)
     });
@@ -1125,7 +1123,6 @@ pub(super) async fn chat_reply_ep(
     if let Some(d) = &p.deploy {
         uc = uc
             .with_deploy(Arc::clone(d))
-            .with_host_port(cfg.deploy.host_port)
             .with_host_port_probe(host_port_probe);
     }
     if let Some(f) = &p.forge {

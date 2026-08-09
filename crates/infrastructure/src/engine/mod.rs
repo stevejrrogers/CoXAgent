@@ -20,7 +20,8 @@ pub use metering::{Meter, MeteringEngine};
 pub use mock::MockEngine;
 pub use opencode::OpencodeEngine;
 pub use registry::{
-    discover, discover_in, discover_tooling, DetectedEngine, DetectedTool, Tooling,
+    discover, discover_in, discover_opencode_models, discover_tooling, DetectedEngine,
+    DetectedTool, Tooling,
 };
 pub use routing::RoutingEngine;
 pub use scripted::ScriptedEngine;
@@ -60,6 +61,46 @@ pub(crate) fn apply_shim_path(cmd: &mut tokio::process::Command) {
         if !shim.is_empty() {
             let path = std::env::var("PATH").unwrap_or_default();
             cmd.env("PATH", format!("{shim}:{path}"));
+        }
+    }
+}
+
+/// Resolve an agent-CLI binary (`opencode`, `claude`, `hermes`, ...) to an
+/// absolute path. Prefer whatever `PATH` already resolves (a caller may set a
+/// rich PATH), then fall back to the common install locations keyed off
+/// `$HOME` — this keeps app-spawned operators working even when their inherited
+/// PATH omits e.g. `~/.opencode/bin`. Returns the bare name only when nothing
+/// is found anywhere, so resolution failures degrade exactly as before.
+pub(crate) fn resolve_engine_binary(name: &str) -> String {
+    // One resolver for spawn AND discovery — registry::resolve_binary. Two
+    // hand-maintained lists drifted once already: the runner could spawn
+    // opencode while the settings page said it was not installed.
+    crate::engine::registry::resolve_binary(name)
+        .map_or_else(|| name.to_owned(), |p| p.display().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_engine_binary_returns_absolute_path_when_installed() {
+        // At least one agent CLI is installed on this machine; the resolver must
+        // return an absolute path (never a bare name) when it finds one.
+        for name in ["opencode", "claude", "hermes"] {
+            let bin = resolve_engine_binary(name);
+            if bin == name {
+                continue; // not installed here — nothing to assert
+            }
+            let p = std::path::Path::new(&bin);
+            assert!(
+                p.is_absolute(),
+                "expected absolute path for {name}, got {bin}"
+            );
+            assert!(
+                p.exists(),
+                "resolved {name} should exist: {bin}"
+            );
         }
     }
 }

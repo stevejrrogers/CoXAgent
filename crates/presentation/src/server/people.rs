@@ -126,9 +126,7 @@ pub(super) fn role_from(s: Option<&str>) -> coxagent_application::AuthRole {
 /// As [`role_from`], but an UNRECOGNISED non-empty name is an error instead
 /// of silently becoming Viewer — "member" quietly demoting a user to
 /// read-only cost a confused hour in the hybrid role-play test.
-pub(super) fn role_from_strict(
-    s: Option<&str>,
-) -> Result<coxagent_application::AuthRole, String> {
+pub(super) fn role_from_strict(s: Option<&str>) -> Result<coxagent_application::AuthRole, String> {
     use coxagent_application::AuthRole;
     let raw = s.unwrap_or("").trim();
     let role = AuthRole::from_str_lenient(raw);

@@ -19,6 +19,7 @@ const INBOX_KIND={
   question:{label:"Question for you",ic:"ti-help-circle",col:"var(--amber)"},
   review_pr:{label:"PR held for human",ic:"ti-git-pull-request",col:"var(--teal)"},
   auto_approved:{label:"Auto-approved",ic:"ti-robot",col:"var(--dim)"},
+  pr_stuck:{label:"PR stuck — needs you",ic:"ti-alert-triangle",col:"var(--red)"},
 };
 
 function inboxCard(kind,meta,title,actions,ticket){
@@ -32,9 +33,25 @@ function inboxCard(kind,meta,title,actions,ticket){
         <span style="font-size:11px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:${k.col}">${k.label}</span>
         <span style="font-size:11.5px;color:var(--dim)">${meta}</span></div>
       <div style="font-size:13.5px;font-weight:600;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${title}</div></div>
-    <div style="display:flex;gap:8px;flex-shrink:0" onclick="event.stopPropagation()">${actions}</div></div>`;
+    <div class="ibx-acts" onclick="event.stopPropagation()">${actions}</div></div>`;
 }
-const ibtn=(label,fn,pri)=>`<button class="tk-btn${pri?' go':''}" style="padding:7px 14px;font-size:12px" onclick="${fn}">${label}</button>`;
+// The primary action is rendered LAST and pinned right, whatever else a card
+// carries. Cards used to lay their buttons out in reading order, so the one
+// cyan block landed in the middle of a 3-button row and on the end of a
+// 2-button row — down a list it zig-zagged, and the eye tracked the colour
+// instead of the text.
+const ibtn=(label,fn,pri)=>`<button class="tk-btn${pri?' go':''} ibx-btn${pri?' ibx-pri':''}" onclick="${fn}">${label}</button>`;
+
+// Who may take which gate decision — the same rule the server enforces
+// (AuthRole::can_approve_ready / can_verify). Mirrored here only to keep a
+// button off screen when it would 403; the server is the authority.
+const LEADS=["super","admin","director","manager","techlead","dslead","dalead"];
+const myRole=()=>((window.ME&&ME.role)||"").toLowerCase();
+// No accounts configured = open mode: the one operator decides everything.
+const canApproveReady=()=>!window.ME||!ME.role||LEADS.includes(myRole())||myRole()==="ba";
+const canVerify=()=>!window.ME||!ME.role||LEADS.includes(myRole())||myRole()==="reviewer";
+// A gate the viewer cannot act on still shows WHY, rather than a bare row.
+const noRight=()=>'<span class="ibx-noright" title="Your role may not take this decision">view only</span>';
 
 async function renderInbox(){
   const el=document.getElementById("inbox-body");if(!el)return;
@@ -52,12 +69,17 @@ async function renderInbox(){
     if(it.kind==="approve_ready"){
       html+=inboxCard("approve_ready",esc(it.ticket)+(it.priority?" · "+esc(it.priority):""),esc(it.title),
         ibtn("Review",`showTicket('${esc(it.ticket)}')`)+
-        ibtn("Approve",`inboxAct('${esc(it.ticket)}','ready')`,1)+
-        ibtn("Reject",`inboxAct('${esc(it.ticket)}','reject')`),it.ticket);
+        (canApproveReady()
+          ?ibtn("Reject",`inboxAct('${esc(it.ticket)}','reject')`)+
+           ibtn("Approve",`inboxAct('${esc(it.ticket)}','ready')`,1)
+          :noRight()),it.ticket);
     }else if(it.kind==="verify"){
       html+=inboxCard("verify",esc(it.ticket),esc(it.title),
         ibtn("Evidence",`showTicket('${esc(it.ticket)}')`)+
-        ibtn("Verified",`inboxAct('${esc(it.ticket)}','verify')`,1),it.ticket);
+        (canVerify()
+          ?ibtn("Send back",`inboxSendBack('${esc(it.ticket)}')`)+
+           ibtn("Verified",`inboxAct('${esc(it.ticket)}','verify')`,1)
+          :noRight()),it.ticket);
     }else if(it.kind==="assigned"){
       html+=inboxCard("assigned",esc(it.ticket)+" · "+esc(it.status||""),esc(it.title),
         ibtn("Return to agents",`inboxUnassign('${esc(it.ticket)}')`),it.ticket);
@@ -70,10 +92,17 @@ async function renderInbox(){
     }else if(it.kind==="auto_approved"){
       html+=inboxCard("auto_approved",esc(it.ticket)+" · undo for "+it.minutes_left+"m",esc(it.title),
         ibtn("Review",`showTicket('${esc(it.ticket)}')`)+
-        ibtn("Undo",`inboxUndo('${esc(it.ticket)}')`),it.ticket);
+        (canApproveReady()?ibtn("Undo",`inboxUndo('${esc(it.ticket)}')`,1):noRight()),it.ticket);
     }else if(it.kind==="review_pr"){
       html+=inboxCard("review_pr","#"+it.number,esc(it.title),
         ibtn("Open review",`nav('review')`,1));
+    }else if(it.kind==="pr_stuck"){
+      // The team tried, the SA rescued it, and it is still not moving. Say what
+      // was tried and give the two moves a person actually has.
+      const why=`#${it.number} · ${it.attempts} fix rounds · ${it.mergeable?"mergeable":"CONFLICTING"} · SA rescue failed`;
+      html+=inboxCard("pr_stuck",why,esc(it.title),
+        ibtn("Open on GitHub",`window.open('${esc(it.url)}','_blank')`)+
+        ibtn("Review queue",`nav('review')`,1));
     }
   }
   el.innerHTML=html;
@@ -90,6 +119,22 @@ async function inboxAct(id,action){
     const r=await fetch(api("/ticket/"+encodeURIComponent(id)+"/"+action),{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
     if(!r.ok){coxToast&&coxToast(await r.text());}
   }catch(e){}
+  renderInbox();
+}
+
+// The verify gate's other answer: the fix is not demonstrated. The reason
+// goes on the ticket, which is what steers the next attempt.
+async function inboxSendBack(id){
+  const reason=await coxModal({title:"Send back "+id,
+    message:"Vì sao chưa nghiệm thu được? (lý do đi kèm ticket — agent đọc và làm lại theo đó)",
+    input:{placeholder:"vd: không có evidence cho acceptance criteria #2"},confirmText:"Send back"});
+  if(reason===null||reason===undefined)return;
+  try{
+    const r=await fetch(api("/ticket/"+encodeURIComponent(id)+"/send-back"),
+      {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({reason:String(reason||"")})});
+    if(!r.ok){toasty(await r.text()||"Send back failed","err");return;}
+    toasty(id+" sent back to the agents","ok");
+  }catch(e){toasty("Network error","err");}
   renderInbox();
 }
 

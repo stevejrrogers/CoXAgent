@@ -17,6 +17,11 @@ pub async fn repair_json<E: AgentEnginePort + ?Sized>(
     schema_hint: &str,
     work_dir: &Path,
 ) -> Option<String> {
+    // Nothing to repair: an empty/whitespace-only blob (the classic timeout
+    // case) would only burn a 120s SM call that asks the engine to fix nothing.
+    if raw.trim().is_empty() || raw.chars().filter(|c| !c.is_whitespace()).count() == 0 {
+        return None;
+    }
     let capped: String = raw.chars().take(8000).collect();
     let request = AgentRequest {
         role: Role::Sm, // routed to the cheap ceremony model when configured
@@ -31,6 +36,7 @@ pub async fn repair_json<E: AgentEnginePort + ?Sized>(
         work_dir: work_dir.to_path_buf(),
         timeout: Duration::from_secs(120),
         escalation_level: 0,
+        label: None,
     };
     let out = engine.run(request).await.ok()?;
     if !out.succeeded() {

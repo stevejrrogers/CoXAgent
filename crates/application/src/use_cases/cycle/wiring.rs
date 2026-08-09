@@ -41,6 +41,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         .with_files(self.files.clone())
     }
 
+    pub(super) fn releases(&self) -> crate::use_cases::RunReleasesUseCase<S> {
+        crate::use_cases::RunReleasesUseCase::new(Arc::clone(&self.store), self.work_dir.clone())
+            .with_config(self.config.clone())
+            .with_git(self.git.clone())
+    }
+
     pub(super) fn design_system(&self) -> RunDesignSystemUseCase<S, E> {
         RunDesignSystemUseCase::new(
             Arc::clone(&self.store),

@@ -3,7 +3,7 @@
 //! Kept in the application layer because `schema_version` is a persistence
 //! concern; the domain stays free of it.
 
-use coxagent_domain::{SemVer, Ticket, TicketId};
+use coxagent_domain::{DebtSignal, SemVer, Ticket, TicketId};
 use serde::{Deserialize, Serialize};
 
 mod chat;
@@ -96,6 +96,11 @@ pub struct ProjectState {
     /// The SA agent's latest review verdict per open PR (by number).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reviews: Vec<PrReview>,
+    /// Open pull requests as reported by the runner over HTTP. The runner owns
+    /// the forge credentials, so the hub only ever reads this list back for the
+    /// Review tab — it never lists PRs itself.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub open_prs: Vec<crate::ports::outbound::PrOpen>,
     /// Team chat: human-to-human messages among the people on the project.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chat: Vec<ChatMsg>,
@@ -167,6 +172,14 @@ pub struct ProjectState {
     /// measured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clippy_baseline: Option<u64>,
+    /// Debt findings from the most recent debt-sweep run, persisted so a sweep
+    /// and its outcomes are auditable across cycles.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub debt_signals: Vec<DebtSignal>,
+    /// Cycle numbers on which a debt-sweep was already filed, so a sweep is not
+    /// re-filed for the same cycle after a restart.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sweeps_done: Vec<u64>,
     /// Merged PR numbers already synced into ticket state (human merges on
     /// the forge must reflect back exactly once).
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
@@ -322,6 +335,7 @@ impl Default for ProjectState {
             deploy: None,
             comments: Vec::new(),
             reviews: Vec::new(),
+            open_prs: Vec::new(),
             chat: Vec::new(),
             channels: Vec::new(),
             design_system: None,
@@ -338,6 +352,8 @@ impl Default for ProjectState {
             pr_sessions: std::collections::BTreeMap::new(),
             cost_holds: std::collections::BTreeMap::new(),
             clippy_baseline: None,
+            debt_signals: Vec::new(),
+            sweeps_done: Vec::new(),
             seen_merged_prs: std::collections::BTreeSet::new(),
             seen_closed_prs: std::collections::BTreeSet::new(),
             cost_approved: std::collections::BTreeSet::new(),
@@ -638,6 +654,26 @@ impl ProjectState {
         if overflow > 0 {
             self.reviews.drain(0..overflow);
         }
+    }
+
+    /// Insert or replace a reported open PR, keeping the list to recent entries.
+    pub fn upsert_open_pr(&mut self, pr: crate::ports::outbound::PrOpen) {
+        if let Some(existing) = self.open_prs.iter_mut().find(|p| p.number == pr.number) {
+            *existing = pr;
+        } else {
+            self.open_prs.push(pr);
+        }
+        let overflow = self.open_prs.len().saturating_sub(50);
+        if overflow > 0 {
+            self.open_prs.drain(0..overflow);
+        }
+    }
+
+    /// Replace the whole reported open-PR list (e.g. a runner refresh).
+    pub fn set_open_prs(&mut self, prs: Vec<crate::ports::outbound::PrOpen>) {
+        let mut v = prs;
+        v.truncate(50);
+        self.open_prs = v;
     }
 
     /// Toggle `user`'s `emoji` reaction on comment `id`; returns the updated

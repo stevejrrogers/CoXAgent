@@ -86,6 +86,31 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
         self
     }
 
+    /// The UX design in the engine's stdout, giving a malformed answer one
+    /// repair pass before giving up.
+    ///
+    /// `Err` carries the ORIGINAL parse error, not the repair's: what the model
+    /// first got wrong is the useful thing to read, while a failed repair only
+    /// says the second attempt was also unparseable.
+    async fn parse_or_repair_ux(&self, stdout: &str) -> Result<UxOutput, String> {
+        match parse_ux(stdout) {
+            Ok(u) => Ok(u),
+            Err(first) => {
+                let fixed = crate::use_cases::repair_json(
+                    self.engine.as_ref(),
+                    stdout,
+                    "a JSON object with the UX design fields",
+                    &self.work_dir,
+                )
+                .await;
+                match fixed.as_deref().map(parse_ux) {
+                    Some(Ok(repaired)) => Ok(repaired),
+                    _ => Err(first),
+                }
+            }
+        }
+    }
+
     /// Author UX for the next pending UI feature awaiting it. Returns the
     /// readied ticket id, or `None` when nothing needs UX.
     ///
@@ -118,6 +143,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
             .to_owned();
 
         let memory = prompts::team_memory_block(&state.decisions, &state.lessons);
+        let steering = prompts::human_steering_block(&state, id.as_str());
         // The product's existing look and its earlier UX decisions live in the
         // team's own pages; designing without them is how a second design
         // language gets born.
@@ -137,7 +163,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
         .await;
         let outcome = self
             .engine
-            .run(self.build_request(&id, &title, &memory, &knowledge).await)
+            .run(
+                self.build_request(&id, &title, &memory, &knowledge, &steering)
+                    .await,
+            )
             .await?;
         if !outcome.succeeded() {
             self.store.release_stage(&id, "pd", &worker).await.ok();
@@ -147,21 +176,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
             ))
             .into());
         }
-        let ux = match parse_ux(&outcome.stdout) {
+        let ux = match self.parse_or_repair_ux(&outcome.stdout).await {
             Ok(u) => u,
             Err(first) => {
-                let fixed = crate::use_cases::repair_json(
-                    self.engine.as_ref(),
-                    &outcome.stdout,
-                    "a JSON object with the UX design fields",
-                    &self.work_dir,
-                )
-                .await;
-                let Some(Ok(repaired)) = fixed.as_deref().map(parse_ux) else {
-                    self.store.release_stage(&id, "pd", &worker).await.ok();
-                    return Err(PortError::Corrupt(format!("PD output: {first}")).into());
-                };
-                repaired
+                self.store.release_stage(&id, "pd", &worker).await.ok();
+                return Err(PortError::Corrupt(format!("PD output: {first}")).into());
             }
         };
 
@@ -204,6 +223,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
         title: &str,
         memory: &str,
         knowledge: &str,
+        steering: &str,
     ) -> AgentRequest {
         let _choice = self.config.engine.resolve(Role::Pd);
         let context_block = self
@@ -216,7 +236,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
             role: Role::Pd,
             system_prompt: prompts::system_prompt(prompts::PD),
             task_prompt: format!(
-                "Design the UX for feature {id}: {title}{context_block}{knowledge}{memory}{}{}",
+                "Design the UX for feature {id}: {title}{context_block}{knowledge}{memory}{steering}{}{}",
                 prompts::focus_block(self.files.as_deref(), &self.work_dir, title).await,
                 prompts::repo_map_block(
                     self.files.as_deref(),
@@ -228,6 +248,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(1200),
             escalation_level: 0,
+            label: Some(id.to_string()),
         }
     }
 }

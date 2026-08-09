@@ -22,6 +22,21 @@ sessions.json
 # Only the placeholder template `.env.example` belongs in git.
 .env
 !.env.example
+# Rotation backups hold the PREVIOUS live credentials — same secrecy as `.env`.
+.env.bak.*
+.env.*.bak
+# Any local-only note (credentials, host-specific ports) never belongs in git.
+*.local.md
+# Host-specific compose overlay: absolute paths that exist on one machine only.
+*.local.yml
+
+# Runtime state of the compose deploy's mounted volume: nightly backups and the
+# hand-edited copies left beside a file before changing it. Per-install data.
+deploy/volume/**/backups/
+*.bak
+
+# An MCP client config carries a live Bearer token for this install.
+cox-opencode.json
 
 # Per-install desktop admin password, generated on first launch (0600).
 admin-password

@@ -52,6 +52,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             work_dir: self.work_dir.clone(),
             timeout: std::time::Duration::from_secs(1200),
             escalation_level: 0,
+            label: None,
         };
         let Ok(outcome) = self.engine.run(request).await else {
             return false;
@@ -203,12 +204,64 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                             ),
                         )
                         .await;
+                        // Publish the opened PR to the hub so every dashboard
+                        // (any machine, any user) can show it — the runner owns
+                        // the forge credentials, the hub just persists.
+                        self.reporter()
+                            .report_pr(crate::ports::outbound::PrOpen::from(pr))
+                            .await;
                     }
                     Err(e) => self.log_git(&format!("open PR for {id} failed: {e}")).await,
                 }
             }
         }
     }
+    /// End-of-cycle safety net ("agents don't sleep"). The normal ship path
+    /// commits a completed ticket inline right after DEV returns — but if that
+    /// window is interrupted (a process crash between the Done/Fixed transition
+    /// and [`Self::commit_for_ticket`], or a transient git failure inside it),
+    /// verified-green work can sit UNCOMMITTED on main indefinitely.
+    ///
+    /// This re-runs shipping at the END of each leader cycle for exactly the
+    /// tickets whose Definition-of-Done formally passed (status `Done` /
+    /// `Fixed`) — "clearly-finished feature/bug work". Calling [`Self::commit_
+    /// for_ticket`] on them is idempotent: once their residue is committed on
+    /// their own branch, `commit_all` reports nothing changed and returns early,
+    /// so an already-shipped ticket is never re-pushed or double-PR'd.
+    ///
+    /// Scope guardrail: only terminal-success statuses are swept. Tickets still
+    /// `Ready`/`Open`, human-assigned tickets, and unclaimed scratch edits from
+    /// self-heal/boot passes have NO formal pass signal, so sweeping them would
+    /// risk committing arbitrary or concurrent-workstream edits — we deliberately
+    /// leave those alone.
+    pub(super) async fn sweep_unshipped_work(&self) {
+        if !self.config.git.enabled {
+            return;
+        }
+        let Some(git) = &self.git else { return };
+        if !git.is_repo(&self.work_dir).await {
+            return;
+        }
+        // Respect PR-queue backpressure: sweeping new branches while over the WIP
+        // limit would only multiply merge conflicts — same law as normal dev work.
+        if self.pr_queue_full().await {
+            return;
+        }
+        // One snapshot of the uncommitted tree; nothing to ship when it's clean.
+        let Ok(tree) = git.working_tree(&self.work_dir).await else {
+            return;
+        };
+        if tree.changed_paths.is_empty() {
+            return;
+        }
+        let Ok(state) = self.store.load().await else {
+            return;
+        };
+        for (id, kind) in unshipped_candidates(&state) {
+            self.commit_for_ticket(&id, kind).await;
+        }
+    }
+
     /// Whether the open-PR queue blocks NEW branch work. Normally that's the
     /// WIP limit (`git.max_open_prs`); but when the team is about to
     /// RESTRUCTURE (refactor mode, or a sprint goal that says so), the bar is a
@@ -289,5 +342,129 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         if ok.is_ok() {
             tracing::info!("SA announced clean-base drain hold for sprint {sprint_no}");
         }
+    }
+}
+
+/// The tickets whose finished-but-uncommitted residue an end-of-cycle sweep may
+/// ship: those whose Definition-of-Done formally passed (`Done` feature/chore,
+/// `Fixed` bug). Ordered oldest-first so stranded work ships in commit order.
+/// Pure over state — no IO — so it's unit-testable without any port double.
+#[must_use]
+fn unshipped_candidates(state: &crate::state::ProjectState) -> Vec<(TicketId, &'static str)> {
+    use coxagent_domain::{Status, TicketType};
+    // Only tickets whose Definition-of-Done formally passed are candidates:
+    // their finished-but-uncommitted residue is unambiguous ("clearly-finished"
+    // feature/bug work). Everything else is deliberately out of scope — a bare
+    // Ready/Open ticket or an unclaimed scratch edit carries no proof of a pass.
+    let mut matched: Vec<(TicketId, &'static str)> = state
+        .tickets
+        .iter()
+        .filter(|t| t.assignee().is_none())
+        .filter_map(|t| match (t.ticket_type(), t.status()) {
+            (TicketType::Feature | TicketType::Chore, Status::Done) => {
+                Some((t.id().clone(), "feat"))
+            }
+            (TicketType::Bug, Status::Fixed) => Some((t.id().clone(), "fix")),
+            _ => None,
+        })
+        .collect();
+    matched.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+    matched
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unshipped_candidates;
+    use crate::state::ProjectState;
+    use coxagent_domain::{
+        Complexity, Priority, Role, Status, TechnicalDesign, Ticket, TicketId, TicketType,
+    };
+
+    fn ticket(id: &str, kind: TicketType) -> Ticket {
+        Ticket::new(
+            TicketId::new(id).expect("id"),
+            kind,
+            id,
+            "desc",
+            Priority::Medium,
+            Complexity::Medium,
+            false,
+        )
+        .expect("ticket")
+    }
+
+    /// Drive a feature/chore to Done through the valid lifecycle.
+    fn done(mut t: Ticket) -> Ticket {
+        t.set_technical_design(
+            Role::Sa,
+            TechnicalDesign {
+                approach: "do it".to_owned(),
+                ..TechnicalDesign::default()
+            },
+        )
+        .expect("design");
+        t.transition_to(Role::Sa, Status::Ready).expect("ready");
+        t.transition_to(Role::DevFeature, Status::InProgress)
+            .expect("in progress");
+        t.transition_to(Role::DevFeature, Status::Done)
+            .expect("done");
+        t
+    }
+
+    /// Drive a bug to Fixed through its valid lifecycle (Open -> InProgress -> Fixed).
+    fn fixed(mut t: Ticket) -> Ticket {
+        t.transition_to(Role::DevBug, Status::InProgress)
+            .expect("in progress");
+        t.transition_to(Role::DevBug, Status::Fixed).expect("fixed");
+        t
+    }
+
+    #[test]
+    fn done_feature_and_fixed_bug_surface_with_kinds() {
+        let state = ProjectState {
+            tickets: vec![
+                done(ticket("C-1", TicketType::Feature)),
+                fixed(ticket("C-2", TicketType::Bug)),
+                ticket("C-3", TicketType::Feature), // Pending — not Done
+                ticket("C-4", TicketType::Bug),     // Open — not Fixed
+            ],
+            ..ProjectState::default()
+        };
+        assert_eq!(
+            unshipped_candidates(&state),
+            vec![
+                (TicketId::new("C-1").expect("id"), "feat"),
+                (TicketId::new("C-2").expect("id"), "fix"),
+            ]
+        );
+    }
+
+    #[test]
+    fn done_feature_assigned_to_human_is_excluded() {
+        let mut t = done(ticket("C-1", TicketType::Feature));
+        t.assign_to_human("alice");
+        let state = ProjectState {
+            tickets: vec![t],
+            ..ProjectState::default()
+        };
+        assert!(unshipped_candidates(&state).is_empty());
+    }
+
+    #[test]
+    fn candidates_are_sorted_by_ticket_id_ascending() {
+        let state = ProjectState {
+            tickets: vec![
+                done(ticket("B-001", TicketType::Feature)),
+                done(ticket("A-001", TicketType::Feature)),
+            ],
+            ..ProjectState::default()
+        };
+        assert_eq!(
+            unshipped_candidates(&state),
+            vec![
+                (TicketId::new("A-001").expect("id"), "feat"),
+                (TicketId::new("B-001").expect("id"), "feat"),
+            ]
+        );
     }
 }

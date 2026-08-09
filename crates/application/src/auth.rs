@@ -86,6 +86,23 @@ impl AuthRole {
         matches!(self, Self::Super | Self::Admin) || self.is_lead()
     }
 
+    /// Whether this role may release a designed ticket into the queue — the
+    /// hybrid Pending→Ready gate. That decision is backlog refinement: the
+    /// product/analysis call, so Admin, the lead tier, and the BA. A developer
+    /// approving their own team's next ticket is not a gate, it is a formality.
+    #[must_use]
+    pub fn can_approve_ready(self) -> bool {
+        matches!(self, Self::Super | Self::Admin | Self::Ba) || self.is_lead()
+    }
+
+    /// Whether this role may render the QA verdict on a fixed ticket — the
+    /// hybrid verify gate. Admin, the lead tier, and the legacy Reviewer, whose
+    /// entire purpose is passing judgement on finished work.
+    #[must_use]
+    pub fn can_verify(self) -> bool {
+        matches!(self, Self::Super | Self::Admin | Self::Reviewer) || self.is_lead()
+    }
+
     /// Hub-wide super admin (cross-space power).
     #[must_use]
     pub fn is_super(self) -> bool {
@@ -262,6 +279,37 @@ mod role_tests {
     }
 
     #[test]
+    fn the_gate_decisions_are_not_open_to_everyone() {
+        // Ready gate: product/analysis call.
+        assert!(AuthRole::Ba.can_approve_ready());
+        assert!(AuthRole::Manager.can_approve_ready());
+        assert!(AuthRole::Admin.can_approve_ready());
+        assert!(!AuthRole::Fe.can_approve_ready(), "a dev is not the PO");
+        assert!(!AuthRole::Viewer.can_approve_ready());
+
+        // Verify gate: the QA verdict.
+        assert!(AuthRole::TechLead.can_verify());
+        assert!(
+            AuthRole::Reviewer.can_verify(),
+            "judging finished work IS its job"
+        );
+        assert!(
+            !AuthRole::Ba.can_verify(),
+            "writing the ticket is not signing it off"
+        );
+        assert!(!AuthRole::Viewer.can_verify());
+
+        // A read-only account may take no gate decision at all.
+        for allowed in [AuthRole::can_approve_ready, AuthRole::can_verify] {
+            assert!(!allowed(AuthRole::Viewer));
+            assert!(
+                allowed(AuthRole::Super),
+                "the hub owner is never locked out"
+            );
+        }
+    }
+
+    #[test]
     fn manage_is_admin_plus_leads_only() {
         assert!(AuthRole::Admin.can_manage());
         assert!(AuthRole::Manager.can_manage());
@@ -389,6 +437,21 @@ pub trait AuthPort: Send + Sync {
     /// Mint an API token (`label`, `role`) and return the secret **once**.
     /// Returns `None` if the label is taken or persistence fails.
     async fn create_token(&self, label: &str, role: AuthRole) -> Option<String>;
+
+    /// Harvest a personal bearer token for `username` at login time — mint-or-
+    /// reuse on the self-service path used by `/my/tokens`
+    /// (`user:{name}:{...}` prefix), bound to that user's own role (never an
+    /// elevation). Idempotent: when one already exists for that user no
+    /// duplicate is minted and no secret is re-issued — secrets are stored only
+    /// as hashes, so the plaintext can be returned exactly once, on first issue.
+    ///
+    /// The returned secret feeds `COXAGENT_REMOTE_TOKEN`, authenticating a
+    /// remote-state runner against this server's `/store`. Default returns
+    /// `None` so non-SQL / loopback auth stores opt out cleanly; a store that
+    /// backs RBAC bearer validation may override to provide real harvesting.
+    async fn auto_issue_personal_token(&self, _username: &str) -> Option<String> {
+        None
+    }
 
     /// List minted tokens (metadata only, never the secret).
     async fn list_tokens(&self) -> Vec<TokenInfo>;

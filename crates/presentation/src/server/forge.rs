@@ -49,7 +49,42 @@ pub(super) async fn git_test_ep(
     let Some(p) = app.project(&pid).await else {
         return not_found();
     };
-    let wd = p.work_dir.clone();
+    // A live runner's own probe wins. git, ssh keys and the forge CLI live on
+    // the machine that runs the agents; on a split deploy this endpoint is
+    // served by a container that has none of them, so probing locally would
+    // report everything broken while the operator's machine is perfectly fine.
+    if let Ok(workers) = p.store.workers().await {
+        if let Some((w, g)) = workers
+            .iter()
+            .find_map(|w| w.git.as_ref().map(|g| (w.worker.clone(), g.clone())))
+        {
+            return Json(serde_json::json!({
+                "repo": true,
+                "remote": serde_json::Value::Null,
+                "reachable": g.push_ok || g.api_ok,
+                "push_ok": g.push_ok,
+                "detail": g.detail,
+                "key_hint": "",
+                "api_ok": g.api_ok,
+                "api_account": g.account,
+                "api_detail": g.remedy,
+                "probed_on": w,
+            }))
+            .into_response();
+        }
+    }
+    local_git_probe(&app, &pid, &p.work_dir).await
+}
+
+/// Probe git from wherever this API is served. Only correct when the hub and
+/// the runner are the same machine — the fallback for when no runner has
+/// reported yet.
+async fn local_git_probe(
+    app: &AppState,
+    pid: &str,
+    work_dir: &std::path::Path,
+) -> axum::response::Response {
+    let wd = work_dir.to_path_buf();
     let is_repo = wd.join(".git").exists();
     let git = |args: &[&str]| {
         let mut c = tokio::process::Command::new("git");
@@ -123,14 +158,188 @@ pub(super) async fn git_test_ep(
             }
         }
     }
+    // Push failing does not mean there is no usable credential — the ssh config
+    // may simply be offering the wrong key first. Try each private key in
+    // ~/.ssh in turn and report one that works, so the fix is "use this key"
+    // rather than an unexplained "permission denied".
+    let mut key_hint = String::new();
+    if is_repo && remote.as_deref().is_some_and(|u| !u.starts_with("http")) && !push_ok {
+        if let Some((key, who)) = first_working_ssh_key().await {
+            push_ok = false; // still not wired up; this is a remedy, not a pass
+            key_hint = format!("{key} authenticates as {who} — point ssh at it (~/.ssh/config) or set GIT_SSH_COMMAND");
+        }
+    }
+
+    // The half this test used to skip. Pushing and opening a PR use DIFFERENT
+    // credentials: git push rides an ssh key, a PR is an API call as whoever
+    // `gh` is logged in as. A machine can push perfectly and still 404 on every
+    // PR — which is silent until the first ticket finishes and cannot deliver.
+    let (api_ok, api_account, api_detail) = probe_forge_api(app, pid).await;
+
     Json(serde_json::json!({
         "repo": is_repo,
         "remote": remote,
         "reachable": reachable,
         "push_ok": push_ok,
         "detail": detail,
+        "key_hint": key_hint,
+        "api_ok": api_ok,
+        "api_account": api_account,
+        "api_detail": api_detail,
     }))
     .into_response()
+}
+
+/// The first `~/.ssh` private key GitHub accepts, with the account it maps to.
+/// `None` when no key authenticates (or ssh is unavailable).
+async fn first_working_ssh_key() -> Option<(String, String)> {
+    let home = std::env::var("HOME").ok()?;
+    let dir = std::path::Path::new(&home).join(".ssh");
+    let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            name.starts_with("id_") && !p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pub"))
+        })
+        .collect();
+    entries.sort();
+    for key in entries {
+        let Ok(Ok(out)) = tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            tokio::process::Command::new("ssh")
+                .args(["-T", "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes"])
+                .arg("-o")
+                .arg(format!("IdentityFile={}", key.display()))
+                .arg("git@github.com")
+                .stdin(std::process::Stdio::null())
+                .output(),
+        )
+        .await
+        else {
+            continue;
+        };
+        // GitHub refuses the shell but greets the account it recognised — that
+        // greeting IS the success signal (the exit status is non-zero).
+        let msg = String::from_utf8_lossy(&out.stderr);
+        if let Some(rest) = msg.trim().strip_prefix("Hi ") {
+            let who = rest.split(['!', ' ']).next().unwrap_or("").to_owned();
+            let name = key
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_owned();
+            return Some((name, who));
+        }
+    }
+    None
+}
+
+/// Can the forge CLI actually reach THIS repository? Returns
+/// `(ok, account, detail)`. A CLI logged in as the wrong account is the common
+/// failure: it reports a healthy login and 404s on the repo.
+async fn probe_forge_api(app: &AppState, pid: &str) -> (bool, String, String) {
+    let Some((provider, base)) = project_provider(app, pid).await else {
+        return (false, String::new(), "no project config".to_owned());
+    };
+    let Some(slug) = project_repo_slug(app, pid).await.filter(|s| !s.is_empty()) else {
+        return (false, String::new(), "no repo configured".to_owned());
+    };
+    let (bin, host_env) = git_cli(&provider);
+    let host = base
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_owned();
+    // Probe as the account this project is configured to act as, not merely the
+    // CLI's active one — otherwise the test passes on a machine where the real
+    // runs would 404, and vice versa.
+    let account = project_forge_account(app, pid).await.unwrap_or_default();
+    let token = if account.is_empty() {
+        None
+    } else {
+        let mut c = tokio::process::Command::new(bin);
+        c.args(["auth", "token", "--user", &account])
+            .stdin(std::process::Stdio::null());
+        if !host.is_empty() {
+            c.env(host_env, &host);
+        }
+        match c.output().await {
+            Ok(o) if o.status.success() => {
+                let t = String::from_utf8_lossy(&o.stdout).trim().to_owned();
+                (!t.is_empty()).then_some(t)
+            }
+            _ => None,
+        }
+    };
+    if !account.is_empty() && token.is_none() {
+        return (
+            false,
+            account.clone(),
+            format!("{bin} has no stored login for '{account}' — run `{bin} auth login` as it, or clear the account field to use the active one"),
+        );
+    }
+    let run = |args: Vec<String>| {
+        let mut c = tokio::process::Command::new(bin);
+        c.args(args).stdin(std::process::Stdio::null());
+        if !host.is_empty() {
+            c.env(host_env, &host);
+        }
+        if let Some(t) = &token {
+            c.env("GH_TOKEN", t);
+        }
+        c
+    };
+    // Who are we?
+    let account = match run(vec![
+        "api".into(),
+        "user".into(),
+        "--jq".into(),
+        ".login".into(),
+    ])
+    .output()
+    .await
+    {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_owned(),
+        _ => String::new(),
+    };
+    // Probe CREATING a pull request, not merely reading the repo: a token scoped
+    // `pull_requests: read` passes a visibility check and then fails at the
+    // first delivery. An empty-field POST distinguishes 403 (not allowed at all)
+    // from 422 (allowed, bad input) without creating anything.
+    let args = vec![
+        "api".to_owned(),
+        format!("repos/{slug}/pulls"),
+        "-X".to_owned(),
+        "POST".to_owned(),
+        "-f".to_owned(),
+        "head=".to_owned(),
+        "-f".to_owned(),
+        "base=".to_owned(),
+    ];
+    match run(args).output().await {
+        Ok(o) => {
+            let err = String::from_utf8_lossy(&o.stderr).to_string();
+            let refused = err.contains("Resource not accessible") || err.contains("(HTTP 403)");
+            if !refused {
+                return (true, account, String::new());
+            }
+            let tail: String = err.lines().last().unwrap_or("").chars().take(160).collect();
+            let detail = if account.is_empty() {
+                format!("{bin} is not logged in — run `{bin} auth login`. {tail}")
+            } else {
+                format!(
+                    "'{account}' cannot OPEN pull requests on {slug} — reading them is \
+                     allowed, which is why a repo-visibility check passes and the first \
+                     finished ticket still fails to deliver. Grant the token \
+                     `Pull requests: Read and write`. {tail}"
+                )
+            };
+            (false, account, detail)
+        }
+        Err(e) => (false, account, format!("{bin} not runnable: {e}")),
+    }
 }
 
 pub(super) async fn git_auth_status_ep(
@@ -154,19 +363,28 @@ pub(super) async fn git_auth_status_ep(
     if !host.is_empty() {
         cmd.env(host_env, &host);
     }
-    let (present, authed, account) = match cmd.output().await {
+    let (present, authed, account, accounts) = match cmd.output().await {
         Ok(out) => {
             let combined = format!(
                 "{}{}",
                 String::from_utf8_lossy(&out.stdout),
                 String::from_utf8_lossy(&out.stderr)
             );
-            (true, out.status.success(), parse_account(&combined))
+            let all = parse_accounts(&combined);
+            let active = all
+                .iter()
+                .find(|(_, a)| *a)
+                .or_else(|| all.first())
+                .map(|(n, _)| n.clone());
+            (true, out.status.success(), active, all)
         }
-        Err(_) => (false, false, None),
+        Err(_) => (false, false, None, Vec::new()),
     };
     Json(serde_json::json!({
         "tool": bin, "present": present, "authenticated": authed, "account": account,
+        "accounts": accounts.iter().map(|(n, a)| serde_json::json!({
+            "name": n, "active": a,
+        })).collect::<Vec<_>>(),
     }))
     .into_response()
 }
@@ -309,6 +527,9 @@ pub(super) async fn pr_action_ep(
         // queued for IT to execute (the control plane never runs engines when
         // it doesn't have to); the runner's 15s poll picks it up. Only when no
         // runner is alive does the hub fall back to executing inline.
+        // Registration means "a process that drains jobs": a headless operator
+        // beats even while idle, and it polls `drain_jobs` every 15s whether or
+        // not it has been Started, so an idle entry is still a safe route.
         let live_runner = p.store.workers().await.is_ok_and(|w| !w.is_empty());
         if live_runner {
             let queued =
@@ -424,6 +645,7 @@ pub(super) async fn force_merge(p: ProjectHandle, num: u64) {
             work_dir: p.work_dir.clone(),
             timeout: std::time::Duration::from_secs(1800),
             escalation_level: 0,
+            label: None,
         };
         match p.engine.run(request).await {
             Ok(o) if o.succeeded() => {}
@@ -477,10 +699,10 @@ pub(super) async fn git_pv(dir: &std::path::Path, args: &[&str]) -> Result<(), S
 }
 
 /// Parse `deploy.host_port` out of a project's raw `coxagent.json` for the
-/// preview health-gate probe (COX-B025/COX-B026). Thin alias over the shared
-/// [`coxagent_application::ports::outbound::parse_deploy_host_port`] — see
-/// its doc for the full contract — kept so call sites here read naturally as
-/// "preview" concerns.
+/// preview health-gate probe. Thin wrapper over the shared
+/// [`coxagent_application::ports::outbound::parse_deploy_host_port`] — every
+/// deploy call site (cycle, chat, PR preview) parses a malformed `host_port`
+/// the same way (COX-B025/COX-B026/COX-B035).
 pub(super) fn parse_preview_host_port(raw_config: &str) -> Result<Option<u16>, ()> {
     coxagent_application::ports::outbound::parse_deploy_host_port(raw_config)
 }
@@ -488,14 +710,15 @@ pub(super) fn parse_preview_host_port(raw_config: &str) -> Result<Option<u16>, (
 /// Run the mandatory post-deploy health gate (COX-B004/COX-B009) for a probe
 /// port that may be invalid (COX-B025/COX-B026): a corrupt `host_port` fails
 /// the gate outright rather than being treated as "nothing configured",
-/// which would pass unconditionally and report a dead app as LIVE. Thin
-/// alias over the shared
-/// [`coxagent_application::ports::outbound::verify_deploy_health_probe`].
+/// which would pass unconditionally and report a dead app as LIVE.
 pub(super) async fn run_preview_health_gate(
     deploy: &Arc<dyn coxagent_application::ports::outbound::DeployPort>,
     probe_port: Result<Option<u16>, ()>,
 ) -> bool {
-    coxagent_application::ports::outbound::verify_deploy_health_probe(deploy, probe_port).await
+    match probe_port {
+        Ok(port) => coxagent_application::ports::outbound::verify_deploy_health(deploy, port).await,
+        Err(()) => false,
+    }
 }
 
 /// Deploy a PR's branch so the human can SEE the change running before
@@ -680,4 +903,96 @@ pub(super) async fn merge_sweep_ep(
     .await;
     Json(serde_json::json!({ "ok": true, "merged": out.merged, "skipped": out.skipped }))
         .into_response()
+}
+
+/// The runner reports a newly opened/refreshed PR or an SA review verdict,
+/// carried in the body (`{ project, pr }` or `{ project, review }`). The runner
+/// owns the forge credentials, so this is how the shared dashboard learns about
+/// PRs without the hub ever holding a forge token. Authenticated by an internal
+/// bearer token (the same pattern as `/api/mcp`); the path deliberately avoids
+/// `/prs/` and a project path segment so it clears the PR-review and
+/// per-project membership gates.
+pub(super) async fn pr_report_ep(
+    State(app): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    use coxagent_application::ports::outbound::mutate_state;
+    let project = body
+        .get("project")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned();
+    let Some(p) = app.project(&project).await else {
+        return not_found();
+    };
+    if let Some(pr) = body.get("pr") {
+        match serde_json::from_value::<coxagent_application::ports::outbound::PrOpen>(pr.clone()) {
+            Ok(pr) => {
+                if mutate_state(p.store.as_ref(), |s| {
+                    s.upsert_open_pr(pr.clone());
+                    Ok(())
+                })
+                .await
+                .is_err()
+                {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "store write failed")
+                        .into_response();
+                }
+                return Json(serde_json::json!({ "ok": true, "pr": pr.number })).into_response();
+            }
+            Err(e) => {
+                return (StatusCode::BAD_REQUEST, format!("bad pr: {e}")).into_response();
+            }
+        }
+    }
+    if let Some(rv) = body.get("review") {
+        let number = rv
+            .get("number")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let decision = rv
+            .get("decision")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned();
+        let summary = rv
+            .get("summary")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned();
+        let head_sha = rv
+            .get("head_sha")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned();
+        if mutate_state(p.store.as_ref(), |s| {
+            s.upsert_review(number, &decision, &summary, &head_sha);
+            Ok(())
+        })
+        .await
+        .is_err()
+        {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "store write failed").into_response();
+        }
+        return Json(serde_json::json!({ "ok": true, "review": number })).into_response();
+    }
+    (
+        StatusCode::BAD_REQUEST,
+        "expected {project, pr} or {project, review}",
+    )
+        .into_response()
+}
+
+/// Read back the persisted SA review verdicts for `project` — the runner calls
+/// this to avoid re-reviewing a head it already marked `request_changes`.
+pub(super) async fn pr_reviews_ep(
+    State(app): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    let project = params.get("project").cloned().unwrap_or_default();
+    let Some(p) = app.project(&project).await else {
+        return not_found();
+    };
+    let reviews = p.store.load().await.map(|s| s.reviews).unwrap_or_default();
+    Json(reviews).into_response()
 }
