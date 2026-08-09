@@ -31,6 +31,7 @@ use std::time::Duration;
 
 mod builders;
 mod config_load;
+mod host_port;
 mod shims;
 
 pub use builders::load_coordination;
@@ -38,6 +39,8 @@ pub use builders::load_coordination;
 use builders::*;
 #[allow(clippy::wildcard_imports)] // one module, many files — see config_load.rs
 use config_load::*;
+#[allow(clippy::wildcard_imports)] // one module, many files — see host_port.rs
+use host_port::*;
 pub use shims::shim_script;
 #[allow(clippy::wildcard_imports)] // one module, many files — see shims.rs
 use shims::*;
@@ -783,69 +786,6 @@ async fn onboard_project(
     build_project(&id, &state_dir, work_dir, auth)
         .await
         .map_err(|e| e.to_string())
-}
-
-/// First host port for auto-allocation.
-const PORT_BASE: u16 = 8100;
-
-/// Write a free `deploy.host_port` into the new project's `coxagent.json`,
-/// picking the lowest port from [`PORT_BASE`] not already used by a registered
-/// project. Best-effort — a failure just leaves the port unset.
-fn assign_host_port(
-    base: &Path,
-    registry_path: &Path,
-    proj_dir: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use coxagent_application::Config;
-    // Collect ports already taken by registered projects.
-    let mut used: std::collections::HashSet<u16> = std::collections::HashSet::new();
-    if let Ok(text) = std::fs::read_to_string(registry_path) {
-        if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&text) {
-            for e in arr {
-                if let Some(p) = e.get("path").and_then(|p| p.as_str()) {
-                    let cfg = Path::new(p).join("coxagent.json");
-                    if let Ok(c) = std::fs::read_to_string(&cfg) {
-                        if let Ok(c) = serde_json::from_str::<Config>(&c) {
-                            if let Some(port) = c.deploy.host_port {
-                                used.insert(port);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    let _ = base; // reserved for future host-wide allocation policy
-                  // Also exclude ports published by Docker containers so a new project never
-                  // picks a port already serving another app.
-    if let Ok(out) = std::process::Command::new("docker")
-        .args(["ps", "--format", "{{.Ports}}"])
-        .output()
-    {
-        let text = String::from_utf8_lossy(&out.stdout);
-        for pair in text.split_whitespace() {
-            if let Some((host, _)) = pair.split_once("->") {
-                if let Some((_, hp)) = host.rsplit_once(':') {
-                    if let Ok(p) = hp.parse::<u16>() {
-                        used.insert(p);
-                    }
-                }
-            }
-        }
-    }
-    let port = (PORT_BASE..PORT_BASE + 500)
-        .find(|p| !used.contains(p))
-        .unwrap_or(PORT_BASE);
-
-    let cfg_path = proj_dir.join("coxagent.json");
-    let mut cfg: Config = std::fs::read_to_string(&cfg_path)
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default();
-    cfg.deploy.host_port = Some(port);
-    std::fs::write(&cfg_path, serde_json::to_string_pretty(&cfg)?)?;
-    tracing::info!("assigned host port {port} to new project");
-    Ok(())
 }
 
 /// Pick an id not already taken by a workspace directory under `base`.

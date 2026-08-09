@@ -89,7 +89,7 @@ pub(crate) fn load_config_with_probe(state_dir: &Path) -> Result<LoadedConfig, S
 
 /// The health gate's view of the raw config text — shared with chat and the PR
 /// preview so every deploy call site rejects the same values.
-fn probe_from_raw(text: &str) -> Result<Option<u16>, ()> {
+pub(crate) fn probe_from_raw(text: &str) -> Result<Option<u16>, ()> {
     coxagent_application::ports::outbound::parse_deploy_host_port(text)
 }
 
