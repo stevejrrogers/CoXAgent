@@ -242,20 +242,28 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                         return Ok(());
                     };
                     if let Some(t) = s.ticket_mut(&tid) {
-                        use coxagent_domain::{Role as R, Status};
-                        // Walk the LEGAL transition path with the proper
-                        // actors — Open→Fixed directly does not exist, which
-                        // silently stranded merged tickets Open (night bug).
+                        use coxagent_domain::{Role as R, Status, TicketType};
+                        // Walk the LEGAL transition path with the proper actors
+                        // — Open→Fixed directly does not exist, which silently
+                        // stranded merged tickets Open (night bug). The terminal
+                        // state depends on the TICKET TYPE, not the status: an
+                        // in-progress bug goes to Fixed via DevBug, but an
+                        // in-progress feature/chore goes to Done via DevFeature
+                        // — trying DevBug→Fixed there failed forever, left the
+                        // merged ticket InProgress, and DEV re-implemented work
+                        // that was already on main (COX-C012, twice).
+                        let bug = t.ticket_type() == TicketType::Bug;
+                        let (role, terminal) = if bug {
+                            (R::DevBug, Status::Fixed)
+                        } else {
+                            (R::DevFeature, Status::Done)
+                        };
                         let moved = match t.status() {
-                            Status::Open => {
-                                t.transition_to(R::DevBug, Status::InProgress).is_ok()
-                                    && t.transition_to(R::DevBug, Status::Fixed).is_ok()
+                            Status::Open | Status::Ready => {
+                                t.transition_to(role, Status::InProgress).is_ok()
+                                    && t.transition_to(role, terminal).is_ok()
                             }
-                            Status::InProgress => t.transition_to(R::DevBug, Status::Fixed).is_ok(),
-                            Status::Ready => {
-                                t.transition_to(R::DevFeature, Status::InProgress).is_ok()
-                                    && t.transition_to(R::DevFeature, Status::Done).is_ok()
-                            }
+                            Status::InProgress => t.transition_to(role, terminal).is_ok(),
                             _ => false,
                         };
                         if moved {

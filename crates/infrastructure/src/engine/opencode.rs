@@ -452,12 +452,45 @@ fn extract_session(raw: &str) -> Option<String> {
 /// Render one NDJSON event into a readable line for the live log.
 /// Empty for non-visible events (step_start, etc.).
 fn render_event(v: &serde_json::Value) -> String {
+    use std::fmt::Write as _;
     match v.get("type").and_then(serde_json::Value::as_str) {
         Some("text") => v
             .pointer("/part/text")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("")
             .to_owned(),
+        // A tool call + its result. Without this, opencode's live log showed
+        // only the prose between actions — "Now check if X is in forge.rs:" and
+        // then nothing, because the check itself (the tool call) never rendered.
+        Some("tool_use") => {
+            let tool = v
+                .pointer("/part/tool")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("tool");
+            let input = v
+                .pointer("/part/state/input")
+                .map(std::string::ToString::to_string)
+                .unwrap_or_default();
+            let input: String = input.chars().take(160).collect();
+            let mut out = format!("🔧 {tool}({input})");
+            if let Some(output) = v
+                .pointer("/part/state/output")
+                .and_then(serde_json::Value::as_str)
+            {
+                let lines: Vec<&str> = output.lines().collect();
+                if !lines.is_empty() {
+                    let _ = write!(out, "\n   ↳ {} lines", lines.len());
+                    for l in lines.iter().take(6) {
+                        let l: String = l.chars().take(200).collect();
+                        let _ = write!(out, "\n   ┆ {l}");
+                    }
+                    if lines.len() > 6 {
+                        let _ = write!(out, "\n   ┆ … (+{} more)", lines.len() - 6);
+                    }
+                }
+            }
+            out
+        }
         _ => String::new(),
     }
 }
@@ -670,6 +703,20 @@ mod tests {
     fn render_event_empty_for_non_text() {
         let v = serde_json::json!({"type":"step_start","part":{}});
         assert_eq!(render_event(&v), "");
+    }
+
+    #[test]
+    fn render_event_shows_tool_calls_with_result_preview() {
+        // The real shape opencode emits (captured live): the work-log otherwise
+        // cut off right before every action.
+        let v = serde_json::json!({"type":"tool_use","part":{
+            "tool":"bash",
+            "state":{"status":"completed","input":{"command":"ls"},"output":"a.txt\nb.txt\n"}
+        }});
+        let got = render_event(&v);
+        assert!(got.starts_with("🔧 bash("), "{got}");
+        assert!(got.contains("↳ 2 lines"), "{got}");
+        assert!(got.contains("┆ a.txt"), "{got}");
     }
 
     fn mcp(token: Option<&str>) -> crate::engine::McpAccess {
