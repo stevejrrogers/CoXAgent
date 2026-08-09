@@ -450,6 +450,12 @@ fn render_event(v: &serde_json::Value) -> String {
                     {
                         let text = tool_result_text(block.get("content"));
                         let _ = write!(out, "\n   ↳ {}", summarize_tool_result(&text));
+                        // Show the actual output, not just its shape: a capped
+                        // preview the dashboard can reveal on click. "13 lines"
+                        // told a reader nothing about WHAT the 13 lines were.
+                        for l in preview_lines(&text) {
+                            let _ = write!(out, "\n   ┆ {l}");
+                        }
                     }
                 }
             }
@@ -499,10 +505,27 @@ pub(crate) fn summarize_tool_result(text: &str) -> String {
             return format!("✓ {n} passed");
         }
     }
-    // clippy / rustc: count diagnostics.
-    if low.contains("could not compile") || low.contains("error[") || low.contains("error:") {
-        let n = t.lines().filter(|l| l.trim_start().starts_with("error")).count();
+    // Compiler/cargo errors — recognised by the diagnostic SHAPE, not the bare
+    // word "error". `git show` of Rust source is full of `.map_err`, `Error`,
+    // "error:" in strings; counting those as failures showed "✗ 1 errors" for a
+    // clean file dump. Real cargo output carries `error[EXXXX]`, a line that
+    // starts with "error:", or "could not compile".
+    let compiler_err = low.contains("could not compile")
+        || t.contains("error[")
+        || t.lines().any(|l| l.trim_start().starts_with("error:"));
+    if compiler_err {
+        let n = t
+            .lines()
+            .filter(|l| {
+                let l = l.trim_start();
+                l.starts_with("error[") || l.starts_with("error:")
+            })
+            .count();
         return format!("✗ {} error{}", n.max(1), if n == 1 { "" } else { "s" });
+    }
+    // A git/shell fatal is a failure too, shown as itself.
+    if let Some(fatal) = t.lines().find(|l| l.trim_start().starts_with("fatal:")) {
+        return format!("✗ {}", fatal.trim().chars().take(76).collect::<String>());
     }
     if low.contains("warning:") {
         let n = t.lines().filter(|l| l.contains("warning:")).count();
@@ -520,6 +543,33 @@ pub(crate) fn summarize_tool_result(text: &str) -> String {
     } else {
         format!("{}…", first.chars().take(80).collect::<String>())
     }
+}
+
+/// A capped preview of a tool's real output for the work log: up to 14 lines,
+/// each ≤ 200 chars, total ≤ 1200 — enough to SEE what happened, bounded so a
+/// giant dump can't bloat the log. A final "… (+N more)" marks truncation.
+fn preview_lines(text: &str) -> Vec<String> {
+    const MAX_LINES: usize = 14;
+    const MAX_CHARS: usize = 1200;
+    let all: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    if all.is_empty() {
+        return Vec::new();
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut budget = MAX_CHARS;
+    for l in all.iter().take(MAX_LINES) {
+        let line: String = l.chars().take(200).collect();
+        if line.len() > budget {
+            break;
+        }
+        budget -= line.len();
+        out.push(line);
+    }
+    let shown = out.len();
+    if all.len() > shown {
+        out.push(format!("… (+{} more)", all.len() - shown));
+    }
+    out
 }
 
 /// Parse `claude --output-format stream-json` (NDJSON): return the final result
@@ -621,6 +671,13 @@ mod tests {
         );
         assert!(summarize_tool_result("error[E0433]: cannot find `x`\nerror: aborting")
             .starts_with("✗ 2 error"));
+        // A source dump full of `.map_err`/`Error` must NOT read as failures.
+        assert_eq!(
+            summarize_tool_result("fn f() -> Result<(), Error> { x.map_err(|e| e)?; Ok(()) }"),
+            "fn f() -> Result<(), Error> { x.map_err(|e| e)?; Ok(()) }"
+        );
+        // A git fatal is shown as itself.
+        assert!(summarize_tool_result("fatal: path 'x.rs' does not exist").starts_with("✗ fatal:"));
         assert_eq!(summarize_tool_result("warning: unused variable `y`"), "⚠ 1 warning");
         assert_eq!(summarize_tool_result("a\nb\nc"), "3 lines");
         assert_eq!(summarize_tool_result("crates/app/src/lib.rs:42"), "crates/app/src/lib.rs:42");

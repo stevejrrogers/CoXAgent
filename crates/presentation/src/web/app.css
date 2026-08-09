@@ -184,6 +184,16 @@
   .wl-result{padding:1px 0 8px 38px;position:relative}
   .wl-result .wl-rin{display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--dim);font-family:ui-monospace,monospace}
   .wl-result .wl-rin i{font-size:13px;color:var(--green)}
+  /* Expandable real output under a result summary. */
+  .wl-out{cursor:pointer}
+  .wl-out summary{list-style:none}
+  .wl-out summary::-webkit-details-marker{display:none}
+  .wl-out .wl-more{color:var(--accent2);font-size:10.5px;margin-left:4px}
+  .wl-out[open] .wl-more::after{content:" ▾"}
+  .wl-out:not([open]) .wl-more::after{content:" ▸"}
+  .wl-pre{margin:6px 0 2px;padding:9px 11px;background:var(--card);border:1px solid var(--border2);
+    border-radius:8px;font-family:ui-monospace,monospace;font-size:11px;line-height:1.5;color:var(--text);
+    white-space:pre-wrap;word-break:break-word;max-height:280px;overflow:auto}
   .wl-meta{display:flex;align-items:center;gap:10px;color:var(--dim);font-size:10.5px;text-transform:uppercase;letter-spacing:.09em;margin:4px 0 14px;font-weight:700}
   .wl-meta::before,.wl-meta::after{content:"";flex:1;height:1px;background:var(--border)}
   .wl-end{display:flex;justify-content:center;margin:16px 0 4px}
