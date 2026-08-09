@@ -252,82 +252,6 @@ pub fn provision_local_token(_base: &Path) {
     std::env::set_var("COXAGENT_REMOTE_TOKEN", token);
 }
 
-/// Read `coxagent.json`'s raw text from the workspace root (parent of the Split out of `load_config` so a caller that also
-/// needs the raw config for a malformed-value probe — e.g. the mandatory
-/// deploy health gate's `host_port` (COX-B035) — reads the file once and
-/// feeds the same string into both parses, rather than reading it twice or
-/// letting the two parses drift.
-pub(crate) fn read_config_text(state_dir: &Path) -> Option<String> {
-    let root = state_dir.parent().unwrap_or(state_dir);
-    std::fs::read_to_string(root.join("coxagent.json")).ok()
-}
-
-/// Parse `text` (already read by [`read_config_text`]) into a `Config`,
-/// falling back to defaults on a missing file or invalid JSON.
-pub(crate) fn parse_config(state_dir: &Path, text: Option<&str>) -> Config {
-    let root = state_dir.parent().unwrap_or(state_dir);
-    let path = root.join("coxagent.json");
-    match text {
-        Some(text) => match serde_json::from_str::<Config>(text) {
-            Ok(mut cfg) => {
-                heal_host_port(root, &path, &mut cfg);
-                cfg
-            }
-            Err(e) => {
-                tracing::warn!("invalid {}: {e}; using defaults", path.display());
-                Config::default()
-            }
-        },
-        None => Config::default(),
-    }
-}
-
-/// Load `coxagent.json` from the workspace root (parent of the state dir), or
-/// fall back to defaults. Config lives beside the state, written by `onboard`.
-pub(crate) fn load_config(state_dir: &Path) -> Config {
-    parse_config(state_dir, read_config_text(state_dir).as_deref())
-}
-
-/// Self-heal a project left without a deploy port: assign a free `host_port` and
-/// persist it, so a project onboarded before per-project ports (or with the field
-/// cleared) stops colliding on the shared default port. Picks the lowest port in
-/// range that no sibling project claims and that is currently bindable, so two
-/// null-port projects on one host land on different ports. Best-effort.
-pub(crate) fn heal_host_port(root: &Path, cfg_path: &Path, cfg: &mut Config) {
-    if cfg.deploy.host_port.is_some() {
-        return;
-    }
-    // Ports already claimed by sibling projects under the same base dir.
-    let mut used: std::collections::HashSet<u16> = std::collections::HashSet::new();
-    if let Some(base) = root.parent() {
-        if let Ok(entries) = std::fs::read_dir(base) {
-            for e in entries.flatten() {
-                let sib = e.path().join("coxagent.json");
-                if sib == *cfg_path {
-                    continue;
-                }
-                if let Ok(text) = std::fs::read_to_string(&sib) {
-                    if let Ok(c) = serde_json::from_str::<Config>(&text) {
-                        if let Some(p) = c.deploy.host_port {
-                            used.insert(p);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    let bindable = |p: u16| std::net::TcpListener::bind(("127.0.0.1", p)).is_ok();
-    let Some(port) = (PORT_BASE..PORT_BASE + 500).find(|p| !used.contains(p) && bindable(*p))
-    else {
-        return;
-    };
-    cfg.deploy.host_port = Some(port);
-    if let Ok(text) = serde_json::to_string_pretty(cfg) {
-        let _ = std::fs::write(cfg_path, text);
-        tracing::info!("self-healed host port {port} for {}", cfg_path.display());
-    }
-}
-
 /// Build one project: store, engine stack, runner (spawned, paused), returned as
 /// a `ProjectHandle` the hub server can host alongside others.
 #[allow(clippy::too_many_lines)] // one linear wiring pass; splitting hurts readability
@@ -340,14 +264,13 @@ pub(crate) async fn build_project(
     use coxagent_application::use_cases::{run_forever, RunCycleUseCase, RunnerHandle};
 
     let store = make_store(id, state_dir).await?;
-    // One raw read feeds both the `Config` parse and the deploy health-gate's
-    // host-port probe, so a malformed `deploy.host_port` fails the gate
-    // (COX-B035) instead of drifting from whatever `Config` parsed.
-    let raw_cfg = read_config_text(state_dir);
-    let config = parse_config(state_dir, raw_cfg.as_deref());
-    let host_port_probe = raw_cfg.as_deref().map_or(Ok(None), |t| {
-        coxagent_application::ports::outbound::parse_deploy_host_port(t)
-    });
+    // One read settles both the `Config` and the deploy health-gate's host-port
+    // probe, so a `deploy.host_port` this project cannot publish fails the gate
+    // (COX-B035) or is healed (COX-B042) instead of drifting between the two.
+    let LoadedConfig {
+        config,
+        host_port_probe,
+    } = load_config_with_probe(state_dir);
     // `auth` must be the SAME store the hub actually serves /api/mcp with —
     // NOT re-derived from state_dir here. Each project can live under a
     // different workspace root than the hub-wide auth.json (see run_hub's

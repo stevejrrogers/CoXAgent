@@ -30,11 +30,14 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 mod builders;
+mod config_load;
 mod shims;
 
 pub use builders::load_coordination;
 #[allow(clippy::wildcard_imports)] // one module, many files — see builders.rs
 use builders::*;
+#[allow(clippy::wildcard_imports)] // one module, many files — see config_load.rs
+use config_load::*;
 pub use shims::shim_script;
 #[allow(clippy::wildcard_imports)] // one module, many files — see shims.rs
 use shims::*;
@@ -1013,14 +1016,13 @@ async fn run_loop(
     context: String,
     max_cycles: Option<u64>,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    // One raw read feeds both the `Config` parse and the deploy health-gate's
-    // host-port probe, so a malformed `deploy.host_port` fails the gate
-    // (COX-B035) instead of drifting from whatever `Config` parsed.
-    let raw_cfg = read_config_text(state_dir);
-    let config = parse_config(state_dir, raw_cfg.as_deref());
-    let host_port_probe = raw_cfg.as_deref().map_or(Ok(None), |t| {
-        coxagent_application::ports::outbound::parse_deploy_host_port(t)
-    });
+    // One read settles both the `Config` and the deploy health-gate's host-port
+    // probe, so a `deploy.host_port` this project cannot publish fails the gate
+    // (COX-B035) or is healed (COX-B042) instead of drifting between the two.
+    let LoadedConfig {
+        config,
+        host_port_probe,
+    } = load_config_with_probe(state_dir);
     // Same project-id derivation as Command::Run/operator_main: the workspace
     // dir name (e.g. `cxc`), not a fixed "default" — so this operator's MCP
     // calls target the same project the hub knows it by.
