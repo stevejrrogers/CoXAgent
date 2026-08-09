@@ -105,7 +105,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                     }
                     s.post_comment(
                         "SYSTEM",
-                        &format!("🧑‍💻 {id} routed to @{owner} (workflow.human.route_exceptions_to)."),
+                        &format!(
+                            "🧑‍💻 {id} routed to @{owner} (workflow.human.route_exceptions_to)."
+                        ),
                         Some(key.clone()),
                     );
                 }

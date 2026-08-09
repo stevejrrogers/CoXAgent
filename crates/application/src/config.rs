@@ -16,6 +16,8 @@ pub enum EngineKind {
     Hermes,
     Gemini,
     Codex,
+    /// GitHub Copilot CLI (`copilot`) — agentic, `--model auto` routing.
+    Copilot,
     /// Deterministic offline engine for demos/tests (writes real code, no LLM).
     Scripted,
 }
@@ -30,6 +32,7 @@ impl EngineKind {
             EngineKind::Hermes => "hermes",
             EngineKind::Gemini => "gemini",
             EngineKind::Codex => "codex",
+            EngineKind::Copilot => "copilot",
             EngineKind::Scripted => "scripted",
         }
     }
@@ -43,6 +46,7 @@ impl EngineKind {
             EngineKind::Hermes,
             EngineKind::Gemini,
             EngineKind::Codex,
+            EngineKind::Copilot,
         ]
     }
 }
@@ -391,6 +395,11 @@ impl Default for PolicyConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeployConfig {
     /// The host port this project's app should publish (None = agent's choice).
+    /// Must be a port a client can connect to: `0` is the kernel's "any free
+    /// port" sentinel, not an address, and config load replaces it with a free
+    /// port rather than letting the deploy health gate probe it forever
+    /// (COX-B042). See
+    /// [`crate::ports::outbound::is_publishable_host_port`].
     #[serde(default)]
     pub host_port: Option<u16>,
     /// Whether the cycle deploys at all (default on). Turn OFF for projects
@@ -482,6 +491,16 @@ pub struct GitConfig {
     /// address to avoid email-privacy push rejections.
     #[serde(default)]
     pub commit_email: String,
+    /// Which forge account to act as, when the CLI holds more than one login
+    /// (`gh auth login` twice). Empty = whichever account is currently active.
+    ///
+    /// Naming the account per project is what lets two projects push and open
+    /// PRs as DIFFERENT users at the same time: the token is fetched from the
+    /// CLI's own credential store on each call, so no secret is stored here —
+    /// only the login name. Without it, a machine whose CLI is signed in as the
+    /// wrong user pushes fine over ssh and then 404s on every pull request.
+    #[serde(default)]
+    pub account: String,
     /// Open a PR/MR automatically after pushing a ticket branch.
     #[serde(default)]
     pub auto_pr: bool,
@@ -505,6 +524,12 @@ pub struct GitConfig {
     /// the brake that prevents cascade merge conflicts. 0 = unlimited.
     #[serde(default = "default_max_open_prs")]
     pub max_open_prs: u32,
+    /// Absolute URL of the hub the runner reports PR/review activity to, e.g.
+    /// `http://localhost:4000`. Empty = the runner uses the loopback URL on
+    /// `deploy.host_port` (the same hub it serves). The runner authenticates
+    /// with an internally-minted token, so no forge secret lives in config.
+    #[serde(default)]
+    pub server_url: String,
 }
 
 fn default_true() -> bool {
@@ -532,13 +557,28 @@ impl Default for GitConfig {
             target_branch: String::new(),
             branch_prefix: default_branch_prefix(),
             commit_email: String::new(),
+            account: String::new(),
             auto_pr: false,
             auto_review: true,
             auto_merge: false,
             require_ci: true,
             max_open_prs: default_max_open_prs(),
+            server_url: String::new(),
         }
     }
+}
+
+/// Per-project release settings. Drives the automated release pipeline that
+/// tags a milestone once its target version is shipped and files the Release
+/// chore. `enabled` is off by default: creating a git tag mutates the managed
+/// codebase's history, so an existing project's release history is never
+/// touched until an operator opts in — the same convention as `GitConfig`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ReleasesConfig {
+    /// Master switch. When false, the cycle never tags or files releases,
+    /// no matter how many milestones have been reached.
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 /// Top-level configuration persisted as `coxagent.json`.
@@ -559,6 +599,9 @@ pub struct Config {
     /// Deploy settings (per-project host port allocation).
     #[serde(default)]
     pub deploy: DeployConfig,
+    /// Release pipeline settings (automated tag + Release chore per milestone).
+    #[serde(default)]
+    pub releases: ReleasesConfig,
 }
 
 impl Default for Config {
@@ -579,6 +622,7 @@ impl Default for Config {
             architecture: Vec::new(),
             policy: PolicyConfig::default(),
             deploy: DeployConfig::default(),
+            releases: ReleasesConfig::default(),
         }
     }
 }

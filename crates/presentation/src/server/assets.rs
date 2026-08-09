@@ -199,8 +199,23 @@ pub(super) async fn releases_watchdog(app: AppState) {
 }
 
 /// Developer tooling the git/deploy flow needs (git, gh, glab, docker) — which
-/// are installed, and how to install the rest. Computed at startup and injected.
+/// are installed, and how to install the rest.
+///
+/// A live runner's own answer wins. `std::env::consts::OS` and a PATH scan
+/// describe whatever process runs them, so a hub in a container called itself
+/// `linux`, offered `apt-get install` to someone on a Mac, and marked git, gh
+/// and docker missing while all three were installed and signed in on the
+/// machine the agents actually run on. The startup scan is the fallback for a
+/// single-machine install, where hub and runner are the same box anyway.
 pub(super) async fn tooling_ep(State(app): State<AppState>) -> impl IntoResponse {
+    let projects = app.projects.read().await.clone();
+    for p in projects.values() {
+        if let Ok(workers) = p.store.workers().await {
+            if let Some(t) = workers.iter().find_map(|w| w.tooling.clone()) {
+                return Json(t);
+            }
+        }
+    }
     Json((*app.tooling).clone())
 }
 

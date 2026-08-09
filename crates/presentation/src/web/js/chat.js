@@ -1765,20 +1765,45 @@ function renderHealth(s){
 }
 function render(s){STATE=s;renderSidebar(s);renderActive();ingestChatSnapshot(s.chat);renderEngineAlert(s);}
 // A stopped team looks like a broken team until you know the engine is down.
+// Turn a raw backend error into one calm human sentence + the kind of trouble
+// it is, so the banner can be a quiet pill instead of a red slab dumping a
+// stack of "SA: backend failure: ... API Error: 401 ...". Kinds: "auth"
+// (recoverable by re-login), "quota" (clears itself / raise cap), "slow"
+// (transient), "other".
+function engineIncidentKind(reason){
+  const r=(reason||"").toLowerCase();
+  if(/revoked|oauth|session expired|token expired|expired token|authenticat|unauthorized|401|403/.test(r))return "auth";
+  if(/quota|spend limit|usage limit|rate.?limit|429|billing|credit|insufficient|out of tokens|overloaded|529/.test(r))return "quota";
+  if(/tim(e|ed) ?out|timeout|deadline|connection|stream closed|broken pipe|reset by peer|temporarily/.test(r))return "slow";
+  return "other";
+}
+function engineIncidentSay(engine,kind){
+  switch(kind){
+    case "auth":  return `${engine} sign-in expired — refresh it: <code>${engine} login</code>`;
+    case "quota": return `${engine} hit its usage limit — clears on reset, or raise the cap`;
+    case "slow":  return `${engine} slow to respond — retrying on its own`;
+    default:      return `${engine} had a run error`;
+  }
+}
 function renderEngineAlert(s){
   const el=document.getElementById("engine-alert");if(!el)return;
   const inc=(s&&s.engine_incidents)||[];
   if(!inc.length){el.hidden=true;el.innerHTML="";return;}
   el.hidden=false;
-  // One line, with the detail on hover: it must be impossible to miss and
-  // cheap to ignore once read — a banner that eats the screen gets dismissed
-  // mentally, which is the opposite of the point.
-  el.innerHTML=inc.map(i=>`<div class="eng-alert" title="${esc(i.reason)}">
-    <i class="ti ti-plug-connected-x"></i>
-    <b>${esc(i.engine)}: ${i.hits} failed run${i.hits>1?"s":""}</b>
-    <span>${esc(i.reason)}</span>
-    <small>${i.hits} run${i.hits>1?"s":""} · clears itself</small>
-  </div>`).join("");
+  // Quiet by design: a slim pill with a status dot and one plain sentence.
+  // The raw backend string lives on hover for whoever wants it — the surface
+  // says what happened and what clears it, nothing more. A banner that shouts
+  // gets tuned out; the point is a glance, not an alarm.
+  el.innerHTML=inc.map(i=>{
+    const kind=engineIncidentKind(i.reason);
+    const say=engineIncidentSay(esc(i.engine),kind);
+    const meta=kind==="auth"?"needs re-login":"clears itself";
+    return `<div class="eng-alert eng-${kind}" title="${esc(i.reason)}">
+      <span class="eng-dot"></span>
+      <span class="eng-say">${say}</span>
+      <span class="eng-meta">${i.hits} run${i.hits>1?"s":""} · ${meta}</span>
+    </div>`;
+  }).join("");
 }
 function depChips(ids){
   if(!ids||!ids.length)return '<span style="color:var(--dim)">—</span>';
@@ -1823,6 +1848,7 @@ async function showTicket(id){
     <button class="tk-btn" onclick="editTicket('${t.id}')"><i class="ti ti-edit"></i> Edit</button>
     ${canWork?`<button class="tk-btn go" onclick="workNext('${t.id}')"><i class="ti ti-player-play-filled"></i> Work on this next</button>`:''}
     ${(t.status==="pending"&&tech)?`<button class="tk-btn go" onclick="humanGate('${t.id}','ready')"><i class="ti ti-checks"></i> Approve → Ready</button>`:''}
+    ${t.status==="fixed"?`<button class="tk-btn" onclick="inboxSendBack('${t.id}')"><i class="ti ti-arrow-back-up"></i> Send back</button>`:''}
     ${t.status==="fixed"?`<button class="tk-btn go" onclick="humanGate('${t.id}','verify')"><i class="ti ti-shield-check"></i> Mark Verified</button>`:''}
     ${(t.status==="pending"||t.status==="open")?`<button class="tk-btn danger" onclick="rejectTicket('${t.id}')"><i class="ti ti-ban"></i> Reject</button>`:''}
   </div>`;
@@ -1904,7 +1930,12 @@ async function reactComment(tid,cid,emoji){
 async function postTicketComment(tid){
   const inp=document.getElementById("tkc-input");const body=(inp.value||"").trim();if(!body)return;
   inp.value="";inp.disabled=true;
-  try{await fetch(api("/comments"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({body,ticket:tid})});}catch(e){}
+  // A swallowed failure looked exactly like a posted comment: the box cleared
+  // and nothing appeared. Say so instead, and give the text back.
+  try{
+    const r=await fetch(api("/comments"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({body,ticket:tid})});
+    if(!r.ok){inp.value=body;toasty(await r.text()||"Comment failed","err");}
+  }catch(e){inp.value=body;toasty("Network error — comment not posted","err");}
   inp.disabled=false;await renderTicketComments(tid);inp.focus();
 }
 async function loadSettings(){
@@ -1924,7 +1955,7 @@ async function loadSettings(){
     <i class="ti ti-${ga.authenticated?'user-check':'user-x'}" style="color:${ga.authenticated?'var(--green)':'var(--amber)'};font-size:17px"></i>
     <div class="toolinfo"><div><b>${esc(ga.tool||gprov)} sign-in</b> <span class="tooldim">· ${ga.authenticated?('connected as '+esc(ga.account||'?')):'not signed in'}</span></div></div>
     ${ga.authenticated?'<span class="toolok">connected</span>':`<button class="gc-btn pri" onclick="openConnect('${gprov}')"><i class="ti ti-plug"></i> Connect</button>`}
-    <button class="gc-btn" onclick="testGitConnection(this)" title="repo → remote → reachable → push permission"><i class="ti ti-antenna-bars-5"></i> Test connection</button>
+    <button class="gc-btn" onclick="testGitConnection(this)" title="repo → remote → reachable → push permission → pull requests (push and PRs use different credentials)"><i class="ti ti-antenna-bars-5"></i> Test connection</button>
   </div><div id="git-test-result"></div>`:'';
   const brewBanner=(td.os==="macos"&&!td.has_brew)
     ? `<div class="toolrow toolbrew"><i class="ti ti-alert-triangle" style="color:var(--amber);font-size:17px"></i>
@@ -1945,9 +1976,10 @@ async function loadSettings(){
   const detNames=new Set(detected.map(d=>d.name));window._detected=detNames;
   if(detNames.has("opencode"))loadOpencodeModels(); // refresh opencode providers
   const def=cfg.engine&&cfg.engine.default||{engine:"claude",model:"sonnet"},per=cfg.engine&&cfg.engine.per_role||{},wf=cfg.workflow||{},pol=cfg.policy||{},git=cfg.git||{};
+  const hu=wf.human||{},ad=hu.adaptive||{};
   // Real agent CLIs only. `scripted`/`mock` are offline test engines (no real
   // LLM) — only shown if a project is already pinned to one, never offered new.
-  const realEng=["claude","opencode","hermes","gemini","codex"];
+  const realEng=["claude","opencode","copilot","hermes","gemini","codex"];
   const eng=[...realEng]; ["scripted","mock"].forEach(t=>{if([def.engine,...Object.values(per).map(p=>p.engine)].includes(t))eng.push(t);});
   const label=e=>e+(detNames.has(e)?" ✓":(e==="scripted"||e==="mock")?" (test)":" (not installed)");
   const opt=(s)=>eng.map(e=>`<option value="${e}" ${e===s?'selected':''}>${label(e)}</option>`).join("");
@@ -2013,6 +2045,19 @@ async function loadSettings(){
           <span class="hint">posts a one-time ⚠️ heads-up in #agents at this % of whichever cap is closer — loop keeps running</span></div>
       </div>
       <div class="set-note">Budget caps apply <b style="color:var(--accent2)">immediately</b>; other settings on the next restart. The total cap is <b>cumulative</b> — to resume past a hit cap, set it above what's already spent (or tick unlimited).</div>
+
+      <div class="sec" style="margin-top:18px">Approval</div>
+      <div class="panel frm">
+        <div class="fr"><span class="lbl">Ready gate</span><select id="hu-ready"><option value="true" ${hu.gate_ready!==false?'selected':''}>on — a person approves each designed ticket</option><option value="false" ${hu.gate_ready===false?'selected':''}>off — designed tickets go straight to the queue</option></select><span class="hint">off = full autonomy: no one approves, work flows on its own</span></div>
+        <div class="fr"><span class="lbl">Verify gate</span><select id="hu-verify"><option value="true" ${hu.gate_verify!==false?'selected':''}>on — a person renders the QA verdict on a fix</option><option value="false" ${hu.gate_verify===false?'selected':''}>off — the agent's tests are the verdict</option></select><span class="hint">verify is always a human when on — there is no auto-verify</span></div>
+        <div class="fr"><span class="lbl">Auto-approve</span><select id="hu-adaptive"><option value="true" ${ad.enabled!==false?'selected':''}>on — routine tickets auto-approve, announced with an undo</option><option value="false" ${ad.enabled===false?'selected':''}>off — every ticket waits for a person</option></select><span class="hint">only when the Ready gate is on. The machine approves what it has learned is routine; you keep an undo window. Verify still needs you.</span></div>
+        <div class="fr"><span class="lbl">Undo window</span><input id="hu-undo" type="number" min="0" value="${ad.undo_window_minutes??30}" style="width:90px"/><span class="hint">minutes to pull back an auto-approval · 0 disables auto-approve entirely</span></div>
+        <div class="fr"><span class="lbl">Learn after</span><input id="hu-learn" type="number" min="1" value="${ad.learn_after_samples??8}" style="width:90px"/><span class="hint">consistent human decisions on one ticket shape before it shifts to auto</span></div>
+        <div class="fr"><span class="lbl">Max auto / cycle</span><input id="hu-maxauto" type="number" min="1" value="${ad.max_auto_per_cycle??3}" style="width:90px"/><span class="hint">blast-radius cap — at most this many auto-approvals per cycle</span></div>
+        <div class="fr"><span class="lbl">Route exceptions to</span><input id="hu-route" value="${esc(hu.route_exceptions_to||'')}" placeholder="username" style="width:160px"/><span class="hint">who a parked/exception ticket lands on</span></div>
+        <div class="fr"><span class="lbl">Question SLA</span><input id="hu-sla" type="number" min="0" value="${hu.question_sla_minutes??60}" style="width:90px"/><span class="hint">minutes before an unanswered agent question escalates</span></div>
+      </div>
+      <div class="set-note">The three dials, weakest to strongest autonomy: <b>Ready gate off</b> (no approval at all) → <b>Auto-approve on</b> (routine auto, exceptions asked) → <b>Auto-approve off</b> (every ticket asked). Applies on the next restart.</div>
     </div>
     <div class="settab" data-p="git" hidden>
       ${toolingHtml}
@@ -2025,6 +2070,7 @@ async function loadSettings(){
         <div class="fr"><span class="lbl">Target branch</span><input id="git-tb" value="${esc(git.target_branch||'')}" placeholder="blank = default" style="width:140px"/><span class="hint">agent PRs open into &amp; auto-merge here (e.g. <code>develop</code>)</span></div>
         <div class="fr"><span class="lbl">Branch prefix</span><input id="git-bp" value="${esc(git.branch_prefix||'feat/')}" style="width:120px"/><span class="hint">→ ${esc(git.branch_prefix||'feat/')}CXC-123</span></div>
         <div class="fr"><span class="lbl">Commit email</span><input id="git-em" value="${esc(git.commit_email||'')}" placeholder="…@users.noreply.github.com" style="width:280px"/><span class="hint">use a noreply email to avoid privacy blocks</span></div>
+        <div class="fr"><span class="lbl">Act as account</span>${gitAccountControl(ga, git.account||'')}<span class="hint" id="git-acct-hint">sign in twice (<code>gh auth login</code>) and pick the one this project uses — two projects can then be two different users at once</span></div>
         <div class="fr"><span class="lbl">Open PR/MR</span><select id="git-pr"><option value="true" ${git.auto_pr!==false?'selected':''}>automatically after push</option><option value="false" ${git.auto_pr===false?'selected':''}>manual</option></select></div>
         <div class="fr"><span class="lbl">Auto-review</span><select id="git-ar"><option value="true" ${git.auto_review!==false?'selected':''}>on — the SA agent reviews every PR &amp; suggests</option><option value="false" ${git.auto_review===false?'selected':''}>off — no automatic review</option></select><span class="hint">SA deep-dives each PR and posts approve / request-changes as a suggestion</span></div>
         <div class="fr"><span class="lbl">Auto-merge</span><select id="git-am"><option value="false" ${!git.auto_merge?'selected':''}>off — you merge from the Review tab</option><option value="true" ${git.auto_merge?'selected':''}>on — SA approves &amp; merges automatically</option></select><span class="hint">On: SA merges on approve (never on failing CI). Off: approval is only a suggestion; request-changes still loops back to the agent to fix.</span></div>
@@ -2074,6 +2120,29 @@ async function loadSettings(){
   setSetTab(window._setTab==="workspace"?"engines":(window._setTab||"engines"));}
 function copyText(btn,text){navigator.clipboard&&navigator.clipboard.writeText(text);
   const old=btn.innerHTML;btn.innerHTML='<i class="ti ti-check"></i>';setTimeout(()=>{btn.innerHTML=old;},1200);}
+// "Act as account" — a <select> of detected `gh auth status` accounts when
+// the CLI is present and signed in (with a "Default = active login" option),
+// falling back to a free-text input when nothing was detected. A configured
+// account that isn't in the detected list stays as an extra option so saving
+// never silently drops it.
+function gitAccountControl(ga, current){
+  const accts = (ga && Array.isArray(ga.accounts)) ? ga.accounts : [];
+  if(!ga || !ga.present || accts.length === 0){
+    return `<input id="git-acct" value="${esc(current||'')}" placeholder="blank = the CLI's active login" style="width:280px"/>`;
+  }
+  const cur = current||'';
+  const names = accts.map(a => a.name);
+  const hasCur = !cur || names.includes(cur);
+  const opts = [`<option value="" ${cur===''?'selected':''}>Default — the CLI's active login</option>`];
+  accts.forEach(a => {
+    const tag = a.active ? ' (active)' : '';
+    opts.push(`<option value="${esc(a.name)}" ${cur===a.name?'selected':''}>${esc(a.name)}${tag}</option>`);
+  });
+  if(!hasCur){
+    opts.push(`<option value="${esc(cur)}" selected>${esc(cur)} (not detected)</option>`);
+  }
+  return `<select id="git-acct" style="max-width:280px">${opts.join('')}</select>`;
+}
 async function testGitConnection(btn){
   const o=btn.innerHTML;btn.innerHTML='<i class="ti ti-loader-2 att-spin"></i> Testing…';btn.disabled=true;
   const box=document.getElementById("git-test-result");
@@ -2085,7 +2154,11 @@ async function testGitConnection(btn){
       ${step(!!d.remote,'remote',d.remote?` <code style="font-size:11px">${esc(d.remote)}</code>`:' — none: agents cannot push; add one (git remote add origin …) or reconnect')}
       ${step(d.reachable,'reachable')}
       ${step(d.push_ok,'push permission')}
+      ${step(d.api_ok,'pull requests',d.api_account?` <code style="font-size:11px">${esc(d.api_account)}</code>`:'')}
+      ${d.probed_on?`<div style="color:var(--dim);margin-top:5px">checked on <code style="font-size:11px">${esc(d.probed_on)}</code> — the machine that runs the agents</div>`:''}
       ${d.detail?`<div style="color:var(--dim);margin-top:5px">${esc(d.detail)}</div>`:''}
+      ${d.key_hint?`<div style="color:var(--amber);margin-top:5px"><i class="ti ti-key"></i> ${esc(d.key_hint)}</div>`:''}
+      ${d.api_detail?`<div style="color:var(--amber);margin-top:5px"><i class="ti ti-alert-triangle"></i> ${esc(d.api_detail)}</div>`:''}
     </div>`;
   }catch(e){box.innerHTML='<div class="empty">test failed</div>';}
   btn.innerHTML=o;btn.disabled=false;

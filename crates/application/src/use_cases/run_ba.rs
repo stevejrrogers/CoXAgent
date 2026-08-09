@@ -4,7 +4,7 @@
 
 use crate::config::Config;
 use crate::error::AppError;
-use crate::parsing::{normalize_title, parse_items};
+use crate::parsing::{normalize_title, parse_items, parse_items_lenient};
 use crate::ports::outbound::{AgentEnginePort, AgentRequest, StateStorePort};
 use crate::prompts;
 use crate::use_cases::{AddTicketInput, AddTicketUseCase};
@@ -145,6 +145,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(600),
             escalation_level: 0,
+            label: None,
         };
 
         let outcome = self.engine.run(request).await?;
@@ -158,10 +159,24 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
         }
 
         // One cheap repair pass instead of discarding the whole call on a
-        // malformed bracket.
+        // malformed bracket. But a truly empty stdout (the opencode timeout
+        // case) has nothing worth repairing — skip the 120s SM call entirely.
         let proposals = match parse_items(&outcome.stdout) {
             Ok(p) => p,
             Err(first) => {
+                let stdout_is_blank = outcome.stdout.trim().is_empty()
+                    || outcome
+                        .stdout
+                        .chars()
+                        .filter(|c| !c.is_whitespace())
+                        .count()
+                        == 0;
+                if stdout_is_blank {
+                    return Err(crate::error::PortError::Corrupt(
+                        "BA produced no output".to_owned(),
+                    )
+                    .into());
+                }
                 let fixed = crate::use_cases::repair_json(
                     self.engine.as_ref(),
                     &outcome.stdout,
@@ -172,9 +187,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
                 match fixed.as_deref().map(parse_items) {
                     Some(Ok(p)) => p,
                     _ => {
-                        return Err(
-                            crate::error::PortError::Corrupt(format!("BA output: {first}")).into(),
-                        )
+                        // Repair gave nothing usable. Try partial salvage: keep
+                        // every object that parses on its own rather than throwing
+                        // the whole (mostly-good) array away because one segment
+                        // is corrupt.
+                        match parse_items_lenient(&outcome.stdout) {
+                            Ok(partial) if !partial.is_empty() => partial,
+                            _ => {
+                                return Err(crate::error::PortError::Corrupt(format!(
+                                    "BA output: {first}"
+                                ))
+                                .into())
+                            }
+                        }
                     }
                 }
             }
@@ -185,16 +210,39 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
         // door with a written reason instead of consuming SA/DEV budget.
         let proposals = self.po_goal_gate(proposals).await;
 
+        // Titles already live on the board — the yardstick for "already
+        // covered". Rejected ones are excluded so a re-proposal of a rejected
+        // idea still gets filtered by the exact-title `seen` set below, not by
+        // similarity to something the team already said no to.
+        let active_titles: Vec<String> = existing
+            .tickets
+            .iter()
+            .filter(|t| t.status() != coxagent_domain::Status::Rejected)
+            .map(|t| t.title().to_owned())
+            .collect();
+
         let adder = AddTicketUseCase::new(Arc::clone(&self.store));
         let mut created = Vec::with_capacity(proposals.len());
         let mut seen = taken;
+        // Titles filed in THIS run, checked with the same fuzzy rule so a batch
+        // of six paraphrases of one idea files exactly one.
+        let mut created_titles: Vec<String> = Vec::new();
         for p in proposals {
-            // Belt-and-suspenders: never file a feature whose title already
-            // exists (or was just proposed this run) — no duplicate work.
             let key = normalize_title(&p.title);
             if key.is_empty() || !seen.insert(key) {
                 continue;
             }
+            // Semantic dedup: an exact-title check let paraphrases through —
+            // "Bug triage and burn-down" vs "Bug burndown cadence — Q3 triage"
+            // are different strings, same ticket. `duplicates_existing` folds in
+            // Jaccard similarity and the single-slot rule for backlog-ceremony
+            // tickets, against both the board and this run's own output.
+            if crate::parsing::duplicates_existing(&p.title, &active_titles)
+                || crate::parsing::duplicates_existing(&p.title, &created_titles)
+            {
+                continue;
+            }
+            created_titles.push(p.title.clone());
             let id = adder
                 .execute(AddTicketInput {
                     ticket_type: TicketType::Feature,
@@ -246,6 +294,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(180),
             escalation_level: 0,
+            label: None,
         };
         let Ok(o) = self.engine.run(request).await else {
             return proposals;
@@ -421,5 +470,96 @@ mod tests {
             code: 0,
         });
         assert!(run(store, engine).execute().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn ba_salvages_partial_good_items_when_no_repair() {
+        // One valid feature plus one garbage segment; repair offers no help, so
+        // partial salvage must keep ONLY the valid item end-to-end.
+        struct SalvageEngine {
+            proposals: String,
+        }
+        #[async_trait]
+        impl AgentEnginePort for SalvageEngine {
+            fn id(&self) -> &'static str {
+                "salvage"
+            }
+            async fn run(&self, req: AgentRequest) -> Result<AgentOutcome, PortError> {
+                match req.role {
+                    Role::Ba => Ok(AgentOutcome {
+                        stdout: self.proposals.clone(),
+                        stderr: String::new(),
+                        exit_code: Some(0),
+                        usage: None,
+                        trace: String::new(),
+                        session_id: None,
+                        sandbox: SandboxStatus::default(),
+                    }),
+                    // No repair available: any SM call fails outright, so
+                    // repair_json yields None and we fall through to salvage.
+                    _ => Err(PortError::Corrupt("no repair available".to_owned())),
+                }
+            }
+        }
+        let store = Arc::new(MemStore::default());
+        let engine = Arc::new(SalvageEngine {
+            proposals:
+                "[{\"title\":\"Login\",\"priority\":\"high\",\"complexity\":\"medium\",\"has_ui\":true}, {\"title\":"
+                    .to_owned(),
+        });
+        let uc = RunBaUseCase::new(
+            Arc::clone(&store),
+            engine,
+            Config::default(),
+            PathBuf::from("/tmp"),
+            "goal: a todo app".to_owned(),
+        );
+        let created = uc.execute().await.expect("partial salvage should succeed");
+        assert_eq!(created.len(), 1);
+        let state = store.load().await.expect("load");
+        assert_eq!(state.tickets.len(), 1);
+        assert_eq!(state.tickets[0].title(), "Login");
+    }
+
+    #[tokio::test]
+    async fn ba_skips_repair_when_stdout_is_blank() {
+        // Blank stdout (the opencode timeout case) must NOT trigger an SM repair
+        // call — it returns a clear Corrupt error instead.
+        struct BlankEngine;
+        #[async_trait]
+        impl AgentEnginePort for BlankEngine {
+            fn id(&self) -> &'static str {
+                "blank"
+            }
+            async fn run(&self, req: AgentRequest) -> Result<AgentOutcome, PortError> {
+                // The only call allowed is the BA proposal; any SM repair attempt
+                // would carry a different role and fail this assertion.
+                assert_eq!(req.role, Role::Ba);
+                Ok(AgentOutcome {
+                    stdout: "   \n  ".to_owned(),
+                    stderr: String::new(),
+                    exit_code: Some(0),
+                    usage: None,
+                    trace: String::new(),
+                    session_id: None,
+                    sandbox: SandboxStatus::default(),
+                })
+            }
+        }
+        let store = Arc::new(MemStore::default());
+        let engine = Arc::new(BlankEngine);
+        let uc = RunBaUseCase::new(
+            store,
+            engine,
+            Config::default(),
+            PathBuf::from("/tmp"),
+            "goal: a todo app".to_owned(),
+        );
+        match uc.execute().await {
+            Err(crate::error::AppError::Port(crate::error::PortError::Corrupt(msg))) => {
+                assert!(msg.contains("no output"), "unexpected message: {msg}");
+            }
+            other => panic!("expected Corrupt error for blank stdout, got {other:?}"),
+        }
     }
 }

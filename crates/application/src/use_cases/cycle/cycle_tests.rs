@@ -279,13 +279,7 @@ struct SpyForge {
 }
 #[async_trait::async_trait]
 impl ForgePort for SpyForge {
-    async fn open_pr(
-        &self,
-        _: &str,
-        _: &str,
-        _: &str,
-        _: &str,
-    ) -> Result<PullRequest, PortError> {
+    async fn open_pr(&self, _: &str, _: &str, _: &str, _: &str) -> Result<PullRequest, PortError> {
         unimplemented!()
     }
     async fn list_open_prs(&self) -> Result<Vec<PullRequest>, PortError> {
@@ -498,11 +492,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// unexpected, so an over-eager retry loop shows up in assertions instead
 /// of silently blending in.
 struct ScriptedDeploy {
-    script: Mutex<VecDeque<crate::ports::outbound::DeployReport>>,
+    script: Mutex<VecDeque<Result<crate::ports::outbound::DeployReport, PortError>>>,
     deploy_calls: AtomicUsize,
 }
 impl ScriptedDeploy {
     fn new(script: Vec<crate::ports::outbound::DeployReport>) -> Self {
+        Self::scripted(script.into_iter().map(Ok).collect())
+    }
+    /// Script that may include `Err` results — a `deploy()` that never
+    /// produced a `DeployReport` at all (spawn failure, or the 900s
+    /// `DEPLOY_TIMEOUT` in `docker_compose.rs`). COX-B039.
+    fn scripted(script: Vec<Result<crate::ports::outbound::DeployReport, PortError>>) -> Self {
         Self {
             script: Mutex::new(script.into_iter().collect()),
             deploy_calls: AtomicUsize::new(0),
@@ -520,7 +520,7 @@ impl crate::ports::outbound::DeployPort for ScriptedDeploy {
     ) -> Result<crate::ports::outbound::DeployReport, PortError> {
         self.deploy_calls.fetch_add(1, Ordering::SeqCst);
         let next = self.script.lock().expect("lock").pop_front();
-        Ok(next.unwrap_or(crate::ports::outbound::DeployReport {
+        next.unwrap_or(Ok(crate::ports::outbound::DeployReport {
             success: true,
             deployed: true,
             summary: "UNSCRIPTED EXTRA DEPLOY CALL".to_owned(),
@@ -977,6 +977,127 @@ async fn deploy_that_never_binds_its_port_is_treated_as_a_failure() {
     assert!(
         events.iter().any(|e| e.kind == "deploy_failed"),
         "the notified event must be deploy_failed, not deploy_ok: {events:?}"
+    );
+}
+
+// --- COX-B039: a deploy() that ERRORS is a deploy failure too ---------
+
+/// A `DeployPort` whose `deploy()` returns `Err` every call — models a spawn
+/// failure or the 900s `DEPLOY_TIMEOUT` in `docker_compose.rs`, where
+/// `docker compose` never even produced a `DeployReport` to judge success/
+/// failure from.
+struct DeploySpawnFails {
+    deploy_calls: AtomicUsize,
+}
+#[async_trait::async_trait]
+impl crate::ports::outbound::DeployPort for DeploySpawnFails {
+    async fn deploy(
+        &self,
+        _work_dir: &std::path::Path,
+    ) -> Result<crate::ports::outbound::DeployReport, PortError> {
+        self.deploy_calls.fetch_add(1, Ordering::SeqCst);
+        Err(PortError::Backend("docker compose timed out".to_owned()))
+    }
+}
+
+/// AC (COX-B039): a `deploy()` spawn/timeout `Err` (not just an unhealthy-but-
+/// completed deploy) must be treated exactly like any other deploy failure —
+/// recorded state, a filed bug, and a `deploy_failed` notification — not
+/// silently swallowed into `report.errors` alone. `state.deploy.ok` staying
+/// `true` is what breaks the self-healing retry: `last_deploy_failed` reads
+/// it, so the next leader cycle never retries the deploy either.
+#[tokio::test(start_paused = true)]
+async fn deploy_spawn_error_is_treated_as_a_failure_not_swallowed() {
+    let store = Arc::new(MemStore::default());
+    let deploy = Arc::new(DeploySpawnFails {
+        deploy_calls: AtomicUsize::new(0),
+    });
+    let notifier = Arc::new(SpyNotifier::default());
+    let uc = RunCycleUseCase::new(
+        Arc::clone(&store),
+        Arc::new(RoleAwareEngine),
+        Config::default(),
+        PathBuf::from("/tmp"),
+        "goal".to_owned(),
+    )
+    .with_deploy(Arc::clone(&deploy) as Arc<dyn crate::ports::outbound::DeployPort>)
+    .with_notifier(Arc::clone(&notifier) as Arc<dyn crate::ports::outbound::NotifierPort>);
+
+    let report = Box::pin(uc.run_cycle(1)).await;
+    let state = store.load().await.expect("load");
+
+    assert!(
+        report.errors.iter().any(|e| e.starts_with("DEPLOY:")),
+        "still surfaced in the cycle report: {:?}",
+        report.errors
+    );
+    assert!(
+        state.deploy.as_ref().is_some_and(|d| !d.ok),
+        "a spawn/timeout error must flip state.deploy.ok to false, or the \
+         self-healing retry (last_deploy_failed) never fires: {:?}",
+        state.deploy
+    );
+    assert_eq!(
+        deploy_bug_tickets(&state).len(),
+        1,
+        "a spawn/timeout error must file a bug like any other deploy failure"
+    );
+    let events = notifier.events.lock().expect("lock");
+    assert!(
+        events.iter().any(|e| e.kind == "deploy_failed"),
+        "must notify deploy_failed, not swallow the error silently: {events:?}"
+    );
+}
+
+/// AC (COX-B039): `docker_compose::deploy()` runs `down --remove-orphans`
+/// BEFORE `up -d --build`, so a spawn/timeout `Err` leaves the app stopped —
+/// the worst possible moment to skip the rollback. The `Err` arm must reach
+/// `attempt_rollback` exactly like an unhealthy deploy does.
+#[tokio::test]
+async fn a_deploy_spawn_error_rolls_back_to_the_last_known_good_deploy() {
+    let deploy = Arc::new(ScriptedDeploy::scripted(vec![
+        Err(PortError::Backend("docker compose timed out".to_owned())),
+        Ok(crate::ports::outbound::DeployReport {
+            success: true,
+            deployed: true,
+            summary: "rollback redeploy ok".to_owned(),
+        }),
+    ]));
+    let notifier = Arc::new(SpyNotifier::default());
+    let (store, git, uc) = rollback_uc(true, &deploy, &notifier);
+
+    Box::pin(uc.run_cycle(1)).await;
+    let state = store.load().await.expect("load");
+
+    assert_eq!(
+        deploy.calls(),
+        2,
+        "a deploy that errored out left the app stopped by `down` — it must be \
+         followed by exactly one automatic redeploy of the last known-good version"
+    );
+    let adds = git.worktree_adds.lock().expect("lock");
+    assert_eq!(
+        adds.first().map(|a| a.1.as_str()),
+        Some(GOOD_SHA),
+        "the rollback checks out the known-good sha: {adds:?}"
+    );
+    assert!(
+        state.deploy.as_ref().is_some_and(|d| d.ok),
+        "after a successful rollback the recorded deploy status is healthy again: {:?}",
+        state.deploy
+    );
+    assert_eq!(
+        deploy_bug_tickets(&state).len(),
+        1,
+        "the root cause still becomes tracked work, rollback or not"
+    );
+    let events = notifier.events.lock().expect("lock");
+    assert!(
+        events
+            .iter()
+            .any(|e| e.kind.to_lowercase().contains("rollback")
+                || e.message.to_lowercase().contains("rollback")),
+        "a rollback notification must be sent for an errored deploy too: {events:?}"
     );
 }
 
@@ -1735,8 +1856,7 @@ async fn impediment_digest_is_delivered_via_the_external_notifier_when_configure
          NotifierPort when one is configured: {all:?}"
     );
     assert!(
-        digest[0].message.contains("Impediment watch")
-            && digest[0].message.contains("RECOVERY"),
+        digest[0].message.contains("Impediment watch") && digest[0].message.contains("RECOVERY"),
         "the notified message must carry the digest body: {:?}",
         digest[0].message
     );
@@ -1888,5 +2008,161 @@ async fn impediment_digest_once_per_day_gate_still_dedupes_both_sinks() {
     assert_eq!(
         notifier_hits, 1,
         "the once-per-day gate must prevent a duplicate external notifier event: {events:?}"
+    );
+}
+
+/// Engine that answers the pre-flight BA call with criteria and nothing else.
+struct CriteriaEngine;
+#[async_trait::async_trait]
+impl AgentEnginePort for CriteriaEngine {
+    fn id(&self) -> &'static str {
+        "criteria"
+    }
+    async fn run(&self, _req: AgentRequest) -> Result<AgentOutcome, PortError> {
+        Ok(AgentOutcome {
+            stdout: "[\"the audit lists every timeout with its file\", \
+                     \"each one says keep or change, with a reason\"]"
+                .to_owned(),
+            stderr: String::new(),
+            exit_code: Some(0),
+            usage: None,
+            trace: String::new(),
+            session_id: None,
+            sandbox: SandboxStatus::default(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_designed_ticket_with_no_criteria_gets_them_before_a_human_sees_it() {
+    use coxagent_domain::{
+        Complexity, Priority, Role, TechnicalDesign, Ticket, TicketId, TicketType,
+    };
+
+    let mut t = Ticket::new(
+        TicketId::new("COX-F001").expect("id"),
+        TicketType::Feature,
+        "Audit timeout patterns".to_owned(),
+        "Look at every timeout we set and say whether it is right.".to_owned(),
+        Priority::Medium,
+        Complexity::Medium,
+        false,
+    )
+    .expect("ticket");
+    t.set_technical_design(
+        Role::Sa,
+        TechnicalDesign {
+            approach: "read them all".to_owned(),
+            files: vec![],
+            api_contract: String::new(),
+            test_plan: "n/a".to_owned(),
+            alternatives: String::new(),
+            data_changes: String::new(),
+        },
+    )
+    .expect("design");
+    assert!(t.acceptance_criteria().is_empty(), "precondition");
+
+    let store = Arc::new(MemStore::default());
+    {
+        let mut s = store.state.lock().expect("lock");
+        s.tickets.push(t);
+    }
+    let uc = RunCycleUseCase::new(
+        Arc::clone(&store),
+        Arc::new(CriteriaEngine),
+        Config::default(),
+        PathBuf::from("/tmp"),
+        "goal".to_owned(),
+    );
+    Box::pin(uc.preflight_acceptance_criteria()).await;
+
+    let s = store.load().await.expect("load");
+    let t = s
+        .ticket(&TicketId::new("COX-F001").expect("id"))
+        .expect("ticket");
+    assert_eq!(
+        t.acceptance_criteria().len(),
+        2,
+        "the BA's criteria should be on the ticket, not in a log"
+    );
+    assert!(
+        s.comments
+            .iter()
+            .any(|c| c.author == "BA" && c.body.contains("Acceptance criteria added")),
+        "the change is announced on the ticket, so a person can see who wrote them"
+    );
+
+    // Second run must not append a duplicate set.
+    Box::pin(uc.preflight_acceptance_criteria()).await;
+    let s = store.load().await.expect("load");
+    assert_eq!(
+        s.ticket(&TicketId::new("COX-F001").expect("id"))
+            .expect("t")
+            .acceptance_criteria()
+            .len(),
+        2,
+        "a ticket that already has criteria is left alone"
+    );
+}
+
+/// AC (COX-B035): a malformed `deploy.host_port` in the raw
+/// `coxagent.json` — surfaced to the use case as `host_port_probe:
+/// Err(())`, since a full `Config` parse of a corrupt field collapses
+/// to `Config::default()` (`host_port: None`) — must fail the mandatory
+/// health gate, not be folded into "nothing configured". Uses a deploy
+/// adapter that would pass any real probe, so a false "known-good" here
+/// would mean the malformed port silently skipped the gate.
+#[tokio::test(start_paused = true)]
+async fn malformed_host_port_fails_the_gate_instead_of_skipping_it() {
+    let store = Arc::new(MemStore::default());
+    let deploy = Arc::new(ScriptedHealthCheckDeploy {
+        deploy_calls: AtomicUsize::new(0),
+        health_check_calls: AtomicUsize::new(0),
+        health_check_script: |_deploys| crate::state::HealthCheckResult {
+            passed: true,
+            http_status: Some(200),
+            response_time_ms: Some(45),
+        },
+        health_check_hangs: false,
+    });
+    // Models `load_config` having fallen back to `Config::default()`
+    // after the raw `coxagent.json` failed to parse as a whole — the
+    // host_port probe is derived separately from the raw text and is
+    // `Err(())`, not `None`.
+    let cfg = Config::default();
+    let notifier = Arc::new(SpyNotifier::default());
+    let uc = RunCycleUseCase::new(
+        Arc::clone(&store),
+        Arc::new(RoleAwareEngine),
+        cfg,
+        PathBuf::from("/tmp"),
+        "goal".to_owned(),
+    )
+    .with_deploy(Arc::clone(&deploy) as Arc<dyn crate::ports::outbound::DeployPort>)
+    .with_host_port_probe(Err(()))
+    .with_notifier(Arc::clone(&notifier) as Arc<dyn crate::ports::outbound::NotifierPort>);
+
+    Box::pin(uc.run_cycle(1)).await;
+
+    let state = store.load().await.expect("load");
+    assert!(
+        state.deploy.as_ref().is_some_and(|d| !d.ok),
+        "a malformed host_port must fail the deploy, not pass vacuously: {:?}",
+        state.deploy
+    );
+    assert!(
+        state.last_good_deploy.is_none(),
+        "a deploy gated by a malformed host_port must never become the auto-rollback target"
+    );
+    let events = notifier.events.lock().expect("lock");
+    assert!(
+        events.iter().any(|e| e.kind == "deploy_failed"),
+        "the notified event must be deploy_failed, not deploy_ok: {events:?}"
+    );
+    assert_eq!(
+        deploy.health_check_calls.load(Ordering::SeqCst),
+        0,
+        "a malformed host_port must fail before ever probing — there's nothing valid to probe"
     );
 }

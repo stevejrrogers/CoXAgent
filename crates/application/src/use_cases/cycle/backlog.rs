@@ -125,12 +125,21 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         dir.is_dir().then_some(dir)
     }
 
-    /// File the periodic tech-debt chore (deduped by title prefix).
+    /// File the periodic tech-debt chore, carved from evidence gathered this
+    /// cycle rather than from vague habit: lint delta against the prior clippy
+    /// baseline and, when workspace files are readable, source modules lacking
+    /// doc headers — each finding lands in the ticket's description and as a
+    /// concrete acceptance criterion so whoever picks it up knows what "done"
+    /// means. Deduped by title prefix AND by recorded cycle number, so a restart
+    /// never re-files for a sweep already run.
     pub(super) async fn file_debt_sweep(&self, cycle: u64) {
         use coxagent_domain::ticket::Status;
         let Ok(state) = self.store.load().await else {
             return;
         };
+        if state.sweeps_done.contains(&cycle) {
+            return;
+        }
         let open_exists = state.tickets.iter().any(|t| {
             t.title().starts_with("Debt sweep")
                 && !matches!(
@@ -138,41 +147,108 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     Status::Done | Status::Documented | Status::Verified | Status::Rejected
                 )
         });
-        if open_exists {
+        if open_exists && !state.debt_signals.is_empty() {
+            self.note_swept(cycle).await;
             return;
         }
-        let lint_note = match &self.deploy {
-            Some(d) => match d.lint(&self.work_dir).await {
-                Ok(Some(n)) if n > 0 => format!(" Current clippy baseline: {n} errors."),
-                _ => String::new(),
-            },
-            None => String::new(),
+
+        // Gather measurements through ports — lint from DeployPort, module docs
+        // from workspace files (absent read access → those signals stay zero).
+        let lint_now = match &self.deploy {
+            Some(d) => d.lint_report(&self.work_dir).await.ok().flatten(),
+            None => None,
         };
+        let mut missing_docs = 0usize;
+        if let Some(files) = &self.files {
+            missing_docs = self.missing_module_docs(files.as_ref()).await;
+        }
+
+        // Only file when there is actual action to take: some lint regression or
+        // at least one module short of a doc header. A clean codebase earns no chore.
+        let signals = crate::use_cases::cycle::debt_sweep::assemble_signals(
+            lint_now.as_ref(),
+            state.clippy_baseline,
+            missing_docs,
+        );
+        if signals.is_empty() {
+            self.note_swept(cycle).await;
+            return;
+        }
+        if open_exists {
+            self.note_swept(cycle).await;
+            return;
+        }
+
+        let accepted = crate::use_cases::cycle::debt_sweep::acceptance_lines(&signals);
+        let desc = crate::use_cases::cycle::debt_sweep::describe(signals.len());
+        self.persist_and_file(cycle, state, desc, accepted).await;
+    }
+
+    async fn note_swept(&self, cycle: u64) {
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+            s.sweeps_done.push(cycle);
+            Ok(())
+        })
+        .await;
+    }
+
+    /// Scan repo sources through the workspace-files port for modules lacking a
+    /// doc header. Reads are done once per sweep; vendored/build dirs are skipped
+    /// by the caller (the adapter reports everything below the root).
+    async fn missing_module_docs(
+        &self,
+        files: &dyn crate::ports::outbound::WorkspaceFilesPort,
+    ) -> usize {
+        let paths = files.list_recursive(&self.work_dir).await;
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        for p in paths {
+            let is_rs = p
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e == "rs");
+            if !is_rs {
+                continue;
+            }
+            if let Some(src) = files.read(&p).await {
+                pairs.push((p.to_string_lossy().to_string(), src));
+            }
+        }
+        crate::use_cases::cycle::debt_sweep::count_modules_missing_docs(
+            pairs
+                .iter()
+                .map(|(path, src)| (path.as_str(), src.as_str())),
+        )
+    }
+
+    async fn persist_and_file(
+        &self,
+        cycle: u64,
+        state: crate::state::ProjectState,
+        desc: String,
+        accepted: Vec<String>,
+    ) {
         let adder = crate::use_cases::AddTicketUseCase::new(Arc::clone(&self.store));
-        if let Ok(id) = adder
+        let Ok(id) = adder
             .execute(crate::use_cases::AddTicketInput {
                 ticket_type: coxagent_domain::TicketType::Chore,
                 title: format!("Debt sweep (cycle {cycle})"),
-                description: format!(
-                    "Scheduled tech-debt pass — no new features. Pick the highest-leverage \
-                     debt and pay it down: reduce the lint/clippy baseline, delete dead code, \
-                     fill missing module docs, strengthen the weakest test area.{lint_note}"
-                ),
+                description: desc,
                 priority: coxagent_domain::ticket::Priority::Medium,
                 complexity: coxagent_domain::ticket::Complexity::Medium,
                 has_ui: false,
-                acceptance_criteria: vec![
-                    "The clippy/lint baseline is LOWER than before this ticket".to_owned(),
-                    "No behavior change: full test suite still green".to_owned(),
-                ],
+                acceptance_criteria: accepted,
             })
             .await
-        {
-            let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
-                s.log_activity("SM", "filed scheduled debt sweep", Some(id.to_string()));
-                Ok(())
-            })
-            .await;
-        }
+        else {
+            return;
+        };
+        let signals = state.debt_signals;
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+            s.debt_signals.clone_from(&signals);
+            s.sweeps_done.push(cycle);
+            s.log_activity("SM", "filed scheduled debt sweep", Some(id.to_string()));
+            Ok(())
+        })
+        .await;
     }
 }

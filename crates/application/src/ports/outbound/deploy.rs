@@ -211,6 +211,55 @@ pub trait DeployPort: Send + Sync {
     }
 }
 
+/// Port 0 is the kernel's "give me any free port" sentinel, not an address a
+/// client can ever connect to. A `coxagent.json` publishing it is a config
+/// error dressed as a port: nothing binds it, so the mandatory post-deploy
+/// health gate probes it for its whole window and reports "the app never binds
+/// its port" forever — a real app bug and an unvalidated config value become
+/// indistinguishable (COX-B042). Bounds live here, next to the other
+/// `host_port` rules, so every reader of the field agrees on what publishable
+/// means.
+#[must_use]
+pub const fn is_publishable_host_port(port: u16) -> bool {
+    port != 0
+}
+
+/// Parse `deploy.host_port` out of a project's raw `coxagent.json` text for
+/// the mandatory post-deploy health-gate probe. A missing/unreadable file,
+/// unparseable JSON, a missing `host_port` key, or an explicit `null` all
+/// mean "nothing configured" — same contract as `Option<u16>` and
+/// [`verify_deploy_health`]'s no-port pass. Any other JSON value that isn't a
+/// publishable `u16` port (negative, float, string, bool, out of range, or
+/// zero) is a corrupt config and must fail the gate rather than being folded
+/// into "nothing configured" (COX-B025/COX-B026/COX-B035/COX-B042) —
+/// `serde_json::Value::as_u64` returns `None` for all of those just as it does
+/// for a genuinely absent field, so the raw JSON value must be inspected
+/// instead of going through `as_u64` first.
+///
+/// Shared by every call site that deploys (cycle, chat, PR preview) so a
+/// malformed `host_port` fails the gate the same way everywhere, rather than
+/// each site re-deriving (and potentially drifting on) the same parse.
+///
+/// # Errors
+/// `Err(())` when `deploy.host_port` is present but isn't a publishable `u16`
+/// port — the caller's only correct response is to fail the health gate, so no
+/// richer error is worth carrying.
+#[allow(clippy::result_unit_err)]
+pub fn parse_deploy_host_port(raw_config: &str) -> Result<Option<u16>, ()> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw_config) else {
+        return Ok(None);
+    };
+    match value.get("deploy").and_then(|d| d.get("host_port")) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(v) => v
+            .as_u64()
+            .and_then(|n| u16::try_from(n).ok())
+            .filter(|p| is_publishable_host_port(*p))
+            .map(Some)
+            .ok_or(()),
+    }
+}
+
 /// Mandatory post-deploy health probe (COX-B004/COX-B009): a `docker compose
 /// up` exit 0 only proves the containers started — it says nothing about
 /// whether the app inside actually bound its configured port. This polls
@@ -404,6 +453,47 @@ mod tests {
             probing.probes.load(Ordering::SeqCst),
             0,
             "with no port configured the gate must not probe at all"
+        );
+    }
+
+    // --- COX-B042: `host_port` bounds --------------------------------------
+
+    /// A `host_port` of `0` deserializes into `u16` without complaint, so
+    /// nothing downstream of `Config` can tell it apart from a port an
+    /// operator meant. It is not connectable, so probing it can only ever
+    /// fail: the parse must reject it here, where the failure names a config
+    /// error, instead of letting the gate blame the app.
+    #[test]
+    fn a_zero_host_port_is_rejected_rather_than_probed() {
+        assert_eq!(
+            super::parse_deploy_host_port(r#"{"deploy":{"host_port":0}}"#),
+            Err(()),
+            "port 0 is not connectable — it must fail the gate as a config error"
+        );
+    }
+
+    /// The rejection must stay narrow: 0 is the only unpublishable `u16`, and
+    /// every other in-range port still parses to itself.
+    #[test]
+    fn the_lowest_real_port_and_the_highest_one_both_still_parse() {
+        assert_eq!(
+            super::parse_deploy_host_port(r#"{"deploy":{"host_port":1}}"#),
+            Ok(Some(1))
+        );
+        assert_eq!(
+            super::parse_deploy_host_port(r#"{"deploy":{"host_port":65535}}"#),
+            Ok(Some(65535))
+        );
+    }
+
+    /// An absent port is still "nothing configured", not a rejection — the
+    /// bounds check must not turn a port-less project into a failing gate.
+    #[test]
+    fn an_absent_host_port_is_still_nothing_to_probe() {
+        assert_eq!(super::parse_deploy_host_port(r#"{"deploy":{}}"#), Ok(None));
+        assert_eq!(
+            super::parse_deploy_host_port(r#"{"deploy":{"host_port":null}}"#),
+            Ok(None)
         );
     }
 

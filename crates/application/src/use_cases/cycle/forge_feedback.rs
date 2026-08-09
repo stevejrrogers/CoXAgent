@@ -137,6 +137,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                         timeout: std::time::Duration::from_secs(1800),
                         // Each prior fix round escalates the model ladder.
                         escalation_level: u8::try_from(attempts.min(3)).unwrap_or(3),
+                        label: None,
                     };
                     self.engine.run(request).await
                 }

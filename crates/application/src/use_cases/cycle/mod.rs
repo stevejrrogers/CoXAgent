@@ -21,9 +21,11 @@ use std::sync::{Arc, Mutex};
 mod audits;
 mod backlog;
 mod ceremonies;
+mod debt_sweep;
+mod escalation;
+mod preflight;
 mod scrum;
 mod wiring;
-mod escalation;
 
 mod forge;
 mod forge_feedback;
@@ -110,6 +112,35 @@ impl CycleReport {
     }
 }
 
+/// Extract the `version = "MAJOR.MINOR.PATCH"` from a Cargo.toml body, or
+/// `None` when absent/unparseable.
+fn parse_cargo_version(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("version") {
+            if let Some(rhs) = rest.trim_start().strip_prefix('=') {
+                let v = rhs.trim().trim_matches('"').trim();
+                if coxagent_domain::SemVer::parse(v).is_ok() {
+                    return Some(v.to_owned());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The version to reconcile `state_ver` down to, or `None` when there is no
+/// drift to correct. Returns `repo_ver` when state has optimistically bumped
+/// ahead of what the tree declares; `None` when state is at or behind reality
+/// or `repo_ver` is unparseable.
+fn reconcile_target(
+    state_ver: &coxagent_domain::SemVer,
+    repo_ver: &str,
+) -> Option<coxagent_domain::SemVer> {
+    let repo = coxagent_domain::SemVer::parse(repo_ver).ok()?;
+    (state_ver > &repo).then_some(repo)
+}
+
 /// Runs the sequential agent cycle over shared adapters.
 pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     store: Arc<S>,
@@ -122,7 +153,19 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     probe: Option<Arc<dyn crate::ports::outbound::ApiProbePort>>,
     storage: Option<Arc<dyn crate::ports::outbound::StoragePort>>,
     deploy: Option<Arc<dyn DeployPort>>,
+    /// The published `host_port` to probe for the mandatory post-deploy
+    /// health gate, or `Err` when the raw `coxagent.json`'s
+    /// `deploy.host_port` is present but malformed (COX-B035). Defaults to
+    /// `Ok(config.deploy.host_port)`; callers reading the raw config
+    /// separately (to fail closed on a malformed value the `Config` parse
+    /// itself may have folded into a default) override it via
+    /// [`Self::with_host_port_probe`].
+    host_port_probe: Result<Option<u16>, ()>,
     notifier: Option<Arc<dyn crate::ports::outbound::NotifierPort>>,
+    /// Reporter that pushes PR/review activity to the hub over HTTP. The runner
+    /// is the sole holder of forge credentials, so the hub must be told what it
+    /// learned rather than listing PRs itself.
+    reporter: Option<Arc<dyn crate::ports::outbound::PrReporterPort>>,
     /// Live, runtime-adjustable spend caps (overrides the config caps when set).
     budget: Option<crate::config::LiveBudget>,
     /// Local git, used for branch + commit per ticket when `config.git.enabled`.
@@ -139,6 +182,8 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     /// This runner's identity (`account@host`) — recorded as the ticket claim
     /// owner so concurrent runners on a shared backlog never collide.
     worker: String,
+    /// What this machine can run (see `set_capabilities`).
+    caps: crate::ports::outbound::WorkerCaps,
     /// Last scrum discussion topic — skip duplicate discussions.
     last_discussion_topic: Mutex<String>,
     /// Whether the `sandbox_unsupported` warning has already fired — posted
@@ -154,6 +199,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         work_dir: PathBuf,
         context: String,
     ) -> Self {
+        let host_port_probe = Ok(config.deploy.host_port);
         Self {
             store,
             engine,
@@ -165,7 +211,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             probe: None,
             storage: None,
             deploy: None,
+            host_port_probe,
             notifier: None,
+            reporter: None,
             budget: None,
             git: None,
             files: None,
@@ -173,6 +221,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             forge: None,
             phase: None,
             worker: String::new(),
+            caps: crate::ports::outbound::WorkerCaps::default(),
             last_discussion_topic: Mutex::new(String::new()),
             sandbox_warned: AtomicBool::new(false),
         }
@@ -182,6 +231,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// owner. Called by `run_forever` from the live operator each cycle.
     pub fn set_worker(&mut self, worker: impl Into<String>) {
         self.worker = worker.into();
+    }
+
+    /// Declare the agent CLIs this machine can launch, so the presence heartbeat
+    /// carries them. Both this and the runner's own heartbeat upsert the SAME
+    /// registry key — leaving it unset here would blank out what the runner
+    /// reported, and the dashboard would flicker back to "no agent CLI".
+    pub fn set_capabilities(&mut self, caps: crate::ports::outbound::WorkerCaps) {
+        self.caps = caps;
     }
 
     /// Trigger the whole-system architecture review on demand (same work the
@@ -301,6 +358,60 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         .await;
     }
 
+    /// Reconcile the state's `current_version` against the version the checked-out
+    /// tree actually declares. The version is bumped optimistically when a DEV
+    /// ticket completes locally — *before* its PR merges. If that PR is later
+    /// rejected or closed, `state.current_version` stays a phantom release no
+    /// build carries. This pass pulls it back to reality, but only when it is
+    /// provably safe: no ticket is mid-flight (in-progress/claimed/fixed pending
+    /// PR), so nothing is actively bumping the version.
+    async fn reconcile_version(&self) {
+        let Some(files) = self.files.clone() else {
+            return;
+        };
+        let cargo = self.work_dir.join("Cargo.toml");
+        let Some(text) = files.read(&cargo).await else {
+            return;
+        };
+        let Some(repo_ver) = parse_cargo_version(&text) else {
+            return;
+        };
+
+        let Ok(mut state) = self.store.load().await else {
+            return;
+        };
+        // Never stomp active work: if a ticket is claimed/in-flight it may be
+        // mid-bump; wait for it to resolve.
+        let ticket_in_flight = state.tickets.iter().any(|t| {
+            matches!(
+                t.status(),
+                coxagent_domain::ticket::Status::InProgress
+                    | coxagent_domain::ticket::Status::Fixed
+            )
+        });
+        if ticket_in_flight {
+            return;
+        }
+        let state_ver = state.current_version.clone();
+        // What version should state be reconciled to, or None when no drift.
+        // Purely a function of (state version, repo version) — the in-flight
+        // guard above already ruled out active work.
+        if let Some(target) = reconcile_target(&state_ver, &repo_ver) {
+            tracing::warn!(
+                "reconcile: state version {} ahead of repo {} with no work in flight — reverting",
+                state_ver,
+                repo_ver
+            );
+            state.current_version = target.clone();
+            state.log_activity(
+                "SYSTEM",
+                &format!("reconciled version {state_ver} → {target} (phantom bump, no PR merged)"),
+                None,
+            );
+            let _ = self.store.save(&state).await;
+        }
+    }
+
     /// Attach a notifier fired on significant events (deploy, budget, policy).
     #[must_use]
     pub fn with_notifier(
@@ -309,6 +420,27 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     ) -> Self {
         self.notifier = Some(notifier);
         self
+    }
+
+    /// Attach the reporter that pushes PR/review activity to the hub over HTTP.
+    ///
+    /// The runner is the only holder of forge credentials, so without this it
+    /// keeps working (git/forge operations are unaffected) but never publishes
+    /// what it opened or reviewed to the shared dashboard.
+    #[must_use]
+    pub fn with_reporter(
+        mut self,
+        reporter: Arc<dyn crate::ports::outbound::PrReporterPort>,
+    ) -> Self {
+        self.reporter = Some(reporter);
+        self
+    }
+
+    /// The runner's PR reporter, or a no-op when none was configured.
+    pub(crate) fn reporter(&self) -> Arc<dyn crate::ports::outbound::PrReporterPort> {
+        self.reporter
+            .clone()
+            .unwrap_or_else(|| Arc::new(crate::ports::outbound::NullPrReporter))
     }
 
     /// Model-allowlist gate. When the configured model is disallowed, record the
@@ -402,6 +534,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         self
     }
 
+    /// Override the post-deploy health-gate probe port (COX-B035): pass
+    /// `Err(())` when the raw `coxagent.json` names a malformed
+    /// `deploy.host_port`, so the gate fails closed instead of the default
+    /// (`Ok(config.deploy.host_port)`) treating a `Config`-parse fallback's
+    /// `None` as "nothing configured".
+    #[must_use]
+    pub fn with_host_port_probe(mut self, probe: Result<Option<u16>, ()>) -> Self {
+        self.host_port_probe = probe;
+        self
+    }
+
     /// Run one cycle. Never returns `Err`: agent failures are collected into the
     /// report so the outer loop keeps going.
     #[allow(clippy::too_many_lines)] // a linear sequence of agent phases; splitting hurts readability
@@ -442,7 +585,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // another machine) can list this team as online.
         let _ = self
             .store
-            .heartbeat_worker(&me, if leader { "leader" } else { "worker" }, "", &now)
+            .heartbeat_worker(
+                &me,
+                if leader { "leader" } else { "worker" },
+                "",
+                &self.caps,
+                &now,
+            )
             .await;
 
         // Keep the code map fresh so `.coxagent/REPO_MAP.md` reflects the tree
@@ -450,6 +599,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // Leader-only: it writes shared files under the repo.
         if leader {
             self.refresh_codegraph(cycle).await;
+            // Drift-check: if the state's version has been bumped ahead of what
+            // the checked-out tree actually declares, and no ticket is mid-flight
+            // to justify it, pull it back to reality. This closes the "version
+            // bumped but the PR never merged" drift (PR rejected/closed) that
+            // otherwise leaves a phantom release version that no build carries.
+            self.reconcile_version().await;
             // Seed the standard Wiki spaces and re-file any legacy pages that
             // were dumped under the wrong space (once, on the first cycle).
             if cycle == 1 {
@@ -552,6 +707,21 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     report.errors.push(format!("PO milestones: {e}"));
                 }
             }
+            // Release pipeline: tag + file a Release chore for every milestone
+            // whose target version is reached and whose goal is complete. Cheap
+            // and idempotent (skips unfulfilled/not-yet-reached milestones and
+            // already-tagged releases), so it runs each leader cycle rather than
+            // waiting for a daily slot — releasing the moment a milestone ships.
+            match self.releases().execute().await {
+                Ok(released) if !released.is_empty() => {
+                    self.report(
+                        "RELEASE",
+                        &format!("released milestone(s): {}", released.join(", ")),
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => report.errors.push(format!("RELEASE: {e}")),
+            }
             if self.claim_daily("pd-design-system").await {
                 self.report("PD", "designing UX");
                 match self.design_system().execute().await {
@@ -634,6 +804,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // cheap compared with a wrong implementation. Bounded per cycle.
         Box::pin(self.answer_open_questions()).await;
         self.escalate_stale_human_questions().await;
+        // Fill the acceptance criteria BEFORE the gate judges the ticket: a
+        // ticket nobody can check is one a human can only bounce, and the
+        // missing AC alone scores it out of the auto lane.
+        Box::pin(self.preflight_acceptance_criteria()).await;
         // The adaptive gate runs AFTER design and before the next dev pass:
         // routine work reaches Ready in the same cycle it was designed.
         self.adaptive_approval_pass().await;
@@ -747,7 +921,28 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                             }
                         }
                         Ok(_) => {}
-                        Err(e) => report.errors.push(format!("DEPLOY: {e}")),
+                        // A spawn/timeout error never even produced a
+                        // DeployReport (COX-B039) — without this arm
+                        // `deploy_bad` stays false, `record_deploy` never
+                        // runs (so `state.deploy.ok` keeps reporting the
+                        // PREVIOUS deploy's status), no bug is filed, and
+                        // `attempt_rollback` never fires even though
+                        // `docker_compose::deploy()` already ran `down`
+                        // before failing — the app is left stopped. Route it
+                        // through the same success=false path as an unhealthy
+                        // deploy so all four (state, bug, notify, rollback)
+                        // happen here too.
+                        Err(e) => {
+                            deploy_bad = true;
+                            let summary = format!("deploy failed: {e}");
+                            self.record_deploy(false, &summary, attempt_sha.clone(), None)
+                                .await;
+                            self.notify("deploy_failed", summary.clone()).await;
+                            if let Some(id) = self.file_deploy_bug(&summary).await {
+                                report.bugs_filed.push(id);
+                            }
+                            report.errors.push(format!("DEPLOY: {e}"));
+                        }
                     }
                     // Hard DoD gate: run the real test suite. A red suite becomes a
                     // high-priority bug (deduped) — deterministic quality, not just
@@ -818,6 +1013,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // Close the loop: when a human (or the SA) requested changes on a
             // PR, a DEV agent addresses the feedback and pushes to the branch.
             self.address_pr_feedback().await;
+
+            // "Agents don't sleep": if finished work is sitting UNCOMMITTED in
+            // the tree — DEV completed & verified a ticket but its ship path
+            // (commit_for_ticket) was interrupted by a crash or transient
+            // failure before it ran — sweep it up into a per-ticket branch +
+            // PR now instead of leaving it stranded on main cycle after cycle.
+            self.sweep_unshipped_work().await;
 
             // Scrum comes alive: when there's a real tension (deploy failure, a
             // bug pile-up, or a periodic check-in), the team actually discusses
@@ -907,7 +1109,6 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .await;
         }
     }
-
 }
 
 /// Drop dangling index lines from the memory dir's `MEMORY.md` after a file is
@@ -1033,6 +1234,54 @@ mod marker_tests {
         // ======= alone is ambiguous (markdown underline) — not a trigger.
         assert!(!diff_has_conflict_markers("+=======\n+Title\n"));
         assert!(!diff_has_conflict_markers("+normal code line\n context\n"));
+    }
+}
+
+#[cfg(test)]
+mod version_reconcile_tests {
+    use super::{parse_cargo_version, reconcile_target};
+    use coxagent_domain::SemVer;
+
+    #[test]
+    fn parses_top_level_version() {
+        let out = parse_cargo_version("[package]\nname = \"x\"\nversion = \"2.22.0\"\n");
+        assert_eq!(out.as_deref(), Some("2.22.0"));
+    }
+
+    #[test]
+    fn ignores_dependency_versions() {
+        // A dependency `serde = { version = "1.x" }` is NOT at line start, so it
+        // is skipped. Cargo's own `[package] version` is the intended target.
+        let out = parse_cargo_version(
+            "[package]\nname = \"x\"\nversion = \"2.22.0\"\n[dependencies]\nserde = { version = \"1.0.0\" }\n",
+        );
+        assert_eq!(out.as_deref(), Some("2.22.0"));
+    }
+
+    #[test]
+    fn missing_or_garbage_version_is_none() {
+        assert_eq!(parse_cargo_version("[package]\nname=\"x\"\n"), None);
+        assert_eq!(parse_cargo_version("version = \"not-a-version\"\n"), None);
+    }
+
+    #[test]
+    fn reconciles_only_when_state_is_ahead() {
+        // State ahead of repo → reconcile DOWN to repo.
+        assert_eq!(
+            reconcile_target(&SemVer::new(2, 23, 0), "2.22.0"),
+            Some(SemVer::new(2, 22, 0))
+        );
+        // State at or behind reality → no-op.
+        assert_eq!(reconcile_target(&SemVer::new(2, 22, 0), "2.22.0"), None);
+        assert_eq!(reconcile_target(&SemVer::new(2, 21, 0), "2.22.0"), None);
+        // Unparseable repo version → no-op (cannot guess).
+        assert_eq!(reconcile_target(&SemVer::new(2, 23, 0), "garbage"), None);
+    }
+
+    #[test]
+    fn semver_ordering_is_not_lexicographic() {
+        // 2.9.0 < 2.10.0 must hold so we never wrongly treat 2.9 as "ahead".
+        assert!(SemVer::new(2, 9, 0) < SemVer::new(2, 10, 0));
     }
 }
 

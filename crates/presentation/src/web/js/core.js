@@ -14,7 +14,7 @@ const UCOLS=[
   ["shipped","Shipped","--teal",["documented","verified"]],
 ];
 const ROLES=["ba","po","sm","sa","pd","dev_bug","dev_feature","test","docs"];
-const MODELS={claude:["sonnet","opus","haiku"],scripted:["n/a"],mock:["n/a"],opencode:null,hermes:["hermes-3-llama-3.1-70b","hermes-2-pro-mistral-7b"],gemini:["gemini-2.5-pro","gemini-2.5-flash","gemini-2.0-flash"],codex:["gpt-4o","gpt-5","gpt-4"]};
+const MODELS={claude:["sonnet","opus","haiku"],copilot:["auto","claude-sonnet-4.6","claude-sonnet-4.5","claude-haiku-4.5","gpt-5.4","gpt-5.4-mini","gpt-5.3-codex","gemini-3.1-pro-preview","grok-4.5"],scripted:["n/a"],mock:["n/a"],opencode:null,hermes:["hermes-3-llama-3.1-70b","hermes-2-pro-mistral-7b"],gemini:["gemini-2.5-pro","gemini-2.5-flash","gemini-2.0-flash"],codex:["gpt-4o","gpt-5","gpt-4"]};
 // Common opencode provider/model choices (it accepts any, incl. local ollama).
 const OPENCODE_PROVIDERS=[{id:"anthropic",label:"Anthropic"},{id:"openai",label:"OpenAI"},{id:"google",label:"Google"},{id:"openrouter",label:"OpenRouter"},{id:"groq",label:"Groq"},{id:"deepseek",label:"DeepSeek"},{id:"ollama",label:"Ollama (local)"},{id:"mistral",label:"Mistral"}];
 let OC_MODELS=["claude-sonnet-4-5","claude-opus-4-1","gpt-5","gpt-4o","gemini-2.5-pro","gemini-2.5-flash","llama3.1","qwen2.5-coder","mixtral-8x7b","deepseek-v3","deepseek-r1"];
@@ -99,6 +99,27 @@ function nav(v){
    if(v==="settings")loadSettings(); else if(v==="calendar"){if(!Array.isArray(MEETINGS))MEETINGS=[];loadMeetings().then(renderCalendar).catch(()=>{MEETINGS=[];renderCalendar();});} else if(v==="discuss"){loadComments();} else if(v==="docs"){loadDocs();} else if(v==="people"){renderPeople();} else if(v==="audit"){renderAudit();} else if(v==="access"){renderAccess();} else if(v==="roadmap"){renderRoadmap();} else if(v==="review"){renderReview();} else if(v==="inbox"){renderInbox();} else if(v==="codemap"){renderCodeMap();} else if(v==="team"){loadAgentEvals();renderActive();} else if(v==="terminal"){openTerminal();} else renderActive();
    setTimeout(centerContent,50);}
 function initials(r){return r.replace("DEV-","").slice(0,2);}
+// A hostname as a person would say it: "Lutons-MacBook-Pro.local" -> "MacBook
+// Pro". Drops the mDNS suffix, the dashes, and the owner's own name, which the
+// account beside it already said.
+function prettyHost(h,account){
+  let s=String(h||"").replace(/\.local\.?$/i,"").replace(/[-_]+/g," ").trim();
+  const a=String(account||"").trim();
+  if(a){const own=new RegExp("^"+a.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")+"(?:'?s)?\\s+","i");s=s.replace(own,"");}
+  return s.trim()||String(h||"");
+}
+// Label a worker id (`account@host`) for display. The machine is named only
+// when it actually tells two workers apart — always printing it makes every row
+// longer in the common case (one person, one machine) while saying nothing.
+function workerLabel(who,all){
+  const s=String(who||""); const at=s.indexOf("@");
+  if(at<0)return s;
+  const account=s.slice(0,at), host=s.slice(at+1);
+  const hosts=new Set((all||[]).map(String)
+    .filter(w=>w.slice(0,w.indexOf("@"))===account&&w.includes("@"))
+    .map(w=>w.slice(w.indexOf("@")+1)));
+  return hosts.size>1?account+" · "+prettyHost(host,account):account;
+}
 function metricsFrom(s){const t=s.tickets||[],h=s.history||[],isF=x=>x.type!=="bug";
   return {shipped:t.filter(x=>isF(x)&&(x.status==="done"||x.status==="documented")).length,
     inflight:t.filter(x=>isF(x)&&(x.status==="ready"||x.status==="in_progress")).length,
@@ -453,7 +474,9 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
       let cur=null,live=working;
       if(r==="DEV-FEATURE"||r==="DEV-BUG"){const w=inProg.find(t=>r==="DEV-BUG"?t.type==="bug":t.type!=="bug");if(w){cur=w.id;}}
       if(!cur&&st.last&&st.last.ticket)cur=st.last.ticket;
-      const short=w=>(w||'').split('@')[0];
+      // Name the machine only when this account runs on more than one.
+      const allWho=runners.map(x=>x.who);
+      const short=w=>workerLabel(w,allWho);
       const taskChip=(note,tid,cls)=>`<span class="ag-task ${cls}"${tid?` onclick="event.stopPropagation();showTicket('${tid}')" style="cursor:pointer"`:''}>${note?esc(note):''}${tid?`<span class="tid">${esc(tid)}</span>`:''}</span>`;
       let statusHtml;
       if(working){
@@ -499,23 +522,19 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
     renderTranscripts();
   }else if(CUR==="insights"){
     const sp=s.spend||{by_role:{}};const tok=(sp.input_tokens||0)+(sp.output_tokens||0);
-    // Counterfactual (what it would cost WITHOUT the token-saver) comes from a
-    // cached fetch — cards render in ONE pass, no flash-then-replace.
+    // These KPIs are the real measured totals — no counterfactual. The old
+    // "không nén ~$X" subtitle scaled a 200-sample char saving against the
+    // lifetime token total: mismatched units and scope, so it read as ~1.4%
+    // and looked fabricated. The token-saver's true, honest ratio lives in its
+    // own panel below (78% off the output it actually compressed).
     const drawKpis=()=>{
-      let subTok="",subCost="";
-      const ts=window._tsCache;
-      if(ts&&ts.saved>0&&tok>0){
-        const wouldTok=tok+Math.round(ts.saved/4);
-        subTok="không nén: ~"+fmtK(wouldTok);
-        subCost="không nén: ~"+money((sp.total_cost_usd||0)*(wouldTok/tok));
-      }
       setHTML(document.getElementById("cost-kpis"),
-        [kpi("Total spend",money(sp.total_cost_usd),subCost),kpi("Tokens",fmtK(tok),subTok),kpi("Runs",sp.runs||0)].join(""));
+        [kpi("Total spend",money(sp.total_cost_usd)),kpi("Tokens",fmtK(tok)),kpi("Runs",sp.runs||0)].join(""));
     };
     drawKpis();
     if(!window._tsCacheAt||Date.now()-window._tsCacheAt>60000){
       window._tsCacheAt=Date.now();
-      fetch("/api/token-saver").then(r=>r.json()).then(ts=>{window._tsCache=ts;if(CUR==="insights")drawKpis();}).catch(()=>{});
+      fetch("/api/token-saver").then(r=>r.json()).then(ts=>{window._tsCache=ts;if(CUR==="insights")renderTokenSaver();}).catch(()=>{});
     }
     const roles=Object.entries(sp.by_role||{}).sort((a,b)=>b[1]-a[1]);
     const max=roles.length?roles[0][1]:1;

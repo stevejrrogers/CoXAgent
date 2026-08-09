@@ -136,6 +136,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunMilestonesUseCase<S, E> {
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(300),
             escalation_level: 0,
+            label: None,
         };
 
         let outcome = self.engine.run(request).await?;
@@ -156,6 +157,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunMilestonesUseCase<S, E> {
                 name: m.name.trim().to_owned(),
                 goal: m.goal.trim().to_owned(),
                 target_version: m.target_version.trim().to_owned(),
+                goal_complete: false,
+                fulfilled: false,
             })
             // An extension target at or below the shipped version is reached
             // the moment it is written — drop it rather than grow a dead roadmap.
@@ -279,6 +282,8 @@ mod tests {
                     name: name.to_owned(),
                     goal: "g".to_owned(),
                     target_version: target.to_owned(),
+                    goal_complete: false,
+                    fulfilled: false,
                 })
                 .collect(),
             ..ProjectState::default()

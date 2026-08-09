@@ -14,7 +14,14 @@ pub fn transition_allowed(ticket_type: TicketType, from: Status, to: Status) -> 
         TicketType::Feature | TicketType::Chore => matches!(
             (from, to),
             (Pending, Ready | Rejected)
-                | (Ready, InProgress)
+                // Ready -> Pending = an approval taken back before any work
+                // started. The adaptive gate promises a 30-minute undo window
+                // on everything it auto-approves; without this edge that
+                // promise could not be kept for a feature or a chore — the
+                // endpoint answered "invalid transition" and the ticket stayed
+                // approved. Ready -> Rejected likewise: a duplicate spotted one
+                // minute too late had no way back off the board.
+                | (Ready, InProgress | Pending | Rejected)
                 | (InProgress, Done)
                 | (Done, Documented)
         ),
@@ -42,8 +49,11 @@ pub fn can_transition(actor: Role, from: Status, to: Status) -> bool {
         // A human (dashboard user) approves readiness when the hybrid
         // ready-gate is on — same move, person instead of agent.
         (Pending, Ready) => matches!(actor, Role::Sa | Role::Pd | Role::User),
-        // PO (or a user acting as super-PO) rejects.
-        (Pending | Open, Rejected) => matches!(actor, Role::Po | Role::User),
+        // PO (or a user acting as super-PO) rejects. From `Ready` too: work has
+        // not started there, and a duplicate is worth catching late.
+        (Pending | Open | Ready, Rejected) => matches!(actor, Role::Po | Role::User),
+        // Taking an approval back — the undo window, and only before work starts.
+        (Ready, Pending) => matches!(actor, Role::Po | Role::User),
         // Claiming work is a dev action.
         (Ready | Open, InProgress) => matches!(actor, Role::DevBug | Role::DevFeature),
         // Dev completes.
@@ -137,5 +147,39 @@ mod tests {
             Status::InProgress
         ));
         assert!(field_permitted(Role::System, "priority"));
+    }
+}
+
+#[cfg(test)]
+mod undo_window_tests {
+    use super::{can_transition, transition_allowed};
+    use crate::ticket::{Role, Status, TicketType};
+
+    #[test]
+    fn an_approval_can_be_taken_back_before_work_starts() {
+        // The adaptive gate promises a 30-minute undo on everything it
+        // auto-approves. Without this edge the endpoint answered "invalid
+        // transition for Feature: Ready -> Pending" and the promise was empty.
+        for t in [TicketType::Feature, TicketType::Chore] {
+            assert!(transition_allowed(t, Status::Ready, Status::Pending));
+            assert!(transition_allowed(t, Status::Ready, Status::Rejected));
+        }
+        assert!(can_transition(Role::User, Status::Ready, Status::Pending));
+        assert!(can_transition(Role::Po, Status::Ready, Status::Rejected));
+        // Not a developer's call: they claim work, they do not un-approve it.
+        assert!(!can_transition(
+            Role::DevFeature,
+            Status::Ready,
+            Status::Pending
+        ));
+    }
+
+    #[test]
+    fn work_already_underway_is_not_undone_by_the_gate() {
+        assert!(!transition_allowed(
+            TicketType::Feature,
+            Status::InProgress,
+            Status::Pending
+        ));
     }
 }

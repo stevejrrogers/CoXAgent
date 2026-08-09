@@ -8,7 +8,9 @@
 mod onboard;
 mod shutdown;
 
-use coxagent_application::config::{Config, DeployConfig, GitConfig, PolicyConfig, WorkflowConfig};
+use coxagent_application::config::{
+    Config, DeployConfig, GitConfig, PolicyConfig, ReleasesConfig, WorkflowConfig,
+};
 use coxagent_application::ports::outbound::StateStorePort;
 use coxagent_application::use_cases::{RecoverUseCase, RunBaUseCase, RunCycleUseCase};
 use coxagent_application::Spend;
@@ -16,7 +18,8 @@ use coxagent_infrastructure::engine::{
     AnyEngine, FailoverEngine, Meter, MeteringEngine, RoutingEngine, TranscriptEngine,
 };
 use coxagent_infrastructure::{
-    discover, AnyStateStore, DockerComposeDeploy, JsonStateStore, SqlStateStore, WebhookNotifier,
+    discover, AnyStateStore, DockerComposeDeploy, JsonStateStore, RestConfig, RestStateStore,
+    SqlStateStore, WebhookNotifier,
 };
 use coxagent_presentation::{cli, render_changelog, render_report, Command};
 use std::fmt::Write as _;
@@ -27,11 +30,14 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 mod builders;
+mod config_load;
 mod shims;
 
 pub use builders::load_coordination;
 #[allow(clippy::wildcard_imports)] // one module, many files — see builders.rs
 use builders::*;
+#[allow(clippy::wildcard_imports)] // one module, many files — see config_load.rs
+use config_load::*;
 pub use shims::shim_script;
 #[allow(clippy::wildcard_imports)] // one module, many files — see shims.rs
 use shims::*;
@@ -53,10 +59,22 @@ pub async fn cli_main() -> ExitCode {
     }
 }
 
-fn init_tracing() {
+pub fn init_tracing() {
     use tracing_subscriber::{fmt, EnvFilter};
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let _ = fmt().with_env_filter(filter).with_target(false).try_init();
+}
+
+/// The project id a `--state-dir` belongs to: the workspace directory name
+/// (`~/CoXAgent/cxa/state` -> `cxa`), falling back to `default`.
+///
+/// Every single-project command must agree on this, or two of them address
+/// different rows of the same shared Postgres for the same workspace.
+fn project_id_for(state_dir: &Path) -> String {
+    state_dir.parent().and_then(Path::file_name).map_or_else(
+        || "default".to_owned(),
+        |n| n.to_string_lossy().into_owned(),
+    )
 }
 
 #[allow(clippy::too_many_lines)] // a flat CLI-command dispatch; splitting hurts readability
@@ -65,7 +83,15 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
     // The single-project store is built lazily: `serve`/`hub`/`discover` don't
     // use it, so we must not create it eagerly — the default `./state` would
     // resolve against a read-only cwd (e.g. a GUI-launched app runs in `/`).
-    let store = || make_store("default", &args.state_dir);
+    //
+    // The id is the workspace directory name, the SAME derivation `run` uses.
+    // It was hardcoded "default" here, so on a shared Postgres `onboard
+    // --state-dir ~/CoXAgent/cxa/state` wrote the new project into the `default`
+    // row while the operator for that very workspace read `cxa`: one dashboard
+    // entry holding the real project under the wrong name, and a second, empty
+    // one that looked like a duplicate.
+    let pid = project_id_for(&args.state_dir);
+    let store = || make_store(&pid, &args.state_dir);
 
     match args.command {
         Command::Report => {
@@ -156,23 +182,16 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
             context,
             max_cycles,
         } => {
-            load_coordination(
-                args.state_dir
-                    .parent()
-                    .and_then(Path::parent)
-                    .unwrap_or(&args.state_dir),
-            );
-            // The project id is the workspace dir name (e.g. `cxc`), NOT a fixed
-            // "default" — so a headless worker shares the SAME Postgres project as
-            // the hub and other operators (distributed coordination).
-            let pid = args
+            let co_base = args
                 .state_dir
                 .parent()
-                .and_then(Path::file_name)
-                .map_or_else(
-                    || "default".to_owned(),
-                    |n| n.to_string_lossy().into_owned(),
-                );
+                .and_then(Path::parent)
+                .unwrap_or(&args.state_dir);
+            // Shared coordination backend from a persistent file next to state
+            // (Finder launch needs no env); then feed any locally-persisted
+            // remote-store bearer so /store calls authenticate without hand-copy.
+            load_coordination(co_base);
+            provision_local_token(co_base);
             Box::pin(run_loop(
                 make_store(&pid, &args.state_dir).await?,
                 &args.state_dir,
@@ -251,6 +270,36 @@ const SHIM_CMDS: &[&str] = &[
 /// of truth instead of being re-implemented in shell. Only these pay the extra
 /// process; every other shim keeps the plain pipeline.
 const EXACT_AWARE_CMDS: &[&str] = &["git"];
+
+#[cfg(test)]
+mod project_id_tests {
+    use super::project_id_for;
+    use std::path::Path;
+
+    /// Every single-project command must land on the SAME Postgres row for a
+    /// given workspace. `onboard` hardcoded "default" while `run` derived the
+    /// name, so onboarding `~/CoXAgent/cxa` wrote the project into `default`
+    /// and the operator for it then read an empty `cxa` — the dashboard showed
+    /// two projects, neither of them right.
+    #[test]
+    fn the_id_is_the_workspace_directory_name() {
+        assert_eq!(
+            project_id_for(Path::new("/Users/u/CoXAgent/cxa/state")),
+            "cxa"
+        );
+        assert_eq!(
+            project_id_for(Path::new("/srv/work/lynx-3/state")),
+            "lynx-3"
+        );
+    }
+
+    #[test]
+    fn a_bare_state_dir_falls_back_to_default() {
+        // `coxagent --state-dir state` from a workspace root: no parent name to
+        // take, and "default" is the id a single-project install already uses.
+        assert_eq!(project_id_for(Path::new("state")), "default");
+    }
+}
 
 #[cfg(test)]
 mod shim_script_tests {
@@ -578,6 +627,7 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
             architecture: Vec::new(),
             deploy: DeployConfig::default(),
             policy: PolicyConfig::default(),
+            releases: ReleasesConfig::default(),
         },
         logs_dir(&base),
         None,
@@ -885,6 +935,7 @@ fn effective_fallbacks(config: &Config) -> Vec<coxagent_application::config::Eng
             EngineKind::Claude => "haiku".to_owned(),
             EngineKind::Opencode => "bizbrain/Qwen3.6-35B-A3B-thinking".to_owned(),
             EngineKind::Hermes => "hermes-3-llama-3.2-3b".to_owned(),
+            EngineKind::Copilot => "auto".to_owned(),
             _ => continue,
         };
         push(d.kind, model);
@@ -966,7 +1017,13 @@ async fn run_loop(
     context: String,
     max_cycles: Option<u64>,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let config = load_config(state_dir);
+    // One read settles both the `Config` and the deploy health-gate's host-port
+    // probe, so a `deploy.host_port` this project cannot publish fails the gate
+    // (COX-B035) or is healed (COX-B042) instead of drifting between the two.
+    let LoadedConfig {
+        config,
+        host_port_probe,
+    } = load_config_with_probe(state_dir);
     // Same project-id derivation as Command::Run/operator_main: the workspace
     // dir name (e.g. `cxc`), not a fixed "default" — so this operator's MCP
     // calls target the same project the hub knows it by.
@@ -1026,12 +1083,14 @@ async fn run_loop(
                 config.git.base_url.clone(),
                 work_dir.clone(),
             );
+            // Which stored login to act as; empty = the CLI's active account.
+            let account = config.git.account.clone();
             match config.git.provider.as_str() {
                 "gitlab" => Some(Arc::new(coxagent_infrastructure::GlForge::new(
                     repo, base, wd,
                 ))),
-                "github" => Some(Arc::new(coxagent_infrastructure::GhForge::new(
-                    repo, base, wd,
+                "github" => Some(Arc::new(coxagent_infrastructure::GhForge::with_account(
+                    repo, base, wd, account,
                 ))),
                 _ => None,
             }
@@ -1041,9 +1100,13 @@ async fn run_loop(
     // Ship this operator's live logs to shared storage (MinIO) so the central
     // hub can show a remote operator's live agent log, not just local ones.
     spawn_log_uploader(state_dir, &work_dir);
+    // Captured before the use case takes ownership: the capability probe needs
+    // the same repo and git settings the agents will actually use.
+    let (caps_config, caps_work_dir) = (config.clone(), work_dir.clone());
     let mut uc = RunCycleUseCase::new(Arc::clone(&store), engine, config, work_dir, context)
         .with_meter(meter)
         .with_deploy(std::sync::Arc::new(DockerComposeDeploy::new()))
+        .with_host_port_probe(host_port_probe)
         .with_git(std::sync::Arc::new(
             coxagent_infrastructure::SystemGit::new(),
         ))
@@ -1059,6 +1122,11 @@ async fn run_loop(
     // so every dashboard shows this headless team's current agent.
     let hb_store = Arc::clone(&store);
     let hb_worker = worker.clone();
+
+    // What THIS machine can actually launch. The hub serving the dashboard may
+    // be a container with no agent CLI at all, so it cannot detect this for us.
+    let hb_caps = local_caps(&caps_config, &caps_work_dir).await;
+    uc.set_capabilities(hb_caps.clone());
     // Shared live phase + keepalive: a single engine call can run for tens of
     // minutes while the registry TTL is a few minutes, so without a mid-phase
     // refresh a busy operator would drop off the dashboard and look dead.
@@ -1066,16 +1134,30 @@ async fn run_loop(
         Arc::new(Mutex::new(("idle".to_owned(), String::new())));
     {
         let (s, w, phase) = (Arc::clone(&store), hb_worker.clone(), Arc::clone(&phase));
+        let caps = hb_caps.clone();
         tokio::spawn(async move {
+            // Announce presence at once, before the first sleep: an operator that
+            // took 45s to appear is one the setup wizard has already declared
+            // missing.
+            {
+                let now = coxagent_application::state::now_rfc3339();
+                let _ = s.heartbeat_worker(&w, "idle", "", &caps, &now).await;
+            }
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(45)).await;
                 let (role, note) = phase
                     .lock()
                     .map_or_else(|_| ("idle".to_owned(), String::new()), |p| p.clone());
-                if role != "idle" {
-                    let now = coxagent_application::state::now_rfc3339();
-                    let _ = s.heartbeat_worker(&w, &role, &note, &now).await;
-                }
+                // Beat even while idle. This operator is a machine with agent
+                // CLIs on it, and the hub — a container that will never have
+                // one — learns what the team can run only from this registry.
+                // Skipping idle meant an operator waiting for its first Start
+                // was invisible, so the dashboard swore no agent CLI existed
+                // while one sat right here. It also drains queued jobs on its
+                // own 15s poll regardless of Start, so advertising it does not
+                // mislead the force-merge routing.
+                let now = coxagent_application::state::now_rfc3339();
+                let _ = s.heartbeat_worker(&w, &role, &note, &caps, &now).await;
             }
         });
     }
@@ -1089,9 +1171,10 @@ async fn run_loop(
             *p = (role.clone(), note.clone());
         }
         let (s, w) = (Arc::clone(&hb_store), hb_worker.clone());
+        let caps = hb_caps.clone();
         tokio::spawn(async move {
             let now = coxagent_application::state::now_rfc3339();
-            let _ = s.heartbeat_worker(&w, &role, &note, &now).await;
+            let _ = s.heartbeat_worker(&w, &role, &note, &caps, &now).await;
         });
     }));
     let operator = worker.clone();
@@ -1421,7 +1504,16 @@ mod mcp_auth_tests {
             .expect("mint Viewer token");
         let auth: Arc<dyn AuthPort> = Arc::new(svc);
 
-        let port = 47_654;
+        // Ephemeral port, not a fixed one: a fixed port collides with any
+        // other hub already listening (a leftover dev hub, a second concurrent
+        // `cargo test`), and the test then talks to a STRANGER's server whose
+        // auth store never minted these tokens — which shows up as a baffling
+        // 401 on the assertion below instead of a bind error.
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .expect("reserve a free port")
+            .local_addr()
+            .expect("local addr")
+            .port();
         let extras = coxagent_presentation::HubExtras {
             auth: Some(auth),
             hub_dir: Some(dir.path().to_path_buf()),
@@ -1453,9 +1545,8 @@ mod mcp_auth_tests {
         serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" })
     }
 
-    // These three tests share one hub instance on a fixed port (real TCP
-    // bind), so they run as one #[tokio::test] rather than three parallel
-    // ones that would race on the same port.
+    // These three checks share one hub instance (real TCP bind), so they run
+    // as one #[tokio::test] rather than three that would each boot a hub.
     #[tokio::test]
     async fn api_mcp_auth_gate_matches_can_write_not_viewer() {
         let (port, be_token, viewer_token, _dir) = boot_hub_with_tokens().await;
@@ -1584,6 +1675,7 @@ mod live_claude_mcp_test {
                 work_dir: std::path::PathBuf::from("/Users/steverogers/Projects/CoXAgent"),
                 timeout: Duration::from_secs(120),
                 escalation_level: 0,
+                label: None,
             })
             .await
             .expect("claude run");

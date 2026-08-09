@@ -26,17 +26,29 @@ x-app-env: &app-env
   COXAGENT_MONGO_URL: mongodb://${MONGO_USER}:${MONGO_PASSWORD}@mongo:27017/?authSource=admin
   COXAGENT_MONGO_DB: coxagent
   COXAGENT_DB_DSN: postgres://${PG_USER}:${PG_PASSWORD}@db:5432/coxagent
-  COXAGENT_REDIS_URL: redis://redis:6379
+  # Shared account/session store — REQUIRED for the split: gateway issues the
+  # login cookie, realtime must validate it. Without this each container keeps
+  # file-backed sessions in its own memory and cross-service auth (e.g. the
+  # /events SSE stream on realtime) answers 401. Sessions ride Redis (native
+  # TTL) on top of this.
+  COXAGENT_AUTH_DSN: postgres://${PG_USER}:${PG_PASSWORD}@db:5432/coxagent
+  COXAGENT_REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
   COXAGENT_TURN_URL: turn:${PUBLIC_IP}:3478
   COXAGENT_TURN_SECRET: ${TURN_SECRET}
 
 services:
+  # Every data store below publishes to 127.0.0.1 ONLY. A bare "5432:5432" binds
+  # 0.0.0.0, which put Postgres, Redis, Mongo and MinIO on the LAN — with Redis
+  # holding live session tokens and no password at all, anyone on the same WiFi
+  # could read a token and sign in as super-admin. Nothing outside this host
+  # needs these ports: the services reach each other over the compose network by
+  # name, and the locally-run operator reaches them over the loopback binding.
   minio:
     image: minio/minio
     command: server /data --console-address ":9001"
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
     environment:
       MINIO_ROOT_USER: ${S3_ACCESS_KEY}
       MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY}
@@ -47,7 +59,7 @@ services:
   mongo:
     image: mongo:7
     ports:
-      - "27017:27017"
+      - "127.0.0.1:27017:27017"
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER}
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD}
@@ -58,7 +70,11 @@ services:
   db:
     image: postgres:16-alpine
     ports:
-      - "5432:5432"
+      # Host port 5433, not 5432: this machine already runs a native Postgres on
+      # 5432. While this container published 0.0.0.0:5432 the two coexisted, so a
+      # local operator dialling 127.0.0.1:5432 silently reached the WRONG server.
+      # Containers are unaffected — they resolve `db:5432` on the compose network.
+      - "127.0.0.1:5433:5432"
     environment:
       POSTGRES_USER: ${PG_USER}
       POSTGRES_PASSWORD: ${PG_PASSWORD}
@@ -75,8 +91,13 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
+      - "127.0.0.1:6379:6379"
+    # Sessions live here (native TTL), so an unauthenticated Redis IS an
+    # authentication bypass — a stolen `cox:auth:session:*` value is a signed-in
+    # super-admin. It ran with no password until 2026-08-04.
+    command:
+      ["redis-server", "--save", "", "--appendonly", "no",
+       "--requirepass", "${REDIS_PASSWORD}"]
     restart: unless-stopped
 
   coturn:

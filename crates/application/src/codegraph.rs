@@ -967,8 +967,12 @@ mod tests {
         assert!(g.search("mai", 10).iter().any(|s| s.name == "main"));
         assert!(g.repo_map(10_000).contains("src/main.rs"));
 
-        g.save(&crate::test_fs::StdFsFiles, &dir).await.expect("save");
-        assert!(CodeGraph::load(&crate::test_fs::StdFsFiles, &dir).await.is_some());
+        g.save(&crate::test_fs::StdFsFiles, &dir)
+            .await
+            .expect("save");
+        assert!(CodeGraph::load(&crate::test_fs::StdFsFiles, &dir)
+            .await
+            .is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

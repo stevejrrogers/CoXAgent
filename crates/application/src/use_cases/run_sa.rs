@@ -134,9 +134,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
                 let awaiting = state
                     .tickets
                     .iter()
-                    .filter(|t| {
-                        t.status() == Status::Pending && t.design().technical.is_some()
-                    })
+                    .filter(|t| t.status() == Status::Pending && t.design().technical.is_some())
                     .count();
                 if awaiting >= 6 {
                     return Ok(None);
@@ -185,7 +183,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
         .await;
         let outcome = self
             .engine
-            .run(self.build_request(&id, &title, &memory, &knowledge).await)
+            .run(
+                self.build_request(
+                    &id,
+                    &title,
+                    &memory,
+                    &knowledge,
+                    &crate::prompts::human_steering_block(&state, id.as_str()),
+                )
+                .await,
+            )
             .await?;
         if !outcome.succeeded() {
             self.store.release_stage(&id, "sa", &worker).await.ok();
@@ -307,6 +314,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             work_dir: self.work_dir.clone(),
             timeout: std::time::Duration::from_secs(600),
             escalation_level: 1,
+            label: Some(id.to_string()),
         };
         let out = self.engine.run(request).await.ok()?;
         if !out.succeeded() {
@@ -383,6 +391,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             work_dir: self.work_dir.clone(),
             timeout: std::time::Duration::from_secs(300),
             escalation_level: 1, // the critic runs on the stronger ladder model
+            label: Some(id.to_string()),
         };
         let critique = match self.engine.run(critique_req).await {
             Ok(o) if o.succeeded() => o.stdout.trim().to_owned(),
@@ -402,6 +411,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             work_dir: self.work_dir.clone(),
             timeout: std::time::Duration::from_secs(600),
             escalation_level: 0,
+            label: Some(id.to_string()),
         };
         match self.engine.run(revise_req).await {
             Ok(o) if o.succeeded() => parse_design(&o.stdout).unwrap_or(design),
@@ -415,6 +425,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
         title: &str,
         memory: &str,
         knowledge: &str,
+        steering: &str,
     ) -> AgentRequest {
         let _choice = self.config.engine.resolve(Role::Sa);
         let context_block = self
@@ -428,7 +439,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             role: Role::Sa,
             system_prompt: prompts::system_prompt(prompts::SA),
             task_prompt: format!(
-                "Design feature {id}: {title}{context_block}{stack}{}{}{knowledge}{memory}",
+                "Design feature {id}: {title}{context_block}{stack}{}{}{knowledge}{memory}{steering}",
                 prompts::focus_block(self.files.as_deref(), &self.work_dir, title).await,
                 prompts::repo_map_block(
                     self.files.as_deref(),
@@ -440,6 +451,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(1200),
             escalation_level: 0,
+            label: Some(id.to_string()),
         }
     }
 }
