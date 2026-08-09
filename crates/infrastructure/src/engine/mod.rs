@@ -4,6 +4,7 @@ pub mod any;
 pub mod claude;
 pub mod failover;
 pub mod hermes;
+pub(crate) mod live;
 pub mod metering;
 pub mod mock;
 pub mod opencode;
