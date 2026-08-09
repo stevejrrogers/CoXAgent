@@ -108,6 +108,7 @@ impl AgentEnginePort for CopilotEngine {
             trace: parsed.trace,
             session_id: parsed.session_id,
             sandbox,
+            engine: "copilot".to_owned(),
         })
     }
 }
