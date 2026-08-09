@@ -716,24 +716,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let Ok(state) = self.store.load().await else {
             return;
         };
-        let Some(topic) = Self::scrum_topic(&state, report, cycle, self.config.workflow.language)
+        let Some((category, topic)) =
+            Self::scrum_topic(&state, report, cycle, self.config.workflow.language)
         else {
             return;
         };
-        // Skip if we discussed the exact same topic last cycle — prevents
-        // duplicate noise when the trigger condition persists across cycles.
-        {
-            // The guard only holds a topic string, so a poisoned lock (another
-            // thread panicked mid-update) costs nothing to recover from — take
-            // the inner value rather than panic a whole cycle over dedupe state.
-            let mut last = self
-                .last_discussion_topic
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if *last == topic {
-                return;
-            }
-            (*last).clone_from(&topic);
+        // At most ONE discussion of a given category per day (persisted + shared
+        // across operators), so a condition that persists — "47 open bugs" every
+        // cycle — is raised once, not re-posted every 30 seconds. A genuinely
+        // different topic (a deploy failure) can still fire the same day.
+        if !self.claim_daily(&format!("discussion:{category}")).await {
+            return;
         }
         self.report("SM", "scrum discussion");
         let uc = crate::use_cases::RunDiscussionUseCase::new(
