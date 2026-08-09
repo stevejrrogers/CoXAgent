@@ -5,7 +5,7 @@
       "type": "remote",
       "url": "http://127.0.0.1:8101/api/mcp",
       "headers": {
-        "Authorization": "Bearer 30e4f8adb7bfb81ac5f8bf6c997966c830cf1921e2b0c831b72e605974d5a27a"
+        "Authorization": "Bearer d951dbb07cf27bcee3412478f5c8704dcfd31986a46541a9972fe91f629d02f8"
       }
     }
   }

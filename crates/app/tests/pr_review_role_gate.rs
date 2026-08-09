@@ -7,7 +7,9 @@
 //! `can_write() || Reviewer`, i.e. "any role except Viewer" — mathematically
 //! identical to the ordinary write gate, so a member-tier user (BA/FE/BE/…)
 //! could force-merge a PR (bypassing CI per the `require_ci` feature) or spin
-//! up a preview deploy.
+//! up a preview deploy. `can_review()` now grants review rights to the
+//! developer roles and the SA too (COX-roles gate map), so the non-review
+//! member tier this test pins is BA/PO/SM/QA plus the legacy Viewer.
 //!
 //! The unit test in `coxagent_application::auth` pins the predicate; this one
 //! pins the HTTP behaviour end to end, because the predicate is only half of
@@ -192,16 +194,14 @@ const ACTIONS: [&str; 6] = [
 async fn pr_actions_are_reviewer_only_not_open_to_every_writer() {
     let _dir = boot().await;
 
-    // Member tier: `can_write()` is true for all of them, which is why every
-    // one of these used to succeed.
+    // Non-review member tier: `can_write()` is true for all of them, which is
+    // why every one of these used to succeed. Per the team's gate map
+    // (COX-roles), PR review belongs to developers and the SA, not BA/PO/SM/QA.
     for role in [
         AuthRole::Ba,
-        AuthRole::Fe,
-        AuthRole::Be,
-        AuthRole::Aie,
-        AuthRole::Ds,
-        AuthRole::Da,
-        AuthRole::De,
+        AuthRole::Po,
+        AuthRole::Sm,
+        AuthRole::Qa,
         AuthRole::Viewer,
     ] {
         for action in ACTIONS {
@@ -220,9 +220,9 @@ async fn pr_actions_are_reviewer_only_not_open_to_every_writer() {
         }
     }
 
-    // Admin, the lead tier, and the legacy Reviewer keep the access the gate
-    // documents: they clear RBAC and fall through to the handler, which 404s
-    // on the unregistered project.
+    // Admin, the lead tier, the legacy Reviewer, the SA, and every developer
+    // keep the access the gate documents: they clear RBAC and fall through to
+    // the handler, which 404s on the unregistered project.
     for role in [
         AuthRole::Super,
         AuthRole::Admin,
@@ -232,6 +232,13 @@ async fn pr_actions_are_reviewer_only_not_open_to_every_writer() {
         AuthRole::DsLead,
         AuthRole::DaLead,
         AuthRole::Reviewer,
+        AuthRole::Sa,
+        AuthRole::Fe,
+        AuthRole::Be,
+        AuthRole::Aie,
+        AuthRole::Ds,
+        AuthRole::Da,
+        AuthRole::De,
     ] {
         for action in ACTIONS {
             let (status, body) = pr_action(role, action).await;

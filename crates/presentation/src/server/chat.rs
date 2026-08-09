@@ -1134,9 +1134,6 @@ pub(super) async fn chat_reply_ep(
     .with_files(p.files.clone())
     .with_actor_role(actor_role);
     if let Some(d) = &p.deploy {
-        let host_port_probe = raw_cfg.as_deref().map_or(Ok(None), |t| {
-            coxagent_application::ports::outbound::parse_deploy_host_port(t)
-        });
         uc = uc
             .with_deploy(Arc::clone(d))
             .with_host_port_probe(host_port_probe);
