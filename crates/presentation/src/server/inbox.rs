@@ -63,7 +63,14 @@ pub(super) async fn inbox_ep(
         // ticket here — otherwise they pile up invisibly and the whole queue
         // stalls before any of it reaches DEV (the "spins but never ships" bug).
         if let Some(est) = state.cost_holds.get(&id) {
-            if !state.cost_approved.contains(&id) {
+            // Only while the ticket is still awaiting work — a hold left on a
+            // ticket that was since rejected/finished is stale and must not keep
+            // showing up as something to approve.
+            let live = matches!(
+                t.status(),
+                coxagent_domain::Status::Pending | coxagent_domain::Status::Ready
+            );
+            if live && !state.cost_approved.contains(&id) {
                 items.push(serde_json::json!({
                     "kind": "cost_approve", "ticket": id, "title": t.title(),
                     "priority": format!("{:?}", t.priority()).to_lowercase(),

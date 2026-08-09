@@ -396,6 +396,10 @@ pub(super) async fn reject_ticket(
     ) {
         return (axum::http::StatusCode::CONFLICT, e.to_string()).into_response();
     }
+    // A rejected ticket is not awaiting work — drop any cost hold so it stops
+    // showing as a spend to approve.
+    state.cost_holds.remove(&id);
+    state.cost_approved.remove(&id);
     state.log_activity("USER", "rejected ticket", Some(id));
     match p.store.save(&state).await {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
