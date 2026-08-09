@@ -459,8 +459,13 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
       const roleKey=r.toLowerCase().replace(/-/g,"_");
       const cost=(spend.by_role||{})[roleKey]||0;
       // The engine this role ACTUALLY ran on (post-failover) and the user whose
-      // runner last ran it — both last-wins from the spend meter.
-      const eng=(spend.engine_by_role||{})[roleKey]||"";
+      // runner last ran it — both last-wins from the spend meter. Until a first
+      // run has finished (the meter folds at run END — a long run would leave
+      // the badge blank for an hour), fall back to the CONFIGURED engine for
+      // the role: that is the engine being launched right now, short of a
+      // failover, and the observed value replaces it as soon as one lands.
+      const engCfg=(window._cfg&&_cfg.engine)?(((_cfg.engine.per_role||{})[roleKey]||{}).engine||( _cfg.engine.default||{}).engine||""):"";
+      const eng=(spend.engine_by_role||{})[roleKey]||engCfg;
       const lastOp=(spend.operator_by_role||{})[roleKey]||"";
       // Live "working now" from the SHARED registry — EVERY team (this hub or
       // another machine) running this agent, so one card shows N users at once.
