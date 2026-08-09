@@ -385,6 +385,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         // to single-shot on engines without session resume.
         let mut request = self.build_request(&state, &id).await;
         let plan_first = request.escalation_level == 0; // retries already carry a journal
+                                                        // The full task, kept before the plan wrapper below — it becomes the
+                                                        // follow-up when RE-ENTERING a ticket on a stored session, so a resumed
+                                                        // (or stale) conversation still gets the complete instructions.
+        let task_full = request.task_prompt.clone();
         if plan_first {
             request.task_prompt = format!(
                 "{}\n\nFIRST: do NOT write code yet. Explore the relevant code (use the repo \
@@ -394,10 +398,40 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 request.task_prompt
             );
         }
+        // Cross-cycle context reuse: on a RE-ENTRY (a retry, or after a parked
+        // question was answered — never the first, planning pass) resume the
+        // conversation this ticket+role left behind, so the agent keeps what it
+        // already read instead of paying to rediscover it. Resume routes to the
+        // role's configured engine; a miss (engine changed, session expired)
+        // falls straight back to a cold run — the follow-up is the full task, so
+        // the worst case is exactly a cold run.
+        let sess_key = format!("{id}/{role_key}");
+        let prior_session = if plan_first {
+            None
+        } else {
+            state.ticket_sessions.get(&sess_key).cloned()
+        };
+        let initial = match prior_session {
+            Some(sid) => match self
+                .engine
+                .resume_run(
+                    self.mode.role(),
+                    &sid,
+                    &task_full,
+                    &self.work_dir,
+                    Duration::from_secs(3600),
+                )
+                .await
+            {
+                Ok(o) if o.succeeded() => Ok(o),
+                _ => self.engine.run(request).await,
+            },
+            None => self.engine.run(request).await,
+        };
         // Keep the engine's conversation id: the execute pass and the repair
         // pass (below) resume this session so the agent keeps everything it
         // just read and wrote in context instead of rediscovering it cold.
-        let session = match self.engine.run(request).await {
+        let session = match initial {
             Ok(o) if o.succeeded() => {
                 // The engine answered: whatever outage was raised against it is
                 // over. Closing it out loud matters as much as raising it — an
@@ -502,6 +536,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             }
         };
 
+        // Remember this run's conversation so a re-entry on this ticket+role can
+        // resume it instead of reading the code cold. Best-effort.
+        if let Some(sid) = &session {
+            let (k, v) = (sess_key.clone(), sid.clone());
+            let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+                s.ticket_sessions.insert(k.clone(), v.clone());
+                Ok(())
+            })
+            .await;
+        }
+
         // Expert habit: review your OWN diff before anyone else sees it.
         // Same conversation (context intact) = one cheap pass that catches
         // nits, dead code and missed edge cases. Best-effort.
@@ -555,7 +600,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 let resumed = match &session {
                     Some(sid) => self
                         .engine
-                        .resume_run(self.mode.role(), sid, &follow_up, &self.work_dir, Duration::from_secs(1800))
+                        .resume_run(
+                            self.mode.role(),
+                            sid,
+                            &follow_up,
+                            &self.work_dir,
+                            Duration::from_secs(1800),
+                        )
                         .await
                         .is_ok(),
                     None => false,
@@ -620,7 +671,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                         if let Some(sid) = &session {
                             let _ = self
                                 .engine
-                                .resume_run(self.mode.role(), sid, &fixup, &self.work_dir, Duration::from_secs(900))
+                                .resume_run(
+                                    self.mode.role(),
+                                    sid,
+                                    &fixup,
+                                    &self.work_dir,
+                                    Duration::from_secs(900),
+                                )
                                 .await;
                         } else {
                             let repair = AgentRequest {
@@ -771,7 +828,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 if let Some(sid) = &session {
                     let _ = self
                         .engine
-                        .resume_run(self.mode.role(), sid, &fixup, &self.work_dir, Duration::from_secs(900))
+                        .resume_run(
+                            self.mode.role(),
+                            sid,
+                            &fixup,
+                            &self.work_dir,
+                            Duration::from_secs(900),
+                        )
                         .await;
                 } else {
                     let repair = AgentRequest {
@@ -844,6 +907,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             transition(state, &id_c, role, status)
                 .map_err(|e| PortError::Corrupt(e.to_string()))?;
             // Done — the work journal and any cost hold served their purpose.
+            // The resumable session is kept: DEV reaching Done/Fixed is NOT the
+            // end of the ticket — a review send-back re-enters DEV, and resuming
+            // the pre-Done conversation there is exactly the context-reuse win.
+            // The session is dropped only when the PR actually merges (see
+            // forge_merge's merged-PR sync).
             state.ticket_journal.remove(&id_c.to_string());
             state.cost_holds.remove(&id_c.to_string());
             state.cost_approved.remove(&id_c.to_string());
@@ -1177,6 +1245,7 @@ mod tests {
                 trace: String::new(),
                 session_id: None,
                 sandbox: SandboxStatus::default(),
+                engine: String::new(),
             })
         }
     }
