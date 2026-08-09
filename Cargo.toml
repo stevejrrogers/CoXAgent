@@ -16,7 +16,7 @@ members = [
 exclude = ["desktop/coxagent-desktop"]
 
 [workspace.package]
-version = "2.24.2"
+version = "2.25.0"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT"

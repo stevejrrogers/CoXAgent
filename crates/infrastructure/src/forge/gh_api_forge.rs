@@ -199,8 +199,8 @@ fn number_and_head(list: &serde_json::Value, want_merged: Option<bool>) -> Vec<(
             arr.iter()
                 .filter(|p| match want_merged {
                     None => true,
-                    Some(true) => !p.get("merged_at").is_none_or(serde_json::Value::is_null),
-                    Some(false) => p.get("merged_at").is_none_or(serde_json::Value::is_null),
+                    Some(true) => p.get("merged_at").is_some_and(|v| !v.is_null()),
+                    Some(false) => p.get("merged_at").map_or(true, serde_json::Value::is_null),
                 })
                 .filter_map(|p| {
                     Some((
