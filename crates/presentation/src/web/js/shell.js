@@ -479,7 +479,7 @@ async function doLogin(){
 async function doLogout(){try{await fetch("/api/auth/logout",{method:"POST"});}catch(e){}location.reload();}
 // Role capabilities (mirror of AuthRole in the backend).
 const LEAD_ROLES=["director","manager","techlead","dslead","dalead"];
-const ROLE_LABELS={super:"Super Admin",admin:"Admin",director:"Director",manager:"Manager",techlead:"Tech.Lead",dslead:"DS.Lead",dalead:"DA.Lead",ba:"BA",fe:"FE",be:"BE",aie:"AIE",ds:"DS",da:"DA",de:"DE",reviewer:"Reviewer",viewer:"Viewer"};
+const ROLE_LABELS={super:"Super Admin",admin:"Admin",director:"Director",manager:"Manager",techlead:"Tech.Lead",dslead:"DS.Lead",dalead:"DA.Lead",ba:"BA",po:"PO",sa:"SA",sm:"SM",qa:"QA",fe:"FE",be:"BE",aie:"AIE",ds:"DS",da:"DA",de:"DE",reviewer:"Reviewer",viewer:"Viewer"};
 function roleLabel(r){return ROLE_LABELS[r]||r;}
 function roleCanWrite(r){return r!=="viewer";}
 function roleCanCreateChannel(r){return r==="super"||r==="admin"||LEAD_ROLES.includes(r);}
@@ -1276,6 +1276,10 @@ function wlSay(name,args){
   if(n==="webfetch")return {verb:"Fetch",detail:a.url||""};
   if(n==="task"||n==="agent")return {verb:"Delegate",detail:a.description||""};
   if(n==="todowrite")return {verb:"Update plan",detail:""};
+  if(n==="reportfindings"||n==="structuredoutput"){
+    const v=a.decision||a.verdict||"";
+    return {verb:"Review verdict",detail:v?String(v).replace(/_/g," "):""};
+  }
   // Unknown tool: keep the name, show the first meaningful argument.
   const first=Object.entries(a).find(([,v])=>typeof v==="string"&&v.trim());
   return {verb:name,detail:first?String(first[1]).slice(0,80):""};
@@ -1343,6 +1347,24 @@ function parseWorklog(raw){
   flush();
   return items;
 }
+// A review/structured-output line is often the model's final answer dumped as
+// raw JSON — `{"decision":"approve","summary":"…"}`. Rendered verbatim it is a
+// wall of braces; parse it into a verdict badge + the summary as prose.
+function wlVerdictCard(text){
+  const t=String(text||"").trim();
+  if(!t.startsWith("{")||!/"(decision|verdict)"/.test(t))return null;
+  let o;try{o=JSON.parse(t);}catch(e){return null;}
+  const d=String(o.decision||o.verdict||"").toLowerCase();
+  if(!d)return null;
+  const summary=o.summary||o.reason||o.rationale||"";
+  const ok=/approve|pass|verified|accept|merge/.test(d);
+  const bad=/reject|request_changes|request-changes|fail|block|deny/.test(d);
+  const col=ok?"--green":(bad?"--red":"--amber");
+  const label=d.replace(/_/g," ").replace(/\b\w/g,c=>c.toUpperCase());
+  return `<div class="wl-item wl-msg"><span class="wl-ic"><i class="ti ti-gavel"></i></span>
+    <div class="wl-body"><span class="wl-verdict" style="background:color-mix(in srgb,var(${col}) 15%,transparent);color:var(${col})">${esc(label)}</span>
+    ${summary?`<div class="wl-verdict-sum">${wlFmt(String(summary))}</div>`:""}</div></div>`;
+}
 function renderWorklog(items,live){
   const parts=items.map(it=>{
     if(it.k==="meta") return `<div class="wl-item wl-meta"><i class="ti ti-player-play"></i> ${esc(it.text)}</div>`;
@@ -1355,6 +1377,8 @@ function renderWorklog(items,live){
       const said=wlSay(it.name,it.args);
       return `<div class="wl-item wl-tool"><span class="wl-chip"><i class="ti ${m.ic} wl-tic" style="color:var(${m.col})"></i><span class="wl-tname">${esc(said.verb)}</span>${said.detail?`<span class="wl-targs">${esc(said.detail)}</span>`:""}</span></div>`; }
     if(it.k==="result") return `<div class="wl-item wl-result"><span class="wl-rin"><i class="ti ti-corner-down-right"></i> ${esc(it.info)}</span></div>`;
+    const card=wlVerdictCard(it.text);
+    if(card) return card;
     return `<div class="wl-item wl-msg"><span class="wl-ic"><i class="ti ti-sparkles"></i></span><div class="wl-body">${wlFmt(it.text)}</div></div>`;
   });
   if(live) parts.push(`<div class="wl-typing"><span class="wl-ic"><i class="ti ti-sparkles"></i></span><span class="dots"><i></i><i></i><i></i></span></div>`);

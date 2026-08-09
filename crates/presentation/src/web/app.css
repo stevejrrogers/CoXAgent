@@ -170,6 +170,10 @@
   .wl-msg .wl-body{flex:1;min-width:0;font-size:13px;line-height:1.62;color:var(--text);white-space:pre-wrap;word-break:break-word}
   .wl-msg .wl-body code{background:var(--card);border:1px solid var(--border);border-radius:5px;padding:1px 5px;font-family:ui-monospace,monospace;font-size:11.5px;color:var(--accent2)}
   .wl-msg .wl-body b{font-weight:700}
+  /* Review verdict rendered as a badge + prose, not raw JSON. */
+  .wl-verdict{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.3px;
+    text-transform:uppercase;padding:2px 9px;border-radius:7px;margin-bottom:4px}
+  .wl-verdict-sum{font-size:13px;line-height:1.6;color:var(--text)}
   /* tool call + result share a subtle vertical rail under the message column */
   .wl-tool{padding:5px 0 5px 38px;position:relative}
   .wl-tool::before,.wl-result::before{content:"";position:absolute;left:13px;top:0;bottom:0;width:1.5px;background:var(--border)}
@@ -1038,7 +1042,16 @@
   .ibx-btn{padding:7px 14px;font-size:12px;white-space:nowrap}
   .ibx-pri{min-width:104px;text-align:center}
   .ibx-noright{min-width:104px;text-align:center;font-size:11px;color:var(--dim);
-    border:1px dashed var(--border2);border-radius:8px;padding:6px 12px}
+    border:1px dashed var(--border2);border-radius:8px;padding:6px 12px;white-space:nowrap}
+  /* Inbox filter chips: All (default) vs Assigned to me. */
+  .ibx-filters{display:flex;gap:8px;margin:0 0 12px}
+  .ibx-chip{display:inline-flex;align-items:center;gap:6px;background:var(--card2);
+    border:1px solid var(--border2);color:var(--muted);border-radius:9px;
+    padding:6px 13px;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;
+    transition:border-color .15s,color .15s,background .15s}
+  .ibx-chip:hover{border-color:var(--accent2);color:var(--text)}
+  .ibx-chip.on{background:var(--accentbg);border-color:var(--accent2);color:var(--accent2)}
+  .ibx-chip .ibx-n{font-size:11px;opacity:.75}
   .sprintpct{text-align:right;flex:none}
   .sprintpct .v{font-size:26px;font-weight:800;color:var(--accent2);line-height:1}
   .sprintpct .k{font-size:10.5px;color:var(--dim);margin-top:2px}

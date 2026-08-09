@@ -1976,6 +1976,7 @@ async function loadSettings(){
   const detNames=new Set(detected.map(d=>d.name));window._detected=detNames;
   if(detNames.has("opencode"))loadOpencodeModels(); // refresh opencode providers
   const def=cfg.engine&&cfg.engine.default||{engine:"claude",model:"sonnet"},per=cfg.engine&&cfg.engine.per_role||{},wf=cfg.workflow||{},pol=cfg.policy||{},git=cfg.git||{};
+  const hu=wf.human||{},ad=hu.adaptive||{};
   // Real agent CLIs only. `scripted`/`mock` are offline test engines (no real
   // LLM) — only shown if a project is already pinned to one, never offered new.
   const realEng=["claude","opencode","hermes","gemini","codex"];
@@ -2044,6 +2045,19 @@ async function loadSettings(){
           <span class="hint">posts a one-time ⚠️ heads-up in #agents at this % of whichever cap is closer — loop keeps running</span></div>
       </div>
       <div class="set-note">Budget caps apply <b style="color:var(--accent2)">immediately</b>; other settings on the next restart. The total cap is <b>cumulative</b> — to resume past a hit cap, set it above what's already spent (or tick unlimited).</div>
+
+      <div class="sec" style="margin-top:18px">Approval</div>
+      <div class="panel frm">
+        <div class="fr"><span class="lbl">Ready gate</span><select id="hu-ready"><option value="true" ${hu.gate_ready!==false?'selected':''}>on — a person approves each designed ticket</option><option value="false" ${hu.gate_ready===false?'selected':''}>off — designed tickets go straight to the queue</option></select><span class="hint">off = full autonomy: no one approves, work flows on its own</span></div>
+        <div class="fr"><span class="lbl">Verify gate</span><select id="hu-verify"><option value="true" ${hu.gate_verify!==false?'selected':''}>on — a person renders the QA verdict on a fix</option><option value="false" ${hu.gate_verify===false?'selected':''}>off — the agent's tests are the verdict</option></select><span class="hint">verify is always a human when on — there is no auto-verify</span></div>
+        <div class="fr"><span class="lbl">Auto-approve</span><select id="hu-adaptive"><option value="true" ${ad.enabled!==false?'selected':''}>on — routine tickets auto-approve, announced with an undo</option><option value="false" ${ad.enabled===false?'selected':''}>off — every ticket waits for a person</option></select><span class="hint">only when the Ready gate is on. The machine approves what it has learned is routine; you keep an undo window. Verify still needs you.</span></div>
+        <div class="fr"><span class="lbl">Undo window</span><input id="hu-undo" type="number" min="0" value="${ad.undo_window_minutes??30}" style="width:90px"/><span class="hint">minutes to pull back an auto-approval · 0 disables auto-approve entirely</span></div>
+        <div class="fr"><span class="lbl">Learn after</span><input id="hu-learn" type="number" min="1" value="${ad.learn_after_samples??8}" style="width:90px"/><span class="hint">consistent human decisions on one ticket shape before it shifts to auto</span></div>
+        <div class="fr"><span class="lbl">Max auto / cycle</span><input id="hu-maxauto" type="number" min="1" value="${ad.max_auto_per_cycle??3}" style="width:90px"/><span class="hint">blast-radius cap — at most this many auto-approvals per cycle</span></div>
+        <div class="fr"><span class="lbl">Route exceptions to</span><input id="hu-route" value="${esc(hu.route_exceptions_to||'')}" placeholder="username" style="width:160px"/><span class="hint">who a parked/exception ticket lands on</span></div>
+        <div class="fr"><span class="lbl">Question SLA</span><input id="hu-sla" type="number" min="0" value="${hu.question_sla_minutes??60}" style="width:90px"/><span class="hint">minutes before an unanswered agent question escalates</span></div>
+      </div>
+      <div class="set-note">The three dials, weakest to strongest autonomy: <b>Ready gate off</b> (no approval at all) → <b>Auto-approve on</b> (routine auto, exceptions asked) → <b>Auto-approve off</b> (every ticket asked). Applies on the next restart.</div>
     </div>
     <div class="settab" data-p="git" hidden>
       ${toolingHtml}
