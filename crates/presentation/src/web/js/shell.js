@@ -1378,7 +1378,10 @@ function parseWorklog(raw){
     // Result line: the backend now emits a human summary ("↳ ✓ 220 passed");
     // the older "↳ result (396 chars)" form is still parsed for old logs.
     const rm=s.match(/^\s*↳\s*(.+?)\s*$/);
-    if(rm){ flush(); const old=rm[1].match(/^result\s*\(([^)]*)\)$/); items.push({k:"result",info:old?old[1]:rm[1]}); continue; }
+    if(rm){ flush(); const old=rm[1].match(/^result\s*\(([^)]*)\)$/); items.push({k:"result",info:old?old[1]:rm[1],body:[]}); continue; }
+    // Preview line (actual output, indented with ┆): attach to the last result.
+    const pv=s.match(/^\s*┆ ?(.*)$/);
+    if(pv){ const last=items[items.length-1]; if(last&&last.k==="result"){ (last.body=last.body||[]).push(pv[1]); } continue; }
     // continuation / plain text
     if(cur&&cur.k==="msg") cur.text+="\n"+s;
     else if(s.trim()) cur={k:"msg",text:s};
@@ -1415,7 +1418,14 @@ function renderWorklog(items,live){
       if(note) return `<div class="wl-item wl-tool"><span class="wl-chip"><i class="ti ti-clock-pause wl-tic" style="color:var(--muted)"></i><span class="wl-tname">${esc(note)}</span></span></div>`;
       const said=wlSay(it.name,it.args);
       return `<div class="wl-item wl-tool"><span class="wl-chip"><i class="ti ${m.ic} wl-tic" style="color:var(${m.col})"></i><span class="wl-tname">${esc(said.verb)}</span>${said.detail?`<span class="wl-targs">${esc(said.detail)}</span>`:""}</span></div>`; }
-    if(it.k==="result") return `<div class="wl-item wl-result"><span class="wl-rin"><i class="ti ti-corner-down-right"></i> ${esc(it.info)}</span></div>`;
+    if(it.k==="result"){
+      const body=(it.body||[]).filter(x=>x!=null);
+      const head=`<i class="ti ti-corner-down-right"></i> ${esc(it.info)}`;
+      if(!body.length) return `<div class="wl-item wl-result"><span class="wl-rin">${head}</span></div>`;
+      // The real output, revealed on click — a summary you can open, not a
+      // dead-end count.
+      return `<div class="wl-item wl-result"><details class="wl-out"><summary class="wl-rin">${head} <span class="wl-more">show output</span></summary><pre class="wl-pre">${esc(body.join("\n"))}</pre></details></div>`;
+    }
     const card=wlVerdictCard(it.text);
     if(card) return card;
     return `<div class="wl-item wl-msg"><span class="wl-ic"><i class="ti ti-sparkles"></i></span><div class="wl-body">${wlFmt(it.text)}</div></div>`;
