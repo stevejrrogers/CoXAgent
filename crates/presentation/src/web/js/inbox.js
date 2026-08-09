@@ -42,44 +42,54 @@ function inboxCard(kind,meta,title,actions,ticket){
 // instead of the text.
 const ibtn=(label,fn,pri)=>`<button class="tk-btn${pri?' go':''} ibx-btn${pri?' ibx-pri':''}" onclick="${fn}">${label}</button>`;
 
-// Who may take which gate decision — the same rule the server enforces
-// (AuthRole::can_approve_ready / can_verify). Mirrored here only to keep a
-// button off screen when it would 403; the server is the authority.
-const LEADS=["super","admin","director","manager","techlead","dslead","dalead"];
-const myRole=()=>((window.ME&&ME.role)||"").toLowerCase();
-// No accounts configured = open mode: the one operator decides everything.
-const canApproveReady=()=>!window.ME||!ME.role||LEADS.includes(myRole())||myRole()==="ba";
-const canVerify=()=>!window.ME||!ME.role||LEADS.includes(myRole())||myRole()==="reviewer";
-// A gate the viewer cannot act on still shows WHY, rather than a bare row.
-const noRight=()=>'<span class="ibx-noright" title="Your role may not take this decision">view only</span>';
+// The server decides who may ACT on each item (it carries `can_act` for the
+// caller's role, and `role` = who this waits on). Everyone SEES every item;
+// only the right role gets an enabled button. `can_act` is the authority — the
+// endpoints 403 anyway — so there is no client-side role table to drift.
+const noRight=(role)=>`<span class="ibx-noright" title="Only ${esc(role||'the right role')} may act on this">waiting on ${esc(role||'—')}</span>`;
+
+// Inbox filter: "" = everything (default), "mine" = only what THIS user can
+// act on right now. Persisted so a chosen view survives a refresh.
+function inboxFilter(){return localStorage.getItem("coxinboxfilter")||"";}
+function setInboxFilter(v){localStorage.setItem("coxinboxfilter",v||"");renderInbox();}
 
 async function renderInbox(){
   const el=document.getElementById("inbox-body");if(!el)return;
   el.innerHTML='<div class="muted" style="padding:20px">Loading…</div>';
   const data=await loadInbox();
-  const items=data.items||[];
-  inboxBadge(items.length);
-  if(!items.length){
-    el.innerHTML='<div class="card" style="padding:28px;text-align:center" class="muted">🎉 Nothing waits on you.</div>';
+  const all=data.items||[];
+  const mineN=all.filter(i=>i.can_act).length;
+  inboxBadge(mineN);
+  const flt=inboxFilter();
+  const chip=(v,lbl,n)=>`<button class="ibx-chip${flt===v?' on':''}" onclick="setInboxFilter('${v}')">${lbl}${n!=null?` <span class="ibx-n">${n}</span>`:""}</button>`;
+  const bar=`<div class="ibx-filters">${chip("","All",all.length)}${chip("mine","Assigned to me",mineN)}</div>`;
+  const items=flt==="mine"?all.filter(i=>i.can_act):all;
+  if(!all.length){
+    el.innerHTML='<div class="card" style="padding:28px;text-align:center" class="muted">🎉 Nothing waits on the team.</div>';
     return;
   }
   items.sort((a,b)=>(b.escalated?1:0)-(a.escalated?1:0));
-  let html="";
+  let html=bar;
+  if(!items.length){
+    html+='<div class="card" style="padding:24px;text-align:center" class="muted">Nothing needs you right now — switch to <b>All</b> to see the team\'s queue.</div>';
+    el.innerHTML=html;return;
+  }
   for(const it of items){
+    const act=!!it.can_act;
     if(it.kind==="approve_ready"){
       html+=inboxCard("approve_ready",esc(it.ticket)+(it.priority?" · "+esc(it.priority):""),esc(it.title),
         ibtn("Review",`showTicket('${esc(it.ticket)}')`)+
-        (canApproveReady()
+        (act
           ?ibtn("Reject",`inboxAct('${esc(it.ticket)}','reject')`)+
            ibtn("Approve",`inboxAct('${esc(it.ticket)}','ready')`,1)
-          :noRight()),it.ticket);
+          :noRight(it.role)),it.ticket);
     }else if(it.kind==="verify"){
       html+=inboxCard("verify",esc(it.ticket),esc(it.title),
         ibtn("Evidence",`showTicket('${esc(it.ticket)}')`)+
-        (canVerify()
+        (act
           ?ibtn("Send back",`inboxSendBack('${esc(it.ticket)}')`)+
            ibtn("Verified",`inboxAct('${esc(it.ticket)}','verify')`,1)
-          :noRight()),it.ticket);
+          :noRight(it.role)),it.ticket);
     }else if(it.kind==="assigned"){
       html+=inboxCard("assigned",esc(it.ticket)+" · "+esc(it.status||""),esc(it.title),
         ibtn("Return to agents",`inboxUnassign('${esc(it.ticket)}')`),it.ticket);
@@ -92,17 +102,17 @@ async function renderInbox(){
     }else if(it.kind==="auto_approved"){
       html+=inboxCard("auto_approved",esc(it.ticket)+" · undo for "+it.minutes_left+"m",esc(it.title),
         ibtn("Review",`showTicket('${esc(it.ticket)}')`)+
-        (canApproveReady()?ibtn("Undo",`inboxUndo('${esc(it.ticket)}')`,1):noRight()),it.ticket);
+        (act?ibtn("Undo",`inboxUndo('${esc(it.ticket)}')`,1):noRight(it.role)),it.ticket);
     }else if(it.kind==="review_pr"){
       html+=inboxCard("review_pr","#"+it.number,esc(it.title),
-        ibtn("Open review",`nav('review')`,1));
+        (act?ibtn("Open review",`nav('review')`,1):noRight(it.role)));
     }else if(it.kind==="pr_stuck"){
       // The team tried, the SA rescued it, and it is still not moving. Say what
       // was tried and give the two moves a person actually has.
       const why=`#${it.number} · ${it.attempts} fix rounds · ${it.mergeable?"mergeable":"CONFLICTING"} · SA rescue failed`;
       html+=inboxCard("pr_stuck",why,esc(it.title),
         ibtn("Open on GitHub",`window.open('${esc(it.url)}','_blank')`)+
-        ibtn("Review queue",`nav('review')`,1));
+        (act?ibtn("Review queue",`nav('review')`,1):noRight(it.role)));
     }
   }
   el.innerHTML=html;
@@ -150,4 +160,4 @@ async function inboxUnassign(id){
 }
 
 // Keep the badge honest even when the user lives in other tabs.
-setInterval(async()=>{try{if(typeof PID!=="undefined"&&PID){const d=await loadInbox();inboxBadge((d.items||[]).length);}}catch(e){}},60000);
+setInterval(async()=>{try{if(typeof PID!=="undefined"&&PID){const d=await loadInbox();inboxBadge((d.items||[]).filter(i=>i.can_act).length);}}catch(e){}},60000);

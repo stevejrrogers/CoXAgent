@@ -24,6 +24,7 @@ pub(super) async fn gate_principal(
 }
 
 /// GET `/api/projects/:pid/inbox` — the caller's "waiting for me" queue.
+#[allow(clippy::too_many_lines)] // one linear pass building each inbox item kind
 pub(super) async fn inbox_ep(
     State(app): State<AppState>,
     Path(pid): Path<String>,
@@ -35,6 +36,16 @@ pub(super) async fn inbox_ep(
     let me = principal_name(&app, &headers)
         .await
         .unwrap_or_else(|| "operator".to_owned());
+    // The caller's role decides which items they may ACT on — but every item is
+    // still SHOWN to everyone, so the whole team sees the queue and only the
+    // right role gets an enabled button. Open mode (no auth) is the operator,
+    // who may do everything.
+    let my_role = match app.auth.clone() {
+        Some(auth) => resolve_principal(&auth, &headers)
+            .await
+            .map_or(coxagent_application::auth::AuthRole::Viewer, |u| u.role),
+        None => coxagent_application::auth::AuthRole::Super,
+    };
     let cfg = std::fs::read_to_string(&p.config_path)
         .ok()
         .and_then(|t| serde_json::from_str::<Config>(&t).ok())
@@ -55,6 +66,7 @@ pub(super) async fn inbox_ep(
             items.push(serde_json::json!({
                 "kind": "approve_ready", "ticket": id, "title": t.title(),
                 "priority": format!("{:?}", t.priority()).to_lowercase(),
+                "role": "BA/PO", "can_act": my_role.can_approve_ready(),
             }));
             continue;
         }
@@ -65,6 +77,7 @@ pub(super) async fn inbox_ep(
         {
             items.push(serde_json::json!({
                 "kind": "verify", "ticket": id, "title": t.title(),
+                "role": "QA", "can_act": my_role.can_verify(),
             }));
             continue;
         }
@@ -73,6 +86,7 @@ pub(super) async fn inbox_ep(
             items.push(serde_json::json!({
                 "kind": "assigned", "ticket": id, "title": t.title(),
                 "status": format!("{:?}", t.status()).to_lowercase(),
+                "role": "you", "can_act": true,
             }));
         }
     }
@@ -88,6 +102,7 @@ pub(super) async fn inbox_ep(
             items.push(serde_json::json!({
                 "kind": "auto_approved", "ticket": id, "title": t.title(),
                 "minutes_left": undo_window.saturating_sub(age_min),
+                "role": "BA/PO", "can_act": my_role.can_approve_ready(),
             }));
         }
     }
@@ -100,6 +115,7 @@ pub(super) async fn inbox_ep(
                 "kind": "question", "id": q.id, "ticket": q.ticket,
                 "from": q.from, "body": q.body,
                 "asked_at": q.asked_at, "escalated": q.escalated,
+                "role": "you", "can_act": true,
             }));
         }
     }
@@ -115,6 +131,7 @@ pub(super) async fn inbox_ep(
                     items.push(serde_json::json!({
                         "kind": "review_pr", "number": pr.number,
                         "title": pr.title, "url": pr.url,
+                        "role": "SA/dev", "can_act": my_role.can_review(),
                     }));
                     continue;
                 }
@@ -132,6 +149,7 @@ pub(super) async fn inbox_ep(
                         "title": pr.title, "url": pr.url,
                         "attempts": attempts,
                         "mergeable": pr.mergeable,
+                        "role": "SA/dev", "can_act": my_role.can_review(),
                     }));
                 }
             }
