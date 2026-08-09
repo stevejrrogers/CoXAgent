@@ -29,6 +29,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 return;
             }
         };
+        // Nothing open → say nothing. Reporting "reviewing PRs" here with an
+        // empty queue is what made the SA card look busy-but-idle.
+        if prs.iter().all(|p| p.base != self.flow_base()) {
+            return;
+        }
+        self.report("SA", "reviewing PRs");
         let target = self.flow_base();
         // With full merge authority (auto_merge on) the SA owns the queue and
         // works it hard — draining the pile-up — rather than nibbling a few PRs.
