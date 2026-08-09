@@ -1765,20 +1765,45 @@ function renderHealth(s){
 }
 function render(s){STATE=s;renderSidebar(s);renderActive();ingestChatSnapshot(s.chat);renderEngineAlert(s);}
 // A stopped team looks like a broken team until you know the engine is down.
+// Turn a raw backend error into one calm human sentence + the kind of trouble
+// it is, so the banner can be a quiet pill instead of a red slab dumping a
+// stack of "SA: backend failure: ... API Error: 401 ...". Kinds: "auth"
+// (recoverable by re-login), "quota" (clears itself / raise cap), "slow"
+// (transient), "other".
+function engineIncidentKind(reason){
+  const r=(reason||"").toLowerCase();
+  if(/revoked|oauth|session expired|token expired|expired token|authenticat|unauthorized|401|403/.test(r))return "auth";
+  if(/quota|spend limit|usage limit|rate.?limit|429|billing|credit|insufficient|out of tokens|overloaded|529/.test(r))return "quota";
+  if(/tim(e|ed) ?out|timeout|deadline|connection|stream closed|broken pipe|reset by peer|temporarily/.test(r))return "slow";
+  return "other";
+}
+function engineIncidentSay(engine,kind){
+  switch(kind){
+    case "auth":  return `${engine} sign-in expired — refresh it: <code>${engine} login</code>`;
+    case "quota": return `${engine} hit its usage limit — clears on reset, or raise the cap`;
+    case "slow":  return `${engine} slow to respond — retrying on its own`;
+    default:      return `${engine} had a run error`;
+  }
+}
 function renderEngineAlert(s){
   const el=document.getElementById("engine-alert");if(!el)return;
   const inc=(s&&s.engine_incidents)||[];
   if(!inc.length){el.hidden=true;el.innerHTML="";return;}
   el.hidden=false;
-  // One line, with the detail on hover: it must be impossible to miss and
-  // cheap to ignore once read — a banner that eats the screen gets dismissed
-  // mentally, which is the opposite of the point.
-  el.innerHTML=inc.map(i=>`<div class="eng-alert" title="${esc(i.reason)}">
-    <i class="ti ti-plug-connected-x"></i>
-    <b>${esc(i.engine)}: ${i.hits} failed run${i.hits>1?"s":""}</b>
-    <span>${esc(i.reason)}</span>
-    <small>${i.hits} run${i.hits>1?"s":""} · clears itself</small>
-  </div>`).join("");
+  // Quiet by design: a slim pill with a status dot and one plain sentence.
+  // The raw backend string lives on hover for whoever wants it — the surface
+  // says what happened and what clears it, nothing more. A banner that shouts
+  // gets tuned out; the point is a glance, not an alarm.
+  el.innerHTML=inc.map(i=>{
+    const kind=engineIncidentKind(i.reason);
+    const say=engineIncidentSay(esc(i.engine),kind);
+    const meta=kind==="auth"?"needs re-login":"clears itself";
+    return `<div class="eng-alert eng-${kind}" title="${esc(i.reason)}">
+      <span class="eng-dot"></span>
+      <span class="eng-say">${say}</span>
+      <span class="eng-meta">${i.hits} run${i.hits>1?"s":""} · ${meta}</span>
+    </div>`;
+  }).join("");
 }
 function depChips(ids){
   if(!ids||!ids.length)return '<span style="color:var(--dim)">—</span>';

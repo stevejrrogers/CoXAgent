@@ -523,11 +523,24 @@ fn parse_json_stream(raw: &str) -> (String, coxagent_application::ports::outboun
             }
             Some("step_finish") => {
                 if let Some(tokens) = v.pointer("/part/tokens") {
+                    // Cached prompt tokens count as input too — opencode nests
+                    // them under `tokens.cache.{read,write}`. Same fix as the
+                    // claude parser: without it a cached run reports near-zero
+                    // input and the Cost tab reads wrong for this harness.
+                    let cache = tokens.get("cache");
+                    let cache_tok = |k: &str| {
+                        cache
+                            .and_then(|c| c.get(k))
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0)
+                    };
                     input_tokens = input_tokens.saturating_add(
                         tokens
                             .get("input")
                             .and_then(serde_json::Value::as_u64)
-                            .unwrap_or(0),
+                            .unwrap_or(0)
+                            + cache_tok("read")
+                            + cache_tok("write"),
                     );
                     output_tokens = output_tokens.saturating_add(
                         tokens
