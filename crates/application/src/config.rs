@@ -16,6 +16,8 @@ pub enum EngineKind {
     Hermes,
     Gemini,
     Codex,
+    /// GitHub Copilot CLI (`copilot`) — agentic, `--model auto` routing.
+    Copilot,
     /// Deterministic offline engine for demos/tests (writes real code, no LLM).
     Scripted,
 }
@@ -30,6 +32,7 @@ impl EngineKind {
             EngineKind::Hermes => "hermes",
             EngineKind::Gemini => "gemini",
             EngineKind::Codex => "codex",
+            EngineKind::Copilot => "copilot",
             EngineKind::Scripted => "scripted",
         }
     }
@@ -43,6 +46,7 @@ impl EngineKind {
             EngineKind::Hermes,
             EngineKind::Gemini,
             EngineKind::Codex,
+            EngineKind::Copilot,
         ]
     }
 }

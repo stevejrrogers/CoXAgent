@@ -1269,6 +1269,10 @@ function wlSay(name,args){
   if(n==="bash"){
     let c=String(a.command||"").replace(/\s+/g," ").trim();
     if(!c)c=raw.replace(/^\{|\}$/g,"").replace(/\s+/g," ").slice(0,92);
+    // Strip the boilerplate that fronts almost every agent command — a
+    // `cd <worktree> &&` prefix and absolute tool paths — so the meaningful
+    // part shows: "cargo test -p …" not "cd /tmp/pr-review-b043 && /opt/…".
+    c=c.replace(/^cd\s+\S+\s*&&\s*/,"").replace(/\/\S*\/(cargo|npm|npx|node|git|python3?|sed|grep|rg)\b/g,"$1");
     return {verb:"Run",detail:c.length>92?c.slice(0,92)+"…":(c||"(command not logged)")};
   }
   if(n==="grep")return {verb:"Search",detail:[a.pattern,a.path?"in "+wlShortPath(a.path):""].filter(Boolean).join(" ")};
@@ -1338,8 +1342,10 @@ function parseWorklog(raw){
     if(s.startsWith("💬")){ flush(); cur={k:"msg",text:s.slice(2).replace(/^\s+/,"")}; continue; }
     if(s.startsWith("🔧")){ flush(); const m=s.slice(2).trim(); const i=m.indexOf("(");
       items.push({k:"tool",name:i>=0?m.slice(0,i):m,args:i>=0?m.slice(i+1).replace(/\)$/,""):""}); continue; }
-    const rm=s.match(/^\s*↳\s*result\s*\(([^)]*)\)/);
-    if(rm){ flush(); items.push({k:"result",info:rm[1]}); continue; }
+    // Result line: the backend now emits a human summary ("↳ ✓ 220 passed");
+    // the older "↳ result (396 chars)" form is still parsed for old logs.
+    const rm=s.match(/^\s*↳\s*(.+?)\s*$/);
+    if(rm){ flush(); const old=rm[1].match(/^result\s*\(([^)]*)\)$/); items.push({k:"result",info:old?old[1]:rm[1]}); continue; }
     // continuation / plain text
     if(cur&&cur.k==="msg") cur.text+="\n"+s;
     else if(s.trim()) cur={k:"msg",text:s};

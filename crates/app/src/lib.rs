@@ -935,6 +935,7 @@ fn effective_fallbacks(config: &Config) -> Vec<coxagent_application::config::Eng
             EngineKind::Claude => "haiku".to_owned(),
             EngineKind::Opencode => "bizbrain/Qwen3.6-35B-A3B-thinking".to_owned(),
             EngineKind::Hermes => "hermes-3-llama-3.2-3b".to_owned(),
+            EngineKind::Copilot => "auto".to_owned(),
             _ => continue,
         };
         push(d.kind, model);

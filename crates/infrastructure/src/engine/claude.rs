@@ -448,13 +448,8 @@ fn render_event(v: &serde_json::Value) -> String {
                 for block in content {
                     if block.get("type").and_then(serde_json::Value::as_str) == Some("tool_result")
                     {
-                        let n = block
-                            .get("content")
-                            .map(std::string::ToString::to_string)
-                            .unwrap_or_default()
-                            .chars()
-                            .count();
-                        let _ = write!(out, "\n   ↳ result ({n} chars)");
+                        let text = tool_result_text(block.get("content"));
+                        let _ = write!(out, "\n   ↳ {}", summarize_tool_result(&text));
                     }
                 }
             }
@@ -462,6 +457,69 @@ fn render_event(v: &serde_json::Value) -> String {
         _ => {}
     }
     out.trim_start_matches('\n').to_owned()
+}
+
+/// The plain text of a tool_result block, whether it arrived as a bare string
+/// or as an array of `{type:"text", text:…}` parts.
+fn tool_result_text(content: Option<&serde_json::Value>) -> String {
+    match content {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Array(parts)) => parts
+            .iter()
+            .filter_map(|p| p.get("text").and_then(serde_json::Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+/// One human line for a tool's output, so the work log reads as an outcome
+/// ("✓ 220 passed", "clippy clean", "6 matches") instead of "result (396
+/// chars)" — the length told a reader nothing. Recognises the tools agents run
+/// constantly; anything else shows its first real line, capped.
+#[must_use]
+pub(crate) fn summarize_tool_result(text: &str) -> String {
+    let t = text.trim();
+    if t.is_empty() {
+        return "done (no output)".to_owned();
+    }
+    let low = t.to_lowercase();
+    // cargo test: the "test result:" line is the verdict.
+    if let Some(line) = t.lines().find(|l| l.contains("test result:")) {
+        if line.contains("FAILED") || line.contains("failed;") && !line.contains("0 failed") {
+            // e.g. "test result: FAILED. 2 passed; 1 failed"
+            if let Some(fail) = line.split("passed;").nth(1) {
+                let n = fail.split("failed").next().unwrap_or("").trim();
+                return format!("✗ {n} failed");
+            }
+            return "✗ tests failed".to_owned();
+        }
+        if let Some(pass) = line.split("result: ok.").nth(1) {
+            let n = pass.split("passed").next().unwrap_or("").trim();
+            return format!("✓ {n} passed");
+        }
+    }
+    // clippy / rustc: count diagnostics.
+    if low.contains("could not compile") || low.contains("error[") || low.contains("error:") {
+        let n = t.lines().filter(|l| l.trim_start().starts_with("error")).count();
+        return format!("✗ {} error{}", n.max(1), if n == 1 { "" } else { "s" });
+    }
+    if low.contains("warning:") {
+        let n = t.lines().filter(|l| l.contains("warning:")).count();
+        return format!("⚠ {n} warning{}", if n == 1 { "" } else { "s" });
+    }
+    // grep -n / -c: line count is the answer.
+    let lines = t.lines().filter(|l| !l.trim().is_empty()).count();
+    if lines > 1 {
+        return format!("{lines} lines");
+    }
+    // A short single-line result IS the answer — show it.
+    let first = t.lines().next().unwrap_or("").trim();
+    if first.chars().count() <= 80 {
+        first.to_owned()
+    } else {
+        format!("{}…", first.chars().take(80).collect::<String>())
+    }
 }
 
 /// Parse `claude --output-format stream-json` (NDJSON): return the final result
@@ -550,6 +608,24 @@ fn parse_json_output(raw: &str) -> (String, Option<Usage>) {
 mod tests {
     use super::*;
     use crate::engine::McpAccess;
+
+    #[test]
+    fn tool_result_summary_reads_as_an_outcome_not_a_byte_count() {
+        assert_eq!(
+            summarize_tool_result("   Compiling…\ntest result: ok. 220 passed; 0 failed; 0 ignored"),
+            "✓ 220 passed"
+        );
+        assert_eq!(
+            summarize_tool_result("test result: FAILED. 2 passed; 1 failed; 0 ignored"),
+            "✗ 1 failed"
+        );
+        assert!(summarize_tool_result("error[E0433]: cannot find `x`\nerror: aborting")
+            .starts_with("✗ 2 error"));
+        assert_eq!(summarize_tool_result("warning: unused variable `y`"), "⚠ 1 warning");
+        assert_eq!(summarize_tool_result("a\nb\nc"), "3 lines");
+        assert_eq!(summarize_tool_result("crates/app/src/lib.rs:42"), "crates/app/src/lib.rs:42");
+        assert_eq!(summarize_tool_result("   "), "done (no output)");
+    }
 
     #[test]
     fn input_tokens_include_the_cached_tiers() {
