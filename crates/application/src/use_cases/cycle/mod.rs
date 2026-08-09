@@ -1008,7 +1008,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             }
 
             // Auto-merge: SA deep-dives open PRs and merges or requests changes.
-            self.report("SA", "reviewing PRs");
+            // The phase note is set INSIDE, only when there are PRs — otherwise
+            // the card read "SA · reviewing PRs" every cycle with zero PRs and an
+            // empty live log, looking stuck when there was simply nothing to do.
             self.review_open_prs().await;
             // Close the loop: when a human (or the SA) requested changes on a
             // PR, a DEV agent addresses the feedback and pushes to the branch.
