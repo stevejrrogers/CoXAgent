@@ -58,6 +58,21 @@ pub(super) async fn inbox_ep(
     let mut items: Vec<serde_json::Value> = Vec::new();
     for t in &state.tickets {
         let id = t.id().to_string();
+        // Cost gate: a ticket whose estimated run cost exceeds the approval
+        // threshold is HELD until a person okays the spend. Surface every held
+        // ticket here — otherwise they pile up invisibly and the whole queue
+        // stalls before any of it reaches DEV (the "spins but never ships" bug).
+        if let Some(est) = state.cost_holds.get(&id) {
+            if !state.cost_approved.contains(&id) {
+                items.push(serde_json::json!({
+                    "kind": "cost_approve", "ticket": id, "title": t.title(),
+                    "priority": format!("{:?}", t.priority()).to_lowercase(),
+                    "estimate_usd": est,
+                    "role": "PO", "can_act": my_role.can_approve_ready(),
+                }));
+                continue;
+            }
+        }
         // Ready-gate approvals: designed, waiting in Pending for a person.
         if human.gate_ready
             && t.status() == coxagent_domain::Status::Pending
