@@ -74,6 +74,7 @@ async function saveSettings(){const cfg=window._cfg||{engine:{},workflow:{}};cfg
   cfg.engine.escalation=val("en-esc").split(",").map(s=>s.trim()).filter(Boolean);
   cfg.workflow.language=val("wf-lang")||"en";
   cfg.workflow.sleep_seconds=parseInt(val("wf-sl")||"30",10);
+  {const cc=parseInt(val("wf-cc")||"1",10);cfg.workflow.concurrency=Number.isFinite(cc)&&cc>0?Math.min(cc,16):1;}
   const bg=val("wf-bg");cfg.workflow.budget_usd=bg?parseFloat(bg):null;
   cfg.policy=cfg.policy||{};
   const dg=val("wf-dg");cfg.policy.daily_budget_usd=dg?parseFloat(dg):null;
