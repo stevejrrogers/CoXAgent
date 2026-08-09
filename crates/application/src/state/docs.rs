@@ -115,6 +115,18 @@ pub fn doc_category_of(folder: &str) -> &'static str {
 /// One living documentation page. `category` is `"product"` or `"technical"`;
 /// `body` is Markdown. Pages are written by the DOCS agent and editable by
 /// humans, and are structured so both people and agents can read them.
+/// Idle-cycle refresh bookkeeping for one Wiki page. `at` is the RFC3339 time of
+/// the last refresh attempt (a cooldown, so a page is not rewritten every
+/// cycle); `fails` counts consecutive rewrites the structure gate rejected — at
+/// the cap the page is parked (it needs a human/redesign, not more calls).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocRefreshMark {
+    #[serde(default)]
+    pub at: String,
+    #[serde(default)]
+    pub fails: u32,
+}
+
 /// One living documentation page. `category` is `"product"` or `"technical"`;
 /// `body` is Markdown. Pages are written by the DOCS agent and editable by
 /// humans, and are structured so both people and agents can read them.
