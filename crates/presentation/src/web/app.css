@@ -1038,7 +1038,16 @@
   .ibx-btn{padding:7px 14px;font-size:12px;white-space:nowrap}
   .ibx-pri{min-width:104px;text-align:center}
   .ibx-noright{min-width:104px;text-align:center;font-size:11px;color:var(--dim);
-    border:1px dashed var(--border2);border-radius:8px;padding:6px 12px}
+    border:1px dashed var(--border2);border-radius:8px;padding:6px 12px;white-space:nowrap}
+  /* Inbox filter chips: All (default) vs Assigned to me. */
+  .ibx-filters{display:flex;gap:8px;margin:0 0 12px}
+  .ibx-chip{display:inline-flex;align-items:center;gap:6px;background:var(--card2);
+    border:1px solid var(--border2);color:var(--muted);border-radius:9px;
+    padding:6px 13px;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;
+    transition:border-color .15s,color .15s,background .15s}
+  .ibx-chip:hover{border-color:var(--accent2);color:var(--text)}
+  .ibx-chip.on{background:var(--accentbg);border-color:var(--accent2);color:var(--accent2)}
+  .ibx-chip .ibx-n{font-size:11px;opacity:.75}
   .sprintpct{text-align:right;flex:none}
   .sprintpct .v{font-size:26px;font-weight:800;color:var(--accent2);line-height:1}
   .sprintpct .k{font-size:10.5px;color:var(--dim);margin-top:2px}

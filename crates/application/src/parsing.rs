@@ -228,6 +228,43 @@ pub fn jaccard<S: std::hash::BuildHasher>(
     }
 }
 
+/// Whether a title is a backlog process/ceremony ticket — "triage the bugs",
+/// "burn-down sprint", "stabilization sprint", "backlog grooming". These are
+/// the SM/PO's recurring rituals, not features, and the BA kept re-filing a
+/// fresh one every cycle (six near-identical "bug triage / burndown sprint"
+/// tickets piled into one inbox). At most ONE should ever be open at a time,
+/// so this lets the caller keep a single active slot for the whole family
+/// regardless of how the wording drifts.
+#[must_use]
+pub fn is_backlog_meta(title: &str) -> bool {
+    let t = normalize_title(title);
+    let ritual = ["triage", "burndown", "burn down", "stabiliz", "grooming"]
+        .iter()
+        .any(|k| t.contains(k));
+    let about_backlog = ["bug", "backlog", "sprint"].iter().any(|k| t.contains(k));
+    ritual && about_backlog
+}
+
+/// Whether `title` duplicates one of `existing` — either an exact normalised
+/// match or a near-paraphrase (Jaccard ≥ 0.6 on content tokens), or, for a
+/// backlog-ceremony ticket, any existing ceremony ticket at all. One place so
+/// the BA insert loop and any future caller agree on what "already covered"
+/// means.
+#[must_use]
+pub fn duplicates_existing(title: &str, existing: &[String]) -> bool {
+    let norm = normalize_title(title);
+    if norm.is_empty() {
+        return true; // a blank title is never worth filing
+    }
+    let meta = is_backlog_meta(title);
+    let toks = title_tokens(title);
+    existing.iter().any(|e| {
+        normalize_title(e) == norm
+            || (meta && is_backlog_meta(e))
+            || jaccard(&toks, &title_tokens(e)) >= 0.6
+    })
+}
+
 /// Extract the outermost JSON array of strings (e.g. acceptance criteria),
 /// tolerating surrounding prose.
 ///
@@ -245,6 +282,38 @@ pub fn parse_string_list(raw: &str) -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_recurring_bug_ceremony_family_files_once() {
+        // The exact six that piled into one inbox — different wording, one idea.
+        let titles = [
+            "Bug triage and burn-down allocation (40% capacity)",
+            "Bug burndown cadence — Q3 backlog triage",
+            "COX-BUG: Sprint bug triage and critical burn-down",
+            "Bug stabilization sprint (2 weeks)",
+            "Bug burndown sprint — data loss + crash fixes",
+        ];
+        for t in titles {
+            assert!(is_backlog_meta(t), "{t} should read as a ceremony ticket");
+        }
+        // Once one is on the board, every later paraphrase is a duplicate.
+        let board = vec![titles[0].to_owned()];
+        for t in &titles[1..] {
+            assert!(
+                duplicates_existing(t, &board),
+                "{t} should collapse onto the existing ceremony ticket"
+            );
+        }
+    }
+
+    #[test]
+    fn genuinely_different_features_are_not_dupes() {
+        let board = vec!["Bug triage and burn-down sprint".to_owned()];
+        assert!(!duplicates_existing("Add CORS + rate-limiting middleware", &board));
+        assert!(!duplicates_existing("Per-engine cost leaderboard", &board));
+        // A real feature that merely mentions "bug" is not a ceremony ticket.
+        assert!(!is_backlog_meta("Fix the avatar upload bug"));
+    }
 
     #[test]
     fn jaccard_flags_paraphrased_titles() {

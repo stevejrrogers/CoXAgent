@@ -75,6 +75,19 @@ async function saveSettings(){const cfg=window._cfg||{engine:{},workflow:{}};cfg
   cfg.policy=cfg.policy||{};
   const dg=val("wf-dg");cfg.policy.daily_budget_usd=dg?parseFloat(dg):null;
   {const bwp=parseFloat(val("wf-bwp"));cfg.policy.budget_warn_pct=Number.isFinite(bwp)&&bwp>0?Math.min(bwp,100)/100:0.8;}
+  // Approval gates + adaptive auto-approve. Preserve any human fields the UI
+  // does not expose rather than dropping them on save.
+  {const h=Object.assign({},cfg.workflow.human||{});
+   h.gate_ready=val("hu-ready")!=="false";
+   h.gate_verify=val("hu-verify")!=="false";
+   h.route_exceptions_to=val("hu-route").trim();
+   {const sla=parseInt(val("hu-sla")||"60",10);h.question_sla_minutes=Number.isFinite(sla)?sla:60;}
+   const a=Object.assign({},h.adaptive||{});
+   a.enabled=val("hu-adaptive")!=="false";
+   {const u=parseInt(val("hu-undo")||"30",10);a.undo_window_minutes=Number.isFinite(u)?u:30;}
+   {const l=parseInt(val("hu-learn")||"8",10);a.learn_after_samples=Number.isFinite(l)&&l>0?l:8;}
+   {const m=parseInt(val("hu-maxauto")||"3",10);a.max_auto_per_cycle=Number.isFinite(m)&&m>0?m:3;}
+   h.adaptive=a;cfg.workflow.human=h;}
   cfg.git=Object.assign(cfg.git||{},{
     enabled:val("git-en")==="true",provider:val("git-pv"),repo:val("git-repo").trim(),
     base_url:val("git-url").trim(),default_branch:val("git-br").trim()||"main",
