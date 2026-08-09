@@ -121,6 +121,13 @@ pub struct ProjectState {
     /// and nest even before it holds a page — Confluence-style spaces/pages.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub doc_folders: Vec<String>,
+    /// Per-page refresh bookkeeping (page id → mark), so the idle-cycle Wiki
+    /// refresher does not re-run the SAME page every cycle: a just-refreshed page
+    /// cools down, and a page whose rewrite keeps failing the structure gate is
+    /// parked (needs a human/redesign) instead of burning a call forever — the
+    /// root of the DOCS run churn.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub doc_refresh: std::collections::BTreeMap<String, DocRefreshMark>,
     /// Lessons the team learned in past retros — fed back into agent prompts so
     /// the team actually improves over time (kept bounded, newest last).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -351,6 +358,7 @@ impl Default for ProjectState {
             milestones: Vec::new(),
             docs: Vec::new(),
             doc_folders: Vec::new(),
+            doc_refresh: std::collections::BTreeMap::new(),
             lessons: Vec::new(),
             decisions: Vec::new(),
             refactor_mode: false,
