@@ -29,6 +29,15 @@ pub struct Spend {
     /// so each user's token spend is measurable even though they share a project.
     #[serde(default)]
     pub by_operator: std::collections::BTreeMap<String, OperatorSpend>,
+    /// The engine CLI each role most recently RAN ON (`copilot`, `opencode`, …),
+    /// last-wins. This is the engine actually observed (post-failover), not the
+    /// one config named — so the dashboard shows the live engine per agent.
+    #[serde(default)]
+    pub engine_by_role: std::collections::BTreeMap<String, String>,
+    /// The operator (`account@host`) whose runner last ran each role, last-wins —
+    /// so an idle agent card can still name which user it belongs to.
+    #[serde(default)]
+    pub operator_by_role: std::collections::BTreeMap<String, String>,
     /// Runs whose file writes were actually confined (Seatbelt/bwrap).
     #[serde(default)]
     pub confined_runs: u64,

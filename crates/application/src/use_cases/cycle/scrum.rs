@@ -178,6 +178,57 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// Append a human-readable activity trail plus drain the spend meter into
     /// state. Returns whether accumulated spend has crossed the budget cap.
     /// Best-effort: a failure here never fails a cycle.
+    /// Fold the spend meter's since-last-cycle deltas into persistent state and
+    /// reset it, returning this cycle's cost. Kept separate so `record_activity`
+    /// stays a readable list of what happened, not a ledger.
+    fn drain_meter(&self, state: &mut crate::state::ProjectState) -> f64 {
+        let mut cycle_cost = 0.0;
+        if let Some(meter) = &self.meter {
+            if let Ok(mut m) = meter.lock() {
+                cycle_cost = m.total_cost_usd;
+                state.spend.total_cost_usd += m.total_cost_usd;
+                state.spend.input_tokens += m.input_tokens;
+                state.spend.output_tokens += m.output_tokens;
+                state.spend.runs += m.runs;
+                for (role, cost) in std::mem::take(&mut m.by_role) {
+                    *state.spend.by_role.entry(role).or_default() += cost;
+                }
+                for (role, n) in std::mem::take(&mut m.runs_by_role) {
+                    *state.spend.runs_by_role.entry(role).or_default() += n;
+                }
+                for (role, cost) in std::mem::take(&mut m.metered_cost_by_role) {
+                    *state.spend.metered_cost_by_role.entry(role).or_default() += cost;
+                }
+                // Live engine per role (last-wins), plus the operator that ran it
+                // — so each agent card can name its real engine and its user.
+                for (role, eng) in std::mem::take(&mut m.engine_by_role) {
+                    if !self.worker.is_empty() {
+                        state
+                            .spend
+                            .operator_by_role
+                            .insert(role.clone(), self.worker.clone());
+                    }
+                    state.spend.engine_by_role.insert(role, eng);
+                }
+                // Attribute this cycle's spend to the operator that ran it, so
+                // each user's token usage is measurable in a shared project.
+                if !self.worker.is_empty() {
+                    let op = state
+                        .spend
+                        .by_operator
+                        .entry(self.worker.clone())
+                        .or_default();
+                    op.cost_usd += m.total_cost_usd;
+                    op.input_tokens += m.input_tokens;
+                    op.output_tokens += m.output_tokens;
+                    op.runs += m.runs;
+                }
+                *m = Spend::default();
+            }
+        }
+        cycle_cost
+    }
+
     pub(super) async fn record_activity(&self, report: &CycleReport) -> bool {
         let Ok(mut state) = self.store.load().await else {
             return false;
@@ -208,39 +259,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
 
         // Drain the spend meter (deltas since last cycle) into persistent state.
-        let mut cycle_cost = 0.0;
-        if let Some(meter) = &self.meter {
-            if let Ok(mut m) = meter.lock() {
-                cycle_cost = m.total_cost_usd;
-                state.spend.total_cost_usd += m.total_cost_usd;
-                state.spend.input_tokens += m.input_tokens;
-                state.spend.output_tokens += m.output_tokens;
-                state.spend.runs += m.runs;
-                for (role, cost) in std::mem::take(&mut m.by_role) {
-                    *state.spend.by_role.entry(role).or_default() += cost;
-                }
-                for (role, n) in std::mem::take(&mut m.runs_by_role) {
-                    *state.spend.runs_by_role.entry(role).or_default() += n;
-                }
-                for (role, cost) in std::mem::take(&mut m.metered_cost_by_role) {
-                    *state.spend.metered_cost_by_role.entry(role).or_default() += cost;
-                }
-                // Attribute this cycle's spend to the operator that ran it, so
-                // each user's token usage is measurable in a shared project.
-                if !self.worker.is_empty() {
-                    let op = state
-                        .spend
-                        .by_operator
-                        .entry(self.worker.clone())
-                        .or_default();
-                    op.cost_usd += m.total_cost_usd;
-                    op.input_tokens += m.input_tokens;
-                    op.output_tokens += m.output_tokens;
-                    op.runs += m.runs;
-                }
-                *m = Spend::default();
-            }
-        }
+        let cycle_cost = self.drain_meter(&mut state);
         let spent_today = state.add_daily_spend(cycle_cost);
 
         // Effective caps: the live cell (adjustable without restart) when present,

@@ -39,6 +39,14 @@ impl<E: AgentEnginePort> AgentEnginePort for MeteringEngine<E> {
     async fn run(&self, request: AgentRequest) -> Result<AgentOutcome, PortError> {
         let role = role_key(request.role);
         let outcome = self.inner.run(request).await?;
+        // Record which engine actually ran this role (stamped by FailoverEngine),
+        // even when usage is unknown — the dashboard shows the live engine per
+        // agent regardless of whether cost came back.
+        if !outcome.engine.is_empty() {
+            if let Ok(mut m) = self.meter.lock() {
+                m.engine_by_role.insert(role.clone(), outcome.engine.clone());
+            }
+        }
         if let Some(u) = outcome.usage {
             if let Ok(mut m) = self.meter.lock() {
                 m.total_cost_usd += u.cost_usd;
@@ -140,6 +148,7 @@ mod tests {
                 trace: String::new(),
                 session_id: None,
                 sandbox: SandboxStatus::NotRequested,
+                engine: "priced".to_owned(),
             })
         }
     }
