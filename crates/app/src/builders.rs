@@ -252,40 +252,71 @@ pub fn provision_local_token(_base: &Path) {
     std::env::set_var("COXAGENT_REMOTE_TOKEN", token);
 }
 
-/// Read `coxagent.json`'s raw text from the workspace root (parent of the Split out of `load_config` so a caller that also
-/// needs the raw config for a malformed-value probe — e.g. the mandatory
-/// deploy health gate's `host_port` (COX-B035) — reads the file once and
-/// feeds the same string into both parses, rather than reading it twice or
-/// letting the two parses drift.
-pub(crate) fn read_config_text(state_dir: &Path) -> Option<String> {
-    let root = state_dir.parent().unwrap_or(state_dir);
-    std::fs::read_to_string(root.join("coxagent.json")).ok()
+/// Where a project's `coxagent.json` lives: the workspace root, beside the
+/// state dir, written by `onboard`.
+pub(crate) fn config_path(state_dir: &Path) -> PathBuf {
+    state_dir
+        .parent()
+        .unwrap_or(state_dir)
+        .join("coxagent.json")
 }
 
-/// Parse `text` (already read by [`read_config_text`]) into a `Config`,
-/// falling back to defaults on a missing file or invalid JSON.
-pub(crate) fn parse_config(state_dir: &Path, text: Option<&str>) -> Config {
-    let root = state_dir.parent().unwrap_or(state_dir);
-    let path = root.join("coxagent.json");
-    match text {
-        Some(text) => match serde_json::from_str::<Config>(text) {
-            Ok(mut cfg) => {
-                heal_host_port(root, &path, &mut cfg);
-                cfg
-            }
-            Err(e) => {
-                tracing::warn!("invalid {}: {e}; using defaults", path.display());
-                Config::default()
-            }
-        },
-        None => Config::default(),
+/// Read `coxagent.json`'s raw text. Split out of [`load_config`] so a caller
+/// that also needs the raw config for a malformed-value probe — e.g. the
+/// mandatory deploy health gate's `host_port` (COX-B035) — reads the file once
+/// and feeds the same string into both parses, rather than reading it twice or
+/// letting the two parses drift.
+///
+/// No file at all is `Ok(None)`: a project that never configured one gets
+/// defaults, which is what a greenfield workspace asks for. A file that IS
+/// there but cannot be read is an error — it may carry the governance policy
+/// this process must not run without (COX-B043).
+///
+/// # Errors
+///
+/// The named file exists but could not be read (permissions, IO).
+pub(crate) fn read_config_text(state_dir: &Path) -> Result<Option<String>, String> {
+    let path = config_path(state_dir);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("cannot read {}: {e}", path.display())),
     }
 }
 
-/// Load `coxagent.json` from the workspace root (parent of the state dir), or
-/// fall back to defaults. Config lives beside the state, written by `onboard`.
-pub(crate) fn load_config(state_dir: &Path) -> Config {
-    parse_config(state_dir, read_config_text(state_dir).as_deref())
+/// Turn `text` (already read by [`read_config_text`]) into a `Config`.
+///
+/// A document that does not parse is an ERROR, never `Config::default()`.
+/// Substituting defaults empties `policy.model_allowlist`,
+/// `policy.forbidden_paths` and `policy.daily_budget_usd`, so one stray field
+/// anywhere in the file used to disable the model allowlist, the forbidden-path
+/// gate and the daily spend cap on the next start — behind nothing but a warn
+/// line (COX-B043). The project fails to load instead, naming the field.
+///
+/// # Errors
+///
+/// The document is not valid JSON, or holds a value the config schema cannot
+/// represent — see [`coxagent_application::config_parse::parse_config`].
+pub(crate) fn config_from_text(state_dir: &Path, text: Option<&str>) -> Result<Config, String> {
+    let Some(text) = text else {
+        return Ok(Config::default());
+    };
+    let path = config_path(state_dir);
+    let mut cfg = coxagent_application::config_parse::parse_config(text)
+        .map_err(|e| format!("invalid {}: {e}", path.display()))?;
+    // The config file's parent IS the workspace root heal_host_port scans.
+    heal_host_port(path.parent().unwrap_or(state_dir), &path, &mut cfg);
+    Ok(cfg)
+}
+
+/// Load `coxagent.json` from the workspace root (parent of the state dir).
+///
+/// # Errors
+///
+/// The file exists but is unreadable or malformed — see [`read_config_text`]
+/// and [`config_from_text`].
+pub fn load_config(state_dir: &Path) -> Result<Config, String> {
+    config_from_text(state_dir, read_config_text(state_dir)?.as_deref())
 }
 
 /// Self-heal a project left without a deploy port: assign a free `host_port` and
@@ -343,8 +374,8 @@ pub(crate) async fn build_project(
     // One raw read feeds both the `Config` parse and the deploy health-gate's
     // host-port probe, so a malformed `deploy.host_port` fails the gate
     // (COX-B035) instead of drifting from whatever `Config` parsed.
-    let raw_cfg = read_config_text(state_dir);
-    let config = parse_config(state_dir, raw_cfg.as_deref());
+    let raw_cfg = read_config_text(state_dir)?;
+    let config = config_from_text(state_dir, raw_cfg.as_deref())?;
     let host_port_probe = raw_cfg.as_deref().map_or(Ok(None), |t| {
         coxagent_application::ports::outbound::parse_deploy_host_port(t)
     });

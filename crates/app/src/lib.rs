@@ -32,7 +32,7 @@ use std::time::Duration;
 mod builders;
 mod shims;
 
-pub use builders::load_coordination;
+pub use builders::{load_config, load_coordination};
 #[allow(clippy::wildcard_imports)] // one module, many files — see builders.rs
 use builders::*;
 pub use shims::shim_script;
@@ -111,7 +111,7 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
         }
         Command::RunBa { work_dir, context } => {
             let store = store().await?;
-            let config = load_config(&args.state_dir);
+            let config = load_config(&args.state_dir)?;
             let (engine, _meter) = build_engine(&config, logs_dir(&args.state_dir), None)?;
             let uc = RunBaUseCase::new(Arc::clone(&store), engine, config, work_dir, context);
             let created = uc.execute().await?;
@@ -134,7 +134,7 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
         }
         Command::Check { work_dir } => {
             let store = store().await?;
-            let config = load_config(&args.state_dir);
+            let config = load_config(&args.state_dir)?;
             let uc = coxagent_application::use_cases::RunConformanceUseCase::new(
                 Arc::clone(&store),
                 work_dir,
@@ -572,7 +572,10 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
                 tracing::info!("hub: registered project '{}'", p.id);
                 projects.push(p);
             }
-            Err(err) => tracing::warn!("hub: skipping '{}': {err}", e.id),
+            // Loud: a skipped project is invisible in the dashboard, so the
+            // reason (a malformed coxagent.json names its field — COX-B043)
+            // must be findable without turning logging up.
+            Err(err) => tracing::error!("hub: skipping '{}': {err}", e.id),
         }
     }
 
@@ -1016,8 +1019,8 @@ async fn run_loop(
     // One raw read feeds both the `Config` parse and the deploy health-gate's
     // host-port probe, so a malformed `deploy.host_port` fails the gate
     // (COX-B035) instead of drifting from whatever `Config` parsed.
-    let raw_cfg = read_config_text(state_dir);
-    let config = parse_config(state_dir, raw_cfg.as_deref());
+    let raw_cfg = read_config_text(state_dir)?;
+    let config = config_from_text(state_dir, raw_cfg.as_deref())?;
     let host_port_probe = raw_cfg.as_deref().map_or(Ok(None), |t| {
         coxagent_application::ports::outbound::parse_deploy_host_port(t)
     });
