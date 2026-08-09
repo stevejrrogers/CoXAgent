@@ -18,28 +18,34 @@ fn pr_path(action: &str) -> String {
     format!("/api/projects/acme/prs/42/{action}")
 }
 
-/// The individual-contributor tier: may write project data, may not review.
+/// Product/analysis/QA roles: may write project data, may NOT review a PR.
+/// Per the gate map "PR thì dev và SA duyệt" these four are the ones held back;
+/// developers review (below).
 const MEMBER_TIER: &[AuthRole] = &[
     AuthRole::Ba,
+    AuthRole::Po,
+    AuthRole::Qa,
+    AuthRole::Sm,
+];
+
+/// Roles that review PRs: Super/Admin, the lead tier, the legacy Reviewer, the
+/// SA, and every developer.
+const REVIEWER_TIER: &[AuthRole] = &[
+    AuthRole::Super,
+    AuthRole::Admin,
+    AuthRole::Reviewer,
+    AuthRole::Sa,
+    AuthRole::Director,
+    AuthRole::Manager,
+    AuthRole::TechLead,
+    AuthRole::DsLead,
+    AuthRole::DaLead,
     AuthRole::Fe,
     AuthRole::Be,
     AuthRole::Aie,
     AuthRole::Ds,
     AuthRole::Da,
     AuthRole::De,
-];
-
-/// Roles the documented policy admits to review: "Admin, leads, and the
-/// legacy Reviewer" (plus hub-wide Super).
-const REVIEWER_TIER: &[AuthRole] = &[
-    AuthRole::Super,
-    AuthRole::Admin,
-    AuthRole::Reviewer,
-    AuthRole::Director,
-    AuthRole::Manager,
-    AuthRole::TechLead,
-    AuthRole::DsLead,
-    AuthRole::DaLead,
 ];
 
 /// The ticket's repro: a Member-tier user who IS a member of the project

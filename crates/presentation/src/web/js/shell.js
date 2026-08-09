@@ -479,7 +479,7 @@ async function doLogin(){
 async function doLogout(){try{await fetch("/api/auth/logout",{method:"POST"});}catch(e){}location.reload();}
 // Role capabilities (mirror of AuthRole in the backend).
 const LEAD_ROLES=["director","manager","techlead","dslead","dalead"];
-const ROLE_LABELS={super:"Super Admin",admin:"Admin",director:"Director",manager:"Manager",techlead:"Tech.Lead",dslead:"DS.Lead",dalead:"DA.Lead",ba:"BA",fe:"FE",be:"BE",aie:"AIE",ds:"DS",da:"DA",de:"DE",reviewer:"Reviewer",viewer:"Viewer"};
+const ROLE_LABELS={super:"Super Admin",admin:"Admin",director:"Director",manager:"Manager",techlead:"Tech.Lead",dslead:"DS.Lead",dalead:"DA.Lead",ba:"BA",po:"PO",sa:"SA",sm:"SM",qa:"QA",fe:"FE",be:"BE",aie:"AIE",ds:"DS",da:"DA",de:"DE",reviewer:"Reviewer",viewer:"Viewer"};
 function roleLabel(r){return ROLE_LABELS[r]||r;}
 function roleCanWrite(r){return r!=="viewer";}
 function roleCanCreateChannel(r){return r==="super"||r==="admin"||LEAD_ROLES.includes(r);}
