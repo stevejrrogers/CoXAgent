@@ -17,17 +17,21 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
 
     /// Pick the most pressing thing worth a team discussion this cycle, or `None`
     /// when there's nothing to talk about (so the team isn't noisy for no reason).
+    /// Returns `(category, text)` — the category keys a once-per-day claim so the
+    /// SAME kind of discussion isn't re-posted every cycle (the "47 open bugs"
+    /// spam), while a genuinely different topic can still fire the same day.
     pub(super) fn scrum_topic(
         state: &crate::state::ProjectState,
         report: &CycleReport,
         cycle: u64,
         lang: crate::config::Language,
-    ) -> Option<String> {
+    ) -> Option<(&'static str, String)> {
         use coxagent_domain::{Status, TicketType};
         let vi = lang.is_vi();
         // A failed deploy is the loudest signal — discuss root cause + prevention.
         if report.errors.iter().any(|e| e.contains("DEPLOY")) || !report.bugs_filed.is_empty() {
-            return Some(
+            return Some((
+                "deploy_fail",
                 if vi {
                     "Lần deploy hoặc chạy test gần nhất phát sinh lỗi. Nguyên nhân gốc có thể là gì, \
                      và ta nên thay đổi gì để nó không tái diễn?"
@@ -36,7 +40,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                      and what should we change to stop it recurring?"
                 }
                 .to_owned(),
-            );
+            ));
         }
         let open_bugs = state
             .tickets
@@ -44,7 +48,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .filter(|t| t.ticket_type() == TicketType::Bug && t.status() == Status::Open)
             .count();
         if open_bugs >= 3 {
-            return Some(if vi {
+            return Some(("bug_backlog", if vi {
                 format!(
                     "Đang có {open_bugs} bug mở. Nên tạm dừng tính năng mới để dọn hết bug trước, \
                      hay tiếp tục ship? Quyết định đi, và nếu cần thì tạo ticket theo dõi."
@@ -54,7 +58,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     "We have {open_bugs} open bugs. Should we pause new features and burn down the \
                      bug backlog first, or keep shipping? Decide and, if useful, create a tracking ticket."
                 )
-            });
+            }));
         }
         // A stalled in-progress ticket is worth flagging as a possible blocker.
         if let Some(t) = state
@@ -63,7 +67,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .find(|t| t.status() == Status::InProgress)
         {
             if cycle % 4 == 0 {
-                return Some(if vi {
+                return Some(("stalled", if vi {
                     format!(
                         "{} đã ở trạng thái đang làm khá lâu. Có bị block hay quá lớn không? \
                          Nên tách nhỏ hay gỡ block cho nó?",
@@ -75,12 +79,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                          Should we split it or unblock it?",
                         t.id()
                     )
-                });
+                }));
             }
         }
         // Otherwise a light periodic check-in keeps the sprint honest.
         if cycle % 6 == 0 {
-            return Some(
+            return Some((
+                "checkin",
                 if vi {
                     "Điểm tin sprint: có đang đúng hướng với mục tiêu sprint không? Có rủi ro, phình \
                      phạm vi, hay blocker nào cần nêu? Chốt một bước tiếp theo cụ thể."
@@ -89,7 +94,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                      or blockers to raise? Decide on one concrete next step."
                 }
                 .to_owned(),
-            );
+            ));
         }
         None
     }
