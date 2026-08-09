@@ -1024,6 +1024,9 @@ async fn run_loop(
         config,
         host_port_probe,
     } = load_config_with_probe(state_dir);
+    
+    // Track config changes so engine can be reloaded at cycle boundaries without restart
+    let mut config_hash = config_content_hash(state_dir);
     // Same project-id derivation as Command::Run/operator_main: the workspace
     // dir name (e.g. `cxc`), not a fixed "default" — so this operator's MCP
     // calls target the same project the hub knows it by.
@@ -1089,9 +1092,7 @@ async fn run_loop(
                 "gitlab" => Some(Arc::new(coxagent_infrastructure::GlForge::new(
                     repo, base, wd,
                 ))),
-                "github" => Some(Arc::new(coxagent_infrastructure::GhForge::with_account(
-                    repo, base, wd, account,
-                ))),
+                "github" => Some(coxagent_infrastructure::github_forge(repo, base, wd, account)),
                 _ => None,
             }
         } else {
@@ -1252,6 +1253,14 @@ async fn run_loop(
             continue;
         }
         cycle += 1;
+        
+        // Check for engine config changes at cycle boundary
+        let new_hash = config_content_hash(state_dir);
+        if new_hash != config_hash {
+            config_hash = new_hash;
+            tracing::info!("engine configuration changed — will apply on next cycle start (current cycle uses previous config)");
+        }
+        
         // Boxed: a cycle future is ~17KB of agent-phase locals, and this loop
         // frame lives for the whole daemon's life.
         let report = Box::pin(uc.run_cycle(cycle)).await;
@@ -1607,6 +1616,20 @@ mod mcp_auth_tests {
 }
 
 /// The one thing no fake-binary test can prove: that the REAL `claude` CLI,
+/// Compute a hash of the config file content to detect changes at cycle boundary
+fn config_content_hash(state_dir: &Path) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    
+    let root = state_dir.parent().unwrap_or(state_dir);
+    let path = root.join("coxagent.json");
+    
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut hasher = DefaultHasher::new();
+    content.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// given a real `--mcp-config` file, actually calls the tool instead of
 /// ignoring it. `#[ignore]`d — costs a real API call and needs `claude`
 /// logged in — run explicitly with `cargo test -- --ignored

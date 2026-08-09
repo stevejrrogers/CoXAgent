@@ -33,7 +33,7 @@ pub use engine::{
     discover, discover_opencode_models, discover_tooling, AnyEngine, ClaudeEngine, DetectedEngine,
     DetectedTool, MockEngine, OpencodeEngine, Tooling,
 };
-pub use forge::{probe_git_access, GhForge, GlForge};
+pub use forge::{github_forge, probe_git_access, GhApiForge, GhForge, GlForge};
 pub use git::SystemGit;
 pub use kv_doc::PgKvDoc;
 pub use notifier::WebhookNotifier;
