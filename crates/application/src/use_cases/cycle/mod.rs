@@ -185,7 +185,6 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     /// What this machine can run (see `set_capabilities`).
     caps: crate::ports::outbound::WorkerCaps,
     /// Last scrum discussion topic — skip duplicate discussions.
-    last_discussion_topic: Mutex<String>,
     /// Whether the `sandbox_unsupported` warning has already fired — posted
     /// once per project per process lifetime, never once per cycle.
     sandbox_warned: AtomicBool,
@@ -222,7 +221,6 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             phase: None,
             worker: String::new(),
             caps: crate::ports::outbound::WorkerCaps::default(),
-            last_discussion_topic: Mutex::new(String::new()),
             sandbox_warned: AtomicBool::new(false),
         }
     }
@@ -673,9 +671,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             if self.claim_daily("standup").await && self.has_recent_activity().await {
                 self.scrum_standup().await;
             }
-            // Mid-sprint backlog grooming, offset from the standup so the two
-            // ceremonies don't land in the same cycle.
-            if self.config.workflow.mode == crate::config::Mode::Scrum && cycle % 3 == 2 {
+            // Backlog grooming is a DAILY ceremony, not an every-few-cycles one —
+            // `cycle % 3` reposted "let's get the top items ready" every ~90s.
+            // Once a day (persisted, like the standup), and only in scrum mode.
+            if self.config.workflow.mode == crate::config::Mode::Scrum
+                && self.claim_daily("grooming").await
+            {
                 self.scrum_grooming().await;
             }
 
