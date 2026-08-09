@@ -1979,7 +1979,7 @@ async function loadSettings(){
   const hu=wf.human||{},ad=hu.adaptive||{};
   // Real agent CLIs only. `scripted`/`mock` are offline test engines (no real
   // LLM) — only shown if a project is already pinned to one, never offered new.
-  const realEng=["claude","opencode","hermes","gemini","codex"];
+  const realEng=["claude","opencode","copilot","hermes","gemini","codex"];
   const eng=[...realEng]; ["scripted","mock"].forEach(t=>{if([def.engine,...Object.values(per).map(p=>p.engine)].includes(t))eng.push(t);});
   const label=e=>e+(detNames.has(e)?" ✓":(e==="scripted"||e==="mock")?" (test)":" (not installed)");
   const opt=(s)=>eng.map(e=>`<option value="${e}" ${e===s?'selected':''}>${label(e)}</option>`).join("");
