@@ -34,6 +34,7 @@ use tokio_stream::{Stream, StreamExt};
 mod assets;
 mod auth;
 mod background;
+mod broken_projects;
 mod channels;
 mod chat;
 mod comments;
@@ -56,6 +57,8 @@ mod work;
 use assets::*;
 use auth::*;
 use background::*;
+pub use broken_projects::BrokenProject;
+use broken_projects::*;
 use channels::*;
 use chat::*;
 use comments::*;
@@ -275,6 +278,11 @@ struct AppState {
     /// Live editors per document room: room → (username → open-connection count).
     docs_editors: Arc<std::sync::Mutex<HashMap<String, HashMap<String, usize>>>>,
     order: Arc<RwLock<Vec<String>>>,
+    /// Registered projects that could not be loaded, kept so the listing can
+    /// name them and their reason (COX-B043). Fixed at boot: a config repaired
+    /// while the hub runs is picked up by restarting it, which is what loading
+    /// a project takes anyway.
+    broken: Arc<Vec<BrokenProject>>,
     factory: Option<ProjectFactory>,
     auth: Option<Arc<dyn AuthPort>>,
     audit: Arc<dyn AuditPort>,
@@ -557,6 +565,10 @@ pub struct HubExtras {
     pub doc_store: Option<Arc<dyn coxagent_application::ports::outbound::DocStorePort>>,
     /// Shared KV store for hub-wide singletons (system chat). `None` = local file.
     pub syschat_store: Option<Arc<dyn coxagent_application::ports::outbound::KvDocPort>>,
+    /// Registered projects that failed to load (e.g. an unparseable
+    /// `coxagent.json`), so the dashboard can show why one is missing instead
+    /// of silently omitting it — COX-B043.
+    pub broken: Vec<BrokenProject>,
 }
 
 /// Warn threshold for a space's budget, matching the dashboard's own amber one

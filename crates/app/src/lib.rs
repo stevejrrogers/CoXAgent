@@ -567,6 +567,7 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
     let auth = build_auth(registry.parent().unwrap_or_else(|| Path::new("."))).await?;
 
     let mut projects = Vec::new();
+    let mut broken = Vec::new();
     for e in entries {
         let state_dir = e.path.join("state");
         let work_dir = e.path.join("codebase");
@@ -575,10 +576,18 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
                 tracing::info!("hub: registered project '{}'", p.id);
                 projects.push(p);
             }
-            // Loud: a skipped project is invisible in the dashboard, so the
-            // reason (a malformed coxagent.json names its field — COX-B043)
-            // must be findable without turning logging up.
-            Err(err) => tracing::error!("hub: skipping '{}': {err}", e.id),
+            // Loud, and carried into the dashboard: a project that fails to
+            // load has no handle to serve, so without this record it would
+            // simply be absent from /api/projects and the person looking for
+            // it would have only the hub log to go on (COX-B043).
+            Err(err) => {
+                tracing::error!("hub: skipping '{}': {err}", e.id);
+                broken.push(coxagent_presentation::BrokenProject {
+                    id: e.id.clone(),
+                    config_path: e.path.join("coxagent.json"),
+                    error: err.to_string(),
+                });
+            }
         }
     }
 
@@ -654,6 +663,7 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
         storage: build_storage().await,
         doc_store: build_doc_store().await,
         syschat_store: build_syschat_store(&base).await,
+        broken,
     };
     coxagent_presentation::serve_full(projects, port, audit, extras).await?;
     Ok(())

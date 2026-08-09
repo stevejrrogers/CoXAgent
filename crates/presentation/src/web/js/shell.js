@@ -152,23 +152,52 @@ async function saveGoal(){
 function toggleProjMenu(e){e.stopPropagation();const m=document.getElementById("proj-menu");if(m.classList.contains("open")){closeProjMenu();return;}renderProjMenu();m.classList.add("open");}
 function closeProjMenu(){document.getElementById("proj-menu").classList.remove("open");}
 document.addEventListener("click",e=>{const pk=document.querySelector(".projpick");if(pk&&!pk.contains(e.target))closeProjMenu();});
+// Projects the hub could not load (a coxagent.json it cannot parse). They are
+// listed but never selectable — there is no store, runner or route behind one,
+// so switching to it would only produce 404s (COX-B043).
+let BROKEN_PROJECTS=[];
+// Ids already announced this page load: loadProjects() re-runs on every create,
+// rename and delete, and a broken config is a boot-time fact that has not
+// changed since the last toast — announcing it again is noise, not news.
+const BROKEN_ANNOUNCED=new Set();
+function announceBroken(){
+  for(const b of BROKEN_PROJECTS){
+    if(BROKEN_ANNOUNCED.has(b.id))continue;
+    BROKEN_ANNOUNCED.add(b.id);
+    toasty(`Project "${b.name||b.id}" did not load: ${b.error||"invalid config"}`,"err");
+  }
+}
+function brokenProjMenuHtml(){
+  if(!BROKEN_PROJECTS.length)return "";
+  return '<div class="projitem" style="cursor:default;color:var(--muted);font-size:11px">Not loaded — fix the config, then restart the hub</div>'+
+    BROKEN_PROJECTS.map(p=>`<div class="projitem" style="cursor:not-allowed;opacity:.75" title="${esc(p.error||"")}">
+    <span class="pi-mk" style="background:var(--card2)"><i class="ti ti-alert-triangle"></i></span>
+    <span class="pi-meta"><span class="pi-name">${esc(p.name||p.id)}</span><span class="pi-sub">${esc(p.config_path||p.id)}</span></span></div>`).join("");
+}
 function renderProjMenu(){
   const m=document.getElementById("proj-menu");
-  if(!PROJECTS.length){m.innerHTML='<div class="projitem" style="cursor:default;color:var(--muted)">No projects yet</div>';return;}
+  if(!PROJECTS.length&&!BROKEN_PROJECTS.length){m.innerHTML='<div class="projitem" style="cursor:default;color:var(--muted)">No projects yet</div>';return;}
   m.innerHTML=PROJECTS.map(p=>`<div class="projitem${p.id===PID?' sel':''}" onclick="switchProject('${esc(p.id)}')">
     <span class="pi-mk">${esc(projInitial(p))}</span>
     <span class="pi-meta"><span class="pi-name">${esc(p.name)}</span><span class="pi-sub">${p.alias?esc(p.alias):esc(p.id)}</span></span>
     <i class="ti ti-check pi-check"></i>
-    <i class="ti ti-trash pi-del" title="Remove project" onclick="event.stopPropagation();deleteProject('${esc(p.id)}')"></i></div>`).join("");
+    <i class="ti ti-trash pi-del" title="Remove project" onclick="event.stopPropagation();deleteProject('${esc(p.id)}')"></i></div>`).join("")
+    +brokenProjMenuHtml();
 }
 async function loadProjects(){
   let list=[];try{list=await(await fetch("/api/projects")).json();}catch(e){}
-  PROJECTS=list;
+  // A project that failed to load is absent from every other API — keep it out
+  // of PROJECTS (which drives selection everywhere) but SHOW it, so an
+  // unparseable config reads as "this project is broken, here is the file"
+  // instead of "this project vanished" (COX-B043).
+  BROKEN_PROJECTS=list.filter(p=>p&&p.broken);
+  PROJECTS=list.filter(p=>p&&!p.broken);
+  announceBroken();
   // System chat + meetings are WORKSPACE-level: connect the live socket even
   // with zero projects, so invites/reminders/rings always reach the user.
-  if(!list.length){renderProjBtn();initChatBackground();return;}
+  if(!PROJECTS.length){renderProjBtn();initChatBackground();return;}
   const saved=localStorage.getItem("coxpid");
-  PID=(saved&&list.some(p=>p.id===saved))?saved:list[0].id;
+  PID=(saved&&PROJECTS.some(p=>p.id===saved))?saved:PROJECTS[0].id;
   renderProjBtn();
   loadBudget();loadComments();connect();initChatBackground();
 }
