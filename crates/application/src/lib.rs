@@ -100,8 +100,11 @@ pub(crate) mod test_fs {
             let Ok(rd) = std::fs::read_dir(dir) else {
                 return Vec::new();
             };
-            let mut out: Vec<PathBuf> =
-                rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+            let mut out: Vec<PathBuf> = rd
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect();
             out.sort();
             out
         }

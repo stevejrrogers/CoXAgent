@@ -152,6 +152,7 @@ mod tests {
             work_dir: PathBuf::from("/tmp"),
             timeout: Duration::from_secs(1),
             escalation_level: 0,
+            label: None,
         }
     }
 

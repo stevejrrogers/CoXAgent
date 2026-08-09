@@ -42,7 +42,20 @@ until the queue is back under the limit.
 project name (cox-<project>-…) and the project's ASSIGNED host port. Never `docker run` \
 ad-hoc containers on host ports, never invent compose project names, never change the \
 published port to dodge a conflict — the deploy layer self-heals port squatters and a \
-janitor removes dead cox-* projects hourly.";
+janitor removes dead cox-* projects hourly.
+- The hub and the runner are DIFFERENT MACHINES. The process serving the dashboard is \
+routinely a container with no agent CLI, no ssh key, no forge login and no checkout of \
+the code; the agents run on an operator's machine that has all four. So a feature must \
+never answer 'what can be done here?' by inspecting the process it happens to run in — \
+the machine that holds the capability reports it (worker registry) or serves it. This \
+one assumption has produced the same bug four separate times: engines shown as 'not \
+installed', a user's custom model provider missing, a git connection test that described \
+the hub instead of the runner, and an empty code map. Before adding any 'detect', \
+'discover' or 'check' that shells out, name which machine must answer it.
+- Run what you changed and read the output. A ticket is not evidence; a green unit test \
+is not evidence that the running system behaves. Curl the endpoint, read the log, inspect \
+the row, look at the rendered page — the defects that matter most are the ones no \
+acceptance criterion thought to ask about.";
 
 pub const ENGINEERING_STANDARDS: &str = "\
 ENGINEERING STANDARDS (non-negotiable house rules):\n\
@@ -394,7 +407,10 @@ pub async fn focus_block(
             .iter()
             .position(|(f, _)| *f == s.file)
             .unwrap_or({
-                let content = files.read(&work_dir.join(&s.file)).await.unwrap_or_default();
+                let content = files
+                    .read(&work_dir.join(&s.file))
+                    .await
+                    .unwrap_or_default();
                 file_cache.push((s.file.clone(), content.lines().map(str::to_owned).collect()));
                 file_cache.len() - 1
             });
@@ -562,6 +578,65 @@ pub async fn test_surface_block(
 /// does not know what the product already does asks the SA to read the code and
 /// report back. Guessing is the expensive option — it fails a gate three
 /// attempts later, having taught nobody anything.
+/// Every author an agent (or the system) posts under. Anyone else commenting
+/// is a person.
+///
+/// Steering used to match the literal author `"USER"`, which only the
+/// account-less open mode produces: on any hub with logins the comment is
+/// authored with the real username. So every comment a signed-in person wrote
+/// was stored, shown in the dialog, and never once read by an agent — the
+/// feature looked present and did nothing.
+const AGENT_AUTHORS: &[&str] = &[
+    "BA",
+    "SA",
+    "PD",
+    "DEV",
+    "DEV-BUG",
+    "DEV-FEATURE",
+    "DOCS",
+    "TEST",
+    "QA",
+    "SM",
+    "PO",
+    "SYSTEM",
+];
+
+/// Whether `author` is a person rather than one of the agents.
+#[must_use]
+pub fn is_human_author(author: &str) -> bool {
+    let a = author.trim();
+    // `USER` is what open mode writes for the operator — a person.
+    a == "USER" || !AGENT_AUTHORS.iter().any(|r| r.eq_ignore_ascii_case(a))
+}
+
+/// What the humans said on this ticket, as instructions.
+///
+/// A person who reads a design or a proposal and thinks "not what I meant"
+/// reaches for the comment box. That only steered DEV: SA kept designing and
+/// BA kept proposing without ever seeing the note, so the correction had to be
+/// re-typed as a rejection reason or lost. Every role that writes something a
+/// human reviews now reads the comments on it first.
+///
+/// Newest first, capped — a long thread should not crowd out the ticket.
+#[must_use]
+pub fn human_steering_block(state: &crate::state::ProjectState, ticket: &str) -> String {
+    let notes: Vec<String> = state
+        .comments
+        .iter()
+        .filter(|c| is_human_author(&c.author) && c.ticket.as_deref() == Some(ticket))
+        .rev()
+        .take(3)
+        .map(|c| c.body.chars().take(400).collect::<String>())
+        .collect();
+    if notes.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n\nHUMAN STEERING on this ticket (newest first — follow it):\n- {}",
+        notes.join("\n- ")
+    )
+}
+
 #[must_use]
 pub fn ask_protocol_block(state: &crate::state::ProjectState, ticket: &str) -> String {
     use std::fmt::Write as _;
@@ -749,7 +824,12 @@ pub async fn repo_docs_block(
         .map(|n| work_dir.join(n))
         .collect();
     // One level of docs/ is enough; deep trees are the code graph's job.
-    for meta in files.list(&work_dir.join("docs")).await.into_iter().take(40) {
+    for meta in files
+        .list(&work_dir.join("docs"))
+        .await
+        .into_iter()
+        .take(40)
+    {
         if meta.path.extension().is_some_and(|x| x == "md") {
             candidates.push(meta.path);
         }
@@ -1049,6 +1129,56 @@ mod tests {
     use super::{deploy_constraints, design_constraints, repo_map_block};
     use crate::config::DeployConfig;
     use crate::state::DesignSystem;
+
+    #[test]
+    fn a_signed_in_person_s_comment_is_steering_too() {
+        // The bug this guards: steering matched the literal author "USER",
+        // which only account-less open mode writes. On a hub with logins every
+        // comment is authored with the real username, so no human note ever
+        // reached an agent.
+        let mut state = crate::state::ProjectState::default();
+        state.post_comment("luffy", "drop the retry loop", Some("F001".to_owned()));
+        state.post_comment("SA", "designed it", Some("F001".to_owned()));
+        state.post_comment("DEV-BUG", "fixed it", Some("F001".to_owned()));
+
+        let out = super::human_steering_block(&state, "F001");
+        assert!(out.contains("drop the retry loop"), "{out}");
+        assert!(!out.contains("designed it"));
+        assert!(!out.contains("fixed it"));
+
+        assert!(super::is_human_author("USER"));
+        assert!(super::is_human_author("luffy"));
+        assert!(!super::is_human_author("BA"));
+        assert!(
+            !super::is_human_author("dev-feature"),
+            "case must not matter"
+        );
+    }
+
+    #[test]
+    fn human_steering_carries_only_this_ticket_s_human_notes() {
+        let mut state = crate::state::ProjectState::default();
+        state.post_comment(
+            "USER",
+            "use the existing auth port",
+            Some("F001".to_owned()),
+        );
+        state.post_comment("SA", "designed it", Some("F001".to_owned()));
+        state.post_comment("USER", "different ticket", Some("F002".to_owned()));
+
+        let out = super::human_steering_block(&state, "F001");
+        assert!(out.contains("existing auth port"));
+        assert!(
+            !out.contains("designed it"),
+            "agent chatter is not steering"
+        );
+        assert!(!out.contains("different ticket"), "other tickets stay out");
+
+        assert!(
+            super::human_steering_block(&state, "F404").is_empty(),
+            "no notes means no block at all, not an empty heading"
+        );
+    }
 
     #[tokio::test]
     async fn repo_map_block_gated_and_present() {

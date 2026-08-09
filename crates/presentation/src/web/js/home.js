@@ -81,6 +81,7 @@ function verGt(a,b){const pa=String(a).split(".").map(Number),pb=String(b).split
 async function checkAppUpdate(){
   let d=null;try{d=await(await fetch("/api/app/latest")).json();}catch(e){return;}
   window._appLatest=d;
+  hubUpgradeReload(d.hub_version);
   const newer=!!(d.latest_version&&d.hub_version&&verGt(d.latest_version,d.hub_version));
   // The get-app button transforms while an update exists: rocket icon, accent
   // pulse + amber dot — visible even after the toast was dismissed.
@@ -93,6 +94,22 @@ async function checkAppUpdate(){
     const ver=document.getElementById("getapp-ver");
     if(ver){ver.hidden=!newer;ver.textContent=newer?("v"+d.latest_version):"";}
   }
+}
+// The hub upgraded under a window that is already open: reload so the page
+// matches the server it is talking to.
+//
+// The desktop shell loads the dashboard ONCE, at launch, and offers no reload
+// — so every hub upgrade left the window showing the previous build's UI while
+// the API underneath had moved on. A shipped fix that no window can see is not
+// shipped. The page is stateless (state lives on the hub), so reloading costs
+// nothing but the paint.
+function hubUpgradeReload(version){
+  if(!version)return;
+  if(!window._hubVersion){window._hubVersion=version;return;}
+  if(window._hubVersion===version||window._hubReloading)return;
+  window._hubReloading=true;
+  toasty(`Hub upgraded to v${version} — reloading`,"ok");
+  setTimeout(()=>location.reload(),900);
 }
 function coxSelfUpdate(url){
   try{
@@ -204,6 +221,8 @@ function renderSprintPanel(s){
         <div><div class="sprintno">Sprint #${sp.number} <span class="pbadge on" style="margin-left:6px">● active</span></div>
           <div class="sprintgoal">${esc(sp.goal)}</div>${msBadge}</div>
         <div class="sp-ring" style="--p:${pct}"><div class="in"><b>${pct}%</b><span>done</span></div></div>
+        <button class="sp-close" onclick="closeSprintNow()" title="Archive this sprint now and open the next one">
+          <i class="ti ti-flag-check"></i> Close sprint</button>
       </div>
       <div class="sp-stats">
         ${stat(total,"Committed")}
@@ -221,7 +240,7 @@ function renderSprintPanel(s){
       ${colHtml("In progress","var(--accent2)",prog)}
       ${colHtml("Done","var(--green)",done)}
     </div>
-    <div class="sec" style="margin-top:16px">Up next <span style="font-size:11px;color:var(--dim);font-weight:400">· top of the backlog the PO pulls into the next sprint</span></div>
+    <div class="sec" style="margin-top:16px">Up next <span style="font-size:11px;color:var(--dim);font-weight:400">· top of the backlog the PO pulls into the next sprint — use <b>+ sprint</b> on the <a onclick="setWorkTab('backlog')" style="cursor:pointer;color:var(--accent2)">Backlog tab</a> to pull one into THIS sprint</span></div>
     <div class="panel">${upnext.map(t=>tRow(t,false)).join("")||'<div class="empty">backlog clear — nothing queued</div>'}</div>
     ${velocityHtml(s.sprints||[])}`;
 }
@@ -257,9 +276,37 @@ function renderBacklogPanel(s){
   const rows=items.map(t=>{const col=pc[t.priority]||"var(--muted)";const inSp=committed.has(t.id);
     return `<div class="act" onclick="showTicket('${t.id}')" style="cursor:pointer"><div class="ad" style="background:${col}22;color:${col}"><i class="ti ti-${t.type==='bug'?'bug':'bulb'}" style="font-size:13px"></i></div>
       <div class="atx"><span class="tk">${esc(t.id)}</span> ${esc(t.title)} <span class="fchip" style="padding:1px 8px;font-size:10px;border:none;background:${col}22;color:${col}">${esc(t.priority||'—')}</span>${inSp?' <span class="fchip" style="padding:1px 8px;font-size:10px;border:none;background:var(--accentbg);color:var(--accent2)">in sprint</span>':''}</div>
+      <button class="sp-scope" onclick="event.stopPropagation();sprintScope('${t.id}',${inSp?"false":"true"})" title="${inSp?'Drop from the running sprint':'Pull into the running sprint'}">${inSp?'− sprint':'+ sprint'}</button>
       <span class="tm">${esc(t.status)}</span></div>`;}).join("");
   el.innerHTML=`<div class="filters"><span style="font-size:12px;color:var(--muted)">Prioritised backlog — the PO pulls from the top into each sprint.</span><div style="flex:1"></div><span class="fchip">${items.length} waiting</span></div>
     <div class="panel">${rows||'<div class="empty">backlog is clear — every ticket is in flight or shipped</div>'}</div>`;
+}
+// Pull a backlog ticket into the sprint that is already running, or drop it.
+// The automatic commit only happens at roll-over; this is how a person changes
+// their mind mid-sprint without editing the ticket.
+async function sprintScope(id,add){
+  try{
+    const r=await fetch(api("/sprint/"+(add?"commit":"drop")),
+      {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tickets:[id]})});
+    if(!r.ok){toasty((await r.text())||"Sprint update failed","err");return;}
+    toasty(add?`${id} pulled into the sprint`:`${id} dropped from the sprint`);
+    await refreshDisc();
+  }catch(e){toasty("Network error","err");}
+}
+// Close the running sprint now instead of waiting out its cycle window. The
+// sprint is archived exactly as a timed roll-over archives it.
+async function closeSprintNow(){
+  const ok=await coxModal({title:"Close sprint",
+    message:"Archive the running sprint now and open the next one? Unfinished tickets stay in the backlog and the next sprint commits from the top.",
+    confirmText:"Close sprint"});
+  if(!ok)return;
+  try{
+    const r=await fetch(api("/sprint/close"),{method:"POST"});
+    if(!r.ok){toasty((await r.text())||"Close failed","err");return;}
+    const d=await r.json();
+    toasty(`Sprint closed — #${d.sprint} is now open`);
+    await refreshDisc();
+  }catch(e){toasty("Network error","err");}
 }
 function loadComments(){if(CUR==="discuss")renderDiscuss();}
 // Show the current sprint goal as a read-only chip; set it with /sprint <goal>.

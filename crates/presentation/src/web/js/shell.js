@@ -320,9 +320,26 @@ async function deleteProject(id){
   }catch(e){toasty("Network error","err");}
 }
 let ME=null;
+const NEXT_KEY="cox_next";
+// Where the guest was trying to go when the auth gate intercepted them. The
+// explicit ?next=<path> query param wins; otherwise we keep whatever hash or
+// search the URL already carried. Saved so a successful login can return them
+// there even when the redirect reloads (fresh location.hash) in between.
+function rememberDestination(){
+  try{
+    const q=new URLSearchParams(location.search);
+    const next=q.get("next"); // already percent-decoded by URLSearchParams
+    // Accept either /path or #fragment form; otherwise keep whatever hash/search
+    // the URL already carries so a reload between gate and login still returns.
+    const target=(typeof next==="string"&&(next.startsWith("/")||next.startsWith("#")))
+      ?next
+      :((location.hash+location.search)||"/");
+    if(target&&target!=="/")sessionStorage.setItem(NEXT_KEY,target);
+  }catch(e){}
+}
 async function boot(){
-  let r;try{r=await fetch("/api/auth/me");}catch(e){showLogin();return;}
-  if(r.status===401){showLogin();return;}
+  let r;try{r=await fetch("/api/auth/me");}catch(e){rememberDestination();showLogin();return;}
+  if(r.status===401){rememberDestination();showLogin();return;}
   try{ME=await r.json();}catch(e){ME={auth:false};}
   try{updateSegments();}catch(e){}
   startApp();
@@ -337,34 +354,69 @@ function startApp(){
   ensureNotifPermission();
   checkAppUpdate();setInterval(checkAppUpdate,5*60*1000);
   window.addEventListener("focus",()=>checkAppUpdate());
-  fetch("/api/health").then(r=>r.json()).then(h=>{const b=document.getElementById("brand-ver");if(b&&h.version)b.textContent="v"+h.version;}).catch(()=>{});
+  // Health is one cheap JSON with the hub's version in it: poll it, keep the
+  // brand chip honest, and reload the window when the hub upgrades under it.
+  const pollHealth=()=>fetch("/api/health").then(r=>r.json()).then(h=>{
+    const b=document.getElementById("brand-ver");if(b&&h.version)b.textContent="v"+h.version;
+    hubUpgradeReload(h.version);
+  }).catch(()=>{});
+  pollHealth();setInterval(pollHealth,30*1000);
   setTimeout(centerContent,200);
 }
 const AGENT_CLIS={claude:{label:"Claude Code",desc:"Anthropic's coding agent",install:"curl -fsSL https://claude.ai/install.sh | bash",docs:"https://claude.com/claude-code"},
   opencode:{label:"opencode",desc:"open-source multi-model agent",install:"curl -fsSL https://opencode.ai/install | bash",docs:"https://opencode.ai"}};
+// Which machine each engine was found on: "hub" for the server's own PATH, else
+// the runner that reported it. Lets the wizard say "installed · luton@mac"
+// instead of implying it sits on the machine you are reading this from.
+function engineHosts(list){
+  const m={};
+  for(const e of (list||[])){ if(e&&e.name) m[String(e.name).toLowerCase()]=e.where||"hub"; }
+  return m;
+}
 async function checkAgentSetup(force){
   let list=[];try{list=await(await fetch("/api/engines")).json();}catch(e){}
   const have=new Set((list||[]).map(e=>e.name.toLowerCase()));
-  window._engines=have;
+  window._engines=have; window._engineHosts=engineHosts(list);
   const dismissed=localStorage.getItem("coxSetupDone")==="1";
   const runnable=[...have].some(n=>n==="claude"||n==="opencode");
   if(runnable)localStorage.setItem("coxSetupDone","1");
-  // If engines list is empty (Docker/no CLI), auto-dismiss so dashboard works
-  // without showing the setup wizard on every login.
-  if(have.size===0){localStorage.setItem("coxSetupDone","1");}
+  // An empty list used to be auto-dismissed, because a hub in a container
+  // detected nothing and nagged every login. /api/engines now also reports what
+  // each live runner found on ITS machine, so empty finally means what it says:
+  // no agent CLI anywhere on this team. That is precisely when the guide helps.
   if(!force&&(runnable||dismissed))return;
   renderSetupWizard(have);
   document.getElementById("ov-setup").classList.add("open");
 }
+// Which OS is reading this page. The shell one-liners below are macOS/Linux
+// only; on Windows they are worse than useless — they look like something you
+// could paste. There the download page is the honest primary path.
+function setupPlatform(){
+  const s=(navigator.userAgentData&&navigator.userAgentData.platform)||navigator.platform||"";
+  if(/win/i.test(s))return "windows";
+  if(/mac/i.test(s))return "macos";
+  return "linux";
+}
 function renderSetupWizard(have){
+  const win=setupPlatform()==="windows";
   const rows=Object.entries(AGENT_CLIS).map(([k,c])=>{
     const ok=have.has(k);
+    // Where an engine was found matters once runners are remote: "installed"
+    // on someone else's machine is not something to install again here.
+    const on=(window._engineHosts&&window._engineHosts[k])||"";
+    const pill=ok
+      ?`<span class="setpill on">installed${on&&on!=="hub"?" · "+esc(workerLabel(on,Object.values(window._engineHosts||{}))):""}</span>`
+      :'<span class="setpill">not found</span>';
+    const dl=`<a href="${c.docs}" target="_blank" rel="noopener" class="setlink"><i class="ti ti-download" style="font-size:12px"></i> Download for ${win?"Windows":setupPlatform()==="macos"?"macOS":"Linux"}</a>`;
     return `<div class="setrow ${ok?'ok':''}">
       <div class="setmk">${ok?'<i class="ti ti-check"></i>':'<i class="ti ti-download"></i>'}</div>
-      <div style="flex:1;min-width:0"><div class="setname">${esc(c.label)} ${ok?'<span class="setpill on">installed</span>':'<span class="setpill">not found</span>'}</div>
+      <div style="flex:1;min-width:0"><div class="setname">${esc(c.label)} ${pill}</div>
         <div class="setdesc">${esc(c.desc)}</div>
-        ${ok?'':`<div class="setcmd"><code id="cmd-${k}">${esc(c.install)}</code><button onclick="copyCmd('${k}')" title="Copy"><i class="ti ti-copy"></i></button></div>
-          <a href="${c.docs}" target="_blank" rel="noopener" class="setlink">Installation guide <i class="ti ti-external-link" style="font-size:12px"></i></a>`}</div></div>`;
+        ${ok?'':(win
+          ?`${dl}<div class="setdesc" style="margin-top:6px">The one-line installer is macOS/Linux only.</div>`
+          :`<div class="setcmd"><code id="cmd-${k}">${esc(c.install)}</code><button onclick="copyCmd('${k}')" title="Copy"><i class="ti ti-copy"></i></button></div>
+            <div style="display:flex;gap:12px;flex-wrap:wrap">${dl}
+            <a href="${c.docs}" target="_blank" rel="noopener" class="setlink">Installation guide <i class="ti ti-external-link" style="font-size:12px"></i></a></div>`)}</div></div>`;
   }).join("");
   const anyOk=[...have].some(n=>n==="claude"||n==="opencode");
   document.getElementById("setup-body").innerHTML=`
@@ -383,6 +435,7 @@ async function recheckAgents(){
   const btn=document.getElementById("set-recheck");const old=btn.innerHTML;btn.innerHTML='<i class="ti ti-loader-2"></i> Checking…';
   let list=[];try{list=await(await fetch("/api/engines")).json();}catch(e){}
   const have=new Set((list||[]).map(e=>e.name.toLowerCase()));window._engines=have;
+  window._engineHosts=engineHosts(list);
   renderSetupWizard(have);btn.innerHTML=old;
   if([...have].some(n=>n==="claude"||n==="opencode")){localStorage.setItem("coxSetupDone","1");}
 }
@@ -410,13 +463,23 @@ async function doLogin(){
     }
     document.getElementById("lg-pass").value="";document.getElementById("lg-totp").value="";
     document.getElementById("lg-totp-row").style.display="none";
+    // Return a guest to where they were headed before the gate intercepted
+    // them (see rememberDestination): navigate there once auth succeeds.
+    const next=sessionStorage.getItem(NEXT_KEY);
+    sessionStorage.removeItem(NEXT_KEY);
     await boot();
+    // A guest who asked for ?next=<hash> lands back on that view once signed
+    // in; an invalid/nonexistent fragment safely falls through to overview.
+    if(next){
+      const frag=(next.indexOf("#")>=0)?next.slice(next.indexOf("#")+1).split("?")[0]:"";
+      if(frag&&TITLES[frag])nav(frag);
+    }
   }catch(e){err.textContent="Network error.";}
 }
 async function doLogout(){try{await fetch("/api/auth/logout",{method:"POST"});}catch(e){}location.reload();}
 // Role capabilities (mirror of AuthRole in the backend).
 const LEAD_ROLES=["director","manager","techlead","dslead","dalead"];
-const ROLE_LABELS={super:"Super Admin",admin:"Admin",director:"Director",manager:"Manager",techlead:"Tech.Lead",dslead:"DS.Lead",dalead:"DA.Lead",ba:"BA",fe:"FE",be:"BE",aie:"AIE",ds:"DS",da:"DA",de:"DE",reviewer:"Reviewer",viewer:"Viewer"};
+const ROLE_LABELS={super:"Super Admin",admin:"Admin",director:"Director",manager:"Manager",techlead:"Tech.Lead",dslead:"DS.Lead",dalead:"DA.Lead",ba:"BA",po:"PO",sa:"SA",sm:"SM",qa:"QA",fe:"FE",be:"BE",aie:"AIE",ds:"DS",da:"DA",de:"DE",reviewer:"Reviewer",viewer:"Viewer"};
 function roleLabel(r){return ROLE_LABELS[r]||r;}
 function roleCanWrite(r){return r!=="viewer";}
 function roleCanCreateChannel(r){return r==="super"||r==="admin"||LEAD_ROLES.includes(r);}
@@ -1206,6 +1269,10 @@ function wlSay(name,args){
   if(n==="bash"){
     let c=String(a.command||"").replace(/\s+/g," ").trim();
     if(!c)c=raw.replace(/^\{|\}$/g,"").replace(/\s+/g," ").slice(0,92);
+    // Strip the boilerplate that fronts almost every agent command — a
+    // `cd <worktree> &&` prefix and absolute tool paths — so the meaningful
+    // part shows: "cargo test -p …" not "cd /tmp/pr-review-b043 && /opt/…".
+    c=c.replace(/^cd\s+\S+\s*&&\s*/,"").replace(/\/\S*\/(cargo|npm|npx|node|git|python3?|sed|grep|rg)\b/g,"$1");
     return {verb:"Run",detail:c.length>92?c.slice(0,92)+"…":(c||"(command not logged)")};
   }
   if(n==="grep")return {verb:"Search",detail:[a.pattern,a.path?"in "+wlShortPath(a.path):""].filter(Boolean).join(" ")};
@@ -1213,6 +1280,10 @@ function wlSay(name,args){
   if(n==="webfetch")return {verb:"Fetch",detail:a.url||""};
   if(n==="task"||n==="agent")return {verb:"Delegate",detail:a.description||""};
   if(n==="todowrite")return {verb:"Update plan",detail:""};
+  if(n==="reportfindings"||n==="structuredoutput"){
+    const v=a.decision||a.verdict||"";
+    return {verb:"Review verdict",detail:v?String(v).replace(/_/g," "):""};
+  }
   // Unknown tool: keep the name, show the first meaningful argument.
   const first=Object.entries(a).find(([,v])=>typeof v==="string"&&v.trim());
   return {verb:name,detail:first?String(first[1]).slice(0,80):""};
@@ -1271,14 +1342,34 @@ function parseWorklog(raw){
     if(s.startsWith("💬")){ flush(); cur={k:"msg",text:s.slice(2).replace(/^\s+/,"")}; continue; }
     if(s.startsWith("🔧")){ flush(); const m=s.slice(2).trim(); const i=m.indexOf("(");
       items.push({k:"tool",name:i>=0?m.slice(0,i):m,args:i>=0?m.slice(i+1).replace(/\)$/,""):""}); continue; }
-    const rm=s.match(/^\s*↳\s*result\s*\(([^)]*)\)/);
-    if(rm){ flush(); items.push({k:"result",info:rm[1]}); continue; }
+    // Result line: the backend now emits a human summary ("↳ ✓ 220 passed");
+    // the older "↳ result (396 chars)" form is still parsed for old logs.
+    const rm=s.match(/^\s*↳\s*(.+?)\s*$/);
+    if(rm){ flush(); const old=rm[1].match(/^result\s*\(([^)]*)\)$/); items.push({k:"result",info:old?old[1]:rm[1]}); continue; }
     // continuation / plain text
     if(cur&&cur.k==="msg") cur.text+="\n"+s;
     else if(s.trim()) cur={k:"msg",text:s};
   }
   flush();
   return items;
+}
+// A review/structured-output line is often the model's final answer dumped as
+// raw JSON — `{"decision":"approve","summary":"…"}`. Rendered verbatim it is a
+// wall of braces; parse it into a verdict badge + the summary as prose.
+function wlVerdictCard(text){
+  const t=String(text||"").trim();
+  if(!t.startsWith("{")||!/"(decision|verdict)"/.test(t))return null;
+  let o;try{o=JSON.parse(t);}catch(e){return null;}
+  const d=String(o.decision||o.verdict||"").toLowerCase();
+  if(!d)return null;
+  const summary=o.summary||o.reason||o.rationale||"";
+  const ok=/approve|pass|verified|accept|merge/.test(d);
+  const bad=/reject|request_changes|request-changes|fail|block|deny/.test(d);
+  const col=ok?"--green":(bad?"--red":"--amber");
+  const label=d.replace(/_/g," ").replace(/\b\w/g,c=>c.toUpperCase());
+  return `<div class="wl-item wl-msg"><span class="wl-ic"><i class="ti ti-gavel"></i></span>
+    <div class="wl-body"><span class="wl-verdict" style="background:color-mix(in srgb,var(${col}) 15%,transparent);color:var(${col})">${esc(label)}</span>
+    ${summary?`<div class="wl-verdict-sum">${wlFmt(String(summary))}</div>`:""}</div></div>`;
 }
 function renderWorklog(items,live){
   const parts=items.map(it=>{
@@ -1292,6 +1383,8 @@ function renderWorklog(items,live){
       const said=wlSay(it.name,it.args);
       return `<div class="wl-item wl-tool"><span class="wl-chip"><i class="ti ${m.ic} wl-tic" style="color:var(${m.col})"></i><span class="wl-tname">${esc(said.verb)}</span>${said.detail?`<span class="wl-targs">${esc(said.detail)}</span>`:""}</span></div>`; }
     if(it.k==="result") return `<div class="wl-item wl-result"><span class="wl-rin"><i class="ti ti-corner-down-right"></i> ${esc(it.info)}</span></div>`;
+    const card=wlVerdictCard(it.text);
+    if(card) return card;
     return `<div class="wl-item wl-msg"><span class="wl-ic"><i class="ti ti-sparkles"></i></span><div class="wl-body">${wlFmt(it.text)}</div></div>`;
   });
   if(live) parts.push(`<div class="wl-typing"><span class="wl-ic"><i class="ti ti-sparkles"></i></span><span class="dots"><i></i><i></i><i></i></span></div>`);

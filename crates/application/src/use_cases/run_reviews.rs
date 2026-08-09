@@ -110,6 +110,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunArchitectureAud
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(1200),
             escalation_level: 0,
+            label: None,
         };
         let raw = match self.engine.run(request).await {
             Ok(o) if o.succeeded() => o.stdout,
@@ -362,6 +363,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunDocsAuditUseCas
                 work_dir: self.work_dir.clone(),
                 timeout: Duration::from_secs(900),
                 escalation_level: 0,
+                label: None,
             };
             let body = match self.engine.run(request).await {
                 Ok(o) if o.succeeded() => o.stdout.trim().to_owned(),
@@ -536,9 +538,9 @@ async fn gather_evidence(
         "compose.yml",
     ];
     let ignore = |p: &std::path::Path| {
-        p.file_name()
-            .and_then(|n| n.to_str())
-            .map_or(true, |n| n.starts_with('.') || n == "target" || n == "node_modules")
+        p.file_name().and_then(|n| n.to_str()).map_or(true, |n| {
+            n.starts_with('.') || n == "target" || n == "node_modules"
+        })
     };
 
     // Manifest files at the root and one/two levels down (workspace members),

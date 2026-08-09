@@ -118,6 +118,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
                 work_dir: self.work_dir.clone(),
                 timeout: Duration::from_secs(900),
                 escalation_level: level,
+                label: None,
             })
         };
         let Ok(out) = run(task).await else { return };
@@ -263,6 +264,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
                 work_dir: self.work_dir.clone(),
                 timeout: Duration::from_secs(900),
                 escalation_level: 0,
+                label: Some(id.to_string()),
             })
             .await?;
         if !outcome.succeeded() {
@@ -294,6 +296,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
                     work_dir: self.work_dir.clone(),
                     timeout: Duration::from_secs(900),
                     escalation_level: 0,
+                    label: Some(id.to_string()),
                 })
                 .await;
             if let Ok(o) = repair {

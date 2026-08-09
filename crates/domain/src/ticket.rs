@@ -264,7 +264,11 @@ impl Ticket {
     /// Route this ticket to a human (empty clears back to the agent pool).
     pub fn assign_to_human(&mut self, username: &str) {
         let u = username.trim();
-        self.assignee = if u.is_empty() { None } else { Some(u.to_owned()) };
+        self.assignee = if u.is_empty() {
+            None
+        } else {
+            Some(u.to_owned())
+        };
     }
 
     /// RFC3339 time the current claim was taken, or `None` when unclaimed.

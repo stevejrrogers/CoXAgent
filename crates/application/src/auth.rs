@@ -32,6 +32,14 @@ pub enum AuthRole {
     DaLead,
     // Member tier (individual contributors)
     Ba,
+    /// Product Owner — owns the sprint and the Ready gate for tickets.
+    Po,
+    /// Solution Architect — owns PR review alongside developers.
+    Sa,
+    /// Scrum Master — runs the flow; no gate of its own, routes exceptions.
+    Sm,
+    /// QA / Tester — owns the Verify gate (test cases and their results).
+    Qa,
     Fe,
     Be,
     Aie,
@@ -62,14 +70,26 @@ impl AuthRole {
         !matches!(self, Self::Viewer)
     }
 
+    /// Whether this role writes code — the developer tier. PR review is theirs
+    /// alongside the SA.
+    #[must_use]
+    pub fn is_dev(self) -> bool {
+        matches!(
+            self,
+            Self::Fe | Self::Be | Self::Aie | Self::Ds | Self::Da | Self::De
+        )
+    }
+
     /// Whether this role may act on code review (approve / merge / close /
-    /// preview pull requests): Super, Admin, the lead tier, and the legacy
-    /// Reviewer. Deliberately NARROWER than [`Self::can_write`] — a member-tier
-    /// contributor may write project data but must not sign off on, merge, or
-    /// force-merge a pull request (COX-B038).
+    /// preview pull requests). Per the team's gate map: developers and the SA
+    /// own PR review, plus Admin/leads and the legacy Reviewer. Deliberately
+    /// NARROWER than [`Self::can_write`] for non-dev member roles — a BA may
+    /// write project data but does not sign off a pull request (COX-B038).
     #[must_use]
     pub fn can_review(self) -> bool {
-        matches!(self, Self::Super | Self::Admin | Self::Reviewer) || self.is_lead()
+        matches!(self, Self::Super | Self::Admin | Self::Sa | Self::Reviewer)
+            || self.is_lead()
+            || self.is_dev()
     }
 
     /// Whether this role may create chat channels: Super, Admin, and the lead tier.
@@ -84,6 +104,22 @@ impl AuthRole {
     #[must_use]
     pub fn can_manage(self) -> bool {
         matches!(self, Self::Super | Self::Admin) || self.is_lead()
+    }
+
+    /// Whether this role may release a designed ticket into the queue — the
+    /// hybrid Pending→Ready gate. Ticket refinement is the BA's call and the
+    /// sprint is the PO's, so both, plus Admin and the lead tier.
+    #[must_use]
+    pub fn can_approve_ready(self) -> bool {
+        matches!(self, Self::Super | Self::Admin | Self::Ba | Self::Po) || self.is_lead()
+    }
+
+    /// Whether this role may render the QA verdict on a fixed ticket — the
+    /// hybrid verify gate over test cases and their results. The Tester's job,
+    /// plus Admin/leads and the legacy Reviewer.
+    #[must_use]
+    pub fn can_verify(self) -> bool {
+        matches!(self, Self::Super | Self::Admin | Self::Qa | Self::Reviewer) || self.is_lead()
     }
 
     /// Hub-wide super admin (cross-space power).
@@ -104,6 +140,10 @@ impl AuthRole {
             Self::DsLead => "dslead",
             Self::DaLead => "dalead",
             Self::Ba => "ba",
+            Self::Po => "po",
+            Self::Sa => "sa",
+            Self::Sm => "sm",
+            Self::Qa => "qa",
             Self::Fe => "fe",
             Self::Be => "be",
             Self::Aie => "aie",
@@ -127,6 +167,10 @@ impl AuthRole {
             Self::DsLead => "DS.Lead",
             Self::DaLead => "DA.Lead",
             Self::Ba => "BA",
+            Self::Po => "PO",
+            Self::Sa => "SA",
+            Self::Sm => "SM",
+            Self::Qa => "QA",
             Self::Fe => "FE",
             Self::Be => "BE",
             Self::Aie => "AIE",
@@ -155,6 +199,10 @@ impl AuthRole {
             "dslead" => Self::DsLead,
             "dalead" => Self::DaLead,
             "ba" => Self::Ba,
+            "po" => Self::Po,
+            "sa" => Self::Sa,
+            "sm" => Self::Sm,
+            "qa" | "tester" | "test" => Self::Qa,
             "fe" => Self::Fe,
             "be" => Self::Be,
             "aie" => Self::Aie,
@@ -177,6 +225,10 @@ impl AuthRole {
             Self::DsLead,
             Self::DaLead,
             Self::Ba,
+            Self::Po,
+            Self::Sa,
+            Self::Sm,
+            Self::Qa,
             Self::Fe,
             Self::Be,
             Self::Aie,
@@ -207,24 +259,28 @@ mod role_tests {
         assert!(!AuthRole::Viewer.can_write());
     }
 
-    /// Regression for COX-B038: `can_review` had been written as
-    /// `can_write() || matches!(self, Reviewer)`, which is mathematically
-    /// identical to `can_write()` — so the PR-action gate granted nothing
-    /// beyond ordinary write access and any non-Viewer could force-merge.
+    /// Regression for COX-B038 (the PR gate must not equal `can_write`) plus
+    /// the team's gate map: "PR thì dev và SA duyệt". Developers and the SA
+    /// review; Admin/leads/Reviewer too. The non-dev member roles — BA, PO,
+    /// QA, SM — write but do NOT sign off a PR.
     #[test]
-    fn review_is_admin_leads_reviewer_only_not_every_writer() {
+    fn review_is_devs_sa_leads_reviewer_not_the_product_roles() {
         assert!(AuthRole::Super.can_review());
         assert!(AuthRole::Admin.can_review());
         assert!(AuthRole::Reviewer.can_review());
+        assert!(AuthRole::Sa.can_review(), "the SA reviews PRs");
         // The whole lead tier reviews.
-        assert!(AuthRole::Director.can_review());
-        assert!(AuthRole::Manager.can_review());
-        assert!(AuthRole::TechLead.can_review());
-        assert!(AuthRole::DsLead.can_review());
-        assert!(AuthRole::DaLead.can_review());
-        // Member tier can write but must NOT merge/close/preview a PR.
         for r in [
-            AuthRole::Ba,
+            AuthRole::Director,
+            AuthRole::Manager,
+            AuthRole::TechLead,
+            AuthRole::DsLead,
+            AuthRole::DaLead,
+        ] {
+            assert!(r.can_review());
+        }
+        // Developers review PRs — their own craft.
+        for r in [
             AuthRole::Fe,
             AuthRole::Be,
             AuthRole::Aie,
@@ -232,6 +288,10 @@ mod role_tests {
             AuthRole::Da,
             AuthRole::De,
         ] {
+            assert!(r.can_review(), "{} is a dev and reviews PRs", r.as_str());
+        }
+        // Product/analysis/QA roles write but must NOT merge/close a PR.
+        for r in [AuthRole::Ba, AuthRole::Po, AuthRole::Qa, AuthRole::Sm] {
             assert!(r.can_write(), "{} should still write", r.as_str());
             assert!(!r.can_review(), "{} must not review PRs", r.as_str());
         }
@@ -259,6 +319,41 @@ mod role_tests {
             narrower_somewhere,
             "can_review() grants nothing beyond can_write() — the PR gate is a no-op"
         );
+    }
+
+    #[test]
+    fn the_gate_decisions_are_not_open_to_everyone() {
+        // Ready gate (ticket → Ready): the BA refines, the PO owns the sprint.
+        assert!(AuthRole::Ba.can_approve_ready());
+        assert!(AuthRole::Po.can_approve_ready());
+        assert!(AuthRole::Manager.can_approve_ready());
+        assert!(AuthRole::Admin.can_approve_ready());
+        assert!(!AuthRole::Fe.can_approve_ready(), "a dev is not the PO/BA");
+        assert!(!AuthRole::Qa.can_approve_ready(), "QA verifies, does not refine");
+        assert!(!AuthRole::Viewer.can_approve_ready());
+
+        // Verify gate (test cases + results): the Tester's verdict.
+        assert!(AuthRole::Qa.can_verify(), "the Tester renders the QA verdict");
+        assert!(AuthRole::TechLead.can_verify());
+        assert!(
+            AuthRole::Reviewer.can_verify(),
+            "judging finished work IS its job"
+        );
+        assert!(
+            !AuthRole::Ba.can_verify(),
+            "writing the ticket is not signing it off"
+        );
+        assert!(!AuthRole::Po.can_verify(), "the PO owns scope, not QA sign-off");
+        assert!(!AuthRole::Viewer.can_verify());
+
+        // A read-only account may take no gate decision at all.
+        for allowed in [AuthRole::can_approve_ready, AuthRole::can_verify] {
+            assert!(!allowed(AuthRole::Viewer));
+            assert!(
+                allowed(AuthRole::Super),
+                "the hub owner is never locked out"
+            );
+        }
     }
 
     #[test]
@@ -389,6 +484,21 @@ pub trait AuthPort: Send + Sync {
     /// Mint an API token (`label`, `role`) and return the secret **once**.
     /// Returns `None` if the label is taken or persistence fails.
     async fn create_token(&self, label: &str, role: AuthRole) -> Option<String>;
+
+    /// Harvest a personal bearer token for `username` at login time — mint-or-
+    /// reuse on the self-service path used by `/my/tokens`
+    /// (`user:{name}:{...}` prefix), bound to that user's own role (never an
+    /// elevation). Idempotent: when one already exists for that user no
+    /// duplicate is minted and no secret is re-issued — secrets are stored only
+    /// as hashes, so the plaintext can be returned exactly once, on first issue.
+    ///
+    /// The returned secret feeds `COXAGENT_REMOTE_TOKEN`, authenticating a
+    /// remote-state runner against this server's `/store`. Default returns
+    /// `None` so non-SQL / loopback auth stores opt out cleanly; a store that
+    /// backs RBAC bearer validation may override to provide real harvesting.
+    async fn auto_issue_personal_token(&self, _username: &str) -> Option<String> {
+        None
+    }
 
     /// List minted tokens (metadata only, never the secret).
     async fn list_tokens(&self) -> Vec<TokenInfo>;

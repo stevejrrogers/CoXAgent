@@ -56,10 +56,7 @@ pub fn check(files_by_area: &BTreeMap<String, Vec<String>>, rules: &[StackRule])
         };
         let files: Vec<&String> = files
             .iter()
-            .filter(|f| {
-                !f.split(['/', '\\'])
-                    .any(|seg| SKIP_DIRS.contains(&seg))
-            })
+            .filter(|f| !f.split(['/', '\\']).any(|seg| SKIP_DIRS.contains(&seg)))
             .collect();
 
         if !rule.require_any.is_empty()

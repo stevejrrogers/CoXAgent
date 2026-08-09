@@ -129,10 +129,30 @@ pub(super) fn is_pr_review_path(path: &str) -> bool {
 /// middleware supplies role and path, and turns `false` into a 403.
 pub(super) fn write_gate_ok(role: coxagent_application::auth::AuthRole, path: &str) -> bool {
     if is_pr_review_path(path) {
-        role.can_review()
-    } else {
-        role.can_write()
+        return role.can_review();
     }
+    // The raw store RPC (`/api/projects/:pid/store`) writes WHOLE state
+    // snapshots — every ticket, every approval sample, every gate decision in
+    // one POST. Ordinary write rights made it a backdoor around every role
+    // gate: a member-tier account that may not approve one ticket could still
+    // `op=save` a state in which the ticket was already approved. The callers
+    // it exists for are remote runners, which authenticate as the operator
+    // that started them — an operator account needs manage rights anyway.
+    // `/api/pr-report` is its sibling: the runner reports PRs it opened, with
+    // the project id in the BODY — so the per-project membership check (which
+    // reads the URL) never sees it. Same caller, same bar.
+    if is_store_rpc_path(path) || path == "/api/pr-report" {
+        return role.can_manage();
+    }
+    role.can_write()
+}
+
+/// The runner store RPC: `/api/projects/<pid>/store` exactly — one path
+/// segment for the pid, nothing after `store`.
+pub(super) fn is_store_rpc_path(path: &str) -> bool {
+    path.strip_prefix("/api/projects/")
+        .and_then(|rest| rest.strip_suffix("/store"))
+        .is_some_and(|pid| !pid.is_empty() && !pid.contains('/'))
 }
 
 /// RBAC gate. Open (pass-through) when no auth is configured. Otherwise: the
@@ -210,7 +230,8 @@ pub(super) async fn auth_mw(
         && path != "/api/chat/dm" // open a DM: any signed-in user
         && !path.starts_with("/api/engines/opencode") // opencode model list: any signed-in user
         && !path.contains("/channels") // create/invite channels: any signed-in user
-        && !path.ends_with("/upload"); // uploads are open to any signed-in user
+        && !path.ends_with("/upload") // uploads are open to any signed-in user
+        && path != "/api/mcp"; // MCP dispatch: role check based on JSON-RPC method, not HTTP verb
     let method = req.method().clone();
     let username = user.username.clone();
     // Management surfaces — user administration, project Settings, and API
@@ -234,6 +255,16 @@ pub(super) async fn auth_mw(
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({ "error": "management role required" })),
+        )
+            .into_response();
+    }
+    // MCP dispatch requires write access, even for read-only JSON-RPC methods,
+    // because the HTTP verb alone can't distinguish read from write operations.
+    if path == "/api/mcp" && !user.role.can_write() {
+        audit_push(&app.audit, &username, format!("{method} {path}"), 403).await;
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "insufficient role" })),
         )
             .into_response();
     }
@@ -423,6 +454,13 @@ pub(super) async fn login_ep(
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("");
             auth.attach_device(&token, &device_label(ua)).await;
+            // CXA-F002: harvest a personal bearer token for remote-state runners
+            // (fed into make_store's COXAGENT_REMOTE_TOKEN so /store calls are
+            // authenticated under P5a). Idempotent per user — first login mints,
+            // later logins reuse without re-issuing the secret.
+            if let Some(secret) = auth.auto_issue_personal_token(&req.username).await {
+                std::env::set_var("COXAGENT_REMOTE_TOKEN", secret);
+            }
             token
         }
         LoginResult::TotpRequired => {

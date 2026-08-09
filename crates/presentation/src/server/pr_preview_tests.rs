@@ -340,8 +340,7 @@ async fn an_unset_host_port_leaves_the_gate_nothing_to_probe() {
 /// gate is probing a port that was never configured.
 #[tokio::test(start_paused = true)]
 async fn an_explicit_null_host_port_leaves_the_gate_nothing_to_probe() {
-    let (_dir, handle) =
-        project_handle_with_raw_host_port(Arc::new(DeployWithDeadPort), "null");
+    let (_dir, handle) = project_handle_with_raw_host_port(Arc::new(DeployWithDeadPort), "null");
     let forge: Arc<dyn ForgePort> = Arc::new(UnusedForge);
 
     let resp = pr_preview(&handle, &forge, 1, false).await;
@@ -394,6 +393,21 @@ async fn a_string_host_port_is_rejected_rather_than_skipping_the_gate() {
 #[tokio::test(start_paused = true)]
 async fn a_boolean_host_port_is_rejected_rather_than_skipping_the_gate() {
     let (_dir, handle) = project_handle_with_raw_host_port(Arc::new(HealthyDeploy), "true");
+    let forge: Arc<dyn ForgePort> = Arc::new(UnusedForge);
+
+    let resp = pr_preview(&handle, &forge, 1, false).await;
+
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+/// AC (COX-B042): `0` is a valid `u16` but not a connectable port — the
+/// kernel's "any free port" sentinel. Probing it can only ever time out, so
+/// a preview would spend the gate's whole window before blaming the app for
+/// a fault that is in the config. Reject it like any other unpublishable
+/// value instead.
+#[tokio::test(start_paused = true)]
+async fn a_zero_host_port_is_rejected_rather_than_probed() {
+    let (_dir, handle) = project_handle_with_raw_host_port(Arc::new(HealthyDeploy), "0");
     let forge: Arc<dyn ForgePort> = Arc::new(UnusedForge);
 
     let resp = pr_preview(&handle, &forge, 1, false).await;

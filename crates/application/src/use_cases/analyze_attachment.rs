@@ -80,6 +80,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> AnalyzeAttachmentU
             // Reading an image and reasoning about it can take a while.
             timeout: Duration::from_secs(180),
             escalation_level: 0,
+            label: None,
         };
         let outcome = self.engine.run(request).await?;
         if !outcome.succeeded() {

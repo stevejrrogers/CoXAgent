@@ -1,4 +1,9 @@
 node_modules/
 test-results/
 .state/
+.state-auth/
 playwright-report/
+
+# Local runtime snapshots of hub state (spaces/system_chat/workspace) written
+# by a live coxagent boot during test runs — machine-local, never fixtures.
+backups/

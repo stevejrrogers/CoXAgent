@@ -142,6 +142,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             work_dir: self.work_dir.clone(),
             timeout: std::time::Duration::from_secs(300),
             escalation_level: 0,
+            label: Some(id.to_string()),
         };
         let Ok(outcome) = self.engine.run(request).await else {
             return;

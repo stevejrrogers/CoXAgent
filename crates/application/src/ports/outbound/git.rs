@@ -176,6 +176,31 @@ pub trait GitPort: Send + Sync {
         let _ = (work_dir, from_sha, to_sha);
         Ok(Vec::new())
     }
+
+    /// Create a lightweight or annotated tag on `ref_target` (sha or branch).
+    /// `author` supplies the committer identity for the annotated tag, so the
+    /// call never depends on a machine's ambient `git config user.name/email`
+    /// (mirrors `commit_all`). Default: unsupported.
+    ///
+    /// # Errors
+    /// [`PortError::Backend`] on a git failure.
+    async fn create_tag(
+        &self,
+        work_dir: &Path,
+        name: &str,
+        ref_target: &str,
+        author: &GitAuthor,
+    ) -> Result<(), PortError> {
+        let _ = (work_dir, name, ref_target, author);
+        Err(PortError::Backend("create_tag: not supported".to_owned()))
+    }
+
+    /// Whether a tag with `name` already exists in the repository. Default:
+    /// false.
+    async fn tag_exists(&self, work_dir: &Path, name: &str) -> bool {
+        let _ = (work_dir, name);
+        false
+    }
 }
 
 /// Outcome of [`GitPort::sync_base`].

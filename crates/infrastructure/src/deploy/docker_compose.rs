@@ -47,6 +47,30 @@ async fn compose_project_on_port(port: &str) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
+/// Whether the deploy may `down` a compose project that is squatting one of the
+/// agent's host ports. This is the blast-radius guard for the port-eviction
+/// self-heal: only agent-managed preview projects (`cox-{parent}-{dir}`) may be
+/// evicted. The live hub (`coxagent` / `coxagent-*`) and shared infra
+/// (`cox-infra`) are NEVER evocable — downing either is a self-inflicted outage,
+/// exactly the class of bug where an agent deploy took the whole control plane
+/// down trying to free a port it thought it owned.
+fn evictable_project(project: &str) -> bool {
+    // `compose_project_name` always yields `cox-<parent>-<dir>`, so an
+    // evocable preview is recognisable by its `cox-` prefix — provided it is
+    // NOT the live hub. `coxagent` and anything starting with `coxagent` (the
+    // production project plus any of its service containers) are protected, as
+    // is shared shared infrastructure (`cox-infra`).
+    let lower = project.to_ascii_lowercase();
+    if lower == "cox-infra"
+        || lower == "coxagent"
+        || lower.starts_with("coxagent")
+        || lower.starts_with("cox-infra")
+    {
+        return false;
+    }
+    lower.starts_with("cox-")
+}
+
 /// Clamp every container of this compose project to a CPU/memory budget via
 /// `docker update`, regardless of what the agent-authored compose file says —
 /// a runaway service (busy loop, leak) can then never take the whole host.
@@ -195,6 +219,63 @@ fn test_command(work_dir: &Path) -> Option<(&'static str, Vec<&'static str>)> {
     }
 }
 
+/// Whether a Linux C/C++ cross toolchain that can actually link native crates
+/// (tree-sitter, ring build C in build.rs) exists on this host. Having a rustup
+/// *target* installed is not enough — without a C compiler for that target,
+/// `cargo check --target x86_64-unknown-linux-gnu` can only ever report those
+/// crates' build-tool failure, never whether *this ticket* broke Linux.
+/// Considers common glibc/musl names in PATH plus `/opt/homebrew/bin` and
+/// `/usr/local/bin`, and explicit rust-style env overrides.
+fn linux_c_toolchain_present() -> bool {
+    use std::{
+        os::unix::fs::PermissionsExt as _,
+        path::{Path, PathBuf},
+    };
+
+    const NAMES: &[&str] = &[
+        "x86_64-linux-gnu-gcc",
+        "x86_64-linux-gnu-cc",
+        "aarch64-linux-gnu-gcc",
+        "x86_64-unknown-linux-musl-gcc",
+        "musl-clang",
+        "zig", // zig cc can drive a configured cross build when present
+    ];
+    if std::env::var("CARGO_BUILD_TARGET")
+        .ok()
+        .is_some_and(|v| v.contains("linux"))
+    {
+        return true;
+    }
+    let overrides = [
+        "CC_x86_64_UNKNOWN_LINUX_GNU",
+        "CC_aarch64_UNKNOWN_LINUX_GNU",
+    ];
+    if overrides.iter().any(|k| std::env::var(k).is_ok()) {
+        return true;
+    }
+    let mut dirs: Vec<String> = std::env::var("PATH")
+        .unwrap_or_default()
+        .split(':')
+        .filter(|d| !d.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    dirs.push("/opt/homebrew/bin".to_string());
+    dirs.push("/usr/local/bin".to_string());
+    for dir in &dirs {
+        for name in NAMES.iter().copied() {
+            let probe: PathBuf = Path::new(dir).join(name);
+            if probe.exists()
+                && probe
+                    .metadata()
+                    .is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 #[async_trait]
 impl DeployPort for DockerComposeDeploy {
     async fn lint(&self, work_dir: &Path) -> Result<Option<u64>, PortError> {
@@ -330,6 +411,27 @@ impl DeployPort for DockerComposeDeploy {
                      succeed (rustup may be absent) and no Docker build is available here. Until \
                      one of them exists, a symbol that is dead code on Linux compiles clean on \
                      this host and only breaks in Docker/CI."
+                ),
+                errors: Vec::new(),
+            });
+        }
+        // The rustup *target* is installed, but that is not enough to verify
+        // this ticket's code against native crates: tree-sitter/ring build C in
+        // build.rs and need a real Linux C cross toolchain, which this macOS
+        // host does not have. Running cargo check here would fail on those
+        // crates' tool-not-found every single time — an infra gap, not evidence
+        // about this ticket. Prefer a Docker answer; otherwise degrade honestly
+        // to unavailable so run_dev warns instead of hard-blocking every ticket.
+        if !linux_c_toolchain_present() {
+            if let Some(check) = compose_build_check(work_dir).await {
+                return Ok(check);
+            }
+            return Ok(CrossCheck {
+                available: false,
+                reason: format!(
+                    "cannot verify {TARGET}: rustup target present but no Linux C/cross \
+                     toolchain (x86_64-linux-gnu-gcc / x86_64-unknown-linux-musl-gcc / \
+                     musl-clang) on this host — native crates cannot build without it"
                 ),
                 errors: Vec::new(),
             });
@@ -509,6 +611,14 @@ impl DeployPort for DockerComposeDeploy {
         // self-inflicted deploy blocker. `down --remove-orphans` releases the
         // project's own ports (and orphaned services) so `up` starts clean.
         let proj = compose_project_name(work_dir);
+        // Safety: `compose_project_name` always yields `cox-<parent>-<dir>`,
+        // but double-check it can never collide with the live hub project
+        // before we `down --remove-orphans` anything.
+        if !evictable_project(&proj) {
+            return Err(PortError::Backend(format!(
+                "refusing to deploy project `{proj}` — collides with the live hub"
+            )));
+        }
         let _ = Command::new("docker")
             .args(["compose", "-p", &proj, "down", "--remove-orphans"])
             .current_dir(work_dir)
@@ -556,6 +666,13 @@ impl DeployPort for DockerComposeDeploy {
                 break;
             };
             if let Some(project) = compose_project_on_port(&port).await {
+                // Blast-radius guard: never `down` the live hub or shared infra
+                // to free the port — that is a self-inflicted outage, not a
+                // port eviction. Only agent preview projects (`cox-...`) are
+                // evictable; anything else is reported as a collision.
+                if !evictable_project(&project) {
+                    break;
+                }
                 let _ = Command::new("docker")
                     .args(["compose", "-p", &project, "down", "--remove-orphans"])
                     .stdin(std::process::Stdio::null())
@@ -632,6 +749,37 @@ impl DeployPort for DockerComposeDeploy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The port-eviction blast-radius guard: agent preview projects are
+    /// evictable, the live hub and shared infra are not.
+    #[test]
+    fn evictable_project_protects_the_live_hub_and_infra() {
+        assert!(
+            evictable_project("cox-cxa-codebase"),
+            "agent preview evictable"
+        );
+        assert!(
+            evictable_project("cox-my-project-preview"),
+            "any cox-<parent>-<dir> preview evictable"
+        );
+        // The live hub and anything sharing its prefix are NEVER evictable —
+        // downing them is the self-inflicted outage we guard against.
+        assert!(!evictable_project("coxagent"), "live hub protected");
+        assert!(
+            !evictable_project("coxagent-gateway"),
+            "hub service protected"
+        );
+        assert!(!evictable_project("cox-infra"), "shared infra protected");
+        assert!(
+            !evictable_project("cox-infra-db"),
+            "shared infra child protected"
+        );
+        // A non-preview project on our port is a collision, not an eviction.
+        assert!(
+            !evictable_project("someone-elses-stack"),
+            "foreign project protected"
+        );
+    }
 
     /// AC (COX-F005): a health endpoint that's unreachable (nothing
     /// listening — connection refused) must be treated as a failed check,

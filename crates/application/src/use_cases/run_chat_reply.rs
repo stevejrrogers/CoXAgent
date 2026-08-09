@@ -43,6 +43,10 @@ pub struct RunChatReplyUseCase<S: StateStorePort + ?Sized, E: AgentEnginePort + 
     files: Option<Arc<dyn crate::ports::outbound::WorkspaceFilesPort>>,
     /// Channel the reply posts into; `None` keeps the Scrum/discuss thread.
     reply_channel: Option<String>,
+    /// The chat author's role, so a gate command typed in chat ("approve F12")
+    /// obeys the same role map as the Inbox buttons. `None` = open mode (no
+    /// auth), where the sole operator may do everything.
+    actor_role: Option<crate::auth::AuthRole>,
 }
 
 /// Common docker-compose filenames we treat as "already has a deploy setup".
@@ -75,7 +79,15 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             import_project_fn: None,
             files: None,
             reply_channel: None,
+            actor_role: None,
         }
+    }
+
+    /// Carry the chat author's role so gate commands honour it.
+    #[must_use]
+    pub fn with_actor_role(mut self, role: Option<crate::auth::AuthRole>) -> Self {
+        self.actor_role = role;
+        self
     }
 
     /// Reply into a chat CHANNEL instead of the Scrum thread — the answer
@@ -152,25 +164,9 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         if msg.is_empty() {
             return Ok(());
         }
-        // Bare gate commands are deterministic — "approve COX-F023" needs no
-        // model in the loop. The engine path once answered it with "COX-F023
-        // does not exist" because the PROMPT's bounded backlog block didn't
-        // include the ticket: never let a context cap veto a direct command.
-        {
-            let lower = msg.to_lowercase();
-            for (kw, to) in [
-                ("approve", coxagent_domain::Status::Ready),
-                ("verify", coxagent_domain::Status::Verified),
-            ] {
-                if let Some(rest) = lower.strip_prefix(kw) {
-                    let id = rest.trim_start_matches([':', ' ']).trim();
-                    let orig = msg[msg.len() - id.len()..].trim();
-                    if !id.is_empty() && !id.contains(' ') && id.contains('-') {
-                        self.human_gate_action(orig, to).await;
-                        return Ok(());
-                    }
-                }
-            }
+        // Bare gate commands are deterministic — handled without the model.
+        if self.try_gate_command(msg).await {
+            return Ok(());
         }
         let persona = route_persona(&msg.to_lowercase());
         let context = self.context().await;
@@ -331,6 +327,48 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         Ok(())
     }
 
+    /// Handle a bare gate command ("approve COX-F023", "verify B031") without
+    /// a model in the loop — the engine path once answered it "does not exist"
+    /// because the prompt's bounded backlog omitted the ticket. Returns whether
+    /// the message WAS a gate command (and was handled). Role-gated the same way
+    /// as the Inbox buttons: approve is BA/PO, verify is QA; open mode (no role)
+    /// is the operator and may do both.
+    async fn try_gate_command(&self, msg: &str) -> bool {
+        let lower = msg.to_lowercase();
+        for (kw, to) in [
+            ("approve", coxagent_domain::Status::Ready),
+            ("verify", coxagent_domain::Status::Verified),
+        ] {
+            let Some(rest) = lower.strip_prefix(kw) else {
+                continue;
+            };
+            let id = rest.trim_start_matches([':', ' ']).trim();
+            let orig = msg[msg.len() - id.len()..].trim();
+            if id.is_empty() || id.contains(' ') || !id.contains('-') {
+                continue;
+            }
+            let verify = to == coxagent_domain::Status::Verified;
+            let allowed = self
+                .actor_role
+                .map_or(true, |r| if verify { r.can_verify() } else { r.can_approve_ready() });
+            if allowed {
+                self.human_gate_action(orig, to).await;
+            } else {
+                let who = if verify { "QA/Tester" } else { "BA/PO" };
+                self.post(
+                    "SYSTEM",
+                    &format!(
+                        "⛔ Only {who} may {kw} a ticket — your role can view but not take this \
+                         decision."
+                    ),
+                )
+                .await;
+            }
+            return true;
+        }
+        false
+    }
+
     /// A human gate decision typed in chat: "approve F012" moves a designed
     /// ticket to Ready, "verify B031" renders the QA verdict — the same moves
     /// the Inbox buttons make, executed with the chat user's authority
@@ -354,7 +392,11 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
                 .ok_or_else(|| crate::PortError::Corrupt(format!("no ticket {tid}")))?;
             t.transition_to(coxagent_domain::Role::User, to)
                 .map_err(|e| crate::PortError::Corrupt(e.to_string()))?;
-            s.log_activity("USER", &format!("chat-approved to {label}"), Some(tid.to_string()));
+            s.log_activity(
+                "USER",
+                &format!("chat-approved to {label}"),
+                Some(tid.to_string()),
+            );
             Ok(())
         })
         .await;
@@ -436,6 +478,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             work_dir: self.work_dir.clone(),
             timeout: std::time::Duration::from_secs(3600),
             escalation_level: 0,
+            label: Some(tid.to_string()),
         };
         match self.engine.run(request).await {
             Ok(outcome) if outcome.succeeded() => {
@@ -500,8 +543,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         };
         self.post("SA", &announce).await;
 
-        let fp =
-            crate::prompts::focus_block(self.files.as_deref(), &self.work_dir, &title).await;
+        let fp = crate::prompts::focus_block(self.files.as_deref(), &self.work_dir, &title).await;
         let rp =
             crate::prompts::repo_map_block(self.files.as_deref(), &self.work_dir, self.token_saver)
                 .await;
@@ -512,6 +554,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             work_dir: self.work_dir.clone(),
             timeout: std::time::Duration::from_secs(1200),
             escalation_level: 0,
+            label: Some(tid.to_string()),
         };
         match self.engine.run(request).await {
             Ok(o) if o.succeeded() => {
@@ -597,6 +640,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             work_dir: self.work_dir.clone(),
             timeout: std::time::Duration::from_secs(1800),
             escalation_level: 0,
+            label: Some(tid.to_string()),
         };
         match self.engine.run(request).await {
             Ok(o) if o.succeeded() => {
@@ -956,6 +1000,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(600),
             escalation_level: 0,
+            label: None,
         };
         let _ = self.engine.run(request).await;
     }
@@ -1079,6 +1124,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             // cheapest model. The first answers this produced were off-topic
             // and reached for `deploy` on a bug report.
             escalation_level: 1,
+            label: None,
         };
         let outcome = match self.engine.run(request).await {
             Ok(o) => o,

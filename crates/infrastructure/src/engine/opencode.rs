@@ -33,7 +33,7 @@ impl OpencodeEngine {
     pub fn new(model: impl Into<String>) -> Self {
         Self {
             model: model.into(),
-            binary: "opencode".to_owned(),
+            binary: crate::engine::resolve_engine_binary("opencode"),
             mcp: None,
             escalation: Vec::new(),
             sandbox: false,
@@ -243,10 +243,17 @@ fn mcp_prompt_hint(mcp: &crate::engine::McpAccess) -> String {
 
 /// The live-log file for a run: `<workspace>/logs/live/<role>.log`, derived
 /// from the codebase work-dir (`<workspace>/codebase`). Same layout as the
-/// claude engine so the dashboard's `agent-log` endpoint finds it.
-fn live_path(work_dir: &Path, role: &str) -> Option<PathBuf> {
+/// claude engine so the dashboard's `agent-log` endpoint finds it. When a
+/// per-run [`AgentRequest::label`] is present it lands between role and
+/// operator so runs are chaseable per ticket:
+/// `<role>__<label>__<operator>.log`.
+fn live_path(work_dir: &Path, role: &str, label: Option<&str>) -> Option<PathBuf> {
     let dir = work_dir.parent()?.join("logs").join("live");
     std::fs::create_dir_all(&dir).ok()?;
+    let label_part = label
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map_or_else(String::new, |l| format!("__{l}"));
     let suffix = std::env::var("COXAGENT_OPERATOR")
         .ok()
         .map(|o| {
@@ -256,7 +263,7 @@ fn live_path(work_dir: &Path, role: &str) -> Option<PathBuf> {
         })
         .filter(|s| !s.is_empty())
         .map_or_else(String::new, |s| format!("__{s}"));
-    Some(dir.join(format!("{role}{suffix}.log")))
+    Some(dir.join(format!("{role}{label_part}{suffix}.log")))
 }
 
 fn append_live(path: &Path, line: &str) {
@@ -298,7 +305,7 @@ impl AgentEnginePort for OpencodeEngine {
         };
 
         let role = crate::engine::role_key(request.role);
-        let live = live_path(&request.work_dir, &role);
+        let live = live_path(&request.work_dir, &role, request.label.as_deref());
         if let Some(p) = &live {
             let _ = std::fs::write(p, format!("# {role} — live @ run start\n"));
         }
@@ -346,7 +353,7 @@ impl AgentEnginePort for OpencodeEngine {
         work_dir: &std::path::Path,
         timeout: std::time::Duration,
     ) -> Result<AgentOutcome, PortError> {
-        let live = live_path(work_dir, "resume");
+        let live = live_path(work_dir, "resume", None);
         let (mut cmd, sandbox) = crate::proc::agent_command(&self.binary, work_dir, self.sandbox);
         cmd.arg("run")
             .arg("--model")
@@ -516,11 +523,24 @@ fn parse_json_stream(raw: &str) -> (String, coxagent_application::ports::outboun
             }
             Some("step_finish") => {
                 if let Some(tokens) = v.pointer("/part/tokens") {
+                    // Cached prompt tokens count as input too — opencode nests
+                    // them under `tokens.cache.{read,write}`. Same fix as the
+                    // claude parser: without it a cached run reports near-zero
+                    // input and the Cost tab reads wrong for this harness.
+                    let cache = tokens.get("cache");
+                    let cache_tok = |k: &str| {
+                        cache
+                            .and_then(|c| c.get(k))
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0)
+                    };
                     input_tokens = input_tokens.saturating_add(
                         tokens
                             .get("input")
                             .and_then(serde_json::Value::as_u64)
-                            .unwrap_or(0),
+                            .unwrap_or(0)
+                            + cache_tok("read")
+                            + cache_tok("write"),
                     );
                     output_tokens = output_tokens.saturating_add(
                         tokens
@@ -901,6 +921,7 @@ mod tests {
                 work_dir: dir.clone(),
                 timeout: std::time::Duration::from_secs(20),
                 escalation_level: 0,
+                label: None,
             })
             .await
             .expect("run");
