@@ -127,11 +127,13 @@ pub(crate) fn heal_host_port(root: &Path, cfg_path: &Path, cfg: &mut Config) -> 
                 if sib == *cfg_path {
                     continue;
                 }
+                // Read the sibling's port from the raw document, not through
+                // `Config`: a sibling with an unrelated bad field would
+                // otherwise contribute nothing, and this project would heal
+                // onto the very port that sibling publishes.
                 if let Ok(text) = std::fs::read_to_string(&sib) {
-                    if let Ok(c) = serde_json::from_str::<Config>(&text) {
-                        if let Some(p) = c.deploy.host_port {
-                            used.insert(p);
-                        }
+                    if let Ok(Some(p)) = probe_from_raw(&text) {
+                        used.insert(p);
                     }
                 }
             }
@@ -269,6 +271,44 @@ mod tests {
         assert!(
             on_disk.contains("-1"),
             "an unparseable config must not be rewritten from defaults"
+        );
+    }
+
+    /// A sibling's published port is off-limits even when the rest of that
+    /// sibling's config is unreadable — healing onto a port another project
+    /// already publishes is the collision this scan exists to prevent, and one
+    /// bad field elsewhere in the sibling's file must not hide its port.
+    #[test]
+    fn a_sibling_with_one_bad_field_still_reserves_its_port() {
+        // What this host heals to with no sibling in the way — the port the
+        // case below must therefore NOT pick.
+        let (_first, first_state) = workspace("0");
+        let contested = load_config_with_probe(&first_state)
+            .expect("a representable port loads")
+            .config
+            .deploy
+            .host_port
+            .expect("a port must be assigned");
+
+        let (dir, state) = workspace("0");
+        let sibling = dir.path().join("sibling");
+        std::fs::create_dir_all(&sibling).expect("sibling dir");
+        std::fs::write(
+            sibling.join("coxagent.json"),
+            format!(r#"{{"policy":{{"daily_budget_usd":"twenty"}},"deploy":{{"host_port":{contested}}}}}"#),
+        )
+        .expect("write sibling config");
+
+        let healed = load_config_with_probe(&state)
+            .expect("a representable port loads")
+            .config
+            .deploy
+            .host_port
+            .expect("a port must be assigned");
+
+        assert_ne!(
+            healed, contested,
+            "the sibling publishes {contested}; healing onto it collides"
         );
     }
 

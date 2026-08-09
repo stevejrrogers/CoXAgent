@@ -167,10 +167,14 @@ function announceBroken(){
     toasty(`Project "${b.name||b.id}" did not load: ${b.error||"invalid config"}`,"err");
   }
 }
+// esc() leaves quotes alone, which is fine between tags but not INSIDE an
+// attribute — and a serde message routinely carries them ("invalid type:
+// string \"twenty\""), so a raw error in title="…" would close the attribute.
+const escAttr=s=>esc(s).replace(/"/g,"&quot;");
 function brokenProjMenuHtml(){
   if(!BROKEN_PROJECTS.length)return "";
   return '<div class="projitem" style="cursor:default;color:var(--muted);font-size:11px">Not loaded — fix the config, then restart the hub</div>'+
-    BROKEN_PROJECTS.map(p=>`<div class="projitem" style="cursor:not-allowed;opacity:.75" title="${esc(p.error||"")}">
+    BROKEN_PROJECTS.map(p=>`<div class="projitem" style="cursor:not-allowed;opacity:.75" title="${escAttr(p.error||"")}">
     <span class="pi-mk" style="background:var(--card2)"><i class="ti ti-alert-triangle"></i></span>
     <span class="pi-meta"><span class="pi-name">${esc(p.name||p.id)}</span><span class="pi-sub">${esc(p.config_path||p.id)}</span></span></div>`).join("");
 }
