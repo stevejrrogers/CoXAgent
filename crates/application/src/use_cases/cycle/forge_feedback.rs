@@ -116,6 +116,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 Some(sid) => self
                     .engine
                     .resume_run(
+                        coxagent_domain::Role::DevBug,
                         sid,
                         &task_prompt,
                         &self.work_dir,

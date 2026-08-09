@@ -230,6 +230,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     }
                     s.ticket_fail_attempts.remove(&ticket);
                     s.ticket_journal.remove(&ticket);
+                    // Merged into main — the DEV work-session for this ticket is
+                    // truly finished now (not at DEV-Done, which a review can
+                    // still bounce back). Drop it so a future ticket never
+                    // resumes a merged conversation.
+                    let sess_prefix = format!("{ticket}/");
+                    s.ticket_sessions
+                        .retain(|k, _| !k.starts_with(&sess_prefix));
                     let mut note = None;
                     let Ok(tid) = coxagent_domain::TicketId::new(&ticket) else {
                         return Ok(());

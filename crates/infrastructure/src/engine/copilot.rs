@@ -111,6 +111,66 @@ impl AgentEnginePort for CopilotEngine {
             engine: "copilot".to_owned(),
         })
     }
+
+    /// Resume a prior Copilot session by id (`--resume=<id>`) with a follow-up
+    /// prompt, so the agent keeps the context it already built on this ticket
+    /// instead of re-reading the code cold. No system prompt: the resumed session
+    /// already carries the role framing from its first turn.
+    async fn resume_run(
+        &self,
+        _role: coxagent_domain::Role,
+        session_id: &str,
+        follow_up: &str,
+        work_dir: &std::path::Path,
+        timeout: std::time::Duration,
+    ) -> Result<AgentOutcome, PortError> {
+        let work = work_dir.display().to_string();
+        let (mut cmd, sandbox) = crate::proc::agent_command(&self.binary, work_dir, self.sandbox);
+        cmd.arg("-p")
+            .arg(follow_up)
+            .arg(format!("--resume={session_id}"))
+            .arg("--model")
+            .arg(&self.model)
+            .arg("--output-format")
+            .arg("json")
+            .arg("--allow-all-tools")
+            .arg("--add-dir")
+            .arg(&work)
+            .arg("--log-level")
+            .arg("none")
+            .arg("--no-color")
+            .current_dir(work_dir)
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true);
+        crate::engine::apply_shim_path(&mut cmd);
+
+        let output =
+            tokio::time::timeout(timeout, crate::proc::output_confined(&mut cmd, sandbox))
+                .await
+                .map_err(|_| PortError::Backend("copilot resume timed out".to_owned()))?
+                .map_err(|e| PortError::Backend(format!("spawn copilot: {e}")))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let parsed = parse_jsonl(&stdout);
+        Ok(AgentOutcome {
+            stdout: if parsed.answer.is_empty() {
+                stdout.clone()
+            } else {
+                parsed.answer
+            },
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            exit_code: output.status.code(),
+            usage: Some(Usage {
+                input_tokens: 0,
+                output_tokens: parsed.output_tokens,
+                cost_usd: 0.0,
+            }),
+            trace: parsed.trace,
+            session_id: parsed.session_id.or_else(|| Some(session_id.to_owned())),
+            sandbox,
+            engine: "copilot".to_owned(),
+        })
+    }
 }
 
 /// What we pull out of Copilot's JSONL stream.
