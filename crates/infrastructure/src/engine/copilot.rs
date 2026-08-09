@@ -212,6 +212,12 @@ impl AgentEnginePort for CopilotEngine {
         let role = crate::engine::role_key(request.role);
         let live =
             crate::engine::live::live_path(&request.work_dir, &role, request.label.as_deref());
+        // Truncate to a fresh header at run start (as claude/opencode do), so the
+        // live view shows THIS run — not a wall of every past run's "run
+        // finished" appended to the same file.
+        if let Some(p) = &live {
+            let _ = std::fs::write(p, format!("# {role} — live @ run start\n"));
+        }
         let (stdout, code, stderr) = self.exec(cmd, live, request.timeout, sandbox).await?;
         let parsed = parse_jsonl(&stdout);
         Ok(AgentOutcome {
