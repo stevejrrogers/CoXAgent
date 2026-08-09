@@ -104,9 +104,9 @@ async function saveSettings(){const cfg=window._cfg||{engine:{},workflow:{}};cfg
     // Check if engine config actually changed
     const newEngine=JSON.stringify(cfg.engine);
     const engineChanged=origEngine!==newEngine;
-    const msg=engineChanged?"Engine config updated — restart to apply changes":"saved";
+    const msg=engineChanged?"Engine config updated — applies on the next cycle":"saved";
     document.getElementById("save-note").textContent=res.ok?msg:"error";
-    if(engineChanged){toasty("⚠️ Engine settings changed — restart the app to apply","warn");}}catch(e){document.getElementById("save-note").textContent="error";}}
+    if(engineChanged){toasty("Engine settings updated — applies on the next cycle, no restart","ok");}}catch(e){document.getElementById("save-note").textContent="error";}}
 function val(id){return document.getElementById(id).value;}
 async function setPriority(id,p){
   try{await fetch(api("/ticket/"+id+"/priority"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({priority:p})});

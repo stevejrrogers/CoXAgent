@@ -1056,7 +1056,7 @@ async fn run_loop(
     )
     .await;
     let (engine, meter) = build_engine(&config, logs_dir(state_dir), mcp.as_ref())?;
-    let sleep = std::time::Duration::from_secs(config.workflow.sleep_seconds);
+    let mut sleep = std::time::Duration::from_secs(config.workflow.sleep_seconds);
 
     // Recovery: release any claims orphaned by a previous crash before looping.
     let recovered = RecoverUseCase::new(Arc::clone(&store)).execute().await?;
@@ -1225,19 +1225,9 @@ async fn run_loop(
     // `cox-server run` keeps its run-immediately default.
     let wait_for_start = std::env::var("COXAGENT_WAIT_FOR_START").is_ok_and(|v| v == "1");
 
-    // Fast job poll: a human's force-merge queued by the hub starts within
-    // ~15s on this runner instead of waiting for the next full cycle.
-    let uc = Arc::new(uc);
-    {
-        let uc = Arc::clone(&uc);
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-                uc.drain_jobs().await;
-            }
-        });
-    }
-
+    // A human's force-merge queued by the hub is drained at the top of each
+    // cycle (below), so the use case can stay owned + mut here — which is what
+    // lets the loop hot-reload its engine when the config changes.
     let mut cycle = 0u64;
     while !shutdown.is_triggered() {
         // Honour this operator's per-user Start/Stop from the web: idle (without
@@ -1253,14 +1243,30 @@ async fn run_loop(
             continue;
         }
         cycle += 1;
-        
-        // Check for engine config changes at cycle boundary
+
+        // Force-merge jobs the hub queued: pick them up at the top of the cycle.
+        uc.drain_jobs().await;
+
+        // Hot-reload on a config change (a Settings edit) — rebuild the engine
+        // and apply the new config NOW, no process restart. The old meter was
+        // drained into state at the previous cycle's end, so the swap loses no
+        // spend. If the rebuild fails, keep running on the previous engine.
         let new_hash = config_content_hash(state_dir);
         if new_hash != config_hash {
             config_hash = new_hash;
-            tracing::info!("engine configuration changed — will apply on next cycle start (current cycle uses previous config)");
+            let reloaded = load_config_with_probe(state_dir).config;
+            match build_engine(&reloaded, logs_dir(state_dir), mcp.as_ref()) {
+                Ok((engine, meter)) => {
+                    sleep = std::time::Duration::from_secs(reloaded.workflow.sleep_seconds);
+                    uc.reload(reloaded, engine, meter);
+                    tracing::info!("config changed — engine reloaded and applied without a restart");
+                }
+                Err(e) => {
+                    tracing::warn!("config changed but engine rebuild failed; keeping previous: {e}");
+                }
+            }
         }
-        
+
         // Boxed: a cycle future is ~17KB of agent-phase locals, and this loop
         // frame lives for the whole daemon's life.
         let report = Box::pin(uc.run_cycle(cycle)).await;

@@ -233,6 +233,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         self.worker = worker.into();
     }
 
+    /// Hot-reload the engine + config mid-run, called at a cycle boundary when
+    /// `coxagent.json` changed — so a Settings edit (a new default engine, a
+    /// per-role model, a routing change) takes effect on the NEXT cycle WITHOUT
+    /// restarting the process. The spend meter is swapped too; the previous one
+    /// was already drained into state at the last cycle's end, so nothing is
+    /// lost. Everything else — worker identity, forge, the phase reporter — is
+    /// preserved, since none of it depends on the engine config.
+    pub fn reload(&mut self, config: Config, engine: Arc<E>, meter: Arc<Mutex<Spend>>) {
+        self.config = config;
+        self.engine = engine;
+        self.meter = Some(meter);
+    }
+
     /// Declare the agent CLIs this machine can launch, so the presence heartbeat
     /// carries them. Both this and the runner's own heartbeat upsert the SAME
     /// registry key — leaving it unset here would blank out what the runner
