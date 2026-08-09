@@ -391,6 +391,11 @@ impl Default for PolicyConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeployConfig {
     /// The host port this project's app should publish (None = agent's choice).
+    /// Must be a port a client can connect to: `0` is the kernel's "any free
+    /// port" sentinel, not an address, and config load replaces it with a free
+    /// port rather than letting the deploy health gate probe it forever
+    /// (COX-B042). See
+    /// [`crate::ports::outbound::is_publishable_host_port`].
     #[serde(default)]
     pub host_port: Option<u16>,
     /// Whether the cycle deploys at all (default on). Turn OFF for projects
