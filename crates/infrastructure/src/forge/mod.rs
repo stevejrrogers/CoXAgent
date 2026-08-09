@@ -1,8 +1,10 @@
 //! Forge (code host) adapters.
 
+pub mod gh_api_forge;
 pub mod gh_forge;
 pub mod gl_forge;
 
+pub use gh_api_forge::GhApiForge;
 pub use gh_forge::GhForge;
 pub use gl_forge::GlForge;
 
@@ -166,4 +168,29 @@ async fn probe_forge_pr_access(
         }
     }
     out
+}
+
+/// Pick the GitHub forge for a repo: the `gh` CLI when it's on the host (uses
+/// its stored logins, per-account), otherwise a token-only REST adapter for a
+/// box that has a PAT but no CLI (a container, CI). Falls back to `GhForge`
+/// when neither a CLI nor a token is available — it will error clearly at call
+/// time rather than silently doing nothing.
+#[must_use]
+pub fn github_forge(
+    repo: impl Into<String>,
+    base_url: impl Into<String>,
+    work_dir: std::path::PathBuf,
+    account: impl Into<String>,
+) -> std::sync::Arc<dyn coxagent_application::ports::outbound::ForgePort> {
+    let (repo, base_url, account) = (repo.into(), base_url.into(), account.into());
+    if crate::engine::registry::resolve_binary("gh").is_some() {
+        return std::sync::Arc::new(GhForge::with_account(repo, base_url, work_dir, account));
+    }
+    if let Some(tok) = GhApiForge::token_from_env() {
+        if let Some(f) = GhApiForge::new(repo.clone(), &base_url, tok) {
+            tracing::info!("forge: no gh CLI — using token REST API for {repo}");
+            return std::sync::Arc::new(f);
+        }
+    }
+    std::sync::Arc::new(GhForge::with_account(repo, base_url, work_dir, account))
 }
