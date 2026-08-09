@@ -2,7 +2,7 @@
 //! the composition root can pick an engine from config without boxing a trait
 //! object. Add a variant here when a new engine adapter lands.
 
-use crate::engine::{ClaudeEngine, HermesEngine, McpAccess, OpencodeEngine, ScriptedEngine};
+use crate::engine::{ClaudeEngine, CopilotEngine, HermesEngine, McpAccess, OpencodeEngine, ScriptedEngine};
 use async_trait::async_trait;
 use coxagent_application::config::{EngineChoice, EngineKind};
 use coxagent_application::ports::outbound::{
@@ -15,6 +15,7 @@ pub enum AnyEngine {
     Opencode(OpencodeEngine),
     Claude(ClaudeEngine),
     Hermes(HermesEngine),
+    Copilot(CopilotEngine),
     Scripted(ScriptedEngine),
 }
 
@@ -60,6 +61,9 @@ impl AnyEngine {
             EngineKind::Hermes => Ok(Self::Hermes(
                 HermesEngine::new(choice.model.clone()).with_sandbox(sandbox),
             )),
+            EngineKind::Copilot => Ok(Self::Copilot(
+                CopilotEngine::new(choice.model.clone()).with_sandbox(sandbox),
+            )),
             EngineKind::Scripted => Ok(Self::Scripted(ScriptedEngine::new())),
             other => Err(PortError::Backend(format!(
                 "no adapter for engine {other:?} yet"
@@ -75,6 +79,7 @@ impl AgentEnginePort for AnyEngine {
             AnyEngine::Opencode(e) => e.id(),
             AnyEngine::Claude(e) => e.id(),
             AnyEngine::Hermes(e) => e.id(),
+            AnyEngine::Copilot(e) => e.id(),
             AnyEngine::Scripted(e) => e.id(),
         }
     }
@@ -84,6 +89,7 @@ impl AgentEnginePort for AnyEngine {
             AnyEngine::Opencode(e) => e.sandbox_status(),
             AnyEngine::Claude(e) => e.sandbox_status(),
             AnyEngine::Hermes(e) => e.sandbox_status(),
+            AnyEngine::Copilot(e) => e.sandbox_status(),
             AnyEngine::Scripted(e) => e.sandbox_status(),
         }
     }
@@ -93,6 +99,7 @@ impl AgentEnginePort for AnyEngine {
             AnyEngine::Opencode(e) => e.run(request).await,
             AnyEngine::Claude(e) => e.run(request).await,
             AnyEngine::Hermes(e) => e.run(request).await,
+            AnyEngine::Copilot(e) => e.run(request).await,
             AnyEngine::Scripted(e) => e.run(request).await,
         }
     }
@@ -108,6 +115,7 @@ impl AgentEnginePort for AnyEngine {
             AnyEngine::Opencode(e) => e.resume_run(session_id, follow_up, work_dir, timeout).await,
             AnyEngine::Claude(e) => e.resume_run(session_id, follow_up, work_dir, timeout).await,
             AnyEngine::Hermes(e) => e.resume_run(session_id, follow_up, work_dir, timeout).await,
+            AnyEngine::Copilot(e) => e.resume_run(session_id, follow_up, work_dir, timeout).await,
             AnyEngine::Scripted(e) => e.resume_run(session_id, follow_up, work_dir, timeout).await,
         }
     }
