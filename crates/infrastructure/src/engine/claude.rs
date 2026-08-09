@@ -380,6 +380,7 @@ impl ClaudeEngine {
             trace,
             session_id: extract_session(&raw),
             sandbox,
+            engine: "claude".to_owned(),
         })
     }
 }

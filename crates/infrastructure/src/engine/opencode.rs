@@ -460,6 +460,7 @@ impl OpencodeEngine {
             trace: String::new(),
             session_id: extract_session(&raw),
             sandbox,
+            engine: "opencode".to_owned(),
         })
     }
 }

@@ -458,6 +458,10 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
       const col=cvar(c);const st=stat[r]||{n:0,tk:new Set(),last:null};
       const roleKey=r.toLowerCase().replace(/-/g,"_");
       const cost=(spend.by_role||{})[roleKey]||0;
+      // The engine this role ACTUALLY ran on (post-failover) and the user whose
+      // runner last ran it — both last-wins from the spend meter.
+      const eng=(spend.engine_by_role||{})[roleKey]||"";
+      const lastOp=(spend.operator_by_role||{})[roleKey]||"";
       // Live "working now" from the SHARED registry — EVERY team (this hub or
       // another machine) running this agent, so one card shows N users at once.
       const localActive=(window.RUNNER&&RUNNER.mode==="running")?(RUNNER.active_role||"").replace(/_/g,"-").toUpperCase():"";
@@ -486,12 +490,15 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
         statusHtml=`<div class="ag-now"><i class="ti ti-loader-2 att-spin"></i> working now${runners.length>1?`<span class="ag-nteams">${runners.length} teams</span>`:''}</div>
           <div class="ag-runs">${rows}</div>`;
       }else{
-        statusHtml=`<div class="ag-last"><i class="ti ti-point"></i> ${cur?'last touched':'idle'}</div>
+        statusHtml=`<div class="ag-last"><i class="ti ti-point"></i> ${cur?'last touched':'idle'}${lastOp?` · <span class="ag-by" title="${esc(lastOp)}"><i class="ti ti-user-cog"></i> ${esc(workerLabel(lastOp,[lastOp]))}</span>`:''}</div>
           ${cur?taskChip('',cur,'idle'):''}`;
       }
+      // Which engine CLI this role is really on — copilot/opencode/claude/… —
+      // stamped from the run that actually happened, so failover shows through.
+      const engBadge=eng?`<span class="ag-eng" title="engine actually running this agent">${esc(eng)}</span>`:'';
       return `<div class="agent ${live?'run':''}" onclick="openAgent('${r}')" style="cursor:pointer">
         <div class="ag-head"><div class="av" style="background:${col}22;color:${col}">${initials(r)}<span class="sr"></span></div>
-          <div class="ag-id"><div class="rl">${r}</div><div class="ds">${d}</div></div>
+          <div class="ag-id"><div class="rl">${r}${engBadge}</div><div class="ds">${d}</div></div>
           <i class="ti ti-terminal-2 ag-term"></i></div>
         <div class="agstats"><span title="actions"><i class="ti ti-bolt"></i> ${st.n}</span><span title="tickets touched"><i class="ti ti-ticket"></i> ${st.tk.size}</span>${cost>0?`<span title="cost"><i class="ti ti-coin"></i> ${money(cost)}</span>`:''}</div>
         <div class="ag-status">${statusHtml}</div></div>`;}).join("");

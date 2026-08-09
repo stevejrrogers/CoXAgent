@@ -82,6 +82,7 @@ impl AgentEnginePort for HermesEngine {
             trace: String::new(),
             session_id: None,
             sandbox,
+            engine: "hermes".to_owned(),
         })
     }
 }

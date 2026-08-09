@@ -73,6 +73,12 @@ pub struct AgentOutcome {
     pub session_id: Option<String>,
     /// Write confinement actually applied to this run (see [`SandboxStatus`]).
     pub sandbox: SandboxStatus,
+    /// The engine CLI that ACTUALLY produced this outcome (`claude`, `opencode`,
+    /// `copilot`, …) — stamped by [`FailoverEngine`] with the id of whichever
+    /// engine won, so the dashboard shows the engine really running a role
+    /// instead of the one config asked for (they differ the moment failover
+    /// fires). Empty when unstamped (a bare engine or a test double).
+    pub engine: String,
 }
 
 impl AgentOutcome {

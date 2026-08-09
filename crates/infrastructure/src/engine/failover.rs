@@ -108,7 +108,9 @@ impl<E: AgentEnginePort> AgentEnginePort for FailoverEngine<E> {
         for (i, engine) in self.engines.iter().enumerate() {
             let is_last = i == last_idx;
             match engine.run(request.clone()).await {
-                // Success — done.
+                // Success — done. The concrete engine has already stamped
+                // `outcome.engine` with its own id, so the outcome that returns
+                // here already names the engine that actually ran (post-failover).
                 Ok(o) if o.succeeded() => return Ok(o),
                 // Failed: only fall through on a quota wall, and only if another
                 // engine is left. A normal task failure is returned as-is.
