@@ -14,6 +14,7 @@ function inboxBadge(n){
 
 const INBOX_KIND={
   approve_ready:{label:"Approve to Ready",ic:"ti-checks",col:"var(--accent2)"},
+  cost_approve:{label:"Approve the spend",ic:"ti-coin",col:"var(--amber)"},
   verify:{label:"Verify fix",ic:"ti-shield-check",col:"var(--green)"},
   assigned:{label:"Assigned to you",ic:"ti-user",col:"var(--purple)"},
   question:{label:"Question for you",ic:"ti-help-circle",col:"var(--amber)"},
@@ -82,6 +83,14 @@ async function renderInbox(){
         (act
           ?ibtn("Reject",`inboxAct('${esc(it.ticket)}','reject')`)+
            ibtn("Approve",`inboxAct('${esc(it.ticket)}','ready')`,1)
+          :noRight(it.role)),it.ticket);
+    }else if(it.kind==="cost_approve"){
+      const est=(typeof it.estimate_usd==="number")?" · ~$"+it.estimate_usd.toFixed(2):"";
+      html+=inboxCard("cost_approve",esc(it.ticket)+(it.priority?" · "+esc(it.priority):"")+est,esc(it.title),
+        ibtn("Review",`showTicket('${esc(it.ticket)}')`)+
+        (act
+          ?ibtn("Reject",`inboxAct('${esc(it.ticket)}','reject')`)+
+           ibtn("Approve spend",`inboxAct('${esc(it.ticket)}','approve-cost')`,1)
           :noRight(it.role)),it.ticket);
     }else if(it.kind==="verify"){
       html+=inboxCard("verify",esc(it.ticket),esc(it.title),
