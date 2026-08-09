@@ -522,23 +522,19 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
     renderTranscripts();
   }else if(CUR==="insights"){
     const sp=s.spend||{by_role:{}};const tok=(sp.input_tokens||0)+(sp.output_tokens||0);
-    // Counterfactual (what it would cost WITHOUT the token-saver) comes from a
-    // cached fetch — cards render in ONE pass, no flash-then-replace.
+    // These KPIs are the real measured totals — no counterfactual. The old
+    // "không nén ~$X" subtitle scaled a 200-sample char saving against the
+    // lifetime token total: mismatched units and scope, so it read as ~1.4%
+    // and looked fabricated. The token-saver's true, honest ratio lives in its
+    // own panel below (78% off the output it actually compressed).
     const drawKpis=()=>{
-      let subTok="",subCost="";
-      const ts=window._tsCache;
-      if(ts&&ts.saved>0&&tok>0){
-        const wouldTok=tok+Math.round(ts.saved/4);
-        subTok="không nén: ~"+fmtK(wouldTok);
-        subCost="không nén: ~"+money((sp.total_cost_usd||0)*(wouldTok/tok));
-      }
       setHTML(document.getElementById("cost-kpis"),
-        [kpi("Total spend",money(sp.total_cost_usd),subCost),kpi("Tokens",fmtK(tok),subTok),kpi("Runs",sp.runs||0)].join(""));
+        [kpi("Total spend",money(sp.total_cost_usd)),kpi("Tokens",fmtK(tok)),kpi("Runs",sp.runs||0)].join(""));
     };
     drawKpis();
     if(!window._tsCacheAt||Date.now()-window._tsCacheAt>60000){
       window._tsCacheAt=Date.now();
-      fetch("/api/token-saver").then(r=>r.json()).then(ts=>{window._tsCache=ts;if(CUR==="insights")drawKpis();}).catch(()=>{});
+      fetch("/api/token-saver").then(r=>r.json()).then(ts=>{window._tsCache=ts;if(CUR==="insights")renderTokenSaver();}).catch(()=>{});
     }
     const roles=Object.entries(sp.by_role||{}).sort((a,b)=>b[1]-a[1]);
     const max=roles.length?roles[0][1]:1;
