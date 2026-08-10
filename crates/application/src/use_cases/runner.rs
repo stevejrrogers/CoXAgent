@@ -279,6 +279,10 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
         };
 
         cycle += 1;
+        // Hot-reload the engine/config at the cycle boundary when coxagent.json
+        // changed (a Settings save) — this is the HUB's runner path, so without
+        // this only headless `coxagent run` picked up edits without a restart.
+        cycle_uc.maybe_reload();
         // Stamp the live operator identity so ticket claims are owned by whoever
         // resumed this runner, on this host.
         cycle_uc.set_worker(handle.worker_id());
