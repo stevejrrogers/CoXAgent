@@ -119,7 +119,12 @@ pub async fn rate_limit_mw(
     window: Duration,
     trust_proxy: bool,
 ) -> Result<Response, StatusCode> {
-    if req.uri().path().starts_with("/api/auth/") {
+    // Only the credential-guessing surface is limited: login and 2FA. The rest
+    // of /api/auth/* is read traffic the UI polls (`/me`, session lists) — and
+    // on a local hub every client shares 127.0.0.1, so limiting those 429'd the
+    // dashboard itself within a minute of normal use.
+    let path = req.uri().path();
+    if path == "/api/auth/login" || path.starts_with("/api/auth/2fa/") {
         let key = client_key(&req, trust_proxy);
         if !limiter.check(&key, max, window, Instant::now()) {
             tracing::warn!(
