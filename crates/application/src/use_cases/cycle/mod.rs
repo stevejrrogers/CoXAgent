@@ -265,12 +265,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
 
     /// Apply a pending config change if the reload hook reports one. Called by
     /// the runner at each cycle boundary; a no-op without a hook or a change.
-    pub fn maybe_reload(&mut self) {
-        let Some(hook) = &self.reloader else { return };
-        if let Some((config, engine, meter)) = hook() {
-            tracing::info!("config changed — engine reloaded and applied without a restart");
-            self.reload(config, engine, meter);
-        }
+    /// Returns whether a reload happened, so the caller can invalidate anything
+    /// derived from the OLD engine stack (e.g. the per-role observed-engine
+    /// badges — an observation of an engine that no longer runs is not truth).
+    pub fn maybe_reload(&mut self) -> bool {
+        let Some(hook) = &self.reloader else {
+            return false;
+        };
+        let Some((config, engine, meter)) = hook() else {
+            return false;
+        };
+        tracing::info!("config changed — engine reloaded and applied without a restart");
+        self.reload(config, engine, meter);
+        true
     }
 
     /// Declare the agent CLIs this machine can launch, so the presence heartbeat
