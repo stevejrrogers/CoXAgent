@@ -194,6 +194,34 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
     /// [`AppError`] on engine failure or an unexpected state transition error.
     #[allow(clippy::too_many_lines)] // one linear pass; splitting hurts readability
     pub async fn execute(&self) -> Result<Option<TicketId>, AppError> {
+        // Fresh base for an idle per-slot worktree: it starts DETACHED at
+        // whatever HEAD existed when it was created and only ages from there —
+        // an agent coding on a ten-commit-old base ships conflicts. When the
+        // tree is detached AND clean (nothing in flight to lose), fast-forward
+        // it to origin/<base> before claiming. A checked-out branch (the
+        // leader's primary tree) is left alone.
+        if self.config.git.enabled {
+            if let Some(git) = &self.git {
+                let detached = !git
+                    .raw(&self.work_dir, &["symbolic-ref", "-q", "HEAD"])
+                    .await
+                    .0;
+                if detached && self.working_tree().await.changed_paths.is_empty() {
+                    let base = if self.config.git.default_branch.is_empty() {
+                        "main"
+                    } else {
+                        &self.config.git.default_branch
+                    };
+                    let _ = git.raw(&self.work_dir, &["fetch", "origin", base]).await;
+                    let target = format!("origin/{base}");
+                    if git.raw(&self.work_dir, &["rev-parse", &target]).await.0 {
+                        let _ = git
+                            .raw(&self.work_dir, &["reset", "--hard", &target])
+                            .await;
+                    }
+                }
+            }
+        }
         // Self-healing boot: if the project doesn't compile, fix that BEFORE
         // touching any tickets. Otherwise every ticket will fail anyway.
         // Skipped entirely when the tree is unchanged since the last green
