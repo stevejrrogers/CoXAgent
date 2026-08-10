@@ -399,7 +399,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         // conversation. Thinking is cheap; unplanned code is not. Falls back
         // to single-shot on engines without session resume.
         let mut request = self.build_request(&state, &id).await;
-        let plan_first = request.escalation_level == 0; // retries already carry a journal
+        // Two-phase plan→execute costs an extra engine call per ticket. That
+        // buys real risk reduction on a LARGE change — and mostly latency on a
+        // small one, where the plan restates the ticket. So: plan-first only
+        // for Large complexity, single-shot for the rest (retries already
+        // carry a failure journal either way).
+        let is_large = state
+            .ticket(&id)
+            .is_some_and(|t| t.complexity() == coxagent_domain::Complexity::Large);
+        let plan_first = request.escalation_level == 0 && is_large;
                                                         // The full task, kept before the plan wrapper below — it becomes the
                                                         // follow-up when RE-ENTERING a ticket on a stored session, so a resumed
                                                         // (or stale) conversation still gets the complete instructions.
