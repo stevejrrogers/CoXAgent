@@ -141,6 +141,11 @@ fn reconcile_target(
     (state_ver > &repo).then_some(repo)
 }
 
+/// The composition root's engine-rebuild hook: `Some(new parts)` only when the
+/// on-disk config changed since last asked (see [`RunCycleUseCase::with_reloader`]).
+pub type Reloader<E> =
+    Arc<dyn Fn() -> Option<(Config, Arc<E>, Arc<Mutex<Spend>>)> + Send + Sync>;
+
 /// Runs the sequential agent cycle over shared adapters.
 pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     store: Arc<S>,
@@ -179,6 +184,9 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     forge: Option<Arc<dyn ForgePort>>,
     /// Reports the currently executing agent to the runner (live "working now").
     phase: Option<crate::use_cases::runner::PhaseReporter>,
+    /// Rebuild hook for hot-reloading engine+config on a file change (set by
+    /// the composition root; `None` in tests).
+    reloader: Option<Reloader<E>>,
     /// This runner's identity (`account@host`) — recorded as the ticket claim
     /// owner so concurrent runners on a shared backlog never collide.
     worker: String,
@@ -219,6 +227,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             janitor: None,
             forge: None,
             phase: None,
+            reloader: None,
             worker: String::new(),
             caps: crate::ports::outbound::WorkerCaps::default(),
             sandbox_warned: AtomicBool::new(false),
@@ -242,6 +251,26 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         self.config = config;
         self.engine = engine;
         self.meter = Some(meter);
+    }
+
+    /// Attach the composition root's rebuild hook: it returns `Some(new parts)`
+    /// only when the on-disk config actually changed since last asked. The
+    /// application layer cannot read the file itself (IO stays in adapters), so
+    /// the closure carries that knowledge in.
+    #[must_use]
+    pub fn with_reloader(mut self, reloader: Reloader<E>) -> Self {
+        self.reloader = Some(reloader);
+        self
+    }
+
+    /// Apply a pending config change if the reload hook reports one. Called by
+    /// the runner at each cycle boundary; a no-op without a hook or a change.
+    pub fn maybe_reload(&mut self) {
+        let Some(hook) = &self.reloader else { return };
+        if let Some((config, engine, meter)) = hook() {
+            tracing::info!("config changed — engine reloaded and applied without a restart");
+            self.reload(config, engine, meter);
+        }
     }
 
     /// Declare the agent CLIs this machine can launch, so the presence heartbeat
