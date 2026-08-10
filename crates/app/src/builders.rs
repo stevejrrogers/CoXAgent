@@ -422,12 +422,17 @@ pub(crate) async fn build_project(
         concurrency.saturating_sub(1),
         concurrency
     );
-    for _ in 1..concurrency {
+    for slot in 1..concurrency {
+        // Each extra worker runs in its OWN git worktree. Sharing the leader's
+        // checkout meant no DEV could ever pass a green-suite DoD — each saw
+        // the other's half-written changes (the overnight zero-throughput
+        // deadlock). Falls back to the shared tree when this isn't a repo.
+        let slot_dir = worktree_at(work_dir.clone(), &format!("{id}-slot-{slot}"));
         let worker = RunCycleUseCase::new(
             Arc::clone(&store),
             engine.clone(),
             config.clone(),
-            work_dir.clone(),
+            slot_dir,
             context.clone(),
         )
         .with_meter(meter.clone())
