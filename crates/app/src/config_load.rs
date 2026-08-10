@@ -236,7 +236,11 @@ mod tests {
             host_port_probe,
         } = load_config_with_probe(&state);
 
-        assert_eq!(host_port_probe, Err(()), "a corrupt port must fail the gate");
+        assert_eq!(
+            host_port_probe,
+            Err(()),
+            "a corrupt port must fail the gate"
+        );
         assert_eq!(config.deploy.host_port, None, "defaults, not a healed port");
         let on_disk = std::fs::read_to_string(state.parent().expect("root").join("coxagent.json"))
             .expect("config still readable");
@@ -258,5 +262,86 @@ mod tests {
 
         assert_eq!(loaded.config.deploy.host_port, None);
         assert_eq!(loaded.host_port_probe, Ok(None));
+    }
+
+    /// COX-B045 repro: `host_port` above `u16::MAX` (e.g. `70000`) poisons the
+    /// whole `Config` deserialization — one bad field discards every other
+    /// setting too, not just the port. The file must survive untouched and the
+    /// gate must fail rather than boot healthy with the mandatory health check
+    /// silently disabled.
+    #[test]
+    fn an_out_of_range_host_port_still_fails_the_gate_and_the_file_survives() {
+        let (_dir, state) = workspace("70000");
+
+        let LoadedConfig {
+            config,
+            host_port_probe,
+        } = load_config_with_probe(&state);
+
+        assert_eq!(
+            host_port_probe,
+            Err(()),
+            "a corrupt port must fail the gate"
+        );
+        assert_eq!(config.deploy.host_port, None, "defaults, not a healed port");
+        let on_disk = std::fs::read_to_string(state.parent().expect("root").join("coxagent.json"))
+            .expect("config still readable");
+        assert!(
+            on_disk.contains("70000"),
+            "an unparseable config must not be rewritten from defaults"
+        );
+    }
+
+    /// `host_port` present but explicitly `null` parses fine (it's a valid
+    /// `Option<u16>`), so this must take the heal path, not the corrupt-config
+    /// path — same as a `host_port` key that's absent altogether.
+    #[test]
+    fn an_explicit_null_host_port_is_healed_like_a_missing_one() {
+        let (_dir, state) = workspace("null");
+
+        let LoadedConfig {
+            config,
+            host_port_probe,
+        } = load_config_with_probe(&state);
+
+        let healed = config.deploy.host_port.expect("a port must be assigned");
+        assert_eq!(
+            host_port_probe,
+            Ok(Some(healed)),
+            "the gate must probe the port the app will actually publish"
+        );
+    }
+
+    /// `coxagent.json` present but with no `deploy.host_port` key at all
+    /// (rather than an explicit `null`) must be indistinguishable from the
+    /// null case — `#[serde(default)]` makes both mean "unconfigured".
+    #[test]
+    fn a_config_with_no_host_port_key_is_healed_like_a_missing_one() {
+        let mut cfg = serde_json::to_value(Config::default()).expect("config as json");
+        cfg["deploy"]
+            .as_object_mut()
+            .expect("deploy is an object")
+            .remove("host_port");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("proj");
+        let state = root.join(".coxagent");
+        std::fs::create_dir_all(&state).expect("state dir");
+        std::fs::write(
+            root.join("coxagent.json"),
+            serde_json::to_string_pretty(&cfg).expect("config text"),
+        )
+        .expect("write config");
+
+        let LoadedConfig {
+            config,
+            host_port_probe,
+        } = load_config_with_probe(&state);
+
+        let healed = config.deploy.host_port.expect("a port must be assigned");
+        assert_eq!(
+            host_port_probe,
+            Ok(Some(healed)),
+            "the gate must probe the port the app will actually publish"
+        );
     }
 }
