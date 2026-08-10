@@ -337,6 +337,37 @@ pub(crate) async fn build_project(
     let handle =
         Arc::new(RunnerHandle::new().with_capabilities(local_caps(&config, &work_dir).await));
 
+    // Hot-reload hook: each runner asks this at its cycle boundary; when
+    // coxagent.json changed since last asked, it rebuilds the engine stack from
+    // the fresh config so Settings edits apply WITHOUT a hub restart. Each
+    // runner gets its own hook (own hash cell) so all of them converge.
+    let mk_reloader = {
+        let state_dir = state_dir.to_path_buf();
+        let mcp = mcp.clone();
+        move || {
+            let (state_dir, mcp) = (state_dir.clone(), mcp.clone());
+            let hash = std::sync::Mutex::new(config_content_hash(&state_dir));
+            Arc::new(move || {
+                let new = config_content_hash(&state_dir);
+                {
+                    let mut h = hash.lock().ok()?;
+                    if *h == new {
+                        return None;
+                    }
+                    *h = new;
+                }
+                let reloaded = load_config_with_probe(&state_dir).config;
+                match build_engine(&reloaded, logs_dir(&state_dir), mcp.as_ref()) {
+                    Ok((engine, meter)) => Some((reloaded, engine, meter)),
+                    Err(e) => {
+                        tracing::warn!("config changed but engine rebuild failed; keeping previous: {e}");
+                        None
+                    }
+                }
+            }) as Arc<dyn Fn() -> _ + Send + Sync>
+        }
+    };
+
     // Leader runner: singleton phases (BA, PO, standup, etc.)
     {
         let leader = RunCycleUseCase::new(
@@ -369,7 +400,8 @@ pub(crate) async fn build_project(
         .with_files(Some(Arc::new(
             coxagent_infrastructure::FsWorkspaceFiles::new(),
         )))
-        .with_janitor(Some(Arc::new(coxagent_infrastructure::OsProcessJanitor)));
+        .with_janitor(Some(Arc::new(coxagent_infrastructure::OsProcessJanitor)))
+        .with_reloader(mk_reloader());
         let leader = if let Some(ref f) = forge {
             leader.with_forge(Arc::clone(f))
         } else {
@@ -421,7 +453,8 @@ pub(crate) async fn build_project(
         .with_files(Some(Arc::new(
             coxagent_infrastructure::FsWorkspaceFiles::new(),
         )))
-        .with_janitor(Some(Arc::new(coxagent_infrastructure::OsProcessJanitor)));
+        .with_janitor(Some(Arc::new(coxagent_infrastructure::OsProcessJanitor)))
+        .with_reloader(mk_reloader());
         let worker = if let Some(ref f) = forge {
             worker.with_forge(Arc::clone(f))
         } else {
