@@ -24,6 +24,18 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         self.sweep_stale_prs().await;
         // 1. Rebase open PRs onto the moving base.
         if let Ok(prs) = forge.list_open_prs().await {
+            // Mirror the open queue into state: the Review page (and the inbox's
+            // held-PR items) read `state.open_prs`, and nothing else writes it —
+            // the page sat empty while three PRs waited on the forge.
+            {
+                let mirror: Vec<crate::ports::outbound::PrOpen> =
+                    prs.iter().cloned().map(Into::into).collect();
+                let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+                    s.set_open_prs(mirror.clone());
+                    Ok(())
+                })
+                .await;
+            }
             let mut rebased: Vec<u64> = Vec::new();
             for pr in prs.iter().filter(|p| p.base == target).take(8) {
                 let Some(git) = &self.git else { continue };
