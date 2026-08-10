@@ -676,6 +676,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // Forge hygiene: rebase open PRs onto the moving base + learn
             // from PRs a human closed without merging.
             self.forge_hygiene().await;
+            // Stop starting, start finishing: review + merge the PR queue at
+            // the TOP of the cycle. This used to run at the very end — after
+            // codegraph, ceremonies and the (tens-of-minutes) dev phases — so
+            // mergeable PRs aged a whole cycle before anyone looked at them.
+            self.review_open_prs().await;
+            self.address_pr_feedback().await;
             // Debt sweep cadence: every 10th cycle files ONE tech-debt chore
             // (lint baseline, dead code, missing docs) if none is open — the
             // discipline of paying debt down on a schedule instead of never.
@@ -1057,13 +1063,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 }
             }
 
-            // Auto-merge: SA deep-dives open PRs and merges or requests changes.
-            // The phase note is set INSIDE, only when there are PRs — otherwise
-            // the card read "SA · reviewing PRs" every cycle with zero PRs and an
-            // empty live log, looking stuck when there was simply nothing to do.
+            // Second review pass at cycle end: catches PRs the DEV phases just
+            // opened, so fresh work can land within the SAME cycle instead of
+            // waiting for the next one. (The main drain runs at the cycle top.)
             self.review_open_prs().await;
-            // Close the loop: when a human (or the SA) requested changes on a
-            // PR, a DEV agent addresses the feedback and pushes to the branch.
             self.address_pr_feedback().await;
 
             // "Agents don't sleep": if finished work is sitting UNCOMMITTED in
