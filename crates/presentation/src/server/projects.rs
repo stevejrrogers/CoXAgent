@@ -34,7 +34,10 @@ pub(super) async fn project_forge_account(app: &AppState, pid: &str) -> Option<S
     Some(cfg.git.account)
 }
 
-/// List projects (id, name, alias, version, ticket count) in registration order.
+/// List projects (id, name, alias, version, ticket count) in registration
+/// order, then the registered projects that failed to load — flagged `broken`
+/// with the reason, so a config error is visible in the dashboard instead of
+/// only in the hub log (COX-B043).
 pub(super) async fn list_projects(State(app): State<AppState>) -> impl IntoResponse {
     let order = app.order.read().await.clone();
     let mut out = Vec::new();
@@ -48,9 +51,13 @@ pub(super) async fn list_projects(State(app): State<AppState>) -> impl IntoRespo
                 "id": p.id, "name": p.name, "alias": p.alias,
                 "version": version, "tickets": tickets,
                 "mode": p.runner.snapshot().mode,
+                // Stated on every entry, not just the broken ones: a client
+                // that must not select a broken project reads one field.
+                "broken": false,
             }));
         }
     }
+    out.extend(broken_entries(&app.broken));
     Json(out)
 }
 

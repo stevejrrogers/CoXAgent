@@ -267,10 +267,11 @@ pub(crate) async fn build_project(
     // One read settles both the `Config` and the deploy health-gate's host-port
     // probe, so a `deploy.host_port` this project cannot publish fails the gate
     // (COX-B035) or is healed (COX-B042) instead of drifting between the two.
+    // A config that does not parse at all fails the project's load (COX-B043).
     let LoadedConfig {
         config,
         host_port_probe,
-    } = load_config_with_probe(state_dir);
+    } = load_config_with_probe(state_dir)?;
     // `auth` must be the SAME store the hub actually serves /api/mcp with —
     // NOT re-derived from state_dir here. Each project can live under a
     // different workspace root than the hub-wide auth.json (see run_hub's
@@ -356,7 +357,13 @@ pub(crate) async fn build_project(
                     }
                     *h = new;
                 }
-                let reloaded = load_config_with_probe(&state_dir).config;
+                let reloaded = match load_config_with_probe(&state_dir) {
+                    Ok(l) => l.config,
+                    Err(e) => {
+                        tracing::warn!("config changed but is invalid — keeping previous: {e}");
+                        return None;
+                    }
+                };
                 match build_engine(&reloaded, logs_dir(&state_dir), mcp.as_ref()) {
                     Ok((engine, meter)) => Some((reloaded, engine, meter)),
                     Err(e) => {

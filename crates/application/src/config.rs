@@ -97,6 +97,26 @@ pub struct EngineMapping {
     pub escalation: Vec<String>,
 }
 
+impl Default for EngineMapping {
+    /// Claude/sonnet with auto-failover on — the mapping a project gets when it
+    /// says nothing about engines. Named here rather than only inside
+    /// [`Config::default`] so `engine` can be `#[serde(default)]`: an omitted
+    /// section is a config that predates the field, not an unrepresentable
+    /// value, and must not fail the whole document's load (COX-B043).
+    fn default() -> Self {
+        Self {
+            default: EngineChoice {
+                engine: EngineKind::Claude,
+                model: "sonnet".to_owned(),
+            },
+            per_role: HashMap::new(),
+            fallbacks: Vec::new(),
+            auto_fallback: true,
+            escalation: Vec::new(),
+        }
+    }
+}
+
 impl EngineMapping {
     /// Resolve the effective choice for a role (override, else default).
     #[must_use]
@@ -582,8 +602,17 @@ pub struct ReleasesConfig {
 }
 
 /// Top-level configuration persisted as `coxagent.json`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// EVERY section is `#[serde(default)]`, so a document written by an older
+/// version — or by hand, mentioning only the sections it cares about — still
+/// loads with defaults for what it omits. Only a value the schema cannot
+/// represent fails the load (COX-B043): an absent section is not a corrupt
+/// config, and must not be the reason a project's governance policy is
+/// discarded along with it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Config {
+    /// Which engine and model each role runs on.
+    #[serde(default)]
     pub engine: EngineMapping,
     /// Version-control / forge integration settings.
     #[serde(default)]
@@ -602,29 +631,6 @@ pub struct Config {
     /// Release pipeline settings (automated tag + Release chore per milestone).
     #[serde(default)]
     pub releases: ReleasesConfig,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            engine: EngineMapping {
-                default: EngineChoice {
-                    engine: EngineKind::Claude,
-                    model: "sonnet".to_owned(),
-                },
-                per_role: HashMap::new(),
-                fallbacks: Vec::new(),
-                auto_fallback: true,
-                escalation: Vec::new(),
-            },
-            git: GitConfig::default(),
-            workflow: WorkflowConfig::default(),
-            architecture: Vec::new(),
-            policy: PolicyConfig::default(),
-            deploy: DeployConfig::default(),
-            releases: ReleasesConfig::default(),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -651,5 +657,33 @@ mod tests {
         let json = serde_json::to_string(&cfg).expect("serialize");
         let back: Config = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(cfg, back);
+    }
+
+    /// The engine mapping a project gets when it configures none: an
+    /// unconfigured project must still have a usable engine, and auto-failover
+    /// on, exactly as the hand-written `Config::default` used to spell out.
+    #[test]
+    fn the_default_engine_mapping_is_claude_sonnet_with_failover_on() {
+        let m = EngineMapping::default();
+
+        assert_eq!(m.default.engine, EngineKind::Claude);
+        assert_eq!(m.default.model, "sonnet");
+        assert!(m.auto_fallback);
+        assert!(m.per_role.is_empty());
+        assert!(m.fallbacks.is_empty());
+        assert!(m.escalation.is_empty());
+    }
+
+    /// COX-B043: an omitted section is a config that predates the field, not a
+    /// corrupt one. `engine` was the last section without `#[serde(default)]`,
+    /// so a hand-written document that never mentions engines used to fail the
+    /// whole parse — taking the policy it DID declare down with it.
+    #[test]
+    fn a_document_that_omits_the_engine_section_keeps_the_policy_it_declares() {
+        let cfg: Config = serde_json::from_str(r#"{"policy":{"forbidden_paths":["infra/"]}}"#)
+            .expect("an omitted section is not a corrupt config");
+
+        assert_eq!(cfg.policy.forbidden_paths, ["infra/"]);
+        assert_eq!(cfg.engine.default.model, "sonnet");
     }
 }
