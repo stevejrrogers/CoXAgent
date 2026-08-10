@@ -164,6 +164,13 @@ fn render_event(v: &serde_json::Value) -> String {
                 }
             }
         }
+        "session.error" => {
+            let msg = data
+                .and_then(|d| d.get("message"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("session error");
+            let _ = write!(out, "✗ {msg}");
+        }
         "result" => {
             let _ = write!(out, "— run finished");
         }
@@ -220,6 +227,13 @@ impl AgentEnginePort for CopilotEngine {
         }
         let (stdout, code, stderr) = self.exec(cmd, live, request.timeout, sandbox).await?;
         let parsed = parse_jsonl(&stdout);
+        // A session.error means the run produced nothing useful even though the
+        // CLI exits 0 — report it as the failure it is, with the message in
+        // stderr so the failover layer can recognize a quota wall and move on.
+        let (code, stderr) = match &parsed.error {
+            Some(e) => (Some(1), format!("{e}\n{stderr}")),
+            None => (code, stderr),
+        };
         Ok(AgentOutcome {
             stdout: if parsed.answer.is_empty() {
                 stdout.clone()
@@ -277,6 +291,10 @@ impl AgentEnginePort for CopilotEngine {
         let live = crate::engine::live::live_path(work_dir, &crate::engine::role_key(role), None);
         let (stdout, code, stderr) = self.exec(cmd, live, timeout, sandbox).await?;
         let parsed = parse_jsonl(&stdout);
+        let (code, stderr) = match &parsed.error {
+            Some(e) => (Some(1), format!("{e}\n{stderr}")),
+            None => (code, stderr),
+        };
         Ok(AgentOutcome {
             stdout: if parsed.answer.is_empty() {
                 stdout.clone()
@@ -304,6 +322,11 @@ struct Parsed {
     trace: String,
     output_tokens: u64,
     session_id: Option<String>,
+    /// A `session.error` the CLI reported (quota exhaustion, auth failure…).
+    /// Copilot exits 0 even on these, so without surfacing it the run looked
+    /// like a SUCCESS with empty output — no failover fired and every
+    /// copilot-routed role silently produced nothing for hours.
+    error: Option<String>,
 }
 
 /// Parse Copilot's `--output-format json` (JSONL). Falls back gracefully: any
@@ -315,6 +338,7 @@ fn parse_jsonl(raw: &str) -> Parsed {
     let mut trace = String::new();
     let mut output_tokens: u64 = 0;
     let mut session_id = None;
+    let mut error = None;
 
     for line in raw.lines() {
         let line = line.trim();
@@ -365,6 +389,22 @@ fn parse_jsonl(raw: &str) -> Parsed {
                     }
                 }
             }
+            // The CLI's own failure report (quota exhaustion, auth death…).
+            // Captured verbatim: the process still EXITS 0 on these, so this
+            // event is the only truth that the run produced nothing.
+            "session.error" => {
+                let msg = data
+                    .and_then(|d| d.get("message"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("copilot session error");
+                let etype = data
+                    .and_then(|d| d.get("errorType"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("error");
+                let full = format!("copilot {etype}: {msg}");
+                let _ = writeln!(trace, "✗ {full}");
+                error = Some(full);
+            }
             "result" => {
                 session_id = v
                     .get("sessionId")
@@ -380,12 +420,28 @@ fn parse_jsonl(raw: &str) -> Parsed {
         trace: trace.trim_end().to_owned(),
         output_tokens,
         session_id,
+        error,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_session_error_is_surfaced_not_swallowed() {
+        // The exact shape captured live when the monthly quota ran out: the CLI
+        // still EXITS 0, so this event is the only signal the run failed. It
+        // must surface as an error (→ failover), never a successful empty run.
+        let raw = r#"{"type":"session.error","data":{"errorType":"quota","message":"You have exceeded your monthly quota (Request ID: X)","statusCode":402}}
+{"type":"result","sessionId":"s1"}"#;
+        let p = parse_jsonl(raw);
+        let err = p.error.expect("session.error must be captured");
+        assert!(err.contains("quota"), "{err}");
+        assert!(err.contains("exceeded your monthly quota"), "{err}");
+        // And the failover layer must classify it as a quota wall.
+        assert!(crate::engine::failover::is_quota_wall(&err));
+    }
 
     #[test]
     fn empty_or_default_model_becomes_auto() {
