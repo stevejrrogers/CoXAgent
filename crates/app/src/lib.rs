@@ -1398,6 +1398,16 @@ fn isolate_worktree(work_dir: PathBuf, worker: &str) -> PathBuf {
     {
         return work_dir;
     }
+    worktree_at(work_dir, worker)
+}
+
+/// Materialize (or reuse) a git worktree for `slug` beside the repo and return
+/// its path — or the original `work_dir` when this isn't a repo or the add
+/// fails. This is what makes CONCURRENT runners real: two DEV agents sharing
+/// one checkout could never both pass a green-suite DoD (each saw the other's
+/// half-written changes — the overnight zero-throughput deadlock), so each
+/// concurrency slot gets its own tree.
+pub(crate) fn worktree_at(work_dir: PathBuf, slug: &str) -> PathBuf {
     let is_repo = std::process::Command::new("git")
         .arg("-C")
         .arg(&work_dir)
@@ -1407,7 +1417,7 @@ fn isolate_worktree(work_dir: PathBuf, worker: &str) -> PathBuf {
     if !is_repo {
         return work_dir;
     }
-    let slug: String = worker
+    let slug: String = slug
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
