@@ -98,7 +98,8 @@ async function saveSettings(){const cfg=window._cfg||{engine:{},workflow:{}};cfg
     target_branch:val("git-tb").trim(),
     branch_prefix:val("git-bp").trim()||"feat/",commit_email:val("git-em").trim(),
     account:val("git-acct").trim(),
-    auto_pr:val("git-pr")==="true",auto_review:val("git-ar")==="true",auto_merge:val("git-am")==="true"});
+    auto_pr:val("git-pr")==="true",auto_review:val("git-ar")==="true",auto_merge:val("git-am")==="true",
+    require_ci:val("git-ci")==="true"});
   try{const res=await(await fetch(api("/config"),{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(cfg)})).json();
     window._budget=cfg.workflow.budget_usd;if(CUR==="insights")renderActive();
     // Check if engine config actually changed
