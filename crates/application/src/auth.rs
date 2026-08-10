@@ -329,11 +329,17 @@ mod role_tests {
         assert!(AuthRole::Manager.can_approve_ready());
         assert!(AuthRole::Admin.can_approve_ready());
         assert!(!AuthRole::Fe.can_approve_ready(), "a dev is not the PO/BA");
-        assert!(!AuthRole::Qa.can_approve_ready(), "QA verifies, does not refine");
+        assert!(
+            !AuthRole::Qa.can_approve_ready(),
+            "QA verifies, does not refine"
+        );
         assert!(!AuthRole::Viewer.can_approve_ready());
 
         // Verify gate (test cases + results): the Tester's verdict.
-        assert!(AuthRole::Qa.can_verify(), "the Tester renders the QA verdict");
+        assert!(
+            AuthRole::Qa.can_verify(),
+            "the Tester renders the QA verdict"
+        );
         assert!(AuthRole::TechLead.can_verify());
         assert!(
             AuthRole::Reviewer.can_verify(),
@@ -343,7 +349,10 @@ mod role_tests {
             !AuthRole::Ba.can_verify(),
             "writing the ticket is not signing it off"
         );
-        assert!(!AuthRole::Po.can_verify(), "the PO owns scope, not QA sign-off");
+        assert!(
+            !AuthRole::Po.can_verify(),
+            "the PO owns scope, not QA sign-off"
+        );
         assert!(!AuthRole::Viewer.can_verify());
 
         // A read-only account may take no gate decision at all.

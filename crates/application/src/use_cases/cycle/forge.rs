@@ -279,7 +279,27 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             return false;
         };
         let target = self.flow_base();
-        let open = prs.iter().filter(|p| p.base == target).count();
+        // Only PRs the AGENTS can still act on count against the queue. A PR
+        // that exhausted the fix→rescue ladder has been handed to a human
+        // (pr_stuck in the inbox) — counting it here left the clean-base gate
+        // waiting on a PR no agent may touch, which locked ALL dev work behind
+        // one human decision indefinitely.
+        let handed_off: std::collections::BTreeSet<u64> = self
+            .store
+            .load()
+            .await
+            .map(|s| {
+                s.pr_fix_attempts
+                    .iter()
+                    .filter(|(_, n)| **n > 2)
+                    .map(|(k, _)| *k)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let open = prs
+            .iter()
+            .filter(|p| p.base == target && !handed_off.contains(&p.number))
+            .count();
         if open == 0 {
             return false;
         }

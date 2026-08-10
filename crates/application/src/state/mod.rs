@@ -121,6 +121,13 @@ pub struct ProjectState {
     /// and nest even before it holds a page — Confluence-style spaces/pages.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub doc_folders: Vec<String>,
+    /// Per-page refresh bookkeeping (page id → mark), so the idle-cycle Wiki
+    /// refresher does not re-run the SAME page every cycle: a just-refreshed page
+    /// cools down, and a page whose rewrite keeps failing the structure gate is
+    /// parked (needs a human/redesign) instead of burning a call forever — the
+    /// root of the DOCS run churn.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub doc_refresh: std::collections::BTreeMap<String, DocRefreshMark>,
     /// Lessons the team learned in past retros — fed back into agent prompts so
     /// the team actually improves over time (kept bounded, newest last).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -163,6 +170,15 @@ pub struct ProjectState {
     /// `pr_fix_attempts` when the PR closes.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub pr_sessions: std::collections::BTreeMap<u64, String>,
+    /// Engine conversation id per ticket work-session, keyed `"<ticket>/<role>"`
+    /// (e.g. `COX-B002/dev_bug`). When a DEV agent RE-ENTERS a ticket it already
+    /// worked (a retry, or after a parked question is answered), it resumes this
+    /// conversation instead of re-reading the code cold. Resume routes to the
+    /// role's configured engine; a session minted by a different engine (a prior
+    /// failover) simply fails to resume and falls back to a cold run — a session
+    /// id is engine-native, so this is safe, just a missed optimization.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub ticket_sessions: std::collections::BTreeMap<String, String>,
     /// Tickets held for HUMAN cost approval: estimated run cost exceeded
     /// `workflow.approve_over_usd`. Value = the estimate shown to the human.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -342,6 +358,7 @@ impl Default for ProjectState {
             milestones: Vec::new(),
             docs: Vec::new(),
             doc_folders: Vec::new(),
+            doc_refresh: std::collections::BTreeMap::new(),
             lessons: Vec::new(),
             decisions: Vec::new(),
             refactor_mode: false,
@@ -350,6 +367,7 @@ impl Default for ProjectState {
             last_digest_day: String::new(),
             pr_fix_attempts: std::collections::BTreeMap::new(),
             pr_sessions: std::collections::BTreeMap::new(),
+            ticket_sessions: std::collections::BTreeMap::new(),
             cost_holds: std::collections::BTreeMap::new(),
             clippy_baseline: None,
             debt_signals: Vec::new(),

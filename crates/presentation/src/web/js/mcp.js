@@ -54,6 +54,9 @@ function toggleRoleOverrides(btn){const box=btn.nextElementSibling;const open=bo
   if(open){box.removeAttribute("hidden");btn.classList.add("open");}else{box.setAttribute("hidden","");btn.classList.remove("open");}
 }
 async function saveSettings(){const cfg=window._cfg||{engine:{},workflow:{}};cfg.engine=cfg.engine||{};cfg.workflow=cfg.workflow||{};
+  // Track engine config BEFORE changes for comparison
+  const origEngine=JSON.stringify(window._cfg?.engine||{});
+  
   function mdl(id){const provEl=document.getElementById("mdl-prov-"+id);if(provEl)return provEl.value+"/"+(val("mdl-"+id)||"");return val("mdl-"+id)||"";}
   cfg.engine.default={engine:val("eng-default"),model:mdl("default")};
   const per={};ROLES.forEach(r=>{const e=val("eng-"+r),m=mdl(r);if(e)per[r]={engine:e,model:m||"sonnet"};});cfg.engine.per_role=per;
@@ -71,6 +74,7 @@ async function saveSettings(){const cfg=window._cfg||{engine:{},workflow:{}};cfg
   cfg.engine.escalation=val("en-esc").split(",").map(s=>s.trim()).filter(Boolean);
   cfg.workflow.language=val("wf-lang")||"en";
   cfg.workflow.sleep_seconds=parseInt(val("wf-sl")||"30",10);
+  {const cc=parseInt(val("wf-cc")||"1",10);cfg.workflow.concurrency=Number.isFinite(cc)&&cc>0?Math.min(cc,16):1;}
   const bg=val("wf-bg");cfg.workflow.budget_usd=bg?parseFloat(bg):null;
   cfg.policy=cfg.policy||{};
   const dg=val("wf-dg");cfg.policy.daily_budget_usd=dg?parseFloat(dg):null;
@@ -78,12 +82,12 @@ async function saveSettings(){const cfg=window._cfg||{engine:{},workflow:{}};cfg
   // Approval gates + adaptive auto-approve. Preserve any human fields the UI
   // does not expose rather than dropping them on save.
   {const h=Object.assign({},cfg.workflow.human||{});
-   h.gate_ready=val("hu-ready")!=="false";
-   h.gate_verify=val("hu-verify")!=="false";
+   h.gate_ready=val("hu-ready")==="false"?false:true;
+   h.gate_verify=val("hu-verify")==="false"?false:true;
    h.route_exceptions_to=val("hu-route").trim();
    {const sla=parseInt(val("hu-sla")||"60",10);h.question_sla_minutes=Number.isFinite(sla)?sla:60;}
    const a=Object.assign({},h.adaptive||{});
-   a.enabled=val("hu-adaptive")!=="false";
+   a.enabled=val("hu-adaptive")==="false"?false:true;
    {const u=parseInt(val("hu-undo")||"30",10);a.undo_window_minutes=Number.isFinite(u)?u:30;}
    {const l=parseInt(val("hu-learn")||"8",10);a.learn_after_samples=Number.isFinite(l)&&l>0?l:8;}
    {const m=parseInt(val("hu-maxauto")||"3",10);a.max_auto_per_cycle=Number.isFinite(m)&&m>0?m:3;}
@@ -94,10 +98,16 @@ async function saveSettings(){const cfg=window._cfg||{engine:{},workflow:{}};cfg
     target_branch:val("git-tb").trim(),
     branch_prefix:val("git-bp").trim()||"feat/",commit_email:val("git-em").trim(),
     account:val("git-acct").trim(),
-    auto_pr:val("git-pr")==="true",auto_review:val("git-ar")==="true",auto_merge:val("git-am")==="true"});
+    auto_pr:val("git-pr")==="true",auto_review:val("git-ar")==="true",auto_merge:val("git-am")==="true",
+    require_ci:val("git-ci")==="true"});
   try{const res=await(await fetch(api("/config"),{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(cfg)})).json();
     window._budget=cfg.workflow.budget_usd;if(CUR==="insights")renderActive();
-    document.getElementById("save-note").textContent=res.ok?(res.note||"saved"):"error";}catch(e){document.getElementById("save-note").textContent="error";}}
+    // Check if engine config actually changed
+    const newEngine=JSON.stringify(cfg.engine);
+    const engineChanged=origEngine!==newEngine;
+    const msg=engineChanged?"Engine config updated — applies on the next cycle":"saved";
+    document.getElementById("save-note").textContent=res.ok?msg:"error";
+    if(engineChanged){toasty("Engine settings updated — applies on the next cycle, no restart","ok");}}catch(e){document.getElementById("save-note").textContent="error";}}
 function val(id){return document.getElementById(id).value;}
 async function setPriority(id,p){
   try{await fetch(api("/ticket/"+id+"/priority"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({priority:p})});

@@ -108,7 +108,9 @@ impl<E: AgentEnginePort> AgentEnginePort for FailoverEngine<E> {
         for (i, engine) in self.engines.iter().enumerate() {
             let is_last = i == last_idx;
             match engine.run(request.clone()).await {
-                // Success — done.
+                // Success — done. The concrete engine has already stamped
+                // `outcome.engine` with its own id, so the outcome that returns
+                // here already names the engine that actually ran (post-failover).
                 Ok(o) if o.succeeded() => return Ok(o),
                 // Failed: only fall through on a quota wall, and only if another
                 // engine is left. A normal task failure is returned as-is.
@@ -146,13 +148,17 @@ impl<E: AgentEnginePort> AgentEnginePort for FailoverEngine<E> {
     /// session. Callers fall back to a full fresh run on error.
     async fn resume_run(
         &self,
+        role: coxagent_domain::Role,
         session_id: &str,
         follow_up: &str,
         work_dir: &std::path::Path,
         timeout: std::time::Duration,
     ) -> Result<AgentOutcome, PortError> {
         match self.engines.first() {
-            Some(e) => e.resume_run(session_id, follow_up, work_dir, timeout).await,
+            Some(e) => {
+                e.resume_run(role, session_id, follow_up, work_dir, timeout)
+                    .await
+            }
             None => Err(PortError::Backend("failover: no engines".to_owned())),
         }
     }

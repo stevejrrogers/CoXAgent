@@ -978,6 +978,9 @@ async fn run_loop(
         config,
         host_port_probe,
     } = load_config_with_probe(state_dir)?;
+
+    // Track config changes so engine can be reloaded at cycle boundaries without restart
+    let mut config_hash = config_content_hash(state_dir);
     // Same project-id derivation as Command::Run/operator_main: the workspace
     // dir name (e.g. `cxc`), not a fixed "default" — so this operator's MCP
     // calls target the same project the hub knows it by.
@@ -1007,7 +1010,7 @@ async fn run_loop(
     )
     .await;
     let (engine, meter) = build_engine(&config, logs_dir(state_dir), mcp.as_ref())?;
-    let sleep = std::time::Duration::from_secs(config.workflow.sleep_seconds);
+    let mut sleep = std::time::Duration::from_secs(config.workflow.sleep_seconds);
 
     // Recovery: release any claims orphaned by a previous crash before looping.
     let recovered = RecoverUseCase::new(Arc::clone(&store)).execute().await?;
@@ -1043,9 +1046,7 @@ async fn run_loop(
                 "gitlab" => Some(Arc::new(coxagent_infrastructure::GlForge::new(
                     repo, base, wd,
                 ))),
-                "github" => Some(Arc::new(coxagent_infrastructure::GhForge::with_account(
-                    repo, base, wd, account,
-                ))),
+                "github" => Some(coxagent_infrastructure::github_forge(repo, base, wd, account)),
                 _ => None,
             }
         } else {
@@ -1178,19 +1179,9 @@ async fn run_loop(
     // `cox-server run` keeps its run-immediately default.
     let wait_for_start = std::env::var("COXAGENT_WAIT_FOR_START").is_ok_and(|v| v == "1");
 
-    // Fast job poll: a human's force-merge queued by the hub starts within
-    // ~15s on this runner instead of waiting for the next full cycle.
-    let uc = Arc::new(uc);
-    {
-        let uc = Arc::clone(&uc);
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-                uc.drain_jobs().await;
-            }
-        });
-    }
-
+    // A human's force-merge queued by the hub is drained at the top of each
+    // cycle (below), so the use case can stay owned + mut here — which is what
+    // lets the loop hot-reload its engine when the config changes.
     let mut cycle = 0u64;
     while !shutdown.is_triggered() {
         // Honour this operator's per-user Start/Stop from the web: idle (without
@@ -1206,6 +1197,36 @@ async fn run_loop(
             continue;
         }
         cycle += 1;
+
+        // Force-merge jobs the hub queued: pick them up at the top of the cycle.
+        uc.drain_jobs().await;
+
+        // Hot-reload on a config change (a Settings edit) — rebuild the engine
+        // and apply the new config NOW, no process restart. The old meter was
+        // drained into state at the previous cycle's end, so the swap loses no
+        // spend. If the rebuild fails, keep running on the previous engine.
+        let new_hash = config_content_hash(state_dir);
+        if new_hash != config_hash {
+            config_hash = new_hash;
+            let reloaded = match load_config_with_probe(state_dir) {
+                Ok(l) => l.config,
+                Err(e) => {
+                    tracing::warn!("config changed but is invalid — keeping previous: {e}");
+                    continue;
+                }
+            };
+            match build_engine(&reloaded, logs_dir(state_dir), mcp.as_ref()) {
+                Ok((engine, meter)) => {
+                    sleep = std::time::Duration::from_secs(reloaded.workflow.sleep_seconds);
+                    uc.reload(reloaded, engine, meter);
+                    tracing::info!("config changed — engine reloaded and applied without a restart");
+                }
+                Err(e) => {
+                    tracing::warn!("config changed but engine rebuild failed; keeping previous: {e}");
+                }
+            }
+        }
+
         // Boxed: a cycle future is ~17KB of agent-phase locals, and this loop
         // frame lives for the whole daemon's life.
         let report = Box::pin(uc.run_cycle(cycle)).await;
@@ -1337,6 +1358,16 @@ fn isolate_worktree(work_dir: PathBuf, worker: &str) -> PathBuf {
     {
         return work_dir;
     }
+    worktree_at(work_dir, worker)
+}
+
+/// Materialize (or reuse) a git worktree for `slug` beside the repo and return
+/// its path — or the original `work_dir` when this isn't a repo or the add
+/// fails. This is what makes CONCURRENT runners real: two DEV agents sharing
+/// one checkout could never both pass a green-suite DoD (each saw the other's
+/// half-written changes — the overnight zero-throughput deadlock), so each
+/// concurrency slot gets its own tree.
+pub(crate) fn worktree_at(work_dir: PathBuf, slug: &str) -> PathBuf {
     let is_repo = std::process::Command::new("git")
         .arg("-C")
         .arg(&work_dir)
@@ -1346,7 +1377,7 @@ fn isolate_worktree(work_dir: PathBuf, worker: &str) -> PathBuf {
     if !is_repo {
         return work_dir;
     }
-    let slug: String = worker
+    let slug: String = slug
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
@@ -1561,6 +1592,20 @@ mod mcp_auth_tests {
 }
 
 /// The one thing no fake-binary test can prove: that the REAL `claude` CLI,
+/// Compute a hash of the config file content to detect changes at cycle boundary
+fn config_content_hash(state_dir: &Path) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    
+    let root = state_dir.parent().unwrap_or(state_dir);
+    let path = root.join("coxagent.json");
+    
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut hasher = DefaultHasher::new();
+    content.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// given a real `--mcp-config` file, actually calls the tool instead of
 /// ignoring it. `#[ignore]`d — costs a real API call and needs `claude`
 /// logged in — run explicitly with `cargo test -- --ignored

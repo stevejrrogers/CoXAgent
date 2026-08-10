@@ -10,7 +10,6 @@ use coxagent_application::ports::outbound::{
     AgentEnginePort, AgentOutcome, AgentRequest, SandboxStatus,
 };
 use coxagent_application::PortError;
-use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 
@@ -241,41 +240,7 @@ fn mcp_prompt_hint(mcp: &crate::engine::McpAccess) -> String {
     )
 }
 
-/// The live-log file for a run: `<workspace>/logs/live/<role>.log`, derived
-/// from the codebase work-dir (`<workspace>/codebase`). Same layout as the
-/// claude engine so the dashboard's `agent-log` endpoint finds it. When a
-/// per-run [`AgentRequest::label`] is present it lands between role and
-/// operator so runs are chaseable per ticket:
-/// `<role>__<label>__<operator>.log`.
-fn live_path(work_dir: &Path, role: &str, label: Option<&str>) -> Option<PathBuf> {
-    let dir = work_dir.parent()?.join("logs").join("live");
-    std::fs::create_dir_all(&dir).ok()?;
-    let label_part = label
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map_or_else(String::new, |l| format!("__{l}"));
-    let suffix = std::env::var("COXAGENT_OPERATOR")
-        .ok()
-        .map(|o| {
-            o.chars()
-                .filter(char::is_ascii_alphanumeric)
-                .collect::<String>()
-        })
-        .filter(|s| !s.is_empty())
-        .map_or_else(String::new, |s| format!("__{s}"));
-    Some(dir.join(format!("{role}{label_part}{suffix}.log")))
-}
-
-fn append_live(path: &Path, line: &str) {
-    use std::io::Write as _;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        let _ = writeln!(f, "{}", line.trim_end());
-    }
-}
+use crate::engine::live::{append_live, live_path};
 
 #[async_trait]
 impl AgentEnginePort for OpencodeEngine {
@@ -348,12 +313,17 @@ impl AgentEnginePort for OpencodeEngine {
 
     async fn resume_run(
         &self,
+        role: coxagent_domain::Role,
         session_id: &str,
         follow_up: &str,
         work_dir: &std::path::Path,
         timeout: std::time::Duration,
     ) -> Result<AgentOutcome, PortError> {
-        let live = live_path(work_dir, "resume", None);
+        // Stream under the ROLE's live file, not a shared "resume" one — the
+        // implement/repair passes of a run resume the session, and writing them
+        // to `resume.log` left the agent's own card frozen at the planning
+        // output while the real work streamed somewhere no card reads.
+        let live = live_path(work_dir, &crate::engine::role_key(role), None);
         let (mut cmd, sandbox) = crate::proc::agent_command(&self.binary, work_dir, self.sandbox);
         cmd.arg("run")
             .arg("--model")
@@ -460,6 +430,7 @@ impl OpencodeEngine {
             trace: String::new(),
             session_id: extract_session(&raw),
             sandbox,
+            engine: "opencode".to_owned(),
         })
     }
 }
@@ -481,12 +452,45 @@ fn extract_session(raw: &str) -> Option<String> {
 /// Render one NDJSON event into a readable line for the live log.
 /// Empty for non-visible events (step_start, etc.).
 fn render_event(v: &serde_json::Value) -> String {
+    use std::fmt::Write as _;
     match v.get("type").and_then(serde_json::Value::as_str) {
         Some("text") => v
             .pointer("/part/text")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("")
             .to_owned(),
+        // A tool call + its result. Without this, opencode's live log showed
+        // only the prose between actions — "Now check if X is in forge.rs:" and
+        // then nothing, because the check itself (the tool call) never rendered.
+        Some("tool_use") => {
+            let tool = v
+                .pointer("/part/tool")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("tool");
+            let input = v
+                .pointer("/part/state/input")
+                .map(std::string::ToString::to_string)
+                .unwrap_or_default();
+            let input: String = input.chars().take(160).collect();
+            let mut out = format!("🔧 {tool}({input})");
+            if let Some(output) = v
+                .pointer("/part/state/output")
+                .and_then(serde_json::Value::as_str)
+            {
+                let lines: Vec<&str> = output.lines().collect();
+                if !lines.is_empty() {
+                    let _ = write!(out, "\n   ↳ {} lines", lines.len());
+                    for l in lines.iter().take(6) {
+                        let l: String = l.chars().take(200).collect();
+                        let _ = write!(out, "\n   ┆ {l}");
+                    }
+                    if lines.len() > 6 {
+                        let _ = write!(out, "\n   ┆ … (+{} more)", lines.len() - 6);
+                    }
+                }
+            }
+            out
+        }
         _ => String::new(),
     }
 }
@@ -699,6 +703,20 @@ mod tests {
     fn render_event_empty_for_non_text() {
         let v = serde_json::json!({"type":"step_start","part":{}});
         assert_eq!(render_event(&v), "");
+    }
+
+    #[test]
+    fn render_event_shows_tool_calls_with_result_preview() {
+        // The real shape opencode emits (captured live): the work-log otherwise
+        // cut off right before every action.
+        let v = serde_json::json!({"type":"tool_use","part":{
+            "tool":"bash",
+            "state":{"status":"completed","input":{"command":"ls"},"output":"a.txt\nb.txt\n"}
+        }});
+        let got = render_event(&v);
+        assert!(got.starts_with("🔧 bash("), "{got}");
+        assert!(got.contains("↳ 2 lines"), "{got}");
+        assert!(got.contains("┆ a.txt"), "{got}");
     }
 
     fn mcp(token: Option<&str>) -> crate::engine::McpAccess {

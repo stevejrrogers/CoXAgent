@@ -147,8 +147,10 @@ pub(super) async fn put_config(
     let Some(p) = app.project(&pid).await else {
         return not_found();
     };
-    // Budget caps apply immediately (shared live cell); everything else needs a
-    // restart since the runner captured it at spawn.
+    // Budget caps apply instantly (shared live cell). The engine/model config is
+    // picked up by the runner at its next cycle boundary — it re-reads
+    // coxagent.json and hot-reloads the engine, no restart. Only a few
+    // process-captured knobs (the loop's own worker identity) still need one.
     if let Ok(mut caps) = p.budget.lock() {
         caps.lifetime_usd = cfg.workflow.budget_usd;
         caps.daily_usd = cfg.policy.daily_budget_usd;
@@ -157,7 +159,7 @@ pub(super) async fn put_config(
         Ok(text) => match std::fs::write(&p.config_path, text) {
             Ok(()) => Json(serde_json::json!({
                 "ok": true,
-                "note": "budget applied live; other changes apply on restart"
+                "note": "budget applied live; engine/model apply on the next cycle (no restart)"
             }))
             .into_response(),
             Err(e) => internal_error(&e.to_string()),

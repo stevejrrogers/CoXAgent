@@ -2035,6 +2035,7 @@ async function loadSettings(){
         <div class="fr"><span class="lbl">Escalation ladder</span><input id="en-esc" placeholder="engine defaults (claude → opus; opencode → custom providers first)" value="${esc(((cfg.engine||{}).escalation||[]).join(', '))}" style="min-width:280px"><span class="hint">comma-separated models tried on RETRIES of a failed ticket, strongest last</span></div>
         <div class="fr"><span class="lbl">Scrum language</span><select id="wf-lang"><option value="en" ${wf.language!=='vi'?'selected':''}>English</option><option value="vi" ${wf.language==='vi'?'selected':''}>Tiếng Việt</option></select><span class="hint">standup, planning, grooming &amp; retro speak this language</span></div>
         <div class="fr"><span class="lbl">Sleep seconds</span><input id="wf-sl" type="number" min="0" value="${wf.sleep_seconds??30}" style="width:90px"/><span class="hint">between cycles</span></div>
+        <div class="fr"><span class="lbl">Concurrency</span><input id="wf-cc" type="number" min="1" max="16" value="${wf.concurrency??1}" style="width:90px"/><span class="hint">parallel workers per role (dev/test/docs) — 1 = serial; higher runs several tickets of a role at once via per-ticket leases</span></div>
         <div class="fr"><span class="lbl">Budget — total (USD)</span><input id="wf-bg" type="number" min="0" step="0.5" value="${wf.budget_usd??''}" placeholder="unlimited" style="width:100px" ${wf.budget_usd==null?'disabled':''}/>
           <label class="hint" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" id="wf-bg-unl" ${wf.budget_usd==null?'checked':''} onchange="document.getElementById('wf-bg').disabled=this.checked;if(this.checked)document.getElementById('wf-bg').value='';"> unlimited</label>
           <span class="hint">lifetime cap · pauses loop · <b style="color:var(--accent2)">applies live</b></span></div>
@@ -2074,6 +2075,7 @@ async function loadSettings(){
         <div class="fr"><span class="lbl">Open PR/MR</span><select id="git-pr"><option value="true" ${git.auto_pr!==false?'selected':''}>automatically after push</option><option value="false" ${git.auto_pr===false?'selected':''}>manual</option></select></div>
         <div class="fr"><span class="lbl">Auto-review</span><select id="git-ar"><option value="true" ${git.auto_review!==false?'selected':''}>on — the SA agent reviews every PR &amp; suggests</option><option value="false" ${git.auto_review===false?'selected':''}>off — no automatic review</option></select><span class="hint">SA deep-dives each PR and posts approve / request-changes as a suggestion</span></div>
         <div class="fr"><span class="lbl">Auto-merge</span><select id="git-am"><option value="false" ${!git.auto_merge?'selected':''}>off — you merge from the Review tab</option><option value="true" ${git.auto_merge?'selected':''}>on — SA approves &amp; merges automatically</option></select><span class="hint">On: SA merges on approve (never on failing CI). Off: approval is only a suggestion; request-changes still loops back to the agent to fix.</span></div>
+        <div class="fr"><span class="lbl">Require CI</span><select id="git-ci"><option value="true" ${git.require_ci!==false?'selected':''}>on — failing/pending CI blocks review &amp; merge</option><option value="false" ${git.require_ci===false?'selected':''}>off — ignore CI (e.g. Actions billing down); local gates carry the review</option></select><span class="hint">Turn off when CI is unavailable for reasons that aren't the code — the SA still runs the diff review and local test gates.</span></div>
       </div>
     </div>
     <div class="settab" data-p="mcp" hidden><div id="mcp-panel"></div></div>
@@ -2116,7 +2118,7 @@ async function loadSettings(){
         <button class="gc-btn" onclick="openWebhooks()" style="margin-top:6px"><i class="ti ti-webhook"></i> Manage webhooks</button>
       </div>
     </div>
-    <div class="set-footer"><button class="save" onclick="saveSettings()"><i class="ti ti-device-floppy"></i> Save changes</button><span id="save-note"></span><span class="set-foothint">Other settings apply on the next restart</span></div>`;
+    <div class="set-footer"><button class="save" onclick="saveSettings()"><i class="ti ti-device-floppy"></i> Save changes</button><span id="save-note"></span><span class="set-foothint">Engine &amp; model changes apply on the next cycle — no restart</span></div>`;
   setSetTab(window._setTab==="workspace"?"engines":(window._setTab||"engines"));}
 function copyText(btn,text){navigator.clipboard&&navigator.clipboard.writeText(text);
   const old=btn.innerHTML;btn.innerHTML='<i class="ti ti-check"></i>';setTimeout(()=>{btn.innerHTML=old;},1200);}

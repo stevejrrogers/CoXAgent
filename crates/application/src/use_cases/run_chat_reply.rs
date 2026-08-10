@@ -348,9 +348,13 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
                 continue;
             }
             let verify = to == coxagent_domain::Status::Verified;
-            let allowed = self
-                .actor_role
-                .map_or(true, |r| if verify { r.can_verify() } else { r.can_approve_ready() });
+            let allowed = self.actor_role.map_or(true, |r| {
+                if verify {
+                    r.can_verify()
+                } else {
+                    r.can_approve_ready()
+                }
+            });
             if allowed {
                 self.human_gate_action(orig, to).await;
             } else {

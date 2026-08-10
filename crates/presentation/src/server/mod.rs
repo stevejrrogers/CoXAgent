@@ -23,6 +23,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::future::Future;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -30,6 +31,8 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio_stream::wrappers::IntervalStream;
 use tokio_stream::{Stream, StreamExt};
+
+use crate::middleware::{cors_layer, rate_limit_mw, RateLimiter, AUTH_RATE_MAX, AUTH_RATE_WINDOW};
 
 mod assets;
 mod auth;
@@ -39,16 +42,20 @@ mod channels;
 mod chat;
 mod comments;
 mod docs;
+mod downloads;
 mod engines;
 mod forge;
+mod guards;
 mod hub_docs;
 mod inbox;
 mod manage;
 mod meetings;
 mod people;
+mod pr_listing;
 mod projects;
 mod realtime;
 mod requests;
+mod security;
 mod status;
 mod store_rpc;
 mod transcripts;
@@ -63,16 +70,20 @@ use channels::*;
 use chat::*;
 use comments::*;
 use docs::*;
+use downloads::*;
 use engines::*;
 use forge::*;
+use guards::*;
 use hub_docs::*;
 use inbox::*;
 use manage::*;
 use meetings::*;
 use people::*;
+use pr_listing::*;
 use projects::*;
 use realtime::*;
 use requests::*;
+use security::*;
 use status::*;
 use transcripts::*;
 use work::*;
@@ -169,30 +180,6 @@ pub struct NewProjectReq {
 pub type ProjectRemover =
     Arc<dyn Fn(String) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync>;
 
-/// Record one audit entry through the injected sink (fire-and-forget).
-/// Baseline security headers on every response: no MIME sniffing, no framing
-/// (clickjacking), same-origin referrers.
-async fn security_headers_mw(
-    req: Request<axum::body::Body>,
-    next: Next,
-) -> axum::response::Response {
-    let mut resp = next.run(req).await;
-    let h = resp.headers_mut();
-    h.insert(
-        "X-Content-Type-Options",
-        axum::http::HeaderValue::from_static("nosniff"),
-    );
-    h.insert(
-        "X-Frame-Options",
-        axum::http::HeaderValue::from_static("DENY"),
-    );
-    h.insert(
-        "Referrer-Policy",
-        axum::http::HeaderValue::from_static("same-origin"),
-    );
-    resp
-}
-
 /// Extract the project ID from a URL path like `/api/projects/:pid/...`.
 fn extract_pid_from_path(path: &str) -> Option<&str> {
     // match /api/projects/<pid> or /api/projects/<pid>/...
@@ -209,18 +196,6 @@ fn now_rfc3339() -> String {
         .unwrap_or_default()
 }
 
-/// The caller's username, via session cookie or bearer token.
-async fn principal_name(app: &AppState, headers: &axum::http::HeaderMap) -> Option<String> {
-    let Some(auth) = app.auth.clone() else {
-        // Open mode (no accounts configured): every request IS the operator.
-        // Returning None here made profile/meeting endpoints 401 on a hub
-        // whose every other endpoint runs open — an inconsistency the e2e
-        // console gate caught.
-        return Some("operator".to_owned());
-    };
-    resolve_principal(&auth, headers).await.map(|u| u.username)
-}
-
 #[allow(clippy::cast_possible_truncation)] // the low 32 bits of the hash IS the value
 fn rand_u32() -> u32 {
     use std::hash::{BuildHasher, Hasher};
@@ -229,43 +204,10 @@ fn rand_u32() -> u32 {
         .finish() as u32
 }
 
-/// Default blob storage: local disk under a root, used when no S3/MinIO backend
-/// is injected. Keys are relative paths (e.g. `chat/<file>`).
-struct DiskStorage {
-    root: PathBuf,
-}
-
-#[async_trait::async_trait]
-impl coxagent_application::ports::outbound::StoragePort for DiskStorage {
-    async fn put(
-        &self,
-        key: &str,
-        data: &[u8],
-        _mime: &str,
-    ) -> Result<(), coxagent_application::PortError> {
-        if key.contains("..") {
-            return Err(coxagent_application::PortError::Backend(
-                "bad key".to_owned(),
-            ));
-        }
-        let path = self.root.join(key);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| coxagent_application::PortError::Backend(e.to_string()))?;
-        }
-        std::fs::write(&path, data)
-            .map_err(|e| coxagent_application::PortError::Backend(e.to_string()))
-    }
-
-    async fn get(&self, key: &str) -> Result<Vec<u8>, coxagent_application::PortError> {
-        if key.contains("..") {
-            return Err(coxagent_application::PortError::Backend(
-                "bad key".to_owned(),
-            ));
-        }
-        std::fs::read(self.root.join(key))
-            .map_err(|e| coxagent_application::PortError::Backend(e.to_string()))
-    }
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 #[derive(Clone)]
@@ -575,52 +517,6 @@ pub struct HubExtras {
 /// (index.html renders the "nearly reached" alert at 80% of a project's cap) —
 /// same UX language, just at the space level and pushed as a chat heads-up.
 const WARN_PCT: f64 = 0.8;
-
-/// Which surface this process serves — the physical service split. One binary,
-/// four roles (`COXAGENT_ROLE`): `all` (default, self-host single process),
-/// `gateway` (REST + MCP, no sockets), `realtime` (WS/SSE only), `knowledge`
-/// (batch loops only). A load balancer routes paths to the right pods; the
-/// role guard makes serving the wrong surface impossible, not just unrouted.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum HubRole {
-    All,
-    Gateway,
-    Realtime,
-    Knowledge,
-}
-
-fn hub_role() -> HubRole {
-    static ROLE: std::sync::OnceLock<HubRole> = std::sync::OnceLock::new();
-    *ROLE.get_or_init(
-        || match std::env::var("COXAGENT_ROLE").unwrap_or_default().as_str() {
-            "gateway" => HubRole::Gateway,
-            "realtime" => HubRole::Realtime,
-            "knowledge" => HubRole::Knowledge,
-            _ => HubRole::All,
-        },
-    )
-}
-
-/// 503 unless this process's role serves the given surface.
-fn role_guard(need_realtime: bool) -> Option<axum::response::Response> {
-    let ok = match hub_role() {
-        HubRole::All => true,
-        HubRole::Gateway => !need_realtime,
-        HubRole::Realtime => need_realtime,
-        HubRole::Knowledge => false,
-    };
-    if ok {
-        None
-    } else {
-        Some(
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "wrong service role for this endpoint — check the load balancer routing",
-            )
-                .into_response(),
-        )
-    }
-}
 
 /// Compose-project prefix of a PR preview (`<workspace>/.preview/<num>` via
 /// `compose_project_name`). Previews are meant to live for as long as someone
@@ -972,13 +868,38 @@ pub async fn serve_full(
         .layer(axum::middleware::from_fn(security_headers_mw))
         .with_state(state);
 
+    // --- CORS layer ---
+    // Applied only when COXAGENT_CORS_ORIGINS is set; unset/empty = no CORS
+    // headers (same-origin + SameSite=Strict cookies guard the app as before).
+    let cors_origins = std::env::var("COXAGENT_CORS_ORIGINS").unwrap_or_default();
+    let app = if let Some(cors) = cors_layer(&cors_origins) {
+        app.layer(cors)
+    } else {
+        app
+    };
+
+    // --- Auth rate-limit layer ---
+    // Applies a per-IP sliding-window limit to all /api/auth/ routes.
+    // COXAGENT_TRUST_PROXY=1 reads the client IP from X-Forwarded-For (LB
+    // topology); default is TCP peer address (safe for direct exposure).
+    let trust_proxy =
+        std::env::var("COXAGENT_TRUST_PROXY").ok().as_deref() == Some("1");
+    let limiter = Arc::new(RateLimiter::new());
+    let app = app.layer(axum::middleware::from_fn(move |req, next| {
+        rate_limit_mw(req, next, Arc::clone(&limiter), AUTH_RATE_MAX, AUTH_RATE_WINDOW, trust_proxy)
+    }));
+
     // Bind loopback by default (safe for local use); a container sets
     // COXAGENT_HOST=0.0.0.0 so published ports are reachable from the host.
     let host = std::env::var("COXAGENT_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned());
     let addr = format!("{host}:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("dashboard on http://{addr}");
-    axum::serve(listener, app).await
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
 }
 
 async fn index() -> impl IntoResponse {
@@ -1062,106 +983,6 @@ async fn run_cli_env(bin: &str, args: &[&str], key: &str, val: &str) -> (bool, S
     }
 }
 
-/// All signed-in accounts parsed from `gh`/`glab auth status` output, with the
-/// active one flagged. Returns `(name, is_active)` pairs in the order the CLI
-/// lists them. Empty when no account can be parsed.
-///
-/// `gh auth status` (multi-account) looks like:
-/// ```text
-/// github.com
-///   ✓ Logged in to github.com account alice (keyring)
-///   - Active account: true
-///   ✓ Logged in to github.com account bob (keyring)
-///   - Active account: false
-/// ```
-/// `glab auth status` (single account) looks like:
-/// ```text
-/// - Logged in to gitlab.com as alice using token
-/// ```
-/// — no "Active account" line, so the lone entry is marked active here.
-fn parse_accounts(out: &str) -> Vec<(String, bool)> {
-    let mut accounts: Vec<(String, bool)> = Vec::new();
-    for line in out.lines() {
-        let trimmed = line.trim();
-        let Some(rest) = trimmed
-            .find("Logged in to ")
-            .map(|i| &trimmed[i + "Logged in to ".len()..])
-        else {
-            // The line right after a "Logged in" entry tells us if it's the
-            // active account (gh multi-account form only).
-            if trimmed.starts_with("- Active account:") || trimmed.starts_with("Active account:") {
-                if let Some(idx) = accounts.len().checked_sub(1) {
-                    accounts[idx].1 = trimmed.contains("true");
-                }
-            }
-            continue;
-        };
-        // Skip the host token, then the marker (`account` or `as`), then the
-        // username is the next whitespace-separated word.
-        let mut parts = rest.split_whitespace();
-        let _host = parts.next();
-        let marker_or_user = parts.next().unwrap_or("");
-        let user = if marker_or_user == "account" || marker_or_user == "as" {
-            parts.next().unwrap_or("")
-        } else {
-            marker_or_user
-        };
-        let name = user
-            .trim_matches(|c: char| c == '@' || c == '(' || c == ')' || c == '.')
-            .to_owned();
-        if !name.is_empty() {
-            // Dedupe: `gh auth status` may list the same login twice across
-            // hosts; keep the first occurrence.
-            if !accounts.iter().any(|(n, _)| n == &name) {
-                accounts.push((name, false));
-            }
-        }
-    }
-    // Single-account output (notably glab) has no "Active account" line — the
-    // one account is the active one.
-    if accounts.len() == 1 && !accounts[0].1 {
-        accounts[0].1 = true;
-    }
-    // If none was flagged active (single-section multi-account edge case),
-    // fall back to the first — matching the historical `parse_account` pick.
-    if !accounts.is_empty() && !accounts.iter().any(|(_, a)| *a) {
-        accounts[0].1 = true;
-    }
-    accounts
-}
-
-/// Pull the signed-in account out of `gh`/`glab auth status` output — the
-/// active one, falling back to the first listed. Used by callers that only
-/// need one account (e.g. the post-`connect` verifier).
-fn parse_account(out: &str) -> Option<String> {
-    let all = parse_accounts(out);
-    all.iter()
-        .find(|(_, a)| *a)
-        .or_else(|| all.first())
-        .map(|(n, _)| n.clone())
-}
-
-/// Whether the caller holds admin/super authority, which outranks channel
-/// ownership everywhere it is checked.
-async fn user_can_manage(app: &AppState, headers: &axum::http::HeaderMap) -> bool {
-    let Some(auth) = app.auth.clone() else {
-        return true; // running open (no auth configured)
-    };
-    resolve_principal(&auth, headers)
-        .await
-        .is_some_and(|u| u.role.can_manage())
-}
-
-/// Resolve the signed-in username, or `"user"` when auth is disabled.
-async fn resolve_username(app: &AppState, headers: &axum::http::HeaderMap) -> String {
-    match &app.auth {
-        Some(auth) => resolve_principal(auth, headers)
-            .await
-            .map_or_else(|| "user".to_owned(), |u| u.username),
-        None => "user".to_owned(),
-    }
-}
-
 /// The project brief agents are seeded with (`project_context.md`): its `Goal`
 /// section plus the full markdown, so the dashboard can surface what the team
 /// is actually building toward.
@@ -1191,189 +1012,12 @@ struct CodeGraphQuery {
     map: Option<u8>,
 }
 
-/// List open pull/merge requests for a project's repository.
-///
-/// The list is supplied by the runner over HTTP (the runner holds the forge
-/// credentials), so this reads what was reported and persisted rather than
-/// asking a forge the hub may not be able to reach (a container serving the
-/// dashboard has no token). Falls back to an empty list when no PRs have been
-/// reported yet.
-async fn list_prs_ep(
-    State(app): State<AppState>,
-    Path(pid): Path<String>,
-) -> axum::response::Response {
-    let Some(p) = app.project(&pid).await else {
-        return not_found();
-    };
-    let Ok(state) = p.store.load().await else {
-        return Json(serde_json::json!({ "configured": false, "prs": [] })).into_response();
-    };
-    let auto_merge = std::fs::read_to_string(&p.config_path)
-        .ok()
-        .and_then(|t| serde_json::from_str::<Config>(&t).ok())
-        .is_some_and(|c| c.git.auto_merge);
-    let enriched: Vec<serde_json::Value> = state
-        .open_prs
-        .iter()
-        .map(|pr| {
-            let mut v = serde_json::to_value(pr).unwrap_or_default();
-            if let Some(r) = state.reviews.iter().find(|r| r.number == pr.number) {
-                v["review"] = serde_json::json!({
-                    "decision": r.decision, "summary": r.summary, "at": r.at,
-                });
-            }
-            v
-        })
-        .collect();
-    let configured = p.forge.is_some();
-    Json(serde_json::json!({
-        "configured": configured, "auto_merge": auto_merge, "prs": enriched
-    }))
-    .into_response()
-}
-
-/// Force-merge one PR on the human's order: if it's already green, merge now;
-/// if it's blocked (conflicts), a DEV agent resolves them IMMEDIATELY (not next
-/// cycle), pushes, and then the merge lands. Progress is narrated in `#agents`.
-/// (project id, PR number) pairs with a force-merge currently running — the
-/// hub-wide guard against concurrent resolutions in one work_dir.
-fn force_inflight() -> &'static tokio::sync::Mutex<std::collections::HashSet<(String, u64)>> {
-    static SET: std::sync::OnceLock<tokio::sync::Mutex<std::collections::HashSet<(String, u64)>>> =
-        std::sync::OnceLock::new();
-    SET.get_or_init(|| tokio::sync::Mutex::new(std::collections::HashSet::new()))
-}
-
-/// Max upload size (bytes) — generous for images/docs, bounded to protect disk.
-const UPLOAD_MAX: usize = 25 * 1024 * 1024;
-
-/// Best-effort MIME from a file extension (for serving uploads).
-fn mime_of(name: &str) -> &'static str {
-    match name.rsplit('.').next().map(str::to_lowercase).as_deref() {
-        Some("png") => "image/png",
-        Some("jpg" | "jpeg") => "image/jpeg",
-        Some("gif") => "image/gif",
-        Some("webp") => "image/webp",
-        Some("svg") => "image/svg+xml",
-        Some("pdf") => "application/pdf",
-        Some("txt" | "log" | "md") => "text/plain; charset=utf-8",
-        Some("json") => "application/json",
-        _ => "application/octet-stream",
-    }
-}
-
-/// True for extensions whose MIME type a browser will execute as script if
-/// the file is opened via direct/top-level navigation (SVG documents, HTML,
-/// XML). `mime_of` derives Content-Type from the filename alone, so this
-/// covers files stored through ANY upload path (avatar, chat attachment,
-/// project attachment) — not just the one that first surfaced the bug.
-fn is_active_content_ext(name: &str) -> bool {
-    matches!(
-        name.rsplit('.').next().map(str::to_lowercase).as_deref(),
-        Some("svg" | "html" | "htm" | "xhtml" | "xml")
-    )
-}
-
-/// Force a download instead of inline rendering for [`is_active_content_ext`]
-/// files, so "open in new tab" / direct navigation can't execute embedded
-/// script — the browser downloads the file rather than parsing it as a
-/// top-level document.
-fn force_download_if_active_content(file: &str, resp: &mut axum::response::Response) {
-    if is_active_content_ext(file) {
-        resp.headers_mut().insert(
-            header::CONTENT_DISPOSITION,
-            axum::http::HeaderValue::from_static("attachment"),
-        );
-    }
-}
-
-// ── System-wide chat (hub-level: #general + project + private channels) ──────
-
-/// Resolve the caller's username and whether they may create channels.
-async fn resolve_user_caps(app: &AppState, headers: &axum::http::HeaderMap) -> (String, bool) {
-    match &app.auth {
-        Some(auth) => match resolve_principal(auth, headers).await {
-            Some(u) => (u.username, u.role.can_create_channel()),
-            None => ("user".to_owned(), false),
-        },
-        None => ("user".to_owned(), true), // open/local mode: allow
-    }
-}
-
-// ── Topic ──────────────────────────────────────────────────────────────────
-
-fn now_unix_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
-}
-
-/// HMAC-SHA1 (coturn's long-term-credential scheme).
-fn hmac_sha1(key: &[u8], msg: &[u8]) -> Vec<u8> {
-    use hmac::Mac;
-    let Ok(mut mac) = hmac::Hmac::<sha1::Sha1>::new_from_slice(key) else {
-        return Vec::new();
-    };
-    mac.update(msg);
-    mac.finalize().into_bytes().to_vec()
-}
-
-/// Standard Base64 (for the TURN credential).
-fn base64_std(data: &[u8]) -> String {
-    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0];
-        let b1 = chunk.get(1).copied().unwrap_or(0);
-        let b2 = chunk.get(2).copied().unwrap_or(0);
-        out.push(A[(b0 >> 2) as usize] as char);
-        out.push(A[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
-        out.push(if chunk.len() > 1 {
-            A[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            A[(b2 & 0x3f) as usize] as char
-        } else {
-            '='
-        });
-    }
-    out
-}
-
-/// Sanitize an original filename to a safe stored suffix (keeps the extension).
-fn sanitize_name(orig: &str) -> String {
-    orig.chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
 /// Max characters accepted in a single chat message.
 const CHAT_MAX_CHARS: usize = 2000;
 /// Sliding-window rate limit for a single WebSocket: at most this many messages
 /// per [`CHAT_RATE_WINDOW`].
 const CHAT_RATE_MAX: usize = 12;
 const CHAT_RATE_WINDOW: Duration = Duration::from_secs(10);
-
-/// Same-origin guard: allow when there is no `Origin` (non-browser client) or
-/// when its host matches the request `Host`. Blocks browser sockets opened from
-/// a different site even if the session cookie were somehow attached.
-fn origin_ok(headers: &axum::http::HeaderMap) -> bool {
-    let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) else {
-        return true;
-    };
-    let origin_host = origin.split("://").nth(1).unwrap_or(origin);
-    match headers.get(header::HOST).and_then(|v| v.to_str().ok()) {
-        Some(host) => origin_host == host,
-        None => false,
-    }
-}
 
 /// Whether `user` may receive a broadcast chat message. `#general` (and any
 /// message with no channel tag) is open; private channels require membership,
@@ -1439,17 +1083,6 @@ async fn digest_ep(
 // ---------------- Workspace: identity, invites, overview, my-agents ----------
 
 // ---------------- Spaces (multi-workspace) + Manage --------------------------
-
-/// Whether the caller is the hub super admin.
-async fn is_super(app: &AppState, headers: &axum::http::HeaderMap) -> bool {
-    match app.auth.clone() {
-        Some(auth) => resolve_principal(&auth, headers)
-            .await
-            .is_some_and(|u| u.role.is_super()),
-        // Open mode (no auth): single-user local — allow.
-        None => true,
-    }
-}
 
 /// The super admin's cross-space overview: every space with its live stats
 /// (projects, members, spend, online), plus hub totals and the user directory.
@@ -1625,35 +1258,6 @@ struct SprintScopeReq {
     tickets: Vec<String>,
 }
 
-/// Name of the session cookie.
-const SESSION_COOKIE: &str = "cox_session";
-
-/// Extract a cookie value from a `Cookie` header set.
-fn cookie_value(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
-    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
-    raw.split(';').find_map(|pair| {
-        let (k, v) = pair.split_once('=')?;
-        (k.trim() == name).then(|| v.trim().to_owned())
-    })
-}
-
-/// Resolve the principal: an `Authorization: Bearer` API token (for automation)
-/// takes precedence, else the session cookie.
-async fn resolve_principal(
-    auth: &Arc<dyn AuthPort>,
-    headers: &axum::http::HeaderMap,
-) -> Option<coxagent_application::AuthUser> {
-    if let Some(token) = bearer_token(headers) {
-        if let Some(user) = auth.principal_for_bearer(&token).await {
-            return Some(user);
-        }
-    }
-    match cookie_value(headers, SESSION_COOKIE) {
-        Some(token) => auth.user_for(&token).await,
-        None => None,
-    }
-}
-
 #[derive(serde::Deserialize)]
 struct CodeReq {
     code: String,
@@ -1688,76 +1292,3 @@ mod avatar_media_security_tests;
 mod pr_preview_tests;
 #[cfg(test)]
 mod pr_review_gate_tests;
-
-#[cfg(test)]
-mod parse_accounts_tests {
-    use super::{parse_account, parse_accounts};
-
-    #[test]
-    fn gh_multi_account_picks_active() {
-        let out = "\
-github.com
-  ✓ Logged in to github.com account stevejrrogers (keyring)
-  - Active account: true
-  - Git operations protocol: ssh
-
-  ✓ Logged in to github.com account kyroc3 (keyring)
-  - Active account: false
-  - Git operations protocol: ssh
-";
-        let all = parse_accounts(out);
-        assert_eq!(all.len(), 2);
-        assert_eq!(all[0], ("stevejrrogers".to_owned(), true));
-        assert_eq!(all[1], ("kyroc3".to_owned(), false));
-        assert_eq!(parse_account(out).as_deref(), Some("stevejrrogers"));
-    }
-
-    #[test]
-    fn gh_single_account_legacy_as_form() {
-        let out = "github.com\n  ✓ Logged in to github.com as alice (oauth_token)\n";
-        let all = parse_accounts(out);
-        assert_eq!(all, vec![("alice".to_owned(), true)]);
-        assert_eq!(parse_account(out).as_deref(), Some("alice"));
-    }
-
-    #[test]
-    fn glab_single_account_no_active_line_is_active() {
-        let out = "- Logged in to gitlab.com as alice using token\n";
-        let all = parse_accounts(out);
-        assert_eq!(all, vec![("alice".to_owned(), true)]);
-        assert_eq!(parse_account(out).as_deref(), Some("alice"));
-    }
-
-    #[test]
-    fn empty_output_yields_empty() {
-        assert!(parse_accounts("").is_empty());
-        assert!(parse_account("").is_none());
-    }
-
-    #[test]
-    fn duplicate_account_across_hosts_is_deduped() {
-        let out = "\
-github.com
-  ✓ Logged in to github.com account alice (keyring)
-  - Active account: true
-ghe.example.com
-  ✓ Logged in to ghe.example.com account alice (keyring)
-  - Active account: false
-";
-        let all = parse_accounts(out);
-        assert_eq!(all, vec![("alice".to_owned(), true)]);
-    }
-
-    #[test]
-    fn no_active_marker_falls_back_to_first() {
-        let out = "\
-github.com
-  ✓ Logged in to github.com account alice (keyring)
-  ✓ Logged in to github.com account bob (keyring)
-";
-        let all = parse_accounts(out);
-        assert_eq!(all[0], ("alice".to_owned(), true));
-        assert_eq!(all[1], ("bob".to_owned(), false));
-        assert_eq!(parse_account(out).as_deref(), Some("alice"));
-    }
-}

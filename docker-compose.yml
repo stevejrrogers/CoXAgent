@@ -1,7 +1,10 @@
 # Self-host CoXAgent: the hub + dashboard, backed by Postgres for multi-tenant
 # state, audit, and audit retention. Bring up with:
-#   COXAGENT_ADMIN_PASSWORD=yourpw docker compose up -d --build
+#   PG_PASSWORD=<strong> COXAGENT_ADMIN_PASSWORD=<strong> docker compose up -d --build
 # then open http://localhost:8101 and log in as root.
+#
+# Both variables are REQUIRED — compose fails fast with a clear message if
+# either is unset. Never start without setting them.
 #
 # Host port is fixed at 8101 (this project's assigned deploy.host_port) so it
 # never collides with a live hub bound to 4000 on the same docker host.
@@ -13,7 +16,7 @@ services:
   db:
     image: postgres:16-alpine
     environment:
-      POSTGRES_PASSWORD: ${PG_PASSWORD:-coxagent_dev}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?PG_PASSWORD is required — set it before running docker compose up}
       POSTGRES_DB: coxagent
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -29,9 +32,9 @@ services:
       db:
         condition: service_healthy
     environment:
-      COXAGENT_DB_DSN: postgres://postgres:${PG_PASSWORD:-coxagent_dev}@db:5432/coxagent
+      COXAGENT_DB_DSN: postgres://postgres:${PG_PASSWORD:?PG_PASSWORD is required — set it before running docker compose up}@db:5432/coxagent
       COXAGENT_ADMIN_USER: root
-      COXAGENT_ADMIN_PASSWORD: ${COXAGENT_ADMIN_PASSWORD:-changeme}
+      COXAGENT_ADMIN_PASSWORD: ${COXAGENT_ADMIN_PASSWORD:?COXAGENT_ADMIN_PASSWORD is required — set it before running docker compose up}
       COXAGENT_AUDIT_RETENTION_DAYS: "90"
     ports:
       - "8101:4000"

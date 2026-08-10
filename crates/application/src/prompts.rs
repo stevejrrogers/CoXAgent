@@ -637,6 +637,52 @@ pub fn human_steering_block(state: &crate::state::ProjectState, ticket: &str) ->
     )
 }
 
+/// A portable, engine-agnostic brief of what EARLIER work on this ticket found
+/// — the ticket's own journal, readable by any role or engine. It carries the
+/// context a session resume cannot (a resume is one engine's private memory;
+/// this survives an engine switch, a failover, and a role handoff SA↔DEV↔TEST).
+#[must_use]
+pub fn ticket_brief_block(state: &crate::state::ProjectState, ticket: &str) -> String {
+    let notes = match state.ticket_journal.get(ticket) {
+        Some(n) if !n.is_empty() => n,
+        _ => return String::new(),
+    };
+    // Newest last (the journal appends), capped so the brief stays a briefing.
+    let recent: Vec<&String> = notes.iter().rev().take(8).collect();
+    let mut lines: Vec<&String> = recent.into_iter().collect();
+    lines.reverse();
+    format!(
+        "\n\nPRIOR WORK ON THIS TICKET (earlier runs, any role/engine — build on it, \
+         do not repeat it):\n- {}",
+        lines
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n- ")
+    )
+}
+
+/// Appended to a ticket-scoped task so agents leave durable, engine-agnostic
+/// notes for whoever works this ticket next. Kept in the TASK prompt (not the
+/// cached system prompt) since it rides alongside per-ticket content.
+pub const BRIEF_PROTOCOL: &str =
+    "\n\nHANDOFF: if you learned something the next agent on this ticket must know — a \
+     gotcha, a decision and why, an approach that failed — end with a line starting \
+     `BRIEF:`. It becomes durable ticket memory read by the next role/engine.";
+
+/// Pull any `BRIEF:`-prefixed lines an agent left in its output — a note to the
+/// NEXT role/engine that works this ticket — so discoveries persist as durable,
+/// engine-agnostic memory instead of dying with the run's session.
+#[must_use]
+pub fn extract_brief_notes(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("BRIEF:"))
+        .map(|n| n.trim().chars().take(400).collect::<String>())
+        .filter(|n| !n.is_empty())
+        .collect()
+}
+
 #[must_use]
 pub fn ask_protocol_block(state: &crate::state::ProjectState, ticket: &str) -> String {
     use std::fmt::Write as _;
@@ -1126,9 +1172,37 @@ pub fn stack_constraints(rules: &[crate::conformance::StackRule]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{deploy_constraints, design_constraints, repo_map_block};
+    use super::{deploy_constraints, design_constraints, extract_brief_notes, repo_map_block};
     use crate::config::DeployConfig;
     use crate::state::DesignSystem;
+
+    #[test]
+    fn brief_notes_are_pulled_from_the_marker_lines_only() {
+        let out = "did the work\nBRIEF: the retry lives in failover.rs, not routing\n\
+                   some log\n  BRIEF:  trailing space trimmed  \nBRIEF:";
+        let got = extract_brief_notes(out);
+        assert_eq!(
+            got,
+            vec![
+                "the retry lives in failover.rs, not routing".to_owned(),
+                "trailing space trimmed".to_owned(),
+            ],
+            "only non-empty BRIEF: lines, trimmed"
+        );
+    }
+
+    #[test]
+    fn ticket_brief_block_renders_prior_work_or_nothing() {
+        let mut st = crate::state::ProjectState::default();
+        assert!(
+            super::ticket_brief_block(&st, "COX-1").is_empty(),
+            "no journal → no block"
+        );
+        st.journal_note("COX-1", "SA: split into two");
+        let block = super::ticket_brief_block(&st, "COX-1");
+        assert!(block.contains("PRIOR WORK ON THIS TICKET"));
+        assert!(block.contains("split into two"));
+    }
 
     #[test]
     fn a_signed_in_person_s_comment_is_steering_too() {
