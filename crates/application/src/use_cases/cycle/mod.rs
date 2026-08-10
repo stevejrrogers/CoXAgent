@@ -1098,8 +1098,26 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 "🛑 Every engine hit a quota/token wall — pausing the loop. Top up quota or add a \
                  fallback engine (Settings → engine.fallbacks), then resume."
             };
+            // Land where people actually look — the team channel, with the
+            // configured exception owner tagged so it pings them — not a ticket
+            // comment thread nobody has open.
+            let owner = self
+                .config
+                .workflow
+                .human
+                .route_exceptions_to
+                .as_deref()
+                .unwrap_or("")
+                .trim();
+            let text = if owner.is_empty() {
+                msg.to_owned()
+            } else {
+                // An @mention in the body is what the chat UI highlights and
+                // pings on — tag the configured exception owner directly.
+                format!("@{owner} {msg}")
+            };
             if let Ok(mut s) = self.store.load().await {
-                s.post_comment("SM", msg, None);
+                s.post_chat_in("SYSTEM", &text, crate::state::AGENTS_CHANNEL, Vec::new());
                 s.log_activity("SM", "paused — engines out of quota", None);
                 let _ = self.store.save(&s).await;
             }
