@@ -7,16 +7,35 @@ use coxagent_domain::{Status, TicketId, TicketType};
 
 /// Open the first sprint or roll over an elapsed one. Returns the number of a
 /// newly opened sprint, or `None` when the current sprint is still running.
+/// A sprint must live at least this long in WALL-CLOCK time before it may roll,
+/// regardless of how many cycles flew by. Cycles shrank from ~30 min to ~90 s
+/// as the loop got faster; counting only cycles produced 500 seven-minute
+/// "sprints" in two days — no goal was ever pursued long enough to matter.
+const MIN_SPRINT: time::Duration = time::Duration::hours(20);
+
 pub fn advance(state: &mut ProjectState, cycle: u64, length: u64) -> Option<u32> {
     let length = length.max(1);
     let need_open = match &state.sprint {
         None => true,
-        Some(s) => cycle.saturating_sub(s.started_cycle) >= length,
+        Some(s) => {
+            cycle.saturating_sub(s.started_cycle) >= length && sprint_age_ok(&s.started_at)
+        }
     };
     if !need_open {
         return None;
     }
     Some(roll_over(state, cycle, length))
+}
+
+/// Whether the sprint is old enough (by wall clock) to close. A missing or
+/// unparseable stamp reads as old — pre-existing sprints roll once and pick up
+/// a stamp from then on.
+fn sprint_age_ok(started_at: &str) -> bool {
+    let fmt = &time::format_description::well_known::Rfc3339;
+    match time::OffsetDateTime::parse(started_at, fmt) {
+        Ok(t) => time::OffsetDateTime::now_utc() - t >= MIN_SPRINT,
+        Err(_) => true,
+    }
 }
 
 /// Archive whatever sprint is running and open the next one. The single place
@@ -49,6 +68,7 @@ fn roll_over(state: &mut ProjectState, cycle: u64, length: u64) -> u32 {
         started_cycle: cycle,
         length_cycles: length,
         committed,
+        started_at: crate::state::now_rfc3339(),
     });
     number
 }
@@ -254,13 +274,21 @@ mod tests {
     }
 
     #[test]
-    fn rolls_over_after_length() {
+    fn rolls_over_after_length_and_min_age() {
         let mut state = ProjectState {
             tickets: vec![feature("F001")],
             ..ProjectState::default()
         };
         advance(&mut state, 1, 10);
-        // cycle 11 is 10 cycles after start -> roll over.
+        // Ten cycles later but only seconds old: cycles alone must NOT roll —
+        // this is the 500-sprints-in-two-days bug.
+        assert_eq!(advance(&mut state, 11, 10), None);
+        assert_eq!(state.sprint.as_ref().expect("s").number, 1);
+        // Age the sprint past the wall-clock minimum: now it rolls.
+        let old = (time::OffsetDateTime::now_utc() - time::Duration::hours(21))
+            .format(&time::format_description::well_known::Rfc3339)
+            .expect("fmt");
+        state.sprint.as_mut().expect("s").started_at = old;
         assert_eq!(advance(&mut state, 11, 10), Some(2));
         assert_eq!(state.sprint.as_ref().expect("s").number, 2);
     }
