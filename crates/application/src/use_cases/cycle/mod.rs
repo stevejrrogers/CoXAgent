@@ -1084,7 +1084,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
         self.report_idle();
 
-        report.over_budget = self.record_activity(&report).await;
+        report.over_budget = self.record_activity(&report, leader).await;
         if report.over_budget {
             self.notify(
                 "budget_reached",
