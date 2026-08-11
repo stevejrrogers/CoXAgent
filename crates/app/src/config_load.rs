@@ -366,24 +366,16 @@ mod tests {
 
     /// COX-B045 repro: `host_port` above `u16::MAX` (e.g. `70000`) poisons the
     /// whole `Config` deserialization — one bad field discards every other
-    /// setting too, not just the port. The file must survive untouched and the
-    /// gate must fail rather than boot healthy with the mandatory health check
-    /// silently disabled.
+    /// setting too, not just the port. Per COX-B043 it must fail the LOAD (so
+    /// no deploy reaches a gate that would pass unprobed), and the file must
+    /// survive untouched rather than be rewritten from defaults.
     #[test]
-    fn an_out_of_range_host_port_still_fails_the_gate_and_the_file_survives() {
+    fn an_out_of_range_host_port_fails_the_load_and_the_file_survives() {
         let (_dir, state) = workspace("70000");
 
-        let LoadedConfig {
-            config,
-            host_port_probe,
-        } = load_config_with_probe(&state);
+        let msg = load_config_with_probe(&state).expect_err("70000 is outside u16");
 
-        assert_eq!(
-            host_port_probe,
-            Err(()),
-            "a corrupt port must fail the gate"
-        );
-        assert_eq!(config.deploy.host_port, None, "defaults, not a healed port");
+        assert!(msg.contains("deploy.host_port"), "{msg}");
         let on_disk = std::fs::read_to_string(state.parent().expect("root").join("coxagent.json"))
             .expect("config still readable");
         assert!(
@@ -402,7 +394,8 @@ mod tests {
         let LoadedConfig {
             config,
             host_port_probe,
-        } = load_config_with_probe(&state);
+        } = load_config_with_probe(&state)
+            .expect("an explicit null host_port must not be a config error");
 
         let healed = config.deploy.host_port.expect("a port must be assigned");
         assert_eq!(
@@ -435,7 +428,8 @@ mod tests {
         let LoadedConfig {
             config,
             host_port_probe,
-        } = load_config_with_probe(&state);
+        } = load_config_with_probe(&state)
+            .expect("a config with no host_port key must not be a config error");
 
         let healed = config.deploy.host_port.expect("a port must be assigned");
         assert_eq!(
