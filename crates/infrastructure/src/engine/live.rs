@@ -12,7 +12,16 @@ use std::path::{Path, PathBuf};
 /// [`AgentRequest::label`](crate::AgentRequest) lands between role and operator
 /// so runs are chaseable per ticket: `<role>__<label>__<operator>.log`.
 pub(crate) fn live_path(work_dir: &Path, role: &str, label: Option<&str>) -> Option<PathBuf> {
-    let dir = work_dir.parent()?.join("logs").join("live");
+    // `<workspace>/codebase` → logs live at `<workspace>/logs/live`. A per-slot
+    // WORKTREE lives one level deeper (`<workspace>/.coxagent-worktrees/<slot>`),
+    // so its parent is the worktrees dir, not the workspace — without this hop
+    // the slot streamed its whole live log into `.coxagent-worktrees/logs/`,
+    // which the dashboard never reads, and the agent looked silent while working.
+    let mut root = work_dir.parent()?;
+    if root.file_name().is_some_and(|n| n == ".coxagent-worktrees") {
+        root = root.parent()?;
+    }
+    let dir = root.join("logs").join("live");
     std::fs::create_dir_all(&dir).ok()?;
     let label_part = label
         .map(str::trim)
