@@ -370,9 +370,16 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
             })
             .await;
         }
+        // Streak bookkeeping. Reset only on REAL signal that the engine lives:
+        // work shipped, or runs that failed for non-infra reasons (the engine
+        // answered, the task was wrong). A SILENT cycle — nothing claimed,
+        // nothing failed — keeps the streak: it used to reset it, and with the
+        // leader lease rotating across three runners no process ever saw three
+        // loud cycles in a row, so the loop spun all night against a dead
+        // provider without ever tripping this breaker.
         if !progressed && infra_errors >= 2 {
             infra_streak += 1;
-        } else {
+        } else if progressed || (infra_errors == 0 && !report.errors.is_empty()) {
             infra_streak = 0;
         }
         if infra_streak >= 3 {
