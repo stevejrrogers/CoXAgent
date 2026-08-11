@@ -279,6 +279,21 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
         };
 
         cycle += 1;
+        // Hot-reload the engine/config at the cycle boundary when coxagent.json
+        // changed (a Settings save) — this is the HUB's runner path, so without
+        // this only headless `coxagent run` picked up edits without a restart.
+        // On a reload, drop the per-role observed-engine records: they describe
+        // the OLD stack, and the dashboard kept showing "copilot" on cards long
+        // after the user had switched everything to claude.
+        if cycle_uc.maybe_reload() {
+            let store = cycle_uc.store();
+            let _ = crate::ports::outbound::mutate_state(store.as_ref(), |s| {
+                s.spend.engine_by_role.clear();
+                s.spend.operator_by_role.clear();
+                Ok(())
+            })
+            .await;
+        }
         // Stamp the live operator identity so ticket claims are owned by whoever
         // resumed this runner, on this host.
         cycle_uc.set_worker(handle.worker_id());

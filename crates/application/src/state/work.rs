@@ -90,6 +90,12 @@ pub struct Sprint {
     pub started_cycle: u64,
     pub length_cycles: u64,
     pub committed: Vec<TicketId>,
+    /// When this sprint opened (RFC3339). Rollover requires BOTH the cycle
+    /// window and a minimum wall-clock age: cycles shrank from ~30 min to ~90 s
+    /// as the loop got faster, and a cycle-only window burned through 500
+    /// seven-minute "sprints" in two days — ceremony noise with no meaning.
+    #[serde(default)]
+    pub started_at: String,
 }
 
 /// A closed sprint's outcome — the velocity history.

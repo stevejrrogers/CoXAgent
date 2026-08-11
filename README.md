@@ -238,6 +238,18 @@ app + Docker files), and `mock`, all behind one port with metering and transcrip
 decorators. Engine and model are configurable per role in `coxagent.json` or from
 the dashboard's Settings screen.
 
+## Project config
+
+Each project's `coxagent.json` is read once at start. A document that does not
+parse — bad JSON, or a value the schema cannot represent such as a `host_port`
+outside `0–65535` — fails that project's load and names the offending field;
+the hub keeps serving every other project and lists the broken one in
+`GET /api/projects` (and the dashboard's project menu) with the reason and the
+file to fix. It is never answered with defaults: defaults carry an empty
+`policy`, so a single stray field would otherwise switch off the model
+allowlist, the forbidden-path gate and the daily spend cap unasked. Fix the
+file and restart the hub.
+
 ## Develop
 
 ```sh

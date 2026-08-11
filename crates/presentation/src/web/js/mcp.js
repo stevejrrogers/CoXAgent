@@ -64,6 +64,8 @@ async function saveSettings(){const cfg=window._cfg||{engine:{},workflow:{}};cfg
   cfg.engine.auto_fallback=val("eng-autofb")!=="false";
   cfg.workflow.mode=val("wf-mode");
   cfg.workflow.sprint_length_cycles=parseInt(val("wf-sp")||"10",10);
+  cfg.workflow.sprint_unit=val("wf-su")==="cycles"?"cycles":"days";
+  {const sd=parseInt(val("wf-sp-days")||"1",10);cfg.workflow.sprint_length_days=Number.isFinite(sd)&&sd>0?sd:1;}
   cfg.workflow.ba_every_n_cycles=parseInt(val("wf-ba")||"4",10);
   cfg.workflow.feature_dev_enabled=val("wf-fd")==="true";
   cfg.workflow.ops_monitor=val("wf-ops")!=="false";
@@ -98,7 +100,8 @@ async function saveSettings(){const cfg=window._cfg||{engine:{},workflow:{}};cfg
     target_branch:val("git-tb").trim(),
     branch_prefix:val("git-bp").trim()||"feat/",commit_email:val("git-em").trim(),
     account:val("git-acct").trim(),
-    auto_pr:val("git-pr")==="true",auto_review:val("git-ar")==="true",auto_merge:val("git-am")==="true"});
+    auto_pr:val("git-pr")==="true",auto_review:val("git-ar")==="true",auto_merge:val("git-am")==="true",
+    require_ci:val("git-ci")==="true"});
   try{const res=await(await fetch(api("/config"),{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(cfg)})).json();
     window._budget=cfg.workflow.budget_usd;if(CUR==="insights")renderActive();
     // Check if engine config actually changed
@@ -252,6 +255,7 @@ function renderDocMain(){
   const crumb=docFolder(d).split("/").map(esc).join(' <i class="ti ti-chevron-right" style="font-size:11px;opacity:.5"></i> ');
   const actions=canEdit?`<div style="display:flex;gap:6px"><button class="gc-btn" onclick="askAiEdit()" title="Ask the DOCS agent to revise this page"><i class="ti ti-sparkles"></i> Ask AI</button><button class="gc-btn" onclick="moveDoc('${esc(d.id)}')" title="Move to another folder"><i class="ti ti-folder-symlink"></i> Move</button><button class="gc-btn" onclick="DOC_EDIT=true;renderDocMain()"><i class="ti ti-pencil"></i> Edit</button></div>`:"";
   el.innerHTML=`<div class="doc-head"><div><span class="doc-cat-tag ${esc(d.category)}">${crumb}</span><h2>${esc(d.title)}</h2>${meta}</div>${actions}</div><div class="doc-body md">${mdRender(d.body)}</div>`;
+  renderMermaidIn(el);
 }
 async function newDoc(folder){
   const title=await coxModal({title:"New page",message:"Tiêu đề trang mới.",input:{placeholder:"Page title"},confirmText:"Next"});if(!title||!title.trim())return;

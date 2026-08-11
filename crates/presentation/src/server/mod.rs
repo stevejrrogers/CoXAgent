@@ -37,6 +37,7 @@ use crate::middleware::{cors_layer, rate_limit_mw, RateLimiter, AUTH_RATE_MAX, A
 mod assets;
 mod auth;
 mod background;
+mod broken_projects;
 mod channels;
 mod chat;
 mod comments;
@@ -63,6 +64,8 @@ mod work;
 use assets::*;
 use auth::*;
 use background::*;
+pub use broken_projects::BrokenProject;
+use broken_projects::*;
 use channels::*;
 use chat::*;
 use comments::*;
@@ -96,6 +99,9 @@ const XTERM_FIT_JS: &str = include_str!("../web/xterm-addon-fit.min.js");
 // surface, not modularity). Embedded like everything else: one binary.
 const APP_CSS: &str = include_str!("../web/app.css");
 const APP_JS: &[(&str, &str)] = &[
+    // Vendored Mermaid (pinned v11 UMD build) so Wiki pages render
+    // sequence/flow diagrams offline — the hub never loads from a CDN.
+    ("mermaid.min.js", include_str!("../web/js/mermaid.min.js")),
     ("core.js", include_str!("../web/js/core.js")),
     ("manage.js", include_str!("../web/js/manage.js")),
     ("home.js", include_str!("../web/js/home.js")),
@@ -217,6 +223,11 @@ struct AppState {
     /// Live editors per document room: room → (username → open-connection count).
     docs_editors: Arc<std::sync::Mutex<HashMap<String, HashMap<String, usize>>>>,
     order: Arc<RwLock<Vec<String>>>,
+    /// Registered projects that could not be loaded, kept so the listing can
+    /// name them and their reason (COX-B043). Fixed at boot: a config repaired
+    /// while the hub runs is picked up by restarting it, which is what loading
+    /// a project takes anyway.
+    broken: Arc<Vec<BrokenProject>>,
     factory: Option<ProjectFactory>,
     auth: Option<Arc<dyn AuthPort>>,
     audit: Arc<dyn AuditPort>,
@@ -499,6 +510,10 @@ pub struct HubExtras {
     pub doc_store: Option<Arc<dyn coxagent_application::ports::outbound::DocStorePort>>,
     /// Shared KV store for hub-wide singletons (system chat). `None` = local file.
     pub syschat_store: Option<Arc<dyn coxagent_application::ports::outbound::KvDocPort>>,
+    /// Registered projects that failed to load (e.g. an unparseable
+    /// `coxagent.json`), so the dashboard can show why one is missing instead
+    /// of silently omitting it — COX-B043.
+    pub broken: Vec<BrokenProject>,
 }
 
 /// Warn threshold for a space's budget, matching the dashboard's own amber one
@@ -712,7 +727,6 @@ pub async fn serve_full(
         .route("/api/token-saver", get(token_saver_ep))
         .route("/api/projects/:pid/audit", get(audit_ep))
         .route("/api/projects/:pid/config", get(get_config).put(put_config))
-        .route("/api/projects/:pid/config/defects", get(config_defects_ep))
         .route("/api/projects/:pid/control/:action", post(control_ep))
         .route("/api/projects/:pid/sprint/goal", post(set_sprint_goal_ep))
         .route("/api/projects/:pid/sprint/close", post(sprint_close_ep))

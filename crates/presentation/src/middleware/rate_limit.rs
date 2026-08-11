@@ -54,8 +54,13 @@ impl RateLimiter {
     ///
     /// `now` is injected so callers in tests can pass a fixed instant without
     /// any clock port or async machinery.
+    ///
+    /// # Panics
+    /// Panics if the internal mutex is poisoned (another thread panicked while
+    /// holding it) — a state this process cannot recover from meaningfully.
     pub fn check(&self, key: &str, max: usize, window: Duration, now: Instant) -> bool {
         let cutoff = now.checked_sub(window).unwrap_or(now);
+        #[allow(clippy::expect_used)]
         let mut guard = self
             .hits
             .lock()
@@ -96,14 +101,16 @@ fn client_key(req: &Request, trust_proxy: bool) -> String {
     // `into_make_service_with_connect_info`.
     req.extensions()
         .get::<ConnectInfo<SocketAddr>>()
-        .map(|ci| ci.0.ip().to_string())
-        .unwrap_or_else(|| "unknown".to_owned())
+        .map_or_else(|| "unknown".to_owned(), |ci| ci.0.ip().to_string())
 }
 
 /// Axum middleware that applies `limiter` to all `/api/auth/` requests.
 ///
-/// Returns `429 Too Many Requests` when the per-IP sliding window is exceeded.
 /// All other paths pass through unconditionally.
+///
+/// # Errors
+/// Returns `429 Too Many Requests` when the client's per-IP sliding window is
+/// exceeded — the only error this middleware produces.
 pub async fn rate_limit_mw(
     req: Request,
     next: Next,
@@ -112,7 +119,12 @@ pub async fn rate_limit_mw(
     window: Duration,
     trust_proxy: bool,
 ) -> Result<Response, StatusCode> {
-    if req.uri().path().starts_with("/api/auth/") {
+    // Only the credential-guessing surface is limited: login and 2FA. The rest
+    // of /api/auth/* is read traffic the UI polls (`/me`, session lists) — and
+    // on a local hub every client shares 127.0.0.1, so limiting those 429'd the
+    // dashboard itself within a minute of normal use.
+    let path = req.uri().path();
+    if path == "/api/auth/login" || path.starts_with("/api/auth/2fa/") {
         let key = client_key(&req, trust_proxy);
         if !limiter.check(&key, max, window, Instant::now()) {
             tracing::warn!(

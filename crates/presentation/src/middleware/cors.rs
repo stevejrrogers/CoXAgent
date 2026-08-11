@@ -28,15 +28,17 @@ pub fn cors_layer(origins_env: &str) -> Option<CorsLayer> {
         .split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .filter_map(|origin| match origin.parse::<HeaderValue>() {
-            Ok(v) => Some(v),
-            Err(_) => {
-                tracing::warn!(
-                    origin,
-                    "COXAGENT_CORS_ORIGINS: skipping malformed entry (not a valid header value)"
-                );
-                None
-            }
+        .filter_map(|origin| {
+            origin.parse::<HeaderValue>().map_or_else(
+                |_| {
+                    tracing::warn!(
+                        origin,
+                        "COXAGENT_CORS_ORIGINS: skipping malformed entry (not a valid header value)"
+                    );
+                    None
+                },
+                Some,
+            )
         })
         .collect();
 
