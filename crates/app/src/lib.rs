@@ -1199,7 +1199,11 @@ async fn run_loop(
         cycle += 1;
 
         // Force-merge jobs the hub queued: pick them up at the top of the cycle.
-        uc.drain_jobs().await;
+        // Boxed for the same reason run_cycle is: this future carries whole
+        // engine-run paths. Polling it inline on the worker stack (after the
+        // drain task was folded into the loop) overflowed the stack right
+        // after "cycle loop started" — the heap is where it belongs.
+        Box::pin(uc.drain_jobs()).await;
 
         // Hot-reload on a config change (a Settings edit) — rebuild the engine
         // and apply the new config NOW, no process restart. The old meter was
