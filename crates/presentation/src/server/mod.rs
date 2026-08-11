@@ -712,6 +712,7 @@ pub async fn serve_full(
         .route("/api/token-saver", get(token_saver_ep))
         .route("/api/projects/:pid/audit", get(audit_ep))
         .route("/api/projects/:pid/config", get(get_config).put(put_config))
+        .route("/api/projects/:pid/config/defects", get(config_defects_ep))
         .route("/api/projects/:pid/control/:action", post(control_ep))
         .route("/api/projects/:pid/sprint/goal", post(set_sprint_goal_ep))
         .route("/api/projects/:pid/sprint/close", post(sprint_close_ep))

@@ -1938,6 +1938,24 @@ async function postTicketComment(tid){
   }catch(e){inp.value=body;toasty("Network error — comment not posted","err");}
   inp.disabled=false;await renderTicketComments(tid);inp.focus();
 }
+// Fields of coxagent.json the hub could not read. It keeps every OTHER
+// setting in the file and defaults only these (COX-B050) — which is precisely
+// why it has to say so: a deploy.auto_rollback that reverted itself because a
+// neighbouring port had one digit too many is invisible otherwise, and this
+// screen writes back what it shows, so Save would make the loss permanent.
+function cfgHealthBanner(h){
+  if(!h)return"";
+  const warn=(body)=>`<div class="panel" style="margin-bottom:12px;border-color:var(--amber)">
+    <div style="font-size:12px;color:var(--amber)"><i class="ti ti-alert-triangle"></i> ${body}</div></div>`;
+  if(h.unreadable)return warn(`<b>coxagent.json could not be read</b> — ${esc(h.unreadable)}.
+    These settings are defaults; fix the file on disk, they are NOT what the project is running on.`);
+  const d=Array.isArray(h.defects)?h.defects:[];
+  if(!d.length)return"";
+  return warn(`<b>${d.length} setting${d.length>1?'s':''} in coxagent.json could not be read</b> and ${d.length>1?'are':'is'} showing the default —
+    every other setting in the file was kept.
+    <ul style="margin:6px 0 0 16px">${d.map(x=>`<li><code>${esc(x.path)}</code> — ${esc(x.reason)}</li>`).join("")}</ul>
+    <div style="margin-top:6px">Fix the file on disk to keep ${d.length>1?'those values':'that value'}: saving from this screen writes the defaults over ${d.length>1?'them':'it'}.</div>`);
+}
 async function loadSettings(){
   if(!canManage()){
     // Member-tier users get self-service settings only: the MCP tab.
@@ -1947,6 +1965,7 @@ async function loadSettings(){
     window._setTab="mcp";renderMcpPanel();return;
   }
   let cfg={};try{cfg=await(await fetch(api("/config"))).json();}catch(e){}window._cfg=cfg;
+  let cfgHealth=null;try{cfgHealth=await(await fetch(api("/config/defects"))).json();}catch(e){}
   let td={tools:[]};try{td=await(await fetch("/api/tooling")).json();}catch(e){}
   let ga={};try{ga=await(await fetch(api("/git/auth"))).json();}catch(e){}
   const tools=td.tools||[];const missing=tools.filter(t=>!t.present).length;
@@ -1996,6 +2015,7 @@ async function loadSettings(){
   const anyOverride=ROLES.some(r=>per[r]&&per[r].engine);
   document.getElementById("settings-body").innerHTML=`
     <datalist id="opencode-models">${OC_MODELS.map(m=>`<option value="${m}">`).join("")}</datalist>
+    ${cfgHealthBanner(cfgHealth)}
     <div class="settabs">
       <button class="settab-btn" data-t="engines" onclick="setSetTab('engines')"><i class="ti ti-cpu"></i> Engines</button>
       <button class="settab-btn" data-t="workflow" onclick="setSetTab('workflow')"><i class="ti ti-adjustments"></i> Workflow</button>

@@ -32,6 +32,9 @@ coxagent-presentation = { path = "crates/presentation" }
 # External
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Which field of a config file serde choked on, so one bad field can be
+# defaulted on its own instead of taking the whole document with it (COX-B050).
+serde_path_to_error = "0.1"
 serde_yaml = "0.9"
 thiserror = "2"
 async-trait = "0.1"

@@ -124,6 +124,13 @@ pub(super) async fn workers_ep(
     Json(workers).into_response()
 }
 
+/// The Settings screen's view of `coxagent.json`.
+///
+/// A field the file cannot supply is defaulted ON ITS OWN (COX-B050). Handing
+/// back a whole default config because of one bad field is worse here than
+/// anywhere else: this screen PUTs back what it was shown, so a single
+/// out-of-range port would turn into every other setting being overwritten
+/// with defaults on disk the next time anyone pressed Save.
 pub(super) async fn get_config(
     State(app): State<AppState>,
     Path(pid): Path<String>,
@@ -131,11 +138,47 @@ pub(super) async fn get_config(
     let Some(p) = app.project(&pid).await else {
         return not_found();
     };
-    let cfg = std::fs::read_to_string(&p.config_path)
-        .ok()
-        .and_then(|t| serde_json::from_str::<Config>(&t).ok())
-        .unwrap_or_default();
-    Json(cfg).into_response()
+    let text = std::fs::read_to_string(&p.config_path).ok();
+    Json(config_for_display(text.as_deref())).into_response()
+}
+
+/// What the Settings screen should show for a config file that reads as
+/// `text` (`None` = no file). Pure, so the rule that one bad field costs one
+/// field is testable without a project fixture.
+fn config_for_display(text: Option<&str>) -> Config {
+    text.and_then(|t| coxagent_application::salvage_config(t).ok())
+        .map_or_else(Config::default, |salvaged| salvaged.config)
+}
+
+/// The Settings screen's warning banner, as a pure function of the file text:
+/// the fields that had to be defaulted, plus why the file could not be read
+/// at all when it could not.
+fn config_health(text: Option<&str>) -> (Vec<coxagent_application::ConfigDefect>, Option<String>) {
+    // No file is not a fault: a project that never wrote one runs on defaults
+    // by design.
+    match text {
+        None => (Vec::new(), None),
+        Some(text) => match coxagent_application::salvage_config(text) {
+            Ok(salvaged) => (salvaged.defects, None),
+            Err(e) => (Vec::new(), Some(e)),
+        },
+    }
+}
+
+/// What [`get_config`] could NOT read out of `coxagent.json`, so the Settings
+/// screen can say so instead of presenting silently-defaulted values as if the
+/// operator had chosen them. `unreadable` is set when the file is not JSON at
+/// all, where there is nothing to salvage field by field.
+pub(super) async fn config_defects_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let text = std::fs::read_to_string(&p.config_path).ok();
+    let (defects, unreadable) = config_health(text.as_deref());
+    Json(serde_json::json!({ "defects": defects, "unreadable": unreadable })).into_response()
 }
 
 pub(super) async fn put_config(
@@ -220,4 +263,70 @@ pub(super) async fn ice_config_ep() -> axum::response::Response {
         }));
     }
     Json(serde_json::json!({ "iceServers": servers })).into_response()
+}
+
+#[cfg(test)]
+mod config_display_tests {
+    use super::{config_for_display, config_health};
+
+    /// A config document with one unreadable field beside good ones.
+    fn with_bad_port() -> String {
+        let mut cfg =
+            serde_json::to_value(super::Config::default()).expect("defaults serialize as json");
+        cfg["deploy"] = serde_json::json!({
+            "host_port": 99_999,
+            "auto_rollback": true,
+            "max_rollback_age_secs": 42,
+        });
+        serde_json::to_string(&cfg).expect("config text")
+    }
+
+    /// AC (COX-B050): the Settings screen must show what the project is
+    /// actually running on. Showing defaults for the whole file because of one
+    /// bad field is doubly wrong here — this screen PUTs back what it shows,
+    /// so the next Save would write those defaults over the operator's file.
+    #[test]
+    fn one_bad_field_does_not_turn_settings_into_a_default_config() {
+        let cfg = config_for_display(Some(&with_bad_port()));
+
+        assert!(cfg.deploy.auto_rollback, "shown as configured");
+        assert_eq!(cfg.deploy.max_rollback_age_secs, 42);
+        assert_eq!(
+            cfg.deploy.host_port, None,
+            "only the bad field is defaulted"
+        );
+    }
+
+    /// And the screen is told which field it is showing a default for, so the
+    /// defaulting is never silent.
+    #[test]
+    fn the_defaulted_field_is_named_for_the_operator() {
+        let (defects, unreadable) = config_health(Some(&with_bad_port()));
+
+        assert_eq!(unreadable, None);
+        assert_eq!(
+            defects.iter().map(|d| d.path.as_str()).collect::<Vec<_>>(),
+            vec!["deploy.host_port"]
+        );
+    }
+
+    /// A file that is not JSON at all has no field to blame: say the file is
+    /// unreadable rather than presenting defaults as the operator's settings.
+    #[test]
+    fn a_file_that_is_not_json_is_reported_as_unreadable() {
+        let (defects, unreadable) = config_health(Some("{\"deploy\": "));
+
+        assert!(defects.is_empty());
+        assert!(unreadable.is_some());
+    }
+
+    /// A project with no config file, and one with a good one, are both quiet
+    /// — the banner must not cry wolf on a healthy install.
+    #[test]
+    fn a_missing_or_healthy_config_reports_nothing() {
+        assert_eq!(config_health(None), (Vec::new(), None));
+
+        let good = serde_json::to_string(&super::Config::default()).expect("config text");
+        assert_eq!(config_health(Some(&good)), (Vec::new(), None));
+    }
 }

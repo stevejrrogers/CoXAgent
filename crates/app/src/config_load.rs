@@ -44,8 +44,8 @@ pub(crate) fn load_config_with_probe(state_dir: &Path) -> LoadedConfig {
             host_port_probe: Ok(None),
         };
     };
-    let mut config = match serde_json::from_str::<Config>(&text) {
-        Ok(config) => config,
+    let salvaged = match coxagent_application::salvage_config(&text) {
+        Ok(salvaged) => salvaged,
         Err(e) => {
             tracing::warn!("invalid {}: {e}; using defaults", path.display());
             // A file we cannot parse is NOT "nothing configured" — it may well
@@ -59,6 +59,28 @@ pub(crate) fn load_config_with_probe(state_dir: &Path) -> LoadedConfig {
             };
         }
     };
+    let coxagent_application::SalvagedConfig {
+        mut config,
+        defects,
+    } = salvaged;
+    if !defects.is_empty() {
+        // One field we cannot read costs that field and nothing else: every
+        // OTHER setting in the file is still in `config` (COX-B050). Say which
+        // ones were lost — the operator's `deploy.auto_rollback` reverting
+        // itself because a neighbouring port had one digit too many is the
+        // kind of thing nobody notices from a bare "invalid config" line.
+        for defect in &defects {
+            tracing::warn!("{}: {defect}", path.display());
+        }
+        // Same reasoning as an unparseable file: the port in the raw text is
+        // the one the gate must judge, and a file we only partly understood is
+        // not one to rewrite — healing would silently erase what the operator
+        // wrote while they are still trying to fix it.
+        return LoadedConfig {
+            config,
+            host_port_probe: probe_from_raw(&text),
+        };
+    }
     let healed = heal_host_port(root, &path, &mut config);
     let host_port_probe = if healed {
         // The raw text's port is the one we just rejected or found missing;
@@ -149,9 +171,24 @@ mod tests {
     /// load from. Built from a real `Config` so nothing but the port under
     /// test can be what makes a case fail.
     fn workspace(raw_host_port: &str) -> (tempfile::TempDir, std::path::PathBuf) {
-        let mut cfg = serde_json::to_value(Config::default()).expect("config as json");
-        cfg["deploy"]["host_port"] =
+        let port: serde_json::Value =
             serde_json::from_str(raw_host_port).expect("host_port token is JSON");
+        workspace_with_deploy(&serde_json::json!({ "host_port": port }))
+    }
+
+    /// As [`workspace`], but every key of `deploy` is under the test's control
+    /// — the cases that matter are the ones where a bad field sits NEXT to
+    /// good ones.
+    fn workspace_with_deploy(
+        deploy: &serde_json::Value,
+    ) -> (tempfile::TempDir, std::path::PathBuf) {
+        let mut cfg = serde_json::to_value(Config::default()).expect("config as json");
+        let Some(section) = cfg["deploy"].as_object_mut() else {
+            panic!("deploy is an object");
+        };
+        for (key, value) in deploy.as_object().expect("deploy patch is an object") {
+            section.insert(key.clone(), value.clone());
+        }
         let dir = tempfile::tempdir().expect("tempdir");
         // A project dir of its own, so the sibling scan sees a realistic base.
         let root = dir.path().join("proj");
@@ -236,7 +273,11 @@ mod tests {
             host_port_probe,
         } = load_config_with_probe(&state);
 
-        assert_eq!(host_port_probe, Err(()), "a corrupt port must fail the gate");
+        assert_eq!(
+            host_port_probe,
+            Err(()),
+            "a corrupt port must fail the gate"
+        );
         assert_eq!(config.deploy.host_port, None, "defaults, not a healed port");
         let on_disk = std::fs::read_to_string(state.parent().expect("root").join("coxagent.json"))
             .expect("config still readable");
@@ -244,6 +285,76 @@ mod tests {
             on_disk.contains("-1"),
             "an unparseable config must not be rewritten from defaults"
         );
+    }
+
+    /// AC (COX-B050), the ticket's own repro: an out-of-range `host_port` used
+    /// to fail the whole document, so load handed back `Config::default()` and
+    /// the operator's `auto_rollback: true` silently became `false` — a safety
+    /// setting turning itself off because a NEIGHBOURING field had one digit
+    /// too many. Only the unreadable field may be lost.
+    #[test]
+    fn one_unreadable_field_does_not_reset_the_rest_of_the_config() {
+        let (_dir, state) = workspace_with_deploy(&serde_json::json!({
+            "host_port": 99_999,
+            "enabled": true,
+            "auto_rollback": true,
+            "max_rollback_age_secs": 42,
+        }));
+
+        let LoadedConfig {
+            config,
+            host_port_probe,
+        } = load_config_with_probe(&state);
+
+        assert!(
+            config.deploy.auto_rollback,
+            "auto_rollback must survive a bad port"
+        );
+        assert_eq!(config.deploy.max_rollback_age_secs, 42);
+        assert!(config.deploy.enabled);
+        assert_eq!(config.deploy.host_port, None, "only the bad field is lost");
+        assert_eq!(
+            host_port_probe,
+            Err(()),
+            "and the port the gate cannot trust still fails it (COX-B035)"
+        );
+    }
+
+    /// A partly-unreadable file is not one to rewrite: the operator is still
+    /// editing it, and healing would overwrite what they wrote with our
+    /// salvage of it.
+    #[test]
+    fn a_file_with_an_unreadable_field_is_left_on_disk_as_written() {
+        let (_dir, state) = workspace_with_deploy(&serde_json::json!({
+            "host_port": 99_999,
+            "auto_rollback": true,
+        }));
+
+        let _ = load_config_with_probe(&state);
+
+        let on_disk = std::fs::read_to_string(state.parent().expect("root").join("coxagent.json"))
+            .expect("config still readable");
+        assert!(
+            on_disk.contains("99999"),
+            "the operator's own text must survive a load: {on_disk}"
+        );
+    }
+
+    /// The other ways a field goes wrong cost exactly as little: a string
+    /// where a number belongs is the commonest hand-edit slip there is.
+    #[test]
+    fn a_string_where_a_number_belongs_costs_only_that_field() {
+        let (_dir, state) = workspace_with_deploy(&serde_json::json!({
+            "host_port": "8101",
+            "auto_rollback": true,
+            "max_rollback_age_secs": 42,
+        }));
+
+        let config = load_config(&state);
+
+        assert!(config.deploy.auto_rollback);
+        assert_eq!(config.deploy.max_rollback_age_secs, 42);
+        assert_eq!(config.deploy.host_port, None);
     }
 
     /// No `coxagent.json` at all is not a config error: defaults, and nothing
