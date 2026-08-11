@@ -422,10 +422,19 @@ impl OpencodeEngine {
 
         let (text, usage) = parse_json_stream(&raw);
 
+        // An `{"type":"error"}` event is the CLI's failure report — same story
+        // as Copilot's session.error: the process can still exit 0 with empty
+        // text, which read as a silent empty SUCCESS. The circuit breaker then
+        // saw a blank failure_detail, recognised nothing, and the loop spun
+        // through hundreds of empty runs against a dead provider. Surface it.
+        let (exit_code, stderr) = match extract_error(&raw) {
+            Some(e) if text.trim().is_empty() => (Some(1), format!("{e}\n{stderr}")),
+            _ => (status.code(), stderr),
+        };
         Ok(AgentOutcome {
             stdout: text,
             stderr,
-            exit_code: status.code(),
+            exit_code,
             usage: Some(usage),
             trace: String::new(),
             session_id: extract_session(&raw),
@@ -433,6 +442,26 @@ impl OpencodeEngine {
             engine: "opencode".to_owned(),
         })
     }
+}
+
+/// The first `{"type":"error"}` event's name+message in the NDJSON stream, if
+/// any (e.g. `UnknownError: Unexpected server error…` from a dead provider).
+fn extract_error(raw: &str) -> Option<String> {
+    raw.lines().find_map(|l| {
+        let v = serde_json::from_str::<serde_json::Value>(l.trim()).ok()?;
+        if v.get("type").and_then(serde_json::Value::as_str) != Some("error") {
+            return None;
+        }
+        let name = v
+            .pointer("/error/name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("error");
+        let msg = v
+            .pointer("/error/data/message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("opencode reported an error event");
+        Some(format!("opencode {name}: {msg}"))
+    })
 }
 
 /// First session id seen in the NDJSON stream (`sessionID` on opencode
