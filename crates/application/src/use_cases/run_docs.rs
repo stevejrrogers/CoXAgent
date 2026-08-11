@@ -114,9 +114,6 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
     }
 
     async fn refresh_stale_page(&self, state: &crate::state::ProjectState) {
-        if !self.take_refresh_budget(state).await {
-            return;
-        }
         let behind = pages_behind_code(self.git.as_ref(), state, &self.work_dir).await;
         // Pages to leave alone this cycle: PARKED (a rewrite the structure gate
         // keeps rejecting — a human/redesign job, not more calls) or COOLING (one
@@ -132,6 +129,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
         let Some(page) = stalest_page(state, &self.work_dir, &behind, &exclude) else {
             return;
         };
+        // Budget is taken only once a refresh will actually run — a no-op cycle
+        // must not eat one of the day's five refreshes.
+        if !self.take_refresh_budget(state).await {
+            return;
+        }
         if let Some(p) = &self.phase {
             p(Some((
                 "DOCS".to_owned(),

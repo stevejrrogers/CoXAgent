@@ -278,7 +278,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
     }
 
-    pub(super) async fn record_activity(&self, report: &CycleReport) -> bool {
+    pub(super) async fn record_activity(&self, report: &CycleReport, leader: bool) -> bool {
         let Ok(mut state) = self.store.load().await else {
             return false;
         };
@@ -309,7 +309,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
 
         // Drain the spend meter (deltas since last cycle) into persistent state.
         let (cycle_cost, cycle_runs) = self.drain_meter(&mut state);
-        Self::record_cycle_score(&mut state, report, cycle_cost, cycle_runs);
+        // LEADER-ONLY: every runner passes through here, and the workers cycle
+        // every few seconds — letting them all score flooded the history with
+        // duplicate/no-op rows within minutes of the feature shipping.
+        if leader {
+            Self::record_cycle_score(&mut state, report, cycle_cost, cycle_runs);
+        }
         let spent_today = state.add_daily_spend(cycle_cost);
 
         // Effective caps: the live cell (adjustable without restart) when present,
