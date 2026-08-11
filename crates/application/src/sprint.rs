@@ -153,21 +153,31 @@ fn goal_from(state: &ProjectState, committed: &[TicketId]) -> String {
     }
 }
 
-/// Feature/chore tickets not yet shipped — the work a sprint commits to.
+/// Unshipped work a sprint commits to. Bugs count too — the sprint board used
+/// to track only features/chores, so a team heads-down on a bug burndown
+/// looked idle ("sprint không work gì hết") while two DEVs were mid-fix.
+/// Open bugs commit first (they outrank new work), then features/chores.
 fn open_backlog(state: &ProjectState) -> Vec<TicketId> {
-    let ready: Vec<TicketId> = state
+    let mut picked: Vec<TicketId> = state
         .tickets
         .iter()
-        .filter(|t| {
-            matches!(t.ticket_type(), TicketType::Feature | TicketType::Chore)
-                && !matches!(
-                    t.status(),
-                    Status::Done | Status::Documented | Status::Rejected
-                )
-        })
+        .filter(|t| t.ticket_type() == TicketType::Bug && t.status() == Status::Open)
         .map(|t| t.id().clone())
         .collect();
-    ready.into_iter().take(sprint_capacity(state)).collect()
+    picked.extend(
+        state
+            .tickets
+            .iter()
+            .filter(|t| {
+                matches!(t.ticket_type(), TicketType::Feature | TicketType::Chore)
+                    && !matches!(
+                        t.status(),
+                        Status::Done | Status::Documented | Status::Rejected
+                    )
+            })
+            .map(|t| t.id().clone()),
+    );
+    picked.into_iter().take(sprint_capacity(state)).collect()
 }
 
 /// How much to commit to one sprint: what the team has actually been finishing,
