@@ -1036,10 +1036,6 @@ fn machine_host() -> String {
         .unwrap_or_else(|| "local".to_owned())
 }
 
-// ---------------- Workspace: identity, invites, overview, my-agents ----------
-
-// ---------------- Spaces (multi-workspace) + Manage --------------------------
-
 /// Minimal HTML escaping for the join page.
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
