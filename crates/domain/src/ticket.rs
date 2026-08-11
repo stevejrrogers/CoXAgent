@@ -9,67 +9,9 @@ use crate::ids::TicketId;
 use crate::transitions::{can_transition, field_permitted, transition_allowed};
 use serde::{Deserialize, Serialize};
 
-/// The single ticket kind, discriminated by `type` (anti-Jira: one entity).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TicketType {
-    Feature,
-    Bug,
-    Chore,
-}
-
-/// Three-level priority — deliberately coarse.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Priority {
-    Low,
-    Medium,
-    High,
-}
-
-/// Coarse sizing used for the SA design gate (small can auto-pass).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Complexity {
-    Small,
-    Medium,
-    Large,
-}
-
-/// Lifecycle status. Feature/chore and bug share `InProgress` and `Rejected`;
-/// the transition table keeps the two lifecycles distinct per [`TicketType`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Status {
-    // Feature / chore lifecycle
-    Pending,
-    Ready,
-    InProgress,
-    Done,
-    Documented,
-    Rejected,
-    // Bug lifecycle
-    Open,
-    Fixed,
-    Verified,
-}
-
-/// The nine team roles plus `User` (super-PO) and `System` (automated bookkeeping).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Role {
-    Ba,
-    Po,
-    Sm,
-    Sa,
-    Pd,
-    DevBug,
-    DevFeature,
-    Test,
-    Docs,
-    User,
-    System,
-}
+// Value objects live in `kinds`; re-exported here so existing paths like
+// `crate::ticket::{Status, TicketType}` keep resolving without a cycle.
+pub use crate::kinds::{Complexity, Priority, Role, Status, TicketType};
 
 /// Technical design authored by SA. Presence gates `Pending -> Ready`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
