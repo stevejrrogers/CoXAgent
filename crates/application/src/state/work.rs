@@ -81,6 +81,47 @@ pub struct OperatorSpend {
     pub runs: u64,
 }
 
+/// One cycle's deterministic scorecard — computed from the report and the spend
+/// delta at the cycle boundary, zero tokens spent. What "was this cycle worth
+/// its cost?" looks like as data instead of a feeling.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CycleScore {
+    pub cycle: u64,
+    pub at: String,
+    /// Engine runs this cycle, and how many produced a recorded outcome
+    /// (ticket moved / design saved / bug filed / doc written). The gap is
+    /// churn — the 4,439-idle-DOCS-runs class of waste.
+    pub runs: u64,
+    pub useful: u64,
+    /// USD metered this cycle.
+    pub cost_usd: f64,
+    /// Tickets shipped this cycle (feature done + bug fixed).
+    pub shipped: u64,
+    /// Engine incidents open at the end of the cycle.
+    pub incidents: u64,
+    /// Cycle errors reported (excluding informational pauses).
+    pub errors: u64,
+    /// A–D verdict, precomputed so every consumer grades identically.
+    pub grade: String,
+}
+
+impl CycleScore {
+    /// Deterministic grade: shipped work is an A; useful-majority activity a B;
+    /// idle-but-clean a C; churn or incidents a D.
+    #[must_use]
+    pub fn grade_of(shipped: u64, runs: u64, useful: u64, incidents: u64, errors: u64) -> String {
+        if incidents > 0 || (runs >= 4 && useful == 0) {
+            "D".to_owned()
+        } else if shipped > 0 {
+            "A".to_owned()
+        } else if runs > 0 && useful.saturating_mul(2) >= runs && errors == 0 {
+            "B".to_owned()
+        } else {
+            "C".to_owned()
+        }
+    }
+}
+
 /// A sprint (scrum mode): a fixed window of cycles with a goal and a committed
 /// set of tickets. Kanban mode leaves this `None`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
