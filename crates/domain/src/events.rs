@@ -2,7 +2,7 @@
 //! these into SSE for the team board, so realtime is a consequence of the model.
 
 use crate::ids::TicketId;
-use crate::ticket::{Role, Status};
+use crate::kinds::{Role, Status};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
