@@ -981,6 +981,36 @@ async fn linux_target_installed(target: &str) -> bool {
         .is_some_and(|o| String::from_utf8_lossy(&o.stdout).contains(target))
 }
 
+/// Whether `stderr` shows compose aborting at variable interpolation rather
+/// than at the actual build — e.g. `${PG_PASSWORD:?...}` when the operator
+/// hasn't set the secret in this shell. That is an environment gap the check
+/// runs in, not evidence the code fails to compile, so it must not be reported
+/// as a build error. Returns the offending line when it matches.
+fn interpolation_gap(stderr: &str) -> Option<String> {
+    stderr
+        .lines()
+        .find(|l| l.contains("error while interpolating") || l.contains("is missing a value"))
+        .map(str::trim)
+        .map(ToOwned::to_owned)
+}
+
+/// Build a `CrossCheck` reporting a genuine (non-interpolation) build failure
+/// from a `docker ... build` command's stderr — shared by the compose-build
+/// path and the Dockerfile fallback so the two don't drift.
+fn build_failure_check(text: &str) -> coxagent_application::ports::outbound::CrossCheck {
+    use coxagent_application::ports::outbound::CrossCheck;
+    let (errors, _) = parse_clippy(text);
+    CrossCheck {
+        available: true,
+        reason: "verified via the Docker (Linux) image build".to_owned(),
+        errors: if errors.is_empty() {
+            vec![text.lines().rev().take(3).collect::<Vec<_>>().join(" | ")]
+        } else {
+            errors.into_iter().take(12).collect()
+        },
+    }
+}
+
 /// Fallback cross-check: build the project's Docker image. It compiles for
 /// Linux by definition, so it catches the same class of platform breakage
 /// without a cross toolchain — and it is the build that actually fails in
@@ -1022,16 +1052,55 @@ async fn compose_build_check(
         });
     }
     let text = String::from_utf8_lossy(&out.stderr);
-    let (errors, _) = parse_clippy(&text);
-    Some(CrossCheck {
-        available: true,
-        reason: "verified via the Docker (Linux) image build".to_owned(),
-        errors: if errors.is_empty() {
-            vec![text.lines().rev().take(3).collect::<Vec<_>>().join(" | ")]
-        } else {
-            errors.into_iter().take(12).collect()
-        },
-    })
+    let Some(gap) = interpolation_gap(&text) else {
+        return Some(build_failure_check(&text));
+    };
+    let dockerfile = work_dir.join("Dockerfile");
+    if !dockerfile.exists() {
+        return Some(CrossCheck {
+            available: false,
+            reason: format!(
+                "cannot verify the Linux build: `docker compose build` aborted at variable \
+                 interpolation ({gap}) and no Dockerfile is available to build directly — set \
+                 the required env vars or add a Dockerfile"
+            ),
+            errors: Vec::new(),
+        });
+    }
+    let dockerfile_build = tokio::time::timeout(
+        DEPLOY_TIMEOUT,
+        Command::new("docker")
+            .args(["build", "-f", "Dockerfile", "."])
+            .current_dir(work_dir)
+            .stdin(std::process::Stdio::null())
+            .output(),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok);
+    let Some(dockerfile_build) = dockerfile_build else {
+        return Some(CrossCheck {
+            available: false,
+            reason: format!(
+                "cannot verify the Linux build: `docker compose build` aborted at variable \
+                 interpolation ({gap}), and the Dockerfile fallback build did not complete \
+                 (timed out or failed to start) — set the required env vars to verify via compose"
+            ),
+            errors: Vec::new(),
+        });
+    };
+    if dockerfile_build.status.success() {
+        return Some(CrossCheck {
+            available: true,
+            reason: "verified via `docker build` (Dockerfile) — compose build could not run \
+                     because required env vars are unset here"
+                .to_owned(),
+            errors: Vec::new(),
+        });
+    }
+    Some(build_failure_check(&String::from_utf8_lossy(
+        &dockerfile_build.stderr,
+    )))
 }
 
 /// Split `cargo clippy` human output into its error lines and the files those
@@ -1097,6 +1166,26 @@ error: could not compile `x` due to 2 previous errors
                 ""
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod interpolation_gap_tests {
+    use super::interpolation_gap;
+
+    #[test]
+    fn a_missing_required_var_is_recognized() {
+        let stderr = "error while interpolating services.db.environment.POSTGRES_PASSWORD: \
+                       required variable PG_PASSWORD is missing a value: PG_PASSWORD is \
+                       required — set it before running docker compose up";
+        assert!(interpolation_gap(stderr).is_some());
+    }
+
+    #[test]
+    fn a_genuine_compile_failure_is_not_mistaken_for_an_interpolation_gap() {
+        let stderr = "error[E0433]: failed to resolve: use of undeclared crate `foo`\n \
+                       --> src/main.rs:1:1";
+        assert!(interpolation_gap(stderr).is_none());
     }
 }
 
