@@ -7,34 +7,59 @@ use coxagent_domain::{Status, TicketId, TicketType};
 
 /// Open the first sprint or roll over an elapsed one. Returns the number of a
 /// newly opened sprint, or `None` when the current sprint is still running.
-/// A sprint must live at least this long in WALL-CLOCK time before it may roll,
-/// regardless of how many cycles flew by. Cycles shrank from ~30 min to ~90 s
-/// as the loop got faster; counting only cycles produced 500 seven-minute
-/// "sprints" in two days — no goal was ever pursued long enough to matter.
-const MIN_SPRINT: time::Duration = time::Duration::hours(20);
+/// How a sprint window elapses — the config's `sprint_unit`/lengths, resolved.
+/// `Days` rolls on wall clock (what most teams mean by "a sprint" — cycles
+/// shrank from ~30 min to ~90 s as the loop got faster, and counting only
+/// cycles produced 500 seven-minute "sprints" in two days). `Cycles` keeps the
+/// pure cycle counter for cadence experiments.
+#[derive(Debug, Clone, Copy)]
+pub enum SprintPolicy {
+    Days(u64),
+    Cycles(u64),
+}
 
-pub fn advance(state: &mut ProjectState, cycle: u64, length: u64) -> Option<u32> {
-    let length = length.max(1);
+impl SprintPolicy {
+    /// Resolve from the workflow config.
+    #[must_use]
+    pub fn from_config(wf: &crate::config::WorkflowConfig) -> Self {
+        match wf.sprint_unit {
+            crate::config::SprintUnit::Days => SprintPolicy::Days(wf.sprint_length_days.max(1)),
+            crate::config::SprintUnit::Cycles => {
+                SprintPolicy::Cycles(wf.sprint_length_cycles.max(1))
+            }
+        }
+    }
+}
+
+pub fn advance(state: &mut ProjectState, cycle: u64, policy: SprintPolicy) -> Option<u32> {
     let need_open = match &state.sprint {
         None => true,
-        Some(s) => {
-            cycle.saturating_sub(s.started_cycle) >= length && sprint_age_ok(&s.started_at)
-        }
+        Some(s) => match policy {
+            SprintPolicy::Cycles(len) => cycle.saturating_sub(s.started_cycle) >= len,
+            SprintPolicy::Days(days) => sprint_age_days(&s.started_at) >= days,
+        },
     };
     if !need_open {
         return None;
     }
+    let length = match policy {
+        SprintPolicy::Cycles(len) => len,
+        // Recorded for display; day-based sprints don't use it to roll.
+        SprintPolicy::Days(_) => state.sprint.as_ref().map_or(0, |s| s.length_cycles),
+    };
     Some(roll_over(state, cycle, length))
 }
 
-/// Whether the sprint is old enough (by wall clock) to close. A missing or
-/// unparseable stamp reads as old — pre-existing sprints roll once and pick up
-/// a stamp from then on.
-fn sprint_age_ok(started_at: &str) -> bool {
+/// Whole days since `started_at`. A missing/unparseable stamp reads as ancient,
+/// so pre-existing sprints roll once and pick up a stamp from then on.
+fn sprint_age_days(started_at: &str) -> u64 {
     let fmt = &time::format_description::well_known::Rfc3339;
     match time::OffsetDateTime::parse(started_at, fmt) {
-        Ok(t) => time::OffsetDateTime::now_utc() - t >= MIN_SPRINT,
-        Err(_) => true,
+        Ok(t) => {
+            let d = time::OffsetDateTime::now_utc() - t;
+            u64::try_from(d.whole_days().max(0)).unwrap_or(0)
+        }
+        Err(_) => u64::MAX,
     }
 }
 
@@ -205,7 +230,7 @@ mod tests {
             tickets: vec![feature("F001"), feature("F002")],
             ..ProjectState::default()
         };
-        let n = advance(&mut state, 1, 10);
+        let n = advance(&mut state, 1, SprintPolicy::Cycles(10));
         assert_eq!(n, Some(1));
         let s = state.sprint.as_ref().expect("sprint");
         assert_eq!(s.number, 1);
@@ -218,7 +243,7 @@ mod tests {
             tickets: vec![feature("F001")],
             ..ProjectState::default()
         };
-        advance(&mut state, 1, 10);
+        advance(&mut state, 1, SprintPolicy::Cycles(10));
         state.tickets.push(feature("F002"));
         let id = TicketId::new("F002").expect("id");
         assert!(commit_ticket(&mut state, &id));
@@ -246,9 +271,9 @@ mod tests {
             tickets: vec![feature("F001")],
             ..ProjectState::default()
         };
-        advance(&mut state, 1, 10);
+        advance(&mut state, 1, SprintPolicy::Cycles(10));
         // Cycle 3 of a 10-cycle window: nothing would roll over on its own.
-        assert_eq!(advance(&mut state, 3, 10), None);
+        assert_eq!(advance(&mut state, 3, SprintPolicy::Cycles(10)), None);
         assert_eq!(close_now(&mut state, 3), Some(2));
         assert_eq!(state.sprints.len(), 1, "the closed sprint is in history");
         assert_eq!(state.sprints[0].number, 1);
@@ -268,29 +293,40 @@ mod tests {
             tickets: vec![feature("F001")],
             ..ProjectState::default()
         };
-        advance(&mut state, 1, 10);
-        assert_eq!(advance(&mut state, 5, 10), None);
+        advance(&mut state, 1, SprintPolicy::Cycles(10));
+        assert_eq!(advance(&mut state, 5, SprintPolicy::Cycles(10)), None);
         assert_eq!(state.sprint.as_ref().expect("s").number, 1);
     }
 
     #[test]
-    fn rolls_over_after_length_and_min_age() {
+    fn cycles_policy_rolls_purely_on_cycles() {
         let mut state = ProjectState {
             tickets: vec![feature("F001")],
             ..ProjectState::default()
         };
-        advance(&mut state, 1, 10);
-        // Ten cycles later but only seconds old: cycles alone must NOT roll —
-        // this is the 500-sprints-in-two-days bug.
-        assert_eq!(advance(&mut state, 11, 10), None);
+        advance(&mut state, 1, SprintPolicy::Cycles(10));
+        // The explicit cycles unit is a deliberate choice — it rolls on the
+        // counter alone, however fast cycles spin.
+        assert_eq!(advance(&mut state, 11, SprintPolicy::Cycles(10)), Some(2));
+    }
+
+    #[test]
+    fn days_policy_ignores_cycle_count_until_the_day_passes() {
+        let mut state = ProjectState {
+            tickets: vec![feature("F001")],
+            ..ProjectState::default()
+        };
+        advance(&mut state, 1, SprintPolicy::Days(1));
+        // A thousand cycles later but seconds old: must NOT roll — this is the
+        // 500-seven-minute-sprints bug the day unit exists to kill.
+        assert_eq!(advance(&mut state, 1000, SprintPolicy::Days(1)), None);
         assert_eq!(state.sprint.as_ref().expect("s").number, 1);
-        // Age the sprint past the wall-clock minimum: now it rolls.
-        let old = (time::OffsetDateTime::now_utc() - time::Duration::hours(21))
+        // Age it past a day: rolls.
+        let old = (time::OffsetDateTime::now_utc() - time::Duration::hours(25))
             .format(&time::format_description::well_known::Rfc3339)
             .expect("fmt");
         state.sprint.as_mut().expect("s").started_at = old;
-        assert_eq!(advance(&mut state, 11, 10), Some(2));
-        assert_eq!(state.sprint.as_ref().expect("s").number, 2);
+        assert_eq!(advance(&mut state, 1000, SprintPolicy::Days(1)), Some(2));
     }
 }
 

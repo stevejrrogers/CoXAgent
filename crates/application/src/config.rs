@@ -134,6 +134,18 @@ pub enum Mode {
     Scrum,
 }
 
+/// What a scrum sprint window is measured in — wall-clock days (default) or
+/// loop cycles. Cycles shrink and stretch with the workload (90 s idle, 30+ min
+/// mid-build), so day-based sprints are what most teams mean by "a sprint";
+/// cycle-based stays available for cadence experiments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SprintUnit {
+    #[default]
+    Days,
+    Cycles,
+}
+
 /// The language the team's Scrum ceremonies and feed posts speak. Code, tickets
 /// and technical review stay in English regardless — this only sets the tone of
 /// the human-facing standup / planning / grooming / retro conversation.
@@ -186,9 +198,17 @@ pub struct WorkflowConfig {
     /// Delivery mode (kanban = continuous, scrum = sprint windows).
     #[serde(default)]
     pub mode: Mode,
-    /// Cycles per sprint in scrum mode.
+    /// Cycles per sprint in scrum mode (used when `sprint_unit` is `cycles`).
     #[serde(default = "default_sprint_len")]
     pub sprint_length_cycles: u64,
+    /// What a sprint window is measured in. `days` (the default) rolls on wall
+    /// clock — a sprint is a real day/week regardless of how fast cycles spin;
+    /// `cycles` restores the pure cycle counter for teams that want it.
+    #[serde(default)]
+    pub sprint_unit: SprintUnit,
+    /// Days per sprint when `sprint_unit` is `days`.
+    #[serde(default = "default_sprint_days")]
+    pub sprint_length_days: u64,
     /// Ops/SRE monitor (default on): after a deploy, the leader pings the app on
     /// its published port each cycle and files a high-priority bug + alerts the
     /// chat if it went down — so the team also runs what it ships.
@@ -328,6 +348,10 @@ fn default_sprint_len() -> u64 {
     10
 }
 
+fn default_sprint_days() -> u64 {
+    1
+}
+
 fn default_concurrency() -> u32 {
     1
 }
@@ -357,6 +381,8 @@ impl Default for WorkflowConfig {
             budget_usd: None,
             mode: Mode::Kanban,
             sprint_length_cycles: default_sprint_len(),
+            sprint_unit: SprintUnit::default(),
+            sprint_length_days: default_sprint_days(),
             webhook_url: None,
             token_saver: true,
             language: Language::En,

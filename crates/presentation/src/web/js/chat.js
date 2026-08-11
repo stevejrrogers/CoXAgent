@@ -2026,7 +2026,14 @@ async function loadSettings(){
     <div class="settab" data-p="workflow" hidden>
       <div class="panel frm">
         <div class="fr"><span class="lbl">Mode</span><select id="wf-mode"><option value="kanban" ${wf.mode!=='scrum'?'selected':''}>kanban</option><option value="scrum" ${wf.mode==='scrum'?'selected':''}>scrum</option></select><span class="hint">scrum groups cycles into sprints</span></div>
-        <div class="fr"><span class="lbl">Sprint length</span><input id="wf-sp" type="number" min="1" value="${wf.sprint_length_cycles??10}" style="width:90px"/><span class="hint">cycles per sprint</span></div>
+        <div class="fr"><span class="lbl">Sprint length</span>
+          <select id="wf-su" onchange="document.getElementById('wf-sp-days').style.display=this.value==='days'?'':'none';document.getElementById('wf-sp').style.display=this.value==='cycles'?'':'none';">
+            <option value="days" ${wf.sprint_unit!=='cycles'?'selected':''}>days</option>
+            <option value="cycles" ${wf.sprint_unit==='cycles'?'selected':''}>cycles</option>
+          </select>
+          <input id="wf-sp-days" type="number" min="1" value="${wf.sprint_length_days??1}" style="width:90px;${wf.sprint_unit==='cycles'?'display:none':''}"/>
+          <input id="wf-sp" type="number" min="1" value="${wf.sprint_length_cycles??10}" style="width:90px;${wf.sprint_unit==='cycles'?'':'display:none'}"/>
+          <span class="hint">days = wall-clock sprints (recommended — cycles speed up and slow down); cycles = roll on the loop counter</span></div>
         <div class="fr"><span class="lbl">BA every N cycles</span><input id="wf-ba" type="number" min="0" value="${wf.ba_every_n_cycles??4}" style="width:90px"/><span class="hint">0 disables BA</span></div>
         <div class="fr"><span class="lbl">Feature dev</span><select id="wf-fd"><option value="true" ${wf.feature_dev_enabled!==false?'selected':''}>enabled</option><option value="false" ${wf.feature_dev_enabled===false?'selected':''}>disabled</option></select></div>
         <div class="fr"><span class="lbl">Ops monitor</span><select id="wf-ops"><option value="true" ${wf.ops_monitor!==false?'selected':''}>on</option><option value="false" ${wf.ops_monitor===false?'selected':''}>off</option></select><span class="hint">pings the deployed app; files a bug + alerts on an outage</span></div>

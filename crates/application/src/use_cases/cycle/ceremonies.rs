@@ -21,6 +21,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         };
         let _ = cycle; // the per-process cycle resets on restart — use the
                        // persistent counter below so sprints keep advancing.
+        let policy = crate::sprint::SprintPolicy::from_config(&self.config.workflow);
         let len = self.config.workflow.sprint_length_cycles;
         // Migrate: seed the persistent counter from the current sprint's stored
         // (old per-process) cycle the first time, so an in-flight sprint doesn't
@@ -40,7 +41,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // Capture the closing sprint before `advance` replaces it, so we can run
         // a real review + retro on it.
         let closing = state.sprint.clone();
-        let Some(n) = crate::sprint::advance(&mut state, sc, len) else {
+        let _ = len;
+        let Some(n) = crate::sprint::advance(&mut state, sc, policy) else {
             // No roll this cycle — still persist the bumped counter.
             let _ = self.store.save(&state).await;
             return;
