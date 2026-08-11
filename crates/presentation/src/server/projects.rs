@@ -300,3 +300,50 @@ pub(super) fn project_language(p: &ProjectHandle) -> coxagent_application::confi
             c.workflow.language
         })
 }
+
+/// The project brief agents are seeded with (`project_context.md`): its `Goal`
+/// section plus the full markdown, so the dashboard can surface what the team
+/// is actually building toward.
+pub(super) async fn context_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let md = tokio::fs::read_to_string(&p.context_path)
+        .await
+        .unwrap_or_default();
+    Json(serde_json::json!({ "goal": extract_goal(&md), "full": md })).into_response()
+}
+
+/// Post an on-demand daily digest (shipped/spend/sprint at a glance) into the
+/// project's team chat and return it — the `/digest` slash command.
+pub(super) async fn digest_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Ok(state) = p.store.load().await else {
+        return internal_error("load failed");
+    };
+    let now = coxagent_application::state::now_rfc3339();
+    let digest = coxagent_application::metrics::digest_markdown(&state, &now);
+    drop(state);
+    let res = coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        s.post_chat_in(
+            "COX",
+            &format!("📰 {digest}"),
+            coxagent_application::state::AGENTS_CHANNEL,
+            Vec::new(),
+        );
+        Ok(())
+    })
+    .await;
+    match res {
+        Ok(()) => Json(serde_json::json!({ "ok": true, "digest": digest })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
