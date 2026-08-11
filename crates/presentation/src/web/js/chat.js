@@ -1856,7 +1856,9 @@ async function showTicket(id){
     <div class="tkc-wrap">${mdToolbar('tkc-input')}<div class="tkc-compose"><input id="tkc-input" placeholder="Add a comment…  (**markdown** · Enter to post · @ to mention)" onkeydown="if(!imeEnter(event)&&event.key==='Enter')postTicketComment('${t.id}')"><button class="pri" onclick="postTicketComment('${t.id}')"><i class="ti ti-send"></i></button></div></div></div>`;
   body.innerHTML=h;
   fillAssignSelect();
-  renderTicketComments(t.id);}
+  renderTicketComments(t.id);
+  // Ticket descriptions can carry ```mermaid fences too (SA designs often do).
+  if(typeof renderMermaidIn==="function")renderMermaidIn(body);}
 async function fillAssignSelect(){
   const sel=document.getElementById("tk-assign-sel");if(!sel)return;
   try{const members=await(await fetch(api("/members"))).json();

@@ -1665,3 +1665,8 @@ textarea.np-in{resize:vertical;line-height:1.5}
      DIRECT MESSAGES label between its chevron and its count. */
   .chatside .chanrail-hd{justify-content:flex-start}
   .chatside .chanrail-hd > span:first-of-type{margin-right:2px}
+  /* Mermaid diagrams in Wiki pages / ticket descriptions: the fence renders as
+     a live SVG; keep it on the card background, centered, and let a wide
+     sequence diagram scroll inside its own box instead of the page. */
+  .md pre.mermaid{background:var(--card);border:1px solid var(--border2);border-radius:10px;padding:14px;overflow-x:auto;display:flex;justify-content:center}
+  .md pre.mermaid svg{max-width:100%;height:auto}

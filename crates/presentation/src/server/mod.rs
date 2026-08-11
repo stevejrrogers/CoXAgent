@@ -99,6 +99,9 @@ const XTERM_FIT_JS: &str = include_str!("../web/xterm-addon-fit.min.js");
 // surface, not modularity). Embedded like everything else: one binary.
 const APP_CSS: &str = include_str!("../web/app.css");
 const APP_JS: &[(&str, &str)] = &[
+    // Vendored Mermaid (pinned v11 UMD build) so Wiki pages render
+    // sequence/flow diagrams offline — the hub never loads from a CDN.
+    ("mermaid.min.js", include_str!("../web/js/mermaid.min.js")),
     ("core.js", include_str!("../web/js/core.js")),
     ("manage.js", include_str!("../web/js/manage.js")),
     ("home.js", include_str!("../web/js/home.js")),
