@@ -14,7 +14,10 @@
   html,body{margin:0;height:100%}
   body{background:var(--bg);color:var(--text);font-family:Inter,-apple-system,system-ui,sans-serif;font-size:14px;display:flex;-webkit-font-smoothing:antialiased}
   .ti{font-size:18px;line-height:1;vertical-align:-2px}
-  .side{width:246px;flex-shrink:0;height:100vh;position:sticky;top:0;background:var(--panel);border-right:1px solid var(--border);display:flex;flex-direction:column;padding:18px 16px;gap:6px}
+  /* overflow-y:auto — the nav outgrew short viewports; without it the
+     overflowing items pushed the BODY into a scroll, shoving the whole app
+     (composer included) off-screen instead of scrolling just the rail. */
+  .side{width:246px;flex-shrink:0;height:100vh;position:sticky;top:0;background:var(--panel);border-right:1px solid var(--border);display:flex;flex-direction:column;padding:18px 16px;gap:6px;overflow-y:auto}
   .brand{display:flex;align-items:center;gap:11px;padding:4px 6px 14px}
   .brand .mk{width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg,#22D3EE,#0E7490);display:flex;align-items:center;justify-content:center;color:#fff;font-size:19px}
   .brand .nm{font-weight:600;font-size:15px} .brand .tg{font-size:11px;color:var(--dim)}
