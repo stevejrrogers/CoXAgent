@@ -186,11 +186,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// Fold the spend meter's since-last-cycle deltas into persistent state and
     /// reset it, returning this cycle's cost. Kept separate so `record_activity`
     /// stays a readable list of what happened, not a ledger.
-    fn drain_meter(&self, state: &mut crate::state::ProjectState) -> f64 {
+    fn drain_meter(&self, state: &mut crate::state::ProjectState) -> (f64, u64) {
         let mut cycle_cost = 0.0;
+        let mut cycle_runs = 0u64;
         if let Some(meter) = &self.meter {
             if let Ok(mut m) = meter.lock() {
                 cycle_cost = m.total_cost_usd;
+                cycle_runs = m.runs;
                 state.spend.total_cost_usd += m.total_cost_usd;
                 state.spend.input_tokens += m.input_tokens;
                 state.spend.output_tokens += m.output_tokens;
@@ -231,7 +233,49 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 *m = Spend::default();
             }
         }
-        cycle_cost
+        (cycle_cost, cycle_runs)
+    }
+
+    /// Deterministic per-cycle scorecard — zero tokens, graded from what the
+    /// cycle actually recorded. "Was the cycle worth its cost?" as chartable
+    /// data instead of a feeling. Bounded history, newest last.
+    fn record_cycle_score(
+        state: &mut crate::state::ProjectState,
+        report: &CycleReport,
+        cost_usd: f64,
+        runs: u64,
+    ) {
+        use crate::state::CycleScore;
+        let shipped =
+            u64::from(report.feature_done.is_some()) + u64::from(report.bug_fixed.is_some());
+        let useful = shipped
+            + report.ba_created.len() as u64
+            + u64::from(report.sa_readied.is_some())
+            + u64::from(report.pd_designed.is_some())
+            + u64::from(report.documented.is_some())
+            + report.bugs_filed.len() as u64;
+        let errors = report
+            .errors
+            .iter()
+            .filter(|e| !e.contains("paused by self-tuning") && !e.contains("skipped"))
+            .count() as u64;
+        let incidents = state.engine_incidents.len() as u64;
+        let grade = CycleScore::grade_of(shipped, runs, useful, incidents, errors);
+        state.cycle_scores.push(CycleScore {
+            cycle: report.cycle,
+            at: crate::state::now_rfc3339(),
+            runs,
+            useful,
+            cost_usd,
+            shipped,
+            incidents,
+            errors,
+            grade,
+        });
+        let overflow = state.cycle_scores.len().saturating_sub(100);
+        if overflow > 0 {
+            state.cycle_scores.drain(0..overflow);
+        }
     }
 
     pub(super) async fn record_activity(&self, report: &CycleReport) -> bool {
@@ -264,7 +308,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
 
         // Drain the spend meter (deltas since last cycle) into persistent state.
-        let cycle_cost = self.drain_meter(&mut state);
+        let (cycle_cost, cycle_runs) = self.drain_meter(&mut state);
+        Self::record_cycle_score(&mut state, report, cycle_cost, cycle_runs);
         let spent_today = state.add_daily_spend(cycle_cost);
 
         // Effective caps: the live cell (adjustable without restart) when present,
