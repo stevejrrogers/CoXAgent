@@ -1,0 +1,44 @@
+# Standalone CXA backend — Postgres + Redis for the native CXA hub on this host.
+#
+# WHY this exists: the root docker-compose.yml (web app on 8101) and the split
+# deploy both name their service "db"/project "coxagent", so they collide.
+# CXA's data lives in the named volume `coxagent_db`; running under its own
+# project (`cxa-backend`) and mounting that volume directly keeps it separate
+# from the web app's `coxagent_pgdata`.
+#
+# The native hub reads ~/CoXAgent/coordination.json which points at
+# 127.0.0.1:5433 (Postgres) + 127.0.0.1:6379 (Redis).
+name: cxa-backend
+
+services:
+  db:
+    image: postgres:16-alpine
+    ports:
+      - "127.0.0.1:5433:5432"
+    environment:
+      POSTGRES_USER: ${PG_USER}
+      POSTGRES_PASSWORD: ${PG_PASSWORD}
+      POSTGRES_DB: coxagent
+    volumes:
+      - source_cxa_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:6379:6379"
+    command:
+      ["redis-server", "--save", "", "--appendonly", "no",
+       "--requirepass", "${REDIS_PASSWORD}"]
+    restart: unless-stopped
+
+volumes:
+  # Mount CXA's existing Postgres data directly — do NOT create a new empty one.
+  source_cxa_data:
+    external:
+      name: coxagent_db

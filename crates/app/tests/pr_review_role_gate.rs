@@ -192,9 +192,10 @@ const ACTIONS: [&str; 6] = [
 async fn pr_actions_are_reviewer_only_not_open_to_every_writer() {
     let _dir = boot().await;
 
-    // Non-reviewing member tier plus Viewer: `can_write()` is true for them
-    // all (except Viewer), which is why every one of these used to succeed —
-    // but none of them may sign off on or merge a PR.
+    // The non-dev member tier can write but must not sign off a PR: BA, PO, QA
+    // and SM review nothing (per the gate map "dev và SA duyệt"), and Viewer is
+    // read-only entirely. `can_write()` was once true for all of them except
+    // Viewer — which is exactly why every one of these used to get through.
     for role in [
         AuthRole::Ba,
         AuthRole::Po,
@@ -218,8 +219,8 @@ async fn pr_actions_are_reviewer_only_not_open_to_every_writer() {
         }
     }
 
-    // Reviewers — Admin/leads/the legacy Reviewer, the SA, and every developer
-    // — keep the access the gate documents: they clear RBAC and fall through to
+    // Admin, the lead tier, the legacy Reviewer, the SA, and every developer
+    // keep the access the gate documents: they clear RBAC and fall through to
     // the handler, which 404s on the unregistered project.
     for role in [
         AuthRole::Super,

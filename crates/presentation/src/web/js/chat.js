@@ -1956,7 +1956,30 @@ async function loadSettings(){
       <div class="settab" data-p="mcp"><div id="mcp-panel"></div></div>`;
     window._setTab="mcp";renderMcpPanel();return;
   }
-  let cfg={};try{cfg=await(await fetch(api("/config"))).json();}catch(e){}window._cfg=cfg;
+  // A coxagent.json the hub cannot read is NOT an empty config (COX-B050).
+  // Rendering the form anyway would seed it from defaults, and Save PUTs the
+  // whole document back — so one typo'd field would be written over every
+  // other setting on disk, governance policy included. Show what broke and
+  // render no form: there is nothing safe to save until the file is fixed.
+  let cfg=null,cfgErr=null;
+  try{const r=await fetch(api("/config"));const b=await r.json();if(r.ok)cfg=b;else cfgErr=b;}
+  catch(e){cfgErr={error:"the hub could not be reached"};}
+  window._cfg=cfg;
+  if(cfgErr){
+    document.getElementById("settings-body").innerHTML=`
+      <div class="panel" style="border-color:var(--red)">
+        <div style="color:var(--red);font-weight:600;margin-bottom:6px">
+          <i class="ti ti-alert-triangle"></i> coxagent.json could not be read</div>
+        <div style="font-size:13px;line-height:1.6">
+          ${cfgErr.field?`The field <code>${esc(cfgErr.field)}</code> holds a value this project's settings cannot represent.`:""}
+          <div style="margin-top:4px;opacity:.8">${esc(cfgErr.error||"")}</div>
+          <div style="margin-top:10px">Settings are hidden on purpose: saving them would write defaults
+          over every other setting in the file, including the model allowlist and forbidden paths.
+          Fix the file on disk, then reload.</div>
+        </div>
+      </div>`;
+    window._setTab=null;return;
+  }
   let td={tools:[]};try{td=await(await fetch("/api/tooling")).json();}catch(e){}
   let ga={};try{ga=await(await fetch(api("/git/auth"))).json();}catch(e){}
   const tools=td.tools||[];const missing=tools.filter(t=>!t.present).length;

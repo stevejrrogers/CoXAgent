@@ -793,3 +793,100 @@ pub(super) async fn audit_log_ep(
         Err(e) => internal_error(&e.to_string()),
     }
 }
+
+/// The super admin's cross-space overview: every space with its live stats
+/// (projects, members, spend, online), plus hub totals and the user directory.
+pub(super) async fn manage_overview_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    if !is_super(&app, &headers).await {
+        return (StatusCode::FORBIDDEN, "super admin required").into_response();
+    }
+    let order = app.order.read().await.clone();
+    let projects_map = app.projects.read().await.clone();
+    // Per-project stats once, plus per-user spend rolled up across projects.
+    let mut pstats: HashMap<String, (f64, usize, Vec<String>)> = HashMap::new();
+    let mut user_spend: HashMap<String, f64> = HashMap::new();
+    for pid in &order {
+        let Some(p) = projects_map.get(pid) else {
+            continue;
+        };
+        let mut spend = 0.0;
+        if let Ok(st) = p.store.load().await {
+            spend = st.spend.total_cost_usd;
+            for (op, v) in &st.spend.by_operator {
+                let user = op.split('@').next().unwrap_or(op).to_owned();
+                *user_spend.entry(user).or_insert(0.0) += v.cost_usd;
+            }
+        }
+        let workers = p.store.workers().await.unwrap_or_default();
+        let online: Vec<String> = workers
+            .iter()
+            .map(|w| w.worker.split('@').next().unwrap_or("").to_owned())
+            .collect();
+        pstats.insert(pid.clone(), (spend, workers.len(), online));
+    }
+    let users = match app.auth.clone() {
+        Some(auth) => auth.list_users().await,
+        None => Vec::new(),
+    };
+    let spaces = app.spaces.inner.lock().await.spaces.clone();
+    let mut assigned: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let spaces_json: Vec<serde_json::Value> = spaces
+        .iter()
+        .map(|s| {
+            let mut spend = 0.0;
+            let mut online: Vec<String> = Vec::new();
+            for pid in &s.projects {
+                assigned.insert(pid.clone());
+                if let Some((sp, _, on)) = pstats.get(pid) {
+                    spend += sp;
+                    online.extend(on.clone());
+                }
+            }
+            let member_list: Vec<_> = users
+                .iter()
+                .filter(|u| {
+                    s.admins.iter().any(|a| a.eq_ignore_ascii_case(&u.username))
+                        || s.members
+                            .iter()
+                            .any(|m| m.eq_ignore_ascii_case(&u.username))
+                        || u.projects.iter().any(|p| s.projects.contains(p))
+                })
+                .collect();
+            let mut roles: std::collections::BTreeMap<String, usize> =
+                std::collections::BTreeMap::new();
+            for u in &member_list {
+                *roles.entry(u.role.as_str().to_owned()).or_default() += 1;
+            }
+            serde_json::json!({
+                "id": s.id, "name": s.name, "tagline": s.tagline,
+                "admins": s.admins, "projects": s.projects,
+                "members": member_list.len(), "roles": roles, "spend": spend,
+                "budget_usd": s.budget_usd, "online": online,
+            })
+        })
+        .collect();
+    let unassigned: Vec<String> = order
+        .iter()
+        .filter(|p| !assigned.contains(*p))
+        .cloned()
+        .collect();
+    Json(serde_json::json!({
+        "spaces": spaces_json,
+        "unassigned_projects": unassigned,
+        "users": users.iter().map(|u| serde_json::json!({
+            "username": u.username, "name": u.name, "role": u.role.as_str(),
+            "projects": u.projects,
+            "spend": user_spend.get(&u.username).copied().unwrap_or(0.0),
+        })).collect::<Vec<_>>(),
+        "totals": {
+            "projects": order.len(),
+            "users": users.len(),
+            "spend": pstats.values().map(|(s,_,_)| s).sum::<f64>(),
+            "online": pstats.values().map(|(_,n,_)| n).sum::<usize>(),
+        },
+    }))
+    .into_response()
+}
