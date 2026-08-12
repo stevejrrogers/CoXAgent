@@ -193,15 +193,14 @@ async fn pr_actions_are_reviewer_only_not_open_to_every_writer() {
     let _dir = boot().await;
 
     // Member tier: `can_write()` is true for all of them, which is why every
-    // one of these used to succeed.
+    // one of these used to succeed. Per the gate map ("PR thì dev và SA duyệt")
+    // only these product/analysis/QA roles are held back from review; developers
+    // review PRs themselves (below).
     for role in [
         AuthRole::Ba,
-        AuthRole::Fe,
-        AuthRole::Be,
-        AuthRole::Aie,
-        AuthRole::Ds,
-        AuthRole::Da,
-        AuthRole::De,
+        AuthRole::Po,
+        AuthRole::Qa,
+        AuthRole::Sm,
         AuthRole::Viewer,
     ] {
         for action in ACTIONS {
@@ -220,18 +219,25 @@ async fn pr_actions_are_reviewer_only_not_open_to_every_writer() {
         }
     }
 
-    // Admin, the lead tier, and the legacy Reviewer keep the access the gate
-    // documents: they clear RBAC and fall through to the handler, which 404s
+    // Admin/leads plus reviewers keep access; so do developers and the SA per
+    // their craft. They clear RBAC and fall through to the handler, which 404s
     // on the unregistered project.
     for role in [
         AuthRole::Super,
         AuthRole::Admin,
+        AuthRole::Reviewer,
+        AuthRole::Sa,
         AuthRole::Director,
         AuthRole::Manager,
         AuthRole::TechLead,
         AuthRole::DsLead,
         AuthRole::DaLead,
-        AuthRole::Reviewer,
+        AuthRole::Fe,
+        AuthRole::Be,
+        AuthRole::Aie,
+        AuthRole::Ds,
+        AuthRole::Da,
+        AuthRole::De,
     ] {
         for action in ACTIONS {
             let (status, body) = pr_action(role, action).await;

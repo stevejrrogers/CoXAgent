@@ -373,17 +373,11 @@ mod tests {
     fn an_out_of_range_host_port_still_fails_the_gate_and_the_file_survives() {
         let (_dir, state) = workspace("70000");
 
-        let LoadedConfig {
-            config,
-            host_port_probe,
-        } = load_config_with_probe(&state);
+        let msg =
+            load_config_with_probe(&state).expect_err("a port outside u16 must fail the load");
 
-        assert_eq!(
-            host_port_probe,
-            Err(()),
-            "a corrupt port must fail the gate"
-        );
-        assert_eq!(config.deploy.host_port, None, "defaults, not a healed port");
+        assert!(msg.contains("coxagent.json"), "{msg}");
+        assert!(msg.contains("deploy.host_port"), "{msg}");
         let on_disk = std::fs::read_to_string(state.parent().expect("root").join("coxagent.json"))
             .expect("config still readable");
         assert!(
@@ -402,7 +396,7 @@ mod tests {
         let LoadedConfig {
             config,
             host_port_probe,
-        } = load_config_with_probe(&state);
+        } = load_config_with_probe(&state).expect("an explicit null port loads and heals");
 
         let healed = config.deploy.host_port.expect("a port must be assigned");
         assert_eq!(
@@ -435,7 +429,7 @@ mod tests {
         let LoadedConfig {
             config,
             host_port_probe,
-        } = load_config_with_probe(&state);
+        } = load_config_with_probe(&state).expect("a missing host_port key loads and heals");
 
         let healed = config.deploy.host_port.expect("a port must be assigned");
         assert_eq!(
