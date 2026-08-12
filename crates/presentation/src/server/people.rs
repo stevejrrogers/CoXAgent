@@ -493,3 +493,60 @@ pub(super) async fn me_ep(
             .into_response(),
     }
 }
+
+/// The signed-in user's agents across every project they belong to: online
+/// state, current work, desired flag, and their token spend — the "my agents"
+/// management panel.
+pub(super) async fn my_agents_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let me = resolve_username(&app, &headers).await;
+    let (is_admin, my_projects) = match app.auth.clone() {
+        Some(auth) => resolve_principal(&auth, &headers)
+            .await
+            .map_or((false, Vec::new()), |u| (u.role.can_manage(), u.projects)),
+        None => (true, Vec::new()),
+    };
+    let order = app.order.read().await.clone();
+    let projects_map = app.projects.read().await.clone();
+    let prefix = format!("{me}@");
+    let mut out = Vec::new();
+    for pid in &order {
+        let Some(p) = projects_map.get(pid) else {
+            continue;
+        };
+        if !is_admin && !my_projects.contains(pid) {
+            continue;
+        }
+        let workers = p.store.workers().await.unwrap_or_default();
+        let mine: Vec<_> = workers
+            .iter()
+            .filter(|w| w.worker.starts_with(&prefix))
+            .collect();
+        let spend = p.store.load().await.ok().map(|s| {
+            s.spend
+                .by_operator
+                .iter()
+                .filter(|(k, _)| k.starts_with(&prefix))
+                .map(|(_, v)| (v.cost_usd, v.input_tokens + v.output_tokens))
+                .fold((0.0, 0u64), |a, b| (a.0 + b.0, a.1 + b.1))
+        });
+        let (cost, tokens) = spend.unwrap_or((0.0, 0));
+        let operator = mine.first().map(|w| w.worker.clone());
+        let desired = match &operator {
+            Some(op) => p.store.get_desired(op).await.ok().flatten(),
+            None => None,
+        };
+        out.push(serde_json::json!({
+            "project": pid, "name": p.name,
+            "online": !mine.is_empty(),
+            "operator": operator,
+            "role": mine.first().map(|w| w.role.clone()),
+            "ticket": mine.first().map(|w| w.ticket.clone()),
+            "desired": desired,
+            "cost": cost, "tokens": tokens,
+        }));
+    }
+    Json(serde_json::json!({ "username": me, "agents": out })).into_response()
+}
