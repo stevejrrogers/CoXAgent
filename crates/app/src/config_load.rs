@@ -364,26 +364,18 @@ mod tests {
         assert_eq!(loaded.host_port_probe, Ok(None));
     }
 
-    /// COX-B045 repro: `host_port` above `u16::MAX` (e.g. `70000`) poisons the
-    /// whole `Config` deserialization — one bad field discards every other
-    /// setting too, not just the port. The file must survive untouched and the
-    /// gate must fail rather than boot healthy with the mandatory health check
-    /// silently disabled.
+    /// COX-B045/B050 repro: `host_port` above `u16::MAX` (e.g. `70000`) poisons
+    /// the whole `Config` deserialization — one bad field used to discard every
+    /// other setting too, not just the port. The load fails naming the field
+    /// (COX-B043) rather than booting healthy on defaults with the mandatory
+    /// health check silently disabled, and the file survives untouched.
     #[test]
     fn an_out_of_range_host_port_still_fails_the_gate_and_the_file_survives() {
         let (_dir, state) = workspace("70000");
 
-        let LoadedConfig {
-            config,
-            host_port_probe,
-        } = load_config_with_probe(&state);
+        let msg = load_config_with_probe(&state).expect_err("70000 is outside u16");
 
-        assert_eq!(
-            host_port_probe,
-            Err(()),
-            "a corrupt port must fail the gate"
-        );
-        assert_eq!(config.deploy.host_port, None, "defaults, not a healed port");
+        assert!(msg.contains("deploy.host_port"), "{msg}");
         let on_disk = std::fs::read_to_string(state.parent().expect("root").join("coxagent.json"))
             .expect("config still readable");
         assert!(
@@ -402,7 +394,7 @@ mod tests {
         let LoadedConfig {
             config,
             host_port_probe,
-        } = load_config_with_probe(&state);
+        } = load_config_with_probe(&state).expect("null is a representable Option<u16>");
 
         let healed = config.deploy.host_port.expect("a port must be assigned");
         assert_eq!(
@@ -435,13 +427,35 @@ mod tests {
         let LoadedConfig {
             config,
             host_port_probe,
-        } = load_config_with_probe(&state);
+        } = load_config_with_probe(&state).expect("an absent key is not a corrupt config");
 
         let healed = config.deploy.host_port.expect("a port must be assigned");
         assert_eq!(
             host_port_probe,
             Ok(Some(healed)),
             "the gate must probe the port the app will actually publish"
+        );
+    }
+
+    /// The ticket's literal repro (COX-B050): a valid JSON document whose only
+    /// fault is an out-of-range `deploy.host_port`, carrying explicit non-default
+    /// neighbours. It used to come back as `Config::default()` — `auto_rollback`
+    /// flipped true -> false and `max_rollback_age_secs` reset 42 -> 3600 — so the
+    /// safety setting turned itself off because a neighbouring field had one digit
+    /// too many. Nothing may be handed back at all now; the load fails naming the
+    /// one field that is actually broken.
+    #[test]
+    fn the_neighbours_of_a_bad_port_are_never_silently_reset_to_defaults() {
+        let (_dir, state) = write_workspace(
+            r#"{"deploy":{"host_port":99999,"enabled":true,"auto_rollback":true,
+               "max_rollback_age_secs":42},"engine":{}}"#,
+        );
+
+        let msg = load_config_with_probe(&state).expect_err("99999 is outside u16");
+
+        assert!(
+            msg.contains("deploy.host_port"),
+            "the one broken field is named, not the whole document: {msg}"
         );
     }
 }
