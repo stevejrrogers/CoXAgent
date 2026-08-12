@@ -879,11 +879,20 @@ async fn compose_build_check(
     }
     let _slot = crate::proc::heavy_slot().await;
     let proj = compose_project_name(work_dir);
+    // The root docker-compose.yml interpolates PG_PASSWORD / COXAGENT_ADMIN_PASSWORD
+    // eagerly (COX-C012 uses ${VAR:?} so real deployments fail fast rather than
+    // boot with a known default). A `build` still interpolates those env sections,
+    // so without values this cross-target check dies at interpolation before it can
+    // verify anything on every secret-bearing compose file. These are ephemeral
+    // verification-only values passed to one throwaway build command — never written
+    // to config or used to start services — mirroring deploy_smoke.rs.
     let out = tokio::time::timeout(
         DEPLOY_TIMEOUT,
         Command::new("docker")
             .args(["compose", "-p", &proj, "build"])
             .current_dir(work_dir)
+            .env("PG_PASSWORD", "ci-smoke")
+            .env("COXAGENT_ADMIN_PASSWORD", "ci-smoke")
             .stdin(std::process::Stdio::null())
             .output(),
     )

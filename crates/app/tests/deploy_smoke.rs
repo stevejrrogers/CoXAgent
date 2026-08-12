@@ -45,7 +45,10 @@ fn compose(root: &Path, args: &[&str]) -> std::process::Output {
         .arg("compose")
         .args(args)
         .current_dir(root)
-        // The documented bring-up command sets the admin password inline.
+        // The documented bring-up command sets both required secrets inline
+        // (PG_PASSWORD for Postgres, COXAGENT_ADMIN_PASSWORD for first-run
+        // super-admin bootstrap); without either, compose fails interpolation.
+        .env("PG_PASSWORD", "ci-smoke")
         .env("COXAGENT_ADMIN_PASSWORD", "ci-smoke")
         .output()
         .unwrap_or_else(|e| panic!("`docker compose {}` failed to spawn: {e}", args.join(" ")))
