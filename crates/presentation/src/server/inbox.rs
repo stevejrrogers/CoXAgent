@@ -173,6 +173,21 @@ pub(super) async fn inbox_ep(
                         "mergeable": pr.mergeable,
                         "role": "SA/dev", "can_act": my_role.can_review(),
                     }));
+                } else if pr.mergeable {
+                    // Auto-merge held the PR for another gate (merged-result
+                    // verification, CI, a competing PR) but didn't abandon it:
+                    // the SA either asked for changes at an unmoved head or the
+                    // sweep skipped it, so it sat parked and invisible while the
+                    // user waited for a notification. If it is genuinely
+                    // landable now, surface it — the person is always told a
+                    // mergeable PR is waiting on them instead of silently
+                    // letting it squat the queue.
+                    items.push(serde_json::json!({
+                        "kind": "review_pr", "number": pr.number,
+                        "title": pr.title, "url": pr.url,
+                        "held": true,
+                        "role": "SA/dev", "can_act": my_role.can_review(),
+                    }));
                 }
             }
         }
