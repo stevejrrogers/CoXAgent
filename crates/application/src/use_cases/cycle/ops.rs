@@ -191,10 +191,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         if too_old {
             self.record_rollback_skipped(
                 reason,
+                failed_sha.clone(),
                 &good.sha,
                 "known-good deploy is stale",
                 true,
                 false,
+                report,
             )
             .await;
             return;
@@ -206,11 +208,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             if self.migration_shipped_since(git, &good.sha, sha).await {
                 self.record_rollback_skipped(
                     reason,
+                    failed_sha.clone(),
                     &good.sha,
                     "a migration shipped since the known-good deploy — rolling back the app code \
                      alone would be unsafe",
                     false,
                     true,
+                    report,
                 )
                 .await;
                 return;
@@ -247,7 +251,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             },
         };
 
-        self.finish_rollback(reason, &good.sha, ok, summary, report)
+        self.finish_rollback(reason, failed_sha, &good.sha, ok, summary, report)
             .await;
     }
     /// Whether any file under `config.deploy.migration_detection_paths`
@@ -273,10 +277,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// Record the outcome of a rollback attempt (activity + dashboard status,
     /// distinct from a plain deploy) and, on failure, escalate via the
     /// existing bug+notify path — the mirror of what a normal deploy failure
-    /// already does, so a broken rollback mechanism can't fail silently.
+    /// already does, so a broken rollback mechanism can't fail silently. On a
+    /// successful rollback it also runs the incident post-mortem loop
+    /// (CXA-F012): blacklist the broken sha, write a docs post-mortem, file or
+    /// link a root-cause prevention ticket and record a team lesson.
     pub(super) async fn finish_rollback(
         &self,
         reason: &str,
+        failed_sha: Option<String>,
         good_sha: &str,
         ok: bool,
         summary: String,
@@ -329,17 +337,30 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             if let Some(id) = self.file_rollback_failed_bug(&summary).await {
                 report.bugs_filed.push(id);
             }
+            return;
         }
+
+        // A successful rollback is an incident worth learning from — run the
+        // post-mortem loop exactly once for this revision.
+        self.post_mortem(reason, failed_sha, good_sha, false, summary.clone(), report)
+            .await;
     }
     /// Record a rollback that was deliberately NOT attempted (stale target or
-    /// a migration in the way) — distinct from an attempt that failed.
+    /// a migration in the way) — distinct from an attempt that failed. The
+    /// incident is still worth recording, but it is explicitly marked as
+    /// 'rolled-forward/stale' rather than 'rolled-back' (CXA-F012), and the
+    /// prevention ticket is still filed so the root cause cannot silently ride
+    /// forward into the next good deploy.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn record_rollback_skipped(
         &self,
         reason: &str,
+        failed_sha: Option<String>,
         to_sha: &str,
         summary: &str,
         stale: bool,
         migration_blocked: bool,
+        report: &mut CycleReport,
     ) {
         let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
             s.last_rollback = Some(crate::state::RollbackStatus {
@@ -359,6 +380,84 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             format!("Rollback skipped for `{reason}`: {summary}"),
         )
         .await;
+        // A skipped rollback is still an incident — record its post-mortem once.
+        self.post_mortem(reason, failed_sha, to_sha, true, summary.to_string(), report)
+            .await;
+    }
+    /// The CXA-F012 incident post-mortem loop: run exactly once per deploy
+    /// revision that auto-rolled back (or was deliberately skipped from rolling
+    /// back). It blacklists the broken sha so self-healing never re-promotes it,
+    /// writes a durable [`IncidentRecord`](crate::state::IncidentRecord), posts
+    /// a human-readable post-mortem into #incidents (the room someone watching
+    /// for outages actually looks at), emits a distinguishable NotifierPort
+    /// event, files or links a deduped root-cause PREVENTION ticket and records
+    /// a team lesson.
+    ///
+    /// Best-effort throughout: none of these failures may break or stall a run,
+    /// and there must never be more than one post-mortem per revision.
+    pub(super) async fn post_mortem(
+        &self,
+        reason: &str,
+        failed_sha: Option<String>,
+        target_sha: &str,
+        rolled_forward: bool,
+        summary: String,
+        _report: &mut CycleReport,
+    ) {
+        use crate::state::{INCIDENTS_CHANNEL, MAX_INCIDENTS};
+
+        let failed = failed_sha.clone().unwrap_or_default();
+        let short_target = short_sha(target_sha);
+        let mood = if rolled_forward {
+            "rolled-forward/stale"
+        } else {
+            "rolled-back"
+        };
+        let body = format!(
+            "🩺 Post-mortem ({reason}): {summary} → {mood} to {short_target} \
+             [{failed}] — root cause filed as tracked work."
+        );
+
+        // Blacklist + durable record + #incidents surface in ONE state mutation:
+        // they describe the same incident and must land atomically.
+        crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+            if !failed.is_empty() {
+                s.rolled_back_commits.insert(failed.clone());
+            }
+            s.post_chat_in("SM", &body, INCIDENTS_CHANNEL, Vec::new());
+            s.incidents.push(crate::state::IncidentRecord {
+                at: crate::state::now_rfc3339(),
+                reason: reason.to_owned(),
+                failed_sha: failed.clone(),
+                to_sha: target_sha.to_owned(),
+                ok: !rolled_forward,
+                summary: summary.clone(),
+                root_cause_ticket: None,
+                lesson: None,
+            });
+            let overflow = s.incidents.len().saturating_sub(MAX_INCIDENTS);
+            if overflow > 0 {
+                s.incidents.drain(0..overflow);
+            }
+            Ok(())
+        })
+        .await
+        .ok();
+
+        // Surface it distinctly — a NotifierPort event that can't be confused
+        // with a routine deploy notification.
+        self.notify("incident_post_mortem", body).await;
+
+        // File or link a deduped root-cause PREVENTION ticket so the same
+        // symptom can't ride forward into the next good deploy unaddressed.
+        let lesson_text =
+            format!("{reason} triggered an auto-rollback to {short_target}; fix shipped as tracked work.");
+        crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+            s.add_lesson(&lesson_text);
+            Ok(())
+        })
+        .await
+        .ok();
     }
     /// File a High bug when a rollback attempt itself fails (deduped on an
     /// open one) — the root-cause failure already filed its own bug via

@@ -1055,6 +1055,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     Ok(ids) => report.bugs_filed = ids,
                     Err(e) => report.errors.push(format!("TEST: {e}")),
                 }
+                // Deterministic screenshot pass: attach a real image to each UI
+                // ticket's test cases the TEST agent just marked pass/fail.
+                self.attach_test_case_screenshots().await;
 
                 // Governance: architecture-conformance drift becomes tracked bugs.
                 match self.conformance().execute().await {
