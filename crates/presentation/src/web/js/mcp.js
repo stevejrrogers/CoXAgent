@@ -53,7 +53,12 @@ async function revokeMyToken(label){
 function toggleRoleOverrides(btn){const box=btn.nextElementSibling;const open=box.hasAttribute("hidden");
   if(open){box.removeAttribute("hidden");btn.classList.add("open");}else{box.setAttribute("hidden","");btn.classList.remove("open");}
 }
-async function saveSettings(){const cfg=window._cfg||{engine:{},workflow:{}};cfg.engine=cfg.engine||{};cfg.workflow=cfg.workflow||{};
+async function saveSettings(){
+  // `_cfg` is null when coxagent.json could not be read (COX-B050). Saving
+  // then would PUT a config built from blanks over a file we never parsed,
+  // destroying the settings the form does not even render. Refuse instead.
+  if(!window._cfg){toasty("coxagent.json could not be read — fix the file on disk before saving","err");return;}
+  const cfg=window._cfg;cfg.engine=cfg.engine||{};cfg.workflow=cfg.workflow||{};
   // Track engine config BEFORE changes for comparison
   const origEngine=JSON.stringify(window._cfg?.engine||{});
   
