@@ -366,11 +366,12 @@ mod tests {
 
     /// COX-B045/B050 repro: `host_port` above `u16::MAX` (e.g. `70000`) poisons
     /// the whole `Config` deserialization — one bad field used to discard every
-    /// other setting too, not just the port. The load fails naming the field
-    /// (COX-B043) rather than booting healthy on defaults with the mandatory
-    /// health check silently disabled, and the file survives untouched.
+    /// other setting too, not just the port. Per COX-B043 it must fail the LOAD,
+    /// naming that one field, so no deploy reaches a gate that would pass unprobed
+    /// with health checks silently disabled; and the file must survive untouched
+    /// rather than be rewritten from defaults.
     #[test]
-    fn an_out_of_range_host_port_still_fails_the_gate_and_the_file_survives() {
+    fn an_out_of_range_host_port_fails_the_load_and_the_file_survives() {
         let (_dir, state) = workspace("70000");
 
         let msg = load_config_with_probe(&state).expect_err("70000 is outside u16");
@@ -394,7 +395,8 @@ mod tests {
         let LoadedConfig {
             config,
             host_port_probe,
-        } = load_config_with_probe(&state).expect("null is a representable Option<u16>");
+        } = load_config_with_probe(&state)
+            .expect("an explicit null host_port must not be a config error");
 
         let healed = config.deploy.host_port.expect("a port must be assigned");
         assert_eq!(
@@ -427,7 +429,8 @@ mod tests {
         let LoadedConfig {
             config,
             host_port_probe,
-        } = load_config_with_probe(&state).expect("an absent key is not a corrupt config");
+        } = load_config_with_probe(&state)
+            .expect("a config with no host_port key must not be a config error");
 
         let healed = config.deploy.host_port.expect("a port must be assigned");
         assert_eq!(
