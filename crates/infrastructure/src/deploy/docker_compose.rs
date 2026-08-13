@@ -230,34 +230,48 @@ fn cxb031_store_file(
 
 /// Adopt secrets that CXA-B031-era code persisted under its OLD path-derived key.
 ///
-/// This is the CXA-B036 migration bridge. CXA-B032 changed [`store_file`] from hashing the
-/// canonicalised absolute path (B031) to hashing the compose project name so secret stability tracks
-/// docker's named pgdata volume (`<project>_db`) instead of disk location. The switch left any
-/// ALREADY-DEPLOYED unconfigured app orphaned on its first post-upgrade cycle: PG_PASSWORD sat at
-/// B031's path-derived filename while resolution read only B032's name-derived one, found nothing,
+/// This is the CXA-B036/CXA-B039 migration bridge. CXA-B032 changed [`store_file`] from hashing
+/// the canonicalised absolute path (B031) to hashing the compose project name so secret stability
+/// tracks docker's named pgdata volume (`<project>_db`) instead of disk location. The switch left
+/// any ALREADY-DEPLOYED unconfigured app orphaned on its first post-upgrade cycle: PG_PASSWORD sat
+/// at B031's path-derived filename while resolution read only B032's name-derived one, found nothing,
 /// generated a fresh value — and Postgres kept talking to a pgdata volume initialised with B031's
-/// value, resurrecting DB/admin auth failure on exactly the deployments this ticket exists to
+/// value, resurrecting DB/admin auth failure on exactly the deployments these tickets exist to
 /// stabilise.
 ///
-/// When requested keys are missing at their current (name-derived) location but a legacy store,
-/// computed for THIS SAME work dir under B031's scheme, holds them:
+/// CXA-B036 adopted legacy values ONLY while nothing existed yet at the current (name-derived)
+/// location; if ANY intervening deploy cycle between B032 and B036 had already minted fresh random
+/// values into F(new) (PG_PASSWORD P != V), it bailed out early and never consulted F(old) — so V,
+/// which alone matches initialized pgdata, was lost permanently even though F(old)==V still sat on
+/// disk. That is CXA-B039: adoption must recover V regardless of whether F(new) is empty or holds a
+/// divergent pre-fix value.
 ///
-/// * both derivations are deterministic functions of `work_dir`, so resolving an in-place upgrade
-///   always finds precisely which file B031 wrote for it;
-/// * relocation semantics are preserved — adoption is keyed by an UNRELOCATED checkout's own path,
-///   so it cannot drag a value across hosts; a genuinely relocated app simply falls through fresh.
+/// The rule here is PER-KEY preference for this SAME work dir's legacy store:
+///
+/// * both derivations are deterministic functions of `work_dir`, so an in-place upgrade always finds
+///   precisely which file B031 wrote for it;
+/// * presence of F(old) at TODAY'S canonicalised path is itself proof this checkout was NOT relocated —
+///   adoption therefore cannot drag a value across hosts; a genuinely relocated app simply falls
+///   through fresh, exactly as before;
+/// * when F(new) already holds a DIFFERENT value for the same required key we PREFER V, because V is
+///   the historical anchor that initialised pgdata — P only ever appeared via an intervening buggy-era
+///   cycle regenerating against initialized data;
+/// * this converges in ONE pass and cannot rotate forever: [`resolve_deploy_secrets_in`] writes every
+///   adopted key straight back into F(new) (its modern home), so immediately after the first fixed run
+///   both files hold equal values and stay equal thereafter — nothing ever writes to `cxb031_store_file`
+///   again except permission repair, so there is no divergent writer left to keep them apart.
 fn adopt_legacy_cxb031_secrets(
     secret_root: &std::path::Path,
     work_dir: &std::path::Path,
     stored: &mut std::collections::HashMap<String, String>,
 ) {
-    // Only merge legacy values in when nothing is stored yet — never override an existing value.
-    if !stored.is_empty() {
-        return;
-    }
     let legacy_path = cxb031_store_file(secret_root, work_dir);
     for (k, v) in read_stored_secrets(&legacy_path) {
-        stored.insert(k, v);
+        // Prefer the pre-switch value whenever it differs from / is absent from what resolution just
+        // read at today's name-derived location — recovering exactly what initialised pgdata.
+        if stored.get(&k) != Some(&v) {
+            stored.insert(k.clone(), v);
+        }
     }
 }
 
@@ -1881,6 +1895,58 @@ mod deploy_secret_tests {
             "world-readable store must be remediated even when no fallback persists \
              this pass (CXA-B038)"
         );
+    }
+
+    /// CXA-B039 regression guard: adoption must recover the correct pre-switch value V even when an
+    /// INTERVENING B032-era deploy cycle already wrote a divergent fresh value P into today's
+    /// name-derived store. CXA-B036's migration bailed out entirely once `stored` (read only from the
+    /// name-derived file) was non-empty, so it never consulted F(old)==V; PG_PASSWORD then stayed at
+    /// P permanently against pgdata initialised with V — persistent auth failure.
+    ///
+    /// Stages the exact repro state 'F(new) non-empty wrong + F(old)==correct' and asserts resolution
+    /// recovers V, AND that a second resolve is stable (no churn) — proving recovery converges instead
+    /// of rotating the secret every pass.
+    #[test]
+    fn post_upgrade_cycle_recovers_legacy_value_even_when_new_store_is_non_empty() {
+        let proj = std::env::temp_dir().join(format!("cxab039-proj-{}", std::process::id()));
+        let secret_root =
+            std::env::temp_dir().join(format!("cxab039-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&proj);
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        let _ = std::fs::remove_dir_all(&secret_root);
+
+        // Pre-switch original: only F(old) holds what initialised pgdata.
+        let mut old_store: HashMap<String, String> = HashMap::new();
+        old_store.insert("PG_PASSWORD".to_owned(), "correct-v".to_owned());
+        write_stored_secrets(legacy_key_file(&secret_root, &proj).as_path(), &old_store);
+
+        // Intervening B032-era cycle minted a divergent value into F(new); without CXA-B039 this
+        // would make adoption bail out early and keep `P != V` forever.
+        let mut new_store: HashMap<String, String> = HashMap::new();
+        new_store.insert("PG_PASSWORD".to_owned(), "divergent-p".to_owned());
+        write_stored_secrets(store_file(&secret_root, &proj).as_path(), &new_store);
+
+        let first = resolve_deploy_secrets_in(&proj, &secret_root);
+        let first_pg = first
+            .iter()
+            .find(|(k, _)| k == "PG_PASSWORD")
+            .map(|(_, v)| v.clone())
+            .expect("unconfigured app must resolve a PG_PASSWORD");
+        assert_eq!(
+            first_pg, "correct-v",
+            "must recover the pre-switch value that initialised pgdata over a divergent \
+             intervening-cycle value (CXA-B039)"
+        );
+
+        // Recovery must converge: a second resolve yields the same recovered V, never rotating it.
+        let second = resolve_deploy_secrets_in(&proj, &secret_root);
+        assert_eq!(
+            first, second,
+            "recovered secrets must be stable across cycles"
+        );
+
+        let _ = std::fs::remove_dir_all(&proj);
+        let _ = std::fs::remove_dir_all(&secret_root);
     }
 }
 
