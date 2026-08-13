@@ -876,10 +876,47 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 Ok(_) | Err(_) => {}
             }
 
-            // Regression-test gate: a BUG fix that touches no test is a fix
-            // on faith. Mechanical check over the working diff; one bounded
-            // repair pass to add the missing test.
+            // Phantom-bug guard: a BUG ticket that ends with NO build-affecting
+            // change against an already-green tree is not a reproducible bug —
+            // typically one already fixed by a merged change, or a report that
+            // never matched main. The suite is green here by construction
+            // (every earlier gate already returned on red), so the empty diff
+            // is the genuine "no bug exists on main" signal. Previously the
+            // regression-test gate below demanded a test that "fails without
+            // your fix" — impossible when there is no fix — and the ticket was
+            // re-queued to burn a full investigation every sprint (the
+            // CXA-B002/B003/B004 loop). Close it Rejected with a finding, via the
+            // orchestrator's `System` role (a transition DEV is not allowed to
+            // make), so it leaves `open_bug_candidates` and stays in history.
             let tree = self.working_tree().await;
+            if self.mode == DevMode::Bug
+                && gates::build_relevant(&tree.changed_paths).is_empty()
+            {
+                let msg = format!(
+                    "{id}: not reproducible — DEV ran against a green tree and produced no \
+                     code change. The bug does not reproduce on main (likely already resolved \
+                     by a merged fix). Closing as not-reproducible so the sprint stops \
+                     re-investigating it."
+                );
+                let id_c = id.clone();
+                crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+                    transition(s, &id_c, Role::System, Status::Rejected)
+                        .map_err(|e| PortError::Corrupt(e.to_string()))?;
+                    s.post_comment("SYSTEM", &msg, Some(id_c.to_string()));
+                    s.ticket_journal.remove(&id_c.to_string());
+                    s.cost_holds.remove(&id_c.to_string());
+                    s.cost_approved.remove(&id_c.to_string());
+                    Ok(())
+                })
+                .await?;
+                tracing::info!(
+                    "DEV bug pass: {id} closed not-reproducible (no change on green tree)"
+                );
+                if let Some(p) = &self.phase {
+                    p(None);
+                }
+                return Ok(Some(id));
+            }
             if self.mode == DevMode::Bug
                 && !gates::diff_is_docs_only(&tree)
                 && !gates::diff_touches_tests(&tree)
