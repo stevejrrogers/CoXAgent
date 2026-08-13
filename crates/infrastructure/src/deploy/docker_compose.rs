@@ -17,6 +17,30 @@ const COMPOSE_FILES: &[&str] = &[
 ];
 const DEPLOY_TIMEOUT: Duration = Duration::from_secs(900);
 
+/// Ephemeral, verification-only secrets fed to throwaway compose commands so
+/// `${VAR:?}` interpolations (COX-C012) resolve during an automated build or
+/// deploy without committing real credentials or demanding a human-set env var
+/// on every agent cycle.
+///
+/// These mirror the values deploy_smoke uses; they are never written to config
+/// and only ever reach command invocations the caller owns and tears down.
+/// PG_PASSWORD / COXAGENT_ADMIN_PASSWORD are both required by the root
+/// docker-compose.yml — without them `up` dies at interpolation (the CXA-B010
+/// symptom). Every site that runs compose against such a file must seed these,
+/// so they live here as ONE source shared by [`DockerComposeDeploy::deploy`]
+/// (the initial `up` plus its eviction retry) and [`compose_build_check`].
+const VERIFY_SECRETS: &[(&str, &str)] = &[
+    ("PG_PASSWORD", "ci-verify-pg"),
+    ("COXAGENT_ADMIN_PASSWORD", "ci-verify-admin"),
+];
+
+/// Seed every pair in [`VERIFY_SECRETS`] onto `cmd`.
+fn seed_verify_secrets(cmd: &mut tokio::process::Command) {
+    for (key, value) in VERIFY_SECRETS {
+        cmd.env(key, value);
+    }
+}
+
 /// Names of currently-running compose services (best-effort; empty on error).
 /// Pull the host port out of a compose bind error like
 /// `Bind for 0.0.0.0:8100 failed: port is already allocated`.
@@ -635,9 +659,14 @@ impl DeployPort for DockerComposeDeploy {
             .arg("up")
             .arg("-d")
             .arg("--build")
+            // Secret-bearing compose files use `${VAR:?}` (COX-C012) and fail
+            // interpolation without a value; seed ephemeral verification-only
+            // ones so an automated deploy of this repo survives its own compose
+            // file's required env sections (CXA-B010).
             .current_dir(work_dir)
             .stdin(std::process::Stdio::null())
             .kill_on_drop(true);
+        seed_verify_secrets(&mut cmd);
 
         let mut output = tokio::time::timeout(DEPLOY_TIMEOUT, cmd.output())
             .await
@@ -695,9 +724,12 @@ impl DeployPort for DockerComposeDeploy {
             let mut retry = Command::new("docker");
             retry
                 .args(["compose", "-p", &proj, "up", "-d", "--build"])
+                // Same ephemeral secrets as the initial `up` — a port-eviction
+                // retry re-runs the same interpolation (CXA-B010).
                 .current_dir(work_dir)
                 .stdin(std::process::Stdio::null())
                 .kill_on_drop(true);
+            seed_verify_secrets(&mut retry);
             output = tokio::time::timeout(DEPLOY_TIMEOUT, retry.output())
                 .await
                 .map_err(|_| PortError::Backend("docker compose timed out".to_owned()))?
@@ -779,6 +811,34 @@ mod tests {
             !evictable_project("someone-elses-stack"),
             "foreign project protected"
         );
+    }
+
+    /// Regression guard for CXA-B010: every site that runs compose against this
+    /// repo's secret-bearing docker-compose.yml must seed PG_PASSWORD and
+    /// COXAGENT_ADMIN_PASSWORD with valid, non-blank values. If either key is
+    /// dropped or emptied, `up` dies at interpolation again with exactly the
+    /// CXA-B010 symptom — so assert both keys are present and usable.
+    #[test]
+    fn verify_secrets_cover_both_required_compose_vars() {
+        let keys: Vec<&str> = VERIFY_SECRETS.iter().map(|(k, _)| *k).collect();
+        for required in ["PG_PASSWORD", "COXAGENT_ADMIN_PASSWORD"] {
+            assert!(
+                keys.contains(&required),
+                "{required} must be seeded on compose commands (CXA-B010)"
+            );
+        }
+        for (key, value) in VERIFY_SECRETS {
+            assert!(
+                !value.trim().is_empty(),
+                "seed value for {key} must not be blank"
+            );
+            assert!(
+                !value.chars().any(char::is_whitespace),
+                "seed value for {key} must not contain whitespace — it feeds YAML \
+                 and a DSN URL"
+            );
+        }
+        assert_eq!(keys.len(), 2, "exactly the two required secrets expected");
     }
 
     /// AC (COX-F005): a health endpoint that's unreachable (nothing
@@ -883,22 +943,17 @@ async fn compose_build_check(
     // eagerly (COX-C012 uses ${VAR:?} so real deployments fail fast rather than
     // boot with a known default). A `build` still interpolates those env sections,
     // so without values this cross-target check dies at interpolation before it can
-    // verify anything on every secret-bearing compose file. These are ephemeral
-    // verification-only values passed to one throwaway build command — never written
-    // to config or used to start services — mirroring deploy_smoke.rs.
-    let out = tokio::time::timeout(
-        DEPLOY_TIMEOUT,
-        Command::new("docker")
-            .args(["compose", "-p", &proj, "build"])
-            .current_dir(work_dir)
-            .env("PG_PASSWORD", "ci-smoke")
-            .env("COXAGENT_ADMIN_PASSWORD", "ci-smoke")
-            .stdin(std::process::Stdio::null())
-            .output(),
-    )
-    .await
-    .ok()?
-    .ok()?;
+    // verify anything on every secret-bearing compose file. Seed the same ephemeral
+    // verification-only values the deploy path and deploy_smoke use; see VERIFY_SECRETS
+    // for why these never become real credentials.
+    let mut build = Command::new("docker");
+    build.args(["compose", "-p", &proj, "build"]);
+    build.current_dir(work_dir);
+    seed_verify_secrets(&mut build);
+    let out = tokio::time::timeout(DEPLOY_TIMEOUT, build.output())
+        .await
+        .ok()?
+        .ok()?;
     if out.status.success() {
         return Some(CrossCheck {
             available: true,
