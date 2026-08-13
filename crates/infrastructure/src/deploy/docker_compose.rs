@@ -258,21 +258,41 @@ fn cxb031_store_file(
 ///   cycle regenerating against initialized data;
 /// * this converges in ONE pass and cannot rotate forever: [`resolve_deploy_secrets_in`] writes every
 ///   adopted key straight back into F(new) (its modern home), so immediately after the first fixed run
-///   both files hold equal values and stay equal thereafter — nothing ever writes to `cxb031_store_file`
-///   again except permission repair, so there is no divergent writer left to keep them apart.
+///   both files hold equal values and stay equal thereafter;
+/// * once converged F(old) becomes a LIABILITY (CXA-B042): while it lingered it was consulted on EVERY
+///   pass with per-key preference over F(new), silently resurrecting stale V whenever an admin deleted
+///   only F(new) to force rotation — an indefinite override with no completion boundary. So once every
+///   legacy key matches what resolution persists, this function EXPIRES (`remove`s) `cxb031_store_file`,
+///   leaving nothing left to resurrect — letting legitimate rotation of compromised credentials stick.
 fn adopt_legacy_cxb031_secrets(
     secret_root: &std::path::Path,
     work_dir: &std::path::Path,
     stored: &mut std::collections::HashMap<String, String>,
 ) {
     let legacy_path = cxb031_store_file(secret_root, work_dir);
-    for (k, v) in read_stored_secrets(&legacy_path) {
+    let legacy = read_stored_secrets(&legacy_path);
+    for (k, v) in &legacy {
         // Prefer the pre-switch value whenever it differs from / is absent from what resolution just
         // read at today's name-derived location — recovering exactly what initialised pgdata.
-        if stored.get(&k) != Some(&v) {
-            stored.insert(k.clone(), v);
+        if stored.get(k) != Some(v) {
+            stored.insert(k.clone(), v.clone());
         }
     }
+
+    // CXA-B042 completion boundary: once every key present in F(old) now matches what resolution will
+    // persist into F(new), adoption has nothing left to contribute forever — so expire F(old). While it
+    // lingered it was an indefinite override: resolving preferred stale V over F(new) on every pass, so an
+    // admin who deleted ONLY F(new) to force rotation had V resurrected each cycle with no way to outvote.
+    if !legacy.is_empty() && legacy.iter().all(|(k, v)| stored.get(k) == Some(v)) {
+        expire_legacy_store(&cxb031_store_file(secret_root, work_dir));
+    }
+}
+
+/// CXA-B042: remove an already-converged legacy store file from disk — best-effort like any other IO
+/// here. Its content lives on inside modern ([`store_file`]), which adoption copied into before this runs;
+/// deleting ensures no stale source remains that could override a later legitimate secret rotation.
+fn expire_legacy_store(path: &std::path::Path) {
+    let _ = std::fs::remove_file(path);
 }
 
 /// Read a project's previously generated secrets back out of the out-of-tree
@@ -1538,10 +1558,8 @@ mod deploy_secret_tests {
     #[cfg(unix)]
     fn mode_for_test(path: &std::path::Path) -> u32 {
         use std::os::unix::fs::PermissionsExt as _;
-        std::fs::metadata(path)
-            .map_or(0, |m| m.permissions().mode() & 0o777)
+        std::fs::metadata(path).map_or(0, |m| m.permissions().mode() & 0o777)
     }
-
 
     /// The core decision rule (CXA-B017): a key configured by the operator —
     /// via process env OR a project-dir `.env` — is left alone (never overridden
@@ -1943,6 +1961,64 @@ mod deploy_secret_tests {
         assert_eq!(
             first, second,
             "recovered secrets must be stable across cycles"
+        );
+
+        let _ = std::fs::remove_dir_all(&proj);
+        let _ = std::fs::remove_dir_all(&secret_root);
+    }
+
+    /// CXA-B042 regression guard: once adoption converges (every key in F(old) matches what resolution
+    /// persists into F(new)), the legacy store must be EXPIRED as a durable completion boundary. Without
+    /// that, an admin who later deletes ONLY F(new) to force rotation of compromised credentials would
+    /// have the stale V resurrected from F(old) on every subsequent cycle, defeating rotation forever.
+    #[test]
+    fn after_migration_converges_deleting_the_modern_store_regenerates_and_survives() {
+        let proj = std::env::temp_dir().join(format!("cxab042-proj-{}", std::process::id()));
+        let secret_root =
+            std::env::temp_dir().join(format!("cxab042-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&proj);
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        let _ = std::fs::remove_dir_all(&secret_root);
+
+        // Pre-switch state: only F(old) holds what initialised pgdata.
+        let mut old_store: HashMap<String, String> = HashMap::new();
+        old_store.insert("PG_PASSWORD".to_owned(), "stale-legacy-password".to_owned());
+        write_stored_secrets(legacy_key_file(&secret_root, &proj).as_path(), &old_store);
+
+        // First resolve adopts V and expires F(old), leaving only the modern store.
+        let first = resolve_deploy_secrets_in(&proj, &secret_root);
+        assert_eq!(
+            first
+                .iter()
+                .find(|(k, _)| k == "PG_PASSWORD")
+                .map(|(_, v)| v.clone())
+                .as_deref(),
+            Some("stale-legacy-password"),
+            "adoption must still recover the legacy value on the first pass"
+        );
+        assert!(
+            !legacy_key_file(&secret_root, &proj).exists(),
+            "converged legacy store must be expired as a completion boundary (CXA-B042)"
+        );
+
+        // Admin deletes ONLY the modern store to force regeneration of a compromised credential.
+        std::fs::remove_file(store_file(&secret_root, &proj)).expect("rm modern store");
+
+        // Second resolve must NOT resurrect stale V — there is no legacy file left to revive it —
+        // so PG_PASSWORD regenerates and persists for good.
+        let second = resolve_deploy_secrets_in(&proj, &secret_root);
+        assert_ne!(
+            second
+                .iter()
+                .find(|(k, _)| k == "PG_PASSWORD")
+                .map(|(_, v)| v.clone())
+                .as_deref(),
+            Some("stale-legacy-password"),
+            "after expiry a rotation must not be reverted by stale legacy values"
+        );
+        assert!(
+            store_file(&secret_root, &proj).exists(),
+            "regenerated secret must persist into the modern store"
         );
 
         let _ = std::fs::remove_dir_all(&proj);
