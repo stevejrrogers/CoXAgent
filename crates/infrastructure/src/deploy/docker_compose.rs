@@ -100,7 +100,11 @@ fn resolve_deploy_secrets_in(
     if missing.is_empty() {
         return Vec::new();
     }
+    // CXA-B036 migration: an already-deployed pre-CXA-B032 app stored its fallback secrets under a
+    // path-derived filename; adopt them here so the first post-upgrade cycle reuses exactly what
+    // initialised pgdata instead of regenerating and resurrecting DB/admin auth failure.
     let mut stored = read_stored_secrets(&store_file(secret_root, work_dir));
+    adopt_legacy_cxb031_secrets(secret_root, work_dir, &mut stored);
     let mut resolved: Vec<(String, String)> = Vec::with_capacity(missing.len());
     for key in missing {
         let value = match stored.get(key) {
@@ -190,6 +194,63 @@ fn store_file(secret_root: &std::path::Path, work_dir: &std::path::Path) -> std:
     // while still distinguishing otherwise-unrelated projects.
     hasher.update(compose_project_name(work_dir).as_bytes());
     secret_root.join(format!("{:x}.env", hasher.finalize()))
+}
+
+/// Filename a project's secrets lived under BEFORE CXA-B032 changed key derivation.
+///
+/// The predecessor ([CXA-B031]) named each store file after SHA-256 of the project's canonicalised
+/// absolute path; this reconstruction replicates it byte-for-byte — including its
+/// canonicalise-with-path-fallback on failure — so an ALREADY-DEPLOYED unconfigured app whose
+/// PG_PASSWORD sits at that old filename can still be located and adopted during the post-upgrade
+/// window ([`adopt_legacy_cxb031_secrets`]). It is only a read/migration source — never where new
+/// secrets get written.
+fn cxb031_store_file(
+    secret_root: &std::path::Path,
+    work_dir: &std::path::Path,
+) -> std::path::PathBuf {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(
+        work_dir
+            .canonicalize()
+            .unwrap_or_else(|_| work_dir.to_path_buf())
+            .to_string_lossy()
+            .as_bytes(),
+    );
+    secret_root.join(format!("{:x}.env", hasher.finalize()))
+}
+
+/// Adopt secrets that CXA-B031-era code persisted under its OLD path-derived key.
+///
+/// This is the CXA-B036 migration bridge. CXA-B032 changed [`store_file`] from hashing the
+/// canonicalised absolute path (B031) to hashing the compose project name so secret stability tracks
+/// docker's named pgdata volume (`<project>_db`) instead of disk location. The switch left any
+/// ALREADY-DEPLOYED unconfigured app orphaned on its first post-upgrade cycle: PG_PASSWORD sat at
+/// B031's path-derived filename while resolution read only B032's name-derived one, found nothing,
+/// generated a fresh value — and Postgres kept talking to a pgdata volume initialised with B031's
+/// value, resurrecting DB/admin auth failure on exactly the deployments this ticket exists to
+/// stabilise.
+///
+/// When requested keys are missing at their current (name-derived) location but a legacy store,
+/// computed for THIS SAME work dir under B031's scheme, holds them:
+///
+/// * both derivations are deterministic functions of `work_dir`, so resolving an in-place upgrade
+///   always finds precisely which file B031 wrote for it;
+/// * relocation semantics are preserved — adoption is keyed by an UNRELOCATED checkout's own path,
+///   so it cannot drag a value across hosts; a genuinely relocated app simply falls through fresh.
+fn adopt_legacy_cxb031_secrets(
+    secret_root: &std::path::Path,
+    work_dir: &std::path::Path,
+    stored: &mut std::collections::HashMap<String, String>,
+) {
+    // Only merge legacy values in when nothing is stored yet — never override an existing value.
+    if !stored.is_empty() {
+        return;
+    }
+    let legacy_path = cxb031_store_file(secret_root, work_dir);
+    for (k, v) in read_stored_secrets(&legacy_path) {
+        stored.insert(k, v);
+    }
 }
 
 /// Read a project's previously generated secrets back out of the out-of-tree
@@ -1417,10 +1478,11 @@ mod cross_check_tests {
 #[cfg(test)]
 mod deploy_secret_tests {
     use super::{
-        compose_project_name, missing_required_secrets, random_secret, read_dot_env,
-        resolve_deploy_secrets_in, store_file,
+        compose_project_name, cxb031_store_file as legacy_key_file,
+        missing_required_secrets, random_secret, read_dot_env,
+        resolve_deploy_secrets_in, store_file, write_stored_secrets,
     };
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
     fn set(keys: &[&str]) -> HashSet<String> {
         keys.iter().map(|k| (*k).to_owned()).collect()
@@ -1674,6 +1736,53 @@ mod deploy_secret_tests {
         for d in [&root_a, &root_b] {
             let _ = std::fs::remove_dir_all(d);
         }
+        let _ = std::fs::remove_dir_all(&secret_root);
+    }
+
+    /// CXA-B036 regression guard: an app deployed BEFORE CXA-B032 switched key derivation has its
+    /// fallback secrets persisted under the OLD path-derived filename (SHA of canonicalised abs
+    /// path); Postgres already initialised its pgdata volume with those values. On the FIRST
+    /// post-upgrade cycle, resolution reads only the NEW name-derived filename, finds nothing there,
+    /// and would regenerate a fresh random PG_PASSWORD — resurrecting DB/admin auth failure against
+    /// already-initialized pgdata.
+    ///
+    /// Simulates that exact upgraded state: ONLY a legacy path-keyed store exists (nothing at the
+    /// current name-keyed location). Resolution must adopt B031's persisted value rather than mint a
+    /// new one — otherwise this assertion fails on exactly what migrate_legacy prevents.
+    #[test]
+    fn first_post_upgrade_cycle_reuses_the_pre_cxb032_persisted_value() {
+        let proj = std::env::temp_dir().join(format!("cxab036-proj-{}", std::process::id()));
+        let secret_root =
+            std::env::temp_dir().join(format!("cxab036-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&proj);
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        let _ = std::fs::remove_dir_all(&secret_root);
+
+        // B031-era on-disk state: only the LEGACY path-derived file holds a value that pgdata was
+        // initialized with; nothing exists at B032's current (name-derived) filename yet.
+        let mut pre_upgrade: HashMap<String, String> = HashMap::new();
+        pre_upgrade.insert(
+            "PG_PASSWORD".to_owned(),
+            "stable-b031-password".to_owned(),
+        );
+        write_stored_secrets(legacy_key_file(&secret_root, &proj).as_path(), &pre_upgrade);
+
+        // Post-upgrade resolve must pick up B031's value instead of generating fresh credentials.
+        // Without migration (the bug), PG_PASSWORD here would be a brand-new random secret != below.
+        let resolved = resolve_deploy_secrets_in(&proj, &secret_root);
+
+        let adopted_pg = resolved
+            .iter()
+            .find(|(k, _)| k == "PG_PASSWORD")
+            .map(|(_, v)| v.clone())
+            .expect("unconfigured app must resolve a PG_PASSWORD");
+        assert_eq!(
+            adopted_pg, "stable-b031-password",
+            "first post-upgrade deploy must reuse the pre-CXA-B032 persisted PG_PASSWORD \
+             instead of regenerating against already-initialized pgdata (CXA-B036)"
+        );
+
+        let _ = std::fs::remove_dir_all(&proj);
         let _ = std::fs::remove_dir_all(&secret_root);
     }
 }
