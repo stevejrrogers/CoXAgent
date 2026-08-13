@@ -75,15 +75,43 @@ fn missing_required_secrets(
         .collect()
 }
 
+/// Stability rule (CXA-B031): once generated for a project, a fallback secret
+/// never changes across deploy cycles. Operator-configured values (process env
+/// or project-dir `.env`) are honoured verbatim and never overridden; only keys
+/// missing from BOTH get a value, reused from this project's out-of-tree store
+/// or freshly generated and persisted there - so an unconfigured app keeps one
+/// stable superuser password instead of rotating it every pass (which breaks
+/// Postgres auth and admin login once pgdata is initialized). Stored OUTSIDE any
+/// project source tree (`deploy_secrets_root`), never written into the work dir's
+/// `.env`, preserving CXA-B028's no-secret-in-source guarantee.
 fn resolve_deploy_secrets(work_dir: &std::path::Path) -> Vec<(String, String)> {
+    resolve_deploy_secrets_in(work_dir, &deploy_secrets_root())
+}
+
+fn resolve_deploy_secrets_in(
+    work_dir: &std::path::Path,
+    secret_root: &std::path::Path,
+) -> Vec<(String, String)> {
     let dot_env = read_dot_env(&work_dir.join(".env"));
-    missing_required_secrets(
+    let missing = missing_required_secrets(
         |key| std::env::var(key).is_ok_and(|v| !v.trim().is_empty()),
         &dot_env,
-    )
-    .into_iter()
-    .map(|key| (key.to_owned(), random_secret()))
-    .collect()
+    );
+    if missing.is_empty() {
+        return Vec::new();
+    }
+    let mut stored = read_stored_secrets(&store_file(secret_root, work_dir));
+    let mut resolved: Vec<(String, String)> = Vec::with_capacity(missing.len());
+    for key in missing {
+        let value = match stored.get(key) {
+            Some(existing) => existing.clone(),
+            None => random_secret(),
+        };
+        stored.insert(key.to_owned(), value.clone());
+        resolved.push((key.to_owned(), value));
+    }
+    write_stored_secrets(&store_file(secret_root, work_dir), &stored);
+    resolved
 }
 
 fn seed_deploy_secrets(cmd: &mut tokio::process::Command, secrets: &[(String, String)]) {
@@ -121,6 +149,117 @@ fn read_dot_env(path: &std::path::Path) -> std::collections::HashSet<String> {
         })
         .collect()
 }
+
+/// Root directory for durable per-project deploy-secret state (CXA-B031).
+///
+/// Always OUTSIDE any project's source tree - never inside `<project>/codebase`
+/// where agents read diffs from and commit from (CXA-B028). Defaults to a
+/// per-user data dir, overridable with `COXAGENT_DEPLOY_SECRETS_DIR` so tests
+/// and sandboxes can point it at an isolated location.
+fn deploy_secrets_root() -> std::path::PathBuf {
+    if let Some(dir) = std::env::var_os("COXAGENT_DEPLOY_SECRETS_DIR") {
+        return std::path::PathBuf::from(dir);
+    }
+    match std::env::var_os("HOME") {
+        Some(home) => std::path::PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join("coxagent")
+            .join("deploy-secrets"),
+        None => std::env::temp_dir().join("coxagent-deploy-secrets"),
+    }
+}
+
+/// Path of one project's stored secrets file: a stable hash of the project's
+/// canonicalised work dir, so the same deployed app resolves to the same file
+/// across cycles but two different projects never collide. The digest is only a
+/// KEY - the values it points at are still unguessable random secrets.
+fn store_file(secret_root: &std::path::Path, work_dir: &std::path::Path) -> std::path::PathBuf {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(
+        work_dir
+            .canonicalize()
+            .unwrap_or_else(|_| work_dir.to_path_buf())
+            .to_string_lossy()
+            .as_bytes(),
+    );
+    secret_root.join(format!("{:x}.env", hasher.finalize()))
+}
+
+/// Read a project's previously generated secrets back out of the out-of-tree
+/// store as `KEY -> value`. Absent or unreadable store = nothing persisted yet.
+fn read_stored_secrets(path: &std::path::Path) -> std::collections::HashMap<String, String> {
+    use std::{collections::HashMap, fs};
+    let Ok(contents) = fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    contents
+        .lines()
+        .filter_map(|raw| {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') {
+                return None;
+            }
+            let (k, v) = line.split_once('=')?;
+            let key = k.trim().to_owned();
+            (!key.is_empty() && !v.is_empty()).then_some((key, v.to_owned()))
+        })
+        .collect()
+}
+
+/// Persist a project's generated secrets into the out-of-tree store so later
+/// deploy cycles reuse them ([resolve_deploy_secrets_in]). Writes atomically
+/// via a temp sibling + rename so a crash mid-write can never leave a half-
+/// written secret file that reads back as empty, and hardens permissions to
+/// owner-only since these are credentials at rest.
+fn write_stored_secrets(
+    path: &std::path::Path,
+    secrets: &std::collections::HashMap<String, String>,
+) {
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let mut body = String::new();
+    for (k, v) in secrets {
+        body.push_str(k);
+        body.push('=');
+        body.push_str(v);
+        body.push('\n');
+    }
+    // Temp sibling + rename keeps readers from ever observing partial content.
+    let tmp = parent.join(format!(
+        "{}.tmp-{}",
+        path.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        std::process::id()
+    ));
+    if std::fs::write(&tmp, body.as_bytes()).is_err() {
+        return;
+    }
+    set_secret_perms(&tmp);
+    // Best-effort store: never fail a deploy because we could not persist;
+    // drop the temp so no stray secret file is left behind.
+    if std::fs::rename(&tmp, path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// Hardens an on-disk secret file to owner-only once written; best-effort so a
+/// filesystem that cannot represent modes never fails a deploy.
+#[cfg(unix)]
+fn set_secret_perms(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    if let Ok(meta) = std::fs::metadata(path) {
+        meta.permissions().set_mode(0o600);
+    }
+}
+#[cfg(not(unix))]
+fn set_secret_perms(_path: &std::path::Path) {}
 
 /// Pull the host port out of a compose bind error like
 /// `Bind for 0.0.0.0:8100 failed: port is already allocated`.
@@ -1272,7 +1411,10 @@ mod cross_check_tests {
 /// generated superuser credentials into the agent-managed source tree).
 #[cfg(test)]
 mod deploy_secret_tests {
-    use super::{missing_required_secrets, random_secret, read_dot_env, resolve_deploy_secrets};
+    use super::{
+        missing_required_secrets, random_secret, read_dot_env, resolve_deploy_secrets_in,
+        store_file,
+    };
     use std::collections::HashSet;
 
     fn set(keys: &[&str]) -> HashSet<String> {
@@ -1400,23 +1542,76 @@ mod deploy_secret_tests {
     #[test]
     fn resolving_deploy_secrets_never_persists_them_to_work_dir_dot_env() {
         let dir = std::env::temp_dir().join(format!("cxab028-t-{}", std::process::id()));
+        let store_root = std::env::temp_dir().join(format!("cxab028-store-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&store_root);
         std::fs::create_dir_all(&dir).expect("mkdir");
 
-        // Resolve against a bare work dir (no `.env`, nothing pre-written).
-        resolve_deploy_secrets(&dir);
+        // Resolve against a bare work dir (no `.env`, nothing pre-written), with an
+        // isolated out-of-tree store root so tests never touch a real HOME store.
+        resolve_deploy_secrets_in(&dir, &store_root);
 
-        let env_path = dir.join(".env");
-        // Persisting generated secrets would materialise a `.env` here; its
-        // absence after resolution proves resolution wrote nothing back out.
+        // Persisting generated secrets into the source tree would materialise a
+        // `.env` here; its absence proves we wrote nothing back into the work dir.
         assert!(
-            !env_path.exists(),
-            "resolving must not create {0} / write secrets into {1}/codebase/.env \
-             where agents read diffs from and commit from (CXA-B028)",
-            env_path.display(),
-            "<project>"
+            !dir.join(".env").exists(),
+            "resolving must not create <project>/codebase/.env where agents read diffs from \
+             and commit from (CXA-B028)"
         );
         let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&store_root);
+    }
+
+    /// CXA-B031 regression guard: generated fallback secrets are STABLE across
+    /// deploy cycles of the SAME project. The original bug regenerated a fresh
+    /// random secret on every pass: Postgres initialised pgdata with cycle N's
+    /// value, then cycle N+1 connected with a regenerated one, breaking DB auth
+    /// and admin login. Re-resolving against the same out-of-tree store must now
+    /// yield identical values for one project while different projects stay distinct.
+    #[test]
+    fn generated_secrets_are_stable_across_cycles_for_the_same_project() {
+        let proj_a = std::env::temp_dir().join(format!("cxab031-a-{}", std::process::id()));
+        let proj_b = std::env::temp_dir().join(format!("cxab031-b-{}", std::process::id()));
+        let secret_root =
+            std::env::temp_dir().join(format!("cxab031-store-{}", std::process::id()));
+
+        for d in [&proj_a, &proj_b] {
+            let _ = std::fs::remove_dir_all(d);
+            std::fs::create_dir_all(d).expect("mkdir");
+        }
+        let _ = std::fs::remove_dir_all(&secret_root);
+
+        // Two deploy cycles of the same unconfigured project must agree exactly:
+        // this is the whole point of CXA-B031 (no per-cycle rotation).
+        let first = resolve_deploy_secrets_in(&proj_a, &secret_root);
+        let second = resolve_deploy_secrets_in(&proj_a, &secret_root);
+        assert_eq!(
+            first, second,
+            "a project's generated secrets must be stable across deploy cycles (CXA-B031)"
+        );
+
+        if !first.is_empty() {
+            // Values live OUT of tree: stored under secret_root keyed per-project.
+            assert!(
+                !store_file(&secret_root, &proj_a).starts_with(&proj_a),
+                "secrets must be stored outside the project source tree"
+            );
+            assert!(
+                store_file(&secret_root, &proj_a).exists(),
+                "generated secret must be persisted out of tree"
+            );
+            // A different project resolves to a different store file (isolation).
+            assert_ne!(
+                store_file(&secret_root, &proj_a),
+                store_file(&secret_root, &proj_b),
+                "distinct projects must not share a secret store file"
+            );
+        }
+
+        for d in [&proj_a, &proj_b] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+        let _ = std::fs::remove_dir_all(&secret_root);
     }
 }
 
