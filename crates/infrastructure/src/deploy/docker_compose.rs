@@ -17,7 +17,111 @@ const COMPOSE_FILES: &[&str] = &[
 ];
 const DEPLOY_TIMEOUT: Duration = Duration::from_secs(900);
 
-/// Names of currently-running compose services (best-effort; empty on error).
+/// Keys every secret-bearing compose file this adapter can meet requires via
+/// `${VAR:?}` interpolation (COX-C012): the root docker-compose.yml needs both
+/// or `up` dies before starting anything — the CXA-B010 symptom.
+const REQUIRED_SECRET_KEYS: &[&str] = &["PG_PASSWORD", "COXAGENT_ADMIN_PASSWORD"];
+
+/// A cryptographically-random 32-char fallback secret. Used ONLY when an
+/// operator configured no value anywhere — never a baked constant, so no reader
+/// of source can predict a deployment's superuser password (CXA-B017). The
+/// alphabet drops look-alikes (0/O, 1/l/I) and any character that would break
+/// YAML or a DSN URL.
+fn random_secret() -> String {
+    use rand::Rng;
+    const CHARSET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+    let mut rng = rand::thread_rng();
+    let mut out = String::with_capacity(32);
+    for _ in 0..32 {
+        let idx = rng.gen_range(0..CHARSET.len());
+        out.push(CHARSET[idx] as char);
+    }
+    out
+}
+
+/// Resolve which required secrets must be injected for one logical deploy pass.
+///
+/// Security rule (CXA-B017): an app-driven deploy must NEVER bake a public,
+/// source-published credential into long-running services — anyone who read
+/// `ci-verify-pg` / `ci-verify-admin` could log in as super on any deployment —
+/// and must NEVER clobber a real secret an operator configured.
+///
+/// Compose resolves `${VAR:?}` from two sources in precedence order: the
+/// process environment (which every subcommand inherits by default), then a
+/// `.env` file in the compose project dir. Any key already resolvable from
+/// EITHER is left entirely alone — we return nothing for it, so compose uses
+/// the operator's own value and we can never override or poison it. Only keys
+/// missing from BOTH sources get a fresh cryptographically-random fallback so
+/// interpolation still resolves and services start without a known credential.
+///
+/// Computed ONCE per pass so an eviction retry re-runs identical interpolation
+/// against any state the initial `up` already created.
+/// Which required secret keys are NOT provided by the operator and therefore
+/// need a random fallback seed for one deploy pass.
+///
+/// Pure over its inputs so all precedence branches are deterministically
+/// unit-testable: `provided_by_env` answers "does this process already carry
+/// `key` (non-blank)?" and `dot_env_keys` is whatever an operator's project-dir
+/// `.env` configured. A key resolvable from EITHER source is left alone — we
+/// never override or poison it; only keys missing from both get a fallback.
+fn missing_required_secrets(
+    provided_by_env: impl Fn(&str) -> bool,
+    dot_env_keys: &std::collections::HashSet<String>,
+) -> Vec<&'static str> {
+    REQUIRED_SECRET_KEYS
+        .iter()
+        .copied()
+        .filter(|key| !provided_by_env(key) && !dot_env_keys.contains(*key))
+        .collect()
+}
+
+fn resolve_deploy_secrets(work_dir: &std::path::Path) -> Vec<(String, String)> {
+    let dot_env = read_dot_env(&work_dir.join(".env"));
+    missing_required_secrets(
+        |key| std::env::var(key).is_ok_and(|v| !v.trim().is_empty()),
+        &dot_env,
+    )
+    .into_iter()
+    .map(|key| (key.to_owned(), random_secret()))
+    .collect()
+}
+
+fn seed_deploy_secrets(cmd: &mut tokio::process::Command, secrets: &[(String, String)]) {
+    for (key, value) in secrets {
+        cmd.env(key.as_str(), value.as_str());
+    }
+}
+
+/// Parse the KEY=VALUE assignments out of an operator-authored `.env` file
+/// (the project-dir file docker compose reads automatically for interpolation).
+/// Returns only which keys are assigned a non-blank value — we need presence,
+/// never the secret itself. Mirrors compose's loose grammar closely enough to
+/// avoid clobbering anything an operator actually configured: blank lines and
+/// `#` comments are skipped; an optional leading `export` is tolerated; values
+/// are split on the FIRST `=` so passwords containing `=` survive intact.
+fn read_dot_env(path: &std::path::Path) -> std::collections::HashSet<String> {
+    use std::collections::HashSet;
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return HashSet::new();
+    };
+    contents
+        .lines()
+        .filter_map(|raw| {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') {
+                return None;
+            }
+            let line = line.strip_prefix("export ").unwrap_or(line);
+            let (k, v) = line.split_once('=')?;
+            let key = k.trim().to_owned();
+            if key.is_empty() || v.trim().is_empty() {
+                return None;
+            }
+            Some(key)
+        })
+        .collect()
+}
+
 /// Pull the host port out of a compose bind error like
 /// `Bind for 0.0.0.0:8100 failed: port is already allocated`.
 fn extract_bind_port(err: &str) -> Option<String> {
@@ -627,6 +731,15 @@ impl DeployPort for DockerComposeDeploy {
             .output()
             .await;
 
+        // Secret-bearing compose files use `${VAR:?}` (COX-C012) and fail
+        // interpolation without a value. Resolve them ONCE for this deploy pass:
+        // an operator-supplied PG_PASSWORD / COXAGENT_ADMIN_PASSWORD (process env
+        // or a project-dir `.env`) is honoured verbatim, and only when none was
+        // configured anywhere does a fresh random value get used — so services
+        // still start but no public known credential ever boots them (CXA-B017 —
+        // never bake source-published constants into real deploys).
+        let secrets = resolve_deploy_secrets(work_dir);
+
         // Compose builds are as heavy as test suites — same host-wide gate.
         let _slot = crate::proc::heavy_slot().await;
         let mut cmd = Command::new("docker");
@@ -638,6 +751,7 @@ impl DeployPort for DockerComposeDeploy {
             .current_dir(work_dir)
             .stdin(std::process::Stdio::null())
             .kill_on_drop(true);
+        seed_deploy_secrets(&mut cmd, &secrets);
 
         let mut output = tokio::time::timeout(DEPLOY_TIMEOUT, cmd.output())
             .await
@@ -698,6 +812,7 @@ impl DeployPort for DockerComposeDeploy {
                 .current_dir(work_dir)
                 .stdin(std::process::Stdio::null())
                 .kill_on_drop(true);
+            seed_deploy_secrets(&mut retry, &secrets);
             output = tokio::time::timeout(DEPLOY_TIMEOUT, retry.output())
                 .await
                 .map_err(|_| PortError::Backend("docker compose timed out".to_owned()))?
@@ -883,22 +998,22 @@ async fn compose_build_check(
     // eagerly (COX-C012 uses ${VAR:?} so real deployments fail fast rather than
     // boot with a known default). A `build` still interpolates those env sections,
     // so without values this cross-target check dies at interpolation before it can
-    // verify anything on every secret-bearing compose file. These are ephemeral
-    // verification-only values passed to one throwaway build command — never written
-    // to config or used to start services — mirroring deploy_smoke.rs.
-    let out = tokio::time::timeout(
-        DEPLOY_TIMEOUT,
-        Command::new("docker")
-            .args(["compose", "-p", &proj, "build"])
-            .current_dir(work_dir)
-            .env("PG_PASSWORD", "ci-smoke")
-            .env("COXAGENT_ADMIN_PASSWORD", "ci-smoke")
-            .stdin(std::process::Stdio::null())
-            .output(),
-    )
-    .await
-    .ok()?
-    .ok()?;
+    // verify anything on every secret-bearing compose file. Seed them via the SAME
+    // honour-generate rule as a real deploy ([`resolve_deploy_secrets`]): an
+    // operator's own value wins, otherwise a fresh random one — never a public
+    // constant baked into source (CXA-B017). These are ephemeral verification-only
+    // values passed to one throwaway build command — never written to config or used
+    // to start services.
+    let secrets = resolve_deploy_secrets(work_dir);
+    let mut build = Command::new("docker");
+    build.args(["compose", "-p", &proj, "build"]);
+    build.current_dir(work_dir);
+    seed_deploy_secrets(&mut build, &secrets);
+    let out = tokio::time::timeout(DEPLOY_TIMEOUT, build.output())
+        .await
+        .ok()?
+        .ok()?;
+
     if out.status.success() {
         return Some(CrossCheck {
             available: true,
@@ -1008,6 +1123,123 @@ mod cross_check_tests {
         );
         assert!(check.errors.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// Regression guard for CXA-B017: an app-driven deploy must NEVER bake a
+/// public, source-published credential into long-running services, and must
+/// honour an operator's own configured secrets rather than clobbering them.
+#[cfg(test)]
+mod deploy_secret_tests {
+    use super::{missing_required_secrets, random_secret, read_dot_env};
+    use std::collections::HashSet;
+
+    fn set(keys: &[&str]) -> HashSet<String> {
+        keys.iter().map(|k| (*k).to_owned()).collect()
+    }
+
+    /// The core decision rule (CXA-B017): a key configured by the operator —
+    /// via process env OR a project-dir `.env` — is left alone (never overridden
+    /// with ours); only a key missing from BOTH sources gets a fallback seed.
+    #[test]
+    fn precedence_honours_process_env_then_dot_env_then_fallback() {
+        // No config anywhere -> both keys need a fallback.
+        assert_eq!(
+            missing_required_secrets(|_| false, &set(&[])),
+            vec!["PG_PASSWORD", "COXAGENT_ADMIN_PASSWORD"]
+        );
+
+        // Process env supplies PG_PASSWORD -> it is not our concern.
+        assert_eq!(
+            missing_required_secrets(|k| k == "PG_PASSWORD", &set(&[])),
+            vec!["COXAGENT_ADMIN_PASSWORD"]
+        );
+
+        // A project-dir `.env` supplies COXAGENT_ADMIN_PASSWORD -> not ours.
+        assert_eq!(
+            missing_required_secrets(|_| false, &set(&["COXAGENT_ADMIN_PASSWORD"])),
+            vec!["PG_PASSWORD"]
+        );
+
+        // Both configured -> nothing to seed at all (no clobbering).
+        assert!(missing_required_secrets(
+            |k| k == "PG_PASSWORD",
+            &set(&["COXAGENT_ADMIN_PASSWORD"]),
+        )
+        .is_empty());
+    }
+
+    /// The strongest guarantee in the ticket: when nothing is configured we
+    /// fall back to a RANDOM secret, never a fixed constant — so no reader of
+    /// source can log in as super on any deployment. Two resolutions differ,
+    /// and neither equals the old public constants.
+    #[test]
+    fn generated_secrets_are_random_never_baked_constants() {
+        let a = random_secret();
+        let b = random_secret();
+        assert_ne!(a, b, "secrets must be unique per call");
+        for s in [&a, &b] {
+            assert_ne!(
+                s.as_str(),
+                "ci-verify-pg",
+                "the old baked PG constant must never come back"
+            );
+            assert_ne!(
+                s.as_str(),
+                "ci-verify-admin",
+                "the old baked admin constant must never come back"
+            );
+            assert_eq!(s.len(), 32, "generated secret length");
+            assert!(
+                !s.chars().any(char::is_whitespace),
+                "secret feeds YAML and a DSN URL — no whitespace"
+            );
+            assert!(
+                !s.contains([':', '@', '"', '\'']),
+                "secret must not break YAML/DSN syntax"
+            );
+        }
+    }
+
+    #[test]
+    fn generated_charset_excludes_similar_lookalikes() {
+        // Excluding 0/O/1/l/I keeps secrets unambiguous when shown to a human;
+        // this also proves we are not using an alphabet that reintroduces the
+        // guessable lowercase-only pattern of the old constants.
+        let sample: String = (0..20).map(|_| random_secret()).collect();
+        for bad in ['0', 'O', '1', 'l', 'I'] {
+            assert!(
+                !sample.contains(bad),
+                "'{bad}' should be absent from charset"
+            );
+        }
+    }
+
+    /// The `.env` parser that decides whether an operator already configured a
+    /// secret in the project dir — it sees every assignment shape compose does,
+    /// ignores comments/blanks/blank values, and never treats prose as config.
+    #[test]
+    fn dot_env_parser_detects_only_real_assignments() {
+        let keys = read_dot_env(std::path::Path::new("/nonexistent/.env"));
+        assert!(keys.is_empty(), "absent file -> no provided keys");
+
+        let dir = std::env::temp_dir().join(format!("dotenv-t-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join(".env");
+        std::fs::write(
+            &path,
+            "# comment\nPG_PASSWORD=a:b@c=\n\nCOXAGENT_ADMIN_PASSWORD=strong!\nexport OTHER_SECRET=x\na\nB=\n",
+        )
+        .expect("write");
+        let keys = read_dot_env(&path);
+        for present in ["PG_PASSWORD", "COXAGENT_ADMIN_PASSWORD", "OTHER_SECRET"] {
+            assert!(keys.contains(present), "{present} should be detected");
+        }
+        // Blank value (`B=`) and valueless (`a`) lines do NOT count as config —
+        // treating them as provided would either fail `${VAR:?}` or boot empty.
+        assert!(!keys.contains("B"), "'B=' is blank — not real config");
+        assert!(!keys.contains("a"), "'a' has no value — not real config");
     }
 }
 
