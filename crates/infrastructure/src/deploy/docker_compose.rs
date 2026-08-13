@@ -92,6 +92,14 @@ fn resolve_deploy_secrets_in(
     work_dir: &std::path::Path,
     secret_root: &std::path::Path,
 ) -> Vec<(String, String)> {
+    // CXA-B038: harden ANY pre-existing off-repo store file to owner-only on every
+    // resolution pass, before deciding whether fallback secrets are even needed.
+    // A <proj>.secrets written world-readable (0644) by a pre-CXA-B033 build carries
+    // live superuser credentials; when all required secrets are supplied externally we
+    // return early below without persisting anything, so that lax-permission file would
+    // otherwise sit world-readable on disk forever. Repairing here remediates it.
+    repair_store_permissions(secret_root, work_dir);
+
     let dot_env = read_dot_env(&work_dir.join(".env"));
     let missing = missing_required_secrets(
         |key| std::env::var(key).is_ok_and(|v| !v.trim().is_empty()),
@@ -320,12 +328,29 @@ fn write_stored_secrets(
 #[cfg(unix)]
 fn set_secret_perms(path: &std::path::Path) {
     use std::os::unix::fs::PermissionsExt as _;
+    // `metadata()` hands back a COPY of the permissions; set_mode alone only mutates
+    // that in-memory copy, so it MUST be written back with `set_permissions` to take
+    // effect on disk — otherwise no secret file is ever actually chmodded (CXA-B038).
     if let Ok(meta) = std::fs::metadata(path) {
-        meta.permissions().set_mode(0o600);
+        let mut perms = meta.permissions();
+        perms.set_mode(0o600);
+        let _ = std::fs::set_permissions(path, perms);
     }
 }
 #[cfg(not(unix))]
 fn set_secret_perms(_path: &std::path::Path) {}
+
+/// CXA-B038: repair an EXISTING off-repo store file to owner-only even when no new
+/// secrets are being persisted this pass. Both the current name-keyed store and any
+/// legacy CXA-B031 path-keyed store may hold live superuser credentials written at lax
+/// permissions (0644) by a pre-CXA-B033 build; whenever all required secrets are now
+/// supplied externally we never reach [`write_stored_secrets`], so without this an
+/// operator who fully configures those creds would leave world-readable credentials on
+/// disk. Best-effort, like [`set_secret_perms`] — a missing file is simply not present.
+fn repair_store_permissions(secret_root: &std::path::Path, work_dir: &std::path::Path) {
+    set_secret_perms(&store_file(secret_root, work_dir));
+    set_secret_perms(&cxb031_store_file(secret_root, work_dir));
+}
 
 /// Pull the host port out of a compose bind error like
 /// `Bind for 0.0.0.0:8100 failed: port is already allocated`.
@@ -1478,15 +1503,31 @@ mod cross_check_tests {
 #[cfg(test)]
 mod deploy_secret_tests {
     use super::{
-        compose_project_name, cxb031_store_file as legacy_key_file,
-        missing_required_secrets, random_secret, read_dot_env,
-        resolve_deploy_secrets_in, store_file, write_stored_secrets,
+        compose_project_name, cxb031_store_file as legacy_key_file, missing_required_secrets,
+        random_secret, read_dot_env, resolve_deploy_secrets_in, store_file, write_stored_secrets,
     };
     use std::collections::{HashMap, HashSet};
 
     fn set(keys: &[&str]) -> HashSet<String> {
         keys.iter().map(|k| (*k).to_owned()).collect()
     }
+
+    /// Force a store file's mode for staging test state; used by CXA-B038's guard
+    /// to simulate a pre-fix world-readable secret artifact.
+    #[cfg(unix)]
+    fn chmod_for_test(path: &std::path::Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+    }
+
+    /// Read a store file's permission bits (masked to 0o777) for assertions.
+    #[cfg(unix)]
+    fn mode_for_test(path: &std::path::Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::metadata(path)
+            .map_or(0, |m| m.permissions().mode() & 0o777)
+    }
+
 
     /// The core decision rule (CXA-B017): a key configured by the operator —
     /// via process env OR a project-dir `.env` — is left alone (never overridden
@@ -1761,10 +1802,7 @@ mod deploy_secret_tests {
         // B031-era on-disk state: only the LEGACY path-derived file holds a value that pgdata was
         // initialized with; nothing exists at B032's current (name-derived) filename yet.
         let mut pre_upgrade: HashMap<String, String> = HashMap::new();
-        pre_upgrade.insert(
-            "PG_PASSWORD".to_owned(),
-            "stable-b031-password".to_owned(),
-        );
+        pre_upgrade.insert("PG_PASSWORD".to_owned(), "stable-b031-password".to_owned());
         write_stored_secrets(legacy_key_file(&secret_root, &proj).as_path(), &pre_upgrade);
 
         // Post-upgrade resolve must pick up B031's value instead of generating fresh credentials.
@@ -1784,6 +1822,65 @@ mod deploy_secret_tests {
 
         let _ = std::fs::remove_dir_all(&proj);
         let _ = std::fs::remove_dir_all(&secret_root);
+    }
+
+    /// CXA-B038 regression guard: an off-repo store file written WORLD-READABLE (0644)
+    /// by a pre-CXA-B033 build must be remediated to owner-only even when every required
+    /// secret is now supplied externally, so `resolve_deploy_secrets_in` returns early
+    /// without persisting anything (and thus without hitting `write_stored_secrets`, which
+    /// was previously the ONLY place permissions got hardened). Otherwise live superuser
+    /// credentials stay world-readable on disk forever once an operator fully configures them.
+    #[cfg(unix)]
+    #[test]
+    fn world_readable_store_file_is_remediated_even_when_no_fallback_is_needed() {
+        let proj = std::env::temp_dir().join(format!("cxab038-proj-{}", std::process::id()));
+        let secret_root =
+            std::env::temp_dir().join(format!("cxab038-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&proj);
+        let _ = std::fs::remove_dir_all(&secret_root);
+        std::fs::create_dir_all(&proj).expect("mkdir");
+
+        // Pre-B033 on-disk state: BOTH required secrets already live in <project>/.env
+        // (so resolution needs no fallback), while a lax-permission store file sits
+        // alongside carrying live-looking superuser credentials.
+        std::fs::write(
+            proj.join(".env"),
+            "PG_PASSWORD=external-pg\nCOXAGENT_ADMIN_PASSWORD=external-admin\n",
+        )
+        .expect("write dot_env");
+
+        let mut legacy_store: HashMap<String, String> = HashMap::new();
+        legacy_store.insert("PG_PASSWORD".to_owned(), "legacy-live-secret".to_owned());
+        write_stored_secrets(store_file(&secret_root, &proj).as_path(), &legacy_store);
+
+        // Relax it to the buggy world-readable mode AFTER writing (write_stored_secrets
+        // hardens its own output; we need to simulate the pre-fix artifact).
+        let store_path = store_file(&secret_root, &proj);
+        assert!(
+            store_path.exists(),
+            "test premise broken: staged store file must exist"
+        );
+        chmod_for_test(&store_path, 0o644);
+        assert_eq!(
+            mode_for_test(&store_path),
+            0o644,
+            "test premise broken: could not stage a world-readable store"
+        );
+
+        // Resolution must return nothing (nothing missing -> no fallback generated)...
+        let resolved = resolve_deploy_secrets_in(&proj, &secret_root);
+        assert!(
+            resolved.is_empty(),
+            "fully-externally-supplied project must resolve NO fallback secrets"
+        );
+
+        // ...but STILL repair the lax-permission store back to owner-only.
+        assert_eq!(
+            mode_for_test(store_file(&secret_root, &proj).as_ref()),
+            0o600,
+            "world-readable store must be remediated even when no fallback persists \
+             this pass (CXA-B038)"
+        );
     }
 }
 
