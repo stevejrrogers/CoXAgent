@@ -112,7 +112,10 @@ fn resolve_deploy_secrets_in(
     // path-derived filename; adopt them here so the first post-upgrade cycle reuses exactly what
     // initialised pgdata instead of regenerating and resurrecting DB/admin auth failure.
     let mut stored = read_stored_secrets(&store_file(secret_root, work_dir));
-    adopt_legacy_cxb031_secrets(secret_root, work_dir, &mut stored);
+    // CXA-B044: adoption only REPORTS whether it converged; it never deletes (deleting inside adoption
+    // would race persistence and could lose both stores). Expiry is deferred until we have durably
+    // persisted the very values convergence depends on, below.
+    let legacy_converged = adopt_legacy_cxb031_secrets(secret_root, work_dir, &mut stored);
     let mut resolved: Vec<(String, String)> = Vec::with_capacity(missing.len());
     for key in missing {
         let value = match stored.get(key) {
@@ -122,7 +125,12 @@ fn resolve_deploy_secrets_in(
         stored.insert(key.to_owned(), value.clone());
         resolved.push((key.to_owned(), value));
     }
-    write_stored_secrets(&store_file(secret_root, work_dir), &stored);
+    // Only a durable commit may authorise removal of the legacy source ([CXA-B044]): if this write
+    // fails (best-effort), F(old)[`cxb031_store_file`] stays in place so the next pass re-adopts and
+    // retries — never both stores gone at once.
+    if write_stored_secrets(&store_file(secret_root, work_dir), &stored) && legacy_converged {
+        expire_converged_legacy_store(&cxb031_store_file(secret_root, work_dir));
+    }
     resolved
 }
 
@@ -259,16 +267,22 @@ fn cxb031_store_file(
 /// * this converges in ONE pass and cannot rotate forever: [`resolve_deploy_secrets_in`] writes every
 ///   adopted key straight back into F(new) (its modern home), so immediately after the first fixed run
 ///   both files hold equal values and stay equal thereafter;
-/// * once converged F(old) becomes a LIABILITY (CXA-B042): while it lingered it was consulted on EVERY
-///   pass with per-key preference over F(new), silently resurrecting stale V whenever an admin deleted
-///   only F(new) to force rotation — an indefinite override with no completion boundary. So once every
-///   legacy key matches what resolution persists, this function EXPIRES (`remove`s) `cxb031_store_file`,
-///   leaving nothing left to resurrect — letting legitimate rotation of compromised credentials stick.
+///
+/// ## CXA-B044 ordering constraint (read before touching expiry)
+///
+/// Removal of F(old)[`cxb031_store_file`] must NEVER happen inside this function. Adoption only mutates an
+/// in-memory HashMap; nothing is durably written to modern [`store_file`] until [`resolve_deploy_secrets_in`]
+/// calls [`write_stored_secrets`] well AFTER this returns. If convergence deletion fired here (as pre-CXA-B044
+/// it did), a best-effort persist failure or a crash between adoption and persist would lose BOTH stores at
+/// once — recreating exactly the auth-failure regression class ([CXA-B036]/[CXA-B039]) this chain exists to fix.
+///
+/// So instead adoption RECORDS whether convergence was reached and returns that verdict; only after its caller has,
+/// downstream, successfully persisted [`write_stored_secrets`] does [`expire_converged_legacy_store`] delete anything.
 fn adopt_legacy_cxb031_secrets(
     secret_root: &std::path::Path,
     work_dir: &std::path::Path,
     stored: &mut std::collections::HashMap<String, String>,
-) {
+) -> bool {
     let legacy_path = cxb031_store_file(secret_root, work_dir);
     let legacy = read_stored_secrets(&legacy_path);
     for (k, v) in &legacy {
@@ -279,19 +293,23 @@ fn adopt_legacy_cxb031_secrets(
         }
     }
 
-    // CXA-B042 completion boundary: once every key present in F(old) now matches what resolution will
-    // persist into F(new), adoption has nothing left to contribute forever — so expire F(old). While it
-    // lingered it was an indefinite override: resolving preferred stale V over F(new) on every pass, so an
-    // admin who deleted ONLY F(new) to force rotation had V resurrected each cycle with no way to outvote.
-    if !legacy.is_empty() && legacy.iter().all(|(k, v)| stored.get(k) == Some(v)) {
-        expire_legacy_store(&cxb031_store_file(secret_root, work_dir));
-    }
+    // Verdict only — never delete here ([CXA-B044]). "Converged" means adoption absorbed a NON-EMPTY
+    // legacy store AND every key it carried now sits verbatim where resolution will persist it; callers
+    // gate actual deletion on having durably written those very values to F(new), so removal can never
+    // outrun persistence (see [`expire_converged_legacy_store`]).
+    !legacy.is_empty() && legacy.iter().all(|(k, v)| stored.get(k) == Some(v))
 }
 
-/// CXA-B042: remove an already-converged legacy store file from disk — best-effort like any other IO
-/// here. Its content lives on inside modern ([`store_file`]), which adoption copied into before this runs;
-/// deleting ensures no stale source remains that could override a later legitimate secret rotation.
-fn expire_legacy_store(path: &std::path::Path) {
+/// CXA-B042 + CXA-B044 completion boundary: remove an ALREADY-CONVERGED AND DURABLY-PERSISTED legacy store file.
+///
+/// This must only be called AFTER [`write_stored_secrets`] has successfully persisted the identical values to
+/// modern [`store_file`]. The atomic temp-sibling + rename in [`write_stored_secrets`] guarantees that once it
+/// returns success the committed bytes ARE exactly what we asked for ([CXA-B044]); because convergence requires
+/// every key of F(old)[`cxb031_store_file`] present-matching under that durable content, deleting leaves nothing
+/// unique behind — while retaining B042's contract that a later legit rotation cannot be resurrected by stale V.
+///
+/// Best-effort like all IO here; a failed/unwritable deletion simply retries next converging pass.
+fn expire_converged_legacy_store(path: &std::path::Path) {
     let _ = std::fs::remove_file(path);
 }
 
@@ -321,15 +339,22 @@ fn read_stored_secrets(path: &std::path::Path) -> std::collections::HashMap<Stri
 /// via a temp sibling + rename so a crash mid-write can never leave a half-
 /// written secret file that reads back as empty, and hardens permissions to
 /// owner-only since these are credentials at rest.
+///
+/// Returns whether the values were committed DURABLY (`true`) or not (`false`,
+/// best-effort IO failed somewhere before or during rename). Only a successful
+/// atomic rename counts as durable; any earlier failure leaves no modern-store
+/// change behind and drops its temp sibling ([CXA-B044]). Callers MUST treat
+/// non-`true` as "nothing durable exists yet" — e.g. deleting an adopted legacy
+/// source after this would risk losing both stores.
 fn write_stored_secrets(
     path: &std::path::Path,
     secrets: &std::collections::HashMap<String, String>,
-) {
+) -> bool {
     let Some(parent) = path.parent() else {
-        return;
+        return false;
     };
     if std::fs::create_dir_all(parent).is_err() {
-        return;
+        return false;
     }
     let mut body = String::new();
     for (k, v) in secrets {
@@ -347,13 +372,16 @@ fn write_stored_secrets(
         std::process::id()
     ));
     if std::fs::write(&tmp, body.as_bytes()).is_err() {
-        return;
+        return false;
     }
     set_secret_perms(&tmp);
-    // Best-effort store: never fail a deploy because we could not persist;
-    // drop the temp so no stray secret file is left behind.
-    if std::fs::rename(&tmp, path).is_err() {
+    // Best-effort store: never fail a deploy because we could not persist; drop the temp so no
+    // stray secret file is left behind. Only a successful atomic rename counts as durable.
+    if std::fs::rename(&tmp, path).is_ok() {
+        true
+    } else {
         let _ = std::fs::remove_file(&tmp);
+        false
     }
 }
 
@@ -2019,6 +2047,63 @@ mod deploy_secret_tests {
         assert!(
             store_file(&secret_root, &proj).exists(),
             "regenerated secret must persist into the modern store"
+        );
+
+        let _ = std::fs::remove_dir_all(&proj);
+        let _ = std::fs::remove_dir_all(&secret_root);
+    }
+
+    /// CXA-B044 regression guard: convergence expiry must NEVER outrun persistence. Pre-CXA-B044,
+    /// `adopt_legacy_cxb031_secrets` deleted F(old) unconditionally on its own pass — BEFORE
+    /// `write_stored_secrets` persisted anything to F(new). If that persist then failed (best-effort:
+    /// disk full, permissions, rename mid-window) or the process crashed between adoption and persist,
+    /// BOTH stores were gone and the next cycle regenerated random secrets against initialized pgdata —
+    /// resurrecting exactly the CXA-B036/B039 auth-failure class this chain exists to fix.
+    ///
+    /// Here we force the modern persist to FAIL by planting a DIRECTORY where F(new)'s final atomic
+    /// rename would land (renaming a regular file onto an existing directory always errors), while a
+    /// valid F(old)==V still sits on disk. Resolution must STILL recover V into memory, but must NOT
+    /// delete F(old): both stores must never be lost at once.
+    #[test]
+    fn legacy_store_survives_a_modern_persist_failure() {
+        let proj = std::env::temp_dir().join(format!("cxab044-proj-{}", std::process::id()));
+        let secret_root =
+            std::env::temp_dir().join(format!("cxab044-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&proj);
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        let _ = std::fs::remove_dir_all(&secret_root);
+
+        // Pre-switch state: only F(old) holds what initialised pgdata.
+        let mut old_store: HashMap<String, String> = HashMap::new();
+        old_store.insert("PG_PASSWORD".to_owned(), "value-v".to_owned());
+        write_stored_secrets(legacy_key_file(&secret_root, &proj).as_path(), &old_store);
+
+        // Sabotage modern persistence: make store_file()'s target an EXISTING DIRECTORY so the atomic
+        // temp-sibling -> target rename fails deterministically (EISDIR/ENOTEMPTY on darwin+linux).
+        let modern_path = store_file(&secret_root, &proj);
+        assert!(
+            !modern_path.exists(),
+            "test premise broken: modern store should not exist yet"
+        );
+        std::fs::create_dir(&modern_path).expect("plant dir over modern store path");
+
+        // Resolution still recovers V into its returned secrets...
+        let resolved = resolve_deploy_secrets_in(&proj, &secret_root);
+        assert_eq!(
+            resolved
+                .iter()
+                .find(|(k, _)| k == "PG_PASSWORD")
+                .map(|(_, v)| v.clone())
+                .as_deref(),
+            Some("value-v"),
+            "adoption must still recover the legacy value even when persistence fails"
+        );
+
+        // ...but MUST NOT expire F(old): losing both stores at once is exactly what CXA-B044 forbids.
+        assert!(
+            legacy_key_file(&secret_root, &proj).exists(),
+            "F(old) must survive a best-effort persist failure; expiry may only run AFTER durable \
+             success (CXA-B044)"
         );
 
         let _ = std::fs::remove_dir_all(&proj);
