@@ -291,6 +291,24 @@ fn deploy_compose_has_no_insecure_defaults() {
     );
 }
 
+#[test]
+fn cxa_backend_compose_has_no_insecure_defaults() {
+    // CXA-B016: PG_USER/PG_PASSWORD/REDIS_PASSWORD must stay REQUIRED here so an
+    // absent .env fails loudly instead of booting Postgres/Redis with blank
+    // credentials.
+    let src = read_file("deploy/docker-compose.cxa.yml");
+    let findings = check("deploy/docker-compose.cxa.yml", &src);
+    assert!(
+        findings.is_empty(),
+        "deploy/docker-compose.cxa.yml has insecure defaults (COX-C012):\n{}",
+        findings
+            .iter()
+            .map(|f| format!("  {}  [{}]  {}", f.file, f.context, f.why))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Synthetic fixtures — prove each rule bites independently.
 // ---------------------------------------------------------------------------
