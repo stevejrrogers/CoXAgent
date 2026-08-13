@@ -171,19 +171,24 @@ fn deploy_secrets_root() -> std::path::PathBuf {
 }
 
 /// Path of one project's stored secrets file: a stable hash of the project's
-/// canonicalised work dir, so the same deployed app resolves to the same file
-/// across cycles but two different projects never collide. The digest is only a
-/// KEY - the values it points at are still unguessable random secrets.
+/// compose project name ([`compose_project_name`]), NOT its absolute filesystem
+/// path. Postgres data persists in docker NAMED volumes keyed by that compose
+/// project name (`<project>_db`), which survive re-clones and relocations; an
+/// unconfigured app-driven deploy regenerates its secrets when its store key is
+/// based on where on disk it happens to live (CXA-B032). Keying by compose
+/// project name makes secret stability track exactly what docker uses to persist
+/// pgdata, so moving/cloning an app between hosts or checkouts reuses the same
+/// PG_PASSWORD instead of resurrecting auth failure against an initialized volume.
+///
+/// The digest stays only a KEY - its values are still unguessable random secrets,
+/// and two genuinely distinct projects keep separate store files.
 fn store_file(secret_root: &std::path::Path, work_dir: &std::path::Path) -> std::path::PathBuf {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
-    hasher.update(
-        work_dir
-            .canonicalize()
-            .unwrap_or_else(|_| work_dir.to_path_buf())
-            .to_string_lossy()
-            .as_bytes(),
-    );
+    // `compose_project_name` derives from basenames only (`cox-<parent>-<dir>`),
+    // so it is invariant under relocation — exactly like docker's volume naming —
+    // while still distinguishing otherwise-unrelated projects.
+    hasher.update(compose_project_name(work_dir).as_bytes());
     secret_root.join(format!("{:x}.env", hasher.finalize()))
 }
 
@@ -1412,8 +1417,8 @@ mod cross_check_tests {
 #[cfg(test)]
 mod deploy_secret_tests {
     use super::{
-        missing_required_secrets, random_secret, read_dot_env, resolve_deploy_secrets_in,
-        store_file,
+        compose_project_name, missing_required_secrets, random_secret, read_dot_env,
+        resolve_deploy_secrets_in, store_file,
     };
     use std::collections::HashSet;
 
@@ -1609,6 +1614,64 @@ mod deploy_secret_tests {
         }
 
         for d in [&proj_a, &proj_b] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+        let _ = std::fs::remove_dir_all(&secret_root);
+    }
+
+    /// CXA-B032 regression guard: secret stability must follow docker's NAMED
+    /// pgdata volume, not the source checkout's absolute path. Postgres data
+    /// persists in a named volume keyed by compose project name (`<project>_db`),
+    /// which is independent of where on disk an app was cloned/moved. Relocating
+    /// an unconfigured app (a fresh checkout, or an agent slot re-cloned at a new
+    /// path) must therefore resolve to the SAME store file and the SAME secrets,
+    /// or a regenerated PG_PASSWORD breaks auth against already-initialized pgdata.
+    ///
+    /// We simulate relocation with two work dirs whose full absolute paths differ
+    /// but whose parent+dir BASENAMES agree - so `compose_project_name` matches
+    /// while any old path-hash key would have diverged.
+    #[test]
+    fn secrets_survive_relocating_the_app_between_paths() {
+        // Same basename pair (`reloc/app`) at two genuinely different absolute
+        // roots: `/tmp/<rand-a>/reloc/app` vs `/tmp/<rand-b>/reloc/app`.
+        let root_a = std::env::temp_dir().join(format!("cxab032-root-a-{}", std::process::id()));
+        let root_b = std::env::temp_dir().join(format!("cxab032-root-b-{}", std::process::id()));
+        let proj_at_a = root_a.join("reloc").join("app");
+        let proj_at_b = root_b.join("reloc").join("app");
+        let secret_root =
+            std::env::temp_dir().join(format!("cxab032-store-{}", std::process::id()));
+
+        for d in [&proj_at_a, &proj_at_b] {
+            let _ = std::fs::remove_dir_all(d);
+            std::fs::create_dir_all(d).expect("mkdir");
+        }
+        let _ = std::fs::remove_dir_all(&secret_root);
+
+        // Sanity: this really is the "same logical app under relocation" shape —
+        // same compose project identity (what docker names its pgdata volume by)
+        // despite different absolute paths.
+        assert_eq!(
+            compose_project_name(&proj_at_a),
+            compose_project_name(&proj_at_b),
+            "test premise broken: relocated clones should share a compose project name"
+        );
+        // First cycle writes from location A...
+        let first = resolve_deploy_secrets_in(&proj_at_a, &secret_root);
+        assert!(
+            !first.is_empty(),
+            "unconfigured app must generate fallback secrets"
+        );
+
+        // ...then the SAME logical app is re-deployed from relocated location B:
+        // it must reuse A's values (same store file), never regenerate them.
+        let relocated = resolve_deploy_secrets_in(&proj_at_b, &secret_root);
+        assert_eq!(
+            first, relocated,
+            "an app's generated secrets must survive relocating its checkout \
+             between paths (CXA-B032)"
+        );
+
+        for d in [&root_a, &root_b] {
             let _ = std::fs::remove_dir_all(d);
         }
         let _ = std::fs::remove_dir_all(&secret_root);
