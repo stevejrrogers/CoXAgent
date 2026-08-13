@@ -211,8 +211,108 @@ fn check(path: &str, src: &str) -> Vec<Finding> {
 }
 
 // ---------------------------------------------------------------------------
-// Real-file helpers.
+// Rule 3: deploy/docker-compose.cxa.yml must require its credentials.
+//
+// CXA-B016 — unlike Rule 1 (which polices `${VAR:-literal}`), this rule catches
+// a *bare* `${VAR}` with no modifier at all. Before the fix cxa.yml used plain
+// `${PG_USER}` / `${PG_PASSWORD}` / `${REDIS_PASSWORD}`, so running it without
+// an .env silently started Postgres/Redis with EMPTY passwords instead of
+// failing loudly like root docker-compose.yml does.
+//
+// Each required credential must be referenced through the required form
+// `${VAR:...}` (compose errors on unset). A bare `${VAR}`, or a credential that
+// is never referenced at all, is a finding.
+//
+// This rule is intentionally scoped to cxa-backend's own file — it asserts the
+// exact contract this compose file promises — and is not folded into the shared
+// `check()` because other compose files legitimately arrange their variables
+// differently.
 // ---------------------------------------------------------------------------
+
+/// Credentials deploy/docker-compose.cxa.yml requires to boot without silently
+/// using blank values. Order matters only for error reporting.
+const CXA_REQUIRED_VARS: &[&str] = &["PG_USER", "PG_PASSWORD", "REDIS_PASSWORD"];
+
+/// True when an interpolation token uses the required form (`${VAR:...}`),
+/// which makes compose fail fast on an unset variable. A bare `${VAR}`
+/// (no colon) resolves to blank and must be flagged.
+fn is_required_form(token: &str) -> bool {
+    match token.strip_prefix("${").and_then(|s| s.strip_suffix('}')) {
+        Some(inner) => inner.contains([':', '?']),
+        None => false,
+    }
+}
+
+/// Collect every interpolation token that references `var` (e.g. matching both
+/// `${PG_USER?msg}` and `${PG_USER}`), preserving source order. The match is on
+/// a full variable name: the character after the name must be a modifier (`:`)
+/// or the closing brace — so `${REDIS_PASSWORD_LEGACY}` is NOT matched when
+/// looking for `REDIS_PASSWORD`.
+fn tokens_for_var(src: &str, var: &str) -> Vec<String> {
+    let prefix = format!("${{{var}");
+    let mut out = Vec::new();
+    let mut rest = src;
+    while let Some(start) = rest.find("${") {
+        let token_src = &rest[start..];
+        let end = match token_src.find('}') {
+            Some(i) => i + 1,
+            None => break,
+        };
+        if token_src.starts_with(&prefix) {
+            // Variable-name boundary: if the character right after the matched
+            // name continues an identifier (`[A-Za-z0-9_]`) it belongs to a
+            // longer differently-named variable; otherwise it terminates ours.
+            // Accepts any terminate/modifier char (`:`/`?`/`-`/`}`).
+            if matches!(
+                token_src.as_bytes().get(prefix.len()),
+                Some(b'_')
+                    | Some(b'A'..=b'Z')
+                    | Some(b'a'..=b'z')
+                    | Some(b'0'..=b'9')
+            ) {
+                rest = &token_src[end..];
+                continue;
+            }
+            out.push(token_src[..end].to_string());
+        }
+        rest = &token_src[end..];
+    }
+    out
+}
+
+/// Check that every CXA_REQUIRED_VAR in `deploy/docker-compose.cxa.yml` is used
+/// through its required form; report a bare reference or a missing reference as
+/// a finding.
+fn check_cxa_required_vars(path: &str, src: &str) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    for var in CXA_REQUIRED_VARS {
+        let refs = tokens_for_var(src, var);
+        if refs.is_empty() {
+            findings.push(Finding {
+                file: path.to_string(),
+                context: format!("variable {var}"),
+                why: format!(
+                    "{var} is required by cxa-backend but never referenced; \
+                     compose would boot with it blank"
+                ),
+            });
+            continue;
+        }
+        for tok in refs.iter().filter(|t| !is_required_form(t)) {
+            findings.push(Finding {
+                file: path.to_string(),
+                context: format!("variable {var}"),
+                why: format!(
+                    "{var} is referenced as {tok}, not ${{{var}:?...}}; when unset compose \
+                     silently boots with blank credentials (CXA-B016). Use \
+                     ${{{var}:{var} is required}} to fail fast"
+                ),
+            });
+        }
+    }
+    findings
+}
+
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -283,6 +383,26 @@ fn deploy_compose_has_no_insecure_defaults() {
     assert!(
         findings.is_empty(),
         "deploy/docker-compose.yml has insecure defaults (COX-C012):\n{}",
+        findings
+            .iter()
+            .map(|f| format!("  {}  [{}]  {}", f.file, f.context, f.why))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+#[test]
+fn cxa_backend_compose_enforces_required_vars() {
+    // CXA-B016 regression: PG_USER / PG_PASSWORD / REDIS_PASSWORD must be wired
+    // through ${VAR:?msg} so compose fails fast on an unset variable instead of
+    // silently booting Postgres/Redis with blank credentials. Fails against the
+    // pre-fix file (bare ${VAR}); passes against the required-form file.
+    let path = "deploy/docker-compose.cxa.yml";
+    let src = read_file(path);
+    let findings = check_cxa_required_vars(path, &src);
+    assert!(
+        findings.is_empty(),
+        "deploy/docker-compose.cxa.yml does not enforce its required credentials (CXA-B016):\n{}",
         findings
             .iter()
             .map(|f| format!("  {}  [{}]  {}", f.file, f.context, f.why))
@@ -493,3 +613,93 @@ fn clean_compose_passes_both_rules() {
         "a fully hardened compose must produce no findings: {findings:?}"
     );
 }
+
+// --- Rule 3 synthetic fixtures (CXA-B016) ------------------------------------
+
+/// Minimal cxa-backend-style compose with a configurable set of credentials.
+fn cxa_compose(pg_user: &str, pg_password: &str, redis_password: &str) -> String {
+    format!(
+        "services:\n  db:\n    image: postgres\n\
+         \x20   environment:\n      POSTGRES_USER: {pg_user}\n\
+         \x20     POSTGRES_PASSWORD: {pg_password}\n\
+         \x20   ports:\n      - \"127.0.0.1:5433:5432\"\n\
+         \x20 redis:\n    image: redis\n\
+         \x20   command:\n      - \"--requirepass\"\n      - \"{redis_password}\"\n"
+    )
+}
+
+/// The exact pre-fix shape that shipped the bug (CXA-B016): every credential is
+/// a bare `${VAR}` with no modifier, so compose silently boots blank.
+#[test]
+fn bare_required_vars_are_caught() {
+    let src = cxa_compose("${PG_USER}", "${PG_PASSWORD}", "${REDIS_PASSWORD}");
+    let findings = check_cxa_required_vars("deploy/docker-compose.cxa.yml", &src);
+    assert_eq!(findings.len(), 3, "all three bare refs must be flagged: {findings:#?}");
+    for var in CXA_REQUIRED_VARS {
+        assert!(
+            findings.iter().any(|f| f.context.contains(var)),
+            "a finding must exist for {var}: {findings:#?}"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.context.contains(var) && f.why.contains(":?")),
+            "{var} finding must recommend the required form `${{VAR:?}}`: {findings:#?}"
+        );
+    }
+}
+
+/// If a required credential is referenced through `${VAR:?...}` it must not be
+/// flagged — this is the fixed form and the real cxa.yml after CXA-B016.
+#[test]
+fn required_form_passes() {
+    let src = cxa_compose(
+        "${PG_USER?PG_USER is required}",
+        "${PG_PASSWORD?PG_PASSWORD is required}",
+        "${REDIS_PASSWORD?REDIS_PASSWORD is required}",
+    );
+    let findings = check_cxa_required_vars("deploy/docker-compose.cxa.yml", &src);
+    assert!(
+        findings.is_empty(),
+        "required-form credentials must pass cleanly (CXA-B016): {findings:#?}"
+    );
+}
+
+/// A credential dropped entirely from the file must be caught — otherwise it
+/// would boot with a blank value and nobody could notice.
+#[test]
+fn missing_required_var_is_caught() {
+    // PG_USER referenced, PG_PASSWORD + REDIS_PASSWORD absent entirely.
+    let src = cxa_compose("${PG_USER}", "", "");
+    let findings = check_cxa_required_vars("deploy/docker-compose.cxa.yml", &src);
+    let missing_passwd = findings.iter().any(|f| f.context.contains("PG_PASSWORD"));
+    let missing_redis = findings.iter().any(|f| f.context.contains("REDIS_PASSWORD"));
+    assert!(
+        missing_passwd && missing_redis,
+        "dropping PG_PASSWORD / REDIS_PASSWORD entirely must be caught (only \
+         found {len}): {findings:#?}",
+        len = findings.len()
+    );
+}
+
+/// The rule keys off full variable names and must not flag an unrelated
+/// variable that merely shares a prefix (e.g. REDIS_PASSWORD_LEGACY), as long
+/// as all three required credentials are present in their required form.
+#[test]
+fn prefix_sibling_does_not_cause_false_positive() {
+    let src = cxa_compose(
+        "${PG_USER?required}",
+        "${PG_PASSWORD?required}",
+        "${REDIS_PASSWORD?required}",
+    );
+    // Add an extra environment key referencing a longer-named sibling var in
+    // bare form. It is NOT one of CXA_REQUIRED_VARS, so Rule 3 must ignore it.
+    let src = format!("{src}     OTHER_REDIS_PASSWORD: ${{REDIS_PASSWORD_LEGACY}}\n");
+    let findings = check_cxa_required_vars("deploy/docker-compose.cxa.yml", &src);
+    assert!(
+        findings.is_empty(),
+        "a differently-named sibling var must not be flagged: {findings:#?}"
+    );
+}
+
+
