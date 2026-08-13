@@ -54,10 +54,8 @@ fn random_secret() -> String {
 /// missing from BOTH sources get a fresh cryptographically-random fallback so
 /// interpolation still resolves and services start without a known credential.
 ///
-/// Computed ONCE per pass so an eviction retry re-runs identical interpolation
-/// against any state the initial `up` already created.
-/// Which required secret keys are NOT provided by the operator and therefore
-/// need a random fallback seed for one deploy pass.
+/// Computed within one deploy pass; an eviction retry re-runs identical
+/// interpolation against any state the initial `up` already created.
 ///
 /// Pure over its inputs so all precedence branches are deterministically
 /// unit-testable: `provided_by_env` answers "does this process already carry
@@ -75,15 +73,60 @@ fn missing_required_secrets(
         .collect()
 }
 
-fn resolve_deploy_secrets(work_dir: &std::path::Path) -> Vec<(String, String)> {
+/// Generate one fresh random fallback for each key in `missing`. Pure over its
+/// input so it is trivially testable; used by the ephemeral cross-check path
+/// and as the source of a persisted deploy secret.
+fn fallback_for_missing(missing: &[&'static str]) -> Vec<(String, String)> {
+    missing
+        .iter()
+        .map(|key| ((*key).to_owned(), random_secret()))
+        .collect()
+}
+
+/// The keys this process must still fall back on for ONE deploy pass — i.e.
+/// not provided by the operator's process env or project-dir `.env`.
+fn missing_now(work_dir: &std::path::Path) -> Vec<&'static str> {
     let dot_env = read_dot_env(&work_dir.join(".env"));
     missing_required_secrets(
         |key| std::env::var(key).is_ok_and(|v| !v.trim().is_empty()),
         &dot_env,
     )
-    .into_iter()
-    .map(|key| (key.to_owned(), random_secret()))
-    .collect()
+}
+
+/// Resolve this deploy pass's secrets AND make them stable across every future
+/// pass (CXA-B027).
+///
+/// Why persist: the data volume survives `down --remove-orphans` (no `-v`), so
+/// Postgres locks POSTGRES_PASSWORD at empty-volume init. If we regenerated a
+/// fresh random secret per pass there'd be no write-back anywhere, and cycle 2
+/// would seed coxagent's COXAGENT_DB_DSN with secret#2 while db still holds
+/// secret#1 → DB auth failure; COXAGENT_ADMIN_PASSWORD would rotate identically,
+/// making root login impossible. By writing a generated fallback into the
+/// project-dir `.env` exactly once, compose re-resolves the SAME value from that
+/// file on every later pass — db init and every DSN agree forever.
+///
+/// Security is preserved (CXA-B017): we never bake a public constant; an
+/// operator who sets PG_PASSWORD/COXAGENT_ADMIN_PASSWORD anywhere is never
+/// touched (only *missing* keys are appended); the persisted value is still a
+/// cryptographically-random 32-char secret living only in the project dir.
+///
+/// Persistence is best-effort — if writing `.env` fails we log why and still run
+/// with this pass's generated values so we degrade to today's behaviour rather
+/// than failing an otherwise-deployable project. Returns exactly what must be
+/// seeded into this pass's compose command(s).
+fn materialize_deploy_secrets(work_dir: &std::path::Path) -> Vec<(String, String)> {
+    let missing = missing_now(work_dir);
+    let generated = fallback_for_missing(&missing);
+    if !generated.is_empty() {
+        if let Err(e) = upsert_dot_env(&work_dir.join(".env"), &generated) {
+            tracing::warn!(
+                "could not persist generated deploy secrets to {}/.env ({e}); \
+                 they will not survive across deploy cycles",
+                work_dir.display(),
+            );
+        }
+    }
+    generated
 }
 
 fn seed_deploy_secrets(cmd: &mut tokio::process::Command, secrets: &[(String, String)]) {
@@ -120,6 +163,37 @@ fn read_dot_env(path: &std::path::Path) -> std::collections::HashSet<String> {
             Some(key)
         })
         .collect()
+}
+
+/// Write each `KEY=VALUE` into `.env`, preserving every line an operator
+/// already wrote verbatim and never duplicating a key that is already assigned.
+///
+/// This is how a generated fallback secret becomes stable across deploy passes
+/// (CXA-B027): once present here, compose re-resolves the same value on every
+/// later pass instead of us seeding a fresh random one. Only keys absent from
+/// the file are appended (the caller has already established they are missing),
+/// so we can never override or clobber an operator's own assignment — the same
+/// no-poisoning guarantee as [`read_dot_env`].
+fn upsert_dot_env(path: &std::path::Path, entries: &[(String, String)]) -> std::io::Result<()> {
+    use std::fmt::Write as _;
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let provided: std::collections::HashSet<String> = read_dot_env(path);
+    // Append only what is not yet configured; keep whatever content existed,
+    // guaranteeing a newline between it and our first appended line.
+    let mut content = existing;
+    for (key, value) in entries {
+        if provided.contains(key.as_str()) {
+            continue;
+        }
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
+        }
+        let _ = writeln!(content, "{key}={value}");
+    }
+    std::fs::write(path, content)
 }
 
 /// Pull the host port out of a compose bind error like
@@ -737,8 +811,11 @@ impl DeployPort for DockerComposeDeploy {
         // or a project-dir `.env`) is honoured verbatim, and only when none was
         // configured anywhere does a fresh random value get used — so services
         // still start but no public known credential ever boots them (CXA-B017 —
-        // never bake source-published constants into real deploys).
-        let secrets = resolve_deploy_secrets(work_dir);
+        // never bake source-published constants into real deploys). A generated
+        // fallback is ALSO persisted into the project-dir `.env`, so db's volume-
+        // level POSTGRES_PASSWORD and coxagent's DSN never drift across cycles
+        // (CXA-B027).
+        let secrets = materialize_deploy_secrets(work_dir);
 
         // Compose builds are as heavy as test suites — same host-wide gate.
         let _slot = crate::proc::heavy_slot().await;
@@ -999,12 +1076,12 @@ async fn compose_build_check(
     // boot with a known default). A `build` still interpolates those env sections,
     // so without values this cross-target check dies at interpolation before it can
     // verify anything on every secret-bearing compose file. Seed them via the SAME
-    // honour-generate rule as a real deploy ([`resolve_deploy_secrets`]): an
-    // operator's own value wins, otherwise a fresh random one — never a public
-    // constant baked into source (CXA-B017). These are ephemeral verification-only
-    // values passed to one throwaway build command — never written to config or used
-    // to start services.
-    let secrets = resolve_deploy_secrets(work_dir);
+    // honour-generate rule as a real deploy: an operator's own value wins, otherwise
+    // a fresh random one — never a public constant baked into source (CXA-B017).
+    // These are ephemeral verification-only values passed to one throwaway build
+    // command — deliberately NOT persisted to `.env` (unlike [`materialize_deploy_secrets`])
+    // because a build must not mutate the project.
+    let secrets = fallback_for_missing(&missing_now(work_dir));
     let mut build = Command::new("docker");
     build.args(["compose", "-p", &proj, "build"]);
     build.current_dir(work_dir);
@@ -1126,12 +1203,16 @@ mod cross_check_tests {
     }
 }
 
-/// Regression guard for CXA-B017: an app-driven deploy must NEVER bake a
-/// public, source-published credential into long-running services, and must
-/// honour an operator's own configured secrets rather than clobbering them.
+/// Regression guard for CXA-B017 + CXA-B027: an app-driven deploy must NEVER
+/// bake a public, source-published credential into long-running services; must
+/// honour an operator's own configured secrets rather than clobbering them;
+/// and — once it generates a fallback — must persist it so it is stable across
+/// every later deploy pass instead of rotating per pass.
 #[cfg(test)]
 mod deploy_secret_tests {
-    use super::{missing_required_secrets, random_secret, read_dot_env};
+    use super::{
+        fallback_for_missing, missing_required_secrets, random_secret, read_dot_env, upsert_dot_env,
+    };
     use std::collections::HashSet;
 
     fn set(keys: &[&str]) -> HashSet<String> {
@@ -1240,6 +1321,92 @@ mod deploy_secret_tests {
         // treating them as provided would either fail `${VAR:?}` or boot empty.
         assert!(!keys.contains("B"), "'B=' is blank — not real config");
         assert!(!keys.contains("a"), "'a' has no value — not real config");
+    }
+
+    /// Read one KEY's assigned value out of a `.env` file verbatim (or `None`
+    /// when absent/blank), mirroring compose's split-on-first-= grammar so a
+    /// password containing `=` survives intact.
+    fn dot_env_value(path: &std::path::Path, key: &str) -> Option<String> {
+        std::fs::read_to_string(path).ok()?.lines().find_map(|raw| {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') {
+                return None;
+            }
+            let line = line.strip_prefix("export ").unwrap_or(line);
+            let (k, v) = line.split_once('=')?;
+            (k.trim() == key && !v.trim().is_empty()).then(|| v.trim().to_owned())
+        })
+    }
+
+    /// CXA-B027 regression: once a fallback is generated for an unconfigured
+    /// key it must be written back to the project-dir `.env`, so compose (and
+    /// this adapter) re-resolve the SAME value on every later pass. Without the
+    /// write-back, db's volume-level POSTGRES_PASSWORD (locked at empty-volume
+    /// init) drifts from coxagent's DSN when cycle 2 seeds a fresh random —
+    /// exactly the reported DB-auth failure.
+    #[test]
+    fn upsert_persists_generated_secrets_for_cross_cycle_stability() {
+        let dir = std::env::temp_dir().join(format!("persist-t-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let env_path = dir.join(".env");
+
+        // Pass 1: nothing configured anywhere -> generate AND persist both keys.
+        let pass1 = fallback_for_missing(&["PG_PASSWORD", "COXAGENT_ADMIN_PASSWORD"]);
+        assert_eq!(pass1.len(), 2);
+        upsert_dot_env(&env_path, &pass1).expect("upsert");
+
+        // Every generated secret round-trips through `.env` VERBATIM — not a
+        // fresh rotation on some later read.
+        for (key, expected) in &pass1 {
+            assert_eq!(
+                dot_env_value(&env_path, key).as_deref(),
+                Some(expected.as_str()),
+                "{key} must persist its exact generated value"
+            );
+        }
+
+        // Simulate cycle 2: with `.env` now carrying both keys and NO process
+        // env supplying them, nothing is missing anymore — so no fresh secret is
+        // ever regenerated. db's volume-level password and coxagent's DSN thus
+        // stay pinned to pass 1's values forever.
+        let still_missing = missing_required_secrets(|_| false, &read_dot_env(&env_path));
+        assert!(
+            still_missing.is_empty(),
+            "after persistence no required key may remain missing: {still_missing:?}"
+        );
+    }
+
+    /// The no-poisoning guarantee holds across the write-back too: an operator who
+    /// configured a key never gets it overwritten or duplicated by upsert, even when
+    /// we persist other missing keys in the same file.
+    #[test]
+    fn upsert_never_clobbers_an_operator_configured_key() {
+        let dir = std::env::temp_dir().join(format!("upsert-t-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let env_path = dir.join(".env");
+        std::fs::write(
+            &env_path,
+            "# comment\nPG_PASSWORD=op-secret\nexport OTHER=x\n",
+        )
+        .expect("write");
+
+        // The operator already set PG_PASSWORD; only COXAGENT_ADMIN_PASSWORD is
+        // missing, so only it may be appended.
+        let admin = fallback_for_missing(&["COXAGENT_ADMIN_PASSWORD"]);
+        upsert_dot_env(&env_path, &admin).expect("upsert");
+
+        assert_eq!(
+            dot_env_value(&env_path, "PG_PASSWORD").as_deref(),
+            Some("op-secret"),
+            "operator PG_PASSWORD must be untouched"
+        );
+        assert_eq!(
+            dot_env_value(&env_path, "OTHER").as_deref(),
+            Some("x"),
+            "unrelated operator line must be preserved"
+        );
     }
 }
 
