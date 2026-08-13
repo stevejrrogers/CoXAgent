@@ -192,18 +192,11 @@ const ACTIONS: [&str; 6] = [
 async fn pr_actions_are_reviewer_only_not_open_to_every_writer() {
     let _dir = boot().await;
 
-    // Member tier: `can_write()` is true for all of them, which is why every
-    // one of these used to succeed.
-    for role in [
-        AuthRole::Ba,
-        AuthRole::Fe,
-        AuthRole::Be,
-        AuthRole::Aie,
-        AuthRole::Ds,
-        AuthRole::Da,
-        AuthRole::De,
-        AuthRole::Viewer,
-    ] {
+    // Non-dev member tier: `can_write()` is true for all of them, which is why
+    // every one of these used to succeed. The dev tier (Fe/Be/Aie/Ds/Da/De)
+    // owns PR review alongside the SA (see `can_review`'s `is_dev()` clause),
+    // so they belong in the "clears the gate" loop below, not here.
+    for role in [AuthRole::Ba, AuthRole::Viewer] {
         for action in ACTIONS {
             let (status, body) = pr_action(role, action).await;
             assert_eq!(
@@ -220,9 +213,9 @@ async fn pr_actions_are_reviewer_only_not_open_to_every_writer() {
         }
     }
 
-    // Admin, the lead tier, and the legacy Reviewer keep the access the gate
-    // documents: they clear RBAC and fall through to the handler, which 404s
-    // on the unregistered project.
+    // Admin, the lead tier, the dev tier, and the legacy Reviewer keep the
+    // access the gate documents: they clear RBAC and fall through to the
+    // handler, which 404s on the unregistered project.
     for role in [
         AuthRole::Super,
         AuthRole::Admin,
@@ -231,6 +224,12 @@ async fn pr_actions_are_reviewer_only_not_open_to_every_writer() {
         AuthRole::TechLead,
         AuthRole::DsLead,
         AuthRole::DaLead,
+        AuthRole::Fe,
+        AuthRole::Be,
+        AuthRole::Aie,
+        AuthRole::Ds,
+        AuthRole::Da,
+        AuthRole::De,
         AuthRole::Reviewer,
     ] {
         for action in ACTIONS {
