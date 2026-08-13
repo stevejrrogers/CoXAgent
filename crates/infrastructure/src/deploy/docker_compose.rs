@@ -75,7 +75,13 @@ fn missing_required_secrets(
         .collect()
 }
 
-fn resolve_deploy_secrets(work_dir: &std::path::Path) -> Vec<(String, String)> {
+/// Ephemeral verification-only resolution used by [`compose_build_check`]. Honors
+/// operator config (process env or project-dir `.env`) exactly like a real deploy,
+/// then falls back to a fresh random value for whatever remains — but NEVER consults
+/// or writes the persistent secret store nor mutates any host state. Builds must stay
+/// side-effect-free regarding pinning/store files, so this is deliberately separate
+/// from the durable [`resolve_deploy_secrets`].
+fn ephemeral_resolve(work_dir: &std::path::Path) -> Vec<(String, String)> {
     let dot_env = read_dot_env(&work_dir.join(".env"));
     missing_required_secrets(
         |key| std::env::var(key).is_ok_and(|v| !v.trim().is_empty()),
@@ -84,6 +90,65 @@ fn resolve_deploy_secrets(work_dir: &std::path::Path) -> Vec<(String, String)> {
     .into_iter()
     .map(|key| (key.to_owned(), random_secret()))
     .collect()
+}
+
+/// Durable/stabilizing resolution used ONLY by real deploys ([`DockerComposeDeploy::deploy`]).
+///
+/// Precedence (never clobber anyone):
+/// 1. An operator-configured value wins if present EITHER as process env OR as an already
+///    assigned non-blank KEY=VALUE in `<workdir>/.env`. Such keys are left entirely alone.
+/// 2. Otherwise consult a persistent hub-private store keyed by `compose_project_name`
+///    (`$COXAGENT_DEPLOY_SECRET_DIR/<proj>.secrets`, else `$HOME/.coxagent-deploy/<proj>.secrets`)
+///    OUTSIDE any source tree / repo checkout / workdir subtree; reuse a value we generated and
+///    persisted on an earlier cycle unchanged so it stays stable across cycles (CXA-B030).
+/// 3. Only when neither exists generate a fresh random via [`random_secret()`] AND persist it so
+///    future cycles reuse it instead of rotating it.
+///
+/// Values are recomputed each invocation strictly from what's missing after filters, so an
+/// operator configuring a key externally AFTER an earlier pinned cycle wins precedence on later
+/// passes — stale pins never leak back once externally configured. Persistence is best-effort:
+/// if writing fails we log a tracing warning about lost cross-cycle stability but still return the
+/// resolved values so deploys don't fail outright.
+fn resolve_deploy_secrets(work_dir: &std::path::Path) -> Vec<(String, String)> {
+    let proj = compose_project_name(work_dir);
+    let store_path = deploy_secret_store_path(&proj);
+
+    // Recompute each invocation strictly from what's missing after filters, so an
+    // operator configuring a key externally AFTER an earlier pinned cycle wins
+    // precedence on later passes — stale pins never leak back once configured.
+    let dot_env = read_dot_env(&work_dir.join(".env"));
+    let missing = missing_required_secrets(
+        |key| std::env::var(key).is_ok_and(|v| !v.trim().is_empty()),
+        &dot_env,
+    );
+
+    if missing.is_empty() {
+        return Vec::new();
+    }
+
+    // Precedence 2: reuse pinned values we persisted on an earlier cycle unchanged.
+    let prior = read_dot_env_values(&store_path);
+    let mut resolved: Vec<(String, String)> = Vec::with_capacity(missing.len());
+    for key in missing {
+        if let Some(existing) = prior.get(key).filter(|v| !v.trim().is_empty()) {
+            resolved.push((key.to_owned(), existing.clone()));
+        } else {
+            // Precedence 3: generate fresh AND persist for future cycles.
+            resolved.push((key.to_owned(), random_secret()));
+        }
+    }
+
+    // Best-effort persistence off-repo so cross-cycle stability survives; a write
+    // failure must not fail the deploy itself (matches B027's behavior).
+    if let Err(e) = persist_generated_deploy_secrets(&store_path, &resolved) {
+        tracing::warn!(
+            "could not persist generated deploy secrets to {} — cross-cycle stability lost \
+             (this deploy still proceeds): {e}",
+            store_path.display()
+        );
+    }
+
+    resolved
 }
 
 fn seed_deploy_secrets(cmd: &mut tokio::process::Command, secrets: &[(String, String)]) {
@@ -120,6 +185,138 @@ fn read_dot_env(path: &std::path::Path) -> std::collections::HashSet<String> {
             Some(key)
         })
         .collect()
+}
+
+/// Like [`read_dot_env`] but keeps the assigned VALUES, not just key presence. Uses
+/// the same loose dot-env grammar: skip `#` comments and blank lines, tolerate an
+/// optional leading `export`, split on the FIRST `=` so values containing `=` survive,
+/// and only a non-blank value counts as provided. Returns an empty map for an absent
+/// or unreadable file.
+fn read_dot_env_values(path: &std::path::Path) -> std::collections::HashMap<String, String> {
+    use std::collections::HashMap;
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    contents
+        .lines()
+        .filter_map(|raw| {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') {
+                return None;
+            }
+            let line = line.strip_prefix("export ").unwrap_or(line);
+            let (k, v) = line.split_once('=')?;
+            let key = k.trim().to_owned();
+            if key.is_empty() || v.trim().is_empty() {
+                return None;
+            }
+            Some((key, v.to_owned()))
+        })
+        .collect()
+}
+
+/// The hub-private path where generated deploy secrets are persisted off-repo,
+/// keyed per compose project: `$COXAGENT_DEPLOY_SECRET_DIR/<proj>.secrets` when that
+/// env var is set (an override that lets hermetic tests point at a temp dir), else
+/// `$HOME/.coxagent-deploy/<proj>.secrets`. Lives OUTSIDE any source tree / repo
+/// checkout / workdir subtree so live superuser creds never land in git-managed source.
+fn deploy_secret_store_path(proj: &str) -> std::path::PathBuf {
+    if let Ok(dir) = std::env::var("COXAGENT_DEPLOY_SECRET_DIR") {
+        if !dir.trim().is_empty() {
+            return std::path::PathBuf::from(dir).join(format!("{proj}.secrets"));
+        }
+    }
+    // HOME convention mirrors crates/infrastructure/src/proc.rs (~line 114).
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default();
+    home.join(".coxagent-deploy")
+        .join(format!("{proj}.secrets"))
+}
+
+/// Persist generated deploy secrets for one project to the off-repo store. Preserves
+/// prior stored values for OTHER keys verbatim while upserting the given entries
+/// idempotently; creates parent dirs best-effort; on Unix sets restrictive perms
+/// (~0600 file, ~0700 dir) since these are live superuser creds at rest off-repo.
+fn persist_generated_deploy_secrets(
+    path: &std::path::Path,
+    entries: &[(String, String)],
+) -> std::io::Result<()> {
+    use std::collections::HashMap;
+
+    // Preserve prior stored values for OTHER keys verbatim while upserting given
+    // entries idempotently.
+    let mut merged: HashMap<String, String> = read_dot_env_values(path);
+    for (k, v) in entries {
+        merged.insert(k.clone(), v.clone());
+    }
+
+    // Restrictive perms on live superuser creds at rest off-repo. Best-effort: a
+    // chmod failure is not fatal — we still write the values.
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    if let Err(e) = std::fs::create_dir_all(parent) {
+        tracing::warn!(
+            "could not create deploy secret dir {}: {e}",
+            parent.display()
+        );
+        return Err(e);
+    }
+
+    // Serialize as loose dot-env (same grammar read_dot_env_values understands),
+    // one KEY=VALUE per line, sorted for determinism.
+    let mut keys: Vec<&String> = merged.keys().collect();
+    keys.sort();
+    let mut out = String::new();
+    for k in keys {
+        out.push_str(k);
+        out.push('=');
+        out.push_str(&merged[k]);
+        out.push('\n');
+    }
+
+    // Atomic-ish write: write then restrict perms so live superuser creds are not
+    // left world-readable on disk (CXA-B033). Best-effort per B027's contract: a
+    // chmod failure is logged via [`restrict_store_to_owner`], never allowed to
+    // fail the deploy.
+    std::fs::write(path, out)?;
+    #[cfg(unix)]
+    restrict_store_to_owner(path);
+    Ok(())
+}
+
+/// Restrict an off-repo deploy-secret store FILE (~0600) and its PARENT DIR (~0700)
+/// to owner-only once written (CXA-B033). Without this an umask of 022 leaves a fresh
+/// `.secrets` file at world-readable 0644 — live PG/admin credentials readable by any
+/// other local user; hardening the enclosing directory as well keeps even filenames,
+/// sizes and existence unobservable to them and protects against future files dropped
+/// there with looser modes.
+///
+/// Both steps are best-effort like every other piece of persistence here — failures are
+/// logged so a security regression stays visible in the deploy trace without aborting it.
+#[cfg(unix)]
+fn restrict_store_to_owner(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    fn set(dir: &std::path::Path, mode: u32) -> std::io::Result<()> {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode))
+    }
+
+    // File owner-only; a failure here is the regression this ticket fixes, so it
+    // gets its own message naming the file. Dir hardening is logged separately.
+    if let Err(e) = set(path, 0o600) {
+        tracing::warn!(
+            "could not restrict deploy secret store {} to owner-only (0600): {e}",
+            path.display()
+        );
+    }
+    if let Some(parent) = path.parent().filter(|p| p.as_os_str() != ".") {
+        if let Err(e) = set(parent, 0o700) {
+            tracing::warn!(
+                "could not restrict deploy secret dir {} to owner-only (0700): {e}",
+                parent.display()
+            );
+        }
+    }
 }
 
 /// Pull the host port out of a compose bind error like
@@ -999,12 +1196,11 @@ async fn compose_build_check(
     // boot with a known default). A `build` still interpolates those env sections,
     // so without values this cross-target check dies at interpolation before it can
     // verify anything on every secret-bearing compose file. Seed them via the SAME
-    // honour-generate rule as a real deploy ([`resolve_deploy_secrets`]): an
-    // operator's own value wins, otherwise a fresh random one — never a public
-    // constant baked into source (CXA-B017). These are ephemeral verification-only
-    // values passed to one throwaway build command — never written to config or used
-    // to start services.
-    let secrets = resolve_deploy_secrets(work_dir);
+    // honour-generate rule as a real deploy ([`ephemeral_resolve`]): an operator's
+    // own value wins, otherwise a fresh random one — never a public constant baked
+    // into source (CXA-B017). These are ephemeral verification-only values passed to
+    // one throwaway build command — deliberately NOT persisted to the off-repo store.
+    let secrets = ephemeral_resolve(work_dir);
     let mut build = Command::new("docker");
     build.args(["compose", "-p", &proj, "build"]);
     build.current_dir(work_dir);
@@ -1131,16 +1327,24 @@ mod cross_check_tests {
 /// honour an operator's own configured secrets rather than clobbering them.
 #[cfg(test)]
 mod deploy_secret_tests {
-    use super::{missing_required_secrets, random_secret, read_dot_env};
+    use super::{
+        compose_project_name, deploy_secret_store_path, ephemeral_resolve,
+        missing_required_secrets, persist_generated_deploy_secrets, random_secret, read_dot_env,
+        read_dot_env_values, resolve_deploy_secrets,
+    };
     use std::collections::HashSet;
 
     fn set(keys: &[&str]) -> HashSet<String> {
         keys.iter().map(|k| (*k).to_owned()).collect()
     }
 
-    /// The core decision rule (CXA-B017): a key configured by the operator —
-    /// via process env OR a project-dir `.env` — is left alone (never overridden
-    /// with ours); only a key missing from BOTH sources gets a fallback seed.
+    /// Serialises every test that mutates the process-global
+    /// COXAGENT_DEPLOY_SECRET_DIR so concurrent threads cannot race each other's
+    /// env set/restore while resolving secret-store paths.
+    ///
+    /// A key — whether supplied via process env OR a project-dir `.env` — is
+    /// left alone (never overridden with ours); only a key missing from BOTH
+    /// sources gets a fallback seed.
     #[test]
     fn precedence_honours_process_env_then_dot_env_then_fallback() {
         // No config anywhere -> both keys need a fallback.
@@ -1240,6 +1444,171 @@ mod deploy_secret_tests {
         // treating them as provided would either fail `${VAR:?}` or boot empty.
         assert!(!keys.contains("B"), "'B=' is blank — not real config");
         assert!(!keys.contains("a"), "'a' has no value — not real config");
+    }
+
+    /// Serialises every secret-store-dependent test in this module. Those tests
+    /// mutate process-GLOBAL state — the `COXAGENT_DEPLOY_SECRET_DIR` env var and
+    /// the single off-repo store directory it points at — so running them on
+    /// parallel threads lets one test wipe/re-point another's just-persisted pins
+    /// mid-body (see CXA-B030 regression where a concurrent `SecretStoreGuard`
+    /// erased an earlier pass's pin before it was read back). Holding this lock
+    /// for the whole body keeps those global mutations atomic per test.
+    static SECRET_STORE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Points [`deploy_secret_store_path`] at a fresh temp dir for one test, then
+    /// restores any prior value on drop so hermetic tests never touch a real $HOME.
+    struct SecretStoreGuard {
+        prev: Option<std::ffi::OsString>,
+        _serialized: std::sync::MutexGuard<'static, ()>,
+    }
+    impl SecretStoreGuard {
+        fn new() -> Self {
+            let serialization = SECRET_STORE_TEST_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let prev = std::env::var_os("COXAGENT_DEPLOY_SECRET_DIR");
+            let dir = std::env::temp_dir().join(format!("cxa-b030-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("mkdir store dir");
+            std::env::set_var("COXAGENT_DEPLOY_SECRET_DIR", &dir);
+            // The lock guard must outlive this constructor so every other
+            // secret-store test stays serialised until after our env restore on
+            // drop. It is stored solely for its RAII lifetime (never read again),
+            // hence an underscore-prefixed field which also silences dead-code.
+            SecretStoreGuard {
+                prev,
+                _serialized: serialization,
+            }
+        }
+    }
+    impl Drop for SecretStoreGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var("COXAGENT_DEPLOY_SECRET_DIR", v),
+                None => std::env::remove_var("COXAGENT_DEPLOY_SECRET_DIR"),
+            }
+        }
+    }
+
+    /// A throwaway per-test work dir (named by a distinct tag so concurrently
+    /// running tests never clobber each other's project files). Mirrors the
+    /// temp-dir idiom used by [`dot_env_parser_detects_only_real_assignments`].
+    fn work_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("cxa-b030-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        dir
+    }
+
+    /// Tests that resolve secrets treat the project as UNCONFIGURED: drop any
+    /// ambient operator-set copies of our required keys from process env so a
+    /// dev machine exporting them cannot skew resolution counts.
+    fn clear_required_env() {
+        for k in ["PG_PASSWORD", "COXAGENT_ADMIN_PASSWORD"] {
+            std::env::remove_var(k);
+        }
+    }
+
+    /// CXA-B030 core: an UNCONFIGURED project resolves the same two secrets on
+    /// every call — resolution is stable across cycles (no rotation between
+    /// passes), so restarting a deploy does not orphan its persisted DB creds.
+    #[test]
+    fn unconfigured_project_resolves_the_same_secrets_across_cycles() {
+        clear_required_env();
+        let _guard = SecretStoreGuard::new();
+        let work = work_dir("stable");
+        let pass1 = resolve_deploy_secrets(&work);
+        assert_eq!(pass1.len(), 2);
+        let pass2 = resolve_deploy_secrets(&work);
+        assert_eq!(pass2, pass1); // CYCLE STABILITY == CXA-B030 core
+    }
+
+    /// CXA-B028 guard: real resolution persists generated creds to the OFF-REPO
+    /// store only and must NEVER materialise a `.env` inside the source tree.
+    #[test]
+    fn generated_secrets_persist_outside_the_source_tree_only() {
+        let _guard = SecretStoreGuard::new();
+        let work = work_dir("offtree");
+        resolve_deploy_secrets(&work);
+        assert!(
+            !work.join(".env").exists(),
+            "resolution must never materialise .env inside project dir (CXA-B028)"
+        );
+    }
+
+    /// CXA-B033 regression guard: generated superuser creds at rest MUST be
+    /// owner-only (~0600), not world-readable (0644). Without an explicit chmod a
+    /// default umask of 022 leaves live PG/admin passwords readable by every other
+    /// local user on the host.
+    #[test]
+    fn persisted_deploy_secrets_are_owner_only() {
+        let _guard = SecretStoreGuard::new();
+        let proj = compose_project_name(&work_dir("perms"));
+        let store_path = deploy_secret_store_path(&proj);
+        persist_generated_deploy_secrets(
+            &store_path,
+            &[("PG_PASSWORD".to_owned(), "s3cret".to_owned())],
+        )
+        .expect("persist");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&store_path)
+                .expect("store file exists")
+                .permissions()
+                .mode();
+            assert_eq!(
+                mode & 0o777,
+                0o600,
+                "store must be owner-only (0600), got {mode:o}"
+            );
+            assert_eq!(mode & 0o044, 0, "group+other read bits must be cleared");
+        }
+    }
+
+    /// The verification-only resolver must be side-effect free: it never writes
+    /// to the off-repo store file nor touches anything in the work dir.
+    #[test]
+    fn ephemeral_resolve_writes_nothing_to_store_or_workdir() {
+        let _guard = SecretStoreGuard::new();
+        let work = work_dir("eph");
+        let sd = std::path::PathBuf::from(
+            std::env::var("COXAGENT_DEPLOY_SECRET_DIR").expect("guard set"),
+        );
+        let expected_store_file = sd.join(format!("{}.secrets", compose_project_name(&work)));
+        ephemeral_resolve(&work);
+        assert!(!expected_store_file.exists());
+        assert!(!work.join(".env").exists());
+    }
+
+    /// Once an operator configures a key in `<proj>/.env` AFTER an earlier pinned
+    /// cycle, later passes must not resurrect that stale pin — external config wins.
+    #[test]
+    fn operator_configuration_wins_over_a_stale_pin_on_later_passes() {
+        clear_required_env();
+        let _guard = SecretStoreGuard::new();
+        let work = work_dir("opin");
+        let _pass1 = resolve_deploy_secrets(&work);
+
+        // Pass one pinned PG_PASSWORD into the off-repo store; grab that stale value.
+        let proj = compose_project_name(&work);
+        let store_path = deploy_secret_store_path(&proj);
+        let stored_before = read_dot_env_values(&store_path)
+            .get("PG_PASSWORD")
+            .cloned()
+            .expect("pinned on pass1");
+
+        // Operator pins PG_PASSWORD via the project-dir `.env` (the only route
+        // that does NOT mutate global process env under parallel tests).
+        std::fs::write(work.join(".env"), "PG_PASSWORD=<opsecret>\n").expect("write");
+
+        // Later pass: externally configured keys are no longer our concern, so the
+        // stale off-repo pin must NOT leak back into resolution.
+        let result = resolve_deploy_secrets(&work);
+        assert!(
+            !result.contains(&("PG_PASSWORD".to_owned(), stored_before.clone())),
+            "external operator config must override any prior stale pin"
+        );
     }
 }
 
