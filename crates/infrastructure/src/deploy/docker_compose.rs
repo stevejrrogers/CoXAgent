@@ -1267,12 +1267,12 @@ mod cross_check_tests {
     }
 }
 
-/// Regression guard for CXA-B017: an app-driven deploy must NEVER bake a
-/// public, source-published credential into long-running services, and must
-/// honour an operator's own configured secrets rather than clobbering them.
+/// Regression guards for CXA-B017 (never bake a source-published credential,
+/// never clobber an operator's configured secret) and CXA-B028 (never persist
+/// generated superuser credentials into the agent-managed source tree).
 #[cfg(test)]
 mod deploy_secret_tests {
-    use super::{missing_required_secrets, random_secret, read_dot_env};
+    use super::{missing_required_secrets, random_secret, read_dot_env, resolve_deploy_secrets};
     use std::collections::HashSet;
 
     fn set(keys: &[&str]) -> HashSet<String> {
@@ -1381,6 +1381,42 @@ mod deploy_secret_tests {
         // treating them as provided would either fail `${VAR:?}` or boot empty.
         assert!(!keys.contains("B"), "'B=' is blank — not real config");
         assert!(!keys.contains("a"), "'a' has no value — not real config");
+    }
+
+    /// CXA-B028 regression guard: resolving deploy secrets must NEVER persist
+    /// them into the project's `.env`. In the hub flow that `.env` lives in
+    /// `<project>/codebase` — the persistent agent checkout agents read diffs
+    /// from and commit from; writing a live root/admin login there leaves a
+    /// durable plaintext superuser credential at rest inside a source tree,
+    /// exactly contradicting CXA-B017 (`no reader of source can predict a
+    /// deployment's superuser password`) for unconfigured app-driven deploys.
+    ///
+    /// Resolution reads config only — its generated values exist as transient
+    /// per-pass child-process env ([`seed_deploy_secrets`]) and are never written
+    /// back out. If someone reintroduces B027-style write-back
+    /// (`materialize_deploy_secrets` / `upsert_dot_env`) into resolution or deploy,
+    /// this guard fails at review even though git-only gates never see an
+    /// untracked preview `.env`.
+    #[test]
+    fn resolving_deploy_secrets_never_persists_them_to_work_dir_dot_env() {
+        let dir = std::env::temp_dir().join(format!("cxab028-t-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+
+        // Resolve against a bare work dir (no `.env`, nothing pre-written).
+        resolve_deploy_secrets(&dir);
+
+        let env_path = dir.join(".env");
+        // Persisting generated secrets would materialise a `.env` here; its
+        // absence after resolution proves resolution wrote nothing back out.
+        assert!(
+            !env_path.exists(),
+            "resolving must not create {0} / write secrets into {1}/codebase/.env \
+             where agents read diffs from and commit from (CXA-B028)",
+            env_path.display(),
+            "<project>"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
