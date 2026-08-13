@@ -267,10 +267,11 @@ pub(crate) async fn build_project(
     // One read settles both the `Config` and the deploy health-gate's host-port
     // probe, so a `deploy.host_port` this project cannot publish fails the gate
     // (COX-B035) or is healed (COX-B042) instead of drifting between the two.
+    // A config that does not parse at all fails the project's load (COX-B043).
     let LoadedConfig {
         config,
         host_port_probe,
-    } = load_config_with_probe(state_dir);
+    } = load_config_with_probe(state_dir)?;
     // `auth` must be the SAME store the hub actually serves /api/mcp with —
     // NOT re-derived from state_dir here. Each project can live under a
     // different workspace root than the hub-wide auth.json (see run_hub's
@@ -337,6 +338,43 @@ pub(crate) async fn build_project(
     let handle =
         Arc::new(RunnerHandle::new().with_capabilities(local_caps(&config, &work_dir).await));
 
+    // Hot-reload hook: each runner asks this at its cycle boundary; when
+    // coxagent.json changed since last asked, it rebuilds the engine stack from
+    // the fresh config so Settings edits apply WITHOUT a hub restart. Each
+    // runner gets its own hook (own hash cell) so all of them converge.
+    let mk_reloader = {
+        let state_dir = state_dir.to_path_buf();
+        let mcp = mcp.clone();
+        move || {
+            let (state_dir, mcp) = (state_dir.clone(), mcp.clone());
+            let hash = std::sync::Mutex::new(config_content_hash(&state_dir));
+            Arc::new(move || {
+                let new = config_content_hash(&state_dir);
+                {
+                    let mut h = hash.lock().ok()?;
+                    if *h == new {
+                        return None;
+                    }
+                    *h = new;
+                }
+                let reloaded = match load_config_with_probe(&state_dir) {
+                    Ok(l) => l.config,
+                    Err(e) => {
+                        tracing::warn!("config changed but is invalid — keeping previous: {e}");
+                        return None;
+                    }
+                };
+                match build_engine(&reloaded, logs_dir(&state_dir), mcp.as_ref()) {
+                    Ok((engine, meter)) => Some((reloaded, engine, meter)),
+                    Err(e) => {
+                        tracing::warn!("config changed but engine rebuild failed; keeping previous: {e}");
+                        None
+                    }
+                }
+            }) as Arc<dyn Fn() -> _ + Send + Sync>
+        }
+    };
+
     // Leader runner: singleton phases (BA, PO, standup, etc.)
     {
         let leader = RunCycleUseCase::new(
@@ -369,7 +407,8 @@ pub(crate) async fn build_project(
         .with_files(Some(Arc::new(
             coxagent_infrastructure::FsWorkspaceFiles::new(),
         )))
-        .with_janitor(Some(Arc::new(coxagent_infrastructure::OsProcessJanitor)));
+        .with_janitor(Some(Arc::new(coxagent_infrastructure::OsProcessJanitor)))
+        .with_reloader(mk_reloader());
         let leader = if let Some(ref f) = forge {
             leader.with_forge(Arc::clone(f))
         } else {
@@ -390,12 +429,17 @@ pub(crate) async fn build_project(
         concurrency.saturating_sub(1),
         concurrency
     );
-    for _ in 1..concurrency {
+    for slot in 1..concurrency {
+        // Each extra worker runs in its OWN git worktree. Sharing the leader's
+        // checkout meant no DEV could ever pass a green-suite DoD — each saw
+        // the other's half-written changes (the overnight zero-throughput
+        // deadlock). Falls back to the shared tree when this isn't a repo.
+        let slot_dir = worktree_at(work_dir.clone(), &format!("{id}-slot-{slot}"));
         let worker = RunCycleUseCase::new(
             Arc::clone(&store),
             engine.clone(),
             config.clone(),
-            work_dir.clone(),
+            slot_dir,
             context.clone(),
         )
         .with_meter(meter.clone())
@@ -421,7 +465,8 @@ pub(crate) async fn build_project(
         .with_files(Some(Arc::new(
             coxagent_infrastructure::FsWorkspaceFiles::new(),
         )))
-        .with_janitor(Some(Arc::new(coxagent_infrastructure::OsProcessJanitor)));
+        .with_janitor(Some(Arc::new(coxagent_infrastructure::OsProcessJanitor)))
+        .with_reloader(mk_reloader());
         let worker = if let Some(ref f) = forge {
             worker.with_forge(Arc::clone(f))
         } else {

@@ -82,9 +82,8 @@ fn check_insecure_fallbacks(path: &str, src: &str) -> Vec<Finding> {
     };
 
     let mut findings = Vec::new();
-    let services = match doc["services"].as_mapping() {
-        Some(m) => m,
-        None => return findings,
+    let Some(services) = doc["services"].as_mapping() else {
+        return findings;
     };
 
     for (svc_name, svc) in services {
@@ -115,7 +114,10 @@ fn check_insecure_fallbacks(path: &str, src: &str) -> Vec<Finding> {
                     let mut rest = val;
                     while let Some(start) = rest.find("${") {
                         let token_src = &rest[start..];
-                        let end = token_src.find('}').map(|i| i + 1).unwrap_or(token_src.len());
+                        let end = match token_src.find('}') {
+                            Some(i) => i + 1,
+                            None => token_src.len(),
+                        };
                         let token = &token_src[..end];
                         if let Some(fallback) = insecure_fallback(token) {
                             findings.push(Finding {
@@ -161,9 +163,8 @@ fn check_bare_datastore_ports(path: &str, src: &str) -> Vec<Finding> {
     };
 
     let mut findings = Vec::new();
-    let services = match doc["services"].as_mapping() {
-        Some(m) => m,
-        None => return findings,
+    let Some(services) = doc["services"].as_mapping() else {
+        return findings;
     };
 
     for (svc_name, svc) in services {
@@ -171,9 +172,8 @@ fn check_bare_datastore_ports(path: &str, src: &str) -> Vec<Finding> {
         if !DATASTORE_SERVICES.contains(&svc_name) {
             continue; // only police datastores
         }
-        let ports = match svc["ports"].as_sequence() {
-            Some(p) => p,
-            None => continue,
+        let Some(ports) = svc["ports"].as_sequence() else {
+            continue;
         };
         for entry in ports {
             let mapping = match entry {
@@ -372,12 +372,11 @@ fn env_reference_without_fallback_passes_rule1() {
 
 #[test]
 fn dsn_with_embedded_insecure_fallback_is_caught() {
-    let src = format!(
-        "services:\n  coxagent:\n    image: coxagent\n\
+    let src = "services:\n  coxagent:\n    image: coxagent\n\
          \x20   environment:\n\
          \x20     COXAGENT_DB_DSN: postgres://postgres:${{PG_PASSWORD:-coxagent_dev}}@db:5432/coxagent\n\
          \x20   ports:\n      - \"8101:4000\"\n"
-    );
+        .to_string();
     let findings = check("docker-compose.yml", &src);
     assert!(
         !findings.is_empty(),
@@ -393,12 +392,11 @@ fn dsn_with_embedded_insecure_fallback_is_caught() {
 #[test]
 fn non_password_key_with_fallback_passes_rule1() {
     // A non-secret key with a fallback is fine (e.g. POSTGRES_DB).
-    let src = format!(
-        "services:\n  db:\n    image: postgres:16-alpine\n\
+    let src = "services:\n  db:\n    image: postgres:16-alpine\n\
          \x20   environment:\n\
          \x20     POSTGRES_DB: ${{PG_DB:-coxagent}}\n\
          \x20   ports:\n      - \"127.0.0.1:5432:5432\"\n"
-    );
+        .to_string();
     let findings = check("docker-compose.yml", &src);
     assert!(
         findings.is_empty(),
@@ -444,10 +442,9 @@ fn bare_port_on_non_datastore_service_passes_rule2() {
 
 #[test]
 fn bare_redis_port_is_caught() {
-    let src = format!(
-        "services:\n  redis:\n    image: redis:7-alpine\n\
+    let src = "services:\n  redis:\n    image: redis:7-alpine\n\
          \x20   ports:\n      - \"6379:6379\"\n"
-    );
+        .to_string();
     let findings = check("docker-compose.yml", &src);
     assert!(
         !findings.is_empty(),
@@ -457,10 +454,9 @@ fn bare_redis_port_is_caught() {
 
 #[test]
 fn bare_mongo_port_is_caught() {
-    let src = format!(
-        "services:\n  mongo:\n    image: mongo:7\n\
+    let src = "services:\n  mongo:\n    image: mongo:7\n\
          \x20   ports:\n      - \"27017:27017\"\n"
-    );
+        .to_string();
     let findings = check("docker-compose.yml", &src);
     assert!(
         !findings.is_empty(),
@@ -470,13 +466,12 @@ fn bare_mongo_port_is_caught() {
 
 #[test]
 fn bare_minio_port_is_caught() {
-    let src = format!(
-        "services:\n  minio:\n    image: minio/minio\n\
+    let src = "services:\n  minio:\n    image: minio/minio\n\
          \x20   environment:\n\
          \x20     MINIO_ROOT_USER: coxagent\n\
          \x20     MINIO_ROOT_PASSWORD: ${{MINIO_ROOT_PASSWORD:?required}}\n\
          \x20   ports:\n      - \"9000:9000\"\n"
-    );
+        .to_string();
     let findings = check("docker-compose.yml", &src);
     // The bare port finding; the password key is clean.
     assert!(

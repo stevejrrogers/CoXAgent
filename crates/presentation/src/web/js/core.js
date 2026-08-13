@@ -393,6 +393,22 @@ function actIcon(action){const s=(action||"").toLowerCase();
   return"point";}
 function relTime(at){if(!at)return"";const d=new Date(at.replace(" ","T"));const s=(Date.now()-d.getTime())/1000;
   if(s<60)return"just now";if(s<3600)return Math.floor(s/60)+"m ago";if(s<86400)return Math.floor(s/3600)+"h ago";return Math.floor(s/86400)+"d ago";}
+// The per-cycle scorecard table: newest first, each cycle graded A–D by the
+// backend (deterministic, zero tokens). The grade colors match intuition:
+// A shipped, B useful, C idle-but-clean, D churn/incident.
+function renderCycleScores(s){
+  const el=document.getElementById("cycle-scores");if(!el)return;
+  const rows=(s.cycle_scores||[]).slice(-12).reverse();
+  if(!rows.length){el.innerHTML='<div class="empty">no cycles scored yet</div>';return;}
+  const gc={A:"var(--green)",B:"var(--accent2)",C:"var(--muted)",D:"var(--red)"};
+  el.innerHTML='<table class="scoretbl"><thead><tr><th></th><th>cycle</th><th>shipped</th><th>useful/runs</th><th>cost</th><th>errors</th><th>when</th></tr></thead><tbody>'+
+    rows.map(r=>`<tr>
+      <td><span class="grade" style="background:color-mix(in srgb,${gc[r.grade]||'var(--muted)'} 16%,transparent);color:${gc[r.grade]||'var(--muted)'}">${esc(r.grade)}</span></td>
+      <td>#${r.cycle}</td><td>${r.shipped||0}</td><td>${r.useful||0}/${r.runs||0}</td>
+      <td>${r.cost_usd?('$'+r.cost_usd.toFixed(2)):'—'}</td>
+      <td>${(r.errors||0)+(r.incidents?(' · '+r.incidents+'⛔'):'')}</td>
+      <td style="color:var(--dim)">${esc((r.at||'').slice(11,16))}</td></tr>`).join("")+'</tbody></table>';
+}
 function actItem(a){const col=cvar(AC[a.agent]||"--muted");
   return `<div class="tlrow"><div class="tl-node" style="--nc:${col}"><i class="ti ti-${actIcon(a.action)}"></i></div>
     <div class="tl-body"><div class="tl-line"><span class="tl-who" style="color:${col}">${esc(a.agent)}</span> <span class="tl-act">${esc(a.action)}</span>${a.ticket?` <span class="tk" onclick="showTicket('${esc(a.ticket)}')" style="cursor:pointer">${esc(a.ticket)}</span>`:''}</div>
@@ -508,6 +524,7 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
         <div class="agstats"><span title="actions"><i class="ti ti-bolt"></i> ${st.n}</span><span title="tickets touched"><i class="ti ti-ticket"></i> ${st.tk.size}</span>${cost>0?`<span title="cost"><i class="ti ti-coin"></i> ${money(cost)}</span>`:''}</div>
         <div class="ag-status">${statusHtml}</div></div>`;}).join("");
     renderDupWarn(s);
+    renderCycleScores(s);
     renderTeamsOnline();
     renderSessions();
     if(ME&&ME.role==="admin")renderTeamPeople();

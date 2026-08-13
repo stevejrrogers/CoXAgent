@@ -194,6 +194,34 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
     /// [`AppError`] on engine failure or an unexpected state transition error.
     #[allow(clippy::too_many_lines)] // one linear pass; splitting hurts readability
     pub async fn execute(&self) -> Result<Option<TicketId>, AppError> {
+        // Fresh base for an idle per-slot worktree: it starts DETACHED at
+        // whatever HEAD existed when it was created and only ages from there —
+        // an agent coding on a ten-commit-old base ships conflicts. When the
+        // tree is detached AND clean (nothing in flight to lose), fast-forward
+        // it to origin/<base> before claiming. A checked-out branch (the
+        // leader's primary tree) is left alone.
+        if self.config.git.enabled {
+            if let Some(git) = &self.git {
+                let detached = !git
+                    .raw(&self.work_dir, &["symbolic-ref", "-q", "HEAD"])
+                    .await
+                    .0;
+                if detached && self.working_tree().await.changed_paths.is_empty() {
+                    let base = if self.config.git.default_branch.is_empty() {
+                        "main"
+                    } else {
+                        &self.config.git.default_branch
+                    };
+                    let _ = git.raw(&self.work_dir, &["fetch", "origin", base]).await;
+                    let target = format!("origin/{base}");
+                    if git.raw(&self.work_dir, &["rev-parse", &target]).await.0 {
+                        let _ = git
+                            .raw(&self.work_dir, &["reset", "--hard", &target])
+                            .await;
+                    }
+                }
+            }
+        }
         // Self-healing boot: if the project doesn't compile, fix that BEFORE
         // touching any tickets. Otherwise every ticket will fail anyway.
         // Skipped entirely when the tree is unchanged since the last green
@@ -252,17 +280,32 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                             "DEV boot check: cargo test failed — self-healing. {}",
                             &r.summary[..r.summary.len().min(200)]
                         );
-                        return self.self_heal_compile(&r.summary).await;
+                        // One clear point for every self-heal outcome, so the
+                        // "boot check" phase note can never outlive the run.
+                        let healed = self.self_heal_compile(&r.summary).await;
+                        if let Some(p) = &self.phase {
+                            p(None);
+                        }
+                        return healed;
                     }
                     Ok(Err(e)) => {
                         // Spawn errors and timeouts are INFRASTRUCTURE, not compile
                         // breakage — healing on them tells the LLM "the project
-                        // doesn't compile" with no compile error to fix.
+                        // doesn't compile" with no compile error to fix. Clear the
+                        // phase note on the way out: leaving it set froze the card
+                        // at "boot check: verifying N files" long after this run
+                        // gave up, which reads as a hung agent.
                         tracing::warn!("DEV boot check: cargo test spawn error — {e}");
+                        if let Some(p) = &self.phase {
+                            p(None);
+                        }
                         return Ok(None);
                     }
                     Err(_timeout) => {
                         tracing::warn!("DEV boot check: cargo test timed out after 30 min");
+                        if let Some(p) = &self.phase {
+                            p(None);
+                        }
                         return Ok(None);
                     }
                 }
@@ -384,7 +427,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         // conversation. Thinking is cheap; unplanned code is not. Falls back
         // to single-shot on engines without session resume.
         let mut request = self.build_request(&state, &id).await;
-        let plan_first = request.escalation_level == 0; // retries already carry a journal
+        // Two-phase plan→execute costs an extra engine call per ticket. That
+        // buys real risk reduction on a LARGE change — and mostly latency on a
+        // small one, where the plan restates the ticket. So: plan-first only
+        // for Large complexity, single-shot for the rest (retries already
+        // carry a failure journal either way).
+        let is_large = state
+            .ticket(&id)
+            .is_some_and(|t| t.complexity() == coxagent_domain::Complexity::Large);
+        let plan_first = request.escalation_level == 0 && is_large;
                                                         // The full task, kept before the plan wrapper below — it becomes the
                                                         // follow-up when RE-ENTERING a ticket on a stored session, so a resumed
                                                         // (or stale) conversation still gets the complete instructions.

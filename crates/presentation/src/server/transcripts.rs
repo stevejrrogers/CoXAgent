@@ -152,44 +152,6 @@ pub(super) async fn agent_log_ep(
     Json(serde_json::json!({ "role": role, "live": live_flag, "log": body })).into_response()
 }
 
-#[cfg(test)]
-mod live_log_tests {
-    use super::live_role_suffix;
-
-    // Names the writer actually produces: `<role_key>__<ticket>__<operator>.log`.
-    #[test]
-    fn matches_the_writers_per_ticket_name() {
-        assert_eq!(
-            live_role_suffix("dev_bug__cox-b043__root.log", "dev_bug"),
-            Some("__cox-b043__root")
-        );
-        // Bare role file (the shared fallback) still matches.
-        assert_eq!(live_role_suffix("dev_bug.log", "dev_bug"), Some(""));
-    }
-
-    // The prefix must not swallow a longer role — the bug a naive `contains`
-    // would have: role `dev` picking up `dev_feature`'s live log.
-    #[test]
-    fn role_prefix_does_not_bleed_into_a_longer_role() {
-        assert_eq!(live_role_suffix("dev_feature__cox-f01__root.log", "dev"), None);
-        assert_eq!(live_role_suffix("developer.log", "dev"), None);
-    }
-
-    // The operator suffix is what the caller filters on to prefer one worker.
-    #[test]
-    fn operator_is_findable_in_the_suffix() {
-        let after = live_role_suffix("sa__cox-f10__alice.log", "sa").unwrap();
-        assert!(after.contains("alice"));
-        assert!(!after.contains("bob"));
-    }
-
-    #[test]
-    fn a_non_log_or_foreign_file_is_rejected() {
-        assert_eq!(live_role_suffix("dev_bug.txt", "dev_bug"), None);
-        assert_eq!(live_role_suffix("qa__cox-b01.log", "sa"), None);
-    }
-}
-
 /// List transcript files (name + size + modified), newest first.
 pub(super) async fn list_transcripts(
     State(app): State<AppState>,
@@ -234,5 +196,43 @@ pub(super) async fn get_transcript(
     match std::fs::read_to_string(&path) {
         Ok(body) => ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response(),
         Err(_) => (StatusCode::NOT_FOUND, "no such transcript").into_response(),
+    }
+}
+
+#[cfg(test)]
+mod live_log_tests {
+    use super::live_role_suffix;
+
+    // Names the writer actually produces: `<role_key>__<ticket>__<operator>.log`.
+    #[test]
+    fn matches_the_writers_per_ticket_name() {
+        assert_eq!(
+            live_role_suffix("dev_bug__cox-b043__root.log", "dev_bug"),
+            Some("__cox-b043__root")
+        );
+        // Bare role file (the shared fallback) still matches.
+        assert_eq!(live_role_suffix("dev_bug.log", "dev_bug"), Some(""));
+    }
+
+    // The prefix must not swallow a longer role — the bug a naive `contains`
+    // would have: role `dev` picking up `dev_feature`'s live log.
+    #[test]
+    fn role_prefix_does_not_bleed_into_a_longer_role() {
+        assert_eq!(live_role_suffix("dev_feature__cox-f01__root.log", "dev"), None);
+        assert_eq!(live_role_suffix("developer.log", "dev"), None);
+    }
+
+    // The operator suffix is what the caller filters on to prefer one worker.
+    #[test]
+    fn operator_is_findable_in_the_suffix() {
+        let after = live_role_suffix("sa__cox-f10__alice.log", "sa").unwrap();
+        assert!(after.contains("alice"));
+        assert!(!after.contains("bob"));
+    }
+
+    #[test]
+    fn a_non_log_or_foreign_file_is_rejected() {
+        assert_eq!(live_role_suffix("dev_bug.txt", "dev_bug"), None);
+        assert_eq!(live_role_suffix("qa__cox-b01.log", "sa"), None);
     }
 }

@@ -85,6 +85,34 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
     /// (written before the skeleton existed) or its documented files have
     /// commits newer than the page. Bounded to a single page per cycle so the
     /// wiki converges without the bill growing with it.
+    /// Take one unit of the DAILY refresh budget, or say no. Per-cycle limits
+    /// don't cap cost anymore — cycles got fast, so "one page per cycle" became
+    /// 12-30 full-page sonnet rewrites an hour. A handful a day converges the
+    /// wiki at a price that does not scale with cycle speed.
+    async fn take_refresh_budget(&self, state: &crate::state::ProjectState) -> bool {
+        const REFRESHES_PER_DAY: u32 = 5;
+        let today = crate::state::now_rfc3339()[..10].to_owned();
+        let spent = state
+            .daily_jobs
+            .get("docs_refresh_budget")
+            .and_then(|v| v.strip_prefix(&format!("{today}:")))
+            .and_then(|n| n.parse::<u32>().ok())
+            .unwrap_or(0);
+        if spent >= REFRESHES_PER_DAY {
+            return false;
+        }
+        let (key, val) = (
+            "docs_refresh_budget".to_owned(),
+            format!("{today}:{}", spent + 1),
+        );
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+            s.daily_jobs.insert(key.clone(), val.clone());
+            Ok(())
+        })
+        .await;
+        true
+    }
+
     async fn refresh_stale_page(&self, state: &crate::state::ProjectState) {
         let behind = pages_behind_code(self.git.as_ref(), state, &self.work_dir).await;
         // Pages to leave alone this cycle: PARKED (a rewrite the structure gate
@@ -101,6 +129,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
         let Some(page) = stalest_page(state, &self.work_dir, &behind, &exclude) else {
             return;
         };
+        // Budget is taken only once a refresh will actually run — a no-op cycle
+        // must not eat one of the day's five refreshes.
+        if !self.take_refresh_budget(state).await {
+            return;
+        }
         if let Some(p) = &self.phase {
             p(Some((
                 "DOCS".to_owned(),

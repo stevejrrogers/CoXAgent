@@ -1856,7 +1856,9 @@ async function showTicket(id){
     <div class="tkc-wrap">${mdToolbar('tkc-input')}<div class="tkc-compose"><input id="tkc-input" placeholder="Add a comment…  (**markdown** · Enter to post · @ to mention)" onkeydown="if(!imeEnter(event)&&event.key==='Enter')postTicketComment('${t.id}')"><button class="pri" onclick="postTicketComment('${t.id}')"><i class="ti ti-send"></i></button></div></div></div>`;
   body.innerHTML=h;
   fillAssignSelect();
-  renderTicketComments(t.id);}
+  renderTicketComments(t.id);
+  // Ticket descriptions can carry ```mermaid fences too (SA designs often do).
+  if(typeof renderMermaidIn==="function")renderMermaidIn(body);}
 async function fillAssignSelect(){
   const sel=document.getElementById("tk-assign-sel");if(!sel)return;
   try{const members=await(await fetch(api("/members"))).json();
@@ -1946,7 +1948,30 @@ async function loadSettings(){
       <div class="settab" data-p="mcp"><div id="mcp-panel"></div></div>`;
     window._setTab="mcp";renderMcpPanel();return;
   }
-  let cfg={};try{cfg=await(await fetch(api("/config"))).json();}catch(e){}window._cfg=cfg;
+  // A coxagent.json the hub cannot read is NOT an empty config (COX-B050).
+  // Rendering the form anyway would seed it from defaults, and Save PUTs the
+  // whole document back — so one typo'd field would be written over every
+  // other setting on disk, governance policy included. Show what broke and
+  // render no form: there is nothing safe to save until the file is fixed.
+  let cfg=null,cfgErr=null;
+  try{const r=await fetch(api("/config"));const b=await r.json();if(r.ok)cfg=b;else cfgErr=b;}
+  catch(e){cfgErr={error:"the hub could not be reached"};}
+  window._cfg=cfg;
+  if(cfgErr){
+    document.getElementById("settings-body").innerHTML=`
+      <div class="panel" style="border-color:var(--red)">
+        <div style="color:var(--red);font-weight:600;margin-bottom:6px">
+          <i class="ti ti-alert-triangle"></i> coxagent.json could not be read</div>
+        <div style="font-size:13px;line-height:1.6">
+          ${cfgErr.field?`The field <code>${esc(cfgErr.field)}</code> holds a value this project's settings cannot represent.`:""}
+          <div style="margin-top:4px;opacity:.8">${esc(cfgErr.error||"")}</div>
+          <div style="margin-top:10px">Settings are hidden on purpose: saving them would write defaults
+          over every other setting in the file, including the model allowlist and forbidden paths.
+          Fix the file on disk, then reload.</div>
+        </div>
+      </div>`;
+    window._setTab=null;return;
+  }
   let td={tools:[]};try{td=await(await fetch("/api/tooling")).json();}catch(e){}
   let ga={};try{ga=await(await fetch(api("/git/auth"))).json();}catch(e){}
   const tools=td.tools||[];const missing=tools.filter(t=>!t.present).length;
@@ -2024,7 +2049,14 @@ async function loadSettings(){
     <div class="settab" data-p="workflow" hidden>
       <div class="panel frm">
         <div class="fr"><span class="lbl">Mode</span><select id="wf-mode"><option value="kanban" ${wf.mode!=='scrum'?'selected':''}>kanban</option><option value="scrum" ${wf.mode==='scrum'?'selected':''}>scrum</option></select><span class="hint">scrum groups cycles into sprints</span></div>
-        <div class="fr"><span class="lbl">Sprint length</span><input id="wf-sp" type="number" min="1" value="${wf.sprint_length_cycles??10}" style="width:90px"/><span class="hint">cycles per sprint</span></div>
+        <div class="fr"><span class="lbl">Sprint length</span>
+          <select id="wf-su" onchange="document.getElementById('wf-sp-days').style.display=this.value==='days'?'':'none';document.getElementById('wf-sp').style.display=this.value==='cycles'?'':'none';">
+            <option value="days" ${wf.sprint_unit!=='cycles'?'selected':''}>days</option>
+            <option value="cycles" ${wf.sprint_unit==='cycles'?'selected':''}>cycles</option>
+          </select>
+          <input id="wf-sp-days" type="number" min="1" value="${wf.sprint_length_days??1}" style="width:90px;${wf.sprint_unit==='cycles'?'display:none':''}"/>
+          <input id="wf-sp" type="number" min="1" value="${wf.sprint_length_cycles??10}" style="width:90px;${wf.sprint_unit==='cycles'?'':'display:none'}"/>
+          <span class="hint">days = wall-clock sprints (recommended — cycles speed up and slow down); cycles = roll on the loop counter</span></div>
         <div class="fr"><span class="lbl">BA every N cycles</span><input id="wf-ba" type="number" min="0" value="${wf.ba_every_n_cycles??4}" style="width:90px"/><span class="hint">0 disables BA</span></div>
         <div class="fr"><span class="lbl">Feature dev</span><select id="wf-fd"><option value="true" ${wf.feature_dev_enabled!==false?'selected':''}>enabled</option><option value="false" ${wf.feature_dev_enabled===false?'selected':''}>disabled</option></select></div>
         <div class="fr"><span class="lbl">Ops monitor</span><select id="wf-ops"><option value="true" ${wf.ops_monitor!==false?'selected':''}>on</option><option value="false" ${wf.ops_monitor===false?'selected':''}>off</option></select><span class="hint">pings the deployed app; files a bug + alerts on an outage</span></div>
@@ -2075,6 +2107,7 @@ async function loadSettings(){
         <div class="fr"><span class="lbl">Open PR/MR</span><select id="git-pr"><option value="true" ${git.auto_pr!==false?'selected':''}>automatically after push</option><option value="false" ${git.auto_pr===false?'selected':''}>manual</option></select></div>
         <div class="fr"><span class="lbl">Auto-review</span><select id="git-ar"><option value="true" ${git.auto_review!==false?'selected':''}>on — the SA agent reviews every PR &amp; suggests</option><option value="false" ${git.auto_review===false?'selected':''}>off — no automatic review</option></select><span class="hint">SA deep-dives each PR and posts approve / request-changes as a suggestion</span></div>
         <div class="fr"><span class="lbl">Auto-merge</span><select id="git-am"><option value="false" ${!git.auto_merge?'selected':''}>off — you merge from the Review tab</option><option value="true" ${git.auto_merge?'selected':''}>on — SA approves &amp; merges automatically</option></select><span class="hint">On: SA merges on approve (never on failing CI). Off: approval is only a suggestion; request-changes still loops back to the agent to fix.</span></div>
+        <div class="fr"><span class="lbl">Require CI</span><select id="git-ci"><option value="true" ${git.require_ci!==false?'selected':''}>on — failing/pending CI blocks review &amp; merge</option><option value="false" ${git.require_ci===false?'selected':''}>off — ignore CI (e.g. Actions billing down); local gates carry the review</option></select><span class="hint">Turn off when CI is unavailable for reasons that aren't the code — the SA still runs the diff review and local test gates.</span></div>
       </div>
     </div>
     <div class="settab" data-p="mcp" hidden><div id="mcp-panel"></div></div>

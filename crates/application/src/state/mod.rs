@@ -128,6 +128,10 @@ pub struct ProjectState {
     /// root of the DOCS run churn.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub doc_refresh: std::collections::BTreeMap<String, DocRefreshMark>,
+    /// Per-cycle scorecards (bounded, newest last) — the deterministic
+    /// stability/cost/effectiveness grade the dashboard charts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cycle_scores: Vec<CycleScore>,
     /// Lessons the team learned in past retros — fed back into agent prompts so
     /// the team actually improves over time (kept bounded, newest last).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -359,6 +363,7 @@ impl Default for ProjectState {
             docs: Vec::new(),
             doc_folders: Vec::new(),
             doc_refresh: std::collections::BTreeMap::new(),
+            cycle_scores: Vec::new(),
             lessons: Vec::new(),
             decisions: Vec::new(),
             refactor_mode: false,

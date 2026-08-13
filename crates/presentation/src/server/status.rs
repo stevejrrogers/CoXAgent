@@ -30,6 +30,7 @@ pub(super) async fn build_state(
         docs_bus: Arc::new(RwLock::new(HashMap::new())),
         docs_editors: Arc::new(std::sync::Mutex::new(HashMap::new())),
         order: Arc::new(RwLock::new(order)),
+        broken: Arc::new(extras.broken),
         factory: extras.factory,
         auth: extras.auth,
         audit,
@@ -124,6 +125,36 @@ pub(super) async fn workers_ep(
     Json(workers).into_response()
 }
 
+/// What the Settings screen should be shown for a config file that reads as
+/// `text` (`None` = no file on disk). Pure, so the rule is testable without a
+/// project fixture.
+///
+/// A project that never wrote a `coxagent.json` runs on defaults by design, so
+/// that case is `Ok`. A file that IS there but holds a field the schema cannot
+/// represent is refused, exactly as the runner's own load refuses it
+/// (COX-B043) — see [`get_config`] for why answering with defaults is worse
+/// here than anywhere else.
+fn config_for_settings(
+    text: Option<&str>,
+) -> Result<Config, coxagent_application::config_parse::ConfigParseError> {
+    text.map_or_else(
+        || Ok(Config::default()),
+        coxagent_application::config_parse::parse_config,
+    )
+}
+
+/// The Settings screen's view of `coxagent.json`.
+///
+/// This handler must never answer a malformed file with `Config::default()`.
+/// The screen is not read-only: [`put_config`] writes back the whole document
+/// the screen was handed, and `saveSettings` deliberately carries the fields
+/// the form does not render so they survive a save. Defaulting here therefore
+/// turns one typo'd field into a full config wipe PERSISTED TO DISK the next
+/// time anyone presses Save — including emptying `policy.model_allowlist` and
+/// `policy.forbidden_paths`, i.e. silently turning the governance gates off.
+/// That is the same wipe COX-B043 locked out of the runner's load path; the
+/// admin UI is simply the other way in (COX-B050). Fail closed and name the
+/// field instead, so the operator fixes the file rather than overwriting it.
 pub(super) async fn get_config(
     State(app): State<AppState>,
     Path(pid): Path<String>,
@@ -131,11 +162,19 @@ pub(super) async fn get_config(
     let Some(p) = app.project(&pid).await else {
         return not_found();
     };
-    let cfg = std::fs::read_to_string(&p.config_path)
-        .ok()
-        .and_then(|t| serde_json::from_str::<Config>(&t).ok())
-        .unwrap_or_default();
-    Json(cfg).into_response()
+    let text = std::fs::read_to_string(&p.config_path).ok();
+    match config_for_settings(text.as_deref()) {
+        Ok(cfg) => Json(cfg).into_response(),
+        Err(e) => (
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({
+                "error": e.to_string(),
+                "field": e.field,
+                "detail": e.detail,
+            })),
+        )
+            .into_response(),
+    }
 }
 
 pub(super) async fn put_config(
@@ -220,4 +259,75 @@ pub(super) async fn ice_config_ep() -> axum::response::Response {
         }));
     }
     Json(serde_json::json!({ "iceServers": servers })).into_response()
+}
+
+#[cfg(test)]
+mod settings_config_tests {
+    use super::{config_for_settings, Config};
+
+    /// A governed project whose config is healthy apart from the one field the
+    /// caller injects — the shape that matters, because the damage is to the
+    /// NEIGHBOURING settings, not to the bad field itself.
+    fn governed(host_port: &str) -> String {
+        let mut cfg = serde_json::to_value(Config::default()).expect("defaults as json");
+        cfg["policy"]["model_allowlist"] = serde_json::json!(["claude/sonnet"]);
+        cfg["policy"]["forbidden_paths"] = serde_json::json!(["infra/"]);
+        cfg["deploy"]["host_port"] = serde_json::from_str(host_port).expect("port token is JSON");
+        serde_json::to_string(&cfg).expect("config text")
+    }
+
+    /// AC (COX-B050): the Settings screen must not be handed a default config
+    /// because one field is unreadable. It PUTs back what it was given, so
+    /// defaults here become the operator's file on the next Save.
+    #[test]
+    fn a_malformed_field_is_refused_rather_than_shown_as_defaults() {
+        let err = config_for_settings(Some(&governed("99999")))
+            .expect_err("an out-of-range port must not be silently defaulted");
+
+        assert_eq!(err.field, "deploy.host_port", "the field is named: {err}");
+    }
+
+    /// The specific harm, stated as its own case: answering with defaults
+    /// empties the governance policy, and Save would then persist that —
+    /// turning the model allowlist and forbidden paths off, unasked.
+    #[test]
+    fn the_governance_policy_is_never_quietly_emptied_by_a_bad_port() {
+        let shown = config_for_settings(Some(&governed("99999"))).ok();
+
+        assert!(
+            shown.is_none(),
+            "a config whose policy would come back empty must not be shown at all"
+        );
+    }
+
+    /// A healthy file is shown exactly as written — failing closed must not
+    /// become a licence to refuse working configs.
+    #[test]
+    fn a_healthy_config_is_shown_as_written() {
+        let cfg = config_for_settings(Some(&governed("8101"))).expect("a valid config is shown");
+
+        assert_eq!(cfg.deploy.host_port, Some(8101));
+        assert_eq!(cfg.policy.model_allowlist, vec!["claude/sonnet".to_owned()]);
+    }
+
+    /// A project that never wrote a config runs on defaults by design; that is
+    /// not a fault and must not become an error banner.
+    #[test]
+    fn a_missing_config_file_is_defaults_not_an_error() {
+        let cfg = config_for_settings(None).expect("no file is not a fault");
+
+        assert_eq!(cfg.deploy.host_port, None);
+    }
+
+    /// A file that is not JSON at all has no single field to blame, but it is
+    /// still refused rather than defaulted.
+    #[test]
+    fn a_file_that_is_not_json_is_refused_too() {
+        let err = config_for_settings(Some("{\"deploy\": ")).expect_err("truncated JSON");
+
+        assert_eq!(
+            err.field,
+            coxagent_application::config_parse::WHOLE_DOCUMENT
+        );
+    }
 }
