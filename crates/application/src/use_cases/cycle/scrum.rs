@@ -385,7 +385,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
 /// a real score. Split out of `record_cycle_score` so the dedupe policy is
 /// testable without a store/engine.
 fn should_record_cycle(scored_max: Option<u64>, new_cycle: u64) -> bool {
-    scored_max.is_none_or(|m| new_cycle > m)
+    // MSRV 1.80 predates Option::is_none_or.
+    scored_max.map_or(true, |m| new_cycle > m)
 }
 
 #[cfg(test)]
