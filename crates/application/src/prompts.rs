@@ -1619,3 +1619,70 @@ mod test_surface_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+#[cfg(test)]
+mod system_prompt_composition_tests {
+    use super::{system_prompt, BASE, ENGINEERING_STANDARDS};
+
+    // Regression guard for F001 (see ticket CXA-F022). Every agent run composes
+    // BASE + ENGINEERING_STANDARDS + a role section through system_prompt. The
+    // four prompt-system fixes gating F001 must leave this exact composition
+    // unchanged; any fix that drops a section, reorders it, or inlines part of
+    // the standards into BASE breaks every role that calls system_prompt.
+    #[test]
+    fn composes_base_then_engineering_standards_then_role_section() {
+        let out = system_prompt("ROLE MARKER");
+        assert!(out.starts_with(BASE), "BASE opens the prompt");
+        assert!(
+            out.contains(ENGINEERING_STANDARDS),
+            "engineering standards present"
+        );
+        assert!(out.contains("ROLE MARKER"), "role section present");
+        let base_end = out.find(ENGINEERING_STANDARDS).unwrap();
+        let eng_end = base_end + ENGINEERING_STANDARDS.len();
+        assert!(
+            !out[..base_end].contains("ROLE MARKER"),
+            "role section must come after engineering standards"
+        );
+        assert!(
+            out[eng_end..].contains("ROLE MARKER"),
+            "role section sits after engineering standards"
+        );
+    }
+
+    #[test]
+    fn sections_are_distinct_and_blank_line_separated() {
+        let out = system_prompt("PD");
+        assert_eq!(out.matches(BASE).count(), 1, "BASE appears exactly once");
+        assert_eq!(
+            out.matches(ENGINEERING_STANDARDS).count(),
+            1,
+            "engineering standards appear exactly once"
+        );
+        for separator in ["", "\n"] {
+            let joined_base = format!("{BASE}{separator}{ENGINEERING_STANDARDS}");
+            let joined_eng = format!("{ENGINEERING_STANDARDS}{separator}PD");
+            assert!(
+                !out.contains(&joined_base),
+                "BASE and standards are not concatenated without blank-line separation"
+            );
+            assert!(
+                !out.contains(&joined_eng),
+                "standards and role section are blank-line separated"
+            );
+        }
+    }
+
+    #[test]
+    fn every_role_still_reaches_a_nonempty_composed_prompt() {
+        for role in [super::PO, super::SM, super::BA, super::SA] {
+            let p = system_prompt(role);
+            assert!(p.starts_with(BASE), "{role:?} prompt opens with BASE");
+            assert!(p.contains(ENGINEERING_STANDARDS));
+            assert!(
+                p.len() > BASE.len() + ENGINEERING_STANDARDS.len(),
+                "{role:?} prompt carries the role section too"
+            );
+        }
+    }
+}
