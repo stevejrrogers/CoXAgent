@@ -21,6 +21,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         };
         let _ = cycle; // the per-process cycle resets on restart — use the
                        // persistent counter below so sprints keep advancing.
+        let policy = crate::sprint::SprintPolicy::from_config(&self.config.workflow);
         let len = self.config.workflow.sprint_length_cycles;
         // Migrate: seed the persistent counter from the current sprint's stored
         // (old per-process) cycle the first time, so an in-flight sprint doesn't
@@ -40,7 +41,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // Capture the closing sprint before `advance` replaces it, so we can run
         // a real review + retro on it.
         let closing = state.sprint.clone();
-        let Some(n) = crate::sprint::advance(&mut state, sc, len) else {
+        let _ = len;
+        let Some(n) = crate::sprint::advance(&mut state, sc, policy) else {
             // No roll this cycle — still persist the bumped counter.
             let _ = self.store.save(&state).await;
             return;
@@ -716,24 +718,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let Ok(state) = self.store.load().await else {
             return;
         };
-        let Some(topic) = Self::scrum_topic(&state, report, cycle, self.config.workflow.language)
+        let Some((category, topic)) =
+            Self::scrum_topic(&state, report, cycle, self.config.workflow.language)
         else {
             return;
         };
-        // Skip if we discussed the exact same topic last cycle — prevents
-        // duplicate noise when the trigger condition persists across cycles.
-        {
-            // The guard only holds a topic string, so a poisoned lock (another
-            // thread panicked mid-update) costs nothing to recover from — take
-            // the inner value rather than panic a whole cycle over dedupe state.
-            let mut last = self
-                .last_discussion_topic
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if *last == topic {
-                return;
-            }
-            (*last).clone_from(&topic);
+        // At most ONE discussion of a given category per day (persisted + shared
+        // across operators), so a condition that persists — "47 open bugs" every
+        // cycle — is raised once, not re-posted every 30 seconds. A genuinely
+        // different topic (a deploy failure) can still fire the same day.
+        if !self.claim_daily(&format!("discussion:{category}")).await {
+            return;
         }
         self.report("SM", "scrum discussion");
         let uc = crate::use_cases::RunDiscussionUseCase::new(

@@ -100,6 +100,7 @@ impl AgentEnginePort for RoleAwareEngine {
             trace: String::new(),
             session_id: None,
             sandbox: SandboxStatus::default(),
+            engine: String::new(),
         })
     }
 }
@@ -329,6 +330,7 @@ impl AgentEnginePort for ReviewEngine {
             trace: String::new(),
             session_id: None,
             sandbox: SandboxStatus::default(),
+            engine: String::new(),
         })
     }
 }
@@ -2029,6 +2031,7 @@ impl AgentEnginePort for CriteriaEngine {
             trace: String::new(),
             session_id: None,
             sandbox: SandboxStatus::default(),
+            engine: String::new(),
         })
     }
 }

@@ -210,16 +210,39 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
         // door with a written reason instead of consuming SA/DEV budget.
         let proposals = self.po_goal_gate(proposals).await;
 
+        // Titles already live on the board — the yardstick for "already
+        // covered". Rejected ones are excluded so a re-proposal of a rejected
+        // idea still gets filtered by the exact-title `seen` set below, not by
+        // similarity to something the team already said no to.
+        let active_titles: Vec<String> = existing
+            .tickets
+            .iter()
+            .filter(|t| t.status() != coxagent_domain::Status::Rejected)
+            .map(|t| t.title().to_owned())
+            .collect();
+
         let adder = AddTicketUseCase::new(Arc::clone(&self.store));
         let mut created = Vec::with_capacity(proposals.len());
         let mut seen = taken;
+        // Titles filed in THIS run, checked with the same fuzzy rule so a batch
+        // of six paraphrases of one idea files exactly one.
+        let mut created_titles: Vec<String> = Vec::new();
         for p in proposals {
-            // Belt-and-suspenders: never file a feature whose title already
-            // exists (or was just proposed this run) — no duplicate work.
             let key = normalize_title(&p.title);
             if key.is_empty() || !seen.insert(key) {
                 continue;
             }
+            // Semantic dedup: an exact-title check let paraphrases through —
+            // "Bug triage and burn-down" vs "Bug burndown cadence — Q3 triage"
+            // are different strings, same ticket. `duplicates_existing` folds in
+            // Jaccard similarity and the single-slot rule for backlog-ceremony
+            // tickets, against both the board and this run's own output.
+            if crate::parsing::duplicates_existing(&p.title, &active_titles)
+                || crate::parsing::duplicates_existing(&p.title, &created_titles)
+            {
+                continue;
+            }
+            created_titles.push(p.title.clone());
             let id = adder
                 .execute(AddTicketInput {
                     ticket_type: TicketType::Feature,
@@ -389,6 +412,7 @@ mod tests {
                 trace: String::new(),
                 session_id: None,
                 sandbox: SandboxStatus::default(),
+                engine: String::new(),
             })
         }
     }
@@ -471,6 +495,7 @@ mod tests {
                         trace: String::new(),
                         session_id: None,
                         sandbox: SandboxStatus::default(),
+                        engine: String::new(),
                     }),
                     // No repair available: any SM call fails outright, so
                     // repair_json yields None and we fall through to salvage.
@@ -520,6 +545,7 @@ mod tests {
                     trace: String::new(),
                     session_id: None,
                     sandbox: SandboxStatus::default(),
+                    engine: String::new(),
                 })
             }
         }

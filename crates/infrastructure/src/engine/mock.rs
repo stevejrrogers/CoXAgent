@@ -32,6 +32,7 @@ impl MockEngine {
                 trace: String::new(),
                 session_id: None,
                 sandbox: coxagent_application::ports::outbound::SandboxStatus::NotRequested,
+                engine: "mock".to_owned(),
             })
             .collect();
         Self {

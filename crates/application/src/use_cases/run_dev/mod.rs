@@ -194,6 +194,34 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
     /// [`AppError`] on engine failure or an unexpected state transition error.
     #[allow(clippy::too_many_lines)] // one linear pass; splitting hurts readability
     pub async fn execute(&self) -> Result<Option<TicketId>, AppError> {
+        // Fresh base for an idle per-slot worktree: it starts DETACHED at
+        // whatever HEAD existed when it was created and only ages from there —
+        // an agent coding on a ten-commit-old base ships conflicts. When the
+        // tree is detached AND clean (nothing in flight to lose), fast-forward
+        // it to origin/<base> before claiming. A checked-out branch (the
+        // leader's primary tree) is left alone.
+        if self.config.git.enabled {
+            if let Some(git) = &self.git {
+                let detached = !git
+                    .raw(&self.work_dir, &["symbolic-ref", "-q", "HEAD"])
+                    .await
+                    .0;
+                if detached && self.working_tree().await.changed_paths.is_empty() {
+                    let base = if self.config.git.default_branch.is_empty() {
+                        "main"
+                    } else {
+                        &self.config.git.default_branch
+                    };
+                    let _ = git.raw(&self.work_dir, &["fetch", "origin", base]).await;
+                    let target = format!("origin/{base}");
+                    if git.raw(&self.work_dir, &["rev-parse", &target]).await.0 {
+                        let _ = git
+                            .raw(&self.work_dir, &["reset", "--hard", &target])
+                            .await;
+                    }
+                }
+            }
+        }
         // Self-healing boot: if the project doesn't compile, fix that BEFORE
         // touching any tickets. Otherwise every ticket will fail anyway.
         // Skipped entirely when the tree is unchanged since the last green
@@ -252,17 +280,32 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                             "DEV boot check: cargo test failed — self-healing. {}",
                             &r.summary[..r.summary.len().min(200)]
                         );
-                        return self.self_heal_compile(&r.summary).await;
+                        // One clear point for every self-heal outcome, so the
+                        // "boot check" phase note can never outlive the run.
+                        let healed = self.self_heal_compile(&r.summary).await;
+                        if let Some(p) = &self.phase {
+                            p(None);
+                        }
+                        return healed;
                     }
                     Ok(Err(e)) => {
                         // Spawn errors and timeouts are INFRASTRUCTURE, not compile
                         // breakage — healing on them tells the LLM "the project
-                        // doesn't compile" with no compile error to fix.
+                        // doesn't compile" with no compile error to fix. Clear the
+                        // phase note on the way out: leaving it set froze the card
+                        // at "boot check: verifying N files" long after this run
+                        // gave up, which reads as a hung agent.
                         tracing::warn!("DEV boot check: cargo test spawn error — {e}");
+                        if let Some(p) = &self.phase {
+                            p(None);
+                        }
                         return Ok(None);
                     }
                     Err(_timeout) => {
                         tracing::warn!("DEV boot check: cargo test timed out after 30 min");
+                        if let Some(p) = &self.phase {
+                            p(None);
+                        }
                         return Ok(None);
                     }
                 }
@@ -384,7 +427,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         // conversation. Thinking is cheap; unplanned code is not. Falls back
         // to single-shot on engines without session resume.
         let mut request = self.build_request(&state, &id).await;
-        let plan_first = request.escalation_level == 0; // retries already carry a journal
+        // Two-phase plan→execute costs an extra engine call per ticket. That
+        // buys real risk reduction on a LARGE change — and mostly latency on a
+        // small one, where the plan restates the ticket. So: plan-first only
+        // for Large complexity, single-shot for the rest (retries already
+        // carry a failure journal either way).
+        let is_large = state
+            .ticket(&id)
+            .is_some_and(|t| t.complexity() == coxagent_domain::Complexity::Large);
+        let plan_first = request.escalation_level == 0 && is_large;
+                                                        // The full task, kept before the plan wrapper below — it becomes the
+                                                        // follow-up when RE-ENTERING a ticket on a stored session, so a resumed
+                                                        // (or stale) conversation still gets the complete instructions.
+        let task_full = request.task_prompt.clone();
         if plan_first {
             request.task_prompt = format!(
                 "{}\n\nFIRST: do NOT write code yet. Explore the relevant code (use the repo \
@@ -394,11 +449,56 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 request.task_prompt
             );
         }
+        // Cross-cycle context reuse: on a RE-ENTRY (a retry, or after a parked
+        // question was answered — never the first, planning pass) resume the
+        // conversation this ticket+role left behind, so the agent keeps what it
+        // already read instead of paying to rediscover it. Resume routes to the
+        // role's configured engine; a miss (engine changed, session expired)
+        // falls straight back to a cold run — the follow-up is the full task, so
+        // the worst case is exactly a cold run.
+        let sess_key = format!("{id}/{role_key}");
+        let prior_session = if plan_first {
+            None
+        } else {
+            state.ticket_sessions.get(&sess_key).cloned()
+        };
+        let initial = match prior_session {
+            Some(sid) => match self
+                .engine
+                .resume_run(
+                    self.mode.role(),
+                    &sid,
+                    &task_full,
+                    &self.work_dir,
+                    Duration::from_secs(3600),
+                )
+                .await
+            {
+                Ok(o) if o.succeeded() => Ok(o),
+                _ => self.engine.run(request).await,
+            },
+            None => self.engine.run(request).await,
+        };
         // Keep the engine's conversation id: the execute pass and the repair
         // pass (below) resume this session so the agent keeps everything it
         // just read and wrote in context instead of rediscovering it cold.
-        let session = match self.engine.run(request).await {
+        let session = match initial {
             Ok(o) if o.succeeded() => {
+                // Persist any BRIEF: notes the agent left for the next
+                // role/engine on this ticket — durable memory that outlives the
+                // engine session (Tầng 2 of per-ticket context reuse).
+                let briefs = crate::prompts::extract_brief_notes(&o.stdout);
+                if !briefs.is_empty() {
+                    let (key, role_tag, briefs) =
+                        (id.to_string(), self.role_name().to_owned(), briefs);
+                    let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+                        for b in &briefs {
+                            s.journal_note(&key, &format!("{role_tag}: {b}"));
+                        }
+                        Ok(())
+                    })
+                    .await;
+                }
                 // The engine answered: whatever outage was raised against it is
                 // over. Closing it out loud matters as much as raising it — an
                 // alert that never clears is one people stop reading.
@@ -446,6 +546,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                         let exec = self
                             .engine
                             .resume_run(
+                                self.mode.role(),
                                 sid_v,
                                 "Plan accepted. Now IMPLEMENT it exactly: follow your steps, \
                                  write the tests you named, and flag (don't silently absorb) \
@@ -501,6 +602,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             }
         };
 
+        // Remember this run's conversation so a re-entry on this ticket+role can
+        // resume it instead of reading the code cold. Best-effort.
+        if let Some(sid) = &session {
+            let (k, v) = (sess_key.clone(), sid.clone());
+            let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+                s.ticket_sessions.insert(k.clone(), v.clone());
+                Ok(())
+            })
+            .await;
+        }
+
         // Expert habit: review your OWN diff before anyone else sees it.
         // Same conversation (context intact) = one cheap pass that catches
         // nits, dead code and missed edge cases. Best-effort.
@@ -508,6 +620,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             let _ = self
                 .engine
                 .resume_run(
+                    self.mode.role(),
                     sid,
                     "Before handing off: run `git diff` and review YOUR OWN change like a \
                      principal engineer reviewing a stranger's PR. Fix what you find — dead \
@@ -553,7 +666,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 let resumed = match &session {
                     Some(sid) => self
                         .engine
-                        .resume_run(sid, &follow_up, &self.work_dir, Duration::from_secs(1800))
+                        .resume_run(
+                            self.mode.role(),
+                            sid,
+                            &follow_up,
+                            &self.work_dir,
+                            Duration::from_secs(1800),
+                        )
                         .await
                         .is_ok(),
                     None => false,
@@ -618,7 +737,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                         if let Some(sid) = &session {
                             let _ = self
                                 .engine
-                                .resume_run(sid, &fixup, &self.work_dir, Duration::from_secs(900))
+                                .resume_run(
+                                    self.mode.role(),
+                                    sid,
+                                    &fixup,
+                                    &self.work_dir,
+                                    Duration::from_secs(900),
+                                )
                                 .await;
                         } else {
                             let repair = AgentRequest {
@@ -769,7 +894,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 if let Some(sid) = &session {
                     let _ = self
                         .engine
-                        .resume_run(sid, &fixup, &self.work_dir, Duration::from_secs(900))
+                        .resume_run(
+                            self.mode.role(),
+                            sid,
+                            &fixup,
+                            &self.work_dir,
+                            Duration::from_secs(900),
+                        )
                         .await;
                 } else {
                     let repair = AgentRequest {
@@ -842,6 +973,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             transition(state, &id_c, role, status)
                 .map_err(|e| PortError::Corrupt(e.to_string()))?;
             // Done — the work journal and any cost hold served their purpose.
+            // The resumable session is kept: DEV reaching Done/Fixed is NOT the
+            // end of the ticket — a review send-back re-enters DEV, and resuming
+            // the pre-Done conversation there is exactly the context-reuse win.
+            // The session is dropped only when the PR actually merges (see
+            // forge_merge's merged-PR sync).
             state.ticket_journal.remove(&id_c.to_string());
             state.cost_holds.remove(&id_c.to_string());
             state.cost_approved.remove(&id_c.to_string());
@@ -1175,6 +1311,7 @@ mod tests {
                 trace: String::new(),
                 session_id: None,
                 sandbox: SandboxStatus::default(),
+                engine: String::new(),
             })
         }
     }

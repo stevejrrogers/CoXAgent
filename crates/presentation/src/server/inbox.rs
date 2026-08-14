@@ -24,6 +24,7 @@ pub(super) async fn gate_principal(
 }
 
 /// GET `/api/projects/:pid/inbox` — the caller's "waiting for me" queue.
+#[allow(clippy::too_many_lines)] // one linear pass building each inbox item kind
 pub(super) async fn inbox_ep(
     State(app): State<AppState>,
     Path(pid): Path<String>,
@@ -35,6 +36,16 @@ pub(super) async fn inbox_ep(
     let me = principal_name(&app, &headers)
         .await
         .unwrap_or_else(|| "operator".to_owned());
+    // The caller's role decides which items they may ACT on — but every item is
+    // still SHOWN to everyone, so the whole team sees the queue and only the
+    // right role gets an enabled button. Open mode (no auth) is the operator,
+    // who may do everything.
+    let my_role = match app.auth.clone() {
+        Some(auth) => resolve_principal(&auth, &headers)
+            .await
+            .map_or(coxagent_application::auth::AuthRole::Viewer, |u| u.role),
+        None => coxagent_application::auth::AuthRole::Super,
+    };
     let cfg = std::fs::read_to_string(&p.config_path)
         .ok()
         .and_then(|t| serde_json::from_str::<Config>(&t).ok())
@@ -47,6 +58,28 @@ pub(super) async fn inbox_ep(
     let mut items: Vec<serde_json::Value> = Vec::new();
     for t in &state.tickets {
         let id = t.id().to_string();
+        // Cost gate: a ticket whose estimated run cost exceeds the approval
+        // threshold is HELD until a person okays the spend. Surface every held
+        // ticket here — otherwise they pile up invisibly and the whole queue
+        // stalls before any of it reaches DEV (the "spins but never ships" bug).
+        if let Some(est) = state.cost_holds.get(&id) {
+            // Only while the ticket is still awaiting work — a hold left on a
+            // ticket that was since rejected/finished is stale and must not keep
+            // showing up as something to approve.
+            let live = matches!(
+                t.status(),
+                coxagent_domain::Status::Pending | coxagent_domain::Status::Ready
+            );
+            if live && !state.cost_approved.contains(&id) {
+                items.push(serde_json::json!({
+                    "kind": "cost_approve", "ticket": id, "title": t.title(),
+                    "priority": format!("{:?}", t.priority()).to_lowercase(),
+                    "estimate_usd": est,
+                    "role": "PO", "can_act": my_role.can_approve_ready(),
+                }));
+                continue;
+            }
+        }
         // Ready-gate approvals: designed, waiting in Pending for a person.
         if human.gate_ready
             && t.status() == coxagent_domain::Status::Pending
@@ -55,6 +88,7 @@ pub(super) async fn inbox_ep(
             items.push(serde_json::json!({
                 "kind": "approve_ready", "ticket": id, "title": t.title(),
                 "priority": format!("{:?}", t.priority()).to_lowercase(),
+                "role": "BA/PO", "can_act": my_role.can_approve_ready(),
             }));
             continue;
         }
@@ -65,6 +99,7 @@ pub(super) async fn inbox_ep(
         {
             items.push(serde_json::json!({
                 "kind": "verify", "ticket": id, "title": t.title(),
+                "role": "QA", "can_act": my_role.can_verify(),
             }));
             continue;
         }
@@ -73,6 +108,7 @@ pub(super) async fn inbox_ep(
             items.push(serde_json::json!({
                 "kind": "assigned", "ticket": id, "title": t.title(),
                 "status": format!("{:?}", t.status()).to_lowercase(),
+                "role": "you", "can_act": true,
             }));
         }
     }
@@ -88,6 +124,7 @@ pub(super) async fn inbox_ep(
             items.push(serde_json::json!({
                 "kind": "auto_approved", "ticket": id, "title": t.title(),
                 "minutes_left": undo_window.saturating_sub(age_min),
+                "role": "BA/PO", "can_act": my_role.can_approve_ready(),
             }));
         }
     }
@@ -100,6 +137,7 @@ pub(super) async fn inbox_ep(
                 "kind": "question", "id": q.id, "ticket": q.ticket,
                 "from": q.from, "body": q.body,
                 "asked_at": q.asked_at, "escalated": q.escalated,
+                "role": "you", "can_act": true,
             }));
         }
     }
@@ -115,6 +153,7 @@ pub(super) async fn inbox_ep(
                     items.push(serde_json::json!({
                         "kind": "review_pr", "number": pr.number,
                         "title": pr.title, "url": pr.url,
+                        "role": "SA/dev", "can_act": my_role.can_review(),
                     }));
                     continue;
                 }
@@ -132,6 +171,7 @@ pub(super) async fn inbox_ep(
                         "title": pr.title, "url": pr.url,
                         "attempts": attempts,
                         "mergeable": pr.mergeable,
+                        "role": "SA/dev", "can_act": my_role.can_review(),
                     }));
                 }
             }

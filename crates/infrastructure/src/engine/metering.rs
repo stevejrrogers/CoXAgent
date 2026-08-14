@@ -39,6 +39,14 @@ impl<E: AgentEnginePort> AgentEnginePort for MeteringEngine<E> {
     async fn run(&self, request: AgentRequest) -> Result<AgentOutcome, PortError> {
         let role = role_key(request.role);
         let outcome = self.inner.run(request).await?;
+        // Record which engine actually ran this role (stamped by FailoverEngine),
+        // even when usage is unknown — the dashboard shows the live engine per
+        // agent regardless of whether cost came back.
+        if !outcome.engine.is_empty() {
+            if let Ok(mut m) = self.meter.lock() {
+                m.engine_by_role.insert(role.clone(), outcome.engine.clone());
+            }
+        }
         if let Some(u) = outcome.usage {
             if let Ok(mut m) = self.meter.lock() {
                 m.total_cost_usd += u.cost_usd;
@@ -56,6 +64,7 @@ impl<E: AgentEnginePort> AgentEnginePort for MeteringEngine<E> {
 
     async fn resume_run(
         &self,
+        role: coxagent_domain::Role,
         session_id: &str,
         follow_up: &str,
         work_dir: &std::path::Path,
@@ -63,7 +72,7 @@ impl<E: AgentEnginePort> AgentEnginePort for MeteringEngine<E> {
     ) -> Result<AgentOutcome, PortError> {
         let outcome = self
             .inner
-            .resume_run(session_id, follow_up, work_dir, timeout)
+            .resume_run(role, session_id, follow_up, work_dir, timeout)
             .await?;
         if let Some(u) = outcome.usage {
             if let Ok(mut m) = self.meter.lock() {
@@ -140,6 +149,7 @@ mod tests {
                 trace: String::new(),
                 session_id: None,
                 sandbox: SandboxStatus::NotRequested,
+                engine: "priced".to_owned(),
             })
         }
     }

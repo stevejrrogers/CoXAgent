@@ -53,7 +53,15 @@ async function revokeMyToken(label){
 function toggleRoleOverrides(btn){const box=btn.nextElementSibling;const open=box.hasAttribute("hidden");
   if(open){box.removeAttribute("hidden");btn.classList.add("open");}else{box.setAttribute("hidden","");btn.classList.remove("open");}
 }
-async function saveSettings(){const cfg=window._cfg||{engine:{},workflow:{}};cfg.engine=cfg.engine||{};cfg.workflow=cfg.workflow||{};
+async function saveSettings(){
+  // `_cfg` is null when coxagent.json could not be read (COX-B050). Saving
+  // then would PUT a config built from blanks over a file we never parsed,
+  // destroying the settings the form does not even render. Refuse instead.
+  if(!window._cfg){toasty("coxagent.json could not be read — fix the file on disk before saving","err");return;}
+  const cfg=window._cfg;cfg.engine=cfg.engine||{};cfg.workflow=cfg.workflow||{};
+  // Track engine config BEFORE changes for comparison
+  const origEngine=JSON.stringify(window._cfg?.engine||{});
+  
   function mdl(id){const provEl=document.getElementById("mdl-prov-"+id);if(provEl)return provEl.value+"/"+(val("mdl-"+id)||"");return val("mdl-"+id)||"";}
   cfg.engine.default={engine:val("eng-default"),model:mdl("default")};
   const per={};ROLES.forEach(r=>{const e=val("eng-"+r),m=mdl(r);if(e)per[r]={engine:e,model:m||"sonnet"};});cfg.engine.per_role=per;
@@ -61,6 +69,8 @@ async function saveSettings(){const cfg=window._cfg||{engine:{},workflow:{}};cfg
   cfg.engine.auto_fallback=val("eng-autofb")!=="false";
   cfg.workflow.mode=val("wf-mode");
   cfg.workflow.sprint_length_cycles=parseInt(val("wf-sp")||"10",10);
+  cfg.workflow.sprint_unit=val("wf-su")==="cycles"?"cycles":"days";
+  {const sd=parseInt(val("wf-sp-days")||"1",10);cfg.workflow.sprint_length_days=Number.isFinite(sd)&&sd>0?sd:1;}
   cfg.workflow.ba_every_n_cycles=parseInt(val("wf-ba")||"4",10);
   cfg.workflow.feature_dev_enabled=val("wf-fd")==="true";
   cfg.workflow.ops_monitor=val("wf-ops")!=="false";
@@ -71,20 +81,40 @@ async function saveSettings(){const cfg=window._cfg||{engine:{},workflow:{}};cfg
   cfg.engine.escalation=val("en-esc").split(",").map(s=>s.trim()).filter(Boolean);
   cfg.workflow.language=val("wf-lang")||"en";
   cfg.workflow.sleep_seconds=parseInt(val("wf-sl")||"30",10);
+  {const cc=parseInt(val("wf-cc")||"1",10);cfg.workflow.concurrency=Number.isFinite(cc)&&cc>0?Math.min(cc,16):1;}
   const bg=val("wf-bg");cfg.workflow.budget_usd=bg?parseFloat(bg):null;
   cfg.policy=cfg.policy||{};
   const dg=val("wf-dg");cfg.policy.daily_budget_usd=dg?parseFloat(dg):null;
   {const bwp=parseFloat(val("wf-bwp"));cfg.policy.budget_warn_pct=Number.isFinite(bwp)&&bwp>0?Math.min(bwp,100)/100:0.8;}
+  // Approval gates + adaptive auto-approve. Preserve any human fields the UI
+  // does not expose rather than dropping them on save.
+  {const h=Object.assign({},cfg.workflow.human||{});
+   h.gate_ready=val("hu-ready")==="false"?false:true;
+   h.gate_verify=val("hu-verify")==="false"?false:true;
+   h.route_exceptions_to=val("hu-route").trim();
+   {const sla=parseInt(val("hu-sla")||"60",10);h.question_sla_minutes=Number.isFinite(sla)?sla:60;}
+   const a=Object.assign({},h.adaptive||{});
+   a.enabled=val("hu-adaptive")==="false"?false:true;
+   {const u=parseInt(val("hu-undo")||"30",10);a.undo_window_minutes=Number.isFinite(u)?u:30;}
+   {const l=parseInt(val("hu-learn")||"8",10);a.learn_after_samples=Number.isFinite(l)&&l>0?l:8;}
+   {const m=parseInt(val("hu-maxauto")||"3",10);a.max_auto_per_cycle=Number.isFinite(m)&&m>0?m:3;}
+   h.adaptive=a;cfg.workflow.human=h;}
   cfg.git=Object.assign(cfg.git||{},{
     enabled:val("git-en")==="true",provider:val("git-pv"),repo:val("git-repo").trim(),
     base_url:val("git-url").trim(),default_branch:val("git-br").trim()||"main",
     target_branch:val("git-tb").trim(),
     branch_prefix:val("git-bp").trim()||"feat/",commit_email:val("git-em").trim(),
     account:val("git-acct").trim(),
-    auto_pr:val("git-pr")==="true",auto_review:val("git-ar")==="true",auto_merge:val("git-am")==="true"});
+    auto_pr:val("git-pr")==="true",auto_review:val("git-ar")==="true",auto_merge:val("git-am")==="true",
+    require_ci:val("git-ci")==="true"});
   try{const res=await(await fetch(api("/config"),{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(cfg)})).json();
     window._budget=cfg.workflow.budget_usd;if(CUR==="insights")renderActive();
-    document.getElementById("save-note").textContent=res.ok?(res.note||"saved"):"error";}catch(e){document.getElementById("save-note").textContent="error";}}
+    // Check if engine config actually changed
+    const newEngine=JSON.stringify(cfg.engine);
+    const engineChanged=origEngine!==newEngine;
+    const msg=engineChanged?"Engine config updated — applies on the next cycle":"saved";
+    document.getElementById("save-note").textContent=res.ok?msg:"error";
+    if(engineChanged){toasty("Engine settings updated — applies on the next cycle, no restart","ok");}}catch(e){document.getElementById("save-note").textContent="error";}}
 function val(id){return document.getElementById(id).value;}
 async function setPriority(id,p){
   try{await fetch(api("/ticket/"+id+"/priority"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({priority:p})});
@@ -230,6 +260,7 @@ function renderDocMain(){
   const crumb=docFolder(d).split("/").map(esc).join(' <i class="ti ti-chevron-right" style="font-size:11px;opacity:.5"></i> ');
   const actions=canEdit?`<div style="display:flex;gap:6px"><button class="gc-btn" onclick="askAiEdit()" title="Ask the DOCS agent to revise this page"><i class="ti ti-sparkles"></i> Ask AI</button><button class="gc-btn" onclick="moveDoc('${esc(d.id)}')" title="Move to another folder"><i class="ti ti-folder-symlink"></i> Move</button><button class="gc-btn" onclick="DOC_EDIT=true;renderDocMain()"><i class="ti ti-pencil"></i> Edit</button></div>`:"";
   el.innerHTML=`<div class="doc-head"><div><span class="doc-cat-tag ${esc(d.category)}">${crumb}</span><h2>${esc(d.title)}</h2>${meta}</div>${actions}</div><div class="doc-body md">${mdRender(d.body)}</div>`;
+  renderMermaidIn(el);
 }
 async function newDoc(folder){
   const title=await coxModal({title:"New page",message:"Tiêu đề trang mới.",input:{placeholder:"Page title"},confirmText:"Next"});if(!title||!title.trim())return;

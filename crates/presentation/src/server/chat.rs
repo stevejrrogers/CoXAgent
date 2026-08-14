@@ -113,6 +113,12 @@ pub(super) async fn chat_post_ep(
             let msg = body.to_owned();
             let reply_channel = channel.clone();
             let p2 = p.clone();
+            // The author's role, so a gate command typed in chat honours the
+            // same role map as the Inbox. Open mode (no auth) = None = operator.
+            let actor_role = match app.auth.clone() {
+                Some(auth) => resolve_principal(&auth, &headers).await.map(|u| u.role),
+                None => None,
+            };
             let cfg = std::fs::read_to_string(&p2.config_path)
                 .ok()
                 .and_then(|t| serde_json::from_str::<Config>(&t).ok())
@@ -126,7 +132,8 @@ pub(super) async fn chat_post_ep(
                     cfg.workflow.language,
                 )
                 .with_files(p2.files.clone())
-                .with_reply_channel(Some(reply_channel));
+                .with_reply_channel(Some(reply_channel))
+                .with_actor_role(actor_role);
                 let _ = uc.execute(&msg).await;
             });
         }
@@ -1091,10 +1098,15 @@ pub(super) async fn chat_socket(
 pub(super) async fn chat_reply_ep(
     State(app): State<AppState>,
     Path(pid): Path<String>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<ChatReplyReq>,
 ) -> axum::response::Response {
     let Some(p) = app.project(&pid).await else {
         return not_found();
+    };
+    let actor_role = match app.auth.clone() {
+        Some(auth) => resolve_principal(&auth, &headers).await.map(|u| u.role),
+        None => None,
     };
     let msg = req.message.trim();
     if msg.is_empty() {
@@ -1119,7 +1131,8 @@ pub(super) async fn chat_reply_ep(
         cfg.workflow.token_saver,
         cfg.workflow.language,
     )
-    .with_files(p.files.clone());
+    .with_files(p.files.clone())
+    .with_actor_role(actor_role);
     if let Some(d) = &p.deploy {
         uc = uc
             .with_deploy(Arc::clone(d))

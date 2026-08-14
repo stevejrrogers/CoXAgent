@@ -13,6 +13,26 @@ pub(super) fn safe_under(root: &std::path::Path, rel: &str) -> Option<PathBuf> {
     cand_c.starts_with(&root_c).then_some(cand_c)
 }
 
+/// The part of a lowercased live-log filename that follows the role, or `None`
+/// when it isn't this role's file. The writer names files
+/// `<role_key>__<ticket>__<operator>.log` (role_key lowercase snake, e.g.
+/// `dev_bug`); the reader must match the role PREFIX and no more — `dev_feature`
+/// must not match role `dev`. The bug this pins: the old reader guessed
+/// `<role>__<account>.log`, matched nothing, and served a stale `<role>.log`.
+fn live_role_suffix<'a>(name: &'a str, role_want: &str) -> Option<&'a str> {
+    let stem = name.strip_suffix(".log")?;
+    let after = stem.strip_prefix(role_want)?;
+    // Fields are joined by `__` (double underscore); role keys carry single
+    // underscores inside them (`dev_bug`). So a match ends the role exactly at
+    // stem-end or at a `__` boundary — `dev` must NOT swallow `dev_feature`,
+    // whose leftover is a single-underscore `_feature…`.
+    if after.is_empty() || after.starts_with("__") {
+        Some(after)
+    } else {
+        None
+    }
+}
+
 /// The transcript directory for a project: `<workspace>/logs/transcripts`.
 pub(super) fn transcripts_dir(p: &ProjectHandle) -> PathBuf {
     p.config_path
@@ -63,12 +83,30 @@ pub(super) async fn agent_log_ep(
         .collect();
     let base = p.config_path.parent().unwrap_or(&p.config_path);
     let live_dir = base.join("logs").join("live");
-    let per_op = live_dir.join(format!("{role}__{account}.log"));
-    let live = if !account.is_empty() && per_op.exists() {
-        per_op
-    } else {
-        live_dir.join(format!("{role}.log"))
-    };
+    // The writer keys a live file `<role_key>__<ticket>__<operator>.log`
+    // (role_key is lowercase snake, e.g. `dev_bug`; the ticket/operator
+    // suffixes vary per run). The old read path guessed `<role>__<account>.log`
+    // and never matched — so the fresh per-ticket log was orphaned and a stale
+    // `<role>.log` was served instead (its results had no output preview).
+    // Match by the role PREFIX, case-insensitively, and serve the newest.
+    let want = role.to_ascii_lowercase().replace('-', "_");
+    let want_op = account.to_ascii_lowercase();
+    let live = std::fs::read_dir(&live_dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_ascii_lowercase();
+            let after = live_role_suffix(&name, &want)?;
+            // When an operator is named, prefer that operator's own log.
+            let op_ok = want_op.is_empty() || after.contains(&want_op);
+            let mtime = e.metadata().and_then(|m| m.modified()).ok()?;
+            Some((op_ok, mtime, e.path()))
+        })
+        // Operator-matched files win; then newest mtime.
+        .max_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)))
+        .map_or_else(|| live_dir.join(format!("{role}.log")), |(_, _, path)| path);
     // Local live file first (this machine's operators). If empty/absent, try
     // shared storage (MinIO) where remote operators mirror their live logs, so
     // the central hub can show an operator running on another machine.
@@ -158,5 +196,43 @@ pub(super) async fn get_transcript(
     match std::fs::read_to_string(&path) {
         Ok(body) => ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response(),
         Err(_) => (StatusCode::NOT_FOUND, "no such transcript").into_response(),
+    }
+}
+
+#[cfg(test)]
+mod live_log_tests {
+    use super::live_role_suffix;
+
+    // Names the writer actually produces: `<role_key>__<ticket>__<operator>.log`.
+    #[test]
+    fn matches_the_writers_per_ticket_name() {
+        assert_eq!(
+            live_role_suffix("dev_bug__cox-b043__root.log", "dev_bug"),
+            Some("__cox-b043__root")
+        );
+        // Bare role file (the shared fallback) still matches.
+        assert_eq!(live_role_suffix("dev_bug.log", "dev_bug"), Some(""));
+    }
+
+    // The prefix must not swallow a longer role — the bug a naive `contains`
+    // would have: role `dev` picking up `dev_feature`'s live log.
+    #[test]
+    fn role_prefix_does_not_bleed_into_a_longer_role() {
+        assert_eq!(live_role_suffix("dev_feature__cox-f01__root.log", "dev"), None);
+        assert_eq!(live_role_suffix("developer.log", "dev"), None);
+    }
+
+    // The operator suffix is what the caller filters on to prefer one worker.
+    #[test]
+    fn operator_is_findable_in_the_suffix() {
+        let after = live_role_suffix("sa__cox-f10__alice.log", "sa").unwrap();
+        assert!(after.contains("alice"));
+        assert!(!after.contains("bob"));
+    }
+
+    #[test]
+    fn a_non_log_or_foreign_file_is_rejected() {
+        assert_eq!(live_role_suffix("dev_bug.txt", "dev_bug"), None);
+        assert_eq!(live_role_suffix("qa__cox-b01.log", "sa"), None);
     }
 }

@@ -4,7 +4,7 @@
 //! only ever move a ticket along an edge listed here, performed by a role listed
 //! here. Everything else is rejected at the aggregate boundary.
 
-use crate::ticket::{Role, Status, TicketType};
+use crate::kinds::{Role, Status, TicketType};
 
 /// Is `from -> to` a legal edge for this ticket type?
 #[must_use]
@@ -153,7 +153,7 @@ mod tests {
 #[cfg(test)]
 mod undo_window_tests {
     use super::{can_transition, transition_allowed};
-    use crate::ticket::{Role, Status, TicketType};
+    use crate::kinds::{Role, Status, TicketType};
 
     #[test]
     fn an_approval_can_be_taken_back_before_work_starts() {

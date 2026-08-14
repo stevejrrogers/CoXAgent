@@ -163,7 +163,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             .map_or("", coxagent_domain::Ticket::title)
             .to_owned();
 
-        let memory = crate::prompts::team_memory_block(&state.decisions, &state.lessons);
+        // Team-wide memory PLUS this ticket's own portable brief — so a
+        // re-design reads what a prior DEV/TEST run on this exact ticket learned,
+        // regardless of which engine produced it.
+        let memory = format!(
+            "{}{}",
+            crate::prompts::team_memory_block(&state.decisions, &state.lessons),
+            crate::prompts::ticket_brief_block(&state, id.as_str()),
+        );
         // The architect is meant to be the encyclopedia: it cannot arbitrate a
         // design for a product whose own wiki, docs and solved tickets it has
         // never been shown.
@@ -201,6 +208,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
                 outcome.failure_detail()
             ))
             .into());
+        }
+        // Persist any BRIEF: notes SA left for the next role/engine (durable,
+        // engine-agnostic ticket memory).
+        let briefs = crate::prompts::extract_brief_notes(&outcome.stdout);
+        if !briefs.is_empty() {
+            let (key, briefs) = (id.to_string(), briefs);
+            let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+                for b in &briefs {
+                    s.journal_note(&key, &format!("SA: {b}"));
+                }
+                Ok(())
+            })
+            .await;
         }
         let design = match parse_design(&outcome.stdout) {
             Ok(d) => d,
@@ -439,7 +459,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             role: Role::Sa,
             system_prompt: prompts::system_prompt(prompts::SA),
             task_prompt: format!(
-                "Design feature {id}: {title}{context_block}{stack}{}{}{knowledge}{memory}{steering}",
+                "Design feature {id}: {title}{context_block}{stack}{}{}{knowledge}{memory}{steering}{}",
                 prompts::focus_block(self.files.as_deref(), &self.work_dir, title).await,
                 prompts::repo_map_block(
                     self.files.as_deref(),
@@ -447,6 +467,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
                     self.config.workflow.token_saver,
                 )
                 .await,
+                prompts::BRIEF_PROTOCOL,
             ),
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(1200),
@@ -516,6 +537,7 @@ mod tests {
                 trace: String::new(),
                 session_id: None,
                 sandbox: SandboxStatus::default(),
+                engine: String::new(),
             })
         }
     }

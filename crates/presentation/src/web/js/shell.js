@@ -152,23 +152,56 @@ async function saveGoal(){
 function toggleProjMenu(e){e.stopPropagation();const m=document.getElementById("proj-menu");if(m.classList.contains("open")){closeProjMenu();return;}renderProjMenu();m.classList.add("open");}
 function closeProjMenu(){document.getElementById("proj-menu").classList.remove("open");}
 document.addEventListener("click",e=>{const pk=document.querySelector(".projpick");if(pk&&!pk.contains(e.target))closeProjMenu();});
+// Projects the hub could not load (a coxagent.json it cannot parse). They are
+// listed but never selectable — there is no store, runner or route behind one,
+// so switching to it would only produce 404s (COX-B043).
+let BROKEN_PROJECTS=[];
+// Ids already announced this page load: loadProjects() re-runs on every create,
+// rename and delete, and a broken config is a boot-time fact that has not
+// changed since the last toast — announcing it again is noise, not news.
+const BROKEN_ANNOUNCED=new Set();
+function announceBroken(){
+  for(const b of BROKEN_PROJECTS){
+    if(BROKEN_ANNOUNCED.has(b.id))continue;
+    BROKEN_ANNOUNCED.add(b.id);
+    toasty(`Project "${b.name||b.id}" did not load: ${b.error||"invalid config"}`,"err");
+  }
+}
+// esc() leaves quotes alone, which is fine between tags but not INSIDE an
+// attribute — and a serde message routinely carries them ("invalid type:
+// string \"twenty\""), so a raw error in title="…" would close the attribute.
+const escAttr=s=>esc(s).replace(/"/g,"&quot;");
+function brokenProjMenuHtml(){
+  if(!BROKEN_PROJECTS.length)return "";
+  return '<div class="projitem" style="cursor:default;color:var(--muted);font-size:11px">Not loaded — fix the config, then restart the hub</div>'+
+    BROKEN_PROJECTS.map(p=>`<div class="projitem" style="cursor:not-allowed;opacity:.75" title="${escAttr(p.error||"")}">
+    <span class="pi-mk" style="background:var(--card2)"><i class="ti ti-alert-triangle"></i></span>
+    <span class="pi-meta"><span class="pi-name">${esc(p.name||p.id)}</span><span class="pi-sub">${esc(p.config_path||p.id)}</span></span></div>`).join("");
+}
 function renderProjMenu(){
   const m=document.getElementById("proj-menu");
-  if(!PROJECTS.length){m.innerHTML='<div class="projitem" style="cursor:default;color:var(--muted)">No projects yet</div>';return;}
+  if(!PROJECTS.length&&!BROKEN_PROJECTS.length){m.innerHTML='<div class="projitem" style="cursor:default;color:var(--muted)">No projects yet</div>';return;}
   m.innerHTML=PROJECTS.map(p=>`<div class="projitem${p.id===PID?' sel':''}" onclick="switchProject('${esc(p.id)}')">
     <span class="pi-mk">${esc(projInitial(p))}</span>
     <span class="pi-meta"><span class="pi-name">${esc(p.name)}</span><span class="pi-sub">${p.alias?esc(p.alias):esc(p.id)}</span></span>
     <i class="ti ti-check pi-check"></i>
-    <i class="ti ti-trash pi-del" title="Remove project" onclick="event.stopPropagation();deleteProject('${esc(p.id)}')"></i></div>`).join("");
+    <i class="ti ti-trash pi-del" title="Remove project" onclick="event.stopPropagation();deleteProject('${esc(p.id)}')"></i></div>`).join("")
+    +brokenProjMenuHtml();
 }
 async function loadProjects(){
   let list=[];try{list=await(await fetch("/api/projects")).json();}catch(e){}
-  PROJECTS=list;
+  // A project that failed to load is absent from every other API — keep it out
+  // of PROJECTS (which drives selection everywhere) but SHOW it, so an
+  // unparseable config reads as "this project is broken, here is the file"
+  // instead of "this project vanished" (COX-B043).
+  BROKEN_PROJECTS=list.filter(p=>p&&p.broken);
+  PROJECTS=list.filter(p=>p&&!p.broken);
+  announceBroken();
   // System chat + meetings are WORKSPACE-level: connect the live socket even
   // with zero projects, so invites/reminders/rings always reach the user.
-  if(!list.length){renderProjBtn();initChatBackground();return;}
+  if(!PROJECTS.length){renderProjBtn();initChatBackground();return;}
   const saved=localStorage.getItem("coxpid");
-  PID=(saved&&list.some(p=>p.id===saved))?saved:list[0].id;
+  PID=(saved&&PROJECTS.some(p=>p.id===saved))?saved:PROJECTS[0].id;
   renderProjBtn();
   loadBudget();loadComments();connect();initChatBackground();
 }
@@ -479,7 +512,7 @@ async function doLogin(){
 async function doLogout(){try{await fetch("/api/auth/logout",{method:"POST"});}catch(e){}location.reload();}
 // Role capabilities (mirror of AuthRole in the backend).
 const LEAD_ROLES=["director","manager","techlead","dslead","dalead"];
-const ROLE_LABELS={super:"Super Admin",admin:"Admin",director:"Director",manager:"Manager",techlead:"Tech.Lead",dslead:"DS.Lead",dalead:"DA.Lead",ba:"BA",fe:"FE",be:"BE",aie:"AIE",ds:"DS",da:"DA",de:"DE",reviewer:"Reviewer",viewer:"Viewer"};
+const ROLE_LABELS={super:"Super Admin",admin:"Admin",director:"Director",manager:"Manager",techlead:"Tech.Lead",dslead:"DS.Lead",dalead:"DA.Lead",ba:"BA",po:"PO",sa:"SA",sm:"SM",qa:"QA",fe:"FE",be:"BE",aie:"AIE",ds:"DS",da:"DA",de:"DE",reviewer:"Reviewer",viewer:"Viewer"};
 function roleLabel(r){return ROLE_LABELS[r]||r;}
 function roleCanWrite(r){return r!=="viewer";}
 function roleCanCreateChannel(r){return r==="super"||r==="admin"||LEAD_ROLES.includes(r);}
@@ -1269,6 +1302,10 @@ function wlSay(name,args){
   if(n==="bash"){
     let c=String(a.command||"").replace(/\s+/g," ").trim();
     if(!c)c=raw.replace(/^\{|\}$/g,"").replace(/\s+/g," ").slice(0,92);
+    // Strip the boilerplate that fronts almost every agent command — a
+    // `cd <worktree> &&` prefix and absolute tool paths — so the meaningful
+    // part shows: "cargo test -p …" not "cd /tmp/pr-review-b043 && /opt/…".
+    c=c.replace(/^cd\s+\S+\s*&&\s*/,"").replace(/\/\S*\/(cargo|npm|npx|node|git|python3?|sed|grep|rg)\b/g,"$1");
     return {verb:"Run",detail:c.length>92?c.slice(0,92)+"…":(c||"(command not logged)")};
   }
   if(n==="grep")return {verb:"Search",detail:[a.pattern,a.path?"in "+wlShortPath(a.path):""].filter(Boolean).join(" ")};
@@ -1276,6 +1313,10 @@ function wlSay(name,args){
   if(n==="webfetch")return {verb:"Fetch",detail:a.url||""};
   if(n==="task"||n==="agent")return {verb:"Delegate",detail:a.description||""};
   if(n==="todowrite")return {verb:"Update plan",detail:""};
+  if(n==="reportfindings"||n==="structuredoutput"){
+    const v=a.decision||a.verdict||"";
+    return {verb:"Review verdict",detail:v?String(v).replace(/_/g," "):""};
+  }
   // Unknown tool: keep the name, show the first meaningful argument.
   const first=Object.entries(a).find(([,v])=>typeof v==="string"&&v.trim());
   return {verb:name,detail:first?String(first[1]).slice(0,80):""};
@@ -1334,14 +1375,37 @@ function parseWorklog(raw){
     if(s.startsWith("💬")){ flush(); cur={k:"msg",text:s.slice(2).replace(/^\s+/,"")}; continue; }
     if(s.startsWith("🔧")){ flush(); const m=s.slice(2).trim(); const i=m.indexOf("(");
       items.push({k:"tool",name:i>=0?m.slice(0,i):m,args:i>=0?m.slice(i+1).replace(/\)$/,""):""}); continue; }
-    const rm=s.match(/^\s*↳\s*result\s*\(([^)]*)\)/);
-    if(rm){ flush(); items.push({k:"result",info:rm[1]}); continue; }
+    // Result line: the backend now emits a human summary ("↳ ✓ 220 passed");
+    // the older "↳ result (396 chars)" form is still parsed for old logs.
+    const rm=s.match(/^\s*↳\s*(.+?)\s*$/);
+    if(rm){ flush(); const old=rm[1].match(/^result\s*\(([^)]*)\)$/); items.push({k:"result",info:old?old[1]:rm[1],body:[]}); continue; }
+    // Preview line (actual output, indented with ┆): attach to the last result.
+    const pv=s.match(/^\s*┆ ?(.*)$/);
+    if(pv){ const last=items[items.length-1]; if(last&&last.k==="result"){ (last.body=last.body||[]).push(pv[1]); } continue; }
     // continuation / plain text
     if(cur&&cur.k==="msg") cur.text+="\n"+s;
     else if(s.trim()) cur={k:"msg",text:s};
   }
   flush();
   return items;
+}
+// A review/structured-output line is often the model's final answer dumped as
+// raw JSON — `{"decision":"approve","summary":"…"}`. Rendered verbatim it is a
+// wall of braces; parse it into a verdict badge + the summary as prose.
+function wlVerdictCard(text){
+  const t=String(text||"").trim();
+  if(!t.startsWith("{")||!/"(decision|verdict)"/.test(t))return null;
+  let o;try{o=JSON.parse(t);}catch(e){return null;}
+  const d=String(o.decision||o.verdict||"").toLowerCase();
+  if(!d)return null;
+  const summary=o.summary||o.reason||o.rationale||"";
+  const ok=/approve|pass|verified|accept|merge/.test(d);
+  const bad=/reject|request_changes|request-changes|fail|block|deny/.test(d);
+  const col=ok?"--green":(bad?"--red":"--amber");
+  const label=d.replace(/_/g," ").replace(/\b\w/g,c=>c.toUpperCase());
+  return `<div class="wl-item wl-msg"><span class="wl-ic"><i class="ti ti-gavel"></i></span>
+    <div class="wl-body"><span class="wl-verdict" style="background:color-mix(in srgb,var(${col}) 15%,transparent);color:var(${col})">${esc(label)}</span>
+    ${summary?`<div class="wl-verdict-sum">${wlFmt(String(summary))}</div>`:""}</div></div>`;
 }
 function renderWorklog(items,live){
   const parts=items.map(it=>{
@@ -1354,7 +1418,16 @@ function renderWorklog(items,live){
       if(note) return `<div class="wl-item wl-tool"><span class="wl-chip"><i class="ti ti-clock-pause wl-tic" style="color:var(--muted)"></i><span class="wl-tname">${esc(note)}</span></span></div>`;
       const said=wlSay(it.name,it.args);
       return `<div class="wl-item wl-tool"><span class="wl-chip"><i class="ti ${m.ic} wl-tic" style="color:var(${m.col})"></i><span class="wl-tname">${esc(said.verb)}</span>${said.detail?`<span class="wl-targs">${esc(said.detail)}</span>`:""}</span></div>`; }
-    if(it.k==="result") return `<div class="wl-item wl-result"><span class="wl-rin"><i class="ti ti-corner-down-right"></i> ${esc(it.info)}</span></div>`;
+    if(it.k==="result"){
+      const body=(it.body||[]).filter(x=>x!=null);
+      const head=`<i class="ti ti-corner-down-right"></i> ${esc(it.info)}`;
+      if(!body.length) return `<div class="wl-item wl-result"><span class="wl-rin">${head}</span></div>`;
+      // The real output, revealed on click — a summary you can open, not a
+      // dead-end count.
+      return `<div class="wl-item wl-result"><details class="wl-out"><summary class="wl-rin">${head} <span class="wl-more">show output</span></summary><pre class="wl-pre">${esc(body.join("\n"))}</pre></details></div>`;
+    }
+    const card=wlVerdictCard(it.text);
+    if(card) return card;
     return `<div class="wl-item wl-msg"><span class="wl-ic"><i class="ti ti-sparkles"></i></span><div class="wl-body">${wlFmt(it.text)}</div></div>`;
   });
   if(live) parts.push(`<div class="wl-typing"><span class="wl-ic"><i class="ti ti-sparkles"></i></span><span class="dots"><i></i><i></i><i></i></span></div>`);

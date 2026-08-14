@@ -141,6 +141,11 @@ fn reconcile_target(
     (state_ver > &repo).then_some(repo)
 }
 
+/// The composition root's engine-rebuild hook: `Some(new parts)` only when the
+/// on-disk config changed since last asked (see [`RunCycleUseCase::with_reloader`]).
+pub type Reloader<E> =
+    Arc<dyn Fn() -> Option<(Config, Arc<E>, Arc<Mutex<Spend>>)> + Send + Sync>;
+
 /// Runs the sequential agent cycle over shared adapters.
 pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     store: Arc<S>,
@@ -179,13 +184,15 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     forge: Option<Arc<dyn ForgePort>>,
     /// Reports the currently executing agent to the runner (live "working now").
     phase: Option<crate::use_cases::runner::PhaseReporter>,
+    /// Rebuild hook for hot-reloading engine+config on a file change (set by
+    /// the composition root; `None` in tests).
+    reloader: Option<Reloader<E>>,
     /// This runner's identity (`account@host`) — recorded as the ticket claim
     /// owner so concurrent runners on a shared backlog never collide.
     worker: String,
     /// What this machine can run (see `set_capabilities`).
     caps: crate::ports::outbound::WorkerCaps,
     /// Last scrum discussion topic — skip duplicate discussions.
-    last_discussion_topic: Mutex<String>,
     /// Whether the `sandbox_unsupported` warning has already fired — posted
     /// once per project per process lifetime, never once per cycle.
     sandbox_warned: AtomicBool,
@@ -220,9 +227,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             janitor: None,
             forge: None,
             phase: None,
+            reloader: None,
             worker: String::new(),
             caps: crate::ports::outbound::WorkerCaps::default(),
-            last_discussion_topic: Mutex::new(String::new()),
             sandbox_warned: AtomicBool::new(false),
         }
     }
@@ -231,6 +238,46 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// owner. Called by `run_forever` from the live operator each cycle.
     pub fn set_worker(&mut self, worker: impl Into<String>) {
         self.worker = worker.into();
+    }
+
+    /// Hot-reload the engine + config mid-run, called at a cycle boundary when
+    /// `coxagent.json` changed — so a Settings edit (a new default engine, a
+    /// per-role model, a routing change) takes effect on the NEXT cycle WITHOUT
+    /// restarting the process. The spend meter is swapped too; the previous one
+    /// was already drained into state at the last cycle's end, so nothing is
+    /// lost. Everything else — worker identity, forge, the phase reporter — is
+    /// preserved, since none of it depends on the engine config.
+    pub fn reload(&mut self, config: Config, engine: Arc<E>, meter: Arc<Mutex<Spend>>) {
+        self.config = config;
+        self.engine = engine;
+        self.meter = Some(meter);
+    }
+
+    /// Attach the composition root's rebuild hook: it returns `Some(new parts)`
+    /// only when the on-disk config actually changed since last asked. The
+    /// application layer cannot read the file itself (IO stays in adapters), so
+    /// the closure carries that knowledge in.
+    #[must_use]
+    pub fn with_reloader(mut self, reloader: Reloader<E>) -> Self {
+        self.reloader = Some(reloader);
+        self
+    }
+
+    /// Apply a pending config change if the reload hook reports one. Called by
+    /// the runner at each cycle boundary; a no-op without a hook or a change.
+    /// Returns whether a reload happened, so the caller can invalidate anything
+    /// derived from the OLD engine stack (e.g. the per-role observed-engine
+    /// badges — an observation of an engine that no longer runs is not truth).
+    pub fn maybe_reload(&mut self) -> bool {
+        let Some(hook) = &self.reloader else {
+            return false;
+        };
+        let Some((config, engine, meter)) = hook() else {
+            return false;
+        };
+        tracing::info!("config changed — engine reloaded and applied without a restart");
+        self.reload(config, engine, meter);
+        true
     }
 
     /// Declare the agent CLIs this machine can launch, so the presence heartbeat
@@ -629,6 +676,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // Forge hygiene: rebase open PRs onto the moving base + learn
             // from PRs a human closed without merging.
             self.forge_hygiene().await;
+            // Stop starting, start finishing: review + merge the PR queue at
+            // the TOP of the cycle. This used to run at the very end — after
+            // codegraph, ceremonies and the (tens-of-minutes) dev phases — so
+            // mergeable PRs aged a whole cycle before anyone looked at them.
+            self.review_open_prs().await;
+            self.address_pr_feedback().await;
             // Debt sweep cadence: every 10th cycle files ONE tech-debt chore
             // (lint baseline, dead code, missing docs) if none is open — the
             // discipline of paying debt down on a schedule instead of never.
@@ -660,9 +713,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             if self.claim_daily("standup").await && self.has_recent_activity().await {
                 self.scrum_standup().await;
             }
-            // Mid-sprint backlog grooming, offset from the standup so the two
-            // ceremonies don't land in the same cycle.
-            if self.config.workflow.mode == crate::config::Mode::Scrum && cycle % 3 == 2 {
+            // Backlog grooming is a DAILY ceremony, not an every-few-cycles one —
+            // `cycle % 3` reposted "let's get the top items ready" every ~90s.
+            // Once a day (persisted, like the standup), and only in scrum mode.
+            if self.config.workflow.mode == crate::config::Mode::Scrum
+                && self.claim_daily("grooming").await
+            {
                 self.scrum_grooming().await;
             }
 
@@ -1007,11 +1063,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 }
             }
 
-            // Auto-merge: SA deep-dives open PRs and merges or requests changes.
-            self.report("SA", "reviewing PRs");
+            // Second review pass at cycle end: catches PRs the DEV phases just
+            // opened, so fresh work can land within the SAME cycle instead of
+            // waiting for the next one. (The main drain runs at the cycle top.)
             self.review_open_prs().await;
-            // Close the loop: when a human (or the SA) requested changes on a
-            // PR, a DEV agent addresses the feedback and pushes to the branch.
             self.address_pr_feedback().await;
 
             // "Agents don't sleep": if finished work is sitting UNCOMMITTED in
@@ -1029,7 +1084,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
         self.report_idle();
 
-        report.over_budget = self.record_activity(&report).await;
+        report.over_budget = self.record_activity(&report, leader).await;
         if report.over_budget {
             self.notify(
                 "budget_reached",
@@ -1053,8 +1108,26 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 "🛑 Every engine hit a quota/token wall — pausing the loop. Top up quota or add a \
                  fallback engine (Settings → engine.fallbacks), then resume."
             };
+            // Land where people actually look — the team channel, with the
+            // configured exception owner tagged so it pings them — not a ticket
+            // comment thread nobody has open.
+            let owner = self
+                .config
+                .workflow
+                .human
+                .route_exceptions_to
+                .as_deref()
+                .unwrap_or("")
+                .trim();
+            let text = if owner.is_empty() {
+                msg.to_owned()
+            } else {
+                // An @mention in the body is what the chat UI highlights and
+                // pings on — tag the configured exception owner directly.
+                format!("@{owner} {msg}")
+            };
             if let Ok(mut s) = self.store.load().await {
-                s.post_comment("SM", msg, None);
+                s.post_chat_in("SYSTEM", &text, crate::state::AGENTS_CHANNEL, Vec::new());
                 s.log_activity("SM", "paused — engines out of quota", None);
                 let _ = self.store.save(&s).await;
             }

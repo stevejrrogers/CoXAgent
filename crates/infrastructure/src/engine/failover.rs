@@ -35,7 +35,19 @@ pub fn is_quota_wall(msg: &str) -> bool {
         "401",
         "403",
         "unauthorized",
+        // Both noun and verb forms: the Claude CLI says "Failed to
+        // authenticate", which the noun "authentication" does not cover.
         "authentication",
+        "authenticate",
+        // OAuth session death: "OAuth access token has been revoked" and
+        // "OAuth session expired and could not be refreshed" — neither carried
+        // a 401 on the direct CLI path, so failover never fired and the whole
+        // team stalled on a dead engine while a live one sat idle.
+        "revoked",
+        "oauth",
+        "session expired",
+        "token expired",
+        "expired token",
         "api key",
     ]
     .iter()
@@ -96,7 +108,9 @@ impl<E: AgentEnginePort> AgentEnginePort for FailoverEngine<E> {
         for (i, engine) in self.engines.iter().enumerate() {
             let is_last = i == last_idx;
             match engine.run(request.clone()).await {
-                // Success — done.
+                // Success — done. The concrete engine has already stamped
+                // `outcome.engine` with its own id, so the outcome that returns
+                // here already names the engine that actually ran (post-failover).
                 Ok(o) if o.succeeded() => return Ok(o),
                 // Failed: only fall through on a quota wall, and only if another
                 // engine is left. A normal task failure is returned as-is.
@@ -134,13 +148,17 @@ impl<E: AgentEnginePort> AgentEnginePort for FailoverEngine<E> {
     /// session. Callers fall back to a full fresh run on error.
     async fn resume_run(
         &self,
+        role: coxagent_domain::Role,
         session_id: &str,
         follow_up: &str,
         work_dir: &std::path::Path,
         timeout: std::time::Duration,
     ) -> Result<AgentOutcome, PortError> {
         match self.engines.first() {
-            Some(e) => e.resume_run(session_id, follow_up, work_dir, timeout).await,
+            Some(e) => {
+                e.resume_run(role, session_id, follow_up, work_dir, timeout)
+                    .await
+            }
             None => Err(PortError::Backend("failover: no engines".to_owned())),
         }
     }
@@ -155,6 +173,10 @@ mod tests {
         assert!(is_quota_wall("Error 429: rate limit exceeded"));
         assert!(is_quota_wall("usage limit reached for your plan"));
         assert!(is_quota_wall("401 Unauthorized: invalid api key"));
+        // The exact CLI strings that stalled the whole team on a dead engine
+        // while a live one sat idle — none carried a 401 on the direct path.
+        assert!(is_quota_wall("Failed to authenticate. API Error: 401 OAuth access token has been revoked."));
+        assert!(is_quota_wall("Failed to authenticate: OAuth session expired and could not be refreshed"));
         assert!(!is_quota_wall("compile error: missing semicolon"));
     }
 

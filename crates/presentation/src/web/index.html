@@ -215,6 +215,8 @@
         <div class="agents" id="agents"></div>
         <div class="sec" style="margin-top:22px">Performance &amp; quality <span style="font-size:11px;color:var(--dim);font-weight:400">· deterministic evals from state — no tokens spent</span></div>
         <div class="kpis" id="team-evals"><div class="empty">loading…</div></div>
+        <div class="sec" style="margin-top:22px">Cycle scorecard <span style="font-size:11px;color:var(--dim);font-weight:400">· each cycle graded A–D: shipped · useful runs · cost · incidents</span></div>
+        <div class="acard" id="cycle-scores"><div class="empty">no cycles scored yet</div></div>
         <div class="sec admin-only" style="margin-top:22px">People on this project <span style="font-size:11px;color:var(--dim);font-weight:400">· humans who oversee & collaborate</span></div>
         <div class="acard admin-only" id="team-people"><div class="empty">loading…</div></div>
       </div>
@@ -770,6 +772,7 @@
     <button class="pri" onclick="createProject()" style="width:100%;justify-content:center;padding:11px"><i class="ti ti-plus"></i> <span id="np-submit-label">Create project</span></button>
   </div></div>
 
+<script src="/assets/js/mermaid.min.js"></script>
 <script src="/assets/js/core.js"></script>
 <script src="/assets/js/manage.js"></script>
 <script src="/assets/js/home.js"></script>

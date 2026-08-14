@@ -17,17 +17,21 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
 
     /// Pick the most pressing thing worth a team discussion this cycle, or `None`
     /// when there's nothing to talk about (so the team isn't noisy for no reason).
+    /// Returns `(category, text)` — the category keys a once-per-day claim so the
+    /// SAME kind of discussion isn't re-posted every cycle (the "47 open bugs"
+    /// spam), while a genuinely different topic can still fire the same day.
     pub(super) fn scrum_topic(
         state: &crate::state::ProjectState,
         report: &CycleReport,
         cycle: u64,
         lang: crate::config::Language,
-    ) -> Option<String> {
+    ) -> Option<(&'static str, String)> {
         use coxagent_domain::{Status, TicketType};
         let vi = lang.is_vi();
         // A failed deploy is the loudest signal — discuss root cause + prevention.
         if report.errors.iter().any(|e| e.contains("DEPLOY")) || !report.bugs_filed.is_empty() {
-            return Some(
+            return Some((
+                "deploy_fail",
                 if vi {
                     "Lần deploy hoặc chạy test gần nhất phát sinh lỗi. Nguyên nhân gốc có thể là gì, \
                      và ta nên thay đổi gì để nó không tái diễn?"
@@ -36,7 +40,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                      and what should we change to stop it recurring?"
                 }
                 .to_owned(),
-            );
+            ));
         }
         let open_bugs = state
             .tickets
@@ -44,7 +48,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .filter(|t| t.ticket_type() == TicketType::Bug && t.status() == Status::Open)
             .count();
         if open_bugs >= 3 {
-            return Some(if vi {
+            return Some(("bug_backlog", if vi {
                 format!(
                     "Đang có {open_bugs} bug mở. Nên tạm dừng tính năng mới để dọn hết bug trước, \
                      hay tiếp tục ship? Quyết định đi, và nếu cần thì tạo ticket theo dõi."
@@ -54,7 +58,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     "We have {open_bugs} open bugs. Should we pause new features and burn down the \
                      bug backlog first, or keep shipping? Decide and, if useful, create a tracking ticket."
                 )
-            });
+            }));
         }
         // A stalled in-progress ticket is worth flagging as a possible blocker.
         if let Some(t) = state
@@ -63,7 +67,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .find(|t| t.status() == Status::InProgress)
         {
             if cycle % 4 == 0 {
-                return Some(if vi {
+                return Some(("stalled", if vi {
                     format!(
                         "{} đã ở trạng thái đang làm khá lâu. Có bị block hay quá lớn không? \
                          Nên tách nhỏ hay gỡ block cho nó?",
@@ -75,12 +79,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                          Should we split it or unblock it?",
                         t.id()
                     )
-                });
+                }));
             }
         }
         // Otherwise a light periodic check-in keeps the sprint honest.
         if cycle % 6 == 0 {
-            return Some(
+            return Some((
+                "checkin",
                 if vi {
                     "Điểm tin sprint: có đang đúng hướng với mục tiêu sprint không? Có rủi ro, phình \
                      phạm vi, hay blocker nào cần nêu? Chốt một bước tiếp theo cụ thể."
@@ -89,7 +94,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                      or blockers to raise? Decide on one concrete next step."
                 }
                 .to_owned(),
-            );
+            ));
         }
         None
     }
@@ -178,7 +183,102 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// Append a human-readable activity trail plus drain the spend meter into
     /// state. Returns whether accumulated spend has crossed the budget cap.
     /// Best-effort: a failure here never fails a cycle.
-    pub(super) async fn record_activity(&self, report: &CycleReport) -> bool {
+    /// Fold the spend meter's since-last-cycle deltas into persistent state and
+    /// reset it, returning this cycle's cost. Kept separate so `record_activity`
+    /// stays a readable list of what happened, not a ledger.
+    fn drain_meter(&self, state: &mut crate::state::ProjectState) -> (f64, u64) {
+        let mut cycle_cost = 0.0;
+        let mut cycle_runs = 0u64;
+        if let Some(meter) = &self.meter {
+            if let Ok(mut m) = meter.lock() {
+                cycle_cost = m.total_cost_usd;
+                cycle_runs = m.runs;
+                state.spend.total_cost_usd += m.total_cost_usd;
+                state.spend.input_tokens += m.input_tokens;
+                state.spend.output_tokens += m.output_tokens;
+                state.spend.runs += m.runs;
+                for (role, cost) in std::mem::take(&mut m.by_role) {
+                    *state.spend.by_role.entry(role).or_default() += cost;
+                }
+                for (role, n) in std::mem::take(&mut m.runs_by_role) {
+                    *state.spend.runs_by_role.entry(role).or_default() += n;
+                }
+                for (role, cost) in std::mem::take(&mut m.metered_cost_by_role) {
+                    *state.spend.metered_cost_by_role.entry(role).or_default() += cost;
+                }
+                // Live engine per role (last-wins), plus the operator that ran it
+                // — so each agent card can name its real engine and its user.
+                for (role, eng) in std::mem::take(&mut m.engine_by_role) {
+                    if !self.worker.is_empty() {
+                        state
+                            .spend
+                            .operator_by_role
+                            .insert(role.clone(), self.worker.clone());
+                    }
+                    state.spend.engine_by_role.insert(role, eng);
+                }
+                // Attribute this cycle's spend to the operator that ran it, so
+                // each user's token usage is measurable in a shared project.
+                if !self.worker.is_empty() {
+                    let op = state
+                        .spend
+                        .by_operator
+                        .entry(self.worker.clone())
+                        .or_default();
+                    op.cost_usd += m.total_cost_usd;
+                    op.input_tokens += m.input_tokens;
+                    op.output_tokens += m.output_tokens;
+                    op.runs += m.runs;
+                }
+                *m = Spend::default();
+            }
+        }
+        (cycle_cost, cycle_runs)
+    }
+
+    /// Deterministic per-cycle scorecard — zero tokens, graded from what the
+    /// cycle actually recorded. "Was the cycle worth its cost?" as chartable
+    /// data instead of a feeling. Bounded history, newest last.
+    fn record_cycle_score(
+        state: &mut crate::state::ProjectState,
+        report: &CycleReport,
+        cost_usd: f64,
+        runs: u64,
+    ) {
+        use crate::state::CycleScore;
+        let shipped =
+            u64::from(report.feature_done.is_some()) + u64::from(report.bug_fixed.is_some());
+        let useful = shipped
+            + report.ba_created.len() as u64
+            + u64::from(report.sa_readied.is_some())
+            + u64::from(report.pd_designed.is_some())
+            + u64::from(report.documented.is_some())
+            + report.bugs_filed.len() as u64;
+        let errors = report
+            .errors
+            .iter()
+            .filter(|e| !e.contains("paused by self-tuning") && !e.contains("skipped"))
+            .count() as u64;
+        let incidents = state.engine_incidents.len() as u64;
+        let grade = CycleScore::grade_of(shipped, runs, useful, incidents, errors);
+        state.cycle_scores.push(CycleScore {
+            cycle: report.cycle,
+            at: crate::state::now_rfc3339(),
+            runs,
+            useful,
+            cost_usd,
+            shipped,
+            incidents,
+            errors,
+            grade,
+        });
+        let overflow = state.cycle_scores.len().saturating_sub(100);
+        if overflow > 0 {
+            state.cycle_scores.drain(0..overflow);
+        }
+    }
+
+    pub(super) async fn record_activity(&self, report: &CycleReport, leader: bool) -> bool {
         let Ok(mut state) = self.store.load().await else {
             return false;
         };
@@ -208,38 +308,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
 
         // Drain the spend meter (deltas since last cycle) into persistent state.
-        let mut cycle_cost = 0.0;
-        if let Some(meter) = &self.meter {
-            if let Ok(mut m) = meter.lock() {
-                cycle_cost = m.total_cost_usd;
-                state.spend.total_cost_usd += m.total_cost_usd;
-                state.spend.input_tokens += m.input_tokens;
-                state.spend.output_tokens += m.output_tokens;
-                state.spend.runs += m.runs;
-                for (role, cost) in std::mem::take(&mut m.by_role) {
-                    *state.spend.by_role.entry(role).or_default() += cost;
-                }
-                for (role, n) in std::mem::take(&mut m.runs_by_role) {
-                    *state.spend.runs_by_role.entry(role).or_default() += n;
-                }
-                for (role, cost) in std::mem::take(&mut m.metered_cost_by_role) {
-                    *state.spend.metered_cost_by_role.entry(role).or_default() += cost;
-                }
-                // Attribute this cycle's spend to the operator that ran it, so
-                // each user's token usage is measurable in a shared project.
-                if !self.worker.is_empty() {
-                    let op = state
-                        .spend
-                        .by_operator
-                        .entry(self.worker.clone())
-                        .or_default();
-                    op.cost_usd += m.total_cost_usd;
-                    op.input_tokens += m.input_tokens;
-                    op.output_tokens += m.output_tokens;
-                    op.runs += m.runs;
-                }
-                *m = Spend::default();
-            }
+        let (cycle_cost, cycle_runs) = self.drain_meter(&mut state);
+        // LEADER-ONLY: every runner passes through here, and the workers cycle
+        // every few seconds — letting them all score flooded the history with
+        // duplicate/no-op rows within minutes of the feature shipping.
+        if leader {
+            Self::record_cycle_score(&mut state, report, cycle_cost, cycle_runs);
         }
         let spent_today = state.add_daily_spend(cycle_cost);
 
