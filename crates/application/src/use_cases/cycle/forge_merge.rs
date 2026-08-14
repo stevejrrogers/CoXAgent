@@ -71,13 +71,38 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     continue;
                 }
                 if run(vec!["checkout".into(), "-B".into(), pr.head.clone(), local]).await
-                    && run(vec!["merge".into(), base_ref, "--no-edit".into()]).await
+                    && run(vec!["merge".into(), base_ref.clone(), "--no-edit".into()]).await
                 {
                     if run(vec!["push".into(), "origin".into(), pr.head.clone()]).await {
                         rebased.push(pr.number);
                     }
                 } else {
-                    let _ = run(vec!["merge".into(), "--abort".into()]).await;
+                    // A PR already open that the moving base has made conflicted
+                    // must be resolved HERE, not parked — otherwise the queue
+                    // hangs at CONFLICTING with nobody holding the pen (the same
+                    // law that governs a fresh PR in commit_for_ticket). List
+                    // the unmerged files and let the DEV engine read both sides,
+                    // preserving both intents; abort only when that genuinely
+                    // cannot complete.
+                    let (_, out) = git
+                        .raw(&self.work_dir, &["diff", "--name-only", "--diff-filter=U"])
+                        .await;
+                    let files: Vec<String> = out
+                        .lines()
+                        .filter(|l| !l.trim().is_empty())
+                        .map(str::to_owned)
+                        .collect();
+                    let resolved = !files.is_empty()
+                        && self
+                            .resolve_merge_in_progress(&pr.head, &target, &files)
+                            .await;
+                    if resolved {
+                        if run(vec!["push".into(), "origin".into(), pr.head.clone()]).await {
+                            rebased.push(pr.number);
+                        }
+                    } else {
+                        let _ = run(vec!["merge".into(), "--abort".into()]).await;
+                    }
                 }
                 let _ = run(vec!["checkout".into(), target.clone()]).await;
             }
