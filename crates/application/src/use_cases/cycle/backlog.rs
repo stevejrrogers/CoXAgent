@@ -6,6 +6,12 @@ use super::*;
 
 /// The cadence between scheduled debt sweeps: every tenth leader cycle files one
 /// tech-debt chore if none is already open.
+///
+/// Today the LIVE tick decision lives at the call site in mod.rs (`% 10 == 0`);
+/// per CXA-C001 that call site stays untouched to preserve behaviour byte-for-
+/// byte, so outside test builds nothing references this constant directly. It is
+/// still kept here as a single source of truth for [`should_file_debt_sweep`]
+/// so the tests cannot silently drift from what production intends.
 #[cfg_attr(not(test), allow(dead_code))]
 const SWEEP_EVERY_CYCLES: u64 = 10;
 
@@ -33,6 +39,12 @@ fn has_open_chore(state: &crate::state::ProjectState) -> bool {
 /// * false on any other (non-sweep-th) tick;
 /// * false while any still-open "Debt sweep ..." chore exists;
 /// * true again once that prior chore reaches a terminal status.
+// Production keeps this rule split across `file_debt_sweep`: the "%10 tick" gate
+// lives at its call site and each blocking case ends in a DIFFERENT side effect
+// (`sweeps_done` records a handled-but-not-filed cycle only on some paths), so a
+// single bool cannot reproduce them losslessly. This predicate therefore exists as
+// an authored, regression-locked statement of ALL four acceptance cases together,
+// exercised by unit tests below rather than reaching out of test builds.
 #[must_use]
 #[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn should_file_debt_sweep(state: &crate::state::ProjectState, cycle: u64) -> bool {
@@ -413,5 +425,23 @@ mod should_file_debt_sweep_tests {
         let mut s = ProjectState::default();
         s.sweeps_done.push(10);
         assert!(!should_file_debt_sweep(&s, 10));
+    }
+
+    #[test]
+    fn an_unrelated_open_ticket_does_not_block_the_sweep() {
+        // An unrelated ticket that happens to be open must NOT suppress
+        // filing; only an open chore of that kind closes the window.
+        let t = coxagent_domain::Ticket::new(
+            coxagent_domain::TicketId::new("COX-C002").expect("id"),
+            coxagent_domain::TicketType::Feature,
+            "Build a thing".to_owned(),
+            "not debt".to_owned(),
+            Priority::Medium,
+            Complexity::Medium,
+            false,
+        )
+        .expect("ticket");
+        let state = state(vec![t], vec![]);
+        assert!(should_file_debt_sweep(&state, 10));
     }
 }
