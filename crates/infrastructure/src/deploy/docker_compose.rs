@@ -122,6 +122,14 @@ fn resolve_deploy_secrets(work_dir: &std::path::Path) -> Vec<(String, String)> {
         &dot_env,
     );
 
+    // Adopt-and-remove any SUPERSEDED path-keyed store this same project left
+    // behind under an earlier software version's SHA-of-path filename BEFORE the
+    // empty-missing shortcut below, so obsolete duplicates are cleaned up on every
+    // successful post-upgrade resolution pass — even one where the operator now
+    // supplies every required secret externally (CXA-B040). Its live credentials must
+    // still be adopted so they are never regenerated against already-initialized pgdata.
+    reconcile_superseded_path_keyed_store(work_dir, &store_path);
+
     if missing.is_empty() {
         return Vec::new();
     }
@@ -232,6 +240,104 @@ fn deploy_secret_store_path(proj: &str) -> std::path::PathBuf {
         .unwrap_or_default();
     home.join(".coxagent-deploy")
         .join(format!("{proj}.secrets"))
+}
+
+/// The on-disk root where CXA-B031-era software persisted each project's fallback
+/// secrets under a PATH-hash filename: `$HOME/.local/share/coxagent/deploy-secrets`
+/// (or an explicit `COXAGENT_DEPLOY_SECRETS_DIR` override, used by hermetic tests).
+///
+/// That scheme was superseded by the per-compose-project name-keyed store
+/// ([`deploy_secret_store_path`]); this root is read ONLY as a migration source by
+/// [`reconcile_superseded_path_keyed_store`] so legacy values can be adopted and their
+/// files removed, and is never a destination for new writes (CXA-B040).
+fn legacy_cxb031_store_root() -> std::path::PathBuf {
+    if let Some(dir) = std::env::var_os("COXAGENT_DEPLOY_SECRETS_DIR") {
+        if !dir.is_empty() {
+            return std::path::PathBuf::from(dir);
+        }
+    }
+    match std::env::var_os("HOME") {
+        Some(home) => std::path::PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join("coxagent")
+            .join("deploy-secrets"),
+        None => std::env::temp_dir().join("coxagent-deploy-secrets"),
+    }
+}
+
+/// Filename an earlier software version (CXA-B031) kept one project's fallback secrets
+/// under: SHA-256 of the canonicalised absolute work dir, in `<root>/<hex>.env`. Reconstructed
+/// byte-for-byte — including the canonicalise-with-path-fallback on error — so an ALREADY-DEPLOYED
+/// unconfigured app whose live PG_PASSWORD sits at that obsolete filename can still be located and
+/// reconciled during the post-upgrade window. It is only a read/migration source; new values are
+/// never written here.
+fn legacy_cxb031_store_file(work_dir: &std::path::Path) -> std::path::PathBuf {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(
+        work_dir
+            .canonicalize()
+            .unwrap_or_else(|_| work_dir.to_path_buf())
+            .to_string_lossy()
+            .as_bytes(),
+    );
+    legacy_cxb031_store_root().join(format!("{:x}.env", hasher.finalize()))
+}
+
+/// Reconcile-and-remove any SUPERSEDED path-keyed secret store left behind for THIS project by an
+/// earlier software version.
+///
+/// CXA-B032/B033 moved secret persistence onto per-compose-project NAME-keyed files; anything an old
+/// build stored under its obsolete SHA-of-absolute-path filename is therefore unreferenced yet still
+/// holds live DB/admin credentials at rest forever — a duplicate plaintext copy that neither rotates,
+/// relates to, nor discloses differently than its twin (CXA-B040). When such a file exists for this same
+/// checkout we adopt any value our canonical store does not already know — so pgdata-initialized creds are
+/// not regenerated against, preserving cross-cycle stability — persist them into `<proj>.secrets`, then DELETE the obsolete file so no duplicate credential remains on disk.
+///
+/// Deletion is gated on durable adoption into the canonical store: only after `persist_generated_deploy_secrets`
+/// succeeds do we remove the legacy file, so we can never lose live credentials before they are owned by our new location.
+///
+/// Best-effort like all persistence here: failures are logged via [`tracing`], never fatal to a deploy.
+fn reconcile_superseded_path_keyed_store(work_dir: &std::path::Path, canonical: &std::path::Path) {
+    let legacy_path = legacy_cxb031_store_file(work_dir);
+
+    // Nothing superseded anywhere? No-op without touching host state.
+    if !legacy_path.exists() {
+        return;
+    }
+
+    // Merge every legacy value into our canonical store WITHOUT ever overriding a
+    // value we already own there — operator-configured or previously-adopted creds win.
+    let mut merged = read_dot_env_values(canonical);
+    for (k, v) in read_dot_env_values(&legacy_path) {
+        merged.entry(k).or_insert(v);
+    }
+    let mut adopted: Vec<(String, String)> = merged.into_iter().collect();
+    adopted.sort();
+
+    // Persist durably first; only once our canonical store owns the adopted values is it
+    // safe to remove the superseded duplicate — deleting first could strand live creds.
+    match persist_generated_deploy_secrets(canonical, &adopted) {
+        Ok(()) => match std::fs::remove_file(&legacy_path) {
+            Ok(()) => tracing::info!(
+                "removed superseded path-keyed deploy secret store {} after adopting its \
+                 values into {}",
+                legacy_path.display(),
+                canonical.display()
+            ),
+            Err(e) => tracing::warn!(
+                "adopted values from superseded secret store {} but could not remove it: {e}",
+                legacy_path.display()
+            ),
+        },
+        Err(e) => tracing::warn!(
+            "could not adopt values from superseded secret store {} into {} ({e}); leaving \
+             it in place until adoption succeeds so no live credential is lost",
+            legacy_path.display(),
+            canonical.display()
+        ),
+    }
 }
 
 /// Persist generated deploy secrets for one project to the off-repo store. Preserves
@@ -1418,8 +1524,9 @@ mod cross_check_tests {
 mod deploy_secret_tests {
     use super::{
         compose_project_name, deploy_secret_store_path, ephemeral_resolve,
-        missing_required_secrets, persist_generated_deploy_secrets, random_secret, read_dot_env,
-        read_dot_env_values, resolve_deploy_secrets,
+        legacy_cxb031_store_file, missing_required_secrets, persist_generated_deploy_secrets,
+        random_secret, read_dot_env, read_dot_env_values, reconcile_superseded_path_keyed_store,
+        resolve_deploy_secrets,
     };
     use std::collections::HashSet;
 
@@ -1579,6 +1686,39 @@ mod deploy_secret_tests {
         }
     }
 
+    /// Points [`legacy_cxb031_store_root`] at a fresh temp dir for one test, then
+    /// restores any prior value on drop — so CXA-B040 tests never touch a real
+    /// `$HOME/.local/share/coxagent/deploy-secrets`. Serialised under the same lock
+    /// as [`SecretStoreGuard`] so env mutations stay atomic across concurrent tests.
+    struct LegacyStoreGuard {
+        prev: Option<std::ffi::OsString>,
+        _serialized: std::sync::MutexGuard<'static, ()>,
+    }
+    impl LegacyStoreGuard {
+        fn new() -> Self {
+            let serialization = SECRET_STORE_TEST_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let prev = std::env::var_os("COXAGENT_DEPLOY_SECRETS_DIR");
+            let dir = std::env::temp_dir().join(format!("cxa-b040-legacy-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("mkdir legacy store dir");
+            std::env::set_var("COXAGENT_DEPLOY_SECRETS_DIR", &dir);
+            LegacyStoreGuard {
+                prev,
+                _serialized: serialization,
+            }
+        }
+    }
+    impl Drop for LegacyStoreGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var("COXAGENT_DEPLOY_SECRETS_DIR", v),
+                None => std::env::remove_var("COXAGENT_DEPLOY_SECRETS_DIR"),
+            }
+        }
+    }
+
     /// A throwaway per-test work dir (named by a distinct tag so concurrently
     /// running tests never clobber each other's project files). Mirrors the
     /// temp-dir idiom used by [`dot_env_parser_detects_only_real_assignments`].
@@ -1697,6 +1837,112 @@ mod deploy_secret_tests {
         assert!(
             !result.contains(&("PG_PASSWORD".to_owned(), stored_before.clone())),
             "external operator config must override any prior stale pin"
+        );
+    }
+
+    /// CXA-B040 core: a SUPERSEDED path-keyed store left behind for THIS project by an
+    /// earlier software version must have its live value adopted (so pgdata-initialized
+    /// creds are not regenerated) AND its duplicate plaintext file REMOVED — leaving no
+    /// unreferenced second copy of active credentials at rest forever.
+    #[test]
+    fn superseded_path_keyed_store_is_adopted_then_removed() {
+        clear_required_env();
+        let _canonical = SecretStoreGuard::new();
+        let _legacy = LegacyStoreGuard::new();
+        let work = work_dir("b040-adopt");
+
+        // Simulate an upgraded host: only the OLD path-hash store holds the value that
+        // initialized pgdata; our canonical `<proj>.secrets` does not exist yet.
+        let legacy_path = legacy_cxb031_store_file(&work);
+        std::fs::write(
+            &legacy_path,
+            "PG_PASSWORD=stable-b031-password\nCOXAGENT_ADMIN_PASSWORD=stable-b031-admin\n",
+        )
+        .expect("write legacy store");
+        assert!(legacy_path.exists(), "premise: legacy store present");
+
+        // Resolving the unconfigured app must reuse B031's persisted value — never mint a
+        // fresh one against already-initialized pgdata (CXA-B036 concern).
+        let resolved = resolve_deploy_secrets(&work);
+        assert_eq!(
+            resolved
+                .iter()
+                .find(|(k, _)| k == "PG_PASSWORD")
+                .map(|(_, v)| v.as_str()),
+            Some("stable-b031-password"),
+            "adopted value must flow into resolution instead of a fresh random"
+        );
+
+        // And the obsolete duplicate must be GONE once reconciled.
+        assert!(
+            !legacy_path.exists(),
+            "superseded path-keyed store must be removed after adoption (CXA-B040)"
+        );
+    }
+
+    /// CXA-B040 guard: when NO superseded path-keyed store exists, reconciliation is a
+    /// strict no-op — it creates nothing and removes nothing outside the canonical store.
+    #[test]
+    fn no_superseded_store_is_a_no_op() {
+        clear_required_env();
+        let _canonical = SecretStoreGuard::new();
+        let _legacy = LegacyStoreGuard::new();
+        let work = work_dir("b040-noop");
+
+        let legacy_root = std::env::var_os("COXAGENT_DEPLOY_SECRETS_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap();
+        reconcile_superseded_path_keyed_store(
+            &work,
+            &deploy_secret_store_path(&compose_project_name(&work)),
+        );
+
+        // Nothing pre-existing under the legacy root -> nothing created or removed.
+        assert!(
+            legacy_root.read_dir().map_or(0, Iterator::count) == 0,
+            "reconciliation must not fabricate a superseded store when none exists"
+        );
+    }
+
+    /// CXA-B040 guard: even when our canonical store ALREADY holds a value (so nothing new is
+    /// adopted), an obsolete path-keyed duplicate present on disk is still reconciled away —
+    /// removing the unreferenced second plaintext copy while never overriding existing creds.
+    #[test]
+    fn existing_canonical_value_wins_and_superseded_copy_is_still_removed() {
+        clear_required_env();
+        let _canonical = SecretStoreGuard::new();
+        let _legacy = LegacyStoreGuard::new();
+        let work = work_dir("b040-dupe");
+
+        // Canonical store already owns PG_PASSWORD from an earlier pass...
+        persist_generated_deploy_secrets(
+            &deploy_secret_store_path(&compose_project_name(&work)),
+            &[("PG_PASSWORD".to_owned(), "already-owned".to_owned())],
+        )
+        .expect("persist canonical");
+
+        // ...but an upgraded host ALSO carries an obsolete path-keyed duplicate holding a
+        // DIFFERENT stale value for the same key.
+        let legacy_path = legacy_cxb031_store_file(&work);
+        std::fs::write(&legacy_path, "PG_PASSWORD=stale-legacy-password\n").expect("write");
+        assert!(legacy_path.exists());
+
+        reconcile_superseded_path_keyed_store(
+            &work,
+            &deploy_secret_store_path(&compose_project_name(&work)),
+        );
+
+        // The canonical value must survive untouched; only the superseded file goes away.
+        assert_eq!(
+            read_dot_env_values(&deploy_secret_store_path(&compose_project_name(&work)))
+                .get("PG_PASSWORD")
+                .map(String::as_str),
+            Some("already-owned"),
+            "existing canonical value must never be overridden by adoption"
+        );
+        assert!(
+            !legacy_path.exists(),
+            "superseded path-keyed store must still be removed (CXA-B040)"
         );
     }
 }
