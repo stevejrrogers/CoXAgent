@@ -153,6 +153,16 @@ pub struct ProjectState {
     /// forward, so sprints keep rolling regardless of restarts.
     #[serde(default)]
     pub sprint_cycle: u64,
+    /// Persistent, restart-safe project-cycle counter — the authoritative cycle
+    /// number, advanced once per leader cycle and reused for scoring + cadence.
+    /// The per-process counter resets to 1 every worker launch, so both the
+    /// scorecard key and the `% N` cadence (codegraph, debt sweep, BA, scrum
+    /// topic) drifted after a restart. This counter lives in state, only moves
+    /// forward, and is unbounded (it is NOT truncated by the cycle_scores 100-cap),
+    /// so cadence positions and `sweeps_done` values stay consistent across
+    /// restarts. Non-leader runners ignore it — their reports are un-scored.
+    #[serde(default)]
+    pub cycle: u64,
     /// The PO's goal for the upcoming sprint (human-set from the Scrum view). When
     /// set it becomes the sprint goal on the next roll-over and steers the BA's
     /// proposals, so the team works toward what the PO asked for — not just
@@ -368,6 +378,7 @@ impl Default for ProjectState {
             decisions: Vec::new(),
             refactor_mode: false,
             sprint_cycle: 0,
+            cycle: 0,
             sprint_goal: String::new(),
             last_digest_day: String::new(),
             pr_fix_attempts: std::collections::BTreeMap::new(),

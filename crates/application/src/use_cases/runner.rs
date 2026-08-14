@@ -98,7 +98,15 @@ impl RunnerHandle {
         self.resume.notify_waiters();
     }
 
-    /// Pause after the current cycle.
+    /// Whether the runner is currently paused — polled by the cycle BETWEEN
+    /// phases so a user's Pause takes effect at the next phase boundary (after
+    /// the in-flight engine call), not after the whole multi-agent cycle.
+    #[must_use]
+    pub fn is_paused(&self) -> bool {
+        self.mode.load(Ordering::SeqCst) == PAUSED
+    }
+
+    /// Pause: no new phases start; the in-flight engine call finishes first.
     pub fn pause(&self) {
         self.mode.store(PAUSED, Ordering::SeqCst);
         self.set_mode_label("paused");
@@ -255,6 +263,10 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
                 .await;
         });
     }));
+    {
+        let h = std::sync::Arc::clone(&handle);
+        cycle_uc.set_pause_check(std::sync::Arc::new(move || h.is_paused()));
+    }
     let breaker_store = cycle_uc.store();
     let mut cycle = 0u64;
     // Circuit breaker: engine-infrastructure outages (revoked auth, network
