@@ -277,6 +277,10 @@ struct SpyForge {
     mergeable: bool,
     merged: Mutex<Vec<u64>>,
     changes: Mutex<Vec<u64>>,
+    closed: Mutex<Vec<u64>>,
+    /// When `Some`, list two SAME-ticket PRs and serve per-PR diffs — the
+    /// competing-PR scenario. Tuples are `(number, title, diff)`.
+    competing: Option<Vec<(u64, String, String)>>,
 }
 #[async_trait::async_trait]
 impl ForgePort for SpyForge {
@@ -284,6 +288,22 @@ impl ForgePort for SpyForge {
         unimplemented!()
     }
     async fn list_open_prs(&self) -> Result<Vec<PullRequest>, PortError> {
+        if let Some(items) = &self.competing {
+            return Ok(items
+                .iter()
+                .map(|(n, t, _)| PullRequest {
+                    number: *n,
+                    title: t.clone(),
+                    head: format!("feat/{n}"),
+                    base: "main".to_owned(),
+                    url: String::new(),
+                    author: "coxagent-bot".to_owned(),
+                    ci: self.ci.clone(),
+                    mergeable: self.mergeable,
+                    created: String::new(),
+                })
+                .collect());
+        }
         Ok(vec![PullRequest {
             number: 7,
             title: "feat(X-1): add a".to_owned(),
@@ -296,7 +316,12 @@ impl ForgePort for SpyForge {
             created: String::new(),
         }])
     }
-    async fn pr_diff(&self, _: u64) -> Result<String, PortError> {
+    async fn pr_diff(&self, n: u64) -> Result<String, PortError> {
+        if let Some(items) = &self.competing {
+            if let Some((_, _, d)) = items.iter().find(|(num, _, _)| *num == n) {
+                return Ok(d.clone());
+            }
+        }
         Ok("+ added a line".to_owned())
     }
     async fn merge_pr(&self, n: u64) -> Result<(), PortError> {
@@ -307,7 +332,8 @@ impl ForgePort for SpyForge {
         self.changes.lock().expect("lock").push(n);
         Ok(())
     }
-    async fn close_pr(&self, _: u64) -> Result<(), PortError> {
+    async fn close_pr(&self, n: u64) -> Result<(), PortError> {
+        self.closed.lock().expect("lock").push(n);
         Ok(())
     }
 }
@@ -478,6 +504,50 @@ async fn sa_requests_changes_on_reject_and_never_merges_failing_ci() {
         .await;
     assert!(forge.merged.lock().expect("lock").is_empty());
     assert_eq!(*forge.changes.lock().expect("lock"), vec![7]);
+}
+
+#[tokio::test]
+async fn competing_prs_self_resolve_when_one_covers_the_other() {
+    // The live deadlock: two open PRs for the same ticket. #98's diff covers
+    // every file #89 touches, so the SA closes #89 (duplicate) and lets #98
+    // land — instead of holding both forever waiting on a human. This is what
+    // lets the ticket reach `shipped` and the scorecard reflect real output.
+    let forge = Arc::new(SpyForge {
+        ci: "passing".to_owned(),
+        mergeable: true,
+        competing: Some(vec![
+            (
+                89,
+                "fix(COX-1): the smaller subset fix".to_owned(),
+                "diff --git a/a.rs b/a.rs\n+let x = 1;\n".to_owned(),
+            ),
+            (
+                98,
+                "fix(COX-1): the covering fix".to_owned(),
+                "diff --git a/a.rs b/a.rs\n+let x = 1;\n+let y = 2;\n\
+                 diff --git a/b.rs b/b.rs\n+let z = 3;\n"
+                    .to_owned(),
+            ),
+        ]),
+        ..Default::default()
+    });
+    review_uc(Arc::clone(&forge), "approve", true)
+        .review_open_prs()
+        .await;
+    let merged = forge.merged.lock().expect("lock");
+    let closed = forge.closed.lock().expect("lock");
+    assert!(
+        merged.contains(&98),
+        "the covering fix #98 is the winner and lands: {merged:?}"
+    );
+    assert!(
+        closed.contains(&89),
+        "the duplicate #89 is closed, not parked on a human: {closed:?}"
+    );
+    assert!(
+        !merged.contains(&89) && !closed.contains(&98),
+        "the winner stays open to merge, the loser is never merged: {merged:?}/{closed:?}"
+    );
 }
 
 // ---- COX-F001: auto-rollback to last known-good deploy on failure ----
