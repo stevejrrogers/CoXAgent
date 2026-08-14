@@ -721,6 +721,8 @@ pub async fn serve_full(
         .route("/api/projects/:pid/store", post(store_rpc::store_rpc_ep))
         .route("/api/projects/:pid/state", get(state_ep))
         .route("/api/projects/:pid/metrics", get(metrics_ep))
+        .route("/api/projects/:pid/metrics/summary", get(metrics_summary_ep))
+        .route("/api/projects/:pid/metrics/trends", get(metrics_trends_ep))
         .route("/api/projects/:pid/agent-evals", get(agent_evals_ep))
         .route("/api/projects/:pid/runner", get(runner_ep))
         .route("/api/projects/:pid/workers", get(workers_ep))
