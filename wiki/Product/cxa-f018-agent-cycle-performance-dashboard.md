@@ -145,11 +145,17 @@ This page states only what was verified against source during this pass; no fail
 
 These paths implement or directly feed this dashboard:
 
-- crates/application/src/metrics.rs — pure computations: Metrics, AgentEvals, RoleEval, DayCount types; compute(), agent_evals(), decide_tuning(), days_back(), digest_markdown().
-- crates/presentation//src/server/mod.rs#L723-L734 registers routes
-   *(path below)*
-   routes /metrics (/api/projects/:pid/metrics), /agent-evals, /digest.
-   Actual registration lines: mod.rs → `.route("/api/projects/:pid/metrics", …)`, `/agent-evals`, `/digest`.
-   Canonical path: crates/presentation/src/server/mod.rs (routes at lines 723–734).
-   *(noted twice intentionally? no—single canonical entry)*
+- `crates/application/src/metrics.rs` — the whole computation core: `Metrics`, `AgentEvals`, `RoleEval`, `DayCount` types and the pure functions `compute()`, `agent_evals()`, `decide_tuning()`, `days_back()`, `digest_markdown()`; includes unit tests (`empty_state_is_all_zeroes`, `agent_evals_math`, `tuning_hysteresis`).
+- `crates/application/src/sprint.rs` — sprint lifecycle that feeds velocity/burndown: `advance()`, `roll_over()` (writes each closed sprint's outcome), `close_now()`, `done_count()`, and next-sprint capacity via private `sprint_capacity()`; resolves window config through [`SprintPolicy::from_config()`].
+- `crates/application/src/state/work.rs` — state shapes behind the numbers: [`Sprint`] (live sprint), [`SprintRecord { number, goal, committed, done }`] (velocity history), [`Tuning`], and the spend maps (`by_role`, `runs_by_role`, `metered_cost_by_role`) used by evals.
+- `crates/application/src/state/mod.rs` — fields feeding KPIs on [`ProjectState`]: sprints/history/ticket_fail_attempts/pr_fix_attempts/spend/tuning.
+- `crates/application/src/config.rs` — workflow config knobs (`mode`, budget_usd, sprint_unit/length) under [`WorkflowConfig`]; defaults in Configuration above.
+- `crates/application/src/parsing.rs` — pattern detection helpers [`is_backlog_meta()`] (ritual titles) and [`duplicates_existing()`] (Jaccard ≥0.6 dedupe).
+- `crates/presentation/src/server/mod.rs` — route registration: `/api/projects/:pid/metrics` at L723, `/api/projects/:pid/agent-evals` at L724, `/api/projects/:pid/digest` at L734.
+- `crates/presentation/src/server/status.rs` — `metrics_ep` handler → `metrics::compute(&state)`.
+- `crates/presentation/src/server/engines.rs` — `agent_evals_ep` handler → `metrics::agent_evals(&state)`.
+- `crates/presentation/src/server/projects.rs` — `digest_ep` handler → builds via `metrics::digest_markdown()`, posts into the AGENTS_CHANNEL chat.
+- Web rendering (classic scripts, one shared scope): `crates/presentation/src/web/js/home.js#L186 renderSprintPanel(s)` draws the sprint card + burndown (`spBurndown`) + velocity; line 245 calls velocityHtml; empty-state redirect to Settings when kanban.
+- `crates/presentation/src/web/js/core.js#L145 velocityHtml(sprints)` renders the shipped-vs-committed bar chart; core.js#L157 chartsHtml(s) draws the 14-day throughput sparkline + status stacked bar.
+- `crates/presentation/src/web/js/shell.js#L1163 loadAgentEvals()` renders the Agents evals panel from `/agent-evals`.
 
