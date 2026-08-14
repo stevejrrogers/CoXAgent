@@ -15,6 +15,7 @@ pub mod parsing;
 pub mod policy;
 pub mod ports;
 pub mod prompts;
+pub mod prompts_resolve;
 pub mod selection;
 pub mod sprint;
 pub mod state;
