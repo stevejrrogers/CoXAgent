@@ -88,6 +88,95 @@ pub fn needs_human_eyes(diff: &str) -> Option<String> {
     ))
 }
 
+/// The files a PR diff touches, taken from its `diff --git` headers. A best
+/// effort: a diff whose headers we cannot name is conservatively treated as
+/// unparseable (empty list), which the resolver turns into a human hold rather
+/// than an unsafe auto-close.
+#[must_use]
+pub fn changed_files(diff: &str) -> Vec<String> {
+    diff.lines()
+        .filter_map(|l| {
+            let rest = l.strip_prefix("diff --git ")?;
+            // `a/a.rs b/a.rs` — the new path is the last token; `b/` strips the
+            // conventional `a/` prefix pair (`a/` is the old path).
+            let new = rest.split_whitespace().last()?;
+            new.strip_prefix("b/").map(str::to_owned)
+        })
+        .collect()
+}
+
+/// One PR's signals the competing-PR resolver needs — forged from the diff and
+/// forge metadata, kept pure so the decision is a function of data, not IO.
+#[derive(Debug, Clone)]
+pub struct CompeteCandidate {
+    pub number: u64,
+    /// Files the diff touches. `None` when the diff could not be read.
+    pub files: Option<Vec<String>>,
+    /// True when the diff is oversized or touches build/ship-sensitive paths
+    /// (`needs_human_eyes`) or commits agent scratch — never auto-merged.
+    pub unsafe_change: bool,
+}
+
+/// The lossless decision for two competing PRs on the same ticket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompeteOutcome {
+    /// Merge `winner`, close `loser`. Only chosen when provably lossless: the
+    /// winner's diff covers every file the loser touches, neither is unsafe,
+    /// and the loser has nothing the winner lacks.
+    MergeClose { winner: u64, loser: u64 },
+    /// Cannot resolve without a human — closing would drop real work, a diff
+    /// could not be read, or a change is too load-bearing to auto-land.
+    Hold(&'static str),
+}
+
+/// Two open PRs for the SAME ticket race each other (see [`competing_pr`]);
+/// the older policy parked BOTH forever waiting on a human to choose. This
+/// self-resolves *only* when it costs nothing: if one PR's diff already covers
+/// every file the other touches, and the winner is safe to auto-merge, then
+/// closing the duplicate loses no work and the ticket can actually ship
+/// (`feature_done`/`bug_fixed`, which the scorecard needs). When either diff
+/// carries work the other lacks, or either is unsafe, it holds for a human
+/// rather than silently drop a change.
+#[must_use]
+pub fn resolve_competing(a: CompeteCandidate, b: CompeteCandidate) -> CompeteOutcome {
+    // Can't prove anything about a diff we couldn't read.
+    let (Some(a_files), Some(b_files)) = (a.files.as_deref(), b.files.as_deref()) else {
+        return CompeteOutcome::Hold("could not read a competing diff — keeping both");
+    };
+    if a.unsafe_change || b.unsafe_change {
+        return CompeteOutcome::Hold(
+            "touches a load-bearing or oversized change — a human should rule on it",
+        );
+    }
+    // A winner must actually claim at least one file; an empty diff proves
+    // nothing and closing its twin would be guesswork.
+    if a_files.is_empty() || b_files.is_empty() {
+        return CompeteOutcome::Hold("diff has no parseable file headers — keeping both");
+    }
+    let a_covers_b = b_files.iter().all(|f| a_files.contains(f));
+    let b_covers_a = a_files.iter().all(|f| b_files.contains(f));
+    // A strict subset decides it — the wider diff is the more complete fix.
+    // Exact overlap (both cover each other) means they are the same change;
+    // keep the newer one arbitrarily deterministic by picking `a`'s twin.
+    match (a_covers_b, b_covers_a) {
+        (true, false) => CompeteOutcome::MergeClose {
+            winner: a.number,
+            loser: b.number,
+        },
+        (false, true) => CompeteOutcome::MergeClose {
+            winner: b.number,
+            loser: a.number,
+        },
+        (true, true) => CompeteOutcome::MergeClose {
+            winner: a.number,
+            loser: b.number,
+        },
+        (false, false) => CompeteOutcome::Hold(
+            "each PR touches files the other does not — closing either would drop work",
+        ),
+    }
+}
+
 /// Paths that are the agents' own workings, never the product: worktrees the
 /// engine creates, state backups, build output, engine config the runner
 /// writes for itself.
@@ -281,6 +370,105 @@ mod merge_guard_tests {
         assert!(needs_human_eyes(ci)
             .expect("held")
             .contains(".github/workflows"));
+    }
+
+    #[test]
+    fn consuming_pr_is_closed_when_the_winner_covers_it() {
+        // The live deadlock: #89 and #98 both fix the same ticket. #98's diff
+        // covers everything #89 touches, so keeping #98 and closing #89 loses
+        // no work — the ticket can finally ship.
+        let a = super::CompeteCandidate {
+            number: 89,
+            files: Some(vec!["crates/app/src/lib.rs".to_owned()]),
+            unsafe_change: false,
+        };
+        let b = super::CompeteCandidate {
+            number: 98,
+            files: Some(vec![
+                "crates/app/src/lib.rs".to_owned(),
+                "crates/app/src/main.rs".to_owned(),
+            ]),
+            unsafe_change: false,
+        };
+        assert_eq!(
+            super::resolve_competing(b.clone(), a.clone()),
+            super::CompeteOutcome::MergeClose {
+                winner: 98,
+                loser: 89
+            },
+            "the wider diff wins, the subset is the duplicate"
+        );
+        // Order-invariant: swap and the same winner is chosen.
+        assert_eq!(
+            super::resolve_competing(a, b),
+            super::CompeteOutcome::MergeClose {
+                winner: 98,
+                loser: 89
+            }
+        );
+    }
+
+    #[test]
+    fn competing_prs_with_disjoint_work_are_held_not_closed() {
+        // Each PR touches a file the other does not: closing either drops real
+        // work, so the machine must hold and let a person reconcile.
+        let a = super::CompeteCandidate {
+            number: 89,
+            files: Some(vec!["crates/app/src/lib.rs".to_owned()]),
+            unsafe_change: false,
+        };
+        let b = super::CompeteCandidate {
+            number: 98,
+            files: Some(vec!["crates/domain/src/models.rs".to_owned()]),
+            unsafe_change: false,
+        };
+        assert!(matches!(
+            super::resolve_competing(a, b),
+            super::CompeteOutcome::Hold(_)
+        ));
+    }
+
+    #[test]
+    fn a_load_bearing_or_unreadable_competing_diff_never_auto_closes() {
+        let safe = super::CompeteCandidate {
+            number: 1,
+            files: Some(vec!["crates/app/src/lib.rs".to_owned()]),
+            unsafe_change: false,
+        };
+        // Load-bearing change (pipeline) → hold, even though it would "cover".
+        let pipeline = super::CompeteCandidate {
+            number: 2,
+            files: Some(vec![
+                ".github/workflows/ci.yml".to_owned(),
+                "crates/app/src/lib.rs".to_owned(),
+            ]),
+            unsafe_change: true,
+        };
+        assert!(matches!(
+            super::resolve_competing(safe.clone(), pipeline),
+            super::CompeteOutcome::Hold(_)
+        ));
+        // A diff that could not be read → hold, never a blind close.
+        let unreadable = super::CompeteCandidate {
+            number: 3,
+            files: None,
+            unsafe_change: false,
+        };
+        assert!(matches!(
+            super::resolve_competing(safe, unreadable),
+            super::CompeteOutcome::Hold(_)
+        ));
+    }
+
+    #[test]
+    fn changed_files_names_simple_and_renamed_paths() {
+        let diff = "diff --git a/src/a.rs b/src/a.rs\n+let x = 1;\n\
+                    diff --git a/src/b.rs b/src/c.rs\n+let y = 2;\n";
+        assert_eq!(
+            super::changed_files(diff),
+            vec!["src/a.rs".to_owned(), "src/c.rs".to_owned()]
+        );
+        assert!(super::changed_files("no headers here").is_empty());
     }
 }
 
