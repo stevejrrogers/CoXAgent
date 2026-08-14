@@ -643,6 +643,7 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
             deploy: DeployConfig::default(),
             policy: PolicyConfig::default(),
             releases: ReleasesConfig::default(),
+            coverage: coxagent_application::config::CoverageConfig::default(),
         },
         logs_dir(&base),
         None,
