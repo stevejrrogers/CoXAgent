@@ -1,15 +1,15 @@
 FOLDER: Configuration
-# Config struct & its inline initializer (CXA-B004 / CXA-F021)
+# Config struct & its inline initializers (CXA-B004)
 
-**Keywords:** Config, coxagent.json, serde(default), CoverageConfig, Config struct initializer, lib.rs:617, build fails missing field, E0063, CONFIG_SCHEMA_VERSION, parse_config
+**Keywords:** Config, coxagent.json, coverage, CoverageConfig, missing field, E0063, struct initializer, lib.rs:617, serde(default), build fails
 
 ## Overview
 
-`Config` (`crates/application/src/config.rs`) is the persisted per-project configuration type serialized as `coxagent.json`. Ticket CXA-B004 reported a compile failure — "missing `coverage` field in Config struct initializer at lib.rs:617" — caused by an inline `Config { ... }` literal in the hub bootstrap being out of sync with the struct body. The fix (CXA-F021) added a real `coverage: CoverageConfig` section to `Config`, gave it explicit documented defaults (`enabled = true, threshold = 3`) rather than Rust's derived zero-value (`{false, 0}`, COX-B043), and added a fail-closed schema anchor. It landed in commit `3f8d8ec`. As of this worktree (`feat/CXA-B040`) the workspace compiles green and all five config-drift gate tests pass. This page documents the resolved shape for anyone changing a config section or touching either side of this literal.
+`Config` (`crates/application/src/config.rs`) is the persisted per-project configuration type serialized as `coxagent.json`. Ticket CXA-B004 reported a compile failure — "missing `coverage` field in Config struct initializer at lib.rs:617" — caused by adding a new section to an inline `Config { ... }` literal used by the hub analyzer before it was declared on the struct. The fix landed as **CXA-F021** (commit `3f8d8ec`, "land config surface so the base compiles green"); today both sides exist and `cargo check --workspace` passes. This page documents how any future section must be added so that error does not recur.
 
 ## How it works
 
-The authoritative shape of a project's config lives in exactly one place: `coxagent_application::config::Config`. It now holds **eight** sections:
+The authoritative shape of a project's config lives in exactly one place: `coxagent_application::config::Config` (`crates/application/src/config.rs:679`). It holds eight sections:
 
 1. `engine: EngineMapping`
 2. `git: GitConfig`
@@ -18,125 +18,155 @@ The authoritative shape of a project's config lives in exactly one place: `coxag
 5. `policy: PolicyConfig`
 6. `deploy: DeployConfig`
 7. `releases: ReleasesConfig`
-8. `coverage: CoverageConfig`
+8. **`coverage: CoverageConfig`** (added by CXA-F021)
 
-Every section carries a standalone [`#[serde(default)]`](crates/application/src/config.rs) so an older or hand-written document that omits it still parses with defaults instead of failing (COX-B043). Parsing goes through [`parse_config()`](crates/application/src/config_parse.rs), which additionally reads the optional top-level `schema_version` marker and refuses — fail-closed — any document whose version is newer than [`CONFIG_SCHEMA_VERSION`](crates/application/src/config.rs) (= 1), never silently re-defaulting it into this build's view.
+Rust requires a struct literal to list every field exactly once; this particular literal cannot use functional-update syntax (`..Default::default()`) because it reaches *into* nested fields (the default engine mapping). So each new section must be declared on the struct **and** added to every full struct literal — otherwise rustc stops with:
+
+```
+error[E0063]: missing field 'coverage' in initializer of '...'
+  --> crates/app/src/lib.rs:<line>
+```
+
+That was exactly CXA-B004's failure mode.
 
 ### Where "lib.rs:617" actually is
 
-In today's file (`crates/app/src/lib.rs`) line 617 falls inside closure code; the relevant object literal sits at **lines 629–647**, inside this call to [`build_engine()`](crates/app/src/lib.rs):
+The object literal referenced by ticket CXA-B004 sits inside the call to [`build_engine(...)`](crates/app/src/lib.rs) for the hub-level cross-project analyzer at **lines 629–647**. Line numbers drift; locate it by symbol:
 
 ```rust
 let analyzer = build_engine(
     &Config {
-        engine: coxagent_application::config::EngineMapping {
-            default: coxagent_application::config::EngineChoice {
-                engine: coxagent_application::config::EngineKind::Opencode,
-                model: "bizbrain/DeepSeek-V4-Pro".to_owned(),
-            },
-            per_role: std::collections::HashMap::new(),
-            fallbacks: Vec::new(),
-            auto_fallback: true,
-            escalation: Vec::new(),
-        },
+        engine: coxagent_application::config::EngineMapping { /* ... */ },
         git: GitConfig::default(),
         workflow: WorkflowConfig::default(),
         architecture: Vec::new(),
         deploy: DeployConfig::default(),
         policy: PolicyConfig::default(),
         releases: ReleasesConfig::default(),
-        coverage:
-            coxagent_application::config::CoverageConfig
-                ::default(), // line 646
+        coverage: coxagent_application::config::CoverageConfig::default(), // line 646
     },
     logs_dir(&base),
     None,
 )
 ```
 
-This block spells out every section because it reaches *into* nested fields rather than relying on derived defaults alone.
+### The coverage section itself
 
-> **What broke on CXA-B004.** Rust requires a struct literal to list every field exactly once (E0063 when one is missing). Editing this block without first declaring/re-ordering a matching public field on the struct body stops compilation loudly — which is preferable to silently deploying a config whose declared section never takes effect.
+[`CoverageConfig { enabled: bool, threshold: u32 }`](crates/application/src/config.rs#L646-L652) models gap-detection coverage policy for scheduled passes (a config surface only — no production pass consumes it yet). Its defaults come from an explicit container-level Default impl, never Rust's derived zero-value:
 
-Only this cross-project analyzer constructs an inline literal; all other paths ([hot-reload around lib.rs line 1218](crates/app/src/lib.rs)) load from disk via [`load_config_with_probe()`](crates/app/src/config_load.rs) + [`build_engine()`], so they cannot drift out of sync with the struct.
+```rust
+impl Default for CoverageConfig {
+    fn default() -> Self {
+        CoverageConfig {
+            enabled: default_coverage_enabled(),     // true
+            threshold: default_coverage_threshold(), // 3
+        }
+    }
+}
+```
+
+This is deliberate per COX-B043 — an unset knob reads as documented-and-true (`enabled=true`) rather than silently misrepresenting an unset state as off (`{false, 0}`).
+
+Every top-level section also carries its own standalone-`#[serde(default)]`, so a document written by an older build or by hand — mentioning only some sections — still loads with defaults for what it omits rather than being rejected as corrupt.
+
+### Schema anchoring (fail-closed load)
+
+To keep a persisted shape newer than this build understands from being loaded blind or defaulted away:
+
+- A module constant anchors what this build knows:
+  ```rust
+  pub const CONFIG_SCHEMA_VERSION: u32 = 1;   // crates/application/src/config.rs
+  ```
+- On load ([parse_config](crates/application/src/config_parse.rs#L47-L91)) any document carrying a higher number is refused before deserialization:
+  ```rust
+  if let Some(schema_version) = header.get("schema_version").and_then(|v| v.as_u64()) {
+      if schema_version > u64::from(CONFIG_SCHEMA_VERSION) {
+          return Err(/* "...upgrade coxagent" */);
+      }
+  }
+  ```
+- A document that omits `schema_version` predates the anchor and loads fine as prior-version state.
+- Because deserialization uses default-laden types with fail-closed posture (COX-B043), any value present but unrepresentable names its offending dotted field via serde_path_to_error instead of falling back to defaults.
 
 ## Usage
 
-The fix needs nothing at runtime for most operators; behaviour changes only when you touch a config section on either side of this seam:
+Confirm current state compiles green:
 
-1. Add/modify a field on any section struct in [`config.rs`](crates/application/src/config.rs).
-2. If you changed top-level sections in *count* or *order*, update both sides consistently.
-3. Run:
-   ```bash
-   cargo check --workspace
-   cargo test -p coxagent-app --test config_drift_gate   # all 5 must pass
+```bash
+cargo check --workspace                      # passes today
+
+# TDD gate that pins this area's acceptance criteria:
+cargo test -p coxagent-app --test config_drift_gate
+```
+
+The pattern for adding any future setting without re-triggering CXA-B004:
+
+1. Add a feature that needs a new setting.
+2. Declare its section on [`Config`](crates/application/src/config.rs) with a standalone `#[serde(default)]` so an older/hand-written document omitting it still parses:
+   ```rust
+   #[serde(default)]
+   pub my_section: MySectionCaps,
    ```
-4. Confirm parse still names bad fields (an out-of-range port yields error field `deploy.host_port`, not `<document>`).
+   If Rust's derived zero-value would misrepresent an unset knob (a bool meaning "on", e.g.), write an explicit container-level `Default` like `CoverageConfig` has, rather than relying on the derived zero.
+3. If the hub analyzer needs it too, add it to the inline literal at [`crates/app/src/lib.rs:629-647`](crates/app/src/lib.rs):
+   ```rust
+   coverage: coxagent_application::config::CoverageConfig::default(),
+   ```
+4. Add acceptance tests beside [`config_drift_gate.rs`](crates/app/tests/config_drift_gate.rs) covering round-trip-on-disk / omitted-field-defaults / newer-schema-refused / next-pass-hot-reload / migration-preserves-user-values.
+5. Run `cargo check --workspace` and the gate test before pushing.
 
-Loading path for reference:
+Loading flow for reference:
 
 ```rust
-// crates/app/src/config_load.rs
-let loaded = load_config_with_probe(state_dir)?; // reads <root>/coxagent.json
-let engine = build_engine(&loaded.config, logs_dir(state_dir), mcp.as_ref())?;
+// crates/app/src/config_load.rs -> load_config_with_probe(state_dir)? reads <root>/coxagent.json
+let parsed = coxagent_application::config_parse::parse_config(text)?; // entry point, also used by tests
 ```
 
 ## Interface
 
-Public surface of top-level [`Config`](crates/application/src/config.rs): every field is `pub`, each carrying a standalone [`#[serde(default)]`]:
+The section added by this ticket ([`CoverageConfig`](crates/application/src/config.rs#L646-L652)):
+
+| Field | Type | Default |
+|-------|------|---------|
+| `enabled` | bool | `true` (via `default_coverage_enabled()`) |
+| `threshold` | u32 | `3` (via `default_coverage_threshold()`) |
+
+Public field on the top-level struct (line 703):
 
 ```rust
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum EngineKind { Opencode, Claude, Hermes, Gemini, Codex, Copilot, Scripted }
+#[serde(default)]
+pub coverage: CoverageConfig,
 ```
 
-The relevant types and constants (all `pub`, all in [`config.rs`](crates/application/src/config.rs)):
+Related public API in the same area:
 
-| Item | Kind | Notes |
-|------|------|-------|
-| `Config` | `struct` | eight sections listed under How it works |
-| `CoverageConfig` | `struct { enabled: bool; threshold: u32 }` | explicit container [`Default`] → `{ true, 3 }`, never derived zero-value |
-| `CONFIG_SCHEMA_VERSION: u32` | const | = 1; newest persisted version this build will load |
-| `EngineMapping` / `EngineChoice` / `EngineKind` | struct / struct / enum | engine+model routing; variant used by the hub analyzer is `EngineKind::Opencode`, model `"bizbrain/DeepSeek-V4-Pro"` |
-| [`parse_config(&str) -> Result<Config, ConfigParseError>`](crates/application/src/config_parse.rs) | fn | serde deserialization with field-path error reporting |
-
-Related error type ([config_parse.rs](crates/application/src/config_parse.rs)):
-
-```rust
-pub struct ConfigParseError {
-    pub field: String,
-    pub detail: String,
-}
-// sentinel for a non-JSON document:
-pub const WHOLE_DOCUMENT: &str = "<document>";
-```
+- [`CONFIG_SCHEMA_VERSION: u32`](crates/application/src/config.rs#L637) — persisted-schema anchor this build understands (`1`).
+- [`parse_config(&str) -> Result<Config, ConfigParseError>`](crates/application/src/config_parse.rs#L47) — JSON text into a `Config`, fail-closed.
+- [`ConfigParseError { field, detail }`](crates/application/src/config_parse.rs#L20) — names the offending dotted field; [`WHOLE_DOCUMENT`](crates/application/src/config_parse.rs#L31) when the text is not JSON at all.
+- Defaults helpers: [`default_coverage_enabled()`](crates/application/src/config.rs#L654), [`default_coverage_threshold()`](crates/application/src/config.rs#L658).
 
 ## Configuration
 
-Everything is driven by the serde defaults on each section — there are no CLI flags or env vars specific to this ticket. Two conventions every new section must honour:
-
-1. **Standalone default per field** (`#[serde(default)]`) so an older or hand-written document omitting it still parses (COX-B043).
-2. **Explicit container default when a zero-value would misrepresent intent** — see the handwritten [`impl Default for CoverageConfig { enabled = true; threshold = 3 }`](crates/application/src/config.rs), chosen over derive's silent `{false, 0}`.
+There is no separate knob for this ticket beyond what is listed under Interface. The governing convention when adding any section: **every field must carry a standalone default** (`#[serde(default)]`) so an older or hand-written document omitting it still parses instead of being rejected as corrupt; and anything whose zero-value would lie about "off vs unset" needs an explicit container-level Default. This is pinned by tests in [`config_drift_gate.rs`](crates/app/tests/config_drift_gate.rs).
 
 ## Edge cases and limits
 
-- **No runtime feature behind "coverage" yet.** The config *field* exists so the base compiles green; nothing in app logic reads it at runtime as of this worktree (grep of application use-cases turns up only unrelated test fixtures). Wiring it into gap-detection is future work implied by AC4 of CXA-F021.
-- **Schema guard is one-way.** Only a *newer* persisted schema_version is refused. An omitted marker means "prior-version state" and loads fine.
-- **Line drift.** "lib.rs:617" no longer points at the literal; today it is lines 629–647 of that file. Always locate by symbol (`build_engine(&Config { ... })`, line number will keep moving).
-- **Failure mode.** Adding a field to only one side (struct vs inline literal) fails loudly with E0063 — preferable to silently deploying a config whose declared section never takes effect.
-- A missing-on-disk file is not an error: it loads as defaults and leaves nothing to probe (`load_config_with_probe`, NotFound branch).
+- **No runtime feature behind `coverage` yet.** The `CoverageConfig` surface is landed and tested, but no production pass reads `cfg.coverage.*` — it is config-only. Do not hunt for a gap-detection subsystem.
+- **Line drift:** "lib.rs:617" no longer points at the literal; today it is lines 629–647 of the same file. Always locate by symbol (`build_engine(... & Config { ... })`), not line number.
+- **One-sided edits fail loudly.** Adding a field only to the struct or only to a literal fails compilation with E0063 — preferred over silently shipping a config section that never takes effect. Both sides must change together.
+- **A missing-on-disk file is not an error**: it loads as defaults and leaves nothing to probe (`load_config_with_probe`, NotFound branch).
+- **Newer schema refuses to load**: a document whose `schema_version` exceeds this build's is rejected with `"...upgrade coxagent"`, never accepted or defaulted away (fail-closed, like state.json).
 
 ## Code map
 
-- crates/app/src/lib.rs — hub bootstrap; builds the inline default-mapping Config at lines 629–647 for its cross-project analyzer; per-project paths load from disk via adapters.
-- crates/app/src/config_load.rs — reads coxagent.json from disk with self-heal on bad deploy ports (`load_config_with_probe`, hot-reload loop).
-- crates/application/src/config.rs — authoritative definition of Config + all eight section structs/defaults/tests + CONFIG_SCHEMA_VERSION + CoverageConfig::default().
-- crates/application/src/config_parse.rs — fail-closed JSON→Config parse naming the offending field (`parse_config`, WHOLE_DOCUMENT).
-- crates/app/tests/config_drift_gate.rs — five acceptance tests (round-trip / omitted-field defaults / newer-schema refusal / hot reload reachability / prior-version migration).
+- crates/app/src/lib.rs — hub bootstrap; builds `Config` inline at lines 629–647 for its cross-project analyzer (this is where CXA-B004 broke).
+- crates/application/src/config.rs — authoritative definition of `Config`, all eight section structs (`CoverageConfig` included) and their defaults/tests; `CONFIG_SCHEMA_VERSION`.
+- crates/application/src/config_parse.rs — serde-based parse from JSON text into `Config`, fail-closed; refuses future schema versions.
+- crates/app/src/config_load.rs — loads coxagent.json from disk with self-heal on bad deploy ports.
+- crates/app/tests/config_drift_gate.rs — TDD contract for CXA-F021: round-trip, omitted-field defaults, newer-schema refusal, hot-reload propagation, migration preservation.
 
 ## Related
 
-- CXA-B004 — this ticket (reported build failure); resolved in current tree.
-- CXA-F021 — landing ticket that added CoverageConfig + schema anchor + gate tests (commit 3f8d8ec).
-- COX-B043 — omitted config sections load with documented defaults instead of failing parse; rule every new field must honour.
-- COX-B042 / COX-B053 — deploy host-port validation enforced through load_config_with_probe/heal_host_port.
+- CXA-B004 — this ticket (reported build failure; resolved via CXA-F021 in current tree).
+- CXA-F021 — the fix that landed the config surface so the base compiles green.
+- COX-B043 — omitted config sections load with defaults instead of failing the parse; the rule every new field must honour.
