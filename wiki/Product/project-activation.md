@@ -70,7 +70,12 @@ REVIEW: skim state/project_context.md ... then run the team.
 
 ### Dashboard / hub API
 
-POST `/api/projects/new-project?op=new-project&space=<id>`:
+Create a project by POSTing to the project collection route with JSON body:
+
+```
+POST /api/projects
+Content-Type: application/json
+```
 
 ```json
 {
@@ -83,7 +88,7 @@ POST `/api/projects/new-project?op=new-project&space=<id>`:
 }
 ```
 
-Returns HTTP 200 with the new project's id; it appears immediately in `/api/projects/list`.
+Returns HTTP 200 with the new project's id; it appears immediately in a subsequent `GET /api/projects`.
 
 After activation you start cycles normally:
 
@@ -101,11 +106,11 @@ cd <workspace>/codebase && coxagent run
 | `--alias <A>` | Option<String> | derived from name | Short ticket-id alias (`CXC`) |
 | `--existing <PATH>` | Option<PathBuf> | none -> greenfield | Adopt this codebase instead of scaffolding |
 
-Global flag on every subcommand: `--state-dir <DIR>`, default `.//state`. Dispatch is in crates/app/src/lib.rs (`Command::Onboard { name, alias, existing }`), calling brownfield or greenfield depending on whether an existing path was given.
+Global flag on every subcommand: `--state-dir <DIR>`, default `./state`. Dispatch is in crates/app/src/lib.rs (`Command::Onboard { name, alias, existing }`), calling brownfield or greenfield depending on whether an existing path was given.
 
 ### HTTP endpoint (hub mode only; crates/presentation/src/server/projects.rs)
 
-- Route `/api/projects/new-project?op=new-project&space=...`.
+- Route `POST /api/projects` (collection route; `GET /api/projects` lists). Registered in crates/presentation/src/server/mod.rs:716.
 - HTTP **501 NOT_IMPLEMENTED** when no factory is injected (`app.factory == None`, i.e. not hub mode).
 - Space checks fail fast before scaffolding: unknown space -> HTTP **400**; non-admin of target space -> HTTP **403**. Once any space exists every new project must declare one (**400** otherwise).
 - Brownfield import path is canonicalized and blocked if under system dirs (`/etc`, `/root`, `/usr/*`, `/bin`, etc.) -> HTTP **403**.

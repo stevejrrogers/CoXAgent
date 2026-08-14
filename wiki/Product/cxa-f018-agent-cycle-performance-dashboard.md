@@ -159,3 +159,11 @@ These paths implement or directly feed this dashboard:
 - `crates/presentation/src/web/js/core.js#L145 velocityHtml(sprints)` renders the shipped-vs-committed bar chart; core.js#L157 chartsHtml(s) draws the 14-day throughput sparkline + status stacked bar.
 - `crates/presentation/src/web/js/shell.js#L1163 loadAgentEvals()` renders the Agents evals panel from `/agent-evals`.
 
+## Related
+
+- **CXA-F012 / Incident postmortem loop** — sibling Product page; both are read-only telemetry over the same `ProjectState`, and share the REST-store/auth serving path (`server/mod.rs`), deploy history, and chat-notify plumbing.
+- **Sprint lifecycle** (`crates/application/src/sprint.rs`) — this dashboard's velocity/burndown numbers come entirely from sprint state written by `roll_over()`; sprint capacity inference lives alongside it. Scrum-mode sprint config (velocity on) vs kanban (off) is documented in Configuration above.
+- **Cycle self-tuning orchestration** (`crates/application/src/use_cases/cycle/ceremonies.rs` — `self_tune()` around L341) — consumes `metrics::decide_tuning(evals, backlog, &state.tuning)` and writes back a new [`Tuning`], announcing changes to team chat. This dashboard only *computes* the decisions; ceremonies is what applies them.
+- **Deployment / known-good pointer** — deploy history in state feeds this dashboard's `releases`, `deploys_by_day`, feature ratio, and cost-per-ship; deployment-health docs cover where that history comes from.
+- **Workflow configuration** (`crates/application/src/config.rs`) — every setting that shapes which KPIs exist is listed under Configuration above.
+
