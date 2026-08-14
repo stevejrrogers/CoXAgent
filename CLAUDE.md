@@ -1,7 +1,7 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **CoXAgent** (7650 symbols, 19791 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **CoXAgent** (7647 symbols, 19796 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 
@@ -13,6 +13,7 @@ This project is indexed by GitNexus as **CoXAgent** (7650 symbols, 19791 relatio
 - When exploring unfamiliar code, use `query({search_query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
 - When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `context({name: "symbolName"})`.
 - For security review, `explain({target: "fileOrSymbol"})` lists taint findings (source→sink flows; needs `analyze --pdg`).
+- **Root cause first.** Before fixing any bug, write down the answer to *why does this exist at the design level, and what is the underlying mechanism?* Then fix the mechanism, not the symptom. If your fix changes the behaviour of an existing mechanism, enumerate every other code path that shares that mechanism and verify each is still correct. A "one-behaviour" fix that only patches the reported path is a band-aid, not a fix.
 
 ## Never Do
 
@@ -20,6 +21,19 @@ This project is indexed by GitNexus as **CoXAgent** (7650 symbols, 19791 relatio
 - NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
 - NEVER rename symbols with find-and-replace — use `rename` which understands the call graph.
 - NEVER commit changes without running `detect_changes()` to check affected scope.
+- NEVER ship a fix that only patches the reported symptom while leaving the underlying mechanism intact. A stopping-gap must be labelled `STOPGAP(why)` in the commit message and must file a follow-up ticket before commit — never silently.
+- NEVER claim a bug fixed unless you have named the failure mechanism and confirmed no other site shares it and breaks. "I confirmed the root cause in code" is not enough; show the mechanism and its blast radius.
+
+## Root-cause contract (required for every bug fix)
+
+Bug fixes must state, in the commit body or PR description:
+
+- `mechanism:` — where the bug comes from (the design-level cause, not the symptom).
+- `why-now:` — why the bug surfaced / regressed at this point.
+- `shared-sites:` — every other path on the same mechanism, all checked.
+- `residual-risk:` — what could still break, plus a follow-up ticket if any gap remains.
+
+If the answer to `mechanism:` is "the previous fix reintroduced it" or "the fix masks an underlying issue", STOP and fix the underlying design instead of shipping another layer.
 
 ## Resources
 
