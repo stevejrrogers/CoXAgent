@@ -22,6 +22,11 @@ const DEPLOY_TIMEOUT: Duration = Duration::from_secs(900);
 /// or `up` dies before starting anything — the CXA-B010 symptom.
 const REQUIRED_SECRET_KEYS: &[&str] = &["PG_PASSWORD", "COXAGENT_ADMIN_PASSWORD"];
 
+/// Prefix of the ownership-stamp first line [`write_stored_secrets_owned`] writes
+/// into a store file (CXA-B043), which [`read_owner_stamp`] reads back so adoption
+/// can refuse credentials authored by a differently-named project sharing this dir.
+const OWNER_STAMP_PREFIX: &str = "# owner=";
+
 /// A cryptographically-random 32-char fallback secret. Used ONLY when an
 /// operator configured no value anywhere — never a baked constant, so no reader
 /// of source can predict a deployment's superuser password (CXA-B017). The
@@ -128,7 +133,13 @@ fn resolve_deploy_secrets_in(
     // Only a durable commit may authorise removal of the legacy source ([CXA-B044]): if this write
     // fails (best-effort), F(old)[`cxb031_store_file`] stays in place so the next pass re-adopts and
     // retries — never both stores gone at once.
-    if write_stored_secrets(&store_file(secret_root, work_dir), &stored) && legacy_converged {
+    let owner = compose_project_name(work_dir);
+    if write_stored_secrets_owned(
+        &store_file(secret_root, work_dir),
+        Some(owner.as_str()),
+        &stored,
+    ) && legacy_converged
+    {
         expire_converged_legacy_store(&cxb031_store_file(secret_root, work_dir));
     }
     resolved
@@ -285,6 +296,16 @@ fn adopt_legacy_cxb031_secrets(
 ) -> bool {
     let legacy_path = cxb031_store_file(secret_root, work_dir);
     let legacy = read_stored_secrets(&legacy_path);
+    if legacy.is_empty() {
+        return false;
+    }
+    // CXA-B043: never adopt creds authored by a differently-named project sharing this dir.
+    if matches!(
+        read_owner_stamp(&legacy_path),
+        Some(author) if author != compose_project_name(work_dir)
+    ) {
+        return false;
+    }
     for (k, v) in &legacy {
         // Prefer the pre-switch value whenever it differs from / is absent from what resolution just
         // read at today's name-derived location — recovering exactly what initialised pgdata.
@@ -334,6 +355,20 @@ fn read_stored_secrets(path: &std::path::Path) -> std::collections::HashMap<Stri
         .collect()
 }
 
+/// Read the ownership stamp embedded by [`write_stored_secrets_owned`] as the
+/// first line of a store file (CXA-B043). Returns the owning compose project
+/// name, or `None` when the file predates stamping / is absent / unreadable.
+fn read_owner_stamp(path: &std::path::Path) -> Option<String> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    contents.lines().next().and_then(|line| {
+        line.trim()
+            .strip_prefix(OWNER_STAMP_PREFIX)
+            .map(str::trim)
+            .filter(|o| !o.is_empty())
+            .map(ToOwned::to_owned)
+    })
+}
+
 /// Persist a project's generated secrets into the out-of-tree store so later
 /// deploy cycles reuse them ([resolve_deploy_secrets_in]). Writes atomically
 /// via a temp sibling + rename so a crash mid-write can never leave a half-
@@ -346,8 +381,29 @@ fn read_stored_secrets(path: &std::path::Path) -> std::collections::HashMap<Stri
 /// change behind and drops its temp sibling ([CXA-B044]). Callers MUST treat
 /// non-`true` as "nothing durable exists yet" — e.g. deleting an adopted legacy
 /// source after this would risk losing both stores.
+///
+/// Production persistence goes through [`write_stored_secrets_owned`] (which stamps
+/// ownership); this unstamped form survives for writing fixtures / pre-stamp stores
+/// in [`mod deploy_secret_tests`].
+#[cfg(test)]
 fn write_stored_secrets(
     path: &std::path::Path,
+    secrets: &std::collections::HashMap<String, String>,
+) -> bool {
+    persist_store(path, None, secrets)
+}
+
+pub(crate) fn write_stored_secrets_owned(
+    path: &std::path::Path,
+    owner: Option<&str>,
+    secrets: &std::collections::HashMap<String, String>,
+) -> bool {
+    persist_store(path, owner, secrets)
+}
+
+fn persist_store(
+    path: &std::path::Path,
+    owner_stamp: Option<&str>,
     secrets: &std::collections::HashMap<String, String>,
 ) -> bool {
     let Some(parent) = path.parent() else {
@@ -357,6 +413,12 @@ fn write_stored_secrets(
         return false;
     }
     let mut body = String::new();
+    // CXA-B043 ownership stamp first line (when owned), before any KEY=VALUE line.
+    if let Some(owner) = owner_stamp {
+        body.push_str(OWNER_STAMP_PREFIX);
+        body.push_str(owner);
+        body.push('\n');
+    }
     for (k, v) in secrets {
         body.push_str(k);
         body.push('=');
@@ -1567,6 +1629,7 @@ mod deploy_secret_tests {
     use super::{
         compose_project_name, cxb031_store_file as legacy_key_file, missing_required_secrets,
         random_secret, read_dot_env, resolve_deploy_secrets_in, store_file, write_stored_secrets,
+        write_stored_secrets_owned,
     };
     use std::collections::{HashMap, HashSet};
 
@@ -1993,6 +2056,71 @@ mod deploy_secret_tests {
 
         let _ = std::fs::remove_dir_all(&proj);
         let _ = std::fs::remove_dir_all(&secret_root);
+    }
+
+    /// CXA-B043 regression guard: adoption must NOT drag ANOTHER project's credentials into
+    /// this one when their path-keyed legacy store is reused by a differently-named compose
+    /// project sharing this directory over time under one secret_root.
+    ///
+    /// Two distinct apps need only occupy one canonicalised absolute path across history plus
+    /// one shared deploy-secrets root; whoever moves in last finds THAT other app's pre-switch
+    /// value at today's F(old). With no ownership signal we would absorb it as our own — seeding
+    /// wrong PG_PASSWORD against OUR volume. The fix stamps every persisted store with its owning
+    /// compose project ([`write_stored_secrets_owned`]) and refuses to adopt any legacy file whose
+    /// stamp names a DIFFERENT project than today's [`compose_project_name`]; a self-stamped or
+    /// unstamped (pre-stamp-era) file remains eligible so genuine in-place migration still works.
+    #[test]
+    fn cross_project_legacy_store_is_not_adopted_but_own_is() {
+        let proj = std::env::temp_dir().join(format!("cxab043-proj-{}", std::process::id()));
+        let secret_root =
+            std::env::temp_dir().join(format!("cxab043-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&proj);
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        let _ = std::fs::remove_dir_all(&secret_root);
+
+        // Another app (different compose name) previously deployed in THIS directory and left its
+        // credential at today's path-derived legacy filename, stamped with ITS owner identity.
+        let mut foreign: HashMap<String, String> = HashMap::new();
+        foreign.insert(
+            "PG_PASSWORD".to_owned(),
+            "foreign-other-app-secret".to_owned(),
+        );
+        write_stored_secrets_owned(
+            legacy_key_file(&secret_root, &proj).as_path(),
+            Some("cox-some-other-parent-app"),
+            &foreign,
+        );
+
+        // This checkout must NOT adopt that other app's credential as its own.
+        let resolved = resolve_deploy_secrets_in(&proj, &secret_root);
+        let pg = resolved
+            .iter()
+            .find(|(k, _)| k == "PG_PASSWORD")
+            .map(|(_, v)| v.clone())
+            .expect("unconfigured app must resolve a PG_PASSWORD");
+        assert_ne!(
+            pg, "foreign-other-app-secret",
+            "must not adopt credentials authored by a differently-named project sharing this \
+             directory (CXA-B043)"
+        );
+
+        // A self-authored (same compose identity) stamped legacy store IS adopted — proving the gate
+        // only blocks cross-project reuse, never legitimate in-place migration of this same app.
+        write_stored_secrets_owned(
+            legacy_key_file(&secret_root, &proj).as_path(),
+            Some(compose_project_name(&proj).as_str()),
+            &foreign,
+        );
+        let self_resolved = resolve_deploy_secrets_in(&proj, &secret_root);
+        assert_eq!(
+            self_resolved
+                .iter()
+                .find(|(k, _)| k == "PG_PASSWORD")
+                .map(|(_, v)| v.clone())
+                .as_deref(),
+            Some("foreign-other-app-secret"),
+            "a legacy store stamped by THIS compose project is still adopted"
+        );
     }
 
     /// CXA-B042 regression guard: once adoption converges (every key in F(old) matches what resolution
