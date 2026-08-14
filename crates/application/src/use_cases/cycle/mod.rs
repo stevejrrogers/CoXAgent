@@ -624,6 +624,31 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         };
         let now = crate::state::now_rfc3339();
         let leader = self.store.acquire_leader(&me, &now).await.unwrap_or(true);
+        // Authoritative cycle number: the persistent, project-wide counter the
+        // leader advances once per cycle. Scoring *and* cadence key off this,
+        // NOT the per-process local number — so restarts / leader handovers
+        // neither renumber the scorecard nor reset the codegraph/debt/BA/scrum
+        // cadence. Falls back to the local number if the store hiccups.
+        let cycle = if leader {
+            // Advance the persistent project-cycle counter: load state, bump
+            // `state.cycle`, save, and use the advanced number. On any store
+            // hiccup fall back to the local number so a state problem never
+            // stalls a cycle.
+            match self.store.load().await {
+                Ok(mut s) => {
+                    // Pure, testable: seeds past existing scorecard history on
+                    // first use, then advances the persistent counter (see
+                    // `advance_project_cycle` below).
+                    let next = advance_project_cycle(&mut s);
+                    let _ = self.store.save(&s).await;
+                    next
+                }
+                Err(_) => cycle,
+            }
+        } else {
+            cycle
+        };
+        report.cycle = cycle;
         // Merge-queue recovery flag (set by the leader once the queue blows up).
         let mut recovery = false;
         // Human-queued execution jobs (force-merge …) run before anything else.
@@ -1286,6 +1311,76 @@ fn apply_budget_warnings(
     state.budget_warned_daily = approaching_daily;
 
     (new_lifetime_warning, new_daily_warning)
+}
+
+/// Advance `state.cycle` — the persistent, restart-safe project-cycle counter —
+/// and return its new value. On a project whose scorecard already has history
+/// (loaded from before `state.cycle` existed), the counter is first seeded past
+/// that history so the scorecard dedupe gate (new cycle > scored max) doesn't
+/// drop the first N real cycles, and so cadence never renumbers onto values
+/// `sweeps_done` already recorded. Pure + testable; the leader calls it with
+/// its loaded state and persists the result.
+fn advance_project_cycle(state: &mut crate::state::ProjectState) -> u64 {
+    if state.cycle == 0 {
+        state.cycle = state
+            .cycle_scores
+            .iter()
+            .map(|c| c.cycle)
+            .max()
+            .unwrap_or(0);
+    }
+    state.cycle = state.cycle.saturating_add(1);
+    state.cycle
+}
+
+#[cfg(test)]
+mod cycle_counter_tests {
+    use super::advance_project_cycle;
+    use crate::state::ProjectState;
+
+    #[test]
+    fn fresh_project_starts_and_advances_from_one() {
+        let mut s = ProjectState::default();
+        assert_eq!(advance_project_cycle(&mut s), 1);
+        assert_eq!(advance_project_cycle(&mut s), 2);
+        assert_eq!(advance_project_cycle(&mut s), 3);
+    }
+
+    #[test]
+    fn resumes_from_an_existing_runner_local_counter() {
+        // A project whose persistent counter was seeded by an older local
+        // counter (e.g. it ran 42 cycles before this field existed).
+        let mut s = ProjectState::default();
+        s.cycle = 42;
+        assert_eq!(advance_project_cycle(&mut s), 43);
+        assert_eq!(advance_project_cycle(&mut s), 44);
+    }
+
+    #[test]
+    fn seeds_past_existing_scorecard_history_on_first_use() {
+        // Migrated project: cycle_scores already has history but `state.cycle`
+        // is 0. The first advance must jump PAST the scored max so the dedupe
+        // gate doesn't suppress real fresh cycles.
+        use crate::state::CycleScore;
+        let mut s = ProjectState::default();
+        s.cycle_scores.push(CycleScore {
+            cycle: 42,
+            ..CycleScore::default()
+        });
+        assert_eq!(advance_project_cycle(&mut s), 43);
+        // Subsequent advances stay monotonic.
+        assert_eq!(advance_project_cycle(&mut s), 44);
+    }
+
+    #[test]
+    fn never_regresses_the_persistent_counter() {
+        // The counter only moves forward — it never wraps or renumbers.
+        let mut s = ProjectState::default();
+        s.cycle = u64::MAX - 1;
+        assert_eq!(advance_project_cycle(&mut s), u64::MAX);
+        // Saturates rather than wrapping to 0 (which would collide with cadence).
+        assert_eq!(advance_project_cycle(&mut s), u64::MAX);
+    }
 }
 
 #[cfg(test)]
