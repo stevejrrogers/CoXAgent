@@ -7,6 +7,18 @@ use coxagent_domain::Role;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Current on-disk schema version of a persisted `coxagent.json` document.
+///
+/// Bumped when the serialized shape of [`Config`] changes in a way an older
+/// build cannot represent safely; the parser refuses to load a document whose
+/// version is newer than this build understands (the same fail-closed posture
+/// state files already have via `json_store.parse_checked`) rather than
+/// silently re-defaulting an incompatible shape into today's view of defaults.
+///
+/// A document with NO version marker is treated as predating/matching this
+/// build and loads normally (COX-B043) — absence is not corruption.
+pub const CONFIG_SCHEMA_VERSION: u32 = 1;
+
 /// Known agent engine CLIs. `as_binary` gives the executable name to look for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -627,6 +639,44 @@ pub struct ReleasesConfig {
     pub enabled: bool,
 }
 
+fn default_coverage_enabled() -> bool {
+    true
+}
+fn default_coverage_threshold() -> u32 {
+    3
+}
+
+/// Test-coverage gap detection (CXA-F007) — whether the post-ship review step
+/// proposes chore tickets for production code that changed without matching
+/// test coverage, and at what threshold a module counts as an uncovered gap.
+///
+/// The documented defaults are **enabled = true, threshold = 3** (uncovered
+/// functions per module). They come from an explicit container [`Default`]
+/// plus per-field serde defaults, NOT Rust's derived zero-value (`{false, 0}`)
+/// which would silently misrepresent an unset knob as "gap detection off"
+/// (COX-B043): a config that never mentions coverage must load with gap
+/// detection ON and its stock threshold intact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoverageConfig {
+    /// Whether the coverage-gap step proposes chore tickets at all. Default on —
+    /// a project opting out turns it off explicitly.
+    #[serde(default = "default_coverage_enabled")]
+    pub enabled: bool,
+    /// A module must have MORE than this many uncovered functions before a chore
+    /// ticket is proposed.
+    #[serde(default = "default_coverage_threshold")]
+    pub threshold: u32,
+}
+
+impl Default for CoverageConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_coverage_enabled(),
+            threshold: default_coverage_threshold(),
+        }
+    }
+}
+
 /// Top-level configuration persisted as `coxagent.json`.
 ///
 /// EVERY section is `#[serde(default)]`, so a document written by an older
@@ -651,6 +701,9 @@ pub struct Config {
     /// Governance policy (model allowlist, forbidden paths, daily budget).
     #[serde(default)]
     pub policy: PolicyConfig,
+    /// Test-coverage gap detection (CXA-F007) — post-ship chore proposals.
+    #[serde(default)]
+    pub coverage: CoverageConfig,
     /// Deploy settings (per-project host port allocation).
     #[serde(default)]
     pub deploy: DeployConfig,
@@ -711,5 +764,18 @@ mod tests {
 
         assert_eq!(cfg.policy.forbidden_paths, ["infra/"]);
         assert_eq!(cfg.engine.default.model, "sonnet");
+    }
+
+    /// A partial coverage section — one subfield set by hand/older build, the
+    /// other omitted — must preserve what IS declared and fill only what ISN'T
+    /// from its documented default ({enabled=true, threshold=3}), never
+    /// fabricate from Rust's zero-value (`{false, 0}`).
+    #[test]
+    fn a_partial_coverage_section_preserves_present_field_and_defaults_the_rest() {
+        let cfg: Config = serde_json::from_str(r#"{"coverage":{"enabled":false}}"#)
+            .expect("a partial section is not corrupt");
+
+        assert!(!cfg.coverage.enabled, "present field must survive partial load");
+        assert_eq!(cfg.coverage.threshold, 3);
     }
 }

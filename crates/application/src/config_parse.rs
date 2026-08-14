@@ -12,7 +12,7 @@
 //! and unseen. Gates are unskippable by default; a config problem is locked to
 //! load time and named, not guessed at during a run.
 
-use crate::config::Config;
+use crate::config::{Config, CONFIG_SCHEMA_VERSION};
 
 /// A `coxagent.json` document that does not deserialize into a [`Config`],
 /// carrying the path of the field that broke it (e.g. `deploy.host_port`).
@@ -45,6 +45,7 @@ pub const WHOLE_DOCUMENT: &str = "<document>";
 /// valid JSON, or holds a value the config schema cannot represent (a port
 /// outside `u16`, a string where a number belongs, an unknown engine, …).
 pub fn parse_config(text: &str) -> Result<Config, ConfigParseError> {
+    refuse_future_schema(text)?;
     let deserializer = &mut serde_json::Deserializer::from_str(text);
     serde_path_to_error::deserialize(deserializer).map_err(|err| {
         let path = err.path().to_string();
@@ -61,6 +62,35 @@ pub fn parse_config(text: &str) -> Result<Config, ConfigParseError> {
             detail: inner.to_string(),
         }
     })
+}
+
+/// Refuse a document whose persisted schema is newer than this build knows —
+/// before it is ever mapped onto today's types. This mirrors the fail-closed
+/// posture `json_store.parse_checked` already gives state files: a schema bump
+/// must never be loaded blind into this build's view of defaults, because that
+/// would silently fabricate values for fields this version cannot represent.
+///
+/// A document with NO `schema_version` marker predates/matches this build and
+/// passes (COX-B043): absence of the marker is not corruption.
+fn refuse_future_schema(text: &str) -> Result<(), ConfigParseError> {
+    let doc: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| ConfigParseError {
+            field: WHOLE_DOCUMENT.to_owned(),
+            detail: e.to_string(),
+        })?;
+    if let Some(serde_json::Value::Number(n)) = doc.get("schema_version") {
+        if let Some(version) = n.as_u64() {
+            if version > u64::from(CONFIG_SCHEMA_VERSION) {
+                return Err(ConfigParseError {
+                    field: "schema_version".to_owned(),
+                    detail: format!(
+                        "{version} is newer than supported {CONFIG_SCHEMA_VERSION}; upgrade coxagent"
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
