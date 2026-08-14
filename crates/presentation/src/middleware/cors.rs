@@ -98,12 +98,18 @@ mod tests {
         // should still produce a layer.
         let layer = cors_layer("https://good.example.com,not a valid origin\x00nul");
         // The null-byte entry is illegal; "good" should survive.
-        assert!(layer.is_some(), "valid origin was discarded alongside the bad one");
+        assert!(
+            layer.is_some(),
+            "valid origin was discarded alongside the bad one"
+        );
     }
 
     #[test]
     fn all_malformed_yields_no_layer() {
         let layer = cors_layer("not\x00valid,also\x00bad");
-        assert!(layer.is_none(), "should return None when every entry is malformed");
+        assert!(
+            layer.is_none(),
+            "should return None when every entry is malformed"
+        );
     }
 }

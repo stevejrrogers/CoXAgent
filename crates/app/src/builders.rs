@@ -325,7 +325,9 @@ pub(crate) async fn build_project(
                 "gitlab" => Some(Arc::new(coxagent_infrastructure::GlForge::new(
                     repo, base, wd,
                 ))),
-                "github" => Some(coxagent_infrastructure::github_forge(repo, base, wd, account)),
+                "github" => Some(coxagent_infrastructure::github_forge(
+                    repo, base, wd, account,
+                )),
                 _ => None,
             }
         } else {
@@ -367,7 +369,9 @@ pub(crate) async fn build_project(
                 match build_engine(&reloaded, logs_dir(&state_dir), mcp.as_ref()) {
                     Ok((engine, meter)) => Some((reloaded, engine, meter)),
                     Err(e) => {
-                        tracing::warn!("config changed but engine rebuild failed; keeping previous: {e}");
+                        tracing::warn!(
+                            "config changed but engine rebuild failed; keeping previous: {e}"
+                        );
                         None
                     }
                 }

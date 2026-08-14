@@ -1046,7 +1046,9 @@ async fn run_loop(
                 "gitlab" => Some(Arc::new(coxagent_infrastructure::GlForge::new(
                     repo, base, wd,
                 ))),
-                "github" => Some(coxagent_infrastructure::github_forge(repo, base, wd, account)),
+                "github" => Some(coxagent_infrastructure::github_forge(
+                    repo, base, wd, account,
+                )),
                 _ => None,
             }
         } else {
@@ -1223,10 +1225,14 @@ async fn run_loop(
                 Ok((engine, meter)) => {
                     sleep = std::time::Duration::from_secs(reloaded.workflow.sleep_seconds);
                     uc.reload(reloaded, engine, meter);
-                    tracing::info!("config changed — engine reloaded and applied without a restart");
+                    tracing::info!(
+                        "config changed — engine reloaded and applied without a restart"
+                    );
                 }
                 Err(e) => {
-                    tracing::warn!("config changed but engine rebuild failed; keeping previous: {e}");
+                    tracing::warn!(
+                        "config changed but engine rebuild failed; keeping previous: {e}"
+                    );
                 }
             }
         }
@@ -1600,10 +1606,10 @@ mod mcp_auth_tests {
 fn config_content_hash(state_dir: &Path) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
-    
+
     let root = state_dir.parent().unwrap_or(state_dir);
     let path = root.join("coxagent.json");
-    
+
     let content = std::fs::read_to_string(&path).unwrap_or_default();
     let mut hasher = DefaultHasher::new();
     content.hash(&mut hasher);

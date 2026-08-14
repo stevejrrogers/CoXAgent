@@ -44,7 +44,8 @@ impl<E: AgentEnginePort> AgentEnginePort for MeteringEngine<E> {
         // agent regardless of whether cost came back.
         if !outcome.engine.is_empty() {
             if let Ok(mut m) = self.meter.lock() {
-                m.engine_by_role.insert(role.clone(), outcome.engine.clone());
+                m.engine_by_role
+                    .insert(role.clone(), outcome.engine.clone());
             }
         }
         if let Some(u) = outcome.usage {

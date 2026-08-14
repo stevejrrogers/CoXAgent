@@ -48,17 +48,20 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .filter(|t| t.ticket_type() == TicketType::Bug && t.status() == Status::Open)
             .count();
         if open_bugs >= 3 {
-            return Some(("bug_backlog", if vi {
-                format!(
+            return Some((
+                "bug_backlog",
+                if vi {
+                    format!(
                     "Đang có {open_bugs} bug mở. Nên tạm dừng tính năng mới để dọn hết bug trước, \
                      hay tiếp tục ship? Quyết định đi, và nếu cần thì tạo ticket theo dõi."
                 )
-            } else {
-                format!(
+                } else {
+                    format!(
                     "We have {open_bugs} open bugs. Should we pause new features and burn down the \
                      bug backlog first, or keep shipping? Decide and, if useful, create a tracking ticket."
                 )
-            }));
+                },
+            ));
         }
         // A stalled in-progress ticket is worth flagging as a possible blocker.
         if let Some(t) = state
@@ -67,19 +70,22 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .find(|t| t.status() == Status::InProgress)
         {
             if cycle % 4 == 0 {
-                return Some(("stalled", if vi {
-                    format!(
-                        "{} đã ở trạng thái đang làm khá lâu. Có bị block hay quá lớn không? \
+                return Some((
+                    "stalled",
+                    if vi {
+                        format!(
+                            "{} đã ở trạng thái đang làm khá lâu. Có bị block hay quá lớn không? \
                          Nên tách nhỏ hay gỡ block cho nó?",
-                        t.id()
-                    )
-                } else {
-                    format!(
-                        "{} has been in progress for a while. Is it blocked or too big? \
+                            t.id()
+                        )
+                    } else {
+                        format!(
+                            "{} has been in progress for a while. Is it blocked or too big? \
                          Should we split it or unblock it?",
-                        t.id()
-                    )
-                }));
+                            t.id()
+                        )
+                    },
+                ));
             }
         }
         // Otherwise a light periodic check-in keeps the sprint honest.

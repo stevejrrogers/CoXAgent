@@ -143,8 +143,7 @@ fn reconcile_target(
 
 /// The composition root's engine-rebuild hook: `Some(new parts)` only when the
 /// on-disk config changed since last asked (see [`RunCycleUseCase::with_reloader`]).
-pub type Reloader<E> =
-    Arc<dyn Fn() -> Option<(Config, Arc<E>, Arc<Mutex<Spend>>)> + Send + Sync>;
+pub type Reloader<E> = Arc<dyn Fn() -> Option<(Config, Arc<E>, Arc<Mutex<Spend>>)> + Send + Sync>;
 
 /// Runs the sequential agent cycle over shared adapters.
 pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
