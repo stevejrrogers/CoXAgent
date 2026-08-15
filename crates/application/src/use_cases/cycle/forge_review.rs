@@ -284,6 +284,41 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                             continue;
                         }
                     }
+                    CompeteOutcome::Proceed { winner, unsafe_other } => {
+                        // The current PR is a SAFE, small subset of a
+                        // load-bearing same-ticket competitor. It is not held
+                        // hostage by that risk — it proceeds to the normal
+                        // review below, where its own size/impact gates still
+                        // apply, while the unsafe sibling waits for a person.
+                        // (The resolver only ever yields Proceed for the safe
+                        // PR, so `winner` is this PR; guard anyway.)
+                        if winner != pr.number {
+                            let reason = format!(
+                                "PR #{other} is open for the same ticket. Holding for a person: \
+                                 the safe candidate is not this PR. Close one or fold this in."
+                            );
+                            let _ = forge.request_changes(pr.number, &reason).await;
+                            self.record_review(
+                                pr.number,
+                                "request_changes",
+                                &reason,
+                                &head_sha,
+                            )
+                            .await;
+                            self.log_git(&format!(
+                                "SA held PR #{}: competes with #{other}",
+                                pr.number
+                            ))
+                            .await;
+                            continue;
+                        }
+                        self.log_git(&format!(
+                            "SA unblocked PR #{}: safe subset of load-bearing #{unsafe_other}; \
+                             routing to normal review",
+                            pr.number
+                        ))
+                        .await;
+                    }
                     CompeteOutcome::Hold(why) => {
                         let reason = format!(
                             "PR #{other} is open for the same ticket. Holding for a person: \

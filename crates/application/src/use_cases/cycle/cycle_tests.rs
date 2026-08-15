@@ -550,6 +550,47 @@ async fn competing_prs_self_resolve_when_one_covers_the_other() {
     );
 }
 
+#[tokio::test]
+async fn a_safe_subset_pr_is_not_held_by_a_load_bearing_competitor() {
+    // The real live pair: #89 is a sprawling same-ticket change that touches
+    // the pipeline (Cargo.toml → `needs_human_eyes` → unsafe), #98 is a small
+    // safe fix that is a strict subset of it. #98 must NOT be blocked by the
+    // risky sibling — it proceeds through normal review and lands.
+    let forge = Arc::new(SpyForge {
+        ci: "passing".to_owned(),
+        mergeable: true,
+        competing: Some(vec![
+            (
+                89,
+                "fix(COX-1): sprawling fix".to_owned(),
+                // Touches Cargo.toml → load-bearing → unsafe_change.
+                "diff --git a/Cargo.toml b/Cargo.toml\n+dep = \"1\"\n\
+                 diff --git a/src/lib.rs b/src/lib.rs\n+let x = 1;\n"
+                    .to_owned(),
+            ),
+            (
+                98,
+                "fix(COX-1): focused fix".to_owned(),
+                "diff --git a/src/lib.rs b/src/lib.rs\n+let x = 1;\n".to_owned(),
+            ),
+        ]),
+        ..Default::default()
+    });
+    review_uc(Arc::clone(&forge), "approve", true)
+        .review_open_prs()
+        .await;
+    let merged = forge.merged.lock().expect("lock");
+    let closed = forge.closed.lock().expect("lock");
+    assert!(
+        merged.contains(&98),
+        "the safe focused fix #98 lands — not held by the sprawling #89: {merged:?}"
+    );
+    assert!(
+        !closed.contains(&89),
+        "the load-bearing #89 is never auto-closed: {closed:?}"
+    );
+}
+
 // ---- COX-F001: auto-rollback to last known-good deploy on failure ----
 //
 // These encode the acceptance criteria only. No production rollback logic

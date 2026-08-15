@@ -124,6 +124,12 @@ pub enum CompeteOutcome {
     /// winner's diff covers every file the loser touches, neither is unsafe,
     /// and the loser has nothing the winner lacks.
     MergeClose { winner: u64, loser: u64 },
+    /// `winner` is a SAFE, small subset of `unsafe_other` — a load-bearing /
+    /// oversized same-ticket change. The safe PR is NOT blocked by the risky
+    /// competitor (land it through normal review); the unsafe one stays for a
+    /// person. Neither is auto-closed: closing the unsafe one would drop the
+    /// extra work it carries, and closing the safe one would discard a real fix.
+    Proceed { winner: u64, unsafe_other: u64 },
     /// Cannot resolve without a human — closing would drop real work, a diff
     /// could not be read, or a change is too load-bearing to auto-land.
     Hold(&'static str),
@@ -137,17 +143,17 @@ pub enum CompeteOutcome {
 /// (`feature_done`/`bug_fixed`, which the scorecard needs). When either diff
 /// carries work the other lacks, or either is unsafe, it holds for a human
 /// rather than silently drop a change.
+///
+/// One further case keeps a clean fix from being held hostage by a risky twin:
+/// when the SAFE PR is a strict subset of the unsafe one, the safe PR is not
+/// blocked by it (it lands through normal review, where its own size/impact
+/// gates still apply) while the unsafe sibling stays for a person.
 #[must_use]
 pub fn resolve_competing(a: CompeteCandidate, b: CompeteCandidate) -> CompeteOutcome {
     // Can't prove anything about a diff we couldn't read.
     let (Some(a_files), Some(b_files)) = (a.files.as_deref(), b.files.as_deref()) else {
         return CompeteOutcome::Hold("could not read a competing diff — keeping both");
     };
-    if a.unsafe_change || b.unsafe_change {
-        return CompeteOutcome::Hold(
-            "touches a load-bearing or oversized change — a human should rule on it",
-        );
-    }
     // A winner must actually claim at least one file; an empty diff proves
     // nothing and closing its twin would be guesswork.
     if a_files.is_empty() || b_files.is_empty() {
@@ -155,9 +161,33 @@ pub fn resolve_competing(a: CompeteCandidate, b: CompeteCandidate) -> CompeteOut
     }
     let a_covers_b = b_files.iter().all(|f| a_files.contains(f));
     let b_covers_a = a_files.iter().all(|f| b_files.contains(f));
-    // A strict subset decides it — the wider diff is the more complete fix.
-    // Exact overlap (both cover each other) means they are the same change;
-    // keep the newer one arbitrarily deterministic by picking `a`'s twin.
+
+    // The current PR (`a`) is itself load-bearing or oversized — never
+    // auto-land or auto-close it.
+    if a.unsafe_change {
+        return CompeteOutcome::Hold(
+            "touches a load-bearing or oversized change — a human should rule on it",
+        );
+    }
+    // `a` is safe, but its same-ticket competitor `b` is unsafe. `a` is only
+    // unblocked when it is a strict subset of `b`'s sprawl — then landing `a`
+    // loses nothing (its files are already inside `b`) and `b` still waits for
+    // a person. If they diverge, racing `a` past a risky sibling is unsafe.
+    if b.unsafe_change {
+        if b_covers_a && !a_covers_b {
+            return CompeteOutcome::Proceed {
+                winner: a.number,
+                unsafe_other: b.number,
+            };
+        }
+        return CompeteOutcome::Hold(
+            "the competing change is load-bearing or oversized — a human should rule on it",
+        );
+    }
+    // Both safe: a strict subset decides it — the wider diff is the more
+    // complete fix. Exact overlap (both cover each other) means they are the
+    // same change; keep the newer one arbitrarily deterministic by picking
+    // `a`'s twin.
     match (a_covers_b, b_covers_a) {
         (true, false) => CompeteOutcome::MergeClose {
             winner: a.number,
@@ -435,7 +465,10 @@ mod merge_guard_tests {
             files: Some(vec!["crates/app/src/lib.rs".to_owned()]),
             unsafe_change: false,
         };
-        // Load-bearing change (pipeline) → hold, even though it would "cover".
+        // Load-bearing change (pipeline) → the SAFE subset PR is unblocked
+        // (Proceed: it lands through normal review, its own gates apply) and
+        // the unsafe one is never auto-closed. When the UNSAFE PR is the one
+        // being considered it is always held for a person.
         let pipeline = super::CompeteCandidate {
             number: 2,
             files: Some(vec![
@@ -445,7 +478,11 @@ mod merge_guard_tests {
             unsafe_change: true,
         };
         assert!(matches!(
-            super::resolve_competing(safe.clone(), pipeline),
+            super::resolve_competing(safe.clone(), pipeline.clone()),
+            super::CompeteOutcome::Proceed { winner: 1, unsafe_other: 2 }
+        ));
+        assert!(matches!(
+            super::resolve_competing(pipeline, safe.clone()),
             super::CompeteOutcome::Hold(_)
         ));
         // A diff that could not be read → hold, never a blind close.
@@ -469,6 +506,64 @@ mod merge_guard_tests {
             vec!["src/a.rs".to_owned(), "src/c.rs".to_owned()]
         );
         assert!(super::changed_files("no headers here").is_empty());
+    }
+
+    #[test]
+    fn a_safe_subset_pr_is_unblocked_from_a_load_bearing_competitor() {
+        // The live case: #98 is a small, safe 1-file fix; #89 is a sprawling
+        // 40-file same-ticket change that is load-bearing/oversized (unsafe).
+        // #98 must NOT be held hostage by #89 — it proceeds to normal review
+        // (where its own size gates still apply), while #89 stays for a human.
+        let safe = super::CompeteCandidate {
+            number: 98,
+            files: Some(vec!["crates/infrastructure/src/deploy/docker_compose.rs".to_owned()]),
+            unsafe_change: false,
+        };
+        let unsafe_sprawl = super::CompeteCandidate {
+            number: 89,
+            files: Some(vec![
+                "crates/infrastructure/src/deploy/docker_compose.rs".to_owned(),
+                "crates/app/src/builders.rs".to_owned(),
+                "crates/application/src/prompts.rs".to_owned(),
+            ]),
+            unsafe_change: true,
+        };
+        // Processing the SAFE pr as the current one: safe is a strict subset of
+        // unsafe → Proceed (unblock the safe fix, keep unsafe for a person).
+        assert_eq!(
+            super::resolve_competing(safe.clone(), unsafe_sprawl.clone()),
+            super::CompeteOutcome::Proceed {
+                winner: 98,
+                unsafe_other: 89
+            }
+        );
+        // Processing the UNSAFE pr as the current one: it stays held — the SA
+        // never auto-lands or auto-closes a load-bearing change.
+        assert!(matches!(
+            super::resolve_competing(unsafe_sprawl, safe),
+            super::CompeteOutcome::Hold(_)
+        ));
+    }
+
+    #[test]
+    fn a_safe_pr_is_not_unblocked_when_the_unsafe_competitor_diverges() {
+        // Safe PR touches a file the unsafe competitor does not, so it is NOT a
+        // strict subset — racing it past the risky sibling would double-fix a
+        // file in parallel. It stays held.
+        let safe = super::CompeteCandidate {
+            number: 7,
+            files: Some(vec!["crates/a.rs".to_owned()]),
+            unsafe_change: false,
+        };
+        let unsafe_other = super::CompeteCandidate {
+            number: 8,
+            files: Some(vec!["crates/b.rs".to_owned()]),
+            unsafe_change: true,
+        };
+        assert!(matches!(
+            super::resolve_competing(safe, unsafe_other),
+            super::CompeteOutcome::Hold(_)
+        ));
     }
 }
 
