@@ -381,15 +381,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         )
         .await;
         // A skipped rollback is still an incident — record its post-mortem once.
-        self.post_mortem(
-            reason,
-            failed_sha,
-            to_sha,
-            true,
-            summary.to_string(),
-            report,
-        )
-        .await;
+        self.post_mortem(reason, failed_sha, to_sha, true, summary.to_string(), report)
+            .await;
     }
     /// The CXA-F012 incident post-mortem loop: run exactly once per deploy
     /// revision that auto-rolled back (or was deliberately skipped from rolling
@@ -457,9 +450,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
 
         // File or link a deduped root-cause PREVENTION ticket so the same
         // symptom can't ride forward into the next good deploy unaddressed.
-        let lesson_text = format!(
-            "{reason} triggered an auto-rollback to {short_target}; fix shipped as tracked work."
-        );
+        let lesson_text =
+            format!("{reason} triggered an auto-rollback to {short_target}; fix shipped as tracked work.");
         crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
             s.add_lesson(&lesson_text);
             Ok(())

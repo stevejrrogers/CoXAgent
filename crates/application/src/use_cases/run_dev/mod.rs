@@ -914,6 +914,34 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 return Ok(Some(id));
             }
             if self.mode == DevMode::Bug
+                && gates::build_relevant(&tree.changed_paths).is_empty()
+            {
+                let msg = format!(
+                    "{id}: not reproducible — DEV ran against a green tree and produced no \
+                     code change. The bug does not reproduce on main (likely already resolved \
+                     by a merged fix). Closing as not-reproducible so the sprint stops \
+                     re-investigating it."
+                );
+                let id_c = id.clone();
+                crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+                    transition(s, &id_c, Role::System, Status::Rejected)
+                        .map_err(|e| PortError::Corrupt(e.to_string()))?;
+                    s.post_comment("SYSTEM", &msg, Some(id_c.to_string()));
+                    s.ticket_journal.remove(&id_c.to_string());
+                    s.cost_holds.remove(&id_c.to_string());
+                    s.cost_approved.remove(&id_c.to_string());
+                    Ok(())
+                })
+                .await?;
+                tracing::info!(
+                    "DEV bug pass: {id} closed not-reproducible (no change on green tree)"
+                );
+                if let Some(p) = &self.phase {
+                    p(None);
+                }
+                return Ok(Some(id));
+            }
+            if self.mode == DevMode::Bug
                 && !gates::diff_is_docs_only(&tree)
                 && !gates::diff_touches_tests(&tree)
             {
