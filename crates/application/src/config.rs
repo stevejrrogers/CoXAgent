@@ -627,6 +627,47 @@ pub struct ReleasesConfig {
     pub enabled: bool,
 }
 
+/// Version of the persisted `coxagent.json` schema this build understands.
+///
+/// A document carrying a `schema_version` HIGHER than this is written by a
+/// future build: load refuses it rather than accepting a shape it cannot
+/// represent or defaulting it away (the same fail-closed posture state.json
+/// already has via `SCHEMA_VERSION` / `parse_checked`). Documents that omit
+/// `schema_version` predate the anchor and load as prior-version state.
+pub const CONFIG_SCHEMA_VERSION: u32 = 1;
+
+/// Gap-detection coverage policy. `enabled` switches the coverage gate on/off;
+/// `threshold` is the minimum gap-free depth (in cycles) a codebase must hold
+/// before the pass stops flagging it — the knob the dashboard edits.
+///
+/// COX-B043: defaults are set by an EXPLICIT container `Default`
+/// (`enabled = true, threshold = 3`), never Rust's derived zero-value, so an
+/// unset knob is *documented-and-true*, not silently `{false, 0}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CoverageConfig {
+    #[serde(default = "default_coverage_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_coverage_threshold")]
+    pub threshold: u32,
+}
+
+fn default_coverage_enabled() -> bool {
+    true
+}
+
+fn default_coverage_threshold() -> u32 {
+    3
+}
+
+impl Default for CoverageConfig {
+    fn default() -> Self {
+        CoverageConfig {
+            enabled: default_coverage_enabled(),
+            threshold: default_coverage_threshold(),
+        }
+    }
+}
+
 /// Top-level configuration persisted as `coxagent.json`.
 ///
 /// EVERY section is `#[serde(default)]`, so a document written by an older
@@ -657,6 +698,9 @@ pub struct Config {
     /// Release pipeline settings (automated tag + Release chore per milestone).
     #[serde(default)]
     pub releases: ReleasesConfig,
+    /// Gap-detection coverage policy (enabled state + threshold).
+    #[serde(default)]
+    pub coverage: CoverageConfig,
 }
 
 #[cfg(test)]

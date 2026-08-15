@@ -1175,10 +1175,18 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
     }
 
     fn candidates(&self, state: &ProjectState) -> Vec<TicketId> {
-        match self.mode {
+        let mut ids = match self.mode {
             DevMode::Bug => open_bug_candidates(state),
             DevMode::Feature => ready_feature_candidates(state),
-        }
+        };
+        // Real-world scope gate: DEV only pulls tickets the team committed to
+        // the current sprint (PO/SM aligned via the sprint-board action), plus
+        // emergency open bugs. In Kanban mode (no sprint open) any ready
+        // ticket stays in scope. A feature/chore the PO/SM has not committed
+        // to an open sprint is out of scope — DEV must ask to have it added
+        // before picking it up.
+        ids.retain(|id| crate::selection::in_dev_scope(state, id));
+        ids
     }
 }
 

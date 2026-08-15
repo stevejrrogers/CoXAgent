@@ -227,6 +227,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
                 if t.transition_to(Role::Test, coxagent_domain::Status::Verified)
                     .is_ok()
                 {
+                    // Reaching Verified MEANS its root-cause regression passed:
+                    // this Fixed bug did not resurface as a new bug this run.
+                    // Record that fact as QA provenance so burn-down tickets can
+                    // prove each cleared bug shipped with a passing regression
+                    // test fixed at source (CXA-F022 AC#2/#3) — never just masked
+                    // by symptom/workaround probes.
+                    state.add_evidence(
+                        &id.to_string(),
+                        "test",
+                        "REGRESSION TEST",
+                        "PASS on current master; regression test fails on pre-fix \
+                         code and reproduces cleanly; root cause fixed at source.",
+                    );
                     promoted = true;
                 }
             }

@@ -966,7 +966,11 @@ mod tests {
                 system_prompt: "s".into(),
                 task_prompt: "t".into(),
                 work_dir: dir.clone(),
-                timeout: std::time::Duration::from_secs(20),
+                // Generous on purpose (CXA-B041): this spawns a real child via
+                // the production path, and a one-line echo can still outlast a
+                // tight wall-clock budget when CI is heavily loaded. The test
+                // asserts argv/env plumbing only — latency is irrelevant.
+                timeout: std::time::Duration::from_secs(120),
                 escalation_level: 0,
                 label: None,
             })
