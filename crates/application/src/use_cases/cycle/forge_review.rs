@@ -227,10 +227,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     .await;
                     continue;
                 };
+                let max_changed_lines = self.config.git.max_changed_lines;
                 let cand = |n: u64, d: &str| CompeteCandidate {
                     number: n,
                     files: Some(changed_files(d)),
-                    unsafe_change: needs_human_eyes(d).is_some()
+                    unsafe_change: needs_human_eyes(d, max_changed_lines).is_some()
                         || crate::use_cases::merge_policy::commits_scratch(d).is_some(),
                 };
                 match resolve_competing(cand(pr.number, &diff), cand(other, &other_diff)) {
@@ -345,7 +346,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                         // alone: a change this large, or one that edits how the
                         // project builds and deploys itself, gets a human even
                         // when every gate is green.
-                        if let Some(why) = needs_human_eyes(&diff) {
+                        if let Some(why) = needs_human_eyes(&diff, self.config.git.max_changed_lines) {
                             let msg = format!(
                                 "Approved, but not auto-merging: {why}. Ask a human to land this."
                             );
