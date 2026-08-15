@@ -1,6 +1,6 @@
 FOLDER: -
 
-# Deploy Secret Rotation vs Stability (CXA-B031)
+# Deploy Secret Rotation → Stability (CXA-B031)
 
 **Keywords:** per-cycle secret rotation, deploy secrets, stable secrets, PG_PASSWORD, COXAGENT_ADMIN_PASSWORD, unconfigured deploy, app-driven deploy, resolve_deploy_secrets_in, out-of-tree store, pgdata volume auth failure
 
@@ -10,7 +10,7 @@ CXA-B031 is the code ticket that makes auto-generated superuser secrets **stable
 
 ## How it works
 
-The decision lives in `crates/infrastructure/src/deploy/docker_compose.rs`. Each pass calls `DockerComposeDeploy::deploy(work_dir)` (`fn deploy`, ~line 1142), which computes secrets ONCE via `resolve_deploy_secrets(work_dir)` → `resolve_deploy_secrets_in(work_dir, secret_root)` before building either compose command (the initial run and any port-eviction retry).
+The decision lives in `crates/infrastructure/src/deploy/docker_compose.rs`. Each pass calls `DockerComposeDeploy::deploy(work_dir)` (`fn deploy`, docker_compose.rs:1142), which computes secrets ONCE via `resolve_deploy_secrets(work_dir)` → `resolve_deploy_secrets_in(work_dir, secret_root)` before building either compose command (the initial run and any port-eviction retry).
 
 `resolve_deploy_secrets_in` applies one precedence rule per key in `REQUIRED_SECRET_KEYS = ["PG_PASSWORD", "COXAGENT_ADMIN_PASSWORD"]`, computed by the pure helper `missing_required_secrets(provided_by_env, dot_env_keys)`:
 
@@ -18,18 +18,22 @@ The decision lives in `crates/infrastructure/src/deploy/docker_compose.rs`. Each
 2. **Project-dir `.env`** — a non-blank assignment parsed by `read_dot_env()` leaves it alone.
 3. **Fallback (this ticket's path)** — only keys missing from BOTH sources get a value: reuse this project's durable out-of-tree store (`stored.get(key)`), or freshly minted by `random_secret()` and persisted there.
 
-The stability guarantee is line 132-135 of the fallback loop:
+The stability guarantee is the fallback loop (docker_compose.rs:131-138):
 
 ```rust
-let value = match stored.get(key) {
-    Some(existing) => existing.clone(), // B031: reuse last cycle's exact value
-    None => random_secret(),
-};
+for key in missing {
+    let value = match stored.get(key) {
+        Some(existing) => existing.clone(), // B031: reuse last cycle's exact value
+        None => random_secret(),
+    };
+    stored.insert(key.to_owned(), value.clone());
+    resolved.push((key.to_owned(), value));
+}
 ```
 
-Because step 3 checks the store BEFORE generating, an unconfigured project reuses last cycle's exact value instead of regenerating — so pgdata initialized with cycle N's password still matches on cycle N+1. Retention removes rotation; removing retention would resurrect CXA-B027.
+Because step 3 checks the store BEFORE generating (`Some(existing) => existing.clone()`), an unconfigured project reuses last cycle's exact value instead of regenerating — so pgdata initialized with cycle N's password still matches on cycle N+1. Retention removes rotation; removing retention would resurrect CXA-B027.
 
-Keying follows docker's named-volume semantics: the store filename is SHA-256 of `compose_project_name(work_dir)` (basenames only → invariant under relocation), matching how docker persists pgdata in `<project>_db`. Fallback values are written OUT of tree to `${COXAGENT_DEPLOY_SECRETS_DIR}` as `<digest>.env`, atomically via temp-sibling + rename (`persist_store`) and hardened to owner-only (`set_secret_perms`, 0o600) — never into `<project>/codebase/.env` (CXA-B028 guard). Legacy path-keyed files are adopted via ownership-stamped merge (`adopt_legacy_cxb031_secrets`, CXA-B043) and retired only after durable persist (`expire_converged_legacy_store` / `retire_superseded_path_keyed_store`, CXA-B044 ordering).
+Keying follows docker's named-volume semantics: the store filename is SHA-256 of `compose_project_name(work_dir)` (`store_file`, basenames only → invariant under relocation), matching how docker persists pgdata in `<project>_db`. Fallback values are written OUT of tree to `${COXAGENT_DEPLOY_SECRETS_DIR}` as `<digest>.env`, atomically via temp-sibling + rename (`persist_store`) and hardened to owner-only (`set_secret_perms`, 0o600) — never into `<project>/codebase/.env` (CXA-B028 guard). Legacy path-keyed files are adopted via ownership-stamped merge (`adopt_legacy_cxb031_secrets`, gated by CXA-B043) and retired only after durable persist (`expire_converged_legacy_store` / `retire_superseded_path_keyed_store`, CXA-B044 ordering).
 
 Values reach compose as transient child-process env only through `seed_deploy_secrets(cmd, &secrets)`; they are never written to any file inside the work dir.
 
@@ -70,7 +74,7 @@ All identifiers live in crates/infrastructure/src/deploy/docker_compose.rs unles
 
 - const REQUIRED_SECRET_KEYS = ["PG_PASSWORD", "COXAGENT_ADMIN_PASSWORD"]
 - fn random_secret() -> String — 32 chars from a charset dropping look-alikes (`0/O/1/l/I`) and YAML/DSN-breaking characters; never baked constants
-- fn resolve_deploy_secrets(work_dir) -> Vec<(String,String)> — thin wrapper using default root
+- fn resolve_deploy_secrets(work_dir) -> Vec<(String,String)> — thin wrapper over resolve_deploy_secrets_in using default root
 - fn resolve_deploy_secrets_in(work_dir: &Path, secret_root: &Path) -> Vec<(String,String)> — single-pass precedence + retention + persist + legacy adoption/expiry; never writes into work dir
 - fn missing_required_secrets(provided_by_env: impl Fn(&str)->bool, dot_env_keys: &HashSet<String>) -> Vec<&'static str> — pure precedence rule over REQUIRED_SECRET_KEYS
 - fn seed_deploy_secrets(cmd: &mut tokio::process::Command, secrets: &[(String,String)]) — feeds resolved values into compose as process env only
@@ -78,9 +82,9 @@ All identifiers live in crates/infrastructure/src/deploy/docker_compose.rs unles
 - fn deploy_secrets_root() -> PathBuf / store_file(...) / cxb031_store_file(...)
 - fn adopt_legacy_cxb031_secrets(...); retire_superseded_path_keyed_store(...); expire_converged_legacy_store(path)
 - fn write_stored_secrets_owned(path, owner: Option<&str>, secrets) -> bool; persist_store(...); set_secret_perms(path); repair_store_permissions(...)
-- Consumers of resolve+seed: DockerComposeDeploy::deploy() (~line 1142), compose_build_check() (~line 1509)
+- Consumers of resolve+seed: DockerComposeDeploy::deploy() (~1142), compose_build_check() (~1509)
 
-Regression tests live in mod deploy_secret_tests (~line 1713): generated_charset_excludes_similar_lookalikes (~1804), precedence_honours_process_env_then_dot_env_then_fallback (~1744), resolving_deploy_secrets_never_persists_them_to_work_dir_dot_env (~1859).
+Regression tests live in mod deploy_secret_tests (~1713): generated_charset_excludes_similar_lookalikes (~1804), precedence_honours_process_env_then_dot_env_then_fallback (~1744), resolving_deploy_secrets_never_persists_them_to_work_dir_dot_env (~1859).
 
 ## Configuration
 
@@ -114,10 +118,7 @@ How it fails / known limits:
 ## Code map
 
 — crates/infrastructure/src/deploy/docker_compose.rs —
-DockerComposeDeploy adapter body containing ALL resolution/persistence logic above plus fn deploy() (~1142), compose_build_check() (~1509), compose_project_name(), apply_resource_limits(), running_services() and port-eviction helpers extract_bind_port / compose_project_on_port / container_on_port / evictable_project(). The unit-test module mod deploy_secret_tests (~1713) carries this ticket's guard generated_chartset-generated stability test generated_charset_excludes_similar_lookalikes etc.; its regression anchor for B031 specifically is generated_charset? No—generated_charset… see note below.**
-
-— mod deploy_tests note —
-The definitive B031 regression guard lives here too under mod-style names embedded above (~1888): generated_charset? The exact function documenting "no per-cycle rotation" has TEST id naming as documented inline ("this is the whole point of CXA-B031") but may be renamed across sweeps to satisfy lint ratchets. Search mod-style names embedded above~1888 if drifted.
+DockerComposeDeploy adapter body containing ALL resolution/persistence logic above plus fn deploy() (~1142), compose_build_check() (~1509), compose_project_name(), apply_resource_limits(), running_services() and port-eviction helpers extract_bind_port / compose_project_on_port / container_on_port / evictable_project(). The unit-test module mod deploy_secret_tests (~1713) carries this ticket's regression guards precedence_honours_process_env_then_dot_env_then_fallback (~1744), generated_charset_excludes_similar_lookalikes (~1804), resolving_deploy_secrets_never_persists_them_to_work_dir_dot_env (~1859). The retention loop at ~131 proves "no per-cycle rotation".
 
 — crates/app/src/builders.rs —
 build_auth() reads COXAGENT_ADMIN_USER / COXAGENT_ADMIN_PASSWORD and calls bootstrap_admin(); admin-login half of whatever stable password a deploy seeds.
@@ -128,14 +129,17 @@ FileAuthService::bootstrap_admin(path, username, password) persists the admin ac
 — crates/app/tests/compose_security_gate.rs —
 Guards compose interpolation/security behaviour around ${VAR} usage for these required keys ({$VAR}? markers).
 
-— crates/app/tests/committed_scottsecrects_gate.rs —
+— crates/app/tests/committed_secrets_gate.rs —
 Anti-regression gate preventing committed source/literals from carrying ADMIN_PASSWORD-style values again.
 
-Note above left intentionally minimal where discoverability masks overlap with previously archived docs referring to said tests under their accepted real names – cross-check grep once within repository current HEAD prior to citation beyond prose here.\*\*
+— crates/app/tests/deploy_smoke.rs —
+Boot-level smoke test of this repo's own compose stack.
 
-(hard marker removed self-contained intended edit final)
+## Related
 
-Wait – stray placeholder contamination flagged internally mid-generation interruptive loop flushed net clean below dash rule objective A.)
-
-Spurious trailing artifact– strikethrough text attached erroneously appended abridged-correct final copy presented WITH next heading onward clean\*\*\*
-
+- deploy-secret-stability.md (CXA-B027) — the incident B031 guards against returning: per-cycle rotation breaking auth on initialized volumes. This page stops rotation; B027 documents why that mattered.
+- cxa-b030-deploy-secret-stability.md (CXA-B030) — shipped no code; frames the B028-vs-B027 tension that B031 resolves with an out-of-tree store.
+- cxa-b032-deploy-secret-relocation.md (CXA-B032) — changed store keying from path-derived to compose-project-name so stability tracks docker's named pgdata volume.
+- deployment.md (CXA-B017) — the honour-or-generate precedence rule (`${VAR:?}` interpolation) both build on.
+- docker-compose-deploys.md (CXA-B001) — end-to-end deploy lifecycle, health gate, rollback on this same adapter.
+- CXA-B028 / CXA-B036 / CXA-B039 / CXA-B040 / CXA-B043 / CXA-B044 — no-secret-in-source guard and the adoption, key-derivation, retirement and durability hardening landed after B031.
