@@ -279,6 +279,57 @@ pub fn parse_string_list(raw: &str) -> Result<Vec<String>, String> {
     serde_json::from_str(&raw[start..=end]).map_err(|e| e.to_string())
 }
 
+/// The structured TEST response — a list of discovered bugs plus a per-acceptance-
+/// criterion verdict for every shipped ticket it verified.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TestOutput {
+    #[serde(default)]
+    pub bugs: Vec<ProposedItem>,
+    #[serde(default)]
+    pub verdicts: Vec<TestVerdict>,
+}
+
+/// One acceptance-criterion verdict from the TEST agent.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TestVerdict {
+    /// The EXACT acceptance-criterion text this verdict is for. The system
+    /// matches it word-for-word against the ticket's test cases.
+    #[serde(default)]
+    pub ac: String,
+    #[serde(default)]
+    pub passed: bool,
+    /// One line of concrete evidence (command/request + actual response).
+    #[serde(default)]
+    pub note: String,
+    /// URL path that demonstrates this criterion (per-case screenshot target),
+    /// or empty when none applies.
+    #[serde(default)]
+    pub route: String,
+}
+
+/// Parse the TEST engine output into (bugs, verdicts). Accepts BOTH the new
+/// `{"bugs":[…], "verdicts":[…]}` object and the legacy bare bug array — the
+/// legacy form yields an empty verdict list. Lenient: prose/code fences are
+/// tolerated, and a malformed `verdicts` array still yields the bugs.
+///
+/// # Errors
+/// Returns a message when neither form yields any parseable bugs.
+pub fn parse_test_output(raw: &str) -> Result<(Vec<ProposedItem>, Vec<TestVerdict>), String> {
+    let stripped = strip_code_fences(raw);
+    // New object format first: a complete {bugs, verdicts} document.
+    for obj in top_level_objects(&stripped) {
+        if obj.contains("\"bugs\"") || obj.contains("\"verdicts\"") {
+            if let Ok(out) = serde_json::from_str::<TestOutput>(&obj) {
+                return Ok((out.bugs, out.verdicts));
+            }
+        }
+    }
+    // Legacy bare bug array (or an object whose `bugs` couldn't parse) — the
+    // tolerant array parser still recovers the bugs; verdicts are simply none.
+    let bugs = parse_items(&stripped)?;
+    Ok((bugs, Vec::new()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,5 +484,40 @@ mod tests {
                 "expected Err for {raw:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_output_object_parses_bugs_and_verdicts() {
+        let raw = r#"```json
+{"bugs":[{"title":"B","priority":"high","complexity":"medium","has_ui":true}],
+ "verdicts":[{"ac":"login works","passed":true,"note":"GET /login 200","route":"/login"},{"ac":"logout works","passed":false,"note":"500","route":"/logout"}]}
+```"#;
+        let (bugs, verdicts) = parse_test_output(raw).expect("parse object");
+        assert_eq!(bugs.len(), 1);
+        assert_eq!(bugs[0].title, "B");
+        assert_eq!(verdicts.len(), 2);
+        assert_eq!(verdicts[0].ac, "login works");
+        assert!(verdicts[0].passed);
+        assert_eq!(verdicts[0].route, "/login");
+        assert!(!verdicts[1].passed);
+    }
+
+    #[test]
+    fn test_output_legacy_bare_array_yields_no_verdicts() {
+        let (bugs, verdicts) =
+            parse_test_output(r#"[{"title":"B","priority":"low","complexity":"small"}]"#)
+                .expect("legacy array still parses");
+        assert_eq!(bugs.len(), 1);
+        assert!(verdicts.is_empty());
+    }
+
+    #[test]
+    fn test_output_all_pass_yields_empty_bugs() {
+        let (bugs, verdicts) = parse_test_output(
+            r#"{"bugs":[],"verdicts":[{"ac":"a","passed":true,"note":"ok","route":""}]}"#,
+        )
+        .expect("empty bugs okay");
+        assert!(bugs.is_empty());
+        assert_eq!(verdicts.len(), 1);
     }
 }

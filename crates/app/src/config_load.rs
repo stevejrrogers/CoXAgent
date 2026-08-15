@@ -376,6 +376,7 @@ mod tests {
 
         let msg = load_config_with_probe(&state).expect_err("70000 is outside u16");
 
+        assert!(msg.contains("coxagent.json"), "{msg}");
         assert!(msg.contains("deploy.host_port"), "{msg}");
         let on_disk = std::fs::read_to_string(state.parent().expect("root").join("coxagent.json"))
             .expect("config still readable");
