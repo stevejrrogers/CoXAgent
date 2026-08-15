@@ -1839,7 +1839,15 @@ async function showTicket(id){
     <div class="mrow"><span class="lbl">Blocked by</span>${depChips(t.depends_on)}</div>
     <div class="mrow"><span class="lbl">Blocks</span>${depChips((STATE.tickets||[]).filter(x=>(x.depends_on||[]).includes(t.id)).map(x=>x.id))}</div>
     <div class="mrow" style="display:block"><span class="lbl">Description</span><div class="doc-body md" style="margin-top:7px;color:var(--muted);line-height:1.6;font-size:13px">${t.description?mdRender(t.description):'—'}</div></div>
-    <div class="mrow" style="display:block"><span class="lbl">Acceptance criteria</span>${ac.length?`<div class="aclist">${ac.map(c=>`<div class="acitem"><i class="ti ti-square-check"></i> ${esc(c)}</div>`).join("")}</div>`:'<div style="margin-top:6px;color:var(--dim);font-size:12px">— none defined yet</div>'}</div>`;
+    <div class="mrow" style="display:block"><span class="lbl">Acceptance criteria</span>${ac.length?`<div class="aclist">${ac.map(c=>`<div class="acitem"><i class="ti ti-square-check"></i> ${esc(c)}</div>`).join("")}</div>`:'<div style="margin-top:6px;color:var(--dim);font-size:12px">— none defined yet</div>'}</div>`
+    +(function(){const tcs=t.test_cases||[];if(!tcs.length)return '';
+      return `<div class="mrow" style="display:block;border:none"><span class="lbl">Test cases</span><div class="tclist">${tcs.map(tc=>{
+        const st=tc.status||'pending';
+        const badge={passed:['var(--green)','ti-circle-check','Passed'],failed:['var(--red)','ti-circle-x','Failed'],pending:['var(--dim)','ti-clock','Pending']}[st]||['var(--dim)','ti-clock','Pending'];
+        const img=tc.evidence&&tc.evidence.image?`<div class="tcimg"><img src="${esc(tc.evidence.image)}" alt="case screenshot" onclick="window.open('${esc(tc.evidence.image)}','_blank')" loading="lazy"></div>`:'';
+        const note=tc.evidence&&tc.evidence.note?`<div class="tcnote">${esc(tc.evidence.note)}</div>`:'';
+        return `<div class="tcitem"><div class="tcrow"><i class="ti ${badge[1]}" style="color:${badge[0]}"></i><span style="color:${badge[0]};font-weight:700;font-size:11px;text-transform:uppercase">${badge[2]}</span><div class="tcdesc">${esc(tc.description)}</div></div>${img}${note}</div>`;
+      }).join("")}</div></div>`;})()
   if(tech)h+=`<div class="mrow" style="display:block;border:none"><span class="lbl">Technical spec</span><pre>${esc(tech.approach)}\nfiles: ${esc((tech.files||[]).join(", "))}\napi: ${esc(tech.api_contract)}\ntest: ${esc(tech.test_plan)}</pre></div>`;
   if(ux)h+=`<div class="mrow" style="display:block;border:none"><span class="lbl">UI/UX spec</span><pre>${esc(ux.user_flow)}\nscreens: ${esc((ux.screens||[]).join(", "))}</pre></div>`;
   const canWork=["pending","ready","open"].includes(t.status);

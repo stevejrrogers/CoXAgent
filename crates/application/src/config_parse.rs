@@ -12,7 +12,7 @@
 //! and unseen. Gates are unskippable by default; a config problem is locked to
 //! load time and named, not guessed at during a run.
 
-use crate::config::{Config, CONFIG_SCHEMA_VERSION};
+use crate::config::Config;
 
 /// A `coxagent.json` document that does not deserialize into a [`Config`],
 /// carrying the path of the field that broke it (e.g. `deploy.host_port`).
@@ -46,32 +46,48 @@ pub const WHOLE_DOCUMENT: &str = "<document>";
 /// outside `u16`, a string where a number belongs, an unknown engine, …).
 pub fn parse_config(text: &str) -> Result<Config, ConfigParseError> {
     let deserializer = &mut serde_json::Deserializer::from_str(text);
-    let cfg: Config =
-        serde_path_to_error::deserialize(deserializer).map_err(|err| {
-            let path = err.path().to_string();
-            let inner = err.into_inner();
-            // Only a data error is ABOUT a field. A syntax/EOF failure never got
-            // far enough to be inside one, and the tracker renders that path as
-            // "?" — useless in a log line, so name what actually broke.
-            let field = match inner.classify() {
-                serde_json::error::Category::Data => path,
-                _ => WHOLE_DOCUMENT.to_owned(),
-            };
-            ConfigParseError {
-                field,
-                detail: inner.to_string(),
-            }
+
+    // Schema anchor (CXA-F021): refuse a document written by a FUTURE build
+    // rather than loading it blind. `schema_version` is not a field on
+    // `Config` (which does not deny unknown fields), so this is the one place
+    // a persisted shape newer than the running code is stopped — never
+    // accepted, never silently re-defaulted into this build's view of
+    // defaults. A document that omits `schema_version` predates the anchor and
+    // is prior-version state, which loads fine.
+    let header: serde_json::Value =
+        serde_json::from_str(text).map_err(|err| ConfigParseError {
+            field: WHOLE_DOCUMENT.to_owned(),
+            detail: err.to_string(),
         })?;
-    if cfg.schema_version > CONFIG_SCHEMA_VERSION {
-        return Err(ConfigParseError {
-            field: "schema_version".to_owned(),
-            detail: format!(
-                "persisted schema {} is newer than supported {CONFIG_SCHEMA_VERSION}; upgrade coxagent",
-                cfg.schema_version
-            ),
-        });
+
+    if let Some(schema_version) = header.get("schema_version").and_then(|v| v.as_u64()) {
+        if schema_version > u64::from(crate::config::CONFIG_SCHEMA_VERSION) {
+            return Err(ConfigParseError {
+                field: "schema_version".to_owned(),
+                detail: format!(
+                    "persisted schema_version {schema_version} is newer than supported {}; \
+                     upgrade coxagent",
+                    crate::config::CONFIG_SCHEMA_VERSION
+                ),
+            });
+        }
     }
-    Ok(cfg)
+
+    serde_path_to_error::deserialize(deserializer).map_err(|err| {
+        let path = err.path().to_string();
+        let inner = err.into_inner();
+        // Only a data error is ABOUT a field. A syntax/EOF failure never got
+        // far enough to be inside one, and the tracker renders that path as
+        // "?" — useless in a log line, so name what actually broke.
+        let field = match inner.classify() {
+            serde_json::error::Category::Data => path,
+            _ => WHOLE_DOCUMENT.to_owned(),
+        };
+        ConfigParseError {
+            field,
+            detail: inner.to_string(),
+        }
+    })
 }
 
 #[cfg(test)]

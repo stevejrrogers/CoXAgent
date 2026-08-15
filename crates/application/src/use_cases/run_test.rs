@@ -4,7 +4,7 @@
 
 use crate::config::Config;
 use crate::error::AppError;
-use crate::parsing::parse_items;
+use crate::parsing::parse_test_output;
 use crate::ports::outbound::{AgentEnginePort, AgentRequest, StateStorePort};
 use crate::prompts;
 use crate::use_cases::{AddTicketInput, AddTicketUseCase};
@@ -118,7 +118,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
             .into());
         }
 
-        let bugs = parse_items(&outcome.stdout)
+        let (bugs, verdicts) = parse_test_output(&outcome.stdout)
             .map_err(|e| crate::error::PortError::Corrupt(format!("TEST output: {e}")))?;
 
         // Dedupe against existing bug titles so re-runs don't pile up duplicates.
@@ -150,6 +150,37 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
                 })
                 .await?;
             filed.push(id);
+        }
+
+        // Apply the TEST agent's per-acceptance-criterion verdicts onto the
+        // shipped tickets' test cases — each criterion becomes a test case
+        // marked passed/failed with its evidence note. Matches by exact AC text.
+        if !verdicts.is_empty() {
+            let mut state = self.store.load().await?;
+            let mut changed = false;
+            let at = crate::state::now_rfc3339();
+            for v in &verdicts {
+                if v.ac.trim().is_empty() {
+                    continue;
+                }
+                let Some(t) = state
+                    .tickets
+                    .iter_mut()
+                    .find(|t| t.acceptance_criteria().iter().any(|c| c == &v.ac))
+                else {
+                    continue;
+                };
+                t.ensure_test_cases_from_acceptance();
+                let note = if v.note.trim().is_empty() {
+                    None
+                } else {
+                    Some(v.note.trim().to_owned())
+                };
+                changed |= t.set_test_case_result(&v.ac, v.passed, note, None, at.clone());
+            }
+            if changed {
+                let _ = self.store.save(&state).await;
+            }
         }
 
         // Close the QA loop: a bug that was Fixed and did NOT resurface as a new

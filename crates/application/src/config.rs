@@ -7,11 +7,6 @@ use coxagent_domain::Role;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Schema version of a persisted `coxagent.json`. Bumped when an older build
-/// could misinterpret what we now write; load refuses a document written by a
-/// NEWER build (a higher version) rather than defaulting it away silently.
-pub const CONFIG_SCHEMA_VERSION: u32 = 1;
-
 /// Known agent engine CLIs. `as_binary` gives the executable name to look for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -349,6 +344,10 @@ fn default_max_open_prs() -> u32 {
     4
 }
 
+fn default_max_changed_lines() -> usize {
+    3000
+}
+
 fn default_sprint_len() -> u64 {
     10
 }
@@ -575,6 +574,11 @@ pub struct GitConfig {
     /// the brake that prevents cascade merge conflicts. 0 = unlimited.
     #[serde(default = "default_max_open_prs")]
     pub max_open_prs: u32,
+    /// Largest diff (changed lines) the SA will auto-merge without a human.
+    /// A change larger than this is approved but held for a human to land.
+    /// 0 = no size bound (never hold for size alone). Default 3000.
+    #[serde(default = "default_max_changed_lines")]
+    pub max_changed_lines: usize,
     /// Absolute URL of the hub the runner reports PR/review activity to, e.g.
     /// `http://localhost:4000`. Empty = the runner uses the loopback URL on
     /// `deploy.host_port` (the same hub it serves). The runner authenticates
@@ -585,10 +589,6 @@ pub struct GitConfig {
 
 fn default_true() -> bool {
     true
-}
-
-fn current_schema_version() -> u32 {
-    CONFIG_SCHEMA_VERSION
 }
 
 fn default_provider() -> String {
@@ -618,6 +618,7 @@ impl Default for GitConfig {
             auto_merge: false,
             require_ci: true,
             max_open_prs: default_max_open_prs(),
+            max_changed_lines: default_max_changed_lines(),
             server_url: String::new(),
         }
     }
@@ -636,16 +637,26 @@ pub struct ReleasesConfig {
     pub enabled: bool,
 }
 
-/// Gap-detection coverage: whether coverage-gap detection runs at all, and the
-/// threshold (coverage percentage) below which a gap is filed. Defaults are
-/// explicit (`enabled = true`, `threshold = 3`) via a named container default —
-/// Rust's derived zero-value would silently misrepresent an unset knob (COX-B043).
+/// Version of the persisted `coxagent.json` schema this build understands.
+///
+/// A document carrying a `schema_version` HIGHER than this is written by a
+/// future build: load refuses it rather than accepting a shape it cannot
+/// represent or defaulting it away (the same fail-closed posture state.json
+/// already has via `SCHEMA_VERSION` / `parse_checked`). Documents that omit
+/// `schema_version` predate the anchor and load as prior-version state.
+pub const CONFIG_SCHEMA_VERSION: u32 = 1;
+
+/// Gap-detection coverage policy. `enabled` switches the coverage gate on/off;
+/// `threshold` is the minimum gap-free depth (in cycles) a codebase must hold
+/// before the pass stops flagging it — the knob the dashboard edits.
+///
+/// COX-B043: defaults are set by an EXPLICIT container `Default`
+/// (`enabled = true, threshold = 3`), never Rust's derived zero-value, so an
+/// unset knob is *documented-and-true*, not silently `{false, 0}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CoverageConfig {
-    /// Master switch for coverage-gap detection.
     #[serde(default = "default_coverage_enabled")]
     pub enabled: bool,
-    /// Coverage percentage below which a gap is filed.
     #[serde(default = "default_coverage_threshold")]
     pub threshold: u32,
 }
@@ -660,7 +671,7 @@ fn default_coverage_threshold() -> u32 {
 
 impl Default for CoverageConfig {
     fn default() -> Self {
-        Self {
+        CoverageConfig {
             enabled: default_coverage_enabled(),
             threshold: default_coverage_threshold(),
         }
@@ -677,11 +688,6 @@ impl Default for CoverageConfig {
 /// discarded along with it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Config {
-    /// Persisted schema version of this document. An older build writes no
-    /// marker (defaults to [`CONFIG_SCHEMA_VERSION`]); load refuses a NEWER
-    /// one so an incompatible persisted config is never read or defaulted away.
-    #[serde(default = "current_schema_version")]
-    pub schema_version: u32,
     /// Which engine and model each role runs on.
     #[serde(default)]
     pub engine: EngineMapping,
@@ -702,7 +708,7 @@ pub struct Config {
     /// Release pipeline settings (automated tag + Release chore per milestone).
     #[serde(default)]
     pub releases: ReleasesConfig,
-    /// Coverage-gap detection knobs.
+    /// Gap-detection coverage policy (enabled state + threshold).
     #[serde(default)]
     pub coverage: CoverageConfig,
 }
