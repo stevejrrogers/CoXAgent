@@ -62,6 +62,12 @@ pub fn needs_human_eyes(diff: &str, max_changed_lines: usize) -> Option<String> 
         "scripts/",
         "Cargo.toml",
         "coxagent.json",
+        // Governance: the rules the agents themselves run under. An agent once
+        // deleted the root-cause contract from CLAUDE.md inside an unrelated
+        // bug-fix PR (90eaf25); no machine may land edits to its own leash.
+        "CLAUDE.md",
+        "AGENTS.md",
+        ".claude/",
     ];
     let changed = diff
         .lines()
@@ -405,6 +411,21 @@ mod merge_guard_tests {
         assert!(needs_human_eyes(ci, 3000)
             .expect("held")
             .contains(".github/workflows"));
+    }
+
+    #[test]
+    fn an_agent_never_lands_edits_to_its_own_governance_rules() {
+        // Regression: 90eaf25 deleted the root-cause contract from CLAUDE.md
+        // inside an unrelated bug-fix PR and auto-merged. Any diff touching the
+        // rules the agents run under now waits for a person.
+        for path in ["CLAUDE.md", "AGENTS.md", ".claude/skills/x/SKILL.md"] {
+            let diff = format!("diff --git a/{path} b/{path}\n+++ b/{path}\n-a rule\n");
+            assert!(needs_human_eyes(&diff, 3000).is_some(), "{path} must hold");
+        }
+        // A mention of the file INSIDE a hunk body is not a file change.
+        let body_only =
+            "diff --git a/src/a.rs b/src/a.rs\n+++ b/src/a.rs\n+// see CLAUDE.md for rules\n";
+        assert!(needs_human_eyes(body_only, 3000).is_none());
     }
 
     #[test]
