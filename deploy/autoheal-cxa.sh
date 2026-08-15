@@ -22,7 +22,8 @@ check() {
   # Redis liveness (extract password from .env if present)
   local rp
   rp=$(grep -E '^REDIS_PASSWORD=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-)
-  if ! docker exec "$REDIS" redis-cli -a "$rp" ping 2>/dev/null | grep -q PONG; then
+  # Password via env (REDISCLI_AUTH), never argv — argv leaks to `ps` on the host.
+  if ! docker exec -e REDISCLI_AUTH="$rp" "$REDIS" redis-cli ping 2>/dev/null | grep -q PONG; then
     return 1
   fi
   return 0
