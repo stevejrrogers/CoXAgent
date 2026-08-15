@@ -127,6 +127,7 @@ fn project_handle_with_raw_host_port(
         context_path: dir.path().join("project_context.md"),
         forge: None,
         deploy: Some(deploy),
+        storage: None,
         files: None,
     };
     (dir, handle)
@@ -278,6 +279,7 @@ async fn git_preview_fixture(
         context_path: work.path().join("project_context.md"),
         forge: None,
         deploy: Some(deploy),
+        storage: None,
         files: None,
     };
     (bare, work, handle)

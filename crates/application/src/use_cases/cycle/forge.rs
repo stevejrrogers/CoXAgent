@@ -118,7 +118,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         if let Err(err) = &result {
             if let Some(collision) = worktree_path_in_use(&err.to_string()) {
                 self.log_git(&format!(
-                    "branch {branch} held by leftover worktree {collision:?} — releasing and retrying"
+                    "branch {branch} held by leftover worktree {} — releasing and retrying",
+                    collision.display()
                 ))
                 .await;
                 let _ = git

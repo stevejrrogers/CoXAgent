@@ -1215,6 +1215,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         self
     }
 
+
     /// The engine this cycle drives, for outage reporting.
     pub fn engine_id(&self) -> &'static str {
         self.engine.id()

@@ -43,7 +43,20 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let closing = state.sprint.clone();
         let _ = len;
         let Some(n) = crate::sprint::advance(&mut state, sc, policy) else {
-            // No roll this cycle — still persist the bumped counter.
+            // No roll this cycle. An open sprint with an EMPTY committed set is
+            // silent DEV starvation under the sprint-scope gate (tickets going
+            // Ready mid-sprint are out of scope until rollover) — the PO
+            // commits the open backlog now and announces, instead of the team
+            // idling for days with a full queue.
+            let refilled = crate::sprint::refill_empty_scope(&mut state);
+            if refilled > 0 {
+                let msg = format!(
+                    "📋 Sprint scope was empty while {refilled} ticket(s) sat ready — \
+                     PO committed them to the current sprint so DEV can pull work."
+                );
+                state.log_activity("PO", "committed backlog to an empty sprint", None);
+                state.post_chat_in("PO", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+            }
             let _ = self.store.save(&state).await;
             return;
         };

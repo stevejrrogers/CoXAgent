@@ -154,6 +154,7 @@ pub enum CompeteOutcome {
 /// blocked by it (it lands through normal review, where its own size/impact
 /// gates still apply) while the unsafe sibling stays for a person.
 #[must_use]
+#[allow(clippy::needless_pass_by_value)] // call sites hand over ownership; refs would just ripple clones
 pub fn resolve_competing(a: CompeteCandidate, b: CompeteCandidate) -> CompeteOutcome {
     // Can't prove anything about a diff we couldn't read.
     let (Some(a_files), Some(b_files)) = (a.files.as_deref(), b.files.as_deref()) else {
@@ -194,17 +195,14 @@ pub fn resolve_competing(a: CompeteCandidate, b: CompeteCandidate) -> CompeteOut
     // same change; keep the newer one arbitrarily deterministic by picking
     // `a`'s twin.
     match (a_covers_b, b_covers_a) {
-        (true, false) => CompeteOutcome::MergeClose {
+        // Exact overlap means the same change; `a` wins deterministically.
+        (true, _) => CompeteOutcome::MergeClose {
             winner: a.number,
             loser: b.number,
         },
         (false, true) => CompeteOutcome::MergeClose {
             winner: b.number,
             loser: a.number,
-        },
-        (true, true) => CompeteOutcome::MergeClose {
-            winner: a.number,
-            loser: b.number,
         },
         (false, false) => CompeteOutcome::Hold(
             "each PR touches files the other does not — closing either would drop work",
