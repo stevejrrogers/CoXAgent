@@ -1,101 +1,110 @@
 FOLDER: -
-# Bug Burn-down: Clearing the F001 Prompt System's Gating Bugs (CXA-F022)
+# Bug Burn-down for the F001 Prompt System
 
-**Keywords:** F001, prompt system, bug burn-down, gating bugs, B1101, B1102, B1103, B1104, regression test evidence, RunTestUseCase, system_prompt
+**Keywords:** F001, prompt system, bug burn-down, gating bugs, B1101, B1102, B1103, B1104, regression test evidence, RunTestUseCase, system_prompt, prompts_resolve
 
 ## Overview
 
-CXA-F022 is the bug-burn-down that un-gates feature **F001** (the prompt system) by clearing four open bugs that depend on it — **B1101, B1102, B1103, B1104**. It is for anyone who needs to know how a burn-down is proven done: it turns "we fixed four bugs" into a checkable contract. The real deliverable is *enforcement*: a bug only counts as cleared when its fix ships with its own recorded root-cause regression test PASS in that ticket's QA evidence — never when the symptom was merely masked.
+CXA-F022 is the bug burn-down that un-gates feature **F001**, the prompt system. Four open bugs (**B1101–B1104**) each depend on F001 via their `depends_on`, so F001 cannot close until all four are cleared. The deliverable is *enforcement*, not four ad-hoc fixes: a bug only counts as burned down when its fix ships with its own recorded root-cause regression-test PASS in that ticket's QA evidence — never when the symptom was merely masked. It is for anyone who needs to know how "we fixed four bugs" is proven done against a checkable contract.
 
 ## How it works
 
-F001 is gated by any `Bug` ticket whose `depends_on` includes F001 (`gating_bugs()` in `crates/app/tests/burndown_f022_gate.rs:48`). The four fixtures are **B1101–B1104**, each created high-priority with dependency on F001 via `Ticket::add_dependency(Role::Sa, tid("F001"))`. They represent prompt-system defects; CXA-F022's work is not four code fixes but the verification loop that proves each one closed.
+A bug "gates feature F001" when it is type `Bug` and its dependency set contains id `F001`. That predicate is computed by `gating_bugs()` over a [`ProjectState`](crates/application/src/state/mod.rs). The acceptance fixtures create four such bugs — B1101–B1104 — each high priority with an F001 dependency added via `Ticket::add_dependency(Role::Sa, tid("F001"))`.
 
-The burn-down is complete (`burndown_complete()`, line 91) iff **all three** hold:
+The burn-down is complete (`burndown_complete()`) iff all three hold:
 
-1. Every gating bug has status `Verified` (and none remains `Open` or `Fixed`).
-2. Every one carries its own root-cause regression PASS in `ticket_evidence`: label starts with `REGRESSION TEST`, and detail contains `PASS`, `reproduces`, and `root cause`, while containing none of the masking words `symptom`, `workaround`, or `incidentally`.
+1. Every gating bug has status `Verified`, and none remains Open or Fixed.
+2. Each carries its own root-cause regression PASS in `ticket_evidence`: evidence label starts with `REGRESSION TEST`, detail contains both "reproduces" and "root cause", and contains none of the masking words "symptom", "workaround", or "incidentally".
 3. No re-opened copy of an already-cleared bug exists — a new Open/Fixed bug sharing a cleared title still gates F001 and blocks closure.
 
-**Production path.** The acceptance criteria are driven through the real use case in `RunTestUseCase::execute` (`crates/application/src/use_cases/run_test.rs:61`). When TEST runs and a previously-`Fixed` bug does not resurface as a newly filed bug this pass (`passed`, lines 159–168), TEST promotes it to Verified (line 196) *and* records provenance via `state.add_evidence(id, "test", "REGRESSION TEST", "...PASS on current master... root cause fixed at source.")` (lines 205–211). That recorded evidence is exactly what AC#2/#3 demand; promoting without recording it fails the gate red-for-the-right-reason.
+**Production path.** AC#2/#3 are driven through the real use case (see `ac2_ac3_production_verification_records_regression_evidence`), not just fixtures. When [`RunTestUseCase::execute()`](crates/application/src/use_cases/run_test.rs) runs and a previously-`Fixed` bug does not resurface as a newly filed bug that pass (`passed`, run_test.rs), TEST promotes it to Verified *and* records provenance via `state.add_evidence(id.to_string(), "test", "REGRESSION TEST", "...root cause fixed at source.")`. Promoting without recording that evidence fails red-for-the-right-reason pre-F022.
 
-**Prompt invariants.** AC#5 guards what F001 actually owns: every run still composes its full system prompt as BASE + ENGINEERING_STANDARDS + role section via `system_prompt(role)` (`prompts.rs:343`) — order and membership unchanged by any fix.
+**Prompt invariants.** AC#5 guards what F001 actually owns: every run composes its full system prompt as BASE + ENGINEERING_STANDARDS + role section through [`system_prompt(role)`](crates/application/src/prompts.rs). Order and membership must be unchanged by any fix; an optional per-project override seam ([`compose_role_system()`](crates/application/src/prompts_resolve.rs)) replaces only the role body while those two invariants survive (`g4`).
 
 ## Usage
 
 Run the acceptance gate to see whether all four bugs are burned down:
 
-```
+```bash
 cd crates/app
 cargo test --test burndown_f022_gate
 ```
 
-This runs all acceptance tests plus AC#5 and the production-path end-to-end check:
-`ac1_all_four_bugs_verified_and_none_open_or_fixed`, `ac2_ac3_production_verification_records_regression_evidence`, `ac4_subset_leaves_burn_down_in_progress`, and the others. Run just AC#5 or the F022 unit guards directly:
+This runs all acceptance tests plus AC#5 and the production-path end-to-end check (`ac1_all_four_bugs_verified_and_none_open_or_fixed`, `ac2_ac3_production_verification_records_regression_evidence`, etc.). Run just one contract:
 
-```
+```bash
 cd crates/app && cargo test --test burndown_f022_gate ac5_system_prompt_still_composes_base_standards_role
-cargo test -p coxagent-application prompts::system_prompt_composition_tests   # unit guards added in commit ec702c3
 ```
 
-Production-path end-to-end proof (drives real TEST verification against an in-memory store with one Fixed gating bug):
+The g1–g4 fix contracts live in their own integration suite:
+
+```bash
+cd crates/app && cargo test -p coxagent-application prompts_resolve
+```
+
+The production-path proof drives real TEST verification against an in-memory store seeded with one Fixed gating bug:
 
 ```rust
 // ac2_ac3_production_verification_records_regression_evidence() seeds state,
-// runs RunTestUseCase against NoNewBugs engine ("[]" stdout), then asserts:
-assert_eq!(s.ticket(&id).status(), Status::Verified);       // promoted
-assert!(recorded_regression_pass(&s, &id));                 // evidence recorded
+// runs RunTestUseCase against NoNewBugs ("[]"), then asserts:
+assert_eq!(s.ticket(&id).status(), Status::Verified);   // promoted Fixed → Verified
+assert!(recorded_regression_pass(&s, &id));             // own root-cause PASS recorded
 ```
 
 ## Interface
 
-No public HTTP endpoints or CLI flags were added; this ticket tightens existing domain logic. Relevant interfaces:
+No public HTTP endpoints or CLI flags were added; CXA-F022 tightens existing domain logic. Relevant interfaces:
 
 | Item | Location | Notes |
 |------|----------|-------|
-| `RunTestUseCase::execute()` | run_test.rs:61 | Returns filed ids; promotes Fixed→Verified + records regression evidence |
-| `.add_evidence(ticket, kind, label, detail)` | state/mod.rs:437 | Appends to bounded per-ticket list (6 max); used by TEST at run_test.rs:205 |
-| `.ticket_evidence` | state/mod.rs:232 | `<TicketIdString>` → Vec\<Evidence\>; rendered by dashboard / required by inbox |
-| struct Evidence { kind, label, detail } | state/work.rs:224 | kind ∈ screenshot\|api\|test\|waived |
-| `.post_comment(author, body)` | state/mod.rs:625 | Deferral notes for missing evidence / human gate |
+| `RunTestUseCase::execute()` | use_cases/run_test.rs:61 | Runs TEST agent; files discovered bugs; promotes Fixed→Verified + records REGRESSION TEST evidence |
+| `.add_evidence(ticket_id_string(), kind, label, detail)` | state/mod.rs:437–450 | Appends to a bounded per-ticket list (max 6, oldest evicted); caps label at 120 chars and detail at 1200 chars |
+| `.ticket_evidence` — `BTreeMap<String, Vec<Evidence>>` keyed by ticket id string | field on ProjectState (state/mod.rs:232) | Rendered by the dashboard / required by the inbox |
+| struct [`Evidence { kind, label, detail }`](crates/application/src/state/work.rs) — `kind ∈ screenshot\|api\|test\|waived` | state/work.rs:224–231 |
 
-Regression-evidence contract consumed by the gate (`recorded_regression_pass()`, burndown_f022_gate.rs:59):
-label prefix = "REGRESSION TEST"; detail must contain "PASS", "reproduces", "root cause"; must NOT contain "symptom"/"workaround"/"incidentally".
+Regression-evidence contract consumed by the gate (`recorded_regression_pass()`): label prefix must be `REGRESSION TEST`; detail must contain `PASS`, `reproduces`, and `root cause`, and must NOT contain any of `symptom`, `workaround`, or `incidentally`.
 
 ## Configuration
 
-No configuration settings change CXA-F022's behaviour directly. Two existing knobs shape *when* promotion happens upstream of evidence recording:
+No configuration settings change CXA-F022's burn-down logic directly — it is hard-coded domain rules in the gate. Two existing knobs shape *when* promotion happens upstream of evidence recording:
 
-| Setting | Default | Effect on verification path |
-|---------|---------|----------------------------|
-| None for CXA-F022 specifically | — | Burn-down logic is hard-coded domain rules |
-| workflow.human.gate_verify (`Config`) | off (`Config::default`) | If on at run_test.rs:187–194 — promotion pauses at Fixed awaiting human verdict even after REGRESSION TEST evidence attaches |
+| Setting | Default (`Config::default`) | Effect on verification path |
+|---------|----------------------------|------------------------------|
+| `deploy.host_port` | none (absent) | With a host port set, `gate_on = self.config.deploy.host_port.is_some()` becomes true (run_test.rs) and promotion defers until DoD evidence is attached to `.ticket_evidence[id]`. Absent port → no such deferral. |
+| `workflow.human.gate_verify` (`HumanConfig`) | off (`false`) | When on (run_test.rs:187–194), TEST stops at "evidence attached" and a human renders the verdict from their inbox; the ticket stays Fixed until then. |
 
-The deploy-based DoD deferral also checks existence of any entry in `.ticket_evidence[id]` before promoting (run_test.rs:176).
+The burn-down acceptance criteria themselves are code constants in `burndown_f022_gate.rs`, not configurable data.
 
 ## Edge cases and limits
 
-This ticket deliberately does **not** perform code fixes for symptoms themselves beyond guarding composition; its scope is proving each gating fix has its own passing root-cause regression test.
+CXA-F022 deliberately does **not** perform code fixes for the prompt-system symptoms themselves beyond guarding composition; its scope is proving each gating fix has its own passing root-cause regression test.
+
 How it fails:
-- A Verified bug lacking its own recorded root-cause PASS → not counted cleared (**AC#2/#3**).
+- A Verified bug lacking its own recorded root-cause PASS → not counted cleared (**AC#2/#3**, including via production path).
 - Only some of the four cleared → burn-down stays in progress (**AC#4a**: clearing just one asserts false).
 - A re-opened copy sharing a cleared title appears → closure blocked even when all four originals are Verified (**AC#4b**, uses id B1199 titled "prompt defect B1101").
 - Overwriting/masking language ("symptom", "workaround", "incidentally") disqualifies otherwise-PASSing detail.
-Evidence is bounded server-side to 6 per ticket with capped text (`add_evidence`, state/mod.rs:437–449), so old entries can be evicted once full.
-The fixture ids live only in this repo's tests; there are no persisted project tickets for them today.
+- An empty gating-bug set reads as not-complete rather than done (`burndown_complete()` returns false when there are no gating bugs).
+
+Limits:
+- Evidence is bounded server-side to 6 per ticket with capped text (`add_evidence`, state/mod.rs:437–450), so old entries can be evicted once full.
+- The fixture ids B1101–B1104 live only in this repo's tests today; there are no persisted project tickets for them.
+- The F001 work lives on branch `feat/CXA-F022` (commit ec702c3 adds unit-test guards); it is **not** merged into current main.
 
 ## Code map
 
-- crates/app/tests/burndown_f022_gate.rs — Executable acceptance criteria for all ACs; fixture factory (`gating_bug`, `fresh_state` with B1101–B1104), predicates (`gating_bugs`, `recorded_regression_pass`, `reopened_copy_exists`, `burndown_complete`), plus production-path store (`MemStore`) / engine (`NoNewBugs`) doubles.
-- crates/application/src/use_cases/run_test.rs — Production TEST loop; promotes Fixed→Verified and records REGRESSION TEST provenance (lines 195–213) satisfying AC#2/#3 through the real use case.
-- crates/application/src/prompts.rs — BASE (:6), ENGINEERING_STANDARDS (:60), role-section constants PO/SM/BA/SA/TEST (:106+:243), and system_prompt (:343) whose BASE + standards + role composition AC#5 protects; carries F022's own unit-test module `system_prompt_composition_tests` added by commit ec702c3 at :1622+.
+- crates/app/tests/burndown_f022_gate.rs — Executable acceptance criteria for every AC (#1–#5). Fixture factory (`gating_bug`, `fresh_state` seeding B1101–B1104), predicates (`gating_bugs`, `recorded_regression_pass`, `reopened_copy_exists`, `burndown_complete`), plus production-path doubles (`MemStore`, engine double).
+- crates/application/src/prompts_resolve.rs — F001 override seam: role-key validation (`is_valid_role_key`), loader (`load_role_override`), pure precedence decision (`resolve_role_body`) and composer that preserves BASE + ENGINEERING_STANDARDS invariant (`compose_role_system`) — where g1–g4 root causes are fixed.
+- crates/application/tests/prompts_resolve.rs — g1–g4 regression tests over that resolver (missing override → embedded default; stray key rejected; blank counts absent; invariants survive role replacement).
+- crates/application/src/prompts.rs — Embedded defaults BASE / ENGINEERING_STANDARDS / role constants and [`system_prompt(role)`](crates/application/src/prompts.rs) (:343). Branch feat/CXA-F022 adds a dedicated unit module here pinning composition.
+- crates/application/src/use_cases/run_test.rs — Production TEST loop that promotes Fixed→Verified while recording REGRESSION TEST provenance (:195–213).
 
 ## Related
 
-Other wiki pages that touch adjacent surface:
-- product/cxa-f021 (in this space) — config schema-drift gate over project config, the same source processed alongside prompt rollout context.
+Other pages touching adjacent surface:
+- product/cxa-f021 (this space) — config schema-drift gate over project config fields such as the host port that upstream gates `gate_on` in run_test.rs.
 
-Related code:
-- The same prompt-composition invariant is asserted in an integration test over the resolver path: crates/application/tests/prompts_resolve.rs:150 ("F001 invariant: BASE first, then ENGINEERING_STANDARDS"). AC#5 (burndown_f022_gate.rs:229) and the F022 unit module both pin the identical composition on `system_prompt`.
-- Related ticket chain referenced by this burn-down's mechanics: CXA-F021 (this space), sharing project-config surface. Implementation commit for F022's regression guards: ec702c3 on branch feat/CXA-F022 (not yet merged to main).
+Related code and tickets:
+- The same prompt-composition invariant is asserted in an integration test over the resolver path: crates/application/tests/prompts_resolve.rs (`g4_base_and_engineering_invariants_survive_even_when_role_replaced`) pins BASE first then ENGINEERING_STANDARDS. AC#5 (burndown_f022_gate.rs) pins the identical composition on `system_prompt`.
+- Implementation commit for F022's regression guards: `ec702c3` on branch `feat/CXA-F022` (adds a dedicated unit-test module to prompts.rs). Not yet merged to main.
 

@@ -39,7 +39,7 @@ If you are an operator debugging one of these tickets by hand:
 ```sh
 # Reproduce exactly what the adapter runs:
 cd <project-codebase>
-PG_PASSWORD=... COXAGENT_ADMIN_PASSWORD=... \
+PG_PASSWORD=<your-pg-secret> COXAGENT_ADMIN_PASSWORD=<your-admin-secret> \
   docker compose -p cox-<parent>-<dir> up -d --build
 
 # See why bootstrap failed after start:
