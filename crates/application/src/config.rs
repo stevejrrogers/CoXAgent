@@ -344,6 +344,10 @@ fn default_max_open_prs() -> u32 {
     4
 }
 
+fn default_max_changed_lines() -> usize {
+    3000
+}
+
 fn default_sprint_len() -> u64 {
     10
 }
@@ -570,6 +574,11 @@ pub struct GitConfig {
     /// the brake that prevents cascade merge conflicts. 0 = unlimited.
     #[serde(default = "default_max_open_prs")]
     pub max_open_prs: u32,
+    /// Largest diff (changed lines) the SA will auto-merge without a human.
+    /// A change larger than this is approved but held for a human to land.
+    /// 0 = no size bound (never hold for size alone). Default 3000.
+    #[serde(default = "default_max_changed_lines")]
+    pub max_changed_lines: usize,
     /// Absolute URL of the hub the runner reports PR/review activity to, e.g.
     /// `http://localhost:4000`. Empty = the runner uses the loopback URL on
     /// `deploy.host_port` (the same hub it serves). The runner authenticates
@@ -609,6 +618,7 @@ impl Default for GitConfig {
             auto_merge: false,
             require_ci: true,
             max_open_prs: default_max_open_prs(),
+            max_changed_lines: default_max_changed_lines(),
             server_url: String::new(),
         }
     }
@@ -625,6 +635,47 @@ pub struct ReleasesConfig {
     /// no matter how many milestones have been reached.
     #[serde(default)]
     pub enabled: bool,
+}
+
+/// Version of the persisted `coxagent.json` schema this build understands.
+///
+/// A document carrying a `schema_version` HIGHER than this is written by a
+/// future build: load refuses it rather than accepting a shape it cannot
+/// represent or defaulting it away (the same fail-closed posture state.json
+/// already has via `SCHEMA_VERSION` / `parse_checked`). Documents that omit
+/// `schema_version` predate the anchor and load as prior-version state.
+pub const CONFIG_SCHEMA_VERSION: u32 = 1;
+
+/// Gap-detection coverage policy. `enabled` switches the coverage gate on/off;
+/// `threshold` is the minimum gap-free depth (in cycles) a codebase must hold
+/// before the pass stops flagging it — the knob the dashboard edits.
+///
+/// COX-B043: defaults are set by an EXPLICIT container `Default`
+/// (`enabled = true, threshold = 3`), never Rust's derived zero-value, so an
+/// unset knob is *documented-and-true*, not silently `{false, 0}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CoverageConfig {
+    #[serde(default = "default_coverage_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_coverage_threshold")]
+    pub threshold: u32,
+}
+
+fn default_coverage_enabled() -> bool {
+    true
+}
+
+fn default_coverage_threshold() -> u32 {
+    3
+}
+
+impl Default for CoverageConfig {
+    fn default() -> Self {
+        CoverageConfig {
+            enabled: default_coverage_enabled(),
+            threshold: default_coverage_threshold(),
+        }
+    }
 }
 
 /// Top-level configuration persisted as `coxagent.json`.
@@ -657,6 +708,9 @@ pub struct Config {
     /// Release pipeline settings (automated tag + Release chore per milestone).
     #[serde(default)]
     pub releases: ReleasesConfig,
+    /// Gap-detection coverage policy (enabled state + threshold).
+    #[serde(default)]
+    pub coverage: CoverageConfig,
 }
 
 #[cfg(test)]

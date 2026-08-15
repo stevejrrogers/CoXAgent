@@ -47,6 +47,10 @@ pub const AGENTS_CHANNEL: &str = "agents";
 /// Where work waiting on a PERSON is announced. Separate from `agents` so a
 /// human can watch decisions without reading the whole machine's chatter.
 pub const APPROVALS_CHANNEL: &str = "approvals";
+/// Where incident post-mortems land (CXA-F012): a single room for outage
+/// analysis so someone watching for service problems isn't sifting `#general`
+/// or re-reading routine deploy chatter.
+pub const INCIDENTS_CHANNEL: &str = "incidents";
 
 fn general_channel() -> String {
     GENERAL_CHANNEL.to_owned()
@@ -153,6 +157,16 @@ pub struct ProjectState {
     /// forward, so sprints keep rolling regardless of restarts.
     #[serde(default)]
     pub sprint_cycle: u64,
+    /// Persistent, restart-safe project-cycle counter — the authoritative cycle
+    /// number, advanced once per leader cycle and reused for scoring + cadence.
+    /// The per-process counter resets to 1 every worker launch, so both the
+    /// scorecard key and the `% N` cadence (codegraph, debt sweep, BA, scrum
+    /// topic) drifted after a restart. This counter lives in state, only moves
+    /// forward, and is unbounded (it is NOT truncated by the cycle_scores 100-cap),
+    /// so cadence positions and `sweeps_done` values stay consistent across
+    /// restarts. Non-leader runners ignore it — their reports are un-scored.
+    #[serde(default)]
+    pub cycle: u64,
     /// The PO's goal for the upcoming sprint (human-set from the Scrum view). When
     /// set it becomes the sprint goal on the next roll-over and steers the BA's
     /// proposals, so the team works toward what the PO asked for — not just
@@ -331,7 +345,23 @@ pub struct ProjectState {
     /// Outcome of the most recent auto-rollback attempt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_rollback: Option<RollbackStatus>,
+    /// Rolling incident history (CXA-F012): one post-mortem per deploy
+    /// revision or incident, newest last, capped so a long outage storm cannot
+    /// grow state without bound. The durable inspection record that links a
+    /// rollback to its root-cause prevention ticket and team lesson.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub incidents: Vec<IncidentRecord>,
+    /// Commit shas blacklisted from known-good promotion (CXA-F012): after a
+    /// rollback the failing sha is pinned here so the self-healing loop cannot
+    /// re-promote the SAME broken commit every cycle until its root-cause bug
+    /// is verified. Consult-only against state — no git ref changes.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub rolled_back_commits: std::collections::BTreeSet<String>,
 }
+
+/// Cap on how many incident records are kept (newest first). One per deploy
+/// revision means a storm of failures still stays bounded and readable.
+pub const MAX_INCIDENTS: usize = 12;
 
 impl Default for ProjectState {
     fn default() -> Self {
@@ -368,6 +398,7 @@ impl Default for ProjectState {
             decisions: Vec::new(),
             refactor_mode: false,
             sprint_cycle: 0,
+            cycle: 0,
             sprint_goal: String::new(),
             last_digest_day: String::new(),
             pr_fix_attempts: std::collections::BTreeMap::new(),
@@ -402,6 +433,8 @@ impl Default for ProjectState {
             in_rollback: false,
             last_good_deploy: None,
             last_rollback: None,
+            incidents: Vec::new(),
+            rolled_back_commits: std::collections::BTreeSet::new(),
         }
     }
 }

@@ -876,10 +876,47 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 Ok(_) | Err(_) => {}
             }
 
-            // Regression-test gate: a BUG fix that touches no test is a fix
-            // on faith. Mechanical check over the working diff; one bounded
-            // repair pass to add the missing test.
+            // Phantom-bug guard: a BUG ticket that ends with NO build-affecting
+            // change against an already-green tree is not a reproducible bug —
+            // typically one already fixed by a merged change, or a report that
+            // never matched main. The suite is green here by construction
+            // (every earlier gate already returned on red), so the empty diff
+            // is the genuine "no bug exists on main" signal. Previously the
+            // regression-test gate below demanded a test that "fails without
+            // your fix" — impossible when there is no fix — and the ticket was
+            // re-queued to burn a full investigation every sprint (the
+            // CXA-B002/B003/B004 loop). Close it Rejected with a finding, via the
+            // orchestrator's `System` role (a transition DEV is not allowed to
+            // make), so it leaves `open_bug_candidates` and stays in history.
             let tree = self.working_tree().await;
+            if self.mode == DevMode::Bug
+                && gates::build_relevant(&tree.changed_paths).is_empty()
+            {
+                let msg = format!(
+                    "{id}: not reproducible — DEV ran against a green tree and produced no \
+                     code change. The bug does not reproduce on main (likely already resolved \
+                     by a merged fix). Closing as not-reproducible so the sprint stops \
+                     re-investigating it."
+                );
+                let id_c = id.clone();
+                crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+                    transition(s, &id_c, Role::System, Status::Rejected)
+                        .map_err(|e| PortError::Corrupt(e.to_string()))?;
+                    s.post_comment("SYSTEM", &msg, Some(id_c.to_string()));
+                    s.ticket_journal.remove(&id_c.to_string());
+                    s.cost_holds.remove(&id_c.to_string());
+                    s.cost_approved.remove(&id_c.to_string());
+                    Ok(())
+                })
+                .await?;
+                tracing::info!(
+                    "DEV bug pass: {id} closed not-reproducible (no change on green tree)"
+                );
+                if let Some(p) = &self.phase {
+                    p(None);
+                }
+                return Ok(Some(id));
+            }
             if self.mode == DevMode::Bug
                 && !gates::diff_is_docs_only(&tree)
                 && !gates::diff_touches_tests(&tree)
@@ -1138,10 +1175,18 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
     }
 
     fn candidates(&self, state: &ProjectState) -> Vec<TicketId> {
-        match self.mode {
+        let mut ids = match self.mode {
             DevMode::Bug => open_bug_candidates(state),
             DevMode::Feature => ready_feature_candidates(state),
-        }
+        };
+        // Real-world scope gate: DEV only pulls tickets the team committed to
+        // the current sprint (PO/SM aligned via the sprint-board action), plus
+        // emergency open bugs. In Kanban mode (no sprint open) any ready
+        // ticket stays in scope. A feature/chore the PO/SM has not committed
+        // to an open sprint is out of scope — DEV must ask to have it added
+        // before picking it up.
+        ids.retain(|id| crate::selection::in_dev_scope(state, id));
+        ids
     }
 }
 
