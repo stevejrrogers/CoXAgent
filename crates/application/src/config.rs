@@ -344,6 +344,10 @@ fn default_max_open_prs() -> u32 {
     4
 }
 
+fn default_max_changed_lines() -> usize {
+    3000
+}
+
 fn default_sprint_len() -> u64 {
     10
 }
@@ -570,6 +574,11 @@ pub struct GitConfig {
     /// the brake that prevents cascade merge conflicts. 0 = unlimited.
     #[serde(default = "default_max_open_prs")]
     pub max_open_prs: u32,
+    /// Largest diff (changed lines) the SA will auto-merge without a human.
+    /// A change larger than this is approved but held for a human to land.
+    /// 0 = no size bound (never hold for size alone). Default 3000.
+    #[serde(default = "default_max_changed_lines")]
+    pub max_changed_lines: usize,
     /// Absolute URL of the hub the runner reports PR/review activity to, e.g.
     /// `http://localhost:4000`. Empty = the runner uses the loopback URL on
     /// `deploy.host_port` (the same hub it serves). The runner authenticates
@@ -609,6 +618,7 @@ impl Default for GitConfig {
             auto_merge: false,
             require_ci: true,
             max_open_prs: default_max_open_prs(),
+            max_changed_lines: default_max_changed_lines(),
             server_url: String::new(),
         }
     }

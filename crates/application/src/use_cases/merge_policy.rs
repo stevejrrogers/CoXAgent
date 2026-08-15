@@ -54,8 +54,7 @@ pub fn ticket_id_in(title: &str) -> Option<String> {
 /// green suite says the code works, not that a 2,000-line change or a rewrite
 /// of the release pipeline should go in unwatched.
 #[must_use]
-pub fn needs_human_eyes(diff: &str) -> Option<String> {
-    const MAX_CHANGED_LINES: usize = 800;
+pub fn needs_human_eyes(diff: &str, max_changed_lines: usize) -> Option<String> {
     const SENSITIVE: &[&str] = &[
         ".github/workflows",
         "Dockerfile",
@@ -72,7 +71,7 @@ pub fn needs_human_eyes(diff: &str) -> Option<String> {
                 && !l.starts_with("---")
         })
         .count();
-    if changed > MAX_CHANGED_LINES {
+    if max_changed_lines > 0 && changed > max_changed_lines {
         return Some(format!(
             "{changed} changed lines is past what lands unreviewed"
         ));
@@ -383,13 +382,19 @@ mod merge_guard_tests {
     #[test]
     fn a_huge_change_or_one_that_moves_the_pipeline_waits_for_a_person() {
         let small = "diff --git a/src/a.rs b/src/a.rs\n+++ b/src/a.rs\n+let x = 1;\n-let x = 0;\n";
-        assert!(needs_human_eyes(small).is_none());
+        // 3000 is the configurable default; a 900-line change is under it, so it
+        // is NOT held for size alone (but is still held for a sensitive path).
+        assert!(needs_human_eyes(small, 3000).is_none());
+        assert!(needs_human_eyes(small, 0).is_none());
 
         let huge = format!(
             "diff --git a/src/a.rs b/src/a.rs\n+++ b/src/a.rs\n{}",
             "+line\n".repeat(900)
         );
-        assert!(needs_human_eyes(&huge)
+        // Under the default 3000 limit a 900-line diff is eligible to land.
+        assert!(needs_human_eyes(&huge, 3000).is_none());
+        // A lower configured bound holds it for size.
+        assert!(needs_human_eyes(&huge, 800)
             .expect("held")
             .contains("changed lines"));
 
@@ -397,7 +402,7 @@ mod merge_guard_tests {
         // change itself unwatched.
         let ci = "diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml\n\
                   +++ b/.github/workflows/ci.yml\n+  run: cargo test\n";
-        assert!(needs_human_eyes(ci)
+        assert!(needs_human_eyes(ci, 3000)
             .expect("held")
             .contains(".github/workflows"));
     }
