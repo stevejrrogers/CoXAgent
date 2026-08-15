@@ -15,7 +15,7 @@ The feature has three moving parts:
 
 2. **The schema anchor.** [`CONFIG_SCHEMA_VERSION = 1`] names what this build understands. A document carrying a higher numeric `schema_version` was written by a newer build; loading it would map fields this build cannot represent onto today's defaults.
 
-3. **The refuse-at-load gate.** [`parse_config()`] first parses the document as raw JSON and checks its top-level numeric `schema_version`. If it exceeds [`CONFIG_SCHEMA_VERSION`], parsing returns a [`ConfigParseError`] naming field `schema_version`, before serde ever maps it onto types. A document with no marker predates/matchs this build and loads normally — absence is not corruption (COX-B043).
+3. **The refuse-at-load gate.** [`parse_config()`] first parses the document as raw JSON and checks its top-level numeric `schema_version`. If it exceeds [`CONFIG_SCHEMA_VERSION`], parsing returns a [`ConfigParseError`] naming field `schema_version`, before serde ever maps it onto types. A document with no marker predates/matches this build and loads normally — absence is not corruption (COX-B043).
 
 End-to-end load flow:
 
@@ -28,7 +28,8 @@ app/src/lib.rs ── load_config_with_probe(state_dir)      [adapter]
         ▼                             │ fs::read_to_string → text
 app/src/config_load.rs                ▼
    .config                    parse_config(text)           [pure decision]
-                                      │  refuse_future_schema? → Err(name "schema_version")
+                                      │  header schema_version check →
+                                      │    Err("schema_version") if future build wrote it
                                       ▼          else serde → Config (coverage filled)
                               health port probe + self-heal host_port
 ```
@@ -43,7 +44,7 @@ Hot-reload path (a Settings edit reaching the next cycle without restart): each 
 {
   "coverage": {
     "enabled": true,
-    "threshold": 3   // uncovered functions per module before a gap chore is proposed
+    "threshold": 3   // see Edge cases: exact unit of `threshold` is not yet pinned
   }
 }
 ```
@@ -104,7 +105,7 @@ Settings that change behaviour (all under Project > Settings, persisted to the r
 |---------|---------|--------|
 | `schema_version` (top-level integer) | absent ⇒ treated as prior/matching build; `> CONFIG_SCHEMA_VERSION` ⇒ load refused, error names `schema_version` | config-drift gate |
 | `coverage.enabled` | `true` | whether gap-detection proposes coverage chore tickets at all (CXA-F007 consumer wiring) |
-| `coverage.threshold` | `3` | a module must have MORE than this many uncovered functions before a gap chore is proposed |
+| `coverage.threshold` | `3` | how large a gap must be before a module is flagged; **unit is unpinned** — config.rs's doc comment says "minimum gap-free depth (in cycles)", while the TDD contract (config_drift_gate.rs) says "uncovered functions per module". Resolve when CXA-F007 wires the consumer. |
 
 There are no new env vars or CLI flags introduced by this ticket; host-port healing and the deploy health gate live under the pre-existing `deploy.*` settings.
 
@@ -113,12 +114,13 @@ There are no new env vars or CLI flags introduced by this ticket; host-port heal
 - **Refuses only NEWER schemas.** A document whose version matches or predates [`CONFIG_SCHEMA_VERSION`] always loads; migrating older shapes relies on per-field serde defaults filling absent subfields, not an explicit migration table in this ticket.
 - **No runtime consumer yet.** CXA-F021 lands only the settings *surface* — types, defaults, and the drift gate. No runtime pass reads `.coverage.enabled/.threshold today outside tests; wiring that consumption belongs to CXA-F007 / follow-up work referenced in docs/CXA-B004-config-initializer.md.
 - **Malformed marker.** A top-level object that is not valid JSON fails parse with field `<document>`; a non-numeric / non-object `schema_version` is simply not treated as a future version (only an integer strictly greater than [`CONFIG_SCHEMA_VERSION`] triggers refusal).
+- **Threshold unit not pinned.** The on-disk value round-trips and defaults correctly, but its meaning is contested in code: `CoverageConfig`'s doc comment (config.rs) calls it "minimum gap-free depth (in cycles)", while config_drift_gate.rs describes it as "uncovered functions per module". No runtime consumer exists yet, so both readings load fine; CXA-F007 must settle one before wiring.
 - **Never rewrites on refusal.** When schema drift or any unrepresentable value breaks load, it aborts naming the field; it never falls back to [`Config::default()`], which would silently empty governance allowlists/budgets (COX-B043).
 
 ## Code map
 
-- `crates/application/src/config.rs` — the surface: [`CoverageConfig`], its explicit container `Default` + per-field serde default fns (`default_coverage_enabled`, `default_coverage_threshold`), [`CONFIG_SCHEMA_VERSION = 1`], and the `pub coverage: CoverageConfig` field on top-level [`Config`] with tests including a partial-section test.
-- `crates/application/src/config_parse.rs` — the drift gate: `parse_config()` calls `refuse_future_schema(text)` before deserializing, returning a [`ConfigParseError`] naming field `schema_version` when the persisted version exceeds supported. Includes malformed-document / bad-field tests.
+- `crates/application/src/config.rs` — the surface: [`CoverageConfig`], its explicit container `Default` + per-field serde default fns (`default_coverage_enabled`, `default_coverage_threshold`), [`CONFIG_SCHEMA_VERSION = 1`], and the `pub coverage: CoverageConfig` field on top-level [`Config`]. Its unit-test module covers default engine mapping, JSON round-trip, and omitted-section handling.
+- `crates/application/src/config_parse.rs` — the drift gate: `parse_config()` parses the raw JSON header first and refuses a `schema_version` strictly greater than supported (inlined, no separate helper fn), returning a [`ConfigParseError`] naming field `schema_version`. Includes malformed-document / bad-field tests.
 - `crates/app/src/config_load.rs` — IO adapter: reads `<state-dir-parent>/coxagent.json`, calls `parse_config`, self-heals host_port, derives the deploy health probe (`load_config_with_probe`, `heal_host_port`, `probe_from_raw`) with its own config-load tests.
 - `crates/app/src/lib.rs` — composition root + hot reload: constructs the hub-level Config incl. the new coverage field (~line 646); the runner loop computes `config_content_hash(state_dir)` each cycle and on change runs `load_config_with_probe(state_dir)` + rebuild engine via (`build_engine`) then applies through (`uc.reload`) so a Settings edit lands next cycle without a restart.
 - crates/app/src/builders.rs — mirrors the same hash+reload detection for engine reuse during builds.
