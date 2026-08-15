@@ -31,14 +31,34 @@ fn has_open_chore(state: &crate::state::ProjectState) -> bool {
     })
 }
 
+/// Whether a previously filed "Debt sweep ..." chore was REJECTED — the team
+/// looked at the debt and opted out of paying it this time, or an automated
+/// gate marked it non-actionable. A rejected prior sweep must suppress any NEW
+/// cycle-numbered sweep: re-filing after a rejection just stacks one rejected
+/// chore per tick forever (127 and counting in production), because the debt
+/// it points at never gets cleared by a chore that is rejected instead of
+/// done. The cadence still logs the tick in `sweeps_done` for the scorecard,
+/// but no new ticket is spawned.
+#[must_use]
+fn has_rejected_sweep(state: &crate::state::ProjectState) -> bool {
+    use coxagent_domain::ticket::Status;
+    state.tickets.iter().any(|t| {
+        t.title().starts_with("Debt sweep") && t.status() == Status::Rejected
+    })
+}
+
 /// Pure decision rule for whether THIS tick should produce a scheduled tech-debt
 /// chore, computed from persisted state + the current cycle number alone — no IO
 /// behind it — so its cases read plainly in one place and unit-test independently:
 ///
-/// * true on a sweep-th tick (`cycle % 10 == 0`) with no open chore;
+/// * true on a sweep-th tick (`cycle % 10 == 0`) with no open chore and no
+///   previously-rejected sweep;
 /// * false on any other (non-sweep-th) tick;
 /// * false while any still-open "Debt sweep ..." chore exists;
-/// * true again once that prior chore reaches a terminal status.
+/// * true again once that prior chore COMPLETES (`Done`/`Verified`/`Documented`);
+/// * false forever once a prior sweep was REJECTED — re-filing after a rejection
+///   only piles up rejected chores, so the cadence records the tick but never
+///   spawns another ticket.
 // Production keeps this rule split across `file_debt_sweep`: the "%10 tick" gate
 // lives at its call site and each blocking case ends in a DIFFERENT side effect
 // (`sweeps_done` records a handled-but-not-filed cycle only on some paths), so a
@@ -54,7 +74,7 @@ pub(super) fn should_file_debt_sweep(state: &crate::state::ProjectState, cycle: 
     if state.sweeps_done.contains(&cycle) {
         return false;
     }
-    !has_open_chore(state)
+    !has_open_chore(state) && !has_rejected_sweep(state)
 }
 
 impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
@@ -196,6 +216,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             return;
         }
         let open_exists = has_open_chore(&state);
+        // A prior sweep that ended REJECTED suppresses any new sweep chore —
+        // re-filing after a rejection just stacks rejected chores every tick
+        // (the debt it tracks is never cleared by a chore that is rejected
+        // instead of done). Record the tick as handled; spawn no ticket.
+        if has_rejected_sweep(&state) {
+            self.note_swept(cycle).await;
+            return;
+        }
         if open_exists && !state.debt_signals.is_empty() {
             self.note_swept(cycle).await;
             return;
@@ -413,11 +441,17 @@ mod should_file_debt_sweep_tests {
     }
 
     #[test]
-    fn sweep_files_again_once_the_prior_reaches_terminal_rejected() {
+    fn sweep_is_suppressed_forever_after_a_rejected_prior_sweep() {
+        // A rejected sweep means the team opted out; re-filing a fresh
+        // cycle-numbered sweep just stacks rejected chores each tick. This is
+        // the regression-lock for the production bug (127 rejected sweeps).
         let prior = sweep_ticket(Status::Rejected);
-        // next tick (20) not yet swept; only cycle 10 was.
-        let state = state(vec![prior], vec![10]);
-        assert!(should_file_debt_sweep(&state, 20));
+        let st1 = state(vec![prior.clone()], vec![10]);
+        assert!(!should_file_debt_sweep(&st1, 20));
+        // ...and it stays suppressed on every later tick too.
+        let later = state(vec![prior], vec![10, 20, 30, 40, 50]);
+        assert!(!should_file_debt_sweep(&later, 60));
+        assert!(!should_file_debt_sweep(&later, 100));
     }
 
     #[test]
