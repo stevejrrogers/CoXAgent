@@ -12,7 +12,7 @@
 //! and unseen. Gates are unskippable by default; a config problem is locked to
 //! load time and named, not guessed at during a run.
 
-use crate::config::Config;
+use crate::config::{Config, CONFIG_SCHEMA_VERSION};
 
 /// A `coxagent.json` document that does not deserialize into a [`Config`],
 /// carrying the path of the field that broke it (e.g. `deploy.host_port`).
@@ -46,21 +46,32 @@ pub const WHOLE_DOCUMENT: &str = "<document>";
 /// outside `u16`, a string where a number belongs, an unknown engine, …).
 pub fn parse_config(text: &str) -> Result<Config, ConfigParseError> {
     let deserializer = &mut serde_json::Deserializer::from_str(text);
-    serde_path_to_error::deserialize(deserializer).map_err(|err| {
-        let path = err.path().to_string();
-        let inner = err.into_inner();
-        // Only a data error is ABOUT a field. A syntax/EOF failure never got
-        // far enough to be inside one, and the tracker renders that path as
-        // "?" — useless in a log line, so name what actually broke.
-        let field = match inner.classify() {
-            serde_json::error::Category::Data => path,
-            _ => WHOLE_DOCUMENT.to_owned(),
-        };
-        ConfigParseError {
-            field,
-            detail: inner.to_string(),
-        }
-    })
+    let cfg: Config =
+        serde_path_to_error::deserialize(deserializer).map_err(|err| {
+            let path = err.path().to_string();
+            let inner = err.into_inner();
+            // Only a data error is ABOUT a field. A syntax/EOF failure never got
+            // far enough to be inside one, and the tracker renders that path as
+            // "?" — useless in a log line, so name what actually broke.
+            let field = match inner.classify() {
+                serde_json::error::Category::Data => path,
+                _ => WHOLE_DOCUMENT.to_owned(),
+            };
+            ConfigParseError {
+                field,
+                detail: inner.to_string(),
+            }
+        })?;
+    if cfg.schema_version > CONFIG_SCHEMA_VERSION {
+        return Err(ConfigParseError {
+            field: "schema_version".to_owned(),
+            detail: format!(
+                "persisted schema {} is newer than supported {CONFIG_SCHEMA_VERSION}; upgrade coxagent",
+                cfg.schema_version
+            ),
+        });
+    }
+    Ok(cfg)
 }
 
 #[cfg(test)]
