@@ -85,7 +85,7 @@ Defaults come from named container defaults rather than Rust zero-value so an un
 | CoverageConfig.enabled | true (default_coverage_enabled) |
 | CoverageConfig.threshold | 3 (default_coverage_threshold) |
 
-It is carried as one field of the top-level Configuration struct above along with EngineMapping / GitConfig / WorkflowConfig / PolicyConfig / DeployConfig / ReleasesConfig . There is no CLI flag or runtime environment setting for this ticket; behavioural knobs surrounding load failure semantics live elsewhere per COX-B043 notes about fail-closed parse rather than silent defaults.
+`CoverageConfig` is carried as the `coverage` field of the top-level `Config` struct shown above, alongside EngineMapping / GitConfig / WorkflowConfig / PolicyConfig / DeployConfig / ReleasesConfig . There is no CLI flag or runtime environment setting for this ticket; load-failure semantics (fail closed rather than silently defaulting a corrupt document) follow COX-B043 and are enforced in `parse_config`. Note the schema anchor: newer persisted documents are refused at load time via a header-level check in `config_parse.rs` rather than a field on `Config`.
 
 ## Edge cases and limits
 
