@@ -390,7 +390,7 @@ pub fn escalation_route(history: &str, spec_gap: bool) -> EscalationRoute {
 
 #[cfg(test)]
 mod merge_guard_tests {
-    use super::{commits_scratch, competing_pr, needs_human_eyes};
+    use super::{commits_scratch, competing_pr, diff_landed_on_main, needs_human_eyes};
 
     #[test]
     fn a_branch_that_committed_agent_scratch_is_named_for_it() {
