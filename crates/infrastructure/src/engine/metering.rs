@@ -110,6 +110,13 @@ impl<E: AgentEnginePort> MeteringEngine<E> {
                 m.unconfined_requested_runs += 1;
                 m.last_sandbox_status = format!("unavailable: {reason}");
             }
+            // Neither counter moves: the agent never ran, so this is neither a
+            // confined run nor an unconfined one — counting it as either would
+            // overstate the work the host actually did. The status line is what
+            // makes it visible (COX-B016).
+            SandboxStatus::Refused(reason) => {
+                m.last_sandbox_status = format!("refused: {reason}");
+            }
         }
     }
 }

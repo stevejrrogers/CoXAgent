@@ -186,9 +186,21 @@ fn production_sources() -> Vec<PathBuf> {
     out
 }
 
+/// The process module and its `confined` submodule as one text: the retry
+/// policy lives in `proc/confined.rs`, but which file holds it is an internal
+/// detail — this guard is about whether the policy is IN THE BUILD at all, so
+/// it must not fail (or pass) merely because the code moved.
 fn proc_source() -> String {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../infrastructure/src/proc.rs");
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../infrastructure/src");
+    ["proc.rs", "proc/confined.rs"]
+        .iter()
+        .map(|rel| {
+            let path = dir.join(rel);
+            std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// COX-B022 failure mode 1: the fix is missing from the branch being built.

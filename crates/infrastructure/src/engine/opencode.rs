@@ -361,7 +361,10 @@ impl OpencodeEngine {
         sandbox: SandboxStatus,
     ) -> Result<AgentOutcome, PortError> {
         let mut cmd = cmd;
-        let mut child = crate::proc::spawn_confined(&mut cmd, sandbox)
+        // `sandbox` is re-bound to what the OS ACTUALLY applied: a Seatbelt
+        // profile it refused to apply leaves the outcome reporting `Refused`,
+        // never a confinement that never happened (COX-B016).
+        let (mut child, sandbox) = crate::proc::spawn_confined(&mut cmd, sandbox)
             .await
             .map_err(|e| PortError::Backend(format!("spawn opencode: {e}")))?;
         let out = child
