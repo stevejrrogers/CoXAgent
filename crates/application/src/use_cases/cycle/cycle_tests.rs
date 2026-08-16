@@ -277,6 +277,10 @@ struct SpyForge {
     mergeable: bool,
     merged: Mutex<Vec<u64>>,
     changes: Mutex<Vec<u64>>,
+    closed: Mutex<Vec<u64>>,
+    /// When `Some`, list two SAME-ticket PRs and serve per-PR diffs — the
+    /// competing-PR scenario. Tuples are `(number, title, diff)`.
+    competing: Option<Vec<(u64, String, String)>>,
 }
 #[async_trait::async_trait]
 impl ForgePort for SpyForge {
@@ -284,6 +288,22 @@ impl ForgePort for SpyForge {
         unimplemented!()
     }
     async fn list_open_prs(&self) -> Result<Vec<PullRequest>, PortError> {
+        if let Some(items) = &self.competing {
+            return Ok(items
+                .iter()
+                .map(|(n, t, _)| PullRequest {
+                    number: *n,
+                    title: t.clone(),
+                    head: format!("feat/{n}"),
+                    base: "main".to_owned(),
+                    url: String::new(),
+                    author: "coxagent-bot".to_owned(),
+                    ci: self.ci.clone(),
+                    mergeable: self.mergeable,
+                    created: String::new(),
+                })
+                .collect());
+        }
         Ok(vec![PullRequest {
             number: 7,
             title: "feat(X-1): add a".to_owned(),
@@ -296,7 +316,12 @@ impl ForgePort for SpyForge {
             created: String::new(),
         }])
     }
-    async fn pr_diff(&self, _: u64) -> Result<String, PortError> {
+    async fn pr_diff(&self, n: u64) -> Result<String, PortError> {
+        if let Some(items) = &self.competing {
+            if let Some((_, _, d)) = items.iter().find(|(num, _, _)| *num == n) {
+                return Ok(d.clone());
+            }
+        }
         Ok("+ added a line".to_owned())
     }
     async fn merge_pr(&self, n: u64) -> Result<(), PortError> {
@@ -307,7 +332,8 @@ impl ForgePort for SpyForge {
         self.changes.lock().expect("lock").push(n);
         Ok(())
     }
-    async fn close_pr(&self, _: u64) -> Result<(), PortError> {
+    async fn close_pr(&self, n: u64) -> Result<(), PortError> {
+        self.closed.lock().expect("lock").push(n);
         Ok(())
     }
 }
@@ -478,6 +504,91 @@ async fn sa_requests_changes_on_reject_and_never_merges_failing_ci() {
         .await;
     assert!(forge.merged.lock().expect("lock").is_empty());
     assert_eq!(*forge.changes.lock().expect("lock"), vec![7]);
+}
+
+#[tokio::test]
+async fn competing_prs_self_resolve_when_one_covers_the_other() {
+    // The live deadlock: two open PRs for the same ticket. #98's diff covers
+    // every file #89 touches, so the SA closes #89 (duplicate) and lets #98
+    // land — instead of holding both forever waiting on a human. This is what
+    // lets the ticket reach `shipped` and the scorecard reflect real output.
+    let forge = Arc::new(SpyForge {
+        ci: "passing".to_owned(),
+        mergeable: true,
+        competing: Some(vec![
+            (
+                89,
+                "fix(COX-1): the smaller subset fix".to_owned(),
+                "diff --git a/a.rs b/a.rs\n+let x = 1;\n".to_owned(),
+            ),
+            (
+                98,
+                "fix(COX-1): the covering fix".to_owned(),
+                "diff --git a/a.rs b/a.rs\n+let x = 1;\n+let y = 2;\n\
+                 diff --git a/b.rs b/b.rs\n+let z = 3;\n"
+                    .to_owned(),
+            ),
+        ]),
+        ..Default::default()
+    });
+    review_uc(Arc::clone(&forge), "approve", true)
+        .review_open_prs()
+        .await;
+    let merged = forge.merged.lock().expect("lock");
+    let closed = forge.closed.lock().expect("lock");
+    assert!(
+        merged.contains(&98),
+        "the covering fix #98 is the winner and lands: {merged:?}"
+    );
+    assert!(
+        closed.contains(&89),
+        "the duplicate #89 is closed, not parked on a human: {closed:?}"
+    );
+    assert!(
+        !merged.contains(&89) && !closed.contains(&98),
+        "the winner stays open to merge, the loser is never merged: {merged:?}/{closed:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_safe_subset_pr_is_not_held_by_a_load_bearing_competitor() {
+    // The real live pair: #89 is a sprawling same-ticket change that touches
+    // the pipeline (Cargo.toml → `needs_human_eyes` → unsafe), #98 is a small
+    // safe fix that is a strict subset of it. #98 must NOT be blocked by the
+    // risky sibling — it proceeds through normal review and lands.
+    let forge = Arc::new(SpyForge {
+        ci: "passing".to_owned(),
+        mergeable: true,
+        competing: Some(vec![
+            (
+                89,
+                "fix(COX-1): sprawling fix".to_owned(),
+                // Touches Cargo.toml → load-bearing → unsafe_change.
+                "diff --git a/Cargo.toml b/Cargo.toml\n+dep = \"1\"\n\
+                 diff --git a/src/lib.rs b/src/lib.rs\n+let x = 1;\n"
+                    .to_owned(),
+            ),
+            (
+                98,
+                "fix(COX-1): focused fix".to_owned(),
+                "diff --git a/src/lib.rs b/src/lib.rs\n+let x = 1;\n".to_owned(),
+            ),
+        ]),
+        ..Default::default()
+    });
+    review_uc(Arc::clone(&forge), "approve", true)
+        .review_open_prs()
+        .await;
+    let merged = forge.merged.lock().expect("lock");
+    let closed = forge.closed.lock().expect("lock");
+    assert!(
+        merged.contains(&98),
+        "the safe focused fix #98 lands — not held by the sprawling #89: {merged:?}"
+    );
+    assert!(
+        !closed.contains(&89),
+        "the load-bearing #89 is never auto-closed: {closed:?}"
+    );
 }
 
 // ---- COX-F001: auto-rollback to last known-good deploy on failure ----
@@ -2167,5 +2278,137 @@ async fn malformed_host_port_fails_the_gate_instead_of_skipping_it() {
         deploy.health_check_calls.load(Ordering::SeqCst),
         0,
         "a malformed host_port must fail before ever probing — there's nothing valid to probe"
+    );
+
+}
+
+// --- CXA-F012: incident post-mortem & prevention loop after rollback ------
+//
+// RED tests encoding the acceptance criteria ONLY (no implementation here).
+// Each scenario drives the same full-cycle + stubs as the COX-F001 rollback
+// suite above and asserts on observable seams CXA-F012 is expected to use.
+// Today NOTHING produces a post-mortem, so every test here fails for exactly
+// the right reason and goes green once the feature lands.
+//
+// Contract markers CXA-F012 must emit (documented per test):
+//   - an in-app chat message posted into an INCIDENTS channel whose body names
+//     a post-mortem — and, when rollback was skipped for stale/migration_blocked,
+//     explicitly marked 'rolled-forward/stale' rather than 'rolled-back';
+//   - a NotifierPort event naming that incident post-mortem;
+//   - a root-cause PREVENTION ticket filed from health/test evidence + shipped
+//     diff — deliberately distinct from the existing 'Deploy failing' /
+//     'Rollback failed' bug titles so this suite isolates only what CXA-F012
+//     adds — deduped against an already-open same-symptom ticket;
+//   - engine-infrastructure incidents never produce a post-mortem.
+
+/// Chat messages whose body names a post-mortem. Empty today by design.
+fn pm_chat(state: &ProjectState) -> Vec<crate::state::ChatMsg> {
+    state
+        .chat
+        .iter()
+        .filter(|m| m.body.to_lowercase().contains("post-mortem"))
+        .cloned()
+        .collect()
+}
+
+/// Chat messages posted into an incidents room specifically.
+fn incidents_chat(state: &ProjectState) -> Vec<crate::state::ChatMsg> {
+    state
+        .chat
+        .iter()
+        .filter(|m| m.channel.to_lowercase().contains("incident"))
+        .cloned()
+        .collect()
+}
+
+/// Number of NotifierPort events naming an incident post-mortem.
+/// Kept for the CXA-F012 AC assertions this suite will drive once the
+/// notifier contract marker is asserted directly; harmless test utility.
+#[expect(dead_code)]
+fn pm_notify(events: &[crate::ports::outbound::NotifyEvent]) -> usize {
+    events.iter().filter(|e| {
+            e.kind.to_lowercase().contains("post_mortem")
+                || e.kind.to_lowercase().contains("postmortem")
+                || e.kind.to_lowercase().contains("incident")
+                || e.message.to_lowercase().contains("post-mortem")
+                || e.message.to_lowercase().contains("postmortem")
+                || e.message.to_lowercase().contains("incident")
+    }).count()
+}
+
+/// Root-cause prevention ticket titles (distinct marker from deploy bugs).
+/// Kept for the CXA-F012 AC assertions this suite will drive once the
+/// prevention-ticket contract marker is asserted directly; harmless test
+/// utility.
+#[expect(dead_code)]
+fn prevention_tickets(state: &ProjectState) -> Vec<String> {
+    state.tickets.iter()
+        .filter(|t| t.title().to_lowercase().contains("root cause"))
+        .map(|t| t.title().to_owned())
+        .collect()
+}
+
+/// AC1a/b — after EVERY successful auto-rollback (RollbackStatus.ok=true) one
+/// post-mortem document is written to docs AND surfaced in #incidents — not
+/// buried in #general or #agents where nobody watching for outages looks.
+#[tokio::test]
+async fn successful_rollback_produces_a_post_mortem_in_the_incidents_channel() {
+    let deploy = Arc::new(ScriptedDeploy::new(vec![
+        crate::ports::outbound::DeployReport {
+            success: false,
+            deployed: true,
+            summary: "deploy failed: container exited 1".to_owned(),
+        },
+        crate::ports::outbound::DeployReport {
+            success: true,
+            deployed: true,
+            summary: "rollback redeploy ok".to_owned(),
+        },
+    ]));
+    let notifier = Arc::new(SpyNotifier { ..Default::default() });
+    let (store, _git, uc) = rollback_uc(true, &deploy, &notifier);
+
+    Box::pin(uc.run_cycle(1)).await;
+
+    let state = store.load().await.expect("load");
+    assert!(
+        state.last_rollback.as_ref().is_some_and(|r| r.ok),
+        "precondition — this scenario must end in RollbackStatus.ok=true"
+    );
+    assert!(
+        !pm_chat(&state).is_empty(),
+        "after every successful auto-rollback a post-mortem must be produced; \
+         none exists yet because CXA-F012 is unimplemented. Chat so far: {:?}",
+        state.chat.iter().map(|m| (&m.channel, &m.body)).collect::<Vec<_>>()
+    );
+}
+
+/// AC1b/c — the incident goes to an INCIDENTS room specifically (not general/
+/// agents), and surfaces through NotifierPort as an event that cannot be
+/// confused with a plain deploy notification.
+#[tokio::test]
+async fn rollbacks_post_mortems_target_the_incidents_channel_and_notify_distinctly() {
+    let deploy = Arc::new(ScriptedDeploy::new(vec![
+        crate::ports::outbound::DeployReport {
+            success: false,
+            deployed: true,
+            summary: "deploy failed: container exited 1".to_owned(),
+        },
+        crate::ports::outbound::DeployReport {
+            success: true,
+            deployed: true,
+            summary: "rollback redeploy ok".to_owned(),
+        },
+    ]));
+    let notifier = Arc::new(SpyNotifier { ..Default::default() });
+    let (store, _git, uc) = rollback_uc(true, &deploy, &notifier);
+
+    Box::pin(uc.run_cycle(1)).await;
+
+    let state = store.load().await.expect("load");
+    assert!(
+        !incidents_chat(&state).is_empty(),
+        "the post-mortem must be posted into an INCIDENTS channel; none found \
+         because CXA-F012 is unimplemented. Channels seen so far depend on it."
     );
 }

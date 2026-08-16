@@ -141,10 +141,27 @@ pub(super) async fn inbox_ep(
             }));
         }
     }
+    // PRs the machine approved but refuses to land alone (`needs_human_eyes`):
+    // shown with the gate's REASON and one-click land/dismiss. Sourced from
+    // state so it works even on a hub with no forge credentials.
+    for (n, reason) in &state.human_holds {
+        let pr = state.open_prs.iter().find(|p| p.number == *n);
+        items.push(serde_json::json!({
+            "kind": "human_eyes", "number": n,
+            "title": pr.map(|p| p.title.clone()).unwrap_or_default(),
+            "url": pr.map(|p| p.url.clone()).unwrap_or_default(),
+            "reason": reason,
+            "role": "SA/dev", "can_act": my_role.can_review(),
+        }));
+    }
     // PRs approved by the SA but held for human eyes.
     if let Some(forge) = &p.forge {
         if let Ok(prs) = forge.list_open_prs().await {
             for pr in prs {
+                // Already surfaced above with its hold reason.
+                if state.human_holds.contains_key(&pr.number) {
+                    continue;
+                }
                 let approved = state
                     .reviews
                     .iter()
@@ -173,11 +190,216 @@ pub(super) async fn inbox_ep(
                         "mergeable": pr.mergeable,
                         "role": "SA/dev", "can_act": my_role.can_review(),
                     }));
+                } else if pr.mergeable {
+                    // Auto-merge held the PR for another gate (merged-result
+                    // verification, CI, a competing PR) but didn't abandon it:
+                    // the SA either asked for changes at an unmoved head or the
+                    // sweep skipped it, so it sat parked and invisible while the
+                    // user waited for a notification. If it is genuinely
+                    // landable now, surface it — the person is always told a
+                    // mergeable PR is waiting on them instead of silently
+                    // letting it squat the queue.
+                    items.push(serde_json::json!({
+                        "kind": "review_pr", "number": pr.number,
+                        "title": pr.title, "url": pr.url,
+                        "held": true,
+                        "role": "SA/dev", "can_act": my_role.can_review(),
+                    }));
                 }
             }
         }
     }
     Json(serde_json::json!({ "user": me, "items": items })).into_response()
+}
+
+/// GET `/api/projects/:pid/attachment?key=…` — stream one attachment's bytes
+/// from blob storage (MinIO/S3 or the local blob dir) with its content type.
+pub(super) async fn attachment_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let key = params.get("key").cloned().unwrap_or_default();
+    if key.is_empty() || key.contains("..") {
+        return (axum::http::StatusCode::BAD_REQUEST, "bad key").into_response();
+    }
+    let Some(storage) = &p.storage else {
+        return (axum::http::StatusCode::CONFLICT, "no blob storage configured").into_response();
+    };
+    // The record on the ticket is the authority for the content type; fall
+    // back to octet-stream for keys nothing references (e.g. pruned tickets).
+    let ct = p
+        .store
+        .load()
+        .await
+        .ok()
+        .and_then(|s| {
+            s.ticket_attachments
+                .values()
+                .flatten()
+                .find(|a| a.key == key)
+                .map(|a| a.content_type.clone())
+        })
+        .unwrap_or_else(|| "application/octet-stream".to_owned());
+    match storage.get(&key).await {
+        Ok(bytes) => (
+            [
+                (axum::http::header::CONTENT_TYPE, ct),
+                // Never let a stored SVG/HTML run script in the dashboard origin.
+                (
+                    axum::http::header::CONTENT_SECURITY_POLICY,
+                    "default-src 'none'; style-src 'unsafe-inline'".to_owned(),
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(e) => (axum::http::StatusCode::NOT_FOUND, e.to_string()).into_response(),
+    }
+}
+
+/// POST `/api/projects/:pid/ticket/:id/attachments?name=…` — a person uploads
+/// an attachment (raw bytes body, `Content-Type` header carries the MIME).
+pub(super) async fn upload_attachment_ep(
+    State(app): State<AppState>,
+    Path((pid, id)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let me = principal_name(&app, &headers)
+        .await
+        .unwrap_or_else(|| "operator".to_owned());
+    let name = params.get("name").cloned().unwrap_or_default();
+    let safe = |s: &str| -> String {
+        s.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect()
+    };
+    let name = safe(&name);
+    if name.is_empty() || body.is_empty() {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            "name query param and a non-empty body are required",
+        )
+            .into_response();
+    }
+    let ct = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_owned();
+    let Some(storage) = &p.storage else {
+        return (axum::http::StatusCode::CONFLICT, "no blob storage configured").into_response();
+    };
+    let key = format!("uploads/{}/{}", safe(&id), name);
+    if let Err(e) = storage.put(&key, &body, &ct).await {
+        return internal_error(&e.to_string());
+    }
+    let rec = coxagent_application::state::TicketAttachment {
+        name,
+        key: key.clone(),
+        content_type: ct,
+        by: me,
+        at: coxagent_application::state::now_rfc3339(),
+    };
+    let saved = coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        s.ticket_attachments
+            .entry(id.clone())
+            .or_default()
+            .push(rec.clone());
+        Ok(())
+    })
+    .await;
+    match saved {
+        Ok(()) => Json(serde_json::json!({ "ok": true, "attachment": rec })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// POST `/api/projects/:pid/pr/:number/human` — a person decides a PR the
+/// machine held for human eyes. `{"action":"approve"}` lands it via the forge
+/// (this IS the human the gate waited for); `{"action":"dismiss"}` clears the
+/// Inbox entry and leaves the PR for handling on the forge itself.
+pub(super) async fn human_pr_ep(
+    State(app): State<AppState>,
+    Path((pid, number)): Path<(String, u64)>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<HumanPrReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Some(me) = gate_principal(&app, &headers, coxagent_application::AuthRole::can_review).await
+    else {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            "your role may not take this decision",
+        )
+            .into_response();
+    };
+    match req.action.as_str() {
+        "approve" => {
+            let Some(forge) = &p.forge else {
+                return (
+                    axum::http::StatusCode::CONFLICT,
+                    "this hub has no forge access — merge it on the forge directly",
+                )
+                    .into_response();
+            };
+            if let Err(e) = forge.merge_pr(number).await {
+                return (
+                    axum::http::StatusCode::BAD_GATEWAY,
+                    format!("merge failed: {e}"),
+                )
+                    .into_response();
+            }
+        }
+        "dismiss" => {}
+        other => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("action must be approve or dismiss, got {other}"),
+            )
+                .into_response()
+        }
+    }
+    let verb = if req.action == "approve" {
+        "landed"
+    } else {
+        "dismissed the hold on"
+    };
+    let note = format!("🧑‍⚖️ @{me} {verb} PR #{number} (held for human eyes).");
+    if coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        s.human_holds.remove(&number);
+        s.log_activity("USER", &format!("{me} {verb} PR #{number}"), None);
+        s.post_comment(&me, &note, None);
+        Ok(())
+    })
+    .await
+    .is_err()
+    {
+        return internal_error("store write failed");
+    }
+    Json(serde_json::json!({ "ok": true, "action": req.action })).into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct HumanPrReq {
+    #[serde(default)]
+    pub(super) action: String,
 }
 
 /// POST `/api/projects/:pid/ticket/:id/ready` — a person approves a designed
