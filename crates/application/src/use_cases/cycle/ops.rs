@@ -592,6 +592,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     ///
     /// - a SLOT worktree sitting on a named branch (worktrees must stay
     ///   detached, or they hold `main`/feature branches hostage) → detach;
+    /// - a SLOT worktree with uncommitted residue (an engine died mid-edit)
+    ///   that would otherwise block every future checkout → stash the WIP with
+    ///   a named marker;
     /// - the LEADER tree dirty on a feature branch (half-written edits block
     ///   every checkout) → stash the WIP with a named marker and return to the
     ///   base branch;
@@ -627,6 +630,21 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 if ok {
                     self.log_git(&format!(
                         "hygiene: slot worktree released branch {branch} (detached)"
+                    ))
+                    .await;
+                }
+            }
+            // A slot left with uncommitted residue (an engine died mid-edit)
+            // is the SAME trap as the leader tree: every later `checkout` of a
+            // new branch fails with "local changes would be overwritten" and
+            // the ticket is mis-assigned forever. Stash the WIP with a named
+            // marker so the slot is clean for the next checkout.
+            let (_, status) = git.raw(wd, &["status", "--porcelain"]).await;
+            if !status.trim().is_empty() {
+                let (ok, _) = git.raw(wd, &["stash", "push", "-u", "-m", "hygiene: slot WIP (engine died mid-edit)"]).await;
+                if ok {
+                    self.log_git(&format!(
+                        "hygiene: stashed slot WIP — recover with `git stash list`"
                     ))
                     .await;
                 }
