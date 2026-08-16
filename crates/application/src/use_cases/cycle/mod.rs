@@ -681,6 +681,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             )
             .await;
 
+        // Tree hygiene FIRST, every runner: an engine that died mid-run leaves
+        // the LEADER tree dirty on a feature branch or its local base polluted,
+        // and a SLOT worktree holding a branch hostage — then every later git
+        // op this cycle fails in a chain (the 2026-08-16 all-D night). Clean
+        // up before anything touches git.
+        self.tree_hygiene().await;
         // Keep the code map fresh so `.coxagent/REPO_MAP.md` reflects the tree
         // the agents are about to work on (best-effort, token-saver-gated).
         // Leader-only: it writes shared files under the repo.
