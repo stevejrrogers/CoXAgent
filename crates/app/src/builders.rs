@@ -496,6 +496,41 @@ pub(crate) async fn build_project(
         }
     }
 
+    // Self-upgrade (dogfood CD, opt-in): every 15 min a DETACHED script checks
+    // origin/<base> for a commit newer than the deployed hub, builds it in a
+    // temp worktree, swaps this very binary (backup kept), restarts, and rolls
+    // back if the new hub fails its health check. Detached because a process
+    // cannot be trusted to finish replacing itself.
+    if config.deploy.self_upgrade {
+        let script = work_dir.join("deploy").join("self-upgrade.sh");
+        let repo = work_dir.clone();
+        let base = config.git.default_branch.clone();
+        if let Ok(target) = std::env::current_exe() {
+            let port = std::env::var("COXAGENT_PORT")
+                .ok()
+                .and_then(|p| p.parse::<u16>().ok())
+                .unwrap_or(4000);
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(900)).await;
+                    if !script.exists() {
+                        continue;
+                    }
+                    let _ = std::process::Command::new("bash")
+                        .arg(&script)
+                        .arg(&repo)
+                        .arg(&target)
+                        .arg(port.to_string())
+                        .arg(&base)
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn();
+                }
+            });
+            tracing::info!("[{id}] self-upgrade watcher armed (every 15 min)");
+        }
+    }
+
     let config_path = state_dir
         .parent()
         .unwrap_or(state_dir)
