@@ -35,9 +35,6 @@ mod ops;
 mod qa_evidence;
 mod recovery;
 
-/// How often (in sprints) the SA runs a whole-system architecture review.
-const ARCH_REVIEW_EVERY_SPRINTS: u32 = 8;
-
 /// Local, non-pushed ref updated after every deploy that passes both
 /// `deploy()` and `run_tests()` — auto-rollback's source of truth for "last
 /// known good". A ref (not a branch tip) survives ticket-branch deletion
@@ -627,6 +624,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             return report;
         }
 
+        // Quiet hours: inside the configured UTC window no NEW engine calls
+        // start — overnight is when quota walls and sleeping laptops kill runs
+        // mid-edit with nobody watching. An open high-priority bug overrides
+        // (urgent work does not wait for morning). Not an error: the cycle
+        // just reports itself quiet, so the breaker and scorecard stay honest.
+        if self.quiet_hours_block().await {
+            return report;
+        }
+
         // Coordinate concurrent runners: at most one leads the singleton phases
         // (BA/PO/design-system/deploy/TEST/review) that must run once per project,
         // not once per runner. Non-leaders still do per-ticket stages (SA/PD/DEV/
@@ -728,10 +734,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // mergeable PRs aged a whole cycle before anyone looked at them.
             self.review_open_prs().await;
             self.address_pr_feedback().await;
-            // Debt sweep cadence: every 10th cycle files ONE tech-debt chore
-            // (lint baseline, dead code, missing docs) if none is open — the
+            // Debt sweep cadence (configurable): every Nth cycle files ONE
+            // tech-debt chore (lint baseline, dead code, missing docs) — the
             // discipline of paying debt down on a schedule instead of never.
-            if cycle % 10 == 0 {
+            if cycle % self.config.workflow.cadence.debt_sweep_every_cycles() == 0 {
                 self.file_debt_sweep(cycle).await;
             }
 
@@ -1209,6 +1215,35 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     ) -> Self {
         self.janitor = janitor;
         self
+    }
+
+    /// Whether this cycle must stay quiet: inside `workflow.quiet_hours_utc`
+    /// and no high-priority bug is open. Reads the wall clock from the same
+    /// RFC3339 source the rest of the state uses.
+    async fn quiet_hours_block(&self) -> bool {
+        let window = self.config.workflow.quiet_hours_utc.trim();
+        if window.is_empty() {
+            return false;
+        }
+        let now = crate::state::now_rfc3339();
+        // "YYYY-MM-DDTHH:MM:…" — minutes since UTC midnight.
+        let minutes = now
+            .get(11..13)
+            .zip(now.get(14..16))
+            .and_then(|(h, m)| Some(h.parse::<u32>().ok()? * 60 + m.parse::<u32>().ok()?));
+        let Some(minutes) = minutes else { return false };
+        if !crate::config::in_quiet_window(window, minutes) {
+            return false;
+        }
+        // Urgent work overrides: an open high-priority bug does not wait.
+        let urgent = self.store.load().await.is_ok_and(|s| {
+            s.tickets.iter().any(|t| {
+                t.ticket_type() == coxagent_domain::TicketType::Bug
+                    && t.status() == coxagent_domain::Status::Open
+                    && t.priority() == coxagent_domain::Priority::High
+            })
+        });
+        !urgent
     }
 
     /// Attach workspace-file access (team notes, memory indexes, maps).
