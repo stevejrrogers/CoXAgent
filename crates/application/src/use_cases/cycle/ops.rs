@@ -563,4 +563,102 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .await
             .ok()
     }
+
+    /// Pre-cycle git tree hygiene — undo the wreckage an engine death leaves
+    /// behind, BEFORE any git op this cycle trips over it:
+    ///
+    /// - a SLOT worktree sitting on a named branch (worktrees must stay
+    ///   detached, or they hold `main`/feature branches hostage) → detach;
+    /// - the LEADER tree dirty on a feature branch (half-written edits block
+    ///   every checkout) → stash the WIP with a named marker and return to the
+    ///   base branch;
+    /// - the LEADER's local base carrying commits origin does not have (an
+    ///   agent merged a feature branch into local base by mistake) → keep them
+    ///   on a `backup/…` branch and hard-reset base to origin.
+    ///
+    /// Best-effort: every step logs what it did; a failure never stops the
+    /// cycle. Pure orchestration over `GitPort::raw` — no direct IO here.
+    pub(super) async fn tree_hygiene(&self) {
+        let Some(git) = &self.git else { return };
+        let wd = &self.work_dir;
+        if !self.config.git.enabled || !git.is_repo(wd).await {
+            return;
+        }
+        let base = {
+            let t = self.config.git.target_branch.trim();
+            if t.is_empty() {
+                self.config.git.default_branch.clone()
+            } else {
+                t.to_owned()
+            }
+        };
+        let branch = git.current_branch(wd).await.unwrap_or_default();
+        let is_slot = wd
+            .components()
+            .any(|c| c.as_os_str() == ".coxagent-worktrees");
+        if is_slot {
+            // Slots must stay detached; holding a branch blocks every other
+            // tree from checking it out.
+            if !branch.is_empty() && branch != "HEAD" {
+                let (ok, _) = git.raw(wd, &["checkout", "--detach"]).await;
+                if ok {
+                    self.log_git(&format!(
+                        "hygiene: slot worktree released branch {branch} (detached)"
+                    ))
+                    .await;
+                }
+            }
+            return;
+        }
+        // Leader tree. 1) Orphan WIP on a feature branch → stash + back to base.
+        let (_, status) = git.raw(wd, &["status", "--porcelain"]).await;
+        let dirty = !status.trim().is_empty();
+        if dirty && !branch.is_empty() && branch != base {
+            let msg = format!("hygiene: orphan WIP on {branch} (engine died mid-run)");
+            let (ok, _) = git.raw(wd, &["stash", "push", "-u", "-m", &msg]).await;
+            if ok {
+                self.log_git(&format!(
+                    "hygiene: stashed orphan WIP from {branch} — recover with `git stash list`"
+                ))
+                .await;
+            }
+        }
+        if !branch.is_empty() && branch != base && branch != "HEAD" {
+            let (ok, _) = git.raw(wd, &["checkout", &base]).await;
+            if !ok {
+                // Base may be held by a stray worktree; a detached base is
+                // still a working position for the cycle.
+                let _ = git
+                    .raw(wd, &["checkout", "--detach", &format!("origin/{base}")])
+                    .await;
+            }
+        }
+        // 2) Local base polluted with commits origin lacks → backup + reset.
+        let _ = git.raw(wd, &["fetch", "origin", &base]).await;
+        let (ok, ahead) = git
+            .raw(
+                wd,
+                &["rev-list", "--count", &format!("origin/{base}..{base}")],
+            )
+            .await;
+        let ahead: u64 = if ok { ahead.trim().parse().unwrap_or(0) } else { 0 };
+        if ahead > 0 {
+            let backup = format!("backup/{base}-hygiene");
+            let _ = git.raw(wd, &["branch", "-f", &backup, &base]).await;
+            // Reset only moves the base ref when we actually sit on it.
+            let cur = git.current_branch(wd).await.unwrap_or_default();
+            if cur == base {
+                let (ok, _) = git
+                    .raw(wd, &["reset", "--hard", &format!("origin/{base}")])
+                    .await;
+                if ok {
+                    self.log_git(&format!(
+                        "hygiene: local {base} had {ahead} commit(s) origin lacks — \
+                         kept on {backup}, reset to origin/{base}"
+                    ))
+                    .await;
+                }
+            }
+        }
+    }
 }
