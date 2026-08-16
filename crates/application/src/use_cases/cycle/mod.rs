@@ -1463,8 +1463,10 @@ mod cycle_counter_tests {
     fn resumes_from_an_existing_runner_local_counter() {
         // A project whose persistent counter was seeded by an older local
         // counter (e.g. it ran 42 cycles before this field existed).
-        let mut s = ProjectState::default();
-        s.cycle = 42;
+        let mut s = ProjectState {
+            cycle: 42,
+            ..ProjectState::default()
+        };
         assert_eq!(advance_project_cycle(&mut s), 43);
         assert_eq!(advance_project_cycle(&mut s), 44);
     }
@@ -1488,8 +1490,10 @@ mod cycle_counter_tests {
     #[test]
     fn never_regresses_the_persistent_counter() {
         // The counter only moves forward — it never wraps or renumbers.
-        let mut s = ProjectState::default();
-        s.cycle = u64::MAX - 1;
+        let mut s = ProjectState {
+            cycle: u64::MAX - 1,
+            ..ProjectState::default()
+        };
         assert_eq!(advance_project_cycle(&mut s), u64::MAX);
         // Saturates rather than wrapping to 0 (which would collide with cadence).
         assert_eq!(advance_project_cycle(&mut s), u64::MAX);
