@@ -25,6 +25,7 @@ mod debt_sweep;
 mod escalation;
 mod preflight;
 mod scrum;
+mod sm_watch;
 mod wiring;
 
 mod forge;
@@ -732,6 +733,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             }
             // Scrum: open/roll over the sprint at the start of the cycle.
             self.advance_sprint_if_scrum(cycle).await;
+            // SM supervision (deterministic, zero tokens): police the sprint
+            // scope, route stalled committed work to the role that unblocks
+            // it, and descope what will not ship — the SM orchestrates the
+            // sprint instead of just announcing it.
+            self.sm_sprint_watch().await;
 
             // One digest per UTC day into the team chat: shipped/spend/sprint at
             // a glance, so the user doesn't need the dashboard open to keep up.
