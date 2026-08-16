@@ -225,31 +225,52 @@ pub const fn is_publishable_host_port(port: u16) -> bool {
 }
 
 /// Parse `deploy.host_port` out of a project's raw `coxagent.json` text for
-/// the mandatory post-deploy health-gate probe. A missing/unreadable file,
-/// unparseable JSON, a missing `host_port` key, or an explicit `null` all
-/// mean "nothing configured" — same contract as `Option<u16>` and
-/// [`verify_deploy_health`]'s no-port pass. Any other JSON value that isn't a
-/// publishable `u16` port (negative, float, string, bool, out of range, or
-/// zero) is a corrupt config and must fail the gate rather than being folded
-/// into "nothing configured" (COX-B025/COX-B026/COX-B035/COX-B042) —
-/// `serde_json::Value::as_u64` returns `None` for all of those just as it does
-/// for a genuinely absent field, so the raw JSON value must be inspected
-/// instead of going through `as_u64` first.
+/// the mandatory post-deploy health-gate probe. A missing/unreadable file, a
+/// missing `deploy` or `host_port` key, or an explicit `null` all mean
+/// "nothing configured" — same contract as `Option<u16>` and
+/// [`verify_deploy_health`]'s no-port pass. Everything else that isn't a
+/// publishable `u16` port is a corrupt config and must fail the gate rather
+/// than being folded into "nothing configured" (COX-B025/COX-B026/COX-B035/
+/// COX-B042/COX-B062): JSON that fails to parse at all, a top-level value
+/// that parses but isn't a JSON object, a `deploy` section that isn't a
+/// JSON object, and a `host_port` that isn't a publishable `u16` (negative,
+/// float, string, bool, out of range, or zero) — `Value::get("deploy")` and
+/// `serde_json::Value::as_u64` both return `None` for every one of those
+/// malformed shapes just as they do for a genuinely absent field, so the
+/// raw JSON value must be inspected at each level instead of chaining
+/// `.get()`/`.as_u64()` straight through.
 ///
 /// Shared by every call site that deploys (cycle, chat, PR preview) so a
-/// malformed `host_port` fails the gate the same way everywhere, rather than
-/// each site re-deriving (and potentially drifting on) the same parse.
+/// corrupt config fails the gate the same way everywhere, rather than each
+/// site re-deriving (and potentially drifting on) the same parse.
 ///
 /// # Errors
-/// `Err(())` when `deploy.host_port` is present but isn't a publishable `u16`
-/// port — the caller's only correct response is to fail the health gate, so no
-/// richer error is worth carrying.
+/// `Err(())` when the config is unparseable JSON, `deploy` isn't a JSON
+/// object, or `deploy.host_port` is present but isn't a publishable `u16`
+/// port — the caller's only correct response in every case is to fail the
+/// health gate, so no richer error is worth carrying.
 #[allow(clippy::result_unit_err)]
 pub fn parse_deploy_host_port(raw_config: &str) -> Result<Option<u16>, ()> {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw_config) else {
-        return Ok(None);
+    let value: serde_json::Value = serde_json::from_str(raw_config).map_err(|_| ())?;
+    // A whole file that parses as valid JSON but isn't an object at all
+    // (bare `null`/`true`/a number/an array) can't sanely be missing
+    // `deploy` either — `Value::get("deploy")` returns `None` for every one
+    // of those shapes exactly like it does for a genuinely absent key, so
+    // without this check a corrupt top-level shape would collapse into
+    // "nothing configured" the same way the unparseable-JSON case did.
+    if !value.is_object() {
+        return Err(());
+    }
+    let deploy = match value.get("deploy") {
+        None | Some(serde_json::Value::Null) => return Ok(None),
+        Some(d) => d,
     };
-    match value.get("deploy").and_then(|d| d.get("host_port")) {
+    // A `deploy` section that isn't a JSON object can't sanely be missing
+    // `host_port` — it's a corrupt config, not "nothing configured".
+    if !deploy.is_object() {
+        return Err(());
+    }
+    match deploy.get("host_port") {
         None | Some(serde_json::Value::Null) => Ok(None),
         Some(v) => v
             .as_u64()
@@ -493,6 +514,60 @@ mod tests {
         assert_eq!(super::parse_deploy_host_port(r#"{"deploy":{}}"#), Ok(None));
         assert_eq!(
             super::parse_deploy_host_port(r#"{"deploy":{"host_port":null}}"#),
+            Ok(None)
+        );
+    }
+
+    /// COX-B062: a `coxagent.json` that fails to parse as JSON at all must
+    /// fail the gate, not collapse into "nothing configured" — the same
+    /// silent-skip COX-B026 already closed for a merely-bad `host_port`
+    /// value applied one level up, to the whole file.
+    #[test]
+    fn unparseable_json_fails_rather_than_skipping_the_gate() {
+        assert_eq!(
+            super::parse_deploy_host_port("{not valid json at all"),
+            Err(())
+        );
+    }
+
+    /// COX-B062: a `deploy` section that exists but isn't a JSON object
+    /// (e.g. hand-edited into a string) can't sanely be read for
+    /// `host_port` — `value.get("deploy").and_then(|d| d.get("host_port"))`
+    /// silently returns `None` for this shape same as a genuinely absent
+    /// field, so it must be checked explicitly rather than falling through.
+    #[test]
+    fn a_non_object_deploy_section_fails_rather_than_skipping_the_gate() {
+        assert_eq!(
+            super::parse_deploy_host_port(r#"{"deploy":"oops"}"#),
+            Err(())
+        );
+    }
+
+    /// COX-B062: a top-level value that parses as valid JSON but isn't an
+    /// object at all (a bare `null`, `true`, a number, or an array) must
+    /// also fail the gate — `Value::get("deploy")` returns `None` for every
+    /// one of these shapes exactly like it does for a genuinely absent key,
+    /// so a truncated/corrupted config that still happens to be valid JSON
+    /// would otherwise pass through as "nothing configured" too.
+    #[test]
+    fn a_non_object_top_level_config_fails_rather_than_skipping_the_gate() {
+        for corrupt in ["null", "true", "42", "[1,2,3]", "\"oops\""] {
+            assert_eq!(
+                super::parse_deploy_host_port(corrupt),
+                Err(()),
+                "expected {corrupt} to fail the gate as a corrupt config"
+            );
+        }
+    }
+
+    /// A missing `deploy` key entirely is still legitimately "nothing
+    /// configured" — only a `deploy` section that's present but malformed
+    /// should fail the gate.
+    #[test]
+    fn a_missing_deploy_section_is_still_nothing_to_probe() {
+        assert_eq!(super::parse_deploy_host_port(r"{}"), Ok(None));
+        assert_eq!(
+            super::parse_deploy_host_port(r#"{"deploy":null}"#),
             Ok(None)
         );
     }
