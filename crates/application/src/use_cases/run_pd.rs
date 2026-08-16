@@ -38,6 +38,7 @@ pub struct RunPdUseCase<S: StateStorePort, E: AgentEnginePort> {
     phase: Option<crate::use_cases::runner::PhaseReporter>,
     context: Option<String>,
     files: Option<Arc<dyn crate::ports::outbound::WorkspaceFilesPort>>,
+    storage: Option<Arc<dyn crate::ports::outbound::StoragePort>>,
 }
 
 impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
@@ -51,7 +52,20 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
             phase: None,
             context: None,
             files: None,
+            storage: None,
         }
+    }
+
+    /// Attach blob storage (MinIO/S3 or the local blob dir) so PD design
+    /// images dropped in `.coxagent/design/<ticket>/` are ingested onto the
+    /// ticket; `None` (tests, unwired runners) skips ingestion.
+    #[must_use]
+    pub fn with_storage(
+        mut self,
+        storage: Option<Arc<dyn crate::ports::outbound::StoragePort>>,
+    ) -> Self {
+        self.storage = storage;
+        self
     }
 
     /// Attach workspace file access for prompt context blocks; `None` (tests)
@@ -211,10 +225,97 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
             Ok(())
         })
         .await?;
+        // Ingest any design images PD dropped in `.coxagent/design/<id>/` —
+        // the visuals travel with the ticket (MinIO/S3 or the local blob dir),
+        // so a person can SEE the proposed design instead of reading it.
+        self.attach_design_images(&id).await;
         if let Some(p) = &self.phase {
             p(None);
         }
         Ok(Some(id))
+    }
+
+    /// Ingest PD's dropped design files and record them on the ticket (with a
+    /// comment), so the visuals show up beside the spec.
+    async fn attach_design_images(&self, id: &TicketId) {
+        let recs = self.ingest_design_files(id).await;
+        if recs.is_empty() {
+            return;
+        }
+        let n = recs.len();
+        crate::ports::outbound::mutate_state(self.store.as_ref(), |state| {
+            state
+                .ticket_attachments
+                .entry(id.to_string())
+                .or_default()
+                .extend(recs.iter().cloned());
+            state.post_comment(
+                "PD",
+                &format!("🎨 attached {n} design image(s) to {id}."),
+                Some(id.to_string()),
+            );
+            Ok(())
+        })
+        .await
+        .ok();
+    }
+
+    /// Sweep `.coxagent/design/<ticket>/` for SVG mockups PD wrote, push each
+    /// into blob storage and CONSUME the file (so a re-run never re-attaches).
+    /// Pure orchestration: all I/O goes through the files + storage ports.
+    async fn ingest_design_files(&self, id: &TicketId) -> Vec<crate::state::TicketAttachment> {
+        let (Some(files), Some(storage)) = (self.files.as_deref(), self.storage.as_deref())
+        else {
+            return Vec::new();
+        };
+        let dir = self
+            .work_dir
+            .join(".coxagent")
+            .join("design")
+            .join(id.as_str());
+        let mut out = Vec::new();
+        for meta in files.list(&dir).await {
+            let name = meta
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            // SVG only: the files port reads text, and SVG is what the PD
+            // prompt asks for. Path-safe key: both parts are sanitised.
+            if !name.to_ascii_lowercase().ends_with(".svg") {
+                continue;
+            }
+            let path = dir.join(&name);
+            let Some(body) = files.read(&path).await else {
+                continue;
+            };
+            let safe = |s: &str| -> String {
+                s.chars()
+                    .map(|c| {
+                        if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                            c
+                        } else {
+                            '-'
+                        }
+                    })
+                    .collect()
+            };
+            let key = format!("design/{}/{}", safe(id.as_str()), safe(&name));
+            match storage.put(&key, body.as_bytes(), "image/svg+xml").await {
+                Ok(()) => {
+                    files.delete(&path).await;
+                    out.push(crate::state::TicketAttachment {
+                        name,
+                        key,
+                        content_type: "image/svg+xml".to_owned(),
+                        by: "PD".to_owned(),
+                        at: crate::state::now_rfc3339(),
+                    });
+                }
+                Err(e) => tracing::warn!("could not store design file {name}: {e}"),
+            }
+        }
+        out
     }
 
     async fn build_request(
@@ -236,7 +337,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
             role: Role::Pd,
             system_prompt: prompts::system_prompt(prompts::PD),
             task_prompt: format!(
-                "Design the UX for feature {id}: {title}{context_block}{knowledge}{memory}{steering}{}{}",
+                "Design the UX for feature {id}: {title}\n\
+                 Also SAVE visual mockups of the key screens as standalone SVG files \
+                 under `.coxagent/design/{id}/` (one file per screen, e.g. \
+                 `login.svg` — real layout, labels and states, not a placeholder \
+                 box). They are attached to the ticket for the humans to review.\
+                 {context_block}{knowledge}{memory}{steering}{}{}",
                 prompts::focus_block(self.files.as_deref(), &self.work_dir, title).await,
                 prompts::repo_map_block(
                     self.files.as_deref(),

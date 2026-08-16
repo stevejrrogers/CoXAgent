@@ -170,17 +170,35 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         if !ok {
             return None;
         }
-        let (ok, status) = git.raw(&self.work_dir, &["status", "--porcelain"]).await;
+        let (ok, status) = git
+            .raw(
+                &self.work_dir,
+                &["status", "--porcelain", "--untracked-files=all"],
+            )
+            .await;
         if !ok {
             return None;
         }
         let mut dirty: Vec<crate::verify_cache::DirtyEntry> = Vec::new();
         for line in status.lines() {
+            // Rename/copy lines (status code R or C) read "old -> new"; the
+            // live path — the one whose mtime/size changes on a post-rename
+            // edit — is the part after the arrow, not the whole blob. Gate on
+            // the status code, not a literal " -> " search: an ordinary
+            // path can itself contain that text.
+            let is_rename_or_copy = line.get(0..2).is_some_and(|xy| xy.contains(['R', 'C']));
             let meta = match line.get(3..) {
-                Some(path) => files
-                    .stat(&self.work_dir.join(path.trim().trim_matches('"')))
-                    .await
-                    .map(|m| (m.size, m.modified_epoch)),
+                Some(rest) => {
+                    let path = if is_rename_or_copy {
+                        rest.rsplit_once(" -> ").map_or(rest, |(_, new)| new)
+                    } else {
+                        rest
+                    };
+                    files
+                        .stat(&self.work_dir.join(path.trim().trim_matches('"')))
+                        .await
+                        .map(|m| (m.size, m.modified_epoch))
+                }
                 None => None,
             };
             dirty.push((line.to_owned(), meta));
@@ -876,10 +894,47 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 Ok(_) | Err(_) => {}
             }
 
-            // Regression-test gate: a BUG fix that touches no test is a fix
-            // on faith. Mechanical check over the working diff; one bounded
-            // repair pass to add the missing test.
+            // Phantom-bug guard: a BUG ticket that ends with NO build-affecting
+            // change against an already-green tree is not a reproducible bug —
+            // typically one already fixed by a merged change, or a report that
+            // never matched main. The suite is green here by construction
+            // (every earlier gate already returned on red), so the empty diff
+            // is the genuine "no bug exists on main" signal. Previously the
+            // regression-test gate below demanded a test that "fails without
+            // your fix" — impossible when there is no fix — and the ticket was
+            // re-queued to burn a full investigation every sprint (the
+            // CXA-B002/B003/B004 loop). Close it Rejected with a finding, via the
+            // orchestrator's `System` role (a transition DEV is not allowed to
+            // make), so it leaves `open_bug_candidates` and stays in history.
             let tree = self.working_tree().await;
+            if self.mode == DevMode::Bug
+                && gates::build_relevant(&tree.changed_paths).is_empty()
+            {
+                let msg = format!(
+                    "{id}: not reproducible — DEV ran against a green tree and produced no \
+                     code change. The bug does not reproduce on main (likely already resolved \
+                     by a merged fix). Closing as not-reproducible so the sprint stops \
+                     re-investigating it."
+                );
+                let id_c = id.clone();
+                crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+                    transition(s, &id_c, Role::System, Status::Rejected)
+                        .map_err(|e| PortError::Corrupt(e.to_string()))?;
+                    s.post_comment("SYSTEM", &msg, Some(id_c.to_string()));
+                    s.ticket_journal.remove(&id_c.to_string());
+                    s.cost_holds.remove(&id_c.to_string());
+                    s.cost_approved.remove(&id_c.to_string());
+                    Ok(())
+                })
+                .await?;
+                tracing::info!(
+                    "DEV bug pass: {id} closed not-reproducible (no change on green tree)"
+                );
+                if let Some(p) = &self.phase {
+                    p(None);
+                }
+                return Ok(Some(id));
+            }
             if self.mode == DevMode::Bug
                 && !gates::diff_is_docs_only(&tree)
                 && !gates::diff_touches_tests(&tree)
@@ -1138,10 +1193,18 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
     }
 
     fn candidates(&self, state: &ProjectState) -> Vec<TicketId> {
-        match self.mode {
+        let mut ids = match self.mode {
             DevMode::Bug => open_bug_candidates(state),
             DevMode::Feature => ready_feature_candidates(state),
-        }
+        };
+        // Real-world scope gate: DEV only pulls tickets the team committed to
+        // the current sprint (PO/SM aligned via the sprint-board action), plus
+        // emergency open bugs. In Kanban mode (no sprint open) any ready
+        // ticket stays in scope. A feature/chore the PO/SM has not committed
+        // to an open sprint is out of scope — DEV must ask to have it added
+        // before picking it up.
+        ids.retain(|id| crate::selection::in_dev_scope(state, id));
+        ids
     }
 }
 
@@ -1385,5 +1448,161 @@ mod tests {
         // A bare marker with no real question is not a question.
         assert!(parse_ask("ASK BA: ?").is_none());
         assert!(parse_ask("no question here").is_none());
+    }
+
+    /// Shells to the real `git` binary — `tree_fingerprint` parses actual
+    /// `git status --porcelain` output, which the pure `verify_cache` unit
+    /// tests never exercise.
+    struct RealGit;
+    #[async_trait::async_trait]
+    impl crate::ports::outbound::GitPort for RealGit {
+        async fn raw(&self, work_dir: &std::path::Path, args: &[&str]) -> (bool, String) {
+            match std::process::Command::new("git")
+                .current_dir(work_dir)
+                .args(args)
+                .output()
+            {
+                Ok(out) => (
+                    out.status.success(),
+                    String::from_utf8_lossy(&out.stdout).into_owned(),
+                ),
+                Err(_) => (false, String::new()),
+            }
+        }
+        async fn is_repo(&self, _work_dir: &std::path::Path) -> bool {
+            unimplemented!("unused by tree_fingerprint")
+        }
+        async fn current_branch(
+            &self,
+            _work_dir: &std::path::Path,
+        ) -> Result<String, PortError> {
+            unimplemented!("unused by tree_fingerprint")
+        }
+        async fn checkout_branch(
+            &self,
+            _work_dir: &std::path::Path,
+            _branch: &str,
+        ) -> Result<(), PortError> {
+            unimplemented!("unused by tree_fingerprint")
+        }
+        async fn commit_all(
+            &self,
+            _work_dir: &std::path::Path,
+            _message: &str,
+            _author: &crate::ports::outbound::GitAuthor,
+        ) -> Result<Option<String>, PortError> {
+            unimplemented!("unused by tree_fingerprint")
+        }
+        async fn push(&self, _work_dir: &std::path::Path, _branch: &str) -> Result<(), PortError> {
+            unimplemented!("unused by tree_fingerprint")
+        }
+        async fn sync_base(
+            &self,
+            _work_dir: &std::path::Path,
+            _base: &str,
+        ) -> Result<crate::ports::outbound::SyncBase, PortError> {
+            unimplemented!("unused by tree_fingerprint")
+        }
+        async fn abort_merge(&self, _work_dir: &std::path::Path) -> Result<(), PortError> {
+            unimplemented!("unused by tree_fingerprint")
+        }
+    }
+
+    /// Reads real filesystem metadata for the one method `tree_fingerprint`
+    /// calls; the rest are unused by this test.
+    struct RealFiles;
+    #[async_trait::async_trait]
+    impl crate::ports::outbound::WorkspaceFilesPort for RealFiles {
+        async fn read(&self, _path: &std::path::Path) -> Option<String> {
+            None
+        }
+        async fn write(&self, _path: &std::path::Path, _content: &str) -> bool {
+            false
+        }
+        async fn write_bytes(&self, _path: &std::path::Path, _bytes: &[u8]) -> bool {
+            false
+        }
+        async fn delete(&self, _path: &std::path::Path) -> bool {
+            false
+        }
+        async fn list(&self, _dir: &std::path::Path) -> Vec<crate::ports::outbound::FileMeta> {
+            vec![]
+        }
+        async fn stat(&self, path: &std::path::Path) -> Option<crate::ports::outbound::FileMeta> {
+            let m = std::fs::metadata(path).ok()?;
+            let modified_epoch = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_secs());
+            Some(crate::ports::outbound::FileMeta {
+                path: path.to_path_buf(),
+                modified_epoch,
+                size: m.len(),
+            })
+        }
+        async fn list_recursive(&self, _dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+            vec![]
+        }
+        async fn list_dirs(&self, _dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+            vec![]
+        }
+    }
+
+    /// Regression for COX-B063: COX-B031 hashed per-file (size, mtime) so
+    /// edits inside a new untracked dir invalidate the green cache, but a
+    /// renamed TRACKED file hits a different branch — `git status` prints one
+    /// `RM old -> new` line whose status-line text does not change between
+    /// edits, so the fingerprint must come from the new path's metadata, not
+    /// the raw "old -> new" text.
+    #[tokio::test]
+    async fn edit_after_rename_changes_the_fingerprint() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let dir = tmp.path();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .current_dir(dir)
+                .args(args)
+                .output()
+                .expect("git");
+            assert!(out.status.success(), "git {args:?} failed");
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@t.com"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(dir.join("tracked.rs"), "fn a() {}\n").expect("write");
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "init"]);
+        git(&["mv", "tracked.rs", "renamed.rs"]);
+        std::fs::write(dir.join("renamed.rs"), "fn a() {}\n// first edit\n").expect("write");
+
+        // Confirms the fixture actually hits the reported shape — one `RM old
+        // -> new` line — before trusting the fingerprint assertions below.
+        let status = git(&["status", "--porcelain", "--untracked-files=all"]);
+        assert_eq!(status.trim(), "RM tracked.rs -> renamed.rs");
+
+        let uc = RunDevUseCase::new(
+            Arc::new(MemStore::default()),
+            Arc::new(OkEngine),
+            Config::default(),
+            dir.to_path_buf(),
+            DevMode::Feature,
+        )
+        .with_git(Some(Arc::new(RealGit)))
+        .with_files(Some(Arc::new(RealFiles)));
+
+        let fp1 = uc.tree_fingerprint().await.expect("fp1");
+        std::fs::write(
+            dir.join("renamed.rs"),
+            "fn a() {}\n// second edit, different length entirely\n",
+        )
+        .expect("write");
+        let fp2 = uc.tree_fingerprint().await.expect("fp2");
+
+        assert_ne!(
+            fp1, fp2,
+            "editing renamed.rs again must invalidate the green cache"
+        );
     }
 }

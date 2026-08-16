@@ -98,7 +98,15 @@ impl RunnerHandle {
         self.resume.notify_waiters();
     }
 
-    /// Pause after the current cycle.
+    /// Whether the runner is currently paused — polled by the cycle BETWEEN
+    /// phases so a user's Pause takes effect at the next phase boundary (after
+    /// the in-flight engine call), not after the whole multi-agent cycle.
+    #[must_use]
+    pub fn is_paused(&self) -> bool {
+        self.mode.load(Ordering::SeqCst) == PAUSED
+    }
+
+    /// Pause: no new phases start; the in-flight engine call finishes first.
     pub fn pause(&self) {
         self.mode.store(PAUSED, Ordering::SeqCst);
         self.set_mode_label("paused");
@@ -255,6 +263,10 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
                 .await;
         });
     }));
+    {
+        let h = std::sync::Arc::clone(&handle);
+        cycle_uc.set_pause_check(std::sync::Arc::new(move || h.is_paused()));
+    }
     let breaker_store = cycle_uc.store();
     let mut cycle = 0u64;
     // Circuit breaker: engine-infrastructure outages (revoked auth, network
@@ -314,6 +326,12 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
 
         if report.over_budget {
             tracing::warn!("budget cap reached — pausing loop");
+            cycle_uc
+                .notify(
+                    "loop_paused",
+                    "loop paused: spend cap reached".to_owned(),
+                )
+                .await;
             handle.pause();
             continue;
         }
@@ -336,6 +354,29 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
             let engine = cycle_uc.engine_id().to_owned();
             let first = infra_faults.first().map(|e| (*e).clone());
             let fault_count = infra_errors;
+            // Webhook mirror of the chat announcements below: fires only on the
+            // open/close EDGE, so a night-long outage is one message, not one
+            // per cycle.
+            let was_open = breaker_store.load().await.is_ok_and(|s| {
+                s.engine_incidents.iter().any(|i| i.engine == engine)
+            });
+            if let Some(detail) = &first {
+                if !was_open && fault_count >= 2 {
+                    cycle_uc
+                        .notify(
+                            "engine_incident",
+                            format!("{engine} failed {fault_count} runs this cycle: {detail}"),
+                        )
+                        .await;
+                }
+            } else if was_open {
+                cycle_uc
+                    .notify(
+                        "engine_recovered",
+                        format!("{engine} is answering again — work resumes"),
+                    )
+                    .await;
+            }
             let _ = crate::ports::outbound::mutate_state(breaker_store.as_ref(), move |s| {
                 if let Some(detail) = &first {
                     let already = s.engine_incidents.iter().any(|i| i.engine == engine);
@@ -396,6 +437,14 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
             })
             .await;
             infra_streak = 0;
+            cycle_uc
+                .notify(
+                    "loop_paused",
+                    "loop paused: engine infrastructure looks DOWN (auth/network) after 3 \
+                     empty cycles — fix the outage, then Resume"
+                        .to_owned(),
+                )
+                .await;
             handle.pause();
             continue;
         }
