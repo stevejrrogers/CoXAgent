@@ -846,11 +846,6 @@ impl DeployPort for DockerComposeDeploy {
 mod tests {
     use super::*;
 
-    /// The deploy port-eviction decision routes through the single shared
-    /// reclaimability policy (`crate::deploy::reclaimable`), whose own unit
-    /// tests own the full blast-radius matrix — live hub, shared infra,
-    /// case-insensitivity and foreign projects.
-
     /// AC (COX-F005): a health endpoint that's unreachable (nothing
     /// listening — connection refused) must be treated as a failed check,
     /// bounded by a timeout, never left hanging indefinitely.
