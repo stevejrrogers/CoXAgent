@@ -225,16 +225,67 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
         let design = match parse_design(&outcome.stdout) {
             Ok(d) => d,
             Err(first) => {
-                let fixed = crate::use_cases::repair_json(
-                    self.engine.as_ref(),
-                    &outcome.stdout,
-                    "a JSON object with the technical design fields",
-                    &self.work_dir,
-                )
-                .await;
-                let Some(Ok(repaired)) = fixed.as_deref().map(parse_design) else {
+                // Flash-tier models occasionally degenerate on long token-dense
+                // output (word-salad inside the JSON), which `parse_design`
+                // rejects. Instead of giving up on one salvage pass, retry with
+                // feedback and escalate the model tier — the same recipe as
+                // run_dev::self_heal_compile. The parse error plus the failed
+                // raw output are fed back so each retry knows exactly what to
+                // fix; later attempts run a stronger model when a ladder is
+                // configured. Falls back to Corrupt after N attempts so a
+                // genuinely bad call still surfaces as a failure.
+                let mut raw = outcome.stdout.clone();
+                let mut parse_err = first;
+                let mut repaired: Option<DesignOutput> = None;
+                for attempt in 1_u32..=3 {
+                    let req = AgentRequest {
+                        role: Role::Sa,
+                        system_prompt: prompts::system_prompt(prompts::SA),
+                        task_prompt: format!(
+                            "The design below for {id} did not parse as the required JSON \
+                             object (a technical design with {{\"approach\":\"...\", \
+                             \"alternatives\":\"...\", \"files\":[...], \"api_contract\":\"...\", \
+                             \"data_changes\":\"...\", \"test_plan\":\"...\"}}). \
+                             Parse error: {parse_err}\n\nRepair it into VALID design JSON — \
+                             preserve the content, fix the structure only. Output ONLY the JSON \
+                             object, no prose, no code fences.\n\nFAILED OUTPUT:\n{}",
+                            &raw[..raw.len().min(8000)]
+                        ),
+                        work_dir: self.work_dir.clone(),
+                        timeout: Duration::from_secs(120),
+                        escalation_level: u8::try_from(attempt.saturating_sub(1)).unwrap_or(3),
+                        label: Some(id.to_string()),
+                    };
+                    match self.engine.run(req).await {
+                        Ok(o) if o.succeeded() => match parse_design(&o.stdout) {
+                            Ok(d) => {
+                                repaired = Some(d);
+                                break;
+                            }
+                            Err(e) => {
+                                parse_err = e;
+                                raw = o.stdout;
+                                tracing::warn!(
+                                    "SA design repair attempt {attempt} for {id} still unparseable: {parse_err}"
+                                );
+                            }
+                        },
+                        Ok(o) => {
+                            tracing::warn!(
+                                "SA design repair attempt {attempt} for {id} failed: {}",
+                                o.stderr.chars().take(200).collect::<String>()
+                            );
+                            break;
+                        }
+                        Err(e) => {
+                            tracing::warn!("SA design repair attempt {attempt} for {id} error: {e}");
+                            break;
+                        }
+                    }
+                }
+                let Some(repaired) = repaired else {
                     self.store.release_stage(&id, "sa", &worker).await.ok();
-                    return Err(PortError::Corrupt(format!("SA output: {first}")).into());
+                    return Err(PortError::Corrupt(format!("SA output: {parse_err}")).into());
                 };
                 repaired
             }

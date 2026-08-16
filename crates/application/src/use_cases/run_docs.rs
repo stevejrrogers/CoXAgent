@@ -90,7 +90,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
     /// 12-30 full-page sonnet rewrites an hour. A handful a day converges the
     /// wiki at a price that does not scale with cycle speed.
     async fn take_refresh_budget(&self, state: &crate::state::ProjectState) -> bool {
-        const REFRESHES_PER_DAY: u32 = 5;
+        let refreshes_per_day = self.config.workflow.cadence.docs_refreshes_per_day();
         let today = crate::state::now_rfc3339()[..10].to_owned();
         let spent = state
             .daily_jobs
@@ -98,7 +98,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
             .and_then(|v| v.strip_prefix(&format!("{today}:")))
             .and_then(|n| n.parse::<u32>().ok())
             .unwrap_or(0);
-        if spent >= REFRESHES_PER_DAY {
+        if spent >= refreshes_per_day {
             return false;
         }
         let (key, val) = (
@@ -339,7 +339,21 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
         // next agent and unsearchable for people. One bounded repair pass, the
         // same deal the code gates give a developer.
         let mut raw = outcome.stdout.clone();
-        if let Some(missing) = docs_gate_failures(&raw, &self.work_dir) {
+        // Flash-tier models can degenerate mid-generation on long token-dense
+        // pages. The skeleton gate rejects that; rather than accept one repair
+        // and move on, retry with feedback and escalate the model tier — the
+        // same recipe as run_dev::self_heal_compile. Each attempt is told
+        // exactly which parts are still missing; later attempts run a stronger
+        // model when a ladder is configured.
+        for attempt in 1_u32..=3 {
+            let Some(missing) = docs_gate_failures(&raw, &self.work_dir) else {
+                break;
+            };
+            if attempt > 1 {
+                tracing::warn!(
+                    "DOCS gate attempt {attempt} for {id} still failing: {missing}"
+                );
+            }
             let fixup = format!(
                 "Your page for {id} is missing required parts: {missing}.\n\nOutput the COMPLETE \
                  page again with the full skeleton — same `FOLDER:` first line, every required \
@@ -354,13 +368,22 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
                     task_prompt: fixup,
                     work_dir: self.work_dir.clone(),
                     timeout: Duration::from_secs(900),
-                    escalation_level: 0,
+                    escalation_level: u8::try_from(attempt.saturating_sub(1)).unwrap_or(3),
                     label: Some(id.to_string()),
                 })
                 .await;
-            if let Ok(o) = repair {
-                if o.succeeded() && docs_gate_failures(&o.stdout, &self.work_dir).is_none() {
-                    raw = o.stdout;
+            match repair {
+                Ok(o) if o.succeeded() => raw = o.stdout,
+                Ok(o) => {
+                    tracing::warn!(
+                        "DOCS repair attempt {attempt} for {id} failed: {}",
+                        o.stderr.chars().take(200).collect::<String>()
+                    );
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!("DOCS repair attempt {attempt} for {id} error: {e}");
+                    break;
                 }
             }
         }

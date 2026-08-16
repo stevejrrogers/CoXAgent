@@ -522,6 +522,15 @@ pub(crate) async fn build_project(
             coxagent_infrastructure::FsWorkspaceFiles::new(),
         )),
         deploy: Some(Arc::new(DockerComposeDeploy::new())),
+        storage: Some(build_storage().await.unwrap_or_else(|| {
+            Arc::new(coxagent_infrastructure::storage::LocalStorage::new(
+                std::env::var_os("HOME")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_default()
+                    .join("CoXAgent")
+                    .join("blobs"),
+            ))
+        })),
     })
 }
 

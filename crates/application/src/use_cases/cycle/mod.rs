@@ -25,6 +25,7 @@ mod debt_sweep;
 mod escalation;
 mod preflight;
 mod scrum;
+mod sm_watch;
 mod wiring;
 
 mod forge;
@@ -34,9 +35,6 @@ mod forge_review;
 mod ops;
 mod qa_evidence;
 mod recovery;
-
-/// How often (in sprints) the SA runs a whole-system architecture review.
-const ARCH_REVIEW_EVERY_SPRINTS: u32 = 8;
 
 /// Local, non-pushed ref updated after every deploy that passes both
 /// `deploy()` and `run_tests()` — auto-rollback's source of truth for "last
@@ -187,6 +185,17 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     /// Rebuild hook for hot-reloading engine+config on a file change (set by
     /// the composition root; `None` in tests).
     reloader: Option<Reloader<E>>,
+    /// Polled between phases: `true` = the user pressed Pause, stop starting
+    /// new phases and end this cycle early. `None` (tests/headless) = never.
+    pause_check: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
+    /// Per-phase wall-clock tracker: `report()` marks each phase switch, the
+    /// scorecard drains the totals at cycle end. `(current phase, since)` plus
+    /// accumulated seconds per phase label.
+    #[allow(clippy::type_complexity)]
+    phase_track: Mutex<(
+        Option<(String, std::time::Instant)>,
+        std::collections::BTreeMap<String, u64>,
+    )>,
     /// This runner's identity (`account@host`) — recorded as the ticket claim
     /// owner so concurrent runners on a shared backlog never collide.
     worker: String,
@@ -228,6 +237,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             forge: None,
             phase: None,
             reloader: None,
+            pause_check: None,
+            phase_track: Mutex::new((None, std::collections::BTreeMap::new())),
             worker: String::new(),
             caps: crate::ports::outbound::WorkerCaps::default(),
             sandbox_warned: AtomicBool::new(false),
@@ -261,6 +272,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     pub fn with_reloader(mut self, reloader: Reloader<E>) -> Self {
         self.reloader = Some(reloader);
         self
+    }
+
+    /// Install the runner's pause probe (composition root only).
+    pub fn set_pause_check(&mut self, check: std::sync::Arc<dyn Fn() -> bool + Send + Sync>) {
+        self.pause_check = Some(check);
+    }
+
+    /// Whether the user has asked to pause — checked between phases so Pause
+    /// cuts the cycle at the next boundary instead of after the whole cycle.
+    fn pause_requested(&self) -> bool {
+        self.pause_check.as_ref().is_some_and(|c| c())
     }
 
     /// Apply a pending config change if the reload hook reports one. Called by
@@ -314,6 +336,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// Report the agent about to run (live "working now"). `note` is a short
     /// context like a ticket id; empty when there's none.
     fn report(&self, role: &str, note: &str) {
+        // Phase switch: bank the previous phase's elapsed time.
+        if let Ok(mut t) = self.phase_track.lock() {
+            let now = std::time::Instant::now();
+            if let Some((prev, since)) = t.0.take() {
+                *t.1.entry(prev).or_default() += since.elapsed().as_secs();
+            }
+            t.0 = Some((role.to_owned(), now));
+        }
         if let Some(p) = &self.phase {
             p(Some((role.to_owned(), note.to_owned())));
         }
@@ -514,7 +544,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     }
 
     /// Emit an event to the notifier, if one is attached. Best-effort.
-    async fn notify(&self, kind: &str, message: String) {
+    pub(crate) async fn notify(&self, kind: &str, message: String) {
         if let Some(n) = &self.notifier {
             let project = self.config_project_label();
             n.notify(crate::ports::outbound::NotifyEvent {
@@ -612,6 +642,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             return report;
         }
 
+        // Quiet hours: inside the configured UTC window no NEW engine calls
+        // start — overnight is when quota walls and sleeping laptops kill runs
+        // mid-edit with nobody watching. An open high-priority bug overrides
+        // (urgent work does not wait for morning). Not an error: the cycle
+        // just reports itself quiet, so the breaker and scorecard stay honest.
+        if self.quiet_hours_block().await {
+            return report;
+        }
+
         // Coordinate concurrent runners: at most one leads the singleton phases
         // (BA/PO/design-system/deploy/TEST/review) that must run once per project,
         // not once per runner. Non-leaders still do per-ticket stages (SA/PD/DEV/
@@ -624,6 +663,31 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         };
         let now = crate::state::now_rfc3339();
         let leader = self.store.acquire_leader(&me, &now).await.unwrap_or(true);
+        // Authoritative cycle number: the persistent, project-wide counter the
+        // leader advances once per cycle. Scoring *and* cadence key off this,
+        // NOT the per-process local number — so restarts / leader handovers
+        // neither renumber the scorecard nor reset the codegraph/debt/BA/scrum
+        // cadence. Falls back to the local number if the store hiccups.
+        let cycle = if leader {
+            // Advance the persistent project-cycle counter: load state, bump
+            // `state.cycle`, save, and use the advanced number. On any store
+            // hiccup fall back to the local number so a state problem never
+            // stalls a cycle.
+            match self.store.load().await {
+                Ok(mut s) => {
+                    // Pure, testable: seeds past existing scorecard history on
+                    // first use, then advances the persistent counter (see
+                    // `advance_project_cycle` below).
+                    let next = advance_project_cycle(&mut s);
+                    let _ = self.store.save(&s).await;
+                    next
+                }
+                Err(_) => cycle,
+            }
+        } else {
+            cycle
+        };
+        report.cycle = cycle;
         // Merge-queue recovery flag (set by the leader once the queue blows up).
         let mut recovery = false;
         // Human-queued execution jobs (force-merge …) run before anything else.
@@ -641,6 +705,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             )
             .await;
 
+        // Tree hygiene FIRST, every runner: an engine that died mid-run leaves
+        // the LEADER tree dirty on a feature branch or its local base polluted,
+        // and a SLOT worktree holding a branch hostage — then every later git
+        // op this cycle fails in a chain (the 2026-08-16 all-D night). Clean
+        // up before anything touches git.
+        self.tree_hygiene().await;
         // Keep the code map fresh so `.coxagent/REPO_MAP.md` reflects the tree
         // the agents are about to work on (best-effort, token-saver-gated).
         // Leader-only: it writes shared files under the repo.
@@ -663,6 +733,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             }
             // Scrum: open/roll over the sprint at the start of the cycle.
             self.advance_sprint_if_scrum(cycle).await;
+            // SM supervision (deterministic, zero tokens): police the sprint
+            // scope, route stalled committed work to the role that unblocks
+            // it, and descope what will not ship — the SM orchestrates the
+            // sprint instead of just announcing it.
+            self.sm_sprint_watch().await;
 
             // One digest per UTC day into the team chat: shipped/spend/sprint at
             // a glance, so the user doesn't need the dashboard open to keep up.
@@ -682,10 +757,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // mergeable PRs aged a whole cycle before anyone looked at them.
             self.review_open_prs().await;
             self.address_pr_feedback().await;
-            // Debt sweep cadence: every 10th cycle files ONE tech-debt chore
-            // (lint baseline, dead code, missing docs) if none is open — the
+            // Debt sweep cadence (configurable): every Nth cycle files ONE
+            // tech-debt chore (lint baseline, dead code, missing docs) — the
             // discipline of paying debt down on a schedule instead of never.
-            if cycle % 10 == 0 {
+            if cycle % self.config.workflow.cadence.debt_sweep_every_cycles() == 0 {
                 self.file_debt_sweep(cycle).await;
             }
 
@@ -799,6 +874,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 .errors
                 .push("SA/PD: design paused — merge-queue recovery, conflicts first".to_owned());
         } else {
+        if self.pause_requested() {
+            report.errors.push("cycle cut short — paused by user".to_owned());
+            return report;
+        }
             match self.sa().execute().await {
                 Ok(id) => report.sa_readied = id,
                 Err(e) => report.errors.push(format!("SA: {e}")),
@@ -824,6 +903,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
 
         if !queue_full {
+        if self.pause_requested() {
+            report.errors.push("cycle cut short — paused by user".to_owned());
+            return report;
+        }
             match self.dev(DevMode::Bug).execute().await {
                 Ok(id) => {
                     if let Some(tid) = &id {
@@ -839,6 +922,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             report
                 .errors
                 .push("DEV-FEATURE: paused by self-tuning — burning down bugs first".to_owned());
+        }
+        if self.pause_requested() {
+            report.errors.push("cycle cut short — paused by user".to_owned());
+            return report;
         }
         if self.config.workflow.feature_dev_enabled && !queue_full && !bugs_first {
             // Before building, make sure the next feature has a clear definition
@@ -1083,6 +1170,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // bug pile-up, or a periodic check-in), the team actually discusses
             // it — PO & SA weigh in, SM decides, and a decision can spawn a
             // ticket. Posts land in the Scrum feed.
+            if self.pause_requested() {
+            report.errors.push("cycle cut short — paused by user".to_owned());
+            return report;
+        }
             self.scrum_discussion(&report, cycle).await;
         }
         self.report_idle();
@@ -1149,6 +1240,49 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         self
     }
 
+    /// Drain the per-phase wall-clock totals (closing any open phase) — called
+    /// once at cycle end by the scorecard.
+    pub(super) fn take_phase_secs(&self) -> std::collections::BTreeMap<String, u64> {
+        match self.phase_track.lock() {
+            Ok(mut t) => {
+                if let Some((prev, since)) = t.0.take() {
+                    *t.1.entry(prev).or_default() += since.elapsed().as_secs();
+                }
+                std::mem::take(&mut t.1)
+            }
+            Err(_) => std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Whether this cycle must stay quiet: inside `workflow.quiet_hours_utc`
+    /// and no high-priority bug is open. Reads the wall clock from the same
+    /// RFC3339 source the rest of the state uses.
+    async fn quiet_hours_block(&self) -> bool {
+        let window = self.config.workflow.quiet_hours_utc.trim();
+        if window.is_empty() {
+            return false;
+        }
+        let now = crate::state::now_rfc3339();
+        // "YYYY-MM-DDTHH:MM:…" — minutes since UTC midnight.
+        let minutes = now
+            .get(11..13)
+            .zip(now.get(14..16))
+            .and_then(|(h, m)| Some(h.parse::<u32>().ok()? * 60 + m.parse::<u32>().ok()?));
+        let Some(minutes) = minutes else { return false };
+        if !crate::config::in_quiet_window(window, minutes) {
+            return false;
+        }
+        // Urgent work overrides: an open high-priority bug does not wait.
+        let urgent = self.store.load().await.is_ok_and(|s| {
+            s.tickets.iter().any(|t| {
+                t.ticket_type() == coxagent_domain::TicketType::Bug
+                    && t.status() == coxagent_domain::Status::Open
+                    && t.priority() == coxagent_domain::Priority::High
+            })
+        });
+        !urgent
+    }
+
     /// Attach workspace-file access (team notes, memory indexes, maps).
     #[must_use]
     pub fn with_files(
@@ -1158,6 +1292,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         self.files = files;
         self
     }
+
 
     /// The engine this cycle drives, for outage reporting.
     pub fn engine_id(&self) -> &'static str {
@@ -1289,6 +1424,76 @@ fn apply_budget_warnings(
     state.budget_warned_daily = approaching_daily;
 
     (new_lifetime_warning, new_daily_warning)
+}
+
+/// Advance `state.cycle` — the persistent, restart-safe project-cycle counter —
+/// and return its new value. On a project whose scorecard already has history
+/// (loaded from before `state.cycle` existed), the counter is first seeded past
+/// that history so the scorecard dedupe gate (new cycle > scored max) doesn't
+/// drop the first N real cycles, and so cadence never renumbers onto values
+/// `sweeps_done` already recorded. Pure + testable; the leader calls it with
+/// its loaded state and persists the result.
+fn advance_project_cycle(state: &mut crate::state::ProjectState) -> u64 {
+    if state.cycle == 0 {
+        state.cycle = state
+            .cycle_scores
+            .iter()
+            .map(|c| c.cycle)
+            .max()
+            .unwrap_or(0);
+    }
+    state.cycle = state.cycle.saturating_add(1);
+    state.cycle
+}
+
+#[cfg(test)]
+mod cycle_counter_tests {
+    use super::advance_project_cycle;
+    use crate::state::ProjectState;
+
+    #[test]
+    fn fresh_project_starts_and_advances_from_one() {
+        let mut s = ProjectState::default();
+        assert_eq!(advance_project_cycle(&mut s), 1);
+        assert_eq!(advance_project_cycle(&mut s), 2);
+        assert_eq!(advance_project_cycle(&mut s), 3);
+    }
+
+    #[test]
+    fn resumes_from_an_existing_runner_local_counter() {
+        // A project whose persistent counter was seeded by an older local
+        // counter (e.g. it ran 42 cycles before this field existed).
+        let mut s = ProjectState::default();
+        s.cycle = 42;
+        assert_eq!(advance_project_cycle(&mut s), 43);
+        assert_eq!(advance_project_cycle(&mut s), 44);
+    }
+
+    #[test]
+    fn seeds_past_existing_scorecard_history_on_first_use() {
+        // Migrated project: cycle_scores already has history but `state.cycle`
+        // is 0. The first advance must jump PAST the scored max so the dedupe
+        // gate doesn't suppress real fresh cycles.
+        use crate::state::CycleScore;
+        let mut s = ProjectState::default();
+        s.cycle_scores.push(CycleScore {
+            cycle: 42,
+            ..CycleScore::default()
+        });
+        assert_eq!(advance_project_cycle(&mut s), 43);
+        // Subsequent advances stay monotonic.
+        assert_eq!(advance_project_cycle(&mut s), 44);
+    }
+
+    #[test]
+    fn never_regresses_the_persistent_counter() {
+        // The counter only moves forward — it never wraps or renumbers.
+        let mut s = ProjectState::default();
+        s.cycle = u64::MAX - 1;
+        assert_eq!(advance_project_cycle(&mut s), u64::MAX);
+        // Saturates rather than wrapping to 0 (which would collide with cadence).
+        assert_eq!(advance_project_cycle(&mut s), u64::MAX);
+    }
 }
 
 #[cfg(test)]
