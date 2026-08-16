@@ -127,6 +127,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 result = git.checkout_branch(&self.work_dir, &branch).await;
             }
         }
+        let mut reconciled = false;
         if let Err(e) = result {
             // Self-heal 2 of 2 — reconcile residual tree debris: rejected-proposal
             // debris or leftover agent residue blocks even switching to this ticket's
@@ -140,6 +141,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 self.log_git(&format!("branch {branch} failed: {e}")).await;
                 return;
             }
+            // The reconcile agent already committed the ticket's work on
+            // `branch` and left the tree switchable, so `commit_all` below will
+            // find nothing NEW to stage — yet the branch is exactly the ship we
+            // must push. Remember that so we still push + record it as swept
+            // instead of bailing on the empty-commit and re-sweeping forever.
+            reconciled = true;
         }
         let email = if self.config.git.commit_email.trim().is_empty() {
             "coxagent-bot@users.noreply.github.com".to_owned()
@@ -153,7 +160,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let msg = format!("{kind}({id}): {title}");
         match git.commit_all(&self.work_dir, &msg, &author).await {
             Ok(Some(sha)) => self.log_git(&format!("committed {sha} on {branch}")).await,
-            Ok(None) => return, // nothing changed — no branch to push
+            // Nothing new to stage. Normally that means no branch to push — but
+            // if we just reconciled the tree, the reconcile agent already
+            // committed the ticket's work on `branch`. Fall through so we push
+            // that and record the ticket as swept; otherwise it is re-matched
+            // and re-reconciled every cycle forever.
+            Ok(None) if !reconciled => return,
+            Ok(None) => {}
             Err(e) => {
                 self.log_git(&format!("commit failed for {id}: {e}")).await;
                 return;
