@@ -11,6 +11,7 @@ pub mod conformance;
 pub mod error;
 pub mod faults;
 pub mod metrics;
+pub mod metrics_health;
 pub mod parsing;
 pub mod policy;
 pub mod ports;
