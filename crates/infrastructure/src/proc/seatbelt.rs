@@ -24,7 +24,7 @@ use tokio::process::Command;
 /// How many times a macOS Seatbelt spawn is attempted in total when
 /// `sandbox-exec` itself fails to even start the confined program (see
 /// [`is_transient_seatbelt_apply_failure`]).
-pub(super) const SEATBELT_APPLY_RETRIES: u32 = 3;
+const SEATBELT_APPLY_RETRIES: u32 = 3;
 
 /// How long a streaming spawn waits to see whether `sandbox-exec` already
 /// bailed. A real agent CLI run never completes this fast (it's a network call
@@ -39,10 +39,7 @@ const SEATBELT_PROBE_GRACE: std::time::Duration = std::time::Duration::from_mill
 /// program exiting 71 with nothing written is not a case this codebase's
 /// engines (`claude`, `opencode`, `hermes`, `copilot`) produce, so the
 /// signature is safe to treat as unambiguous.
-pub(super) fn is_transient_seatbelt_apply_failure(
-    sandbox: SandboxStatus,
-    code: Option<i32>,
-) -> bool {
+fn is_transient_seatbelt_apply_failure(sandbox: SandboxStatus, code: Option<i32>) -> bool {
     sandbox == SandboxStatus::Confined("seatbelt") && code == Some(71)
 }
 
