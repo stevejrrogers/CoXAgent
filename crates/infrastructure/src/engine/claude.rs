@@ -274,7 +274,11 @@ impl ClaudeEngine {
         }
         cmd.stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        let mut child = crate::proc::spawn_confined(&mut cmd, sandbox)
+        // The status comes BACK from the spawn: a host whose Seatbelt refused
+        // the profile on every attempt downgrades it to `Denied`, so the
+        // outcome reports a run that never happened instead of a confined one
+        // (COX-B016).
+        let (mut child, sandbox) = crate::proc::spawn_confined(&mut cmd, sandbox)
             .await
             .map_err(|e| PortError::Backend(format!("spawn claude: {e}")))?;
         let out = child
