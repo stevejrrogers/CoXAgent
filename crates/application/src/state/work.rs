@@ -165,6 +165,22 @@ pub struct PrReview {
     pub head_sha: String,
 }
 
+/// One ticket attachment (a PD design image, a screenshot): the record the UI
+/// lists. The bytes live in blob storage (`StoragePort`) under `key`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TicketAttachment {
+    /// Human file name ("login-mockup.svg").
+    pub name: String,
+    /// Opaque storage key; echoed back to the attachment fetch endpoint.
+    pub key: String,
+    /// MIME type ("image/svg+xml").
+    pub content_type: String,
+    /// Who attached it ("PD", or a username).
+    pub by: String,
+    /// RFC3339 timestamp.
+    pub at: String,
+}
+
 /// A product milestone — a named delivery target that one or more sprints work
 /// toward. `target_version` is the release that marks it reached.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

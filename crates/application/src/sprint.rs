@@ -118,6 +118,29 @@ pub fn commit_ticket(state: &mut ProjectState, id: &TicketId) -> bool {
     true
 }
 
+/// Refill an open sprint whose committed set is EMPTY from the open backlog.
+///
+/// Rollover commits capacity once; a sprint that opened onto an empty backlog
+/// stays empty even as tickets become Ready mid-sprint — and under the
+/// sprint-scope DEV gate that is silent starvation: a full queue, an idle
+/// team, and nothing on any screen saying why. Returns how many tickets were
+/// committed (0 = sprint absent, already scoped, or backlog still empty).
+pub fn refill_empty_scope(state: &mut ProjectState) -> usize {
+    let needs_scope = state
+        .sprint
+        .as_ref()
+        .is_some_and(|s| s.committed.is_empty());
+    if !needs_scope {
+        return 0;
+    }
+    let backlog = open_backlog(state);
+    let Some(sprint) = &mut state.sprint else {
+        return 0;
+    };
+    sprint.committed = backlog;
+    sprint.committed.len()
+}
+
 /// Drop a ticket from the running sprint — scope a sprint DOWN mid-flight
 /// without deleting the ticket.
 pub fn uncommit_ticket(state: &mut ProjectState, id: &TicketId) -> bool {
@@ -245,6 +268,23 @@ mod tests {
         let s = state.sprint.as_ref().expect("sprint");
         assert_eq!(s.number, 1);
         assert_eq!(s.committed.len(), 2);
+    }
+
+    #[test]
+    fn an_empty_sprint_scope_refills_from_backlog_instead_of_starving_dev() {
+        // Sprint opened onto an empty backlog…
+        let mut state = ProjectState::default();
+        advance(&mut state, 1, SprintPolicy::Cycles(10));
+        assert!(state.sprint.as_ref().expect("sprint").committed.is_empty());
+        // …then tickets became Ready mid-sprint. Under the sprint-scope DEV
+        // gate they'd be invisible until rollover — refill commits them now.
+        state.tickets.push(feature("F001"));
+        assert_eq!(refill_empty_scope(&mut state), 1);
+        // Already-scoped sprints are never rewritten.
+        assert_eq!(refill_empty_scope(&mut state), 0);
+        // No sprint at all (Kanban): nothing to do.
+        state.sprint = None;
+        assert_eq!(refill_empty_scope(&mut state), 0);
     }
 
     #[test]

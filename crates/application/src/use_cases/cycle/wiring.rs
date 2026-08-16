@@ -64,6 +64,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             self.work_dir.clone(),
         )
         .with_files(self.files.clone())
+        .with_storage(self.storage.clone())
         .with_worker(self.worker.clone())
         .with_phase(self.phase.clone())
         .with_context(Some(self.context.clone()))
