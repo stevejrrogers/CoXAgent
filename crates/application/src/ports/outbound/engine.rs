@@ -51,6 +51,12 @@ pub enum SandboxStatus {
     /// mechanism — the run still executed unconfined. The payload is a short
     /// human-readable reason.
     Unavailable(&'static str),
+    /// Confinement was requested AND this host supports it, but the OS refused
+    /// to apply the profile on every attempt — so the agent never ran at all
+    /// (COX-B016). Distinct from [`Self::Unavailable`], where the agent did its
+    /// work, just unconfined: here there is no work and no output, and the
+    /// non-zero exit belongs to the sandbox rather than the agent.
+    Refused(&'static str),
 }
 
 /// The raw result of an engine run. Parsing into domain effects is the caller's
