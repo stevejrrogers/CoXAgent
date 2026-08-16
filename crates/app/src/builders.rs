@@ -510,14 +510,23 @@ pub(crate) async fn build_project(
                 .ok()
                 .and_then(|p| p.parse::<u16>().ok())
                 .unwrap_or(4000);
+            let _ = &script; // superseded: the script comes from origin, not the clone
             tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(Duration::from_secs(900)).await;
-                    if !script.exists() {
-                        continue;
-                    }
+                    // Run the LATEST script straight from origin/<base> via
+                    // `git show` — reading it from the clone was a
+                    // chicken-and-egg: a clone that predates the script never
+                    // upgrades, and therefore never gets the script.
+                    let cmd = format!(
+                        "git -C \"$1\" fetch -q origin \"$4\" && \
+                         git -C \"$1\" show \"origin/$4:deploy/self-upgrade.sh\" 2>/dev/null \
+                         | bash -s -- \"$1\" \"$2\" \"$3\" \"$4\""
+                    );
                     let _ = std::process::Command::new("bash")
-                        .arg(&script)
+                        .arg("-c")
+                        .arg(&cmd)
+                        .arg("self-upgrade") // $0
                         .arg(&repo)
                         .arg(&target)
                         .arg(port.to_string())
