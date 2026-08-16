@@ -538,6 +538,14 @@ pub struct DeployConfig {
     /// the live hub serves.
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Self-upgrade (dogfood CD): the hub periodically runs
+    /// `deploy/self-upgrade.sh`, which builds origin/<default_branch> in a
+    /// detached worktree, swaps its OWN binary (backup kept), restarts, and
+    /// rolls back if the new hub fails its health check. The script is a
+    /// detached process so a dying hub cannot orphan its own rescue. Opt-in
+    /// (default off) — only meaningful when the hub manages its own repo.
+    #[serde(default)]
+    pub self_upgrade: bool,
     /// Auto-redeploy the last known-good version when `deploy()` or a
     /// post-deploy `run_tests()` fails, so the shared environment self-heals
     /// instead of staying broken until a DEV agent picks up the bug ticket.
@@ -579,6 +587,7 @@ impl Default for DeployConfig {
         Self {
             host_port: None,
             enabled: true,
+            self_upgrade: false,
             auto_rollback: false,
             max_rollback_age_secs: default_max_rollback_age_secs(),
             migration_detection_paths: default_migration_detection_paths(),
