@@ -194,6 +194,7 @@ pub(super) async fn auth_mw(
     // webhook token is the credential, so no session is required).
     if path == "/"
         || path == "/api/health"
+        || path == "/api/openapi.json"
         || path == "/api/auth/login"
         // Embedded static assets (vendored JS/CSS) — same trust level as "/".
         || path.starts_with("/assets/")

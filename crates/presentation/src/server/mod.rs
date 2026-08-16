@@ -50,6 +50,7 @@ mod hub_docs;
 mod inbox;
 mod manage;
 mod meetings;
+mod openapi;
 mod people;
 mod pr_listing;
 mod projects;
@@ -598,6 +599,7 @@ pub async fn serve_full(
             get(|| async { ([("content-type", "application/javascript")], XTERM_FIT_JS) }),
         )
         .route("/api/health", get(health))
+        .route("/api/openapi.json", get(openapi::openapi_ep))
         .route("/api/mcp", post(mcp_ep))
         .route("/api/app/latest", get(app_latest_ep))
         .route("/api/app/download/:file", get(app_download_ep))
