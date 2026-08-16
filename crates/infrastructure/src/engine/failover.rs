@@ -107,7 +107,25 @@ impl<E: AgentEnginePort> AgentEnginePort for FailoverEngine<E> {
         let mut last_err = String::new();
         for (i, engine) in self.engines.iter().enumerate() {
             let is_last = i == last_idx;
-            match engine.run(request.clone()).await {
+            // A fallback engine inherits whatever the dead engine left behind:
+            // uncommitted edits in the working tree and possibly a BRIEF note.
+            // Without saying so, it re-plans from zero, redoing (and often
+            // conflicting with) minutes of paid work. Tell it to CONTINUE.
+            let mut request = request.clone();
+            if i > 0 {
+                request.task_prompt = format!(
+                    "{}\n\n## Continuation after engine failover\n\
+                     A previous engine started this exact task and died mid-run \
+                     (quota/outage). Its partial work may be in the working tree \
+                     as uncommitted changes, and a handoff note may exist under \
+                     `.coxagent/briefs/`. FIRST inspect `git status`/`git diff` \
+                     (and the brief if present), then CONTINUE from that state — \
+                     keep what is correct, finish what is missing. Do not start \
+                     over or revert work you did not write.",
+                    request.task_prompt
+                );
+            }
+            match engine.run(request).await {
                 // Success — done. The concrete engine has already stamped
                 // `outcome.engine` with its own id, so the outcome that returns
                 // here already names the engine that actually ran (post-failover).
