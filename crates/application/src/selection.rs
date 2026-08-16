@@ -131,6 +131,7 @@ fn priority_rank(p: Priority) -> u8 {
 ///  - bugs still `Open` — dedicated bug work outranks the board, and
 ///  - Kanban mode (no sprint open) — there is no sprint to be out of scope
 ///    for, so any ready ticket is fair game.
+///
 /// In Scrum mode a feature/chore the PO/SM has not committed is out of scope:
 /// DEV must ask to have it added before picking it up.
 #[must_use]

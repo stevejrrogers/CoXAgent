@@ -351,6 +351,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                                 "Approved, but not auto-merging: {why}. Ask a human to land this."
                             );
                             let _ = forge.comment_pr(pr.number, &msg).await;
+                            // Surface the hold on the hub so the Inbox can ask
+                            // a person instead of the PR waiting silently —
+                            // and ping the webhook so they hear about it away
+                            // from the dashboard too.
+                            self.reporter().report_hold(pr.number, &why).await;
+                            self.notify(
+                                "human_eyes",
+                                format!(
+                                    "PR #{} approved but held for a human: {why}",
+                                    pr.number
+                                ),
+                            )
+                            .await;
                             self.log_git(&format!(
                                 "PR #{} approved but held for a human: {why}",
                                 pr.number
