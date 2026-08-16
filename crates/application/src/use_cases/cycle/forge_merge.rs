@@ -746,7 +746,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     continue;
                 }
                 // Never touch work a human is deliberately sitting on.
-                if crate::use_cases::merge_policy::needs_human_eyes(&diff).is_some() {
+                if crate::use_cases::merge_policy::needs_human_eyes(
+                    &diff,
+                    self.config.git.max_changed_lines,
+                )
+                .is_some()
+                {
                     continue;
                 }
             }

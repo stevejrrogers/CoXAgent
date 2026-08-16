@@ -150,6 +150,9 @@ pub struct ProjectHandle {
     /// Deploy adapter, so on-demand actions (e.g. a chat "deploy" request) can
     /// build & run the app.
     pub deploy: Option<Arc<dyn coxagent_application::ports::outbound::DeployPort>>,
+    /// Blob storage (MinIO/S3 or the local blob dir) for ticket attachments
+    /// and evidence media.
+    pub storage: Option<Arc<dyn coxagent_application::ports::outbound::StoragePort>>,
     /// Workspace file access for on-demand reviews; injected by the
     /// composition root so this layer stays free of infrastructure.
     pub files: Option<Arc<dyn coxagent_application::ports::outbound::WorkspaceFilesPort>>,
@@ -801,6 +804,13 @@ pub async fn serve_full(
             post(approve_cost),
         )
         .route("/api/projects/:pid/inbox", get(inbox_ep))
+        .route("/api/projects/:pid/pr/:number/human", post(human_pr_ep))
+        .route("/api/projects/:pid/attachment", get(attachment_ep))
+        .route(
+            "/api/projects/:pid/ticket/:id/attachments",
+            post(upload_attachment_ep)
+                .layer(axum::extract::DefaultBodyLimit::max(25 * 1024 * 1024)),
+        )
         .route("/api/projects/:pid/ticket/:id/ready", post(human_ready_ep))
         .route(
             "/api/projects/:pid/ticket/:id/verify",
@@ -864,6 +874,10 @@ pub async fn serve_full(
         .route("/api/projects/:pid/prs/:num/diff", get(pr_diff_ep))
         .route("/api/projects/:pid/prs/:num/:action", post(pr_action_ep))
         .route("/api/projects/:pid/agent-log", get(agent_log_ep))
+        .route(
+            "/api/projects/:pid/agent-log/stream",
+            get(agent_log_stream_ep),
+        )
         .route("/api/projects/:pid/transcripts", get(list_transcripts))
         .route("/api/projects/:pid/transcripts/:name", get(get_transcript))
         .route("/api/projects/:pid/events", get(events_ep))
