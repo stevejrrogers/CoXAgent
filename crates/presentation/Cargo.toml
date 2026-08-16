@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 redis = { workspace = true }
+coxagent-infrastructure = { path = "../infrastructure" }
 coxagent-contracts = { path = "../contracts" }
 coxagent-domain.workspace = true
 coxagent-application.workspace = true
