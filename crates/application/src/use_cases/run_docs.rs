@@ -90,7 +90,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
     /// 12-30 full-page sonnet rewrites an hour. A handful a day converges the
     /// wiki at a price that does not scale with cycle speed.
     async fn take_refresh_budget(&self, state: &crate::state::ProjectState) -> bool {
-        const REFRESHES_PER_DAY: u32 = 5;
+        let refreshes_per_day = self.config.workflow.cadence.docs_refreshes_per_day();
         let today = crate::state::now_rfc3339()[..10].to_owned();
         let spent = state
             .daily_jobs
@@ -98,7 +98,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
             .and_then(|v| v.strip_prefix(&format!("{today}:")))
             .and_then(|n| n.parse::<u32>().ok())
             .unwrap_or(0);
-        if spent >= REFRESHES_PER_DAY {
+        if spent >= refreshes_per_day {
             return false;
         }
         let (key, val) = (

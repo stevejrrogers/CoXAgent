@@ -25,6 +25,7 @@ mod debt_sweep;
 mod escalation;
 mod preflight;
 mod scrum;
+mod sm_watch;
 mod wiring;
 
 mod forge;
@@ -34,9 +35,6 @@ mod forge_review;
 mod ops;
 mod qa_evidence;
 mod recovery;
-
-/// How often (in sprints) the SA runs a whole-system architecture review.
-const ARCH_REVIEW_EVERY_SPRINTS: u32 = 8;
 
 /// Local, non-pushed ref updated after every deploy that passes both
 /// `deploy()` and `run_tests()` — auto-rollback's source of truth for "last
@@ -189,6 +187,14 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     /// Polled between phases: `true` = the user pressed Pause, stop starting
     /// new phases and end this cycle early. `None` (tests/headless) = never.
     pause_check: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
+    /// Per-phase wall-clock tracker: `report()` marks each phase switch, the
+    /// scorecard drains the totals at cycle end. `(current phase, since)` plus
+    /// accumulated seconds per phase label.
+    #[allow(clippy::type_complexity)]
+    phase_track: Mutex<(
+        Option<(String, std::time::Instant)>,
+        std::collections::BTreeMap<String, u64>,
+    )>,
     /// This runner's identity (`account@host`) — recorded as the ticket claim
     /// owner so concurrent runners on a shared backlog never collide.
     worker: String,
@@ -231,6 +237,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             phase: None,
             reloader: None,
             pause_check: None,
+            phase_track: Mutex::new((None, std::collections::BTreeMap::new())),
             worker: String::new(),
             caps: crate::ports::outbound::WorkerCaps::default(),
             sandbox_warned: AtomicBool::new(false),
@@ -328,6 +335,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// Report the agent about to run (live "working now"). `note` is a short
     /// context like a ticket id; empty when there's none.
     fn report(&self, role: &str, note: &str) {
+        // Phase switch: bank the previous phase's elapsed time.
+        if let Ok(mut t) = self.phase_track.lock() {
+            let now = std::time::Instant::now();
+            if let Some((prev, since)) = t.0.take() {
+                *t.1.entry(prev).or_default() += since.elapsed().as_secs();
+            }
+            t.0 = Some((role.to_owned(), now));
+        }
         if let Some(p) = &self.phase {
             p(Some((role.to_owned(), note.to_owned())));
         }
@@ -528,7 +543,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     }
 
     /// Emit an event to the notifier, if one is attached. Best-effort.
-    async fn notify(&self, kind: &str, message: String) {
+    pub(crate) async fn notify(&self, kind: &str, message: String) {
         if let Some(n) = &self.notifier {
             let project = self.config_project_label();
             n.notify(crate::ports::outbound::NotifyEvent {
@@ -626,6 +641,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             return report;
         }
 
+        // Quiet hours: inside the configured UTC window no NEW engine calls
+        // start — overnight is when quota walls and sleeping laptops kill runs
+        // mid-edit with nobody watching. An open high-priority bug overrides
+        // (urgent work does not wait for morning). Not an error: the cycle
+        // just reports itself quiet, so the breaker and scorecard stay honest.
+        if self.quiet_hours_block().await {
+            return report;
+        }
+
         // Coordinate concurrent runners: at most one leads the singleton phases
         // (BA/PO/design-system/deploy/TEST/review) that must run once per project,
         // not once per runner. Non-leaders still do per-ticket stages (SA/PD/DEV/
@@ -708,6 +732,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             }
             // Scrum: open/roll over the sprint at the start of the cycle.
             self.advance_sprint_if_scrum(cycle).await;
+            // SM supervision (deterministic, zero tokens): police the sprint
+            // scope, route stalled committed work to the role that unblocks
+            // it, and descope what will not ship — the SM orchestrates the
+            // sprint instead of just announcing it.
+            self.sm_sprint_watch().await;
 
             // One digest per UTC day into the team chat: shipped/spend/sprint at
             // a glance, so the user doesn't need the dashboard open to keep up.
@@ -727,10 +756,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // mergeable PRs aged a whole cycle before anyone looked at them.
             self.review_open_prs().await;
             self.address_pr_feedback().await;
-            // Debt sweep cadence: every 10th cycle files ONE tech-debt chore
-            // (lint baseline, dead code, missing docs) if none is open — the
+            // Debt sweep cadence (configurable): every Nth cycle files ONE
+            // tech-debt chore (lint baseline, dead code, missing docs) — the
             // discipline of paying debt down on a schedule instead of never.
-            if cycle % 10 == 0 {
+            if cycle % self.config.workflow.cadence.debt_sweep_every_cycles() == 0 {
                 self.file_debt_sweep(cycle).await;
             }
 
@@ -1208,6 +1237,49 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     ) -> Self {
         self.janitor = janitor;
         self
+    }
+
+    /// Drain the per-phase wall-clock totals (closing any open phase) — called
+    /// once at cycle end by the scorecard.
+    pub(super) fn take_phase_secs(&self) -> std::collections::BTreeMap<String, u64> {
+        match self.phase_track.lock() {
+            Ok(mut t) => {
+                if let Some((prev, since)) = t.0.take() {
+                    *t.1.entry(prev).or_default() += since.elapsed().as_secs();
+                }
+                std::mem::take(&mut t.1)
+            }
+            Err(_) => std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Whether this cycle must stay quiet: inside `workflow.quiet_hours_utc`
+    /// and no high-priority bug is open. Reads the wall clock from the same
+    /// RFC3339 source the rest of the state uses.
+    async fn quiet_hours_block(&self) -> bool {
+        let window = self.config.workflow.quiet_hours_utc.trim();
+        if window.is_empty() {
+            return false;
+        }
+        let now = crate::state::now_rfc3339();
+        // "YYYY-MM-DDTHH:MM:…" — minutes since UTC midnight.
+        let minutes = now
+            .get(11..13)
+            .zip(now.get(14..16))
+            .and_then(|(h, m)| Some(h.parse::<u32>().ok()? * 60 + m.parse::<u32>().ok()?));
+        let Some(minutes) = minutes else { return false };
+        if !crate::config::in_quiet_window(window, minutes) {
+            return false;
+        }
+        // Urgent work overrides: an open high-priority bug does not wait.
+        let urgent = self.store.load().await.is_ok_and(|s| {
+            s.tickets.iter().any(|t| {
+                t.ticket_type() == coxagent_domain::TicketType::Bug
+                    && t.status() == coxagent_domain::Status::Open
+                    && t.priority() == coxagent_domain::Priority::High
+            })
+        });
+        !urgent
     }
 
     /// Attach workspace-file access (team notes, memory indexes, maps).
