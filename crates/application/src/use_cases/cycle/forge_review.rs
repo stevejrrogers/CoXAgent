@@ -109,6 +109,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                         );
                         let _ = forge.comment_pr(pr.number, &note).await;
                         if forge.close_pr(pr.number).await.is_ok() {
+                            self.announce_pr_close(
+                                pr.number,
+                                &pr.title,
+                                &format!("{tid} already merged elsewhere and this diff is on main"),
+                            )
+                            .await;
                             self.log_git(&format!(
                                 "review: closed PR #{} — {tid} already merged elsewhere",
                                 pr.number
@@ -177,6 +183,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                         );
                         let _ = forge.comment_pr(pr.number, &note).await;
                         if forge.close_pr(pr.number).await.is_ok() {
+                            self.announce_pr_close(
+                                pr.number,
+                                &pr.title,
+                                &format!("{tid} is settled and this diff is on main"),
+                            )
+                            .await;
                             self.log_git(&format!(
                                 "review: closed PR #{} — {tid} settled and landed",
                                 pr.number
@@ -208,6 +220,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     );
                     let _ = forge.comment_pr(pr.number, &note).await;
                     if forge.close_pr(pr.number).await.is_ok() {
+                        self.announce_pr_close(
+                            pr.number,
+                            &pr.title,
+                            &format!("commits agent scratch ({path}); ticket returns to the queue"),
+                        )
+                        .await;
                         self.log_git(&format!(
                             "review: closed PR #{} — commits scratch ({path})",
                             pr.number

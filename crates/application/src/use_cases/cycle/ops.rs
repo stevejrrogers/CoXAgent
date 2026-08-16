@@ -572,6 +572,21 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .ok()
     }
 
+    /// Announce an automated PR close where PEOPLE look — the team channel and
+    /// the webhook — never just a comment on the PR itself. Twelve PRs died
+    /// silently in one night (#185–#196) because the close only wrote to
+    /// GitHub and the activity log; an irreversible act done by a machine must
+    /// be loud enough to challenge.
+    pub(super) async fn announce_pr_close(&self, number: u64, title: &str, why: &str) {
+        let msg = format!("🗑️ auto-closed PR #{number} (\"{title}\") — {why}");
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+            s.post_chat_in("SA", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+            Ok(())
+        })
+        .await;
+        self.notify("pr_closed", msg).await;
+    }
+
     /// Pre-cycle git tree hygiene — undo the wreckage an engine death leaves
     /// behind, BEFORE any git op this cycle trips over it:
     ///
