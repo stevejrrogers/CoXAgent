@@ -105,6 +105,17 @@ pub struct ProjectState {
     /// Review tab — it never lists PRs itself.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub open_prs: Vec<crate::ports::outbound::PrOpen>,
+    /// PRs the SA approved but held for a person (`needs_human_eyes`): PR
+    /// number → why the machine refused to land it alone. Surfaced in the
+    /// Inbox with approve/dismiss; entries for PRs no longer open are pruned
+    /// on every open-PR sync.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub human_holds: std::collections::BTreeMap<u64, String>,
+    /// Attachments per ticket id (PD design images, screenshots) — the bytes
+    /// live in blob storage (`StoragePort`: MinIO/S3 or the local blob dir);
+    /// this holds the records the UI lists.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub ticket_attachments: std::collections::BTreeMap<String, Vec<TicketAttachment>>,
     /// Team chat: human-to-human messages among the people on the project.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chat: Vec<ChatMsg>,
@@ -386,6 +397,8 @@ impl Default for ProjectState {
             comments: Vec::new(),
             reviews: Vec::new(),
             open_prs: Vec::new(),
+            human_holds: std::collections::BTreeMap::new(),
+            ticket_attachments: std::collections::BTreeMap::new(),
             chat: Vec::new(),
             channels: Vec::new(),
             design_system: None,
@@ -730,6 +743,10 @@ impl ProjectState {
         let mut v = prs;
         v.truncate(50);
         self.open_prs = v;
+        // A hold on a PR that is no longer open is stale — merged or closed
+        // elsewhere; prune so the Inbox never asks about a decided PR.
+        self.human_holds
+            .retain(|n, _| self.open_prs.iter().any(|p| p.number == *n));
     }
 
     /// Toggle `user`'s `emoji` reaction on comment `id`; returns the updated

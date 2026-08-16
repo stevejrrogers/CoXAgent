@@ -34,9 +34,6 @@ description: "Use when the user is debugging a bug, tracing an error, or asking 
 - [ ] Trace execution flow via process resource if applicable
 - [ ] cypher for custom call chain traces if needed
 - [ ] Read source files to confirm root cause
-- [ ] State the design-level mechanism (why it exists), not just the symptom
-- [ ] Enumerate other code paths sharing that mechanism; verify each still works
-- [ ] Confirm the fix removes the mechanism — not just the reported path — and file a follow-up if any gap remains
 ```
 
 ## Debugging Patterns
