@@ -1104,7 +1104,7 @@ mod refresh_tests {
                 &s,
                 std::path::Path::new("/nonexistent"),
                 &std::collections::BTreeSet::default(),
-            &std::collections::BTreeSet::default()
+                &std::collections::BTreeSet::default()
             )
             .map(|p| p.id.as_str()),
             Some("legacy")

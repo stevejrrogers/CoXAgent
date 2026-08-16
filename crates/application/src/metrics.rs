@@ -151,7 +151,7 @@ pub fn decide_tuning(
 /// `YYYY-MM-DD` minus `n` days (lexicographic-comparable). Falls back to the
 /// input on parse trouble — fine for a dashboard stat.
 #[allow(clippy::many_single_char_names)] // civil-calendar math keeps the canonical y/m/d notation
-fn days_back(day: &str, n: u64) -> String {
+pub(crate) fn days_back(day: &str, n: u64) -> String {
     let parse = |s: &str| -> Option<(i64, i64, i64)> {
         let mut it = s.split('-');
         Some((

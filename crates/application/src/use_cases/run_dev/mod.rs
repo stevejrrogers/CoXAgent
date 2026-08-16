@@ -233,9 +233,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                     let _ = git.raw(&self.work_dir, &["fetch", "origin", base]).await;
                     let target = format!("origin/{base}");
                     if git.raw(&self.work_dir, &["rev-parse", &target]).await.0 {
-                        let _ = git
-                            .raw(&self.work_dir, &["reset", "--hard", &target])
-                            .await;
+                        let _ = git.raw(&self.work_dir, &["reset", "--hard", &target]).await;
                     }
                 }
             }
@@ -454,9 +452,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             .ticket(&id)
             .is_some_and(|t| t.complexity() == coxagent_domain::Complexity::Large);
         let plan_first = request.escalation_level == 0 && is_large;
-                                                        // The full task, kept before the plan wrapper below — it becomes the
-                                                        // follow-up when RE-ENTERING a ticket on a stored session, so a resumed
-                                                        // (or stale) conversation still gets the complete instructions.
+        // The full task, kept before the plan wrapper below — it becomes the
+        // follow-up when RE-ENTERING a ticket on a stored session, so a resumed
+        // (or stale) conversation still gets the complete instructions.
         let task_full = request.task_prompt.clone();
         if plan_first {
             request.task_prompt = format!(
@@ -907,9 +905,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             // orchestrator's `System` role (a transition DEV is not allowed to
             // make), so it leaves `open_bug_candidates` and stays in history.
             let tree = self.working_tree().await;
-            if self.mode == DevMode::Bug
-                && gates::build_relevant(&tree.changed_paths).is_empty()
-            {
+            if self.mode == DevMode::Bug && gates::build_relevant(&tree.changed_paths).is_empty() {
                 let msg = format!(
                     "{id}: not reproducible — DEV ran against a green tree and produced no \
                      code change. The bug does not reproduce on main (likely already resolved \
