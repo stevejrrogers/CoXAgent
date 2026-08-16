@@ -518,11 +518,9 @@ pub(crate) async fn build_project(
                     // `git show` — reading it from the clone was a
                     // chicken-and-egg: a clone that predates the script never
                     // upgrades, and therefore never gets the script.
-                    let cmd = format!(
-                        "git -C \"$1\" fetch -q origin \"$4\" && \
+                    let cmd = "git -C \"$1\" fetch -q origin \"$4\" && \
                          git -C \"$1\" show \"origin/$4:deploy/self-upgrade.sh\" 2>/dev/null \
-                         | bash -s -- \"$1\" \"$2\" \"$3\" \"$4\""
-                    );
+                         | bash -s -- \"$1\" \"$2\" \"$3\" \"$4\"";
                     let _ = std::process::Command::new("bash")
                         .arg("-c")
                         .arg(&cmd)
