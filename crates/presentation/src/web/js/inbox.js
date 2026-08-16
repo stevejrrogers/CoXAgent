@@ -21,6 +21,7 @@ const INBOX_KIND={
   review_pr:{label:"PR held for human",ic:"ti-git-pull-request",col:"var(--teal)"},
   auto_approved:{label:"Auto-approved",ic:"ti-robot",col:"var(--dim)"},
   pr_stuck:{label:"PR stuck — needs you",ic:"ti-alert-triangle",col:"var(--red)"},
+  human_eyes:{label:"Needs human eyes",ic:"ti-eye-exclamation",col:"var(--amber)"},
 };
 
 function inboxCard(kind,meta,title,actions,ticket){
@@ -115,6 +116,15 @@ async function renderInbox(){
     }else if(it.kind==="review_pr"){
       html+=inboxCard("review_pr","#"+it.number,esc(it.title),
         (act?ibtn("Open review",`nav('review')`,1):noRight(it.role)));
+    }else if(it.kind==="human_eyes"){
+      // The machine approved this PR but refuses to land it alone — the meta
+      // line carries the gate's exact reason so the person decides informed.
+      html+=inboxCard("human_eyes","#"+it.number+" · "+esc(it.reason||""),esc(it.title||("PR #"+it.number)),
+        (it.url?ibtn("Open PR",`window.open('${esc(it.url)}','_blank')`):"")+
+        (act
+          ?ibtn("Dismiss",`inboxHumanPr(${it.number},'dismiss')`)+
+           ibtn("Land it",`inboxHumanPr(${it.number},'approve')`,1)
+          :noRight(it.role)));
     }else if(it.kind==="pr_stuck"){
       // The team tried, the SA rescued it, and it is still not moving. Say what
       // was tried and give the two moves a person actually has.
@@ -162,6 +172,18 @@ async function inboxUndo(id){
     if(!r.ok)toasty(await r.text(),"err");else toasty(id+" pulled back — that shape asks again","ok");
   }catch(e){}
   renderInbox();}
+
+// Decide a PR the machine held for human eyes: land it (this click IS the
+// human the gate waited for) or dismiss the hold and handle it on the forge.
+async function inboxHumanPr(number,action){
+  try{
+    const r=await fetch(api("/pr/"+number+"/human"),
+      {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action})});
+    if(!r.ok){toasty(await r.text()||"Failed","err");return;}
+    toasty(action==="approve"?("PR #"+number+" landed"):("Hold on #"+number+" dismissed"),"ok");
+  }catch(e){toasty("Network error","err");}
+  renderInbox();
+}
 
 async function inboxUnassign(id){
   try{await fetch(api("/ticket/"+encodeURIComponent(id)+"/assign"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:""})});}catch(e){}

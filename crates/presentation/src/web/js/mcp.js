@@ -128,10 +128,18 @@ function renderRunner(r){if(!r)return;window.RUNNER=r;const running=r.mode==="ru
   if(lbl)lbl.textContent=running?(r.active_role?r.active_role.replace(/_/g,'-'):("cycle "+r.cycle)):(r.cycle>0?("paused · "+r.cycle):"idle");
   const pill=document.getElementById("runpill");if(pill)pill.title=(running&&r.active_note)?(r.active_role+" — "+r.active_note):(r.last_summary||(running?"running":(r.cycle>0?"paused":"idle")));
   // Primary toggles Start/Pause; it's the accent "go" button unless running.
+  // Ownership: a live run belongs to whoever started it (r.operator). Others
+  // see Start (starts THEIR agents), never Pause — only owner or admin/root
+  // may pause. Backend enforces the same rule; this just matches the UI to it.
+  const mine=!r.operator||!ME||!ME.auth||ME.username===r.operator||ME.role==="super"||ME.role==="admin";
   const prim=document.getElementById("ctl-primary"),ic=document.getElementById("ctl-primary-ic");
-  if(prim&&ic){ic.className="ti ti-player-"+(running?"pause":"play");prim.title=running?"Pause":(r.cycle>0?"Resume":"Start");prim.classList.toggle("rp-go",!running);}
-  const step=document.getElementById("ctl-step");if(step)step.style.display=running?"none":"";}
-function toggleRun(){ctl((window.RUNNER&&RUNNER.mode==="running")?"pause":"resume");}
+  if(prim&&ic){
+    const showPause=running&&mine;
+    ic.className="ti ti-player-"+(showPause?"pause":"play");
+    prim.title=showPause?"Pause":(running?("Start my agents ("+r.operator+"'s run stays untouched)"):(r.cycle>0?"Resume":"Start"));
+    prim.classList.toggle("rp-go",!showPause);}
+  const step=document.getElementById("ctl-step");if(step)step.style.display=(running&&mine)?"none":"";}
+function toggleRun(){const r=window.RUNNER;const mine=!r||!r.operator||!ME||!ME.auth||ME.username===r.operator||ME.role==="super"||ME.role==="admin";ctl((r&&r.mode==="running"&&mine)?"pause":"resume");}
 async function ctl(a){try{renderRunner(await(await fetch(api("/control/"+a),{method:"POST"})).json());}catch(e){}}
 let PID=null, ES=null, poll=null;
 const api=p=>"/api/projects/"+encodeURIComponent(PID)+p;

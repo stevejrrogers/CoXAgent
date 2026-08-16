@@ -4,14 +4,15 @@
 //! The Wiki surface: pages, folders, AI edits, and the docs websocket.
 
 use super::*;
+use coxagent_infrastructure::deploy::reclaimable_compose_project;
 
 /// Docker janitor: agents deploy a lot — the host must not silt up. Hourly:
-/// any `cox-*` compose project whose containers are ALL stopped gets a full
+/// any reclaimable compose project whose containers are ALL stopped gets a full
 /// `down --remove-orphans` (dead previews, stale deploys), any PR preview
 /// still running past [`PREVIEW_TTL`] is reclaimed, then dangling build images
-/// are pruned. Scoped strictly to the `cox-` prefix — the backing-services
-/// group (`cox-infra`) is running, so it is never touched, and a RUNNING
-/// non-preview project is someone's live deploy and is left alone.
+/// are pruned. Which projects are reclaimable is decided by the single shared
+/// policy [`reclaimable_compose_project`]: it excludes our own live hub and
+/// backing services, so a janitor tick can never take production down.
 pub(super) async fn docker_janitor() {
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
@@ -35,8 +36,8 @@ pub(super) async fn docker_janitor() {
                 .get("Status")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("");
-            // Only OUR projects, and only fully-stopped ones.
-            if !name.starts_with("cox-") || name == "cox-infra" {
+            // Only OUR projects — and only ones this pass may safely reclaim.
+            if !reclaimable_compose_project(name) {
                 continue;
             }
             let mut reason = "dead";
