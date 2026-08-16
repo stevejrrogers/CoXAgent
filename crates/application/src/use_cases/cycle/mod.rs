@@ -187,6 +187,14 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     /// Polled between phases: `true` = the user pressed Pause, stop starting
     /// new phases and end this cycle early. `None` (tests/headless) = never.
     pause_check: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
+    /// Per-phase wall-clock tracker: `report()` marks each phase switch, the
+    /// scorecard drains the totals at cycle end. `(current phase, since)` plus
+    /// accumulated seconds per phase label.
+    #[allow(clippy::type_complexity)]
+    phase_track: Mutex<(
+        Option<(String, std::time::Instant)>,
+        std::collections::BTreeMap<String, u64>,
+    )>,
     /// This runner's identity (`account@host`) — recorded as the ticket claim
     /// owner so concurrent runners on a shared backlog never collide.
     worker: String,
@@ -229,6 +237,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             phase: None,
             reloader: None,
             pause_check: None,
+            phase_track: Mutex::new((None, std::collections::BTreeMap::new())),
             worker: String::new(),
             caps: crate::ports::outbound::WorkerCaps::default(),
             sandbox_warned: AtomicBool::new(false),
@@ -326,6 +335,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// Report the agent about to run (live "working now"). `note` is a short
     /// context like a ticket id; empty when there's none.
     fn report(&self, role: &str, note: &str) {
+        // Phase switch: bank the previous phase's elapsed time.
+        if let Ok(mut t) = self.phase_track.lock() {
+            let now = std::time::Instant::now();
+            if let Some((prev, since)) = t.0.take() {
+                *t.1.entry(prev).or_default() += since.elapsed().as_secs();
+            }
+            t.0 = Some((role.to_owned(), now));
+        }
         if let Some(p) = &self.phase {
             p(Some((role.to_owned(), note.to_owned())));
         }
@@ -526,7 +543,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     }
 
     /// Emit an event to the notifier, if one is attached. Best-effort.
-    async fn notify(&self, kind: &str, message: String) {
+    pub(crate) async fn notify(&self, kind: &str, message: String) {
         if let Some(n) = &self.notifier {
             let project = self.config_project_label();
             n.notify(crate::ports::outbound::NotifyEvent {
@@ -1215,6 +1232,20 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     ) -> Self {
         self.janitor = janitor;
         self
+    }
+
+    /// Drain the per-phase wall-clock totals (closing any open phase) — called
+    /// once at cycle end by the scorecard.
+    pub(super) fn take_phase_secs(&self) -> std::collections::BTreeMap<String, u64> {
+        match self.phase_track.lock() {
+            Ok(mut t) => {
+                if let Some((prev, since)) = t.0.take() {
+                    *t.1.entry(prev).or_default() += since.elapsed().as_secs();
+                }
+                std::mem::take(&mut t.1)
+            }
+            Err(_) => std::collections::BTreeMap::new(),
+        }
     }
 
     /// Whether this cycle must stay quiet: inside `workflow.quiet_hours_utc`
