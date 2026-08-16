@@ -326,6 +326,12 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
 
         if report.over_budget {
             tracing::warn!("budget cap reached — pausing loop");
+            cycle_uc
+                .notify(
+                    "loop_paused",
+                    "loop paused: spend cap reached".to_owned(),
+                )
+                .await;
             handle.pause();
             continue;
         }
@@ -348,6 +354,29 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
             let engine = cycle_uc.engine_id().to_owned();
             let first = infra_faults.first().map(|e| (*e).clone());
             let fault_count = infra_errors;
+            // Webhook mirror of the chat announcements below: fires only on the
+            // open/close EDGE, so a night-long outage is one message, not one
+            // per cycle.
+            let was_open = breaker_store.load().await.is_ok_and(|s| {
+                s.engine_incidents.iter().any(|i| i.engine == engine)
+            });
+            if let Some(detail) = &first {
+                if !was_open && fault_count >= 2 {
+                    cycle_uc
+                        .notify(
+                            "engine_incident",
+                            format!("{engine} failed {fault_count} runs this cycle: {detail}"),
+                        )
+                        .await;
+                }
+            } else if was_open {
+                cycle_uc
+                    .notify(
+                        "engine_recovered",
+                        format!("{engine} is answering again — work resumes"),
+                    )
+                    .await;
+            }
             let _ = crate::ports::outbound::mutate_state(breaker_store.as_ref(), move |s| {
                 if let Some(detail) = &first {
                     let already = s.engine_incidents.iter().any(|i| i.engine == engine);
@@ -408,6 +437,14 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
             })
             .await;
             infra_streak = 0;
+            cycle_uc
+                .notify(
+                    "loop_paused",
+                    "loop paused: engine infrastructure looks DOWN (auth/network) after 3 \
+                     empty cycles — fix the outage, then Resume"
+                        .to_owned(),
+                )
+                .await;
             handle.pause();
             continue;
         }
