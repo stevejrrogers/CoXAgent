@@ -45,6 +45,11 @@ pub struct Spend {
     /// this host, so the run executed unconfined.
     #[serde(default)]
     pub unconfined_requested_runs: u64,
+    /// Runs the confinement mechanism refused to apply (macOS Seatbelt's
+    /// `sandbox_apply()` denial, COX-B016): the agent never started, so these
+    /// are neither confined nor unconfined runs — they are an OS fault.
+    #[serde(default)]
+    pub sandbox_denied_runs: u64,
     /// Human-readable status of the most recent run's confinement (e.g.
     /// `"confined via bwrap"`, `"unavailable: bwrap not found on PATH"`),
     /// surfaced on the dashboard.
