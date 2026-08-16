@@ -523,7 +523,7 @@ pub(crate) async fn build_project(
                          | bash -s -- \"$1\" \"$2\" \"$3\" \"$4\"";
                     let _ = std::process::Command::new("bash")
                         .arg("-c")
-                        .arg(&cmd)
+                        .arg(cmd)
                         .arg("self-upgrade") // $0
                         .arg(&repo)
                         .arg(&target)
