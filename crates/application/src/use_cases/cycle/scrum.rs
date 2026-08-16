@@ -261,6 +261,21 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .count() as u64;
         let incidents = state.engine_incidents.len() as u64;
         let grade = CycleScore::grade_of(shipped, runs, useful, incidents, errors);
+        // The cycle counter is per-RUNNER (local, starts at 1 in the app loop).
+        // When the leader lease hands over — another runner takes the wheel, or
+        // the same runner restarts mid-run — its counter resets, so 'cycle 1'
+        // gets scored again and again. Each of those is a DIFFERENT runner's
+        // fresh-work cycle, but collapsing them all under the same number floods
+        // the bounded history with duplicate-number noise and evicts the real
+        // scores. Keep the number spending-monotonic: only accept a cycle that
+        // advances past the largest already scored. The runner's local counter
+        // is still used everywhere else (scrum/sprint/debt cadence); only the
+        // scored *history key* is deduped so the chart reflects project cycles,
+        // not leader churn.
+        let scored_max = state.cycle_scores.iter().map(|c| c.cycle).max();
+        if !should_record_cycle(scored_max, report.cycle) {
+            return;
+        }
         state.cycle_scores.push(CycleScore {
             cycle: report.cycle,
             at: crate::state::now_rfc3339(),
@@ -360,5 +375,42 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .await;
 
         over_lifetime || over_daily
+    }
+}
+
+/// Pure gate deciding whether a freshly-scored cycle advances the bounded
+/// history. The scored *key* (`report.cycle`) must be strictly greater than
+/// every cycle already in the buffer; a duplicate or stale number (a leader
+/// handover / runner restart renumbering from 1) is dropped so it can't evict
+/// a real score. Split out of `record_cycle_score` so the dedupe policy is
+/// testable without a store/engine.
+fn should_record_cycle(scored_max: Option<u64>, new_cycle: u64) -> bool {
+    // MSRV 1.80 predates Option::is_none_or.
+    scored_max.map_or(true, |m| new_cycle > m)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_record_cycle;
+
+    #[test]
+    fn accepts_first_cycle_when_buffer_empty() {
+        assert!(should_record_cycle(None, 1));
+    }
+
+    #[test]
+    fn accepts_monotonic_advancing_cycles() {
+        assert!(should_record_cycle(Some(1), 2));
+        assert!(should_record_cycle(Some(41), 42));
+    }
+
+    #[test]
+    fn rejects_duplicate_and_stale_cycles() {
+        // Duplicate of the current max — a leader handover renames a fresh
+        // run's work back to the same number.
+        assert!(!should_record_cycle(Some(3), 3));
+        // Stale re-run of an early number after a restart.
+        assert!(!should_record_cycle(Some(42), 1));
+        assert!(!should_record_cycle(Some(42), 41));
     }
 }

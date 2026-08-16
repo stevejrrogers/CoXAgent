@@ -976,9 +976,33 @@ pub(super) async fn pr_report_ep(
         }
         return Json(serde_json::json!({ "ok": true, "review": number })).into_response();
     }
+    if let Some(h) = body.get("hold") {
+        let number = h
+            .get("number")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let reason = h
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned();
+        if number == 0 {
+            return (StatusCode::BAD_REQUEST, "bad hold: number required").into_response();
+        }
+        if mutate_state(p.store.as_ref(), |s| {
+            s.human_holds.insert(number, reason.clone());
+            Ok(())
+        })
+        .await
+        .is_err()
+        {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "store write failed").into_response();
+        }
+        return Json(serde_json::json!({ "ok": true, "hold": number })).into_response();
+    }
     (
         StatusCode::BAD_REQUEST,
-        "expected {project, pr} or {project, review}",
+        "expected {project, pr}, {project, review} or {project, hold}",
     )
         .into_response()
 }

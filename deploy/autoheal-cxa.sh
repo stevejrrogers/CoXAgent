@@ -1,23 +1,52 @@
-#!/bin/bash
-# Auto-heal watchdog for the CXA backend (Postgres 5433 + Redis 6379).
-# If the containers die (Docker restart, crash, stop), bring the stack back up.
-# Run detached:  nohup ./autoheal-cxa.sh &
-LOGFILE=/Users/luton/CoXAgent/cxa/logs/autoheal.log
-COMPOSE_DIR=/Users/luton/Projects/CoXAgent/deploy
-mkdir -p "$(dirname "$LOGFILE")"
+#!/usr/bin/env bash
+# autoheal-cxa.sh — Watchdog for the live CXA backend stack (Postgres 5433 + Redis 6379).
+# If either DB or Redis goes unresponsive, restart the compose stack.
+# Run detached: nohup bash deploy/autoheal-cxa.sh >> autoheal.log 2>&1 &
+set -u
+
+DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="$DEPLOY_DIR/.env"
+COMPOSE_FILE="$DEPLOY_DIR/docker-compose.cxa.yml"
+PROJECT="cxa-backend"
+DB="cxa-backend-db-1"
+REDIS="cxa-backend-redis-1"
+LOG="$DEPLOY_DIR/autoheal.log"
+
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" | tee -a "$LOG"; }
+
+check() {
+  # DB liveness
+  if ! docker exec "$DB" pg_isready -U coxagent >/dev/null 2>&1; then
+    return 1
+  fi
+  # Redis liveness (extract password from .env if present)
+  local rp
+  rp=$(grep -E '^REDIS_PASSWORD=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-)
+  # Password via env (REDISCLI_AUTH), never argv — argv leaks to `ps` on the host.
+  if ! docker exec -e REDISCLI_AUTH="$rp" "$REDIS" redis-cli ping 2>/dev/null | grep -q PONG; then
+    return 1
+  fi
+  return 0
+}
+
+log "autoheal watchdog started (pid $$)"
+
 while true; do
-  # Health check: can the hub's DB on 5433+6379 be reached (containers up)?
-  UP=1
-  docker exec cxa-backend-db-1 pg_isready -U coxagent -d coxagent >/dev/null 2>&1 || UP=0
-  docker exec cxa-backend-redis-1 redis-cli -a "$(grep REDIS_PASSWORD "$COMPOSE_DIR/.env" | head -1 | cut -d= -f2)" ping >/dev/null 2>&1 || UP=0
-  if [ "$UP" -eq 0 ]; then
-    echo "$(date '+%F %T') HEAL: cxa-backend DB/Redis down, restarting stack" >> "$LOGFILE"
-    cd "$COMPOSE_DIR" && set -a && source .env && set +a && \
-      docker compose -f docker-compose.cxa.yml up -d >> "$LOGFILE" 2>&1
-    sleep 20
-    docker exec cxa-backend-db-1 pg_isready -U coxagent -d coxagent >/dev/null 2>&1 \
-      && echo "$(date '+%F %T') HEAL: DB healthy again" >> "$LOGFILE" \
-      || echo "$(date '+%F %T') HEAL: DB still down after restart" >> "$LOGFILE"
+  if ! check; then
+    log "ALERT: DB/Redis down or unresponsive — restarting stack"
+    if cd "$DEPLOY_DIR" && set -a && . "$ENV_FILE" && set +a && \
+       docker compose -f "$COMPOSE_FILE" up -d; then
+      log "OK: stack restart issued"
+    else
+      log "ERROR: compose up failed — will retry"
+    fi
+    # give the stack time to come back after a restart, then verify liveness again.
+    sleep 30
+    if check; then
+      log "OK: DB/Redis healthy again after restart"
+    else
+      log "WARN: DB/Redis still down after restart"
+    fi
   fi
   sleep 60
 done

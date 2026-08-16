@@ -4,11 +4,12 @@
 //! synthetic fixtures can prove the guard bites before it is pointed at the
 //! real files.
 //!
-//! **Rule 1 — no insecure fallback on a password key.**
+//! **Rule 1 — a credential must carry the required-marker `${VAR:?msg}`.**
 //! A compose interpolation `${VAR:-literal}` silently boots with `literal` when
-//! the operator forgets to set `VAR`. For credentials that means the service
-//! starts with a known, public-repo-visible password. Replace with `${VAR:?msg}`
-//! so compose fails fast with a clear error instead.
+//! the operator forgets to set `VAR`, and a bare `${VAR}` resolves to an empty
+//! string — either way Postgres/Redis/Mongo boot with blank or known credentials
+//! instead of failing loudly (CXA-B029). For credentials that is a silent auth
+//! bypass. Require `${VAR:?msg}` so compose fails fast with a clear error.
 //!
 //! **Rule 2 — no bare host-port binding on a datastore service.**
 //! A mapping like `"5432:5432"` (no host-IP prefix) binds to `0.0.0.0`, putting
@@ -54,17 +55,56 @@ fn is_password_key(key: &str) -> bool {
     k.contains("PASSWORD") || k.contains("SECRET") || k.contains("PASSWD")
 }
 
-/// Returns `Some(fallback)` when `value` is a compose interpolation with a
-/// non-empty default using the `:-` form: `${VAR:-something}`.
-/// The `:?` form (error on unset) is safe and must NOT be flagged.
-fn insecure_fallback(value: &str) -> Option<&str> {
-    let inner = value.strip_prefix("${")?.strip_suffix('}')?;
-    let (_, after_colon) = inner.split_once(":-")?;
-    // An empty fallback is harmless (blank default).
-    if after_colon.is_empty() {
+/// Split an interpolation body (`PG_PASSWORD`, `PG_PASSWORD:-x`,
+/// `PG_PASSWORD:?msg`) into its variable name and two-character modifier
+/// (`""`, `":-"`, or `":?"`).
+fn interp_parts(inner: &str) -> (&str, &str) {
+    match inner.find(':') {
+        Some(i) => (&inner[..i], inner.get(i..i + 2).unwrap_or("")),
+        None => (inner.trim(), ""),
+    }
+}
+
+/// Report why a single credential interpolation is unsafe for Rule 1.
+///
+/// A secret reference may ONLY use the `${VAR:?message}` required-marker form:
+///
+///   - bare `${VAR}` resolves to an empty string when unset, so Postgres / Redis /
+///     Mongo boot with BLANK credentials instead of failing loudly — the CXA-B029
+///     gap. `.env.example` warns this Redis blank-password case is "a straight
+///     authentication bypass".
+///   - `${VAR:-nonempty}` boots with a known public-repo visible fallback.
+///
+/// Returns the human-readable reason when unsafe; None for the safe `:?` form,
+/// an empty-fallback `${VAR:-}`, or anything that isn't a credential reference.
+fn insecure_secret_reason(token_body: &str) -> Option<String> {
+    let (name, modifier) = interp_parts(token_body);
+    if !is_password_key(name) {
         return None;
     }
-    Some(after_colon)
+    match modifier {
+        ":?" => None,
+        ":-" => {
+            // Non-empty fallback only; an empty one behaves like bare-blank but
+            // carries no leaked literal, so treat it as needing :? instead.
+            let after = &token_body[name.len() + 2..];
+            if after.is_empty() {
+                Some(format!(
+                    "bare `${name}` has no required-marker — compose boots blank \
+                     when unset. Use `${{{name}:?...}}` to fail fast"
+                ))
+            } else {
+                Some(format!(
+                    "compose will boot with default `{after}` when ${name} is unset \
+                     — never use known defaults for credentials"
+                ))
+            }
+        }
+        _ => Some(format!(
+            "bare `${name}` has no required-marker — compose boots blank \
+             when unset. Use `${{{name}:?...}}` to fail fast"
+        )),
+    }
 }
 
 /// Scan a compose YAML document (as raw text) for Rule 1 violations.
@@ -93,45 +133,34 @@ fn check_insecure_fallbacks(path: &str, src: &str) -> Vec<Finding> {
                 let key = k.as_str().unwrap_or("");
                 let val = v.as_str().unwrap_or("");
 
-                // Check password keys for direct insecure fallback.
-                if is_password_key(key) {
-                    if let Some(fallback) = insecure_fallback(val) {
-                        findings.push(Finding {
-                            file: path.to_string(),
-                            context: format!("services.{svc_name}.environment.{key}"),
-                            why: format!(
-                                "`{key}` uses `${{VAR:-{fallback}}}` — compose will boot \
-                                 with `{fallback}` when the variable is unset. \
-                                 Use `${{VAR:?{key} is required}}` to fail fast instead"
-                            ),
-                        });
-                    }
-                }
-
-                // Check DSN/URL keys for embedded insecure fallbacks (passwords
-                // carried inside a connection string).
-                if key.ends_with("_DSN") || key.ends_with("_URL") {
-                    let mut rest = val;
-                    while let Some(start) = rest.find("${") {
-                        let token_src = &rest[start..];
-                        let end = match token_src.find('}') {
-                            Some(i) => i + 1,
-                            None => token_src.len(),
-                        };
-                        let token = &token_src[..end];
-                        if let Some(fallback) = insecure_fallback(token) {
+                // Scan every `${...}` interpolation on this key. A credential
+                // variable must use the `${VAR:?msg}` required-marker form;
+                // bare `${VAR}` and `:-fallback`s are flagged whether they appear
+                // as the whole value or embedded inside a _DSN/_URL string.
+                let mut rest = val;
+                while let Some(start) = rest.find("${") {
+                    let token_src = &rest[start + 2..];
+                    let end = match token_src.find('}') {
+                        Some(i) => i,
+                        None => token_src.len(),
+                    };
+                    if is_password_key(key)
+                        || is_password_key(&token_src[..end])
+                        || key.ends_with("_DSN")
+                        || key.ends_with("_URL")
+                    {
+                        if let Some(reason) = insecure_secret_reason(&token_src[..end]) {
                             findings.push(Finding {
                                 file: path.to_string(),
                                 context: format!("services.{svc_name}.environment.{key}"),
                                 why: format!(
-                                    "`{key}` embeds `{token}` — a password carried in a \
-                                     DSN/URL will use the fallback `{fallback}` when unset. \
-                                     Use `${{VAR:?message}}` to fail fast instead"
+                                    "`{key}` carries {reason}. Use `${{VAR:?message}}` \
+                                     so compose fails fast instead of booting blank"
                                 ),
                             });
                         }
-                        rest = &token_src[end..];
                     }
+                    rest = &token_src[end..];
                 }
             }
         }
@@ -359,14 +388,36 @@ fn safe_required_form_passes_rule1() {
 }
 
 #[test]
-fn env_reference_without_fallback_passes_rule1() {
-    // ${VAR} with no default — unset will leave it blank (compose may warn,
-    // but no silent insecure boot). Not flagged by Rule 1.
+fn bare_secret_reference_is_caught() {
+    // CXA-B029: `${VAR}` with no marker resolves to an empty string when unset,
+    // so Postgres/Redis boot with BLANK credentials. This is exactly the gap
+    // Rule 1 must close — a bare credential reference is now flagged.
     let src = db_compose("${PG_PASSWORD}", "127.0.0.1:5432:5432");
     let findings = check("docker-compose.yml", &src);
     assert!(
+        !findings.is_empty(),
+        "a bare `${{VAR}}` on a PASSWORD key must be caught"
+    );
+    let why = &findings[0].why;
+    assert!(
+        why.contains("POSTGRES_PASSWORD"),
+        "finding must name the key: {why}"
+    );
+}
+
+#[test]
+fn non_secret_bare_reference_passes_rule1() {
+    // A non-secret variable referenced without a marker is not a credential
+    // (e.g. POSTGRES_DB) — leaving it blank isn't an auth bypass.
+    let src = "services:\n  db:\n    image: postgres:16-alpine\n\
+         \x20   environment:\n\
+         \x20     POSTGRES_DB: ${{PG_DB}}\n\
+         \x20   ports:\n      - \"127.0.0.1:5432:5432\"\n"
+        .to_string();
+    let findings = check("docker-compose.yml", &src);
+    assert!(
         findings.is_empty(),
-        "`${{VAR}}` with no fallback must not be flagged: {findings:?}"
+        "a bare reference on a non-secret key must not be flagged: {findings:?}"
     );
 }
 
