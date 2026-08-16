@@ -44,7 +44,8 @@ impl<E: AgentEnginePort> AgentEnginePort for MeteringEngine<E> {
         // agent regardless of whether cost came back.
         if !outcome.engine.is_empty() {
             if let Ok(mut m) = self.meter.lock() {
-                m.engine_by_role.insert(role.clone(), outcome.engine.clone());
+                m.engine_by_role
+                    .insert(role.clone(), outcome.engine.clone());
             }
         }
         if let Some(u) = outcome.usage {
@@ -110,11 +111,12 @@ impl<E: AgentEnginePort> MeteringEngine<E> {
                 m.unconfined_requested_runs += 1;
                 m.last_sandbox_status = format!("unavailable: {reason}");
             }
-            // Neither counter moves: the agent never ran, so this is neither a
-            // confined run nor an unconfined one — counting it as either would
-            // overstate the work the host actually did. The status line is what
-            // makes it visible (COX-B016).
+            // Counted apart from both: the agent never ran, so this is neither
+            // a confined run nor an unconfined one — folding it into either
+            // hides a host stuck refusing Seatbelt inside the agent's own
+            // failure rate (COX-B016).
             SandboxStatus::Refused(reason) => {
+                m.sandbox_refused_runs += 1;
                 m.last_sandbox_status = format!("refused: {reason}");
             }
         }
@@ -161,6 +163,25 @@ mod tests {
         }
     }
 
+    /// An engine that reports whatever confinement it is constructed with, so
+    /// the metering of each [`SandboxStatus`] can be pinned without a real
+    /// sandbox — including the one no host reproduces on demand.
+    struct FixedSandbox(SandboxStatus);
+    #[async_trait]
+    impl AgentEnginePort for FixedSandbox {
+        fn id(&self) -> &'static str {
+            "fixed-sandbox"
+        }
+        async fn run(&self, _r: AgentRequest) -> Result<AgentOutcome, PortError> {
+            Ok(AgentOutcome {
+                sandbox: self.0,
+                // `sandbox-exec`'s own status: nothing of the agent ran.
+                exit_code: Some(71),
+                ..AgentOutcome::default()
+            })
+        }
+    }
+
     fn req(role: Role) -> AgentRequest {
         AgentRequest {
             role,
@@ -187,5 +208,28 @@ mod tests {
         assert!((m.total_cost_usd - 0.30).abs() < 1e-9);
         assert!((m.by_role["dev_feature"] - 0.20).abs() < 1e-9);
         assert!((m.by_role["docs"] - 0.10).abs() < 1e-9);
+    }
+
+    /// COX-B016: a run the OS refused to confine is neither a confined run nor
+    /// an unconfined one. Folding it into either hides a host stuck refusing
+    /// Seatbelt inside numbers an operator reads as "confinement is working".
+    #[tokio::test]
+    async fn a_refused_sandbox_is_metered_apart_from_confined_and_unconfined_runs() {
+        let meter: Meter = Arc::new(Mutex::new(Spend::default()));
+        let engine = MeteringEngine::new(
+            FixedSandbox(SandboxStatus::Refused("seatbelt refused the profile")),
+            Arc::clone(&meter),
+        );
+        engine.run(req(Role::DevBug)).await.unwrap();
+
+        let m = meter.lock().unwrap();
+        assert_eq!(m.sandbox_refused_runs, 1);
+        assert_eq!(m.confined_runs, 0, "nothing ran confined");
+        assert_eq!(m.unconfined_requested_runs, 0, "nothing ran at all");
+        assert!(
+            m.last_sandbox_status.contains("refused"),
+            "the dashboard line must name the refusal, got {}",
+            m.last_sandbox_status
+        );
     }
 }
