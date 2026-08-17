@@ -327,10 +327,7 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
         if report.over_budget {
             tracing::warn!("budget cap reached — pausing loop");
             cycle_uc
-                .notify(
-                    "loop_paused",
-                    "loop paused: spend cap reached".to_owned(),
-                )
+                .notify("loop_paused", "loop paused: spend cap reached".to_owned())
                 .await;
             handle.pause();
             continue;
@@ -357,19 +354,38 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
             // Webhook mirror of the chat announcements below: fires only on the
             // open/close EDGE, so a night-long outage is one message, not one
             // per cycle.
-            let was_open = breaker_store.load().await.is_ok_and(|s| {
-                s.engine_incidents.iter().any(|i| i.engine == engine)
-            });
+            let was_open = breaker_store
+                .load()
+                .await
+                .is_ok_and(|s| s.engine_incidents.iter().any(|i| i.engine == engine));
             if let Some(detail) = &first {
-                if !was_open && fault_count >= 2 {
+                // Auth deaths alarm on FIRST sight: revoked credentials never
+                // heal without a person, so waiting to count cycles just burns
+                // quiet hours. Everything else keeps the >=2 debounce.
+                let urgent = crate::faults::is_auth_death(detail);
+                if !was_open && (fault_count >= 2 || urgent) {
+                    let hint = if urgent {
+                        " — credentials are dead; re-login the engine CLI (e.g. `claude login`) and the loop resumes"
+                    } else {
+                        ""
+                    };
                     cycle_uc
                         .notify(
                             "engine_incident",
-                            format!("{engine} failed {fault_count} runs this cycle: {detail}"),
+                            format!("{engine} failed {fault_count} run(s) this cycle: {detail}{hint}"),
                         )
                         .await;
                 }
-            } else if was_open {
+            }
+            // Life is EVIDENCE, not absence of failure: a cycle that shipped
+            // something, or whose failures were all task-shaped (the engine
+            // answered and was wrong), proves the engine lives. A SILENT cycle
+            // — nothing ran, nothing failed — proves nothing: the 2026-08-17
+            // OAuth death opened an incident at 01:33 and the next empty cycle
+            // closed it again, so the hub spent the night dead with a clean
+            // dashboard and no webhook.
+            let engine_alive = progressed || (infra_errors == 0 && !report.errors.is_empty());
+            if first.is_none() && was_open && engine_alive {
                 cycle_uc
                     .notify(
                         "engine_recovered",
@@ -385,19 +401,19 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
                     // a single dropped connection is a blip the retry handles,
                     // and shouting about it teaches people to ignore the alert
                     // that matters.
-                    if !already && fault_count >= 2 {
+                    if !already && (fault_count >= 2 || crate::faults::is_auth_death(detail)) {
                         let msg = format!(
-                            "🔌 {engine} failed {fault_count} runs this cycle: {detail}. If it \
+                            "🔌 {engine} failed {fault_count} run(s) this cycle: {detail}. If it \
                              keeps up, the loop pauses itself — fix the credentials or the model \
                              and this clears."
                         );
                         s.post_chat_in("SYSTEM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
                     }
-                } else {
-                    // The engine answered this cycle: nothing infra-shaped
-                    // failed. That is the promise the banner makes, so it is
-                    // what closes it — waiting for the team to also SHIP would
-                    // leave a stale alert up through a quiet backlog.
+                } else if engine_alive {
+                    // The engine PROVABLY answered this cycle (work landed, or
+                    // failures were task-shaped). Only that closes the banner —
+                    // an idle cycle with zero runs closes nothing, or an
+                    // overnight outage clears its own alarm (2026-08-17).
                     if let Some(inc) = s.close_engine_incident(&engine) {
                         let msg = format!(
                             "✅ {engine} is answering again after {} failed run(s) — resolved, \
@@ -418,7 +434,13 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
         // leader lease rotating across three runners no process ever saw three
         // loud cycles in a row, so the loop spun all night against a dead
         // provider without ever tripping this breaker.
-        if !progressed && infra_errors >= 2 {
+        // ONE infra fault in a no-progress cycle counts: overnight the dead
+        // engine produced exactly one fault per cycle (a single DEV attempt),
+        // so a >=2 threshold meant the streak never grew and the loop spun
+        // dead until morning (2026-08-17). Three consecutive such cycles are
+        // still required before the pause — a lone transient blip cycle gets
+        // reset by the next alive cycle.
+        if !progressed && infra_errors >= 1 {
             infra_streak += 1;
         } else if progressed || (infra_errors == 0 && !report.errors.is_empty()) {
             infra_streak = 0;

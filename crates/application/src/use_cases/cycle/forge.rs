@@ -122,9 +122,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     collision.display()
                 ))
                 .await;
-                let _ = git
-                    .worktree_remove(&self.work_dir, &collision)
-                    .await;
+                let _ = git.worktree_remove(&self.work_dir, &collision).await;
                 result = git.checkout_branch(&self.work_dir, &branch).await;
             }
         }

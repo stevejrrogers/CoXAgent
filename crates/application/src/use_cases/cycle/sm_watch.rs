@@ -117,7 +117,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 let Some(t) = state.tickets.iter().find(|t| t.id() == &id) else {
                     continue;
                 };
-                let untouched = matches!(t.status(), Status::Open | Status::Pending | Status::Ready);
+                let untouched =
+                    matches!(t.status(), Status::Open | Status::Pending | Status::Ready);
                 if !untouched {
                     continue;
                 }
@@ -153,12 +154,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                          hold — approve or reject it, half the sprint is gone.",
                         sprint.number
                     );
-                    state.post_chat_in(
-                        "SM",
-                        &msg,
-                        crate::state::APPROVALS_CHANNEL,
-                        Vec::new(),
-                    );
+                    state.post_chat_in("SM", &msg, crate::state::APPROVALS_CHANNEL, Vec::new());
                     state.log_activity("SM", "chased a cost hold", Some(id.to_string()));
                 } else {
                     let msg = format!(
