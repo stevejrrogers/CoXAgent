@@ -9,21 +9,38 @@ name: Visual QA
 # GitHub branch-protection matches a required status check by its CHECK RUN's
 # display name, which comes from this job's `name:` field (or falls back to the
 # YAML key). Protected main gates merges on exactly that string.
+#
+# Merged from two independently-authored pipelines:
+#   - CXA-B063/B064 (branch): the mandatory "Visual QA" check; runs macOS because
+#     e2e golden screenshots are committed as *-darwin.png (Linux would fail every
+#     screenshot with "missing snapshot", recreating the un-passable required check).
+#   - CXA-F005 (main): auto-run visual regression on PR events and post a summary
+#     of screenshot diffs to the failing PR thread.
 on:
   pull_request:
+    types: [opened, synchronize]
     branches: [main]
   push:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
 jobs:
-  visual-qa:
+  visual-regression:
     # This display name IS the required-check that protected main gates on.
     name: Visual QA
     # Runs macOS because e2e golden screenshots are committed as *-darwin.png;
     # Linux looks for *-linux.png and fails every screenshot ("missing snapshot"),
     # recreating precisely the un-passable-required-check bug this ticket fixes.
     runs-on: macos-latest
+    timeout-minutes: 30
+
+    env:
+      CARGO_TERM_COLOR: always
 
     steps:
       - uses: actions/checkout@v4
@@ -37,21 +54,63 @@ jobs:
       - name: Build hub binary for the visual suite
         run: cargo build --bin coxagent
 
-      - name: Install Playwright test runner + browsers
+      - name: Install Playwright test runner + browsers + system deps
         working-directory: e2e
         run: |
           npm ci
-          npx playwright install chromium
+          npx playwright install chromium --with-deps
 
-      - name: Run visual QA (golden screenshots + console-error gate)
+      - name: Run visual-regression suite against committed snapshots
         working-directory: e2e
-        run: npx playwright test
+        shell: bash
+        run: |
+          set +e
+          npx playwright test --update-snapshots=off \
+            --reporter=json > .playwright-report.json 2> .playwright-stderr.txt
+          code=$?
+          exit "$code"
 
-      - name: Upload failed-test traces on failure
-        if: failure()
+      - name: Upload test artifacts (report + screenshot diffs)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: visual-qa-traces-${{ github.run_id }}
+          name: visual-qa-results-${{ github.sha }}
           path: |
             e2e/test-results/
-            e2e/specs/**/*-snapshots/
+            e2e/.playwright-report.json
+
+      # Failing PRs only. Read the JSON report to count failures and list failing
+      # specs, then comment with a link to the artifact containing diff images.
+      - name: Post failure summary to the PR thread
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const out = 'e2e/.playwright-report.json';
+            let body;
+            if (fs.existsSync(out)) {
+              const rep = JSON.parse(fs.readFileSync(out, 'utf8'));
+              const fails = [];
+              for (const s of rep.suites) {
+                for (const f of (s.specs || [])) {
+                  for (const t of f.tests) {
+                    for (const r of t.results || []) {
+                      if (r.status === 'failed') fails.push(f.title);
+                    }
+                  }
+                }
+              }
+              const count = fails.length;
+              body = `## Visual QA failed\n\n${count} test(s) exceeded the 2% screenshot tolerance.\n\n` +
+                `Failing spec(s):\n${fails.map((x) => '- ' + x).join('\n')}\n\n` +
+                `Diff images and screenshots are in the run artifacts you can download from GitHub Actions UI (#${context.runNumber}).`;
+            } else {
+              body = `## Visual QA failed\n\nThe run reported failures but produced no JSON report.\nSee run #${context.runNumber} artifacts.`;
+            }
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
