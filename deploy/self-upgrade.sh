@@ -28,13 +28,19 @@ SHA_FILE="$STATE_DIR/deployed-sha"
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"; }
 
-# One upgrade at a time; a stale lock (>30 min) is a dead run.
+# One upgrade at a time. Staleness is judged by whether the OWNING PROCESS is
+# alive, not by age: a cold build on a loaded machine can exceed any timer, and
+# an age-based takeover once put two instances into the same build worktree —
+# they destroyed each other's build and both "failed" in the same second.
 if [ -d "$LOCK" ]; then
-  age=$(( $(date +%s) - $(stat -f %m "$LOCK" 2>/dev/null || echo 0) ))
-  [ "$age" -lt 1800 ] && exit 0
+  owner=$(cat "$LOCK/pid" 2>/dev/null || echo "")
+  if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
+    exit 0 # a live run owns the lock — never take it over
+  fi
   rm -rf "$LOCK"
 fi
 mkdir "$LOCK" || exit 0
+echo $$ > "$LOCK/pid"
 trap 'rm -rf "$LOCK"' EXIT
 
 cd "$REPO_DIR" || exit 1
@@ -45,14 +51,21 @@ OLD_SHA=$(cat "$SHA_FILE" 2>/dev/null || echo "")
 
 log "upgrade candidate: ${OLD_SHA:-none} -> $NEW_SHA"
 
-# Build from a detached temp worktree so the working tree (agents may be
-# mid-edit in it) is never touched.
+# Build from a detached persistent worktree so the working tree (agents may be
+# mid-edit in it) is never touched. The worktree is KEPT between runs: its
+# target/ makes every upgrade after the first an incremental build (minutes,
+# not an hour on a loaded machine).
 BUILD_WT="$STATE_DIR/build-tree"
-git worktree remove --force "$BUILD_WT" >/dev/null 2>&1
-git worktree add --detach "$BUILD_WT" "$NEW_SHA" >>"$LOG" 2>&1 || { log "worktree add failed"; exit 1; }
+if [ -d "$BUILD_WT/.git" ] || [ -f "$BUILD_WT/.git" ]; then
+  git -C "$BUILD_WT" checkout --detach -f "$NEW_SHA" >>"$LOG" 2>&1 \
+    || { log "worktree checkout failed"; exit 1; }
+else
+  git worktree remove --force "$BUILD_WT" >/dev/null 2>&1
+  git worktree add --detach "$BUILD_WT" "$NEW_SHA" >>"$LOG" 2>&1 \
+    || { log "worktree add failed"; exit 1; }
+fi
 if ! (cd "$BUILD_WT" && cargo build --release --bin coxagent >>"$LOG" 2>&1); then
   log "BUILD FAILED for $NEW_SHA — keeping current hub"
-  git worktree remove --force "$BUILD_WT" >/dev/null 2>&1
   exit 1
 fi
 NEW_BIN="$BUILD_WT/target/release/coxagent"
@@ -88,4 +101,3 @@ else
   [ -n "$NP" ] && kill "$NP" 2>/dev/null
   log "rollback issued; shell will respawn the previous hub"
 fi
-git worktree remove --force "$BUILD_WT" >/dev/null 2>&1
