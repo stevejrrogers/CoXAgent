@@ -1403,7 +1403,10 @@ pub(crate) fn worktree_at(work_dir: PathBuf, slug: &str) -> PathBuf {
         let canon = std::fs::canonicalize(&work_dir).unwrap_or_else(|_| work_dir.clone());
         let mut h = std::collections::hash_map::DefaultHasher::new();
         canon.hash(&mut h);
-        format!("{:08x}", u32::try_from(h.finish() & u64::from(u32::MAX)).unwrap_or(0))
+        format!(
+            "{:08x}",
+            u32::try_from(h.finish() & u64::from(u32::MAX)).unwrap_or(0)
+        )
     };
     let slug = format!("{sanitized}-{repo_key}");
     // Sibling of the repo, so it is never inside the tree the agent commits.

@@ -612,8 +612,8 @@ pub(super) async fn control_ep(
                     coxagent_application::auth::AuthRole::Super
                         | coxagent_application::auth::AuthRole::Admin
                 ) || owner
-                        .as_deref()
-                        .map_or(true, |o| o.eq_ignore_ascii_case(&u.username))
+                    .as_deref()
+                    .map_or(true, |o| o.eq_ignore_ascii_case(&u.username))
             })
         }
     };

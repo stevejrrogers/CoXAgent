@@ -108,6 +108,13 @@ pub struct CycleScore {
     pub errors: u64,
     /// A–D verdict, precomputed so every consumer grades identically.
     pub grade: String,
+    /// Wall-clock seconds spent per phase (role label → secs) this cycle —
+    /// where the minutes went, so cadence tuning has data instead of feeling.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub phase_secs: std::collections::BTreeMap<String, u64>,
+    /// USD metered per role this cycle — where the money went.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub phase_cost: std::collections::BTreeMap<String, f64>,
 }
 
 impl CycleScore {

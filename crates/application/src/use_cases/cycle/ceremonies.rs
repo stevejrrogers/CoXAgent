@@ -4,7 +4,7 @@
 //! Split out of the cycle so the rhythm of the team lives in one place and a
 //! ticket about a ceremony stops colliding with a ticket about a deploy.
 
-use super::{prune_memory_index, CycleReport, RunCycleUseCase, ARCH_REVIEW_EVERY_SPRINTS};
+use super::{prune_memory_index, CycleReport, RunCycleUseCase};
 use crate::ports::outbound::{AgentEnginePort, AgentRequest, StateStorePort};
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -86,7 +86,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // Every few sprints the SA steps back and reviews the whole architecture,
         // filing refactor tickets and asking the PO to prioritise a hardening
         // sprint before tech debt compounds.
-        if n % ARCH_REVIEW_EVERY_SPRINTS == 0 {
+        if n % self.config.workflow.cadence.arch_review_every_sprints() == 0 {
             self.architecture_audit(n).await;
             self.docs_audit(n).await;
         }

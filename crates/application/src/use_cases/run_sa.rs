@@ -278,7 +278,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
                             break;
                         }
                         Err(e) => {
-                            tracing::warn!("SA design repair attempt {attempt} for {id} error: {e}");
+                            tracing::warn!(
+                                "SA design repair attempt {attempt} for {id} error: {e}"
+                            );
                             break;
                         }
                     }

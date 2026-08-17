@@ -122,9 +122,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     collision.display()
                 ))
                 .await;
-                let _ = git
-                    .worktree_remove(&self.work_dir, &collision)
-                    .await;
+                let _ = git.worktree_remove(&self.work_dir, &collision).await;
                 result = git.checkout_branch(&self.work_dir, &branch).await;
             }
         }
@@ -136,20 +134,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // free the branch; if it has uncommitted work, do NOT destroy it — log
         // and bail so the drain loop surfaces the ticket later instead of
         // retrying a doomed checkout every cycle.
-        if result.is_err() {
-            if let Some(collision) =
-                worktree_path_in_use(&result.as_ref().unwrap_err().to_string())
-            {
+        if let Err(err) = &result {
+            if let Some(collision) = worktree_path_in_use(&err.to_string()) {
                 let base = self.flow_base().to_owned();
                 let clean = git
                     .working_tree(&collision)
                     .await
-                    .map(|wt| wt.changed_paths.is_empty())
-                    .unwrap_or(false);
+                    .is_ok_and(|wt| wt.changed_paths.is_empty());
                 if clean {
-                    let (ok, _) = git
-                        .raw(&collision, &["checkout", &base])
-                        .await;
+                    let (ok, _) = git.raw(&collision, &["checkout", &base]).await;
                     if ok {
                         self.log_git(&format!(
                             "released {branch}: relocated clean worktree {} onto {base}",
