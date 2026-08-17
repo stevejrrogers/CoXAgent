@@ -1,0 +1,57 @@
+name: Visual QA
+
+# CXA-B063: branch protection requires a "Visual QA" status check on main, but
+# no workflow emitted one - so a required check with no producing run failed
+# every merge by default (and could never be made green). This workflow is that
+# emitter.
+#
+# Do NOT rename or reshape this job's display name ("Visual QA", spaces intact):
+# GitHub branch-protection matches a required status check by its CHECK RUN's
+# display name, which comes from this job's `name:` field (or falls back to the
+# YAML key). Protected main gates merges on exactly that string.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  visual-qa:
+    # This display name IS the required-check that protected main gates on.
+    name: Visual QA
+    # Runs macOS because e2e golden screenshots are committed as *-darwin.png;
+    # Linux looks for *-linux.png and fails every screenshot ("missing snapshot"),
+    # recreating precisely the un-passable-required-check bug this ticket fixes.
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # The e2e suite boots a REAL hub against frozen fixture state; without a
+      # build here there is nothing to serve (run-server.sh refuses a missing binary).
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build hub binary for the visual suite
+        run: cargo build --bin coxagent
+
+      - name: Install Playwright test runner + browsers
+        working-directory: e2e
+        run: |
+          npm ci
+          npx playwright install chromium
+
+      - name: Run visual QA (golden screenshots + console-error gate)
+        working-directory: e2e
+        run: npx playwright test
+
+      - name: Upload failed-test traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-qa-traces-${{ github.run_id }}
+          path: |
+            e2e/test-results/
+            e2e/specs/**/*-snapshots/
