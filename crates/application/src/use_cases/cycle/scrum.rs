@@ -48,17 +48,20 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .filter(|t| t.ticket_type() == TicketType::Bug && t.status() == Status::Open)
             .count();
         if open_bugs >= 3 {
-            return Some(("bug_backlog", if vi {
-                format!(
+            return Some((
+                "bug_backlog",
+                if vi {
+                    format!(
                     "Đang có {open_bugs} bug mở. Nên tạm dừng tính năng mới để dọn hết bug trước, \
                      hay tiếp tục ship? Quyết định đi, và nếu cần thì tạo ticket theo dõi."
                 )
-            } else {
-                format!(
+                } else {
+                    format!(
                     "We have {open_bugs} open bugs. Should we pause new features and burn down the \
                      bug backlog first, or keep shipping? Decide and, if useful, create a tracking ticket."
                 )
-            }));
+                },
+            ));
         }
         // A stalled in-progress ticket is worth flagging as a possible blocker.
         if let Some(t) = state
@@ -67,19 +70,22 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .find(|t| t.status() == Status::InProgress)
         {
             if cycle % 4 == 0 {
-                return Some(("stalled", if vi {
-                    format!(
-                        "{} đã ở trạng thái đang làm khá lâu. Có bị block hay quá lớn không? \
+                return Some((
+                    "stalled",
+                    if vi {
+                        format!(
+                            "{} đã ở trạng thái đang làm khá lâu. Có bị block hay quá lớn không? \
                          Nên tách nhỏ hay gỡ block cho nó?",
-                        t.id()
-                    )
-                } else {
-                    format!(
-                        "{} has been in progress for a while. Is it blocked or too big? \
+                            t.id()
+                        )
+                    } else {
+                        format!(
+                            "{} has been in progress for a while. Is it blocked or too big? \
                          Should we split it or unblock it?",
-                        t.id()
-                    )
-                }));
+                            t.id()
+                        )
+                    },
+                ));
             }
         }
         // Otherwise a light periodic check-in keeps the sprint honest.
@@ -186,9 +192,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// Fold the spend meter's since-last-cycle deltas into persistent state and
     /// reset it, returning this cycle's cost. Kept separate so `record_activity`
     /// stays a readable list of what happened, not a ledger.
-    fn drain_meter(&self, state: &mut crate::state::ProjectState) -> (f64, u64) {
+    fn drain_meter(
+        &self,
+        state: &mut crate::state::ProjectState,
+    ) -> (f64, u64, std::collections::BTreeMap<String, f64>) {
         let mut cycle_cost = 0.0;
         let mut cycle_runs = 0u64;
+        let mut cycle_by_role = std::collections::BTreeMap::new();
         if let Some(meter) = &self.meter {
             if let Ok(mut m) = meter.lock() {
                 cycle_cost = m.total_cost_usd;
@@ -198,6 +208,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 state.spend.output_tokens += m.output_tokens;
                 state.spend.runs += m.runs;
                 for (role, cost) in std::mem::take(&mut m.by_role) {
+                    cycle_by_role.insert(role.clone(), cost);
                     *state.spend.by_role.entry(role).or_default() += cost;
                 }
                 for (role, n) in std::mem::take(&mut m.runs_by_role) {
@@ -233,7 +244,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 *m = Spend::default();
             }
         }
-        (cycle_cost, cycle_runs)
+        (cycle_cost, cycle_runs, cycle_by_role)
     }
 
     /// Deterministic per-cycle scorecard — zero tokens, graded from what the
@@ -244,6 +255,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         report: &CycleReport,
         cost_usd: f64,
         runs: u64,
+        phase_secs: std::collections::BTreeMap<String, u64>,
+        phase_cost: std::collections::BTreeMap<String, f64>,
     ) {
         use crate::state::CycleScore;
         let shipped =
@@ -286,6 +299,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             incidents,
             errors,
             grade,
+            phase_secs,
+            phase_cost,
         });
         let overflow = state.cycle_scores.len().saturating_sub(100);
         if overflow > 0 {
@@ -323,12 +338,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
 
         // Drain the spend meter (deltas since last cycle) into persistent state.
-        let (cycle_cost, cycle_runs) = self.drain_meter(&mut state);
+        let (cycle_cost, cycle_runs, cycle_by_role) = self.drain_meter(&mut state);
         // LEADER-ONLY: every runner passes through here, and the workers cycle
         // every few seconds — letting them all score flooded the history with
         // duplicate/no-op rows within minutes of the feature shipping.
         if leader {
-            Self::record_cycle_score(&mut state, report, cycle_cost, cycle_runs);
+            Self::record_cycle_score(
+                &mut state,
+                report,
+                cycle_cost,
+                cycle_runs,
+                self.take_phase_secs(),
+                cycle_by_role,
+            );
         }
         let spent_today = state.add_daily_spend(cycle_cost);
 

@@ -15,16 +15,12 @@
 //! (`sandbox-exec`); Linux uses Bubblewrap (`bwrap`) when it's on `PATH`.
 //! Platforms/hosts without a supported mechanism run unconfined and report
 //! [`SandboxStatus::Unavailable`] rather than silently pretending to be safe.
-//! Actually RUNNING a confined command — surviving macOS Seatbelt's transient
-//! refusals, and reporting the confinement that really applied — belongs to
-//! the `confined` submodule.
 
-mod confined;
+/// The macOS Seatbelt apply-failure policy (retry, then report the
+/// confinement actually in force) — its own concern, its own file.
+mod seatbelt;
 
-/// Spawning a confined command survives macOS Seatbelt refusing to apply the
-/// profile, and reports the confinement that ACTUALLY applied — see
-/// `proc/confined.rs` for why both halves are load-bearing (COX-B013/B016).
-pub use confined::{output_confined, spawn_confined};
+pub use seatbelt::{output_confined, spawn_confined};
 
 use coxagent_application::ports::outbound::SandboxStatus;
 use std::ffi::OsStr;
@@ -370,10 +366,10 @@ mod tests {
         let outside = std::env::var("HOME").unwrap() + "/cox-sbx-should-never-exist";
         let script = format!("echo ok > {}/in.txt; echo x > {outside}", ws.display());
         let (mut c, requested) = agent_command("/bin/sh", &ws, true);
-        let (out, applied) = output_confined(c.arg("-c").arg(&script), requested)
+        let (out, effective) = output_confined(c.arg("-c").arg(&script), requested)
             .await
             .unwrap();
-        // COX-B022/B016: some hosts refuse `sandbox_apply()` for this process no
+        // COX-B022: some hosts refuse `sandbox_apply()` for this process no
         // matter how often it is retried — measured on this repo's own CI/dev
         // boxes, where the failure arrives in bursts that outlast the whole
         // retry loop (a probe of 400 consecutive calls in a warm process saw
@@ -381,23 +377,24 @@ mod tests {
         // fail). `sandbox-exec` then exits 71 before the script runs, so NOTHING
         // about the write policy was exercised and asserting on it would report
         // an OS condition as a code regression — the false-fail this ticket is
-        // about. What IS this repo's job in that case is saying so, which is
-        // exactly what `applied` now carries; the retry policy itself is pinned
-        // deterministically by the `confined` module's own tests, so stopping
-        // here gives up no coverage of the fix.
-        if let SandboxStatus::Refused(why) = applied {
+        // about. The retry policy itself is pinned deterministically by the
+        // `seatbelt` module's tests, so skipping here gives up no coverage of
+        // the fix. COX-B016: the skip now keys on the status the helper itself
+        // reports, so the test and production code agree on what "the OS
+        // refused" means instead of re-deriving it from an exit code.
+        if effective == SandboxStatus::Denied("seatbelt") {
             eprintln!(
-                "SKIPPED sandboxed_command_blocks_writes_outside_workspace: {why} ({}) \
-                 — the write policy was never exercised on this host",
+                "SKIPPED sandboxed_command_blocks_writes_outside_workspace: this host \
+                 refused to apply a Seatbelt profile on every attempt ({}) — the \
+                 write policy was never exercised",
                 String::from_utf8_lossy(&out.stderr).trim()
             );
             let _ = std::fs::remove_dir_all(&ws);
             return;
         }
         assert_eq!(
-            applied,
-            SandboxStatus::Confined("seatbelt"),
-            "a run that reached the script was confined by Seatbelt"
+            effective, requested,
+            "an applied profile must still report as confined"
         );
         // Any OTHER failure is ours: say which, so exit 71 is never confused
         // with the target program's own status.

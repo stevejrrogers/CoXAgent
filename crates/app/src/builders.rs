@@ -496,6 +496,58 @@ pub(crate) async fn build_project(
         }
     }
 
+    // Self-upgrade (dogfood CD, opt-in): every 15 min a DETACHED script checks
+    // origin/<base> for a commit newer than the deployed hub, builds it in a
+    // temp worktree, swaps this very binary (backup kept), restarts, and rolls
+    // back if the new hub fails its health check. Detached because a process
+    // cannot be trusted to finish replacing itself.
+    if config.deploy.self_upgrade {
+        let script = work_dir.join("deploy").join("self-upgrade.sh");
+        let repo = work_dir.clone();
+        let base = config.git.default_branch.clone();
+        if let Ok(target) = std::env::current_exe() {
+            let port = std::env::var("COXAGENT_PORT")
+                .ok()
+                .and_then(|p| p.parse::<u16>().ok())
+                .unwrap_or(4000);
+            let _ = &script; // superseded: the script comes from origin, not the clone
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(900)).await;
+                    // Heartbeat: proof the watcher is alive, distinguishable
+                    // from "script ran and had nothing to do" (which is
+                    // silent by design). The hub's own logs are swallowed by
+                    // the app shell, so this file is the only observable.
+                    let hb = repo.join(".coxagent-self-upgrade");
+                    let _ = std::fs::create_dir_all(&hb);
+                    let _ = std::fs::write(
+                        hb.join("watcher-heartbeat"),
+                        format!("{:?}\n", std::time::SystemTime::now()),
+                    );
+                    // Run the LATEST script straight from origin/<base> via
+                    // `git show` — reading it from the clone was a
+                    // chicken-and-egg: a clone that predates the script never
+                    // upgrades, and therefore never gets the script.
+                    let cmd = "git -C \"$1\" fetch -q origin \"$4\" && \
+                         git -C \"$1\" show \"origin/$4:deploy/self-upgrade.sh\" 2>/dev/null \
+                         | bash -s -- \"$1\" \"$2\" \"$3\" \"$4\"";
+                    let _ = std::process::Command::new("bash")
+                        .arg("-c")
+                        .arg(cmd)
+                        .arg("self-upgrade") // $0
+                        .arg(&repo)
+                        .arg(&target)
+                        .arg(port.to_string())
+                        .arg(&base)
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn();
+                }
+            });
+            tracing::info!("[{id}] self-upgrade watcher armed (every 15 min)");
+        }
+    }
+
     let config_path = state_dir
         .parent()
         .unwrap_or(state_dir)
