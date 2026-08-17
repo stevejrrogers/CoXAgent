@@ -35,7 +35,16 @@ pub fn advance(state: &mut ProjectState, cycle: u64, policy: SprintPolicy) -> Op
     let need_open = match &state.sprint {
         None => true,
         Some(s) => match policy {
-            SprintPolicy::Cycles(len) => cycle.saturating_sub(s.started_cycle) >= len,
+            // Cycle windows ALSO require a minimum wall-clock age (the promise
+            // Sprint.started_at documents): cycles shrank from ~30 min to ~2
+            // min as the loop got faster, and a pure cycle counter rolled a
+            // "sprint" every 10 minutes — the team spent the whole day in
+            // planning/review/retro ceremonies and DEV never shipped anything
+            // (sprint 586's velocity-0% retro, tickets carried over forever).
+            SprintPolicy::Cycles(len) => {
+                cycle.saturating_sub(s.started_cycle) >= len
+                    && sprint_age_minutes(&s.started_at) >= MIN_SPRINT_MINUTES
+            }
             SprintPolicy::Days(days) => sprint_age_days(&s.started_at) >= days,
         },
     };
@@ -48,6 +57,22 @@ pub fn advance(state: &mut ProjectState, cycle: u64, policy: SprintPolicy) -> Op
         SprintPolicy::Days(_) => state.sprint.as_ref().map_or(0, |s| s.length_cycles),
     };
     Some(roll_over(state, cycle, length))
+}
+
+/// The floor under a cycle-window sprint: however fast the cycles spin, a
+/// sprint younger than this never rolls — ceremonies must stay rarer than work.
+const MIN_SPRINT_MINUTES: u64 = 240;
+
+/// Whole minutes since `started_at`; missing/unparseable reads as ancient.
+fn sprint_age_minutes(started_at: &str) -> u64 {
+    let fmt = &time::format_description::well_known::Rfc3339;
+    match time::OffsetDateTime::parse(started_at, fmt) {
+        Ok(t) => {
+            let d = time::OffsetDateTime::now_utc() - t;
+            u64::try_from(d.whole_minutes().max(0)).unwrap_or(0)
+        }
+        Err(_) => u64::MAX,
+    }
 }
 
 /// Whole days since `started_at`. A missing/unparseable stamp reads as ancient,
@@ -349,14 +374,20 @@ mod tests {
     }
 
     #[test]
-    fn cycles_policy_rolls_purely_on_cycles() {
+    fn cycles_policy_needs_both_the_counter_and_real_time() {
         let mut state = ProjectState {
             tickets: vec![feature("F001")],
             ..ProjectState::default()
         };
         advance(&mut state, 1, SprintPolicy::Cycles(10));
-        // The explicit cycles unit is a deliberate choice — it rolls on the
-        // counter alone, however fast cycles spin.
+        // Counter elapsed but the sprint is seconds old: must NOT roll. Pure
+        // cycle-rolling at ~2-min cycles produced 10-minute "sprints" that
+        // were all ceremony and no delivery (sprint 586, velocity 0%).
+        assert_eq!(advance(&mut state, 11, SprintPolicy::Cycles(10)), None);
+        // Same counter, but the sprint is genuinely old — now it rolls.
+        if let Some(s) = &mut state.sprint {
+            s.started_at = "2020-01-01T00:00:00Z".to_owned();
+        }
         assert_eq!(advance(&mut state, 11, SprintPolicy::Cycles(10)), Some(2));
     }
 

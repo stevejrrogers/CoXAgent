@@ -253,6 +253,84 @@ pub struct WorkflowConfig {
     /// linked back so no work is lost). 0 = default (2).
     #[serde(default)]
     pub pr_stale_days: u64,
+    /// Per-phase cadence knobs (docs budget, debt sweep, architecture audit).
+    #[serde(default)]
+    pub cadence: CadenceConfig,
+    /// Quiet window `"HH:MM-HH:MM"` in UTC during which NO new engine calls
+    /// start — overnight quota walls and sleeping laptops make those hours the
+    /// most failure-prone and least supervised. (UTC because the hub has no
+    /// reliable local-timezone source; VN 02:00–07:00 = `"19:00-00:00"`.)
+    /// Urgent work is the exception: an open high-priority bug still runs.
+    /// Empty = no window.
+    #[serde(default)]
+    pub quiet_hours_utc: String,
+}
+
+/// How often the periodic phases run. Zeros mean "use the built-in default" so
+/// an absent config block changes nothing.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CadenceConfig {
+    /// Wiki refresh budget per UTC day (0 = default 5).
+    pub docs_refreshes_per_day: u32,
+    /// File a tech-debt sweep chore every N cycles (0 = default 10).
+    pub debt_sweep_every_cycles: u64,
+    /// SA architecture + docs audit every N sprints (0 = default 8).
+    pub arch_review_every_sprints: u32,
+}
+
+impl CadenceConfig {
+    #[must_use]
+    pub fn docs_refreshes_per_day(&self) -> u32 {
+        if self.docs_refreshes_per_day == 0 {
+            5
+        } else {
+            self.docs_refreshes_per_day
+        }
+    }
+    #[must_use]
+    pub fn debt_sweep_every_cycles(&self) -> u64 {
+        if self.debt_sweep_every_cycles == 0 {
+            10
+        } else {
+            self.debt_sweep_every_cycles
+        }
+    }
+    #[must_use]
+    pub fn arch_review_every_sprints(&self) -> u32 {
+        if self.arch_review_every_sprints == 0 {
+            8
+        } else {
+            self.arch_review_every_sprints
+        }
+    }
+}
+
+/// Whether local wall-clock `now` (minutes since midnight) falls inside the
+/// `"HH:MM-HH:MM"` window; supports windows that wrap midnight ("22:00-06:00").
+/// Malformed windows are treated as no window — quiet hours must never be able
+/// to halt a team by typo.
+#[must_use]
+pub fn in_quiet_window(window: &str, now_minutes: u32) -> bool {
+    let Some((a, b)) = window.trim().split_once('-') else {
+        return false;
+    };
+    let parse = |s: &str| -> Option<u32> {
+        let (h, m) = s.trim().split_once(':')?;
+        let (h, m): (u32, u32) = (h.parse().ok()?, m.parse().ok()?);
+        (h < 24 && m < 60).then_some(h * 60 + m)
+    };
+    let (Some(start), Some(end)) = (parse(a), parse(b)) else {
+        return false;
+    };
+    if start == end {
+        return false; // zero-length window means "off", not "always"
+    }
+    if start < end {
+        (start..end).contains(&now_minutes)
+    } else {
+        now_minutes >= start || now_minutes < end
+    }
 }
 
 /// Human-in-the-loop configuration (see docs/HYBRID_TEAM.md).
@@ -396,6 +474,8 @@ impl Default for WorkflowConfig {
             human: HumanConfig::default(),
             backlog_cap: 0,
             pr_stale_days: 0,
+            cadence: CadenceConfig::default(),
+            quiet_hours_utc: String::new(),
         }
     }
 }
@@ -458,6 +538,14 @@ pub struct DeployConfig {
     /// the live hub serves.
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Self-upgrade (dogfood CD): the hub periodically runs
+    /// `deploy/self-upgrade.sh`, which builds origin/<default_branch> in a
+    /// detached worktree, swaps its OWN binary (backup kept), restarts, and
+    /// rolls back if the new hub fails its health check. The script is a
+    /// detached process so a dying hub cannot orphan its own rescue. Opt-in
+    /// (default off) — only meaningful when the hub manages its own repo.
+    #[serde(default)]
+    pub self_upgrade: bool,
     /// Auto-redeploy the last known-good version when `deploy()` or a
     /// post-deploy `run_tests()` fails, so the shared environment self-heals
     /// instead of staying broken until a DEV agent picks up the bug ticket.
@@ -499,6 +587,7 @@ impl Default for DeployConfig {
         Self {
             host_port: None,
             enabled: true,
+            self_upgrade: false,
             auto_rollback: false,
             max_rollback_age_secs: default_max_rollback_age_secs(),
             migration_detection_paths: default_migration_detection_paths(),
@@ -635,6 +724,12 @@ pub struct ReleasesConfig {
     /// no matter how many milestones have been reached.
     #[serde(default)]
     pub enabled: bool,
+    /// Cadence of the automated release cut (days between cuts; 0 = off).
+    /// Every cut scans conventional commits since the last `v*` tag, decides
+    /// the bump (feat → minor, else patch; major is a human call), and opens
+    /// a release PR that a person lands from the Inbox. The merge tags it.
+    #[serde(default)]
+    pub cut_every_days: u64,
 }
 
 /// Version of the persisted `coxagent.json` schema this build understands.
@@ -716,6 +811,38 @@ pub struct Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quiet_window_handles_wrap_zero_and_garbage() {
+        // Plain window.
+        assert!(in_quiet_window("02:00-07:00", 3 * 60));
+        assert!(!in_quiet_window("02:00-07:00", 8 * 60));
+        // Wraps midnight (VN overnight in UTC).
+        assert!(in_quiet_window("19:00-00:00", 20 * 60));
+        assert!(in_quiet_window("22:00-06:00", 60));
+        assert!(!in_quiet_window("22:00-06:00", 12 * 60));
+        // Zero-length = off; garbage = off (a typo must never halt the team).
+        assert!(!in_quiet_window("07:00-07:00", 7 * 60));
+        assert!(!in_quiet_window("bogus", 0));
+        assert!(!in_quiet_window("25:00-26:00", 0));
+        assert!(!in_quiet_window("", 0));
+    }
+
+    #[test]
+    fn cadence_zeros_mean_defaults() {
+        let c = CadenceConfig::default();
+        assert_eq!(c.docs_refreshes_per_day(), 5);
+        assert_eq!(c.debt_sweep_every_cycles(), 10);
+        assert_eq!(c.arch_review_every_sprints(), 8);
+        let c = CadenceConfig {
+            docs_refreshes_per_day: 2,
+            debt_sweep_every_cycles: 50,
+            arch_review_every_sprints: 3,
+        };
+        assert_eq!(c.docs_refreshes_per_day(), 2);
+        assert_eq!(c.debt_sweep_every_cycles(), 50);
+        assert_eq!(c.arch_review_every_sprints(), 3);
+    }
 
     #[test]
     fn resolve_prefers_per_role_override() {

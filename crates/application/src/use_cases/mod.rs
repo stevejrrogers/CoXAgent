@@ -61,6 +61,8 @@ pub use run_test::RunTestUseCase;
 pub use runner::{run_forever, RunnerHandle, RunnerSnapshot};
 
 #[cfg(test)]
+mod mod_guard_tests;
+#[cfg(test)]
 mod run_releases_tdd_tests;
 #[cfg(test)]
 mod run_releases_tests;

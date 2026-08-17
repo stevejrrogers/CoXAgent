@@ -634,15 +634,19 @@ mod tests {
     #[test]
     fn tool_result_summary_reads_as_an_outcome_not_a_byte_count() {
         assert_eq!(
-            summarize_tool_result("   Compiling…\ntest result: ok. 220 passed; 0 failed; 0 ignored"),
+            summarize_tool_result(
+                "   Compiling…\ntest result: ok. 220 passed; 0 failed; 0 ignored"
+            ),
             "✓ 220 passed"
         );
         assert_eq!(
             summarize_tool_result("test result: FAILED. 2 passed; 1 failed; 0 ignored"),
             "✗ 1 failed"
         );
-        assert!(summarize_tool_result("error[E0433]: cannot find `x`\nerror: aborting")
-            .starts_with("✗ 2 error"));
+        assert!(
+            summarize_tool_result("error[E0433]: cannot find `x`\nerror: aborting")
+                .starts_with("✗ 2 error")
+        );
         // A source dump full of `.map_err`/`Error` must NOT read as failures.
         assert_eq!(
             summarize_tool_result("fn f() -> Result<(), Error> { x.map_err(|e| e)?; Ok(()) }"),
@@ -650,9 +654,15 @@ mod tests {
         );
         // A git fatal is shown as itself.
         assert!(summarize_tool_result("fatal: path 'x.rs' does not exist").starts_with("✗ fatal:"));
-        assert_eq!(summarize_tool_result("warning: unused variable `y`"), "⚠ 1 warning");
+        assert_eq!(
+            summarize_tool_result("warning: unused variable `y`"),
+            "⚠ 1 warning"
+        );
         assert_eq!(summarize_tool_result("a\nb\nc"), "3 lines");
-        assert_eq!(summarize_tool_result("crates/app/src/lib.rs:42"), "crates/app/src/lib.rs:42");
+        assert_eq!(
+            summarize_tool_result("crates/app/src/lib.rs:42"),
+            "crates/app/src/lib.rs:42"
+        );
         assert_eq!(summarize_tool_result("   "), "done (no output)");
     }
 
