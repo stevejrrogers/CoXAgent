@@ -1,9 +1,11 @@
-//! CXA-B063 acceptance gate: the GitHub Actions visual-regression workflow.
+//! CXA-B063 / CXA-F005 acceptance gate: the GitHub Actions visual-regression
+//! workflow.
 //!
+//! Two tickets converged on the same deliverable and both must be satisfied.
 //! CXA-B063 requires that branch protection's "Visual QA" status check be able
 //! to pass — impossible while `.github/workflows/visual-qa.yml` did not exist on
-//! main (only ci + desktop workflows were present). This deliverable lands that
-//! workflow (authored originally as CXA-F005, but never merged) so a real job
+//! main (only ci + desktop workflows were present). CXA-F005 landed that
+//! workflow (authored originally as CXA-F002/F004, never merged) so a real job
 //! emits the check. The acceptance criteria are enforced here by parsing the
 //! shipped `.github/workflows/visual-qa.yml`:
 //!
