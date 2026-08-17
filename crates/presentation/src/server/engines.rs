@@ -232,7 +232,15 @@ pub(super) async fn engines_ep(State(app): State<AppState>) -> impl IntoResponse
 /// their own machine. The machine that has the CLI is the only one that knows.
 pub(super) async fn opencode_models_ep(State(app): State<AppState>) -> impl IntoResponse {
     let mut full: Vec<String> = Vec::new();
-    if let Ok(o) = tokio::process::Command::new("opencode")
+    // Use the path the hub's own discovery found: its PATH may omit
+    // ~/.opencode/bin (GUI launch), and presentation cannot reach the
+    // infrastructure resolver — the discovery result IS the resolved path.
+    let opencode = app
+        .engines
+        .iter()
+        .find(|(n, _)| n == "opencode")
+        .map_or_else(|| "opencode".to_owned(), |(_, p)| p.clone());
+    if let Ok(o) = tokio::process::Command::new(&opencode)
         .arg("models")
         .output()
         .await

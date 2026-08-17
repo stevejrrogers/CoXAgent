@@ -60,3 +60,4 @@ test-results/
 # SwiftPM build dir (companion)
 .build/
 opencode.json
+.coxagent-worktrees/

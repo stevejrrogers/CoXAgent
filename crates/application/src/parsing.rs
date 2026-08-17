@@ -228,6 +228,43 @@ pub fn jaccard<S: std::hash::BuildHasher>(
     }
 }
 
+/// Whether a title is a backlog process/ceremony ticket — "triage the bugs",
+/// "burn-down sprint", "stabilization sprint", "backlog grooming". These are
+/// the SM/PO's recurring rituals, not features, and the BA kept re-filing a
+/// fresh one every cycle (six near-identical "bug triage / burndown sprint"
+/// tickets piled into one inbox). At most ONE should ever be open at a time,
+/// so this lets the caller keep a single active slot for the whole family
+/// regardless of how the wording drifts.
+#[must_use]
+pub fn is_backlog_meta(title: &str) -> bool {
+    let t = normalize_title(title);
+    let ritual = ["triage", "burndown", "burn down", "stabiliz", "grooming"]
+        .iter()
+        .any(|k| t.contains(k));
+    let about_backlog = ["bug", "backlog", "sprint"].iter().any(|k| t.contains(k));
+    ritual && about_backlog
+}
+
+/// Whether `title` duplicates one of `existing` — either an exact normalised
+/// match or a near-paraphrase (Jaccard ≥ 0.6 on content tokens), or, for a
+/// backlog-ceremony ticket, any existing ceremony ticket at all. One place so
+/// the BA insert loop and any future caller agree on what "already covered"
+/// means.
+#[must_use]
+pub fn duplicates_existing(title: &str, existing: &[String]) -> bool {
+    let norm = normalize_title(title);
+    if norm.is_empty() {
+        return true; // a blank title is never worth filing
+    }
+    let meta = is_backlog_meta(title);
+    let toks = title_tokens(title);
+    existing.iter().any(|e| {
+        normalize_title(e) == norm
+            || (meta && is_backlog_meta(e))
+            || jaccard(&toks, &title_tokens(e)) >= 0.6
+    })
+}
+
 /// Extract the outermost JSON array of strings (e.g. acceptance criteria),
 /// tolerating surrounding prose.
 ///
@@ -242,9 +279,95 @@ pub fn parse_string_list(raw: &str) -> Result<Vec<String>, String> {
     serde_json::from_str(&raw[start..=end]).map_err(|e| e.to_string())
 }
 
+/// The structured TEST response — a list of discovered bugs plus a per-acceptance-
+/// criterion verdict for every shipped ticket it verified.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TestOutput {
+    #[serde(default)]
+    pub bugs: Vec<ProposedItem>,
+    #[serde(default)]
+    pub verdicts: Vec<TestVerdict>,
+}
+
+/// One acceptance-criterion verdict from the TEST agent.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TestVerdict {
+    /// The EXACT acceptance-criterion text this verdict is for. The system
+    /// matches it word-for-word against the ticket's test cases.
+    #[serde(default)]
+    pub ac: String,
+    #[serde(default)]
+    pub passed: bool,
+    /// One line of concrete evidence (command/request + actual response).
+    #[serde(default)]
+    pub note: String,
+    /// URL path that demonstrates this criterion (per-case screenshot target),
+    /// or empty when none applies.
+    #[serde(default)]
+    pub route: String,
+}
+
+/// Parse the TEST engine output into (bugs, verdicts). Accepts BOTH the new
+/// `{"bugs":[…], "verdicts":[…]}` object and the legacy bare bug array — the
+/// legacy form yields an empty verdict list. Lenient: prose/code fences are
+/// tolerated, and a malformed `verdicts` array still yields the bugs.
+///
+/// # Errors
+/// Returns a message when neither form yields any parseable bugs.
+pub fn parse_test_output(raw: &str) -> Result<(Vec<ProposedItem>, Vec<TestVerdict>), String> {
+    let stripped = strip_code_fences(raw);
+    // New object format first: a complete {bugs, verdicts} document.
+    for obj in top_level_objects(&stripped) {
+        if obj.contains("\"bugs\"") || obj.contains("\"verdicts\"") {
+            if let Ok(out) = serde_json::from_str::<TestOutput>(&obj) {
+                return Ok((out.bugs, out.verdicts));
+            }
+        }
+    }
+    // Legacy bare bug array (or an object whose `bugs` couldn't parse) — the
+    // tolerant array parser still recovers the bugs; verdicts are simply none.
+    let bugs = parse_items(&stripped)?;
+    Ok((bugs, Vec::new()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_recurring_bug_ceremony_family_files_once() {
+        // The exact six that piled into one inbox — different wording, one idea.
+        let titles = [
+            "Bug triage and burn-down allocation (40% capacity)",
+            "Bug burndown cadence — Q3 backlog triage",
+            "COX-BUG: Sprint bug triage and critical burn-down",
+            "Bug stabilization sprint (2 weeks)",
+            "Bug burndown sprint — data loss + crash fixes",
+        ];
+        for t in titles {
+            assert!(is_backlog_meta(t), "{t} should read as a ceremony ticket");
+        }
+        // Once one is on the board, every later paraphrase is a duplicate.
+        let board = vec![titles[0].to_owned()];
+        for t in &titles[1..] {
+            assert!(
+                duplicates_existing(t, &board),
+                "{t} should collapse onto the existing ceremony ticket"
+            );
+        }
+    }
+
+    #[test]
+    fn genuinely_different_features_are_not_dupes() {
+        let board = vec!["Bug triage and burn-down sprint".to_owned()];
+        assert!(!duplicates_existing(
+            "Add CORS + rate-limiting middleware",
+            &board
+        ));
+        assert!(!duplicates_existing("Per-engine cost leaderboard", &board));
+        // A real feature that merely mentions "bug" is not a ceremony ticket.
+        assert!(!is_backlog_meta("Fix the avatar upload bug"));
+    }
 
     #[test]
     fn jaccard_flags_paraphrased_titles() {
@@ -361,5 +484,40 @@ mod tests {
                 "expected Err for {raw:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_output_object_parses_bugs_and_verdicts() {
+        let raw = r#"```json
+{"bugs":[{"title":"B","priority":"high","complexity":"medium","has_ui":true}],
+ "verdicts":[{"ac":"login works","passed":true,"note":"GET /login 200","route":"/login"},{"ac":"logout works","passed":false,"note":"500","route":"/logout"}]}
+```"#;
+        let (bugs, verdicts) = parse_test_output(raw).expect("parse object");
+        assert_eq!(bugs.len(), 1);
+        assert_eq!(bugs[0].title, "B");
+        assert_eq!(verdicts.len(), 2);
+        assert_eq!(verdicts[0].ac, "login works");
+        assert!(verdicts[0].passed);
+        assert_eq!(verdicts[0].route, "/login");
+        assert!(!verdicts[1].passed);
+    }
+
+    #[test]
+    fn test_output_legacy_bare_array_yields_no_verdicts() {
+        let (bugs, verdicts) =
+            parse_test_output(r#"[{"title":"B","priority":"low","complexity":"small"}]"#)
+                .expect("legacy array still parses");
+        assert_eq!(bugs.len(), 1);
+        assert!(verdicts.is_empty());
+    }
+
+    #[test]
+    fn test_output_all_pass_yields_empty_bugs() {
+        let (bugs, verdicts) = parse_test_output(
+            r#"{"bugs":[],"verdicts":[{"ac":"a","passed":true,"note":"ok","route":""}]}"#,
+        )
+        .expect("empty bugs okay");
+        assert!(bugs.is_empty());
+        assert_eq!(verdicts.len(), 1);
     }
 }

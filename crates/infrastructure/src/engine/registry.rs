@@ -11,12 +11,46 @@ pub struct DetectedEngine {
     pub path: PathBuf,
 }
 
-/// Discover known engines on the current process `PATH`.
+/// Discover known engines on the current process `PATH`, plus the well-known
+/// install homes `PATH` tends to omit.
+///
+/// The extra dirs are the SAME list `resolve_engine_binary` falls back to when
+/// it spawns an engine — and they must stay the same list. When only the
+/// spawn side had them, an app-launched hub (GUI `PATH`, no `~/.opencode/bin`)
+/// could RUN opencode fine while the settings page said it was not installed.
 #[must_use]
 pub fn discover() -> Vec<DetectedEngine> {
     let path = std::env::var_os("PATH").unwrap_or_default();
-    let dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
+    let mut dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
+    dirs.extend(fallback_dirs());
     discover_in(&dirs)
+}
+
+/// Resolve one agent CLI to an absolute path, searching `PATH` and then the
+/// fallback install homes. The ONE resolver: discovery, the models probe and
+/// spawn-time resolution must all agree on where a binary is, or the UI and
+/// the runner tell the user different stories about the same machine.
+#[must_use]
+pub fn resolve_binary(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let mut dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
+    dirs.extend(fallback_dirs());
+    find_binary(&dirs, name)
+}
+
+/// Install locations agent CLIs use that a GUI-inherited `PATH` omits.
+fn fallback_dirs() -> Vec<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    vec![
+        home.join(".local/bin"),
+        home.join(".claude/bin"),
+        home.join(".opencode/bin"),
+        home.join(".hermes/bin"),
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+    ]
 }
 
 /// The `provider/model` pairs this machine's `opencode` can reach, from
@@ -28,10 +62,10 @@ pub fn discover() -> Vec<DetectedEngine> {
 /// through the worker registry with everything else this machine can do.
 #[must_use]
 pub fn discover_opencode_models() -> Vec<String> {
-    let Ok(out) = std::process::Command::new("opencode")
-        .arg("models")
-        .output()
-    else {
+    let Some(bin) = resolve_binary("opencode") else {
+        return Vec::new();
+    };
+    let Ok(out) = std::process::Command::new(bin).arg("models").output() else {
         return Vec::new();
     };
     if !out.status.success() {
@@ -150,7 +184,10 @@ fn install_for(tool: &str, os: &str, brew: bool) -> String {
 #[must_use]
 pub fn discover_tooling() -> Tooling {
     let path = std::env::var_os("PATH").unwrap_or_default();
-    let dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
+    let mut dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
+    // Same GUI-PATH blindness as engines: an app-spawned hub missed gh/docker
+    // in /opt/homebrew/bin and told a Mac user to install what they had.
+    dirs.extend(fallback_dirs());
     let os = std::env::consts::OS;
     let has_brew = find_binary(&dirs, "brew").is_some();
     let tools = TOOLING

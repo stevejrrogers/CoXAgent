@@ -129,10 +129,30 @@ pub(super) fn is_pr_review_path(path: &str) -> bool {
 /// middleware supplies role and path, and turns `false` into a 403.
 pub(super) fn write_gate_ok(role: coxagent_application::auth::AuthRole, path: &str) -> bool {
     if is_pr_review_path(path) {
-        role.can_review()
-    } else {
-        role.can_write()
+        return role.can_review();
     }
+    // The raw store RPC (`/api/projects/:pid/store`) writes WHOLE state
+    // snapshots — every ticket, every approval sample, every gate decision in
+    // one POST. Ordinary write rights made it a backdoor around every role
+    // gate: a member-tier account that may not approve one ticket could still
+    // `op=save` a state in which the ticket was already approved. The callers
+    // it exists for are remote runners, which authenticate as the operator
+    // that started them — an operator account needs manage rights anyway.
+    // `/api/pr-report` is its sibling: the runner reports PRs it opened, with
+    // the project id in the BODY — so the per-project membership check (which
+    // reads the URL) never sees it. Same caller, same bar.
+    if is_store_rpc_path(path) || path == "/api/pr-report" {
+        return role.can_manage();
+    }
+    role.can_write()
+}
+
+/// The runner store RPC: `/api/projects/<pid>/store` exactly — one path
+/// segment for the pid, nothing after `store`.
+pub(super) fn is_store_rpc_path(path: &str) -> bool {
+    path.strip_prefix("/api/projects/")
+        .and_then(|rest| rest.strip_suffix("/store"))
+        .is_some_and(|pid| !pid.is_empty() && !pid.contains('/'))
 }
 
 /// RBAC gate. Open (pass-through) when no auth is configured. Otherwise: the
@@ -175,6 +195,9 @@ pub(super) async fn auth_mw(
     if path == "/"
         || path == "/api/health"
         || path == "/api/auth/login"
+        // OpenAPI spec - public, like health: MCP clients and SDK generators
+        // must discover endpoints without holding a hub session.
+        || path == "/api/openapi.json"
         // Embedded static assets (vendored JS/CSS) — same trust level as "/".
         || path.starts_with("/assets/")
         // Installer downloads: same trust as the login page; the native

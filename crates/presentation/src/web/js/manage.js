@@ -177,7 +177,7 @@ function renderMgPeople(){
   const sf=(window._mgspace||"");
   const pf=(window._mgproj||"");
   const spaceOf=u=>(MG.spaces||[]).filter(s=>(s.admins||[]).includes(u.username)||(u.projects||[]).some(p=>(s.projects||[]).includes(p))).map(s=>s.name).join(", ");
-  const roles=["super","admin","director","manager","techlead","ba","fe","be","viewer"];
+  const roles=["super","admin","director","manager","techlead","dslead","dalead","ba","po","sa","sm","qa","fe","be","aie","ds","da","de","reviewer","viewer"];
   var list=(MG.users||[]).filter(u=>!q||u.username.toLowerCase().includes(q)||(u.name||"").toLowerCase().includes(q));
   // Filter by space
   if(sf){list=list.filter(u=>spaceOf(u).toLowerCase().includes(sf.toLowerCase()));}

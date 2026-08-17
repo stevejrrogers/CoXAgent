@@ -10,47 +10,13 @@ use coxagent_application::ports::outbound::{
     AgentEnginePort, AgentOutcome, AgentRequest, SandboxStatus, Usage,
 };
 use coxagent_application::PortError;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 
-/// The live-log file for a run: `<workspace>/logs/live/<role>.log`, derived from
-/// the codebase work-dir (`<workspace>/codebase`). Streamed to during the run so
-/// the UI can tail it live. When a per-run [`AgentRequest::label`] is present it
-/// lands between role and operator so runs are chaseable per ticket:
-/// `<role>__<label>__<operator>.log`.
-fn live_path(work_dir: &Path, role: &str, label: Option<&str>) -> Option<PathBuf> {
-    let dir = work_dir.parent()?.join("logs").join("live");
-    std::fs::create_dir_all(&dir).ok()?;
-    // Key the file by operator when this process runs as a named headless worker
-    // (COXAGENT_OPERATOR), so two operators working the same role don't clobber
-    // each other's live log and each can be tailed separately in the dashboard.
-    let label_part = label
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map_or_else(String::new, |l| format!("__{l}"));
-    let suffix = std::env::var("COXAGENT_OPERATOR")
-        .ok()
-        .map(|o| {
-            o.chars()
-                .filter(char::is_ascii_alphanumeric)
-                .collect::<String>()
-        })
-        .filter(|s| !s.is_empty())
-        .map_or_else(String::new, |s| format!("__{s}"));
-    Some(dir.join(format!("{role}{label_part}{suffix}.log")))
-}
-
-fn append_live(path: &Path, line: &str) {
-    use std::io::Write as _;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        let _ = writeln!(f, "{}", line.trim_end());
-    }
-}
+// Shared with every streaming engine so all live logs land where the
+// dashboard reads them (including the per-slot-worktree hop) — see engine::live.
+use crate::engine::live::{append_live, live_path};
 
 /// Adapter over the `claude` binary for one model selection.
 pub struct ClaudeEngine {
@@ -260,6 +226,7 @@ impl AgentEnginePort for ClaudeEngine {
 
     async fn resume_run(
         &self,
+        _role: coxagent_domain::Role,
         session_id: &str,
         follow_up: &str,
         work_dir: &std::path::Path,
@@ -307,7 +274,11 @@ impl ClaudeEngine {
         }
         cmd.stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        let mut child = crate::proc::spawn_confined(&mut cmd, sandbox)
+        // The status comes BACK from the spawn: a host whose Seatbelt refused
+        // the profile on every attempt downgrades it to `Denied`, so the
+        // outcome reports a run that never happened instead of a confined one
+        // (COX-B016).
+        let (mut child, sandbox) = crate::proc::spawn_confined(&mut cmd, sandbox)
             .await
             .map_err(|e| PortError::Backend(format!("spawn claude: {e}")))?;
         let out = child
@@ -380,6 +351,7 @@ impl ClaudeEngine {
             trace,
             session_id: extract_session(&raw),
             sandbox,
+            engine: "claude".to_owned(),
         })
     }
 }
@@ -448,13 +420,14 @@ fn render_event(v: &serde_json::Value) -> String {
                 for block in content {
                     if block.get("type").and_then(serde_json::Value::as_str) == Some("tool_result")
                     {
-                        let n = block
-                            .get("content")
-                            .map(std::string::ToString::to_string)
-                            .unwrap_or_default()
-                            .chars()
-                            .count();
-                        let _ = write!(out, "\n   ↳ result ({n} chars)");
+                        let text = tool_result_text(block.get("content"));
+                        let _ = write!(out, "\n   ↳ {}", summarize_tool_result(&text));
+                        // Show the actual output, not just its shape: a capped
+                        // preview the dashboard can reveal on click. "13 lines"
+                        // told a reader nothing about WHAT the 13 lines were.
+                        for l in preview_lines(&text) {
+                            let _ = write!(out, "\n   ┆ {l}");
+                        }
                     }
                 }
             }
@@ -462,6 +435,113 @@ fn render_event(v: &serde_json::Value) -> String {
         _ => {}
     }
     out.trim_start_matches('\n').to_owned()
+}
+
+/// The plain text of a tool_result block, whether it arrived as a bare string
+/// or as an array of `{type:"text", text:…}` parts.
+fn tool_result_text(content: Option<&serde_json::Value>) -> String {
+    match content {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Array(parts)) => parts
+            .iter()
+            .filter_map(|p| p.get("text").and_then(serde_json::Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+/// One human line for a tool's output, so the work log reads as an outcome
+/// ("✓ 220 passed", "clippy clean", "6 matches") instead of "result (396
+/// chars)" — the length told a reader nothing. Recognises the tools agents run
+/// constantly; anything else shows its first real line, capped.
+#[must_use]
+pub(crate) fn summarize_tool_result(text: &str) -> String {
+    let t = text.trim();
+    if t.is_empty() {
+        return "done (no output)".to_owned();
+    }
+    let low = t.to_lowercase();
+    // cargo test: the "test result:" line is the verdict.
+    if let Some(line) = t.lines().find(|l| l.contains("test result:")) {
+        if line.contains("FAILED") || line.contains("failed;") && !line.contains("0 failed") {
+            // e.g. "test result: FAILED. 2 passed; 1 failed"
+            if let Some(fail) = line.split("passed;").nth(1) {
+                let n = fail.split("failed").next().unwrap_or("").trim();
+                return format!("✗ {n} failed");
+            }
+            return "✗ tests failed".to_owned();
+        }
+        if let Some(pass) = line.split("result: ok.").nth(1) {
+            let n = pass.split("passed").next().unwrap_or("").trim();
+            return format!("✓ {n} passed");
+        }
+    }
+    // Compiler/cargo errors — recognised by the diagnostic SHAPE, not the bare
+    // word "error". `git show` of Rust source is full of `.map_err`, `Error`,
+    // "error:" in strings; counting those as failures showed "✗ 1 errors" for a
+    // clean file dump. Real cargo output carries `error[EXXXX]`, a line that
+    // starts with "error:", or "could not compile".
+    let compiler_err = low.contains("could not compile")
+        || t.contains("error[")
+        || t.lines().any(|l| l.trim_start().starts_with("error:"));
+    if compiler_err {
+        let n = t
+            .lines()
+            .filter(|l| {
+                let l = l.trim_start();
+                l.starts_with("error[") || l.starts_with("error:")
+            })
+            .count();
+        return format!("✗ {} error{}", n.max(1), if n == 1 { "" } else { "s" });
+    }
+    // A git/shell fatal is a failure too, shown as itself.
+    if let Some(fatal) = t.lines().find(|l| l.trim_start().starts_with("fatal:")) {
+        return format!("✗ {}", fatal.trim().chars().take(76).collect::<String>());
+    }
+    if low.contains("warning:") {
+        let n = t.lines().filter(|l| l.contains("warning:")).count();
+        return format!("⚠ {n} warning{}", if n == 1 { "" } else { "s" });
+    }
+    // grep -n / -c: line count is the answer.
+    let lines = t.lines().filter(|l| !l.trim().is_empty()).count();
+    if lines > 1 {
+        return format!("{lines} lines");
+    }
+    // A short single-line result IS the answer — show it.
+    let first = t.lines().next().unwrap_or("").trim();
+    if first.chars().count() <= 80 {
+        first.to_owned()
+    } else {
+        format!("{}…", first.chars().take(80).collect::<String>())
+    }
+}
+
+/// A capped preview of a tool's real output for the work log: up to 14 lines,
+/// each ≤ 200 chars, total ≤ 1200 — enough to SEE what happened, bounded so a
+/// giant dump can't bloat the log. A final "… (+N more)" marks truncation.
+fn preview_lines(text: &str) -> Vec<String> {
+    const MAX_LINES: usize = 14;
+    const MAX_CHARS: usize = 1200;
+    let all: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    if all.is_empty() {
+        return Vec::new();
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut budget = MAX_CHARS;
+    for l in all.iter().take(MAX_LINES) {
+        let line: String = l.chars().take(200).collect();
+        if line.len() > budget {
+            break;
+        }
+        budget -= line.len();
+        out.push(line);
+    }
+    let shown = out.len();
+    if all.len() > shown {
+        out.push(format!("… (+{} more)", all.len() - shown));
+    }
+    out
 }
 
 /// Parse `claude --output-format stream-json` (NDJSON): return the final result
@@ -492,14 +572,23 @@ fn parse_stream(raw: &str) -> Option<(String, Option<Usage>, String)> {
     result.map(|r| (r, usage, trace.trim().to_owned()))
 }
 
+/// Sum every input-side token field claude reports. With prompt caching on —
+/// which it is, by default — the bulk of the prompt lands in
+/// `cache_read_input_tokens` / `cache_creation_input_tokens`, and only the
+/// uncached delta in `input_tokens`. Counting just the last field made the
+/// Cost tab report a fraction of the real input (223K in vs 10.5M out — the
+/// wrong way round). Cost itself is unaffected: `total_cost_usd` from the CLI
+/// already prices every tier.
+fn input_tokens_all(u: &serde_json::Value) -> u64 {
+    let get = |k: &str| u.get(k).and_then(serde_json::Value::as_u64).unwrap_or(0);
+    get("input_tokens") + get("cache_read_input_tokens") + get("cache_creation_input_tokens")
+}
+
 /// Extract usage/cost from a stream `result` event.
 fn parse_usage(v: &serde_json::Value) -> Option<Usage> {
     let u = v.get("usage")?;
     Some(Usage {
-        input_tokens: u
-            .get("input_tokens")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0),
+        input_tokens: input_tokens_all(u),
         output_tokens: u
             .get("output_tokens")
             .and_then(serde_json::Value::as_u64)
@@ -524,10 +613,7 @@ fn parse_json_output(raw: &str) -> (String, Option<Usage>) {
         .unwrap_or(raw)
         .to_owned();
     let usage = v.get("usage").map(|u| Usage {
-        input_tokens: u
-            .get("input_tokens")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0),
+        input_tokens: input_tokens_all(u),
         output_tokens: u
             .get("output_tokens")
             .and_then(serde_json::Value::as_u64)
@@ -544,6 +630,53 @@ fn parse_json_output(raw: &str) -> (String, Option<Usage>) {
 mod tests {
     use super::*;
     use crate::engine::McpAccess;
+
+    #[test]
+    fn tool_result_summary_reads_as_an_outcome_not_a_byte_count() {
+        assert_eq!(
+            summarize_tool_result(
+                "   Compiling…\ntest result: ok. 220 passed; 0 failed; 0 ignored"
+            ),
+            "✓ 220 passed"
+        );
+        assert_eq!(
+            summarize_tool_result("test result: FAILED. 2 passed; 1 failed; 0 ignored"),
+            "✗ 1 failed"
+        );
+        assert!(
+            summarize_tool_result("error[E0433]: cannot find `x`\nerror: aborting")
+                .starts_with("✗ 2 error")
+        );
+        // A source dump full of `.map_err`/`Error` must NOT read as failures.
+        assert_eq!(
+            summarize_tool_result("fn f() -> Result<(), Error> { x.map_err(|e| e)?; Ok(()) }"),
+            "fn f() -> Result<(), Error> { x.map_err(|e| e)?; Ok(()) }"
+        );
+        // A git fatal is shown as itself.
+        assert!(summarize_tool_result("fatal: path 'x.rs' does not exist").starts_with("✗ fatal:"));
+        assert_eq!(
+            summarize_tool_result("warning: unused variable `y`"),
+            "⚠ 1 warning"
+        );
+        assert_eq!(summarize_tool_result("a\nb\nc"), "3 lines");
+        assert_eq!(
+            summarize_tool_result("crates/app/src/lib.rs:42"),
+            "crates/app/src/lib.rs:42"
+        );
+        assert_eq!(summarize_tool_result("   "), "done (no output)");
+    }
+
+    #[test]
+    fn input_tokens_include_the_cached_tiers() {
+        // With caching on, most of the prompt is billed as cache reads. The
+        // Cost tab was undercounting input by ignoring the two cache fields.
+        let raw = r#"{"result":"ok","total_cost_usd":0.5,"usage":{"input_tokens":100,"cache_read_input_tokens":9000,"cache_creation_input_tokens":900,"output_tokens":50}}"#;
+        let (_text, usage) = parse_json_output(raw);
+        let u = usage.expect("usage");
+        assert_eq!(u.input_tokens, 10_000, "100 + 9000 + 900");
+        assert_eq!(u.output_tokens, 50);
+        assert!((u.cost_usd - 0.5).abs() < 1e-9);
+    }
 
     #[test]
     fn mcp_config_json_includes_auth_header_when_token_present() {
@@ -634,7 +767,11 @@ mod tests {
                 system_prompt: "sys".to_owned(),
                 task_prompt: "task".to_owned(),
                 work_dir: dir.clone(),
-                timeout: std::time::Duration::from_secs(10),
+                // Generous on purpose (CXA-B041): this spawns a real child via
+                // the production path, and a one-line echo can still outlast a
+                // tight wall-clock budget when CI is heavily loaded. The test
+                // asserts argv/env plumbing only — latency is irrelevant.
+                timeout: std::time::Duration::from_secs(120),
                 escalation_level: 0,
                 label: None,
             })

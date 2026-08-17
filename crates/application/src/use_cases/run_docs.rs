@@ -85,11 +85,55 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
     /// (written before the skeleton existed) or its documented files have
     /// commits newer than the page. Bounded to a single page per cycle so the
     /// wiki converges without the bill growing with it.
+    /// Take one unit of the DAILY refresh budget, or say no. Per-cycle limits
+    /// don't cap cost anymore — cycles got fast, so "one page per cycle" became
+    /// 12-30 full-page sonnet rewrites an hour. A handful a day converges the
+    /// wiki at a price that does not scale with cycle speed.
+    async fn take_refresh_budget(&self, state: &crate::state::ProjectState) -> bool {
+        let refreshes_per_day = self.config.workflow.cadence.docs_refreshes_per_day();
+        let today = crate::state::now_rfc3339()[..10].to_owned();
+        let spent = state
+            .daily_jobs
+            .get("docs_refresh_budget")
+            .and_then(|v| v.strip_prefix(&format!("{today}:")))
+            .and_then(|n| n.parse::<u32>().ok())
+            .unwrap_or(0);
+        if spent >= refreshes_per_day {
+            return false;
+        }
+        let (key, val) = (
+            "docs_refresh_budget".to_owned(),
+            format!("{today}:{}", spent + 1),
+        );
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+            s.daily_jobs.insert(key.clone(), val.clone());
+            Ok(())
+        })
+        .await;
+        true
+    }
+
     async fn refresh_stale_page(&self, state: &crate::state::ProjectState) {
         let behind = pages_behind_code(self.git.as_ref(), state, &self.work_dir).await;
-        let Some(page) = stalest_page(state, &self.work_dir, &behind) else {
+        // Pages to leave alone this cycle: PARKED (a rewrite the structure gate
+        // keeps rejecting — a human/redesign job, not more calls) or COOLING (one
+        // refresh is plenty per few hours; the code moving a little does not
+        // justify re-billing the whole page every 30 seconds). This is what turns
+        // the every-cycle DOCS churn into bounded, converging refreshes.
+        let exclude: std::collections::BTreeSet<String> = state
+            .doc_refresh
+            .iter()
+            .filter(|(_, m)| m.fails >= REFRESH_FAIL_CAP || within_cooldown(&m.at))
+            .map(|(id, _)| id.clone())
+            .collect();
+        let Some(page) = stalest_page(state, &self.work_dir, &behind, &exclude) else {
             return;
         };
+        // Budget is taken only once a refresh will actually run — a no-op cycle
+        // must not eat one of the day's five refreshes.
+        if !self.take_refresh_budget(state).await {
+            return;
+        }
         if let Some(p) = &self.phase {
             p(Some((
                 "DOCS".to_owned(),
@@ -145,18 +189,33 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
         if let Some(missing) = docs_gate_failures(&raw, &self.work_dir) {
             // Refusing a bad rewrite matters more here than anywhere: this page
             // already exists and a failed refresh would replace it with less.
-            // Say so — a silent skip is indistinguishable from "nothing stale".
+            // Record the failure so a page the model cannot fix is PARKED after a
+            // couple of tries instead of burning a call every cycle forever.
             tracing::warn!(
                 "DOCS refresh of \"{}\" rejected by the structure gate: {missing}",
                 page.title
             );
+            let (id, now) = (page.id.clone(), crate::state::now_rfc3339());
+            let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+                let m = s.doc_refresh.entry(id.clone()).or_default();
+                m.fails = m.fails.saturating_add(1);
+                m.at.clone_from(&now);
+                Ok(())
+            })
+            .await;
             return;
         }
         let (_, body) = parse_folder_hint(&raw);
         let (id, folder, title) = (page.id.clone(), page.folder.clone(), page.title.clone());
         let category = crate::state::doc_category_of(&folder);
+        let now = crate::state::now_rfc3339();
         let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
             s.upsert_doc(&id, &folder, category, &title, body.trim(), "DOCS");
+            // Refreshed cleanly: clear failures and start the cooldown so this
+            // page is not rewritten again for a while.
+            let m = s.doc_refresh.entry(id.clone()).or_default();
+            m.fails = 0;
+            m.at.clone_from(&now);
             Ok(())
         })
         .await;
@@ -280,7 +339,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
         // next agent and unsearchable for people. One bounded repair pass, the
         // same deal the code gates give a developer.
         let mut raw = outcome.stdout.clone();
-        if let Some(missing) = docs_gate_failures(&raw, &self.work_dir) {
+        // Flash-tier models can degenerate mid-generation on long token-dense
+        // pages. The skeleton gate rejects that; rather than accept one repair
+        // and move on, retry with feedback and escalate the model tier — the
+        // same recipe as run_dev::self_heal_compile. Each attempt is told
+        // exactly which parts are still missing; later attempts run a stronger
+        // model when a ladder is configured.
+        for attempt in 1_u32..=3 {
+            let Some(missing) = docs_gate_failures(&raw, &self.work_dir) else {
+                break;
+            };
+            if attempt > 1 {
+                tracing::warn!("DOCS gate attempt {attempt} for {id} still failing: {missing}");
+            }
             let fixup = format!(
                 "Your page for {id} is missing required parts: {missing}.\n\nOutput the COMPLETE \
                  page again with the full skeleton — same `FOLDER:` first line, every required \
@@ -295,13 +366,22 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
                     task_prompt: fixup,
                     work_dir: self.work_dir.clone(),
                     timeout: Duration::from_secs(900),
-                    escalation_level: 0,
+                    escalation_level: u8::try_from(attempt.saturating_sub(1)).unwrap_or(3),
                     label: Some(id.to_string()),
                 })
                 .await;
-            if let Ok(o) = repair {
-                if o.succeeded() && docs_gate_failures(&o.stdout, &self.work_dir).is_none() {
-                    raw = o.stdout;
+            match repair {
+                Ok(o) if o.succeeded() => raw = o.stdout,
+                Ok(o) => {
+                    tracing::warn!(
+                        "DOCS repair attempt {attempt} for {id} failed: {}",
+                        o.stderr.chars().take(200).collect::<String>()
+                    );
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!("DOCS repair attempt {attempt} for {id} error: {e}");
+                    break;
                 }
             }
         }
@@ -371,6 +451,39 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
 /// own prose is not a gate.
 #[must_use]
 pub fn docs_gate_failures(raw: &str, work_dir: &std::path::Path) -> Option<String> {
+    // A page that OPENS with first-person process narration ("I'll start by
+    // reading the repo map...", "Let me search...") is the agent's stream of
+    // consciousness, not a document. It sails past every substring check below
+    // because it *talks about* a valid page (it names the headings and real
+    // files) instead of being one — that is how a narration got persisted as a
+    // live page. The mechanical tell: a real page opens with structure (a
+    // `#`/`##` heading, a `**Keywords:**` line, or a short title), never with
+    // the agent narrating its own work. Check the opening line only, so a doc
+    // that ends with a stray note is still accepted.
+    const NARRATION_OPENS: [&str; 22] = [
+        "I'll",
+        "I’ll",
+        "i'll",
+        "I'm",
+        "I’m",
+        "i'm",
+        "I will",
+        "Let me",
+        "let me",
+        "Let's",
+        "Let’s",
+        "let's",
+        "Now I",
+        "now I",
+        "I need to",
+        "i need to",
+        "I'd like",
+        "I want to",
+        "Here is my",
+        "Here's my",
+        "All facts confirmed",
+        "Note: I",
+    ];
     let body = parse_folder_hint(raw).1;
     let text = body.trim();
     let mut missing: Vec<&str> = Vec::new();
@@ -391,6 +504,14 @@ pub fn docs_gate_failures(raw: &str, work_dir: &std::path::Path) -> Option<Strin
     let mut problems: Vec<String> = Vec::new();
     if !missing.is_empty() {
         problems.push(format!("missing headings: {}", missing.join(", ")));
+    }
+    if let Some(first) = text.lines().find(|l| !l.trim().is_empty()) {
+        let f = first.trim_start();
+        if let Some(nar) = NARRATION_OPENS.iter().find(|t| f.starts_with(**t)) {
+            problems.push(format!(
+                "page opens with first-person narration (`{nar}`), not a document"
+            ));
+        }
     }
     if !text.to_lowercase().contains("**keywords:**") {
         problems.push("no `**Keywords:**` line (nothing to search on)".to_owned());
@@ -430,17 +551,38 @@ pub fn docs_gate_failures(raw: &str, work_dir: &std::path::Path) -> Option<Strin
 /// The page most worth rewriting right now, or `None` when the wiki holds up.
 /// Structural failures come first — a page the gate would reject is unusable
 /// to the next agent — then pages whose documented files have newer commits.
+/// Consecutive structure-gate failures after which a page is PARKED — stop
+/// auto-refreshing it, it needs a human or a redesign, not more calls.
+const REFRESH_FAIL_CAP: u32 = 2;
+/// Hours a page rests after a refresh attempt before it is eligible again — one
+/// rewrite is plenty per few hours; the code moving a little does not justify
+/// re-billing the whole page every cycle.
+const REFRESH_COOLDOWN_HOURS: i64 = 6;
+
+/// Whether `at` (RFC3339) falls within the refresh cooldown of now. An empty or
+/// unparseable stamp reads as long past, so the page is eligible.
+fn within_cooldown(at: &str) -> bool {
+    let fmt = &time::format_description::well_known::Rfc3339;
+    let Ok(then) = time::OffsetDateTime::parse(at, fmt) else {
+        return false;
+    };
+    time::OffsetDateTime::now_utc() - then < time::Duration::hours(REFRESH_COOLDOWN_HOURS)
+}
+
 fn stalest_page<'a>(
     state: &'a crate::state::ProjectState,
     work_dir: &std::path::Path,
     behind: &std::collections::BTreeSet<String>,
+    exclude: &std::collections::BTreeSet<String>,
 ) -> Option<&'a crate::state::DocPage> {
-    // Only pages this role owns. Two things would go wrong otherwise, and both
-    // cost real money: the `hub-lessons` mirror the SM rewrites daily is a
-    // lessons list, not a feature page, so it can never satisfy the skeleton —
-    // the refresher would pick it every idle cycle and fail forever. And a page
-    // a HUMAN last edited is not ours to silently rewrite.
-    let mine = |p: &&crate::state::DocPage| p.updated_by == "DOCS";
+    // Only pages this role owns, and not ones on cooldown or parked. Two things
+    // would go wrong otherwise, and both cost real money: the `hub-lessons`
+    // mirror the SM rewrites daily is a lessons list, not a feature page, so it
+    // can never satisfy the skeleton — the refresher would pick it every idle
+    // cycle and fail forever. And a page a HUMAN last edited is not ours to
+    // silently rewrite. `exclude` adds pages just refreshed (cooling) or parked
+    // after repeated gate failures, so neither is retried every single cycle.
+    let mine = |p: &&crate::state::DocPage| p.updated_by == "DOCS" && !exclude.contains(&p.id);
     let broken = state
         .docs
         .iter()
@@ -701,6 +843,7 @@ mod tests {
                 trace: String::new(),
                 session_id: None,
                 sandbox: SandboxStatus::default(),
+                engine: String::new(),
             })
         }
     }
@@ -889,12 +1032,83 @@ mod docs_gate_tests {
         assert!(why.contains("no real file paths"), "{why}");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn first_person_agent_narration_is_rejected() {
+        // A live page once stored the agent's whole stream of consciousness —
+        // "I'll start by reading the repo map... Let me search... Now I
+        // understand..." — because it *mentions* every heading and cites real
+        // files, so every substring check passed while no document was saved.
+        // The page must be rejected on its opening line alone.
+        let narration = format!(
+            "I'll start by reading the repo map and finding the real files.\n\
+             Let me search for the ticket and related files.\n\n\
+             {}\n\n\
+             All headings verified: ## Overview, ## How it works, ## Usage, \
+             ## Interface, ## Configuration, ## Edge cases and limits, ## Code map, \
+             ## Related. The `**Keywords:**` line is present.\n\
+             All Code map entries are confirmed real files: \
+             crates/application/src/ports/outbound/deploy.rs.",
+            "## Overview\nFiller. ".repeat(60)
+        );
+        let dir = fixture_repo("narration");
+        let why = docs_gate_failures(&narration, &dir).expect("must be rejected");
+        assert!(
+            why.contains("first-person narration"),
+            "expected narration rejection, got: {why}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(test)]
 mod refresh_tests {
-    use super::{page_is_behind_code, stalest_page};
+    use super::{page_is_behind_code, stalest_page, within_cooldown, REFRESH_COOLDOWN_HOURS};
     use crate::state::{DocPage, ProjectState};
+
+    #[test]
+    fn cooldown_covers_a_recent_stamp_only() {
+        assert!(!within_cooldown(""), "empty stamp is eligible");
+        assert!(!within_cooldown("not-a-time"), "garbage is eligible");
+        assert!(
+            !within_cooldown("2000-01-01T00:00:00Z"),
+            "long past is eligible"
+        );
+        let recent = (time::OffsetDateTime::now_utc() - time::Duration::hours(1))
+            .format(&time::format_description::well_known::Rfc3339)
+            .expect("fmt");
+        assert!(within_cooldown(&recent), "an hour ago is still cooling");
+        let old = (time::OffsetDateTime::now_utc()
+            - time::Duration::hours(REFRESH_COOLDOWN_HOURS + 1))
+        .format(&time::format_description::well_known::Rfc3339)
+        .expect("fmt");
+        assert!(!within_cooldown(&old), "past the window is eligible");
+    }
+
+    #[test]
+    fn an_excluded_page_is_skipped_so_the_next_is_picked() {
+        // Two gate-failing pages; excluding the first (parked/cooling) must let
+        // the refresher move on to the second instead of retrying the parked one.
+        let s = ProjectState {
+            docs: vec![
+                page("parked", "See the code.", "2026-01-01T00:00:00Z"),
+                page("next", "Also see the code.", "2026-01-01T00:00:00Z"),
+            ],
+            ..ProjectState::default()
+        };
+        let mut exclude = std::collections::BTreeSet::new();
+        exclude.insert("parked".to_owned());
+        assert_eq!(
+            stalest_page(
+                &s,
+                std::path::Path::new("/nonexistent"),
+                &std::collections::BTreeSet::default(),
+                &exclude,
+            )
+            .map(|p| p.id.as_str()),
+            Some("next")
+        );
+    }
 
     fn page(id: &str, body: &str, updated_at: &str) -> DocPage {
         DocPage {
@@ -934,6 +1148,7 @@ mod refresh_tests {
         assert!(stalest_page(
             &s,
             std::path::Path::new("/nonexistent"),
+            &std::collections::BTreeSet::default(),
             &std::collections::BTreeSet::default()
         )
         .is_none());
@@ -954,6 +1169,7 @@ mod refresh_tests {
             stalest_page(
                 &s,
                 std::path::Path::new("/nonexistent"),
+                &std::collections::BTreeSet::default(),
                 &std::collections::BTreeSet::default()
             )
             .map(|p| p.id.as_str()),

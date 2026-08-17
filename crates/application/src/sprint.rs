@@ -7,16 +7,85 @@ use coxagent_domain::{Status, TicketId, TicketType};
 
 /// Open the first sprint or roll over an elapsed one. Returns the number of a
 /// newly opened sprint, or `None` when the current sprint is still running.
-pub fn advance(state: &mut ProjectState, cycle: u64, length: u64) -> Option<u32> {
-    let length = length.max(1);
+/// How a sprint window elapses — the config's `sprint_unit`/lengths, resolved.
+/// `Days` rolls on wall clock (what most teams mean by "a sprint" — cycles
+/// shrank from ~30 min to ~90 s as the loop got faster, and counting only
+/// cycles produced 500 seven-minute "sprints" in two days). `Cycles` keeps the
+/// pure cycle counter for cadence experiments.
+#[derive(Debug, Clone, Copy)]
+pub enum SprintPolicy {
+    Days(u64),
+    Cycles(u64),
+}
+
+impl SprintPolicy {
+    /// Resolve from the workflow config.
+    #[must_use]
+    pub fn from_config(wf: &crate::config::WorkflowConfig) -> Self {
+        match wf.sprint_unit {
+            crate::config::SprintUnit::Days => SprintPolicy::Days(wf.sprint_length_days.max(1)),
+            crate::config::SprintUnit::Cycles => {
+                SprintPolicy::Cycles(wf.sprint_length_cycles.max(1))
+            }
+        }
+    }
+}
+
+pub fn advance(state: &mut ProjectState, cycle: u64, policy: SprintPolicy) -> Option<u32> {
     let need_open = match &state.sprint {
         None => true,
-        Some(s) => cycle.saturating_sub(s.started_cycle) >= length,
+        Some(s) => match policy {
+            // Cycle windows ALSO require a minimum wall-clock age (the promise
+            // Sprint.started_at documents): cycles shrank from ~30 min to ~2
+            // min as the loop got faster, and a pure cycle counter rolled a
+            // "sprint" every 10 minutes — the team spent the whole day in
+            // planning/review/retro ceremonies and DEV never shipped anything
+            // (sprint 586's velocity-0% retro, tickets carried over forever).
+            SprintPolicy::Cycles(len) => {
+                cycle.saturating_sub(s.started_cycle) >= len
+                    && sprint_age_minutes(&s.started_at) >= MIN_SPRINT_MINUTES
+            }
+            SprintPolicy::Days(days) => sprint_age_days(&s.started_at) >= days,
+        },
     };
     if !need_open {
         return None;
     }
+    let length = match policy {
+        SprintPolicy::Cycles(len) => len,
+        // Recorded for display; day-based sprints don't use it to roll.
+        SprintPolicy::Days(_) => state.sprint.as_ref().map_or(0, |s| s.length_cycles),
+    };
     Some(roll_over(state, cycle, length))
+}
+
+/// The floor under a cycle-window sprint: however fast the cycles spin, a
+/// sprint younger than this never rolls — ceremonies must stay rarer than work.
+const MIN_SPRINT_MINUTES: u64 = 240;
+
+/// Whole minutes since `started_at`; missing/unparseable reads as ancient.
+fn sprint_age_minutes(started_at: &str) -> u64 {
+    let fmt = &time::format_description::well_known::Rfc3339;
+    match time::OffsetDateTime::parse(started_at, fmt) {
+        Ok(t) => {
+            let d = time::OffsetDateTime::now_utc() - t;
+            u64::try_from(d.whole_minutes().max(0)).unwrap_or(0)
+        }
+        Err(_) => u64::MAX,
+    }
+}
+
+/// Whole days since `started_at`. A missing/unparseable stamp reads as ancient,
+/// so pre-existing sprints roll once and pick up a stamp from then on.
+fn sprint_age_days(started_at: &str) -> u64 {
+    let fmt = &time::format_description::well_known::Rfc3339;
+    match time::OffsetDateTime::parse(started_at, fmt) {
+        Ok(t) => {
+            let d = time::OffsetDateTime::now_utc() - t;
+            u64::try_from(d.whole_days().max(0)).unwrap_or(0)
+        }
+        Err(_) => u64::MAX,
+    }
 }
 
 /// Archive whatever sprint is running and open the next one. The single place
@@ -49,6 +118,7 @@ fn roll_over(state: &mut ProjectState, cycle: u64, length: u64) -> u32 {
         started_cycle: cycle,
         length_cycles: length,
         committed,
+        started_at: crate::state::now_rfc3339(),
     });
     number
 }
@@ -71,6 +141,29 @@ pub fn commit_ticket(state: &mut ProjectState, id: &TicketId) -> bool {
     }
     sprint.committed.push(id.clone());
     true
+}
+
+/// Refill an open sprint whose committed set is EMPTY from the open backlog.
+///
+/// Rollover commits capacity once; a sprint that opened onto an empty backlog
+/// stays empty even as tickets become Ready mid-sprint — and under the
+/// sprint-scope DEV gate that is silent starvation: a full queue, an idle
+/// team, and nothing on any screen saying why. Returns how many tickets were
+/// committed (0 = sprint absent, already scoped, or backlog still empty).
+pub fn refill_empty_scope(state: &mut ProjectState) -> usize {
+    let needs_scope = state
+        .sprint
+        .as_ref()
+        .is_some_and(|s| s.committed.is_empty());
+    if !needs_scope {
+        return 0;
+    }
+    let backlog = open_backlog(state);
+    let Some(sprint) = &mut state.sprint else {
+        return 0;
+    };
+    sprint.committed = backlog;
+    sprint.committed.len()
 }
 
 /// Drop a ticket from the running sprint — scope a sprint DOWN mid-flight
@@ -108,21 +201,31 @@ fn goal_from(state: &ProjectState, committed: &[TicketId]) -> String {
     }
 }
 
-/// Feature/chore tickets not yet shipped — the work a sprint commits to.
+/// Unshipped work a sprint commits to. Bugs count too — the sprint board used
+/// to track only features/chores, so a team heads-down on a bug burndown
+/// looked idle ("sprint không work gì hết") while two DEVs were mid-fix.
+/// Open bugs commit first (they outrank new work), then features/chores.
 fn open_backlog(state: &ProjectState) -> Vec<TicketId> {
-    let ready: Vec<TicketId> = state
+    let mut picked: Vec<TicketId> = state
         .tickets
         .iter()
-        .filter(|t| {
-            matches!(t.ticket_type(), TicketType::Feature | TicketType::Chore)
-                && !matches!(
-                    t.status(),
-                    Status::Done | Status::Documented | Status::Rejected
-                )
-        })
+        .filter(|t| t.ticket_type() == TicketType::Bug && t.status() == Status::Open)
         .map(|t| t.id().clone())
         .collect();
-    ready.into_iter().take(sprint_capacity(state)).collect()
+    picked.extend(
+        state
+            .tickets
+            .iter()
+            .filter(|t| {
+                matches!(t.ticket_type(), TicketType::Feature | TicketType::Chore)
+                    && !matches!(
+                        t.status(),
+                        Status::Done | Status::Documented | Status::Rejected
+                    )
+            })
+            .map(|t| t.id().clone()),
+    );
+    picked.into_iter().take(sprint_capacity(state)).collect()
 }
 
 /// How much to commit to one sprint: what the team has actually been finishing,
@@ -185,11 +288,28 @@ mod tests {
             tickets: vec![feature("F001"), feature("F002")],
             ..ProjectState::default()
         };
-        let n = advance(&mut state, 1, 10);
+        let n = advance(&mut state, 1, SprintPolicy::Cycles(10));
         assert_eq!(n, Some(1));
         let s = state.sprint.as_ref().expect("sprint");
         assert_eq!(s.number, 1);
         assert_eq!(s.committed.len(), 2);
+    }
+
+    #[test]
+    fn an_empty_sprint_scope_refills_from_backlog_instead_of_starving_dev() {
+        // Sprint opened onto an empty backlog…
+        let mut state = ProjectState::default();
+        advance(&mut state, 1, SprintPolicy::Cycles(10));
+        assert!(state.sprint.as_ref().expect("sprint").committed.is_empty());
+        // …then tickets became Ready mid-sprint. Under the sprint-scope DEV
+        // gate they'd be invisible until rollover — refill commits them now.
+        state.tickets.push(feature("F001"));
+        assert_eq!(refill_empty_scope(&mut state), 1);
+        // Already-scoped sprints are never rewritten.
+        assert_eq!(refill_empty_scope(&mut state), 0);
+        // No sprint at all (Kanban): nothing to do.
+        state.sprint = None;
+        assert_eq!(refill_empty_scope(&mut state), 0);
     }
 
     #[test]
@@ -198,7 +318,7 @@ mod tests {
             tickets: vec![feature("F001")],
             ..ProjectState::default()
         };
-        advance(&mut state, 1, 10);
+        advance(&mut state, 1, SprintPolicy::Cycles(10));
         state.tickets.push(feature("F002"));
         let id = TicketId::new("F002").expect("id");
         assert!(commit_ticket(&mut state, &id));
@@ -226,9 +346,9 @@ mod tests {
             tickets: vec![feature("F001")],
             ..ProjectState::default()
         };
-        advance(&mut state, 1, 10);
+        advance(&mut state, 1, SprintPolicy::Cycles(10));
         // Cycle 3 of a 10-cycle window: nothing would roll over on its own.
-        assert_eq!(advance(&mut state, 3, 10), None);
+        assert_eq!(advance(&mut state, 3, SprintPolicy::Cycles(10)), None);
         assert_eq!(close_now(&mut state, 3), Some(2));
         assert_eq!(state.sprints.len(), 1, "the closed sprint is in history");
         assert_eq!(state.sprints[0].number, 1);
@@ -248,21 +368,46 @@ mod tests {
             tickets: vec![feature("F001")],
             ..ProjectState::default()
         };
-        advance(&mut state, 1, 10);
-        assert_eq!(advance(&mut state, 5, 10), None);
+        advance(&mut state, 1, SprintPolicy::Cycles(10));
+        assert_eq!(advance(&mut state, 5, SprintPolicy::Cycles(10)), None);
         assert_eq!(state.sprint.as_ref().expect("s").number, 1);
     }
 
     #[test]
-    fn rolls_over_after_length() {
+    fn cycles_policy_needs_both_the_counter_and_real_time() {
         let mut state = ProjectState {
             tickets: vec![feature("F001")],
             ..ProjectState::default()
         };
-        advance(&mut state, 1, 10);
-        // cycle 11 is 10 cycles after start -> roll over.
-        assert_eq!(advance(&mut state, 11, 10), Some(2));
-        assert_eq!(state.sprint.as_ref().expect("s").number, 2);
+        advance(&mut state, 1, SprintPolicy::Cycles(10));
+        // Counter elapsed but the sprint is seconds old: must NOT roll. Pure
+        // cycle-rolling at ~2-min cycles produced 10-minute "sprints" that
+        // were all ceremony and no delivery (sprint 586, velocity 0%).
+        assert_eq!(advance(&mut state, 11, SprintPolicy::Cycles(10)), None);
+        // Same counter, but the sprint is genuinely old — now it rolls.
+        if let Some(s) = &mut state.sprint {
+            s.started_at = "2020-01-01T00:00:00Z".to_owned();
+        }
+        assert_eq!(advance(&mut state, 11, SprintPolicy::Cycles(10)), Some(2));
+    }
+
+    #[test]
+    fn days_policy_ignores_cycle_count_until_the_day_passes() {
+        let mut state = ProjectState {
+            tickets: vec![feature("F001")],
+            ..ProjectState::default()
+        };
+        advance(&mut state, 1, SprintPolicy::Days(1));
+        // A thousand cycles later but seconds old: must NOT roll — this is the
+        // 500-seven-minute-sprints bug the day unit exists to kill.
+        assert_eq!(advance(&mut state, 1000, SprintPolicy::Days(1)), None);
+        assert_eq!(state.sprint.as_ref().expect("s").number, 1);
+        // Age it past a day: rolls.
+        let old = (time::OffsetDateTime::now_utc() - time::Duration::hours(25))
+            .format(&time::format_description::well_known::Rfc3339)
+            .expect("fmt");
+        state.sprint.as_mut().expect("s").started_at = old;
+        assert_eq!(advance(&mut state, 1000, SprintPolicy::Days(1)), Some(2));
     }
 }
 
