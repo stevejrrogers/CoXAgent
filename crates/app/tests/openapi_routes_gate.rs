@@ -3,10 +3,11 @@
 //! served by `/api/openapi.json`.
 //!
 //! The hub ships no axum route introspection we can query at runtime cheaply, so
-//! the spec mirrors registration explicitly and this guard pins them equal. It
-//! scans both source files textually over their path literals - the same way
-//! other gates here stay honest when there is no live surface to probe cheaply.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+//! the spec mirrors registration explicitly and this guard pins them equal: a
+//! route added live but forgotten from [`ROUTES`] fails CI here (and so does an
+//! orphan entry claiming a route that no longer exists).
+#![allow(clippy::unwrap_used)]
+#![allow(clippy::expect_used)]
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -56,7 +57,8 @@ fn is_service_path(path: &str) -> bool {
 #[test]
 fn every_registered_service_route_is_documented_in_openapi() {
     // Registered via axum's `.route(` builder; documented via ROUTES entries,
-    // which are indented (`\n   route(`) so they do not collide with other calls.
+    // which are indented list items so they do not collide with any other call
+    // site (definitions, comments) in either file.
     //
     // Both directions matter: a live route with no spec entry drifts silently,
     // but so does an orphan entry claiming a route that no longer exists.

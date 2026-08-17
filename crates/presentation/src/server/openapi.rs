@@ -215,7 +215,7 @@ fn operation(path: &str, method: &str) -> serde_json::Value {
         "operationId": format!("{}_{}", method.to_lowercase(), tail_word(path)),
         // Parameters come from :path segments; bodies are not modelled here.
         "parameters": parameters(path),
-        // Synthetic response contract - bodies are not modelled (see boundary #3),
+        // Synthetic response contract - request/response bodies are not modelled,
         // so only an empty description ships.
         "responses": { "200": { "description": "" } },
     })
@@ -274,5 +274,43 @@ mod tests {
             tail_word("/api/projects/:pid/ticket/:id/priority"),
             "api_projects_pid_ticket_id_priority"
         );
+    }
+
+    #[test]
+    fn every_route_and_method_from_the_table_is_in_the_document() {
+        let doc = build_document();
+        let paths = doc["paths"].as_object().expect("paths object");
+        // One Path Item per distinct route...
+        assert_eq!(paths.len(), ROUTES.len());
+        for spec in ROUTES {
+            let item = paths[spec.path].as_object().unwrap_or_else(|| {
+                panic!("missing path item for {}", spec.path)
+            });
+            // ...and one operation per supported method on that path.
+            for method in spec.methods {
+                assert!(
+                    item.contains_key(*method),
+                    "missing {method} operation for {}",
+                    spec.path
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn operation_ids_are_unique_across_the_whole_document() {
+        // SDK generators index operations by id, so a collision (e.g. two routes
+        // whose tails collapse after stripping :params) breaks generated clients.
+        let doc = build_document();
+        let mut seen = std::collections::BTreeSet::new();
+        for item in doc["paths"].as_object().unwrap().values() {
+            for op in item.as_object().unwrap().values() {
+                let id = op["operationId"].as_str().expect("operationId string");
+                assert!(
+                    seen.insert(id.to_string()),
+                    "duplicate OpenAPI operationId: {id}"
+                );
+            }
+        }
     }
 }
