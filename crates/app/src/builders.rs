@@ -685,6 +685,7 @@ pub(crate) async fn local_caps(
     coxagent_application::ports::outbound::WorkerCaps {
         engines: detected_engines().into_iter().map(|(n, _)| n).collect(),
         models: detected_models(),
+        version: env!("CARGO_PKG_VERSION").to_owned(),
         tooling: Some(detected_tooling()),
         git: if config.git.enabled && !config.git.repo.is_empty() {
             Some(

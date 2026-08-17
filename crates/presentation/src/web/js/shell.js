@@ -1230,9 +1230,15 @@ async function renderTeamsOnline(){
       const acct=(w.worker||'').split('@')[0].toLowerCase();
       const mine=!ME||(ME.role==="admin")||((ME.username||'').toLowerCase()===acct);
       const stopBtn=mine?`<button class="tso-stop" title="Stop this operator (idles it — saves its tokens)" onclick="stopOperator('${esc(w.worker)}')"><i class="ti ti-player-stop"></i></button>`:'';
+      // Version skew: the hub self-upgrades but remote workers don't — a
+      // worker on an older build runs OLD orchestration rules. Flag it.
+      const hubV=(window.STATE&&STATE.current_version)?String(STATE.current_version):"";
+      const skew=w.version&&hubV&&w.version!==hubV
+        ?`<span class="tso-skew" title="worker runs v${esc(w.version)}, hub is v${esc(hubV)} — update this machine's coxagent">⚠ v${esc(w.version)}</span>`:'';
       return `<div class="tso"><span class="tso-dot"></span><span class="tso-id">${esc(w.worker)}</span>`
         +`<span class="tso-role ${busy?'lead':''}">${esc(role.replace(/_/g,'-').toUpperCase())}</span>`
         +(w.ticket?`<span class="tso-tk">${esc(w.ticket)}</span>`:'')
+        +skew
         +stopBtn
         +`</div>`;
     }).join("")+`</div></div>`;
