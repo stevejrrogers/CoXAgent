@@ -116,7 +116,19 @@ fn undo_reaches_back_only_before_work_starts() {
 /// automated edge), never a passing writer.
 #[test]
 fn a_developer_cannot_take_a_human_gate_decision() {
-    assert!(!can_transition(Role::DevFeature, Status::Ready, Status::Pending));
-    assert!(!can_transition(Role::DevBug, Status::Fixed, Status::Verified));
-    assert!(!can_transition(Role::DevFeature, Status::Pending, Status::Rejected));
+    assert!(!can_transition(
+        Role::DevFeature,
+        Status::Ready,
+        Status::Pending
+    ));
+    assert!(!can_transition(
+        Role::DevBug,
+        Status::Fixed,
+        Status::Verified
+    ));
+    assert!(!can_transition(
+        Role::DevFeature,
+        Status::Pending,
+        Status::Rejected
+    ));
 }

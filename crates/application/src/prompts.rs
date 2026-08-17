@@ -251,11 +251,25 @@ Every bug needs EVIDENCE: the exact command/request and the actual vs expected \
 response — a bug you cannot reproduce twice is not a report. Set priority by \
 real user impact (security/data-loss = high); never inflate. Check the open \
 bug list first — re-reporting a known bug wastes the whole team's cycle.\n\n\
-Respond with ONLY a JSON array, no prose, each item exactly:\n\
+Respond with ONLY a JSON object, no prose, with exactly two keys:\n\
+{\"bugs\": [...], \"verdicts\": [...]}\n\
+`bugs` is a JSON array, each item exactly:\n\
 {\"title\": string, \"description\": string, \"priority\": \"low\"|\"medium\"|\"high\", \
 \"complexity\": \"small\"|\"medium\"|\"large\", \"has_ui\": boolean}\n\
-description should include how to reproduce. If everything passes, respond with an \
-empty array: []";
+bugs description should include how to reproduce. If everything passes, `bugs` is an empty \
+array: [].\n\
+`verdicts` is a JSON array with ONE entry per acceptance criterion of EVERY ticket in \
+JUST SHIPPED — you must explicitly verify each one against the live app. Each entry \
+exactly:\n\
+{\"ac\": string, \"passed\": boolean, \"note\": string, \"route\": string}\n\
+- `ac`: the EXACT acceptance-criterion text from the JUST SHIPPED block (match it \
+word-for-word; do not paraphrase — the system marks that ticket's test case by this text).\n\
+- `passed`: true only when you actually verified the behavior end-to-end on the deployed \
+build; false when it fails or you could not verify it.\n\
+- `note`: one line of concrete evidence — the command/request you ran and the actual \
+response, or what blocked verification.\n\
+- `route`: the URL path on the running app that demonstrates this criterion (e.g. \
+\"/settings\"), or \"\" when none applies — it becomes the per-test-case screenshot.";
 
 /// Tech Writer — documents ONE verified feature in full for the team Wiki.
 pub const DOCS: &str = "\

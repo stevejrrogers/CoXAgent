@@ -17,24 +17,24 @@ name: coxagent
 x-app-env: &app-env
   COXAGENT_HOST: 0.0.0.0
   COXAGENT_REGISTRY: /root/CoXAgent/registry.json
-  COXAGENT_ADMIN_USER: ${ADMIN_USER}
-  COXAGENT_ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+  COXAGENT_ADMIN_USER: ${ADMIN_USER:?superuser login must be set}
+  COXAGENT_ADMIN_PASSWORD: ${COXAGENT_ADMIN_PASSWORD:?a strong super-admin secret must be set}
   COXAGENT_S3_ENDPOINT: http://minio:9000
   COXAGENT_S3_BUCKET: coxagent
-  COXAGENT_S3_ACCESS_KEY: ${S3_ACCESS_KEY}
-  COXAGENT_S3_SECRET_KEY: ${S3_SECRET_KEY}
-  COXAGENT_MONGO_URL: mongodb://${MONGO_USER}:${MONGO_PASSWORD}@mongo:27017/?authSource=admin
+  COXAGENT_S3_ACCESS_KEY: ${S3_ACCESS_KEY:?MinIO access-key must be set}
+  COXAGENT_S3_SECRET_KEY: ${S3_SECRET_KEY:?MinIO credential must be set}
+  COXAGENT_MONGO_URL: mongodb://${MONGO_USER:?MongoDB root user must be set}:${MONGO_PASSWORD:?MongoDB root secret must be set}@mongo:27017/?authSource=admin
   COXAGENT_MONGO_DB: coxagent
-  COXAGENT_DB_DSN: postgres://${PG_USER}:${PG_PASSWORD}@db:5432/coxagent
+  COXAGENT_DB_DSN: postgres://${PG_USER:?Postgres role must be set}:${PG_PASSWORD:?Postgres superuser secret must be set}@db:5432/coxagent
   # Shared account/session store — REQUIRED for the split: gateway issues the
   # login cookie, realtime must validate it. Without this each container keeps
   # file-backed sessions in its own memory and cross-service auth (e.g. the
   # /events SSE stream on realtime) answers 401. Sessions ride Redis (native
   # TTL) on top of this.
-  COXAGENT_AUTH_DSN: postgres://${PG_USER}:${PG_PASSWORD}@db:5432/coxagent
-  COXAGENT_REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+  COXAGENT_AUTH_DSN: postgres://${PG_USER:?Postgres role must be set}:${PG_PASSWORD:?Postgres superuser secret must be set}@db:5432/coxagent
+  COXAGENT_REDIS_URL: redis://:${REDIS_PASSWORD:?must carry a value; blank means an unauthenticated session store}@redis:6379
   COXAGENT_TURN_URL: turn:${PUBLIC_IP}:3478
-  COXAGENT_TURN_SECRET: ${TURN_SECRET}
+  COXAGENT_TURN_SECRET: ${TURN_SECRET:?coturn shared-secret must be set}
 
 services:
   # Every data store below publishes to 127.0.0.1 ONLY. A bare "5432:5432" binds
@@ -50,8 +50,8 @@ services:
       - "127.0.0.1:9000:9000"
       - "127.0.0.1:9001:9001"
     environment:
-      MINIO_ROOT_USER: ${S3_ACCESS_KEY}
-      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY}
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:?MinIO access-key must be set}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:?MinIO credential must be set}
     volumes:
       - minio:/data
     restart: unless-stopped
@@ -61,8 +61,8 @@ services:
     ports:
       - "127.0.0.1:27017:27017"
     environment:
-      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER}
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD}
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:?MongoDB root user must be set}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:?MongoDB root secret must be set}
     volumes:
       - mongo:/data/db
     restart: unless-stopped
@@ -76,13 +76,13 @@ services:
       # Containers are unaffected — they resolve `db:5432` on the compose network.
       - "127.0.0.1:5433:5432"
     environment:
-      POSTGRES_USER: ${PG_USER}
-      POSTGRES_PASSWORD: ${PG_PASSWORD}
+      POSTGRES_USER: ${PG_USER:?Postgres role must be set}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?Postgres superuser secret must be set}
       POSTGRES_DB: coxagent
     volumes:
       - db:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${PG_USER}"]
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:?Postgres role must be set}"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -97,7 +97,7 @@ services:
     # super-admin. It ran with no password until 2026-08-04.
     command:
       ["redis-server", "--save", "", "--appendonly", "no",
-       "--requirepass", "${REDIS_PASSWORD}"]
+       "--requirepass", "${REDIS_PASSWORD:?must carry a value; blank means an unauthenticated session store}"]
     restart: unless-stopped
 
   coturn:
@@ -106,7 +106,7 @@ services:
     command:
       - -n
       - --use-auth-secret
-      - --static-auth-secret=${TURN_SECRET}
+      - --static-auth-secret=${TURN_SECRET:?coturn shared-secret must be set}
       - --realm=coxagent
       - --no-tls
       - --no-dtls
