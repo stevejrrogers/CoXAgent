@@ -52,16 +52,20 @@ impl CopilotEngine {
     }
 
     /// Spawn `cmd`, stream its JSONL stdout to the live log line-by-line, and
-    /// return the raw stdout, exit code, and stderr. Same shape as the opencode
-    /// adapter's exec so both feed the dashboard's live view identically.
+    /// return the raw stdout, exit code, stderr and the confinement actually
+    /// applied. Same shape as the opencode adapter's exec so both feed the
+    /// dashboard's live view identically.
     async fn exec(
         &self,
         mut cmd: Command,
         live: Option<PathBuf>,
         timeout: std::time::Duration,
         sandbox: SandboxStatus,
-    ) -> Result<(String, Option<i32>, String), PortError> {
-        let mut child = crate::proc::spawn_confined(&mut cmd, sandbox)
+    ) -> Result<StreamedRun, PortError> {
+        // The status comes BACK from the spawn: `Denied` when this host's
+        // Seatbelt refused the profile every time, so the outcome never claims
+        // a confinement that was not applied (COX-B016).
+        let (mut child, sandbox) = crate::proc::spawn_confined(&mut cmd, sandbox)
             .await
             .map_err(|e| PortError::Backend(format!("spawn copilot: {e}")))?;
         let out = child
@@ -116,8 +120,22 @@ impl CopilotEngine {
         if let Some(p) = &live {
             crate::engine::live::append_live(p, "\n— run finished —");
         }
-        Ok((raw, status.code(), stderr))
+        Ok(StreamedRun {
+            stdout: raw,
+            exit_code: status.code(),
+            stderr,
+            sandbox,
+        })
     }
+}
+
+/// One streamed Copilot run: what the CLI produced, plus the write confinement
+/// that was actually in force while it produced it.
+struct StreamedRun {
+    stdout: String,
+    exit_code: Option<i32>,
+    stderr: String,
+    sandbox: SandboxStatus,
 }
 
 /// Render ONE Copilot JSONL event as a work-log line for the live view — the
@@ -225,7 +243,12 @@ impl AgentEnginePort for CopilotEngine {
         if let Some(p) = &live {
             let _ = std::fs::write(p, format!("# {role} — live @ run start\n"));
         }
-        let (stdout, code, stderr) = self.exec(cmd, live, request.timeout, sandbox).await?;
+        let StreamedRun {
+            stdout,
+            exit_code: code,
+            stderr,
+            sandbox,
+        } = self.exec(cmd, live, request.timeout, sandbox).await?;
         let parsed = parse_jsonl(&stdout);
         // A session.error means the run produced nothing useful even though the
         // CLI exits 0 — report it as the failure it is, with the message in
@@ -289,7 +312,12 @@ impl AgentEnginePort for CopilotEngine {
         crate::engine::apply_shim_path(&mut cmd);
 
         let live = crate::engine::live::live_path(work_dir, &crate::engine::role_key(role), None);
-        let (stdout, code, stderr) = self.exec(cmd, live, timeout, sandbox).await?;
+        let StreamedRun {
+            stdout,
+            exit_code: code,
+            stderr,
+            sandbox,
+        } = self.exec(cmd, live, timeout, sandbox).await?;
         let parsed = parse_jsonl(&stdout);
         let (code, stderr) = match &parsed.error {
             Some(e) => (Some(1), format!("{e}\n{stderr}")),

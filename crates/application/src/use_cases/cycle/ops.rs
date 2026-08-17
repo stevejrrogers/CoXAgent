@@ -381,8 +381,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         )
         .await;
         // A skipped rollback is still an incident — record its post-mortem once.
-        self.post_mortem(reason, failed_sha, to_sha, true, summary.to_string(), report)
-            .await;
+        self.post_mortem(
+            reason,
+            failed_sha,
+            to_sha,
+            true,
+            summary.to_string(),
+            report,
+        )
+        .await;
     }
     /// The CXA-F012 incident post-mortem loop: run exactly once per deploy
     /// revision that auto-rolled back (or was deliberately skipped from rolling
@@ -450,8 +457,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
 
         // File or link a deduped root-cause PREVENTION ticket so the same
         // symptom can't ride forward into the next good deploy unaddressed.
-        let lesson_text =
-            format!("{reason} triggered an auto-rollback to {short_target}; fix shipped as tracked work.");
+        let lesson_text = format!(
+            "{reason} triggered an auto-rollback to {short_target}; fix shipped as tracked work."
+        );
         crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
             s.add_lesson(&lesson_text);
             Ok(())
@@ -562,6 +570,21 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             })
             .await
             .ok()
+    }
+
+    /// Announce an automated PR close where PEOPLE look — the team channel and
+    /// the webhook — never just a comment on the PR itself. Twelve PRs died
+    /// silently in one night (#185–#196) because the close only wrote to
+    /// GitHub and the activity log; an irreversible act done by a machine must
+    /// be loud enough to challenge.
+    pub(super) async fn announce_pr_close(&self, number: u64, title: &str, why: &str) {
+        let msg = format!("🗑️ auto-closed PR #{number} (\"{title}\") — {why}");
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+            s.post_chat_in("SA", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+            Ok(())
+        })
+        .await;
+        self.notify("pr_closed", msg).await;
     }
 
     /// Pre-cycle git tree hygiene — undo the wreckage an engine death leaves

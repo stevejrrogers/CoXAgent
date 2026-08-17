@@ -45,6 +45,11 @@ pub struct Spend {
     /// this host, so the run executed unconfined.
     #[serde(default)]
     pub unconfined_requested_runs: u64,
+    /// Runs the confinement mechanism refused to apply (macOS Seatbelt's
+    /// `sandbox_apply()` denial, COX-B016): the agent never started, so these
+    /// are neither confined nor unconfined runs — they are an OS fault.
+    #[serde(default)]
+    pub sandbox_denied_runs: u64,
     /// Human-readable status of the most recent run's confinement (e.g.
     /// `"confined via bwrap"`, `"unavailable: bwrap not found on PATH"`),
     /// surfaced on the dashboard.
@@ -103,6 +108,13 @@ pub struct CycleScore {
     pub errors: u64,
     /// A–D verdict, precomputed so every consumer grades identically.
     pub grade: String,
+    /// Wall-clock seconds spent per phase (role label → secs) this cycle —
+    /// where the minutes went, so cadence tuning has data instead of feeling.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub phase_secs: std::collections::BTreeMap<String, u64>,
+    /// USD metered per role this cycle — where the money went.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub phase_cost: std::collections::BTreeMap<String, f64>,
 }
 
 impl CycleScore {
