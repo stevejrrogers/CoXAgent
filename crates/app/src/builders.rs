@@ -514,6 +514,16 @@ pub(crate) async fn build_project(
             tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(Duration::from_secs(900)).await;
+                    // Heartbeat: proof the watcher is alive, distinguishable
+                    // from "script ran and had nothing to do" (which is
+                    // silent by design). The hub's own logs are swallowed by
+                    // the app shell, so this file is the only observable.
+                    let hb = repo.join(".coxagent-self-upgrade");
+                    let _ = std::fs::create_dir_all(&hb);
+                    let _ = std::fs::write(
+                        hb.join("watcher-heartbeat"),
+                        format!("{:?}\n", std::time::SystemTime::now()),
+                    );
                     // Run the LATEST script straight from origin/<base> via
                     // `git show` — reading it from the clone was a
                     // chicken-and-egg: a clone that predates the script never
