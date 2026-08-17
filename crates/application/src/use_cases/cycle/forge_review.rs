@@ -4,8 +4,8 @@
 use super::{diff_has_conflict_markers, ReviewVerdict, RunCycleUseCase};
 use crate::ports::outbound::{AgentEnginePort, AgentRequest, StateStorePort};
 use crate::use_cases::merge_policy::{
-    changed_files, competing_pr, needs_human_eyes, CompeteCandidate, CompeteOutcome,
-    resolve_competing,
+    changed_files, competing_pr, needs_human_eyes, resolve_competing, CompeteCandidate,
+    CompeteOutcome,
 };
 use std::fmt::Write as _;
 
@@ -78,20 +78,57 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // still wanted.
             if let Some(tid) = crate::use_cases::merge_policy::ticket_id_in(&pr.title) {
                 if merged_tickets.contains(&tid) && !merged.iter().any(|(n, _)| *n == pr.number) {
-                    let note = format!(
-                        "Closing: a pull request for {tid} is already merged — this branch \
-                         rebuilds what main has. Reopen only if something here is genuinely \
-                         missing from the merged fix."
-                    );
-                    let _ = forge.comment_pr(pr.number, &note).await;
-                    if forge.close_pr(pr.number).await.is_ok() {
-                        self.log_git(&format!(
-                            "review: closed PR #{} — {tid} already merged elsewhere",
-                            pr.number
-                        ))
-                        .await;
+                    // Another PR for this ticket merged — but a second PR can
+                    // still carry work the first one lacks. Same burden of
+                    // proof as the settled-status close below: only close when
+                    // this diff's substance is verifiably on main already.
+                    let landed = match forge.pr_diff(pr.number).await {
+                        Ok(d) => {
+                            let mut on_main = std::collections::HashMap::new();
+                            if let Some(files) = self.files.as_deref() {
+                                for (rel, _) in
+                                    crate::use_cases::merge_policy::added_lines_by_file(&d)
+                                {
+                                    let path = self.work_dir.join(&rel);
+                                    if let Some(body) = files.read(&path).await {
+                                        on_main.insert(rel, body);
+                                    }
+                                }
+                            }
+                            crate::use_cases::merge_policy::diff_landed_on_main(&d, |rel| {
+                                on_main.get(rel).cloned()
+                            })
+                        }
+                        Err(_) => false,
+                    };
+                    if landed {
+                        let note = format!(
+                            "Closing: a pull request for {tid} is already merged and this \
+                             diff's content is present on main — this branch rebuilds what \
+                             main has."
+                        );
+                        let _ = forge.comment_pr(pr.number, &note).await;
+                        if forge.close_pr(pr.number).await.is_ok() {
+                            self.announce_pr_close(
+                                pr.number,
+                                &pr.title,
+                                &format!("{tid} already merged elsewhere and this diff is on main"),
+                            )
+                            .await;
+                            self.log_git(&format!(
+                                "review: closed PR #{} — {tid} already merged elsewhere",
+                                pr.number
+                            ))
+                            .await;
+                        }
+                        continue;
                     }
-                    continue;
+                    self.log_git(&format!(
+                        "review: PR #{} kept OPEN — {tid} merged elsewhere but this \
+                         diff is NOT on main; letting review land it",
+                        pr.number
+                    ))
+                    .await;
                 }
                 let settled = self.store.load().await.ok().and_then(|s| {
                     s.tickets
@@ -108,20 +145,65 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                             | coxagent_domain::Status::Rejected
                     )
                 ) {
-                    let note = format!(
-                        "Closing: {tid} is already {:?} — this branch is superseded. Nothing is \
-                         lost; the branch stays in git if any of it is ever wanted.",
-                        settled.unwrap_or(coxagent_domain::Status::Done)
-                    );
-                    let _ = forge.comment_pr(pr.number, &note).await;
-                    if forge.close_pr(pr.number).await.is_ok() {
-                        self.log_git(&format!(
-                            "review: closed PR #{} — {tid} already settled",
-                            pr.number
-                        ))
-                        .await;
+                    // A settled STATUS is not proof the code landed: tickets go
+                    // Done/Verified through the dev flow while their PR merges
+                    // separately, and closing on status alone threw away twelve
+                    // PRs of real work in one night (#185–#196, 2026-08-16).
+                    // Closing is the irreversible side, so it carries the
+                    // burden of proof: only when the diff's substance is
+                    // ALREADY on main is the branch superseded — otherwise the
+                    // PR stays and the normal review flow merges it.
+                    let landed = match forge.pr_diff(pr.number).await {
+                        Ok(d) => {
+                            // Pre-read main's version of every touched file so
+                            // the containment check stays a pure function.
+                            let mut on_main = std::collections::HashMap::new();
+                            if let Some(files) = self.files.as_deref() {
+                                for (rel, _) in
+                                    crate::use_cases::merge_policy::added_lines_by_file(&d)
+                                {
+                                    let path = self.work_dir.join(&rel);
+                                    if let Some(body) = files.read(&path).await {
+                                        on_main.insert(rel, body);
+                                    }
+                                }
+                            }
+                            crate::use_cases::merge_policy::diff_landed_on_main(&d, |rel| {
+                                on_main.get(rel).cloned()
+                            })
+                        }
+                        Err(_) => false,
+                    };
+                    if landed {
+                        let note = format!(
+                            "Closing: {tid} is already {:?} and this diff's content is \
+                             present on main — superseded. The branch stays in git if any \
+                             of it is ever wanted.",
+                            settled.unwrap_or(coxagent_domain::Status::Done)
+                        );
+                        let _ = forge.comment_pr(pr.number, &note).await;
+                        if forge.close_pr(pr.number).await.is_ok() {
+                            self.announce_pr_close(
+                                pr.number,
+                                &pr.title,
+                                &format!("{tid} is settled and this diff is on main"),
+                            )
+                            .await;
+                            self.log_git(&format!(
+                                "review: closed PR #{} — {tid} settled and landed",
+                                pr.number
+                            ))
+                            .await;
+                        }
+                        continue;
                     }
-                    continue;
+                    self.log_git(&format!(
+                        "review: PR #{} kept OPEN — {tid} is settled but the diff is \
+                         NOT on main; letting review land it",
+                        pr.number
+                    ))
+                    .await;
+                    // fall through to the normal review path below
                 }
             }
             // Scratch in the diff is wrong the moment it exists — there is no
@@ -138,6 +220,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     );
                     let _ = forge.comment_pr(pr.number, &note).await;
                     if forge.close_pr(pr.number).await.is_ok() {
+                        self.announce_pr_close(
+                            pr.number,
+                            &pr.title,
+                            &format!("commits agent scratch ({path}); ticket returns to the queue"),
+                        )
+                        .await;
                         self.log_git(&format!(
                             "review: closed PR #{} — commits scratch ({path})",
                             pr.number
@@ -285,7 +373,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                             continue;
                         }
                     }
-                    CompeteOutcome::Proceed { winner, unsafe_other } => {
+                    CompeteOutcome::Proceed {
+                        winner,
+                        unsafe_other,
+                    } => {
                         // The current PR is a SAFE, small subset of a
                         // load-bearing same-ticket competitor. It is not held
                         // hostage by that risk — it proceeds to the normal
@@ -299,13 +390,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                                  the safe candidate is not this PR. Close one or fold this in."
                             );
                             let _ = forge.request_changes(pr.number, &reason).await;
-                            self.record_review(
-                                pr.number,
-                                "request_changes",
-                                &reason,
-                                &head_sha,
-                            )
-                            .await;
+                            self.record_review(pr.number, "request_changes", &reason, &head_sha)
+                                .await;
                             self.log_git(&format!(
                                 "SA held PR #{}: competes with #{other}",
                                 pr.number
@@ -346,7 +432,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                         // alone: a change this large, or one that edits how the
                         // project builds and deploys itself, gets a human even
                         // when every gate is green.
-                        if let Some(why) = needs_human_eyes(&diff, self.config.git.max_changed_lines) {
+                        if let Some(why) =
+                            needs_human_eyes(&diff, self.config.git.max_changed_lines)
+                        {
                             let msg = format!(
                                 "Approved, but not auto-merging: {why}. Ask a human to land this."
                             );
@@ -358,10 +446,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                             self.reporter().report_hold(pr.number, &why).await;
                             self.notify(
                                 "human_eyes",
-                                format!(
-                                    "PR #{} approved but held for a human: {why}",
-                                    pr.number
-                                ),
+                                format!("PR #{} approved but held for a human: {why}", pr.number),
                             )
                             .await;
                             self.log_git(&format!(

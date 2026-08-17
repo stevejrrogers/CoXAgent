@@ -1,35 +1,28 @@
-//! TDD contract for CXA-F021 ("Fix missing coverage field and add a
-//! Config-drift compile gate"), written BEFORE any implementation.
-//!
-//! Every test below encodes exactly one acceptance criterion from the ticket.
-//! They are intentionally RED today: they reference three additions to the
-//! config surface that CXA-F021 must land, listed here so the implementer knows
-//! precisely what minimal public API turns them green:
-//!
-//!   1. `coxagent_application::config::CoverageConfig`, carrying at least
-//!      `.enabled: bool` and `.threshold: u32`.
-//!
-///   2. A `#[serde(default)] pub coverage: CoverageConfig` field on the existing
-///      top-level [`coxagent_application::config::Config`], like every sibling
-///      section (step 2 of docs/CXA-B004-config-initializer.md). Its documented
-///      defaults MUST be **enabled = true, threshold = 3**, produced by an
-///      explicit container default rather than Rust's derived zero-value —
-///      `{false, 0}` would silently misrepresent an unset knob (COX-B043).
+// Config-drift compile gate — TDD contract for CXA-F021 ("Fix missing coverage
+// field and add a Config-drift compile gate"), written BEFORE any implementation.
 //
-////   3. A schema anchor naming whether a persisted document predates / matches /
-////      exceeds what this running build understands (`CONFIG_SCHEMA_VERSION`) —
-////      used by load to refuse an incompatible persisted schema before accepting
-////      it (the same fail-closed posture state.json already has via
-////      json_store.parse_checked), so a bump is never loaded blind or defaulted away.
+// Every test below encodes exactly one acceptance criterion from the ticket.
+// The three additions to the config surface that CXA-F021 must land:
 //
-//// ---------------------------------------------------------------------------
-//// AC -> test mapping (see ticket CXA-F021):
-////   AC1 round-trip        -> coverage_section_round_trips_exactly_on_disk
-////   AC2 omitted-field def -> omitted_coverage_applies_the_documented_defaults
-////   AC3 drift gate        -> newer_persisted_schema_is_refused_at_load_not_defaulted
-////   AC4 hot reload        -> threshold_change_reaches_the_next_pass_without_a_restart
-////   AC5 bump migration    -> prior_version_state_migrates_and_preserves_user_coverage
-//// ---------------------------------------------------------------------------
+//   1. `coxagent_application::config::CoverageConfig`, carrying at least
+//      `.enabled: bool` and `.threshold: u32`.
+//   2. A `#[serde(default)] pub coverage: CoverageConfig` field on the existing
+//      top-level `Config`, with documented defaults enabled=true, threshold=3,
+//      produced by an explicit container default rather than Rust's derived
+//      zero-value `{false, 0}` (COX-B043).
+//   3. A schema anchor naming whether a persisted document predates / matches /
+//      exceeds what this running build understands (`CONFIG_SCHEMA_VERSION`),
+//      used by load to refuse an incompatible persisted schema before accepting
+//      it (fail-closed, like state.json's json_store.parse_checked).
+//
+// AC -> test mapping (see ticket CXA-F021):
+//   AC1 round-trip        -> coverage_section_round_trips_exactly_on_disk
+//   AC2 omitted-field def -> omitted_coverage_applies_the_documented_defaults
+//   AC3 drift gate        -> newer_persisted_schema_is_refused_at_load_not_defaulted
+//   AC4 hot reload        -> threshold_change_reaches_the_next_pass_without_a_restart
+//   AC5 bump migration    -> prior_version_state_migrates_and_preserves_user_coverage
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use coxagent_application::config::{Config, CONFIG_SCHEMA_VERSION};
 use serde_json::{json, Value};
 
@@ -65,8 +58,8 @@ fn coverage_section_round_trips_exactly_on_disk() {
     let text_on_disk = persist_and_read(&cfg);
     let back = parse(&text_on_disk);
 
-    assert_eq!(
-        back.coverage.enabled, false,
+    assert!(
+        !back.coverage.enabled,
         "enabled must survive the cycle unchanged"
     );
     assert_eq!(
@@ -103,8 +96,7 @@ fn newer_persisted_schema_is_refused_at_load_not_defaulted() {
     let outcome = coxagent_application::config_parse::parse_config(&future_doc);
     assert!(
         outcome.is_err(),
-        "a persisted schema newer than supported ({}) must refuse to load, not default away",
-        CONFIG_SCHEMA_VERSION
+        "a persisted schema newer than supported ({CONFIG_SCHEMA_VERSION}) must refuse to load, not default away"
     );
 }
 
@@ -146,13 +138,12 @@ fn prior_version_state_migrates_and_preserves_user_coverage() {
     let text_from_prior_version = persist_and_read(&cfg);
     let migrated = parse(&text_from_prior_version);
 
-    assert_eq!(
-        migrated.coverage.enabled, false,
+    assert!(
+        !migrated.coverage.enabled,
         "user-set enabled must survive migration"
     );
     assert_eq!(
         migrated.coverage.threshold, 11,
-        "user-set threshold must survive migration; default-fabrication would yield {}",
-        DOCUMENTED_DEFAULT_THRESHOLD
+        "user-set threshold must survive migration; default-fabrication would yield {DOCUMENTED_DEFAULT_THRESHOLD}"
     );
 }

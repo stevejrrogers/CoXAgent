@@ -173,6 +173,7 @@ async fn op_heartbeat(p: &ProjectHandle, args: &Args) -> Response {
         models: Option<Vec<String>>,
         git: Option<String>,
         tooling: Option<String>,
+        version: Option<String>,
         now: String,
     }
     let Some(b) = args
@@ -192,6 +193,7 @@ async fn op_heartbeat(p: &ProjectHandle, args: &Args) -> Response {
             .tooling
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok()),
+        version: b.version.unwrap_or_default(),
     };
     let worker = args.worker.as_deref().unwrap_or("");
     match p
@@ -276,13 +278,12 @@ pub(super) async fn store_rpc_ep(
     // principal — mirroring chat/inbox/etc. The route-level `auth_mw` already
     // rejects anonymous traffic while /store sits under it; this keeps access
     // gated even if /store ever moves out from under that middleware.
-    match &app.auth {
-        Some(auth) => {
-            if super::resolve_principal(auth, &headers).await.is_none() {
-                return (axum::http::StatusCode::UNAUTHORIZED, "sign in first").into_response();
-            }
-        }
-        None => {}
+    let authorized = match &app.auth {
+        Some(auth) => super::resolve_principal(auth, &headers).await.is_some(),
+        None => true,
+    };
+    if !authorized {
+        return (axum::http::StatusCode::UNAUTHORIZED, "sign in first").into_response();
     }
     match q.op.as_str() {
         "load" => op_load(&p).await,
