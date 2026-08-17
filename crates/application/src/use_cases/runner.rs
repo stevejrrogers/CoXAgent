@@ -359,11 +359,20 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
                 .await
                 .is_ok_and(|s| s.engine_incidents.iter().any(|i| i.engine == engine));
             if let Some(detail) = &first {
-                if !was_open && fault_count >= 2 {
+                // Auth deaths alarm on FIRST sight: revoked credentials never
+                // heal without a person, so waiting to count cycles just burns
+                // quiet hours. Everything else keeps the >=2 debounce.
+                let urgent = crate::faults::is_auth_death(detail);
+                if !was_open && (fault_count >= 2 || urgent) {
+                    let hint = if urgent {
+                        " — credentials are dead; re-login the engine CLI (e.g. `claude login`) and the loop resumes"
+                    } else {
+                        ""
+                    };
                     cycle_uc
                         .notify(
                             "engine_incident",
-                            format!("{engine} failed {fault_count} runs this cycle: {detail}"),
+                            format!("{engine} failed {fault_count} run(s) this cycle: {detail}{hint}"),
                         )
                         .await;
                 }
@@ -392,9 +401,9 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
                     // a single dropped connection is a blip the retry handles,
                     // and shouting about it teaches people to ignore the alert
                     // that matters.
-                    if !already && fault_count >= 2 {
+                    if !already && (fault_count >= 2 || crate::faults::is_auth_death(detail)) {
                         let msg = format!(
-                            "🔌 {engine} failed {fault_count} runs this cycle: {detail}. If it \
+                            "🔌 {engine} failed {fault_count} run(s) this cycle: {detail}. If it \
                              keeps up, the loop pauses itself — fix the credentials or the model \
                              and this clears."
                         );

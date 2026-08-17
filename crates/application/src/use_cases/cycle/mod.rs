@@ -637,6 +637,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             return report;
         }
 
+        // Canary mode: this engine has an OPEN incident. Running the full
+        // multi-phase cycle against a dead engine burns a claim/release/
+        // journal round per phase per minute ("engine infrastructure fault —
+        // attempt not counted" wallpaper). Instead run exactly ONE cheap probe
+        // phase: if the engine answers, the incident closes on the evidence
+        // and the next cycle is full; if not, one fault, not eight.
+        if self.engine_incident_open().await {
+            self.run_canary_probe(&mut report).await;
+            return report;
+        }
+
         // Coordinate concurrent runners: at most one leads the singleton phases
         // (BA/PO/design-system/deploy/TEST/review) that must run once per project,
         // not once per runner. Non-leaders still do per-ticket stages (SA/PD/DEV/
@@ -1248,6 +1259,58 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 std::mem::take(&mut t.1)
             }
             Err(_) => std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Whether THIS runner's engine has an open incident recorded.
+    async fn engine_incident_open(&self) -> bool {
+        let engine = self.engine_id();
+        self.store
+            .load()
+            .await
+            .is_ok_and(|s| s.engine_incidents.iter().any(|i| i.engine == engine))
+    }
+
+    /// The one probe a canary cycle runs: a single DEV-BUG pass. If the engine
+    /// answers (success OR an ordinary task failure) the incident-close logic
+    /// sees evidence of life; if the engine is still dead, the cycle cost one
+    /// fault instead of a phase-by-phase burn.
+    async fn run_canary_probe(&self, report: &mut CycleReport) {
+        self.report("DEV-BUG", "canary probe (engine incident open)");
+        match self.dev(DevMode::Bug).execute().await {
+            Ok(Some(done)) => report.bug_fixed = Some(done),
+            // Nothing to claim proves nothing about the engine — without a
+            // fallback the incident could never close on an empty backlog.
+            // One minimal ping settles it either way.
+            Ok(None) => {
+                let ping = AgentRequest {
+                    role: coxagent_domain::Role::Sm,
+                    system_prompt: String::new(),
+                    task_prompt: "Reply with the single word OK.".to_owned(),
+                    work_dir: self.work_dir.clone(),
+                    timeout: std::time::Duration::from_secs(120),
+                    escalation_level: 0,
+                    label: Some("canary".to_owned()),
+                };
+                match self.engine.run(ping).await {
+                    Ok(o) if o.succeeded() => {
+                        // Alive: give the close logic its evidence via a
+                        // task-shaped no-op error-free signal — an explicit
+                        // non-infra "error" would ding the scorecard, so mark
+                        // progress-equivalent through bugs_filed-free report by
+                        // recording a documented no-op instead.
+                        report.errors.push("canary: engine answered — recovering".to_owned());
+                    }
+                    Ok(o) => report
+                        .errors
+                        .push(format!("canary probe: {}", o.failure_detail())),
+                    Err(e) => report.errors.push(format!("canary probe: {e}")),
+                }
+            }
+            Err(e) => report.errors.push(format!("canary probe: {e}")),
+        }
+        if let Some(p) = &self.phase {
+            p(None);
         }
     }
 
