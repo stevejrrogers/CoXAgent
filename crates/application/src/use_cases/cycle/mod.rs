@@ -149,6 +149,11 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     engine: Arc<E>,
     config: Config,
     work_dir: PathBuf,
+    /// Isolated git worktree for leader feedback-fix / SA-rescue git ops, so
+    /// those never collide with the shared leader checkout's dirty, mid-cycle
+    /// state. `None` falls back to `work_dir` (tests / non-repo). Mirrors how
+    /// each concurrency slot already gets its own tree for DEV.
+    feedback_work_dir: Option<PathBuf>,
     context: String,
     meter: Option<Arc<Mutex<Spend>>>,
     shot: Option<Arc<dyn crate::ports::outbound::ScreenshotPort>>,
@@ -220,6 +225,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             engine,
             config,
             work_dir,
+            feedback_work_dir: None,
             context,
             meter: None,
             shot: None,
@@ -367,6 +373,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     #[must_use]
     pub fn with_git(mut self, git: Arc<dyn GitPort>) -> Self {
         self.git = Some(git);
+        self
+    }
+
+    /// Attach an isolated feedback/SA-rescue worktree so leader git ops for
+    /// the merge queue run outside the (possibly dirty) shared checkout. See
+    /// `feedback_work_dir`.
+    #[must_use]
+    pub fn with_feedback_workdir(mut self, dir: PathBuf) -> Self {
+        self.feedback_work_dir = Some(dir);
         self
     }
 

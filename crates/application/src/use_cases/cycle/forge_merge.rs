@@ -401,6 +401,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .chars()
             .take(12_000)
             .collect();
+        // Run the SA rescue in the leader's ISOLATED feedback worktree — the
+        // shared checkout is dirty mid-cycle, so branch switching there aborts
+        // and the rescue never lands (the stuck PR spins forever). The tree
+        // shares repo refs, so checkout/commit/push work as on the main tree.
+        let fix_dir = self
+            .feedback_work_dir
+            .clone()
+            .unwrap_or_else(|| self.work_dir.clone());
         let request = crate::ports::outbound::AgentRequest {
             role: coxagent_domain::Role::Sa,
             system_prompt: crate::prompts::system_prompt(crate::prompts::SA),
@@ -422,7 +430,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 h = pr.head,
                 t = pr.title,
             ),
-            work_dir: self.work_dir.clone(),
+            work_dir: fix_dir.clone(),
             timeout: std::time::Duration::from_secs(900),
             escalation_level: 0,
             label: None,
@@ -433,7 +441,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         };
         // The SA may have switched branches while fixing — repark the checkout.
         if let Some(git) = &self.git {
-            let _ = git.checkout_branch(&self.work_dir, self.flow_base()).await;
+            let _ = git.checkout_branch(&fix_dir, self.flow_base()).await;
         }
         let say = |msg: String| {
             let store = Arc::clone(&self.store);
