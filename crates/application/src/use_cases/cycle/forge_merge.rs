@@ -737,6 +737,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     );
                     let _ = forge.comment_pr(pr.number, &note).await;
                     if forge.close_pr(pr.number).await.is_ok() {
+                        self.announce_pr_close(
+                            pr.number,
+                            &pr.title,
+                            &format!(
+                                "stale + commits agent scratch ({path}); ticket returns to the queue"
+                            ),
+                        )
+                        .await;
                         self.log_git(&format!(
                             "stale sweep: closed PR #{} — commits scratch ({path})",
                             pr.number
