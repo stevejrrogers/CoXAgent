@@ -50,9 +50,8 @@ pub(super) async fn list_prs_ep(
 /// hub-wide guard against concurrent resolutions in one work_dir.
 pub(super) fn force_inflight(
 ) -> &'static tokio::sync::Mutex<std::collections::HashSet<(String, u64)>> {
-    static SET: std::sync::OnceLock<
-        tokio::sync::Mutex<std::collections::HashSet<(String, u64)>>,
-    > = std::sync::OnceLock::new();
+    static SET: std::sync::OnceLock<tokio::sync::Mutex<std::collections::HashSet<(String, u64)>>> =
+        std::sync::OnceLock::new();
     SET.get_or_init(|| tokio::sync::Mutex::new(std::collections::HashSet::new()))
 }
 

@@ -325,7 +325,9 @@ pub(crate) async fn build_project(
                 "gitlab" => Some(Arc::new(coxagent_infrastructure::GlForge::new(
                     repo, base, wd,
                 ))),
-                "github" => Some(coxagent_infrastructure::github_forge(repo, base, wd, account)),
+                "github" => Some(coxagent_infrastructure::github_forge(
+                    repo, base, wd, account,
+                )),
                 _ => None,
             }
         } else {
@@ -367,7 +369,9 @@ pub(crate) async fn build_project(
                 match build_engine(&reloaded, logs_dir(&state_dir), mcp.as_ref()) {
                     Ok((engine, meter)) => Some((reloaded, engine, meter)),
                     Err(e) => {
-                        tracing::warn!("config changed but engine rebuild failed; keeping previous: {e}");
+                        tracing::warn!(
+                            "config changed but engine rebuild failed; keeping previous: {e}"
+                        );
                         None
                     }
                 }
@@ -377,6 +381,12 @@ pub(crate) async fn build_project(
 
     // Leader runner: singleton phases (BA, PO, standup, etc.)
     {
+        // The leader's feedback-fix / SA-rescue git ops get their OWN worktree,
+        // mirroring what every concurrency slot already gets for DEV. The main
+        // checkout is dirty mid-cycle, so git ops there abort and the merge
+        // queue spins forever; the feedback tree shares repo refs, so branch
+        // checkout/commit/push land normally.
+        let feedback_worktree = worktree_at(work_dir.clone(), &format!("{id}-feedback"));
         let leader = RunCycleUseCase::new(
             Arc::clone(&store),
             engine.clone(),
@@ -408,7 +418,8 @@ pub(crate) async fn build_project(
             coxagent_infrastructure::FsWorkspaceFiles::new(),
         )))
         .with_janitor(Some(Arc::new(coxagent_infrastructure::OsProcessJanitor)))
-        .with_reloader(mk_reloader());
+        .with_reloader(mk_reloader())
+        .with_feedback_workdir(feedback_worktree);
         let leader = if let Some(ref f) = forge {
             leader.with_forge(Arc::clone(f))
         } else {

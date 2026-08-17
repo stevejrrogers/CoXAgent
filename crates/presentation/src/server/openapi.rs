@@ -98,7 +98,10 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/ba-analyze", &["post"]),
     route("/api/projects/:pid/channels", &["get", "post"]),
     route("/api/projects/:pid/channels/:cid/invite", &["post"]),
-    route("/api/projects/:pid/channels/:cid/members/:member", &["delete"]),
+    route(
+        "/api/projects/:pid/channels/:cid/members/:member",
+        &["delete"],
+    ),
     route("/api/projects/:pid/channels/:cid/settings", &["patch"]),
     route("/api/projects/:pid/chat", &["get", "post"]),
     route("/api/projects/:pid/chat-reply", &["post"]),
@@ -283,9 +286,9 @@ mod tests {
         // One Path Item per distinct route...
         assert_eq!(paths.len(), ROUTES.len());
         for spec in ROUTES {
-            let item = paths[spec.path].as_object().unwrap_or_else(|| {
-                panic!("missing path item for {}", spec.path)
-            });
+            let item = paths[spec.path]
+                .as_object()
+                .unwrap_or_else(|| panic!("missing path item for {}", spec.path));
             // ...and one operation per supported method on that path.
             for method in spec.methods {
                 assert!(

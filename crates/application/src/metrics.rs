@@ -139,10 +139,18 @@ pub fn decide_tuning(
             next.bugs_first = false;
         }
     }
-    // Intake brake: backlog far beyond throughput → stop proposing; drained → resume.
-    if backlog > 25 {
-        next.skip_ba = true;
-    } else if backlog < 12 {
+    // Intake brake: pause BA only when the backlog is far beyond throughput AND
+    // nothing has shipped for a full week (a genuine stall that risks piling
+    // more work onto an un-drainable queue). The moment any feature ships the
+    // pipeline is healthy — release the brake so BA keeps feeding work and the
+    // backlog drains. Parking BA on a big backlog is what makes it never drain.
+    if evals.shipped_7d == 0 {
+        if backlog > 25 {
+            next.skip_ba = true;
+        } else if backlog < 12 {
+            next.skip_ba = false;
+        }
+    } else if next.skip_ba {
         next.skip_ba = false;
     }
     next
@@ -436,10 +444,11 @@ mod tests {
 
     #[test]
     fn tuning_hysteresis() {
+        // Stalled (nothing shipped this week) → the intake brake's hysteresis is live.
         let mut e = super::AgentEvals {
             per_role: vec![],
             shipped_total: 10,
-            shipped_7d: 2,
+            shipped_7d: 0,
             parked: 0,
             failed_attempts: 20,
             churn_per_ship: 2.0,
@@ -458,5 +467,54 @@ mod tests {
         e.churn_per_ship = 0.5;
         let t3 = super::decide_tuning(&e, 5, &t2);
         assert!(!t3.bugs_first && !t3.skip_ba);
+    }
+
+    #[test]
+    fn intake_brake_releases_when_shipping_resumes() {
+        // Production deadlock: a fat backlog parks the intake brake; without a
+        // shipping-based recovery it stays parked forever because the parked BA
+        // is what stops the backlog from draining below the release threshold.
+        let mut e = super::AgentEvals {
+            per_role: vec![],
+            shipped_total: 3,
+            shipped_7d: 0,
+            parked: 0,
+            failed_attempts: 0,
+            churn_per_ship: 0.4,
+            prs_stuck: 0,
+            cost_per_ship_usd: 1.0,
+        };
+        let t0 = crate::state::Tuning::default();
+        // Huge backlog + nothing shipping → brake parks (defensive overload stop).
+        let parked = super::decide_tuning(&e, 84, &t0);
+        assert!(parked.skip_ba, "stalled overload parks the intake brake");
+        // Team ships → the brake must release even while the 84-ticket backlog remains.
+        e.shipped_7d = 2;
+        let recovered = super::decide_tuning(&e, 84, &parked);
+        assert!(
+            !recovered.skip_ba,
+            "shipping must un-park BA at a fat backlog"
+        );
+    }
+
+    #[test]
+    fn intake_brake_stays_off_while_shipping() {
+        // When the team is shipping, a big backlog must NOT hard-park BA — that
+        // starves the very work that drains the queue.
+        let e = super::AgentEvals {
+            per_role: vec![],
+            shipped_total: 3,
+            shipped_7d: 3,
+            parked: 0,
+            failed_attempts: 0,
+            churn_per_ship: 0.4,
+            prs_stuck: 0,
+            cost_per_ship_usd: 1.0,
+        };
+        let out = super::decide_tuning(&e, 84, &crate::state::Tuning::default());
+        assert!(
+            !out.skip_ba,
+            "shipping team must keep proposing at a fat backlog"
+        );
     }
 }
