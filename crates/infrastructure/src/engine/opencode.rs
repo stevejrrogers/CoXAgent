@@ -10,7 +10,6 @@ use coxagent_application::ports::outbound::{
     AgentEnginePort, AgentOutcome, AgentRequest, SandboxStatus,
 };
 use coxagent_application::PortError;
-use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 
@@ -33,7 +32,7 @@ impl OpencodeEngine {
     pub fn new(model: impl Into<String>) -> Self {
         Self {
             model: model.into(),
-            binary: "opencode".to_owned(),
+            binary: crate::engine::resolve_engine_binary("opencode"),
             mcp: None,
             escalation: Vec::new(),
             sandbox: false,
@@ -241,34 +240,7 @@ fn mcp_prompt_hint(mcp: &crate::engine::McpAccess) -> String {
     )
 }
 
-/// The live-log file for a run: `<workspace>/logs/live/<role>.log`, derived
-/// from the codebase work-dir (`<workspace>/codebase`). Same layout as the
-/// claude engine so the dashboard's `agent-log` endpoint finds it.
-fn live_path(work_dir: &Path, role: &str) -> Option<PathBuf> {
-    let dir = work_dir.parent()?.join("logs").join("live");
-    std::fs::create_dir_all(&dir).ok()?;
-    let suffix = std::env::var("COXAGENT_OPERATOR")
-        .ok()
-        .map(|o| {
-            o.chars()
-                .filter(char::is_ascii_alphanumeric)
-                .collect::<String>()
-        })
-        .filter(|s| !s.is_empty())
-        .map_or_else(String::new, |s| format!("__{s}"));
-    Some(dir.join(format!("{role}{suffix}.log")))
-}
-
-fn append_live(path: &Path, line: &str) {
-    use std::io::Write as _;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        let _ = writeln!(f, "{}", line.trim_end());
-    }
-}
+use crate::engine::live::{append_live, live_path};
 
 #[async_trait]
 impl AgentEnginePort for OpencodeEngine {
@@ -298,7 +270,7 @@ impl AgentEnginePort for OpencodeEngine {
         };
 
         let role = crate::engine::role_key(request.role);
-        let live = live_path(&request.work_dir, &role);
+        let live = live_path(&request.work_dir, &role, request.label.as_deref());
         if let Some(p) = &live {
             let _ = std::fs::write(p, format!("# {role} — live @ run start\n"));
         }
@@ -341,12 +313,17 @@ impl AgentEnginePort for OpencodeEngine {
 
     async fn resume_run(
         &self,
+        role: coxagent_domain::Role,
         session_id: &str,
         follow_up: &str,
         work_dir: &std::path::Path,
         timeout: std::time::Duration,
     ) -> Result<AgentOutcome, PortError> {
-        let live = live_path(work_dir, "resume");
+        // Stream under the ROLE's live file, not a shared "resume" one — the
+        // implement/repair passes of a run resume the session, and writing them
+        // to `resume.log` left the agent's own card frozen at the planning
+        // output while the real work streamed somewhere no card reads.
+        let live = live_path(work_dir, &crate::engine::role_key(role), None);
         let (mut cmd, sandbox) = crate::proc::agent_command(&self.binary, work_dir, self.sandbox);
         cmd.arg("run")
             .arg("--model")
@@ -384,7 +361,10 @@ impl OpencodeEngine {
         sandbox: SandboxStatus,
     ) -> Result<AgentOutcome, PortError> {
         let mut cmd = cmd;
-        let mut child = crate::proc::spawn_confined(&mut cmd, sandbox)
+        // The status comes BACK from the spawn: `Denied` when this host's
+        // Seatbelt refused the profile every time, so the outcome never claims
+        // a confinement that was not applied (COX-B016).
+        let (mut child, sandbox) = crate::proc::spawn_confined(&mut cmd, sandbox)
             .await
             .map_err(|e| PortError::Backend(format!("spawn opencode: {e}")))?;
         let out = child
@@ -445,16 +425,46 @@ impl OpencodeEngine {
 
         let (text, usage) = parse_json_stream(&raw);
 
+        // An `{"type":"error"}` event is the CLI's failure report — same story
+        // as Copilot's session.error: the process can still exit 0 with empty
+        // text, which read as a silent empty SUCCESS. The circuit breaker then
+        // saw a blank failure_detail, recognised nothing, and the loop spun
+        // through hundreds of empty runs against a dead provider. Surface it.
+        let (exit_code, stderr) = match extract_error(&raw) {
+            Some(e) if text.trim().is_empty() => (Some(1), format!("{e}\n{stderr}")),
+            _ => (status.code(), stderr),
+        };
         Ok(AgentOutcome {
             stdout: text,
             stderr,
-            exit_code: status.code(),
+            exit_code,
             usage: Some(usage),
             trace: String::new(),
             session_id: extract_session(&raw),
             sandbox,
+            engine: "opencode".to_owned(),
         })
     }
+}
+
+/// The first `{"type":"error"}` event's name+message in the NDJSON stream, if
+/// any (e.g. `UnknownError: Unexpected server error…` from a dead provider).
+fn extract_error(raw: &str) -> Option<String> {
+    raw.lines().find_map(|l| {
+        let v = serde_json::from_str::<serde_json::Value>(l.trim()).ok()?;
+        if v.get("type").and_then(serde_json::Value::as_str) != Some("error") {
+            return None;
+        }
+        let name = v
+            .pointer("/error/name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("error");
+        let msg = v
+            .pointer("/error/data/message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("opencode reported an error event");
+        Some(format!("opencode {name}: {msg}"))
+    })
 }
 
 /// First session id seen in the NDJSON stream (`sessionID` on opencode
@@ -474,12 +484,45 @@ fn extract_session(raw: &str) -> Option<String> {
 /// Render one NDJSON event into a readable line for the live log.
 /// Empty for non-visible events (step_start, etc.).
 fn render_event(v: &serde_json::Value) -> String {
+    use std::fmt::Write as _;
     match v.get("type").and_then(serde_json::Value::as_str) {
         Some("text") => v
             .pointer("/part/text")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("")
             .to_owned(),
+        // A tool call + its result. Without this, opencode's live log showed
+        // only the prose between actions — "Now check if X is in forge.rs:" and
+        // then nothing, because the check itself (the tool call) never rendered.
+        Some("tool_use") => {
+            let tool = v
+                .pointer("/part/tool")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("tool");
+            let input = v
+                .pointer("/part/state/input")
+                .map(std::string::ToString::to_string)
+                .unwrap_or_default();
+            let input: String = input.chars().take(160).collect();
+            let mut out = format!("🔧 {tool}({input})");
+            if let Some(output) = v
+                .pointer("/part/state/output")
+                .and_then(serde_json::Value::as_str)
+            {
+                let lines: Vec<&str> = output.lines().collect();
+                if !lines.is_empty() {
+                    let _ = write!(out, "\n   ↳ {} lines", lines.len());
+                    for l in lines.iter().take(6) {
+                        let l: String = l.chars().take(200).collect();
+                        let _ = write!(out, "\n   ┆ {l}");
+                    }
+                    if lines.len() > 6 {
+                        let _ = write!(out, "\n   ┆ … (+{} more)", lines.len() - 6);
+                    }
+                }
+            }
+            out
+        }
         _ => String::new(),
     }
 }
@@ -516,11 +559,24 @@ fn parse_json_stream(raw: &str) -> (String, coxagent_application::ports::outboun
             }
             Some("step_finish") => {
                 if let Some(tokens) = v.pointer("/part/tokens") {
+                    // Cached prompt tokens count as input too — opencode nests
+                    // them under `tokens.cache.{read,write}`. Same fix as the
+                    // claude parser: without it a cached run reports near-zero
+                    // input and the Cost tab reads wrong for this harness.
+                    let cache = tokens.get("cache");
+                    let cache_tok = |k: &str| {
+                        cache
+                            .and_then(|c| c.get(k))
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0)
+                    };
                     input_tokens = input_tokens.saturating_add(
                         tokens
                             .get("input")
                             .and_then(serde_json::Value::as_u64)
-                            .unwrap_or(0),
+                            .unwrap_or(0)
+                            + cache_tok("read")
+                            + cache_tok("write"),
                     );
                     output_tokens = output_tokens.saturating_add(
                         tokens
@@ -679,6 +735,20 @@ mod tests {
     fn render_event_empty_for_non_text() {
         let v = serde_json::json!({"type":"step_start","part":{}});
         assert_eq!(render_event(&v), "");
+    }
+
+    #[test]
+    fn render_event_shows_tool_calls_with_result_preview() {
+        // The real shape opencode emits (captured live): the work-log otherwise
+        // cut off right before every action.
+        let v = serde_json::json!({"type":"tool_use","part":{
+            "tool":"bash",
+            "state":{"status":"completed","input":{"command":"ls"},"output":"a.txt\nb.txt\n"}
+        }});
+        let got = render_event(&v);
+        assert!(got.starts_with("🔧 bash("), "{got}");
+        assert!(got.contains("↳ 2 lines"), "{got}");
+        assert!(got.contains("┆ a.txt"), "{got}");
     }
 
     fn mcp(token: Option<&str>) -> crate::engine::McpAccess {
@@ -899,8 +969,13 @@ mod tests {
                 system_prompt: "s".into(),
                 task_prompt: "t".into(),
                 work_dir: dir.clone(),
-                timeout: std::time::Duration::from_secs(20),
+                // Generous on purpose (CXA-B041): this spawns a real child via
+                // the production path, and a one-line echo can still outlast a
+                // tight wall-clock budget when CI is heavily loaded. The test
+                // asserts argv/env plumbing only — latency is irrelevant.
+                timeout: std::time::Duration::from_secs(120),
                 escalation_level: 0,
+                label: None,
             })
             .await
             .expect("run");

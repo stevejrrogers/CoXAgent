@@ -1,6 +1,6 @@
 //! Domain-level errors. No IO concerns here — only rule violations.
 
-use crate::ticket::{Role, Status, TicketType};
+use crate::kinds::{Role, Status, TicketType};
 
 /// Errors raised by the domain when an invariant or rule would be broken.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]

@@ -6,7 +6,7 @@
 //! recovered.
 
 use async_trait::async_trait;
-use coxagent_application::ports::outbound::{StateStorePort, WorkerEntry};
+use coxagent_application::ports::outbound::{StateStorePort, WorkerCaps, WorkerEntry};
 use coxagent_application::state::{ProjectState, SCHEMA_VERSION};
 use coxagent_application::PortError;
 use coxagent_domain::{Role, TicketId};
@@ -266,6 +266,7 @@ impl JsonStateStore {
         worker: &str,
         role: &str,
         ticket: &str,
+        caps: &WorkerCaps,
         now: &str,
     ) -> Result<(), PortError> {
         let lock = acquire_lock(&self.lock_path())?;
@@ -278,6 +279,10 @@ impl JsonStateStore {
             role: role.to_owned(),
             ticket: ticket.to_owned(),
             at: now.to_owned(),
+            engines: caps.engines.clone(),
+            models: caps.models.clone(),
+            git: caps.git.clone(),
+            tooling: caps.tooling.clone(),
         });
         let outcome = self.write_coord(&coord);
         drop(lock);
@@ -376,6 +381,7 @@ impl StateStorePort for JsonStateStore {
         worker: &str,
         role: &str,
         ticket: &str,
+        caps: &WorkerCaps,
         now: &str,
     ) -> Result<(), PortError> {
         let root = self.root.clone();
@@ -385,8 +391,9 @@ impl StateStorePort for JsonStateStore {
             ticket.to_owned(),
             now.to_owned(),
         );
+        let caps = caps.clone();
         tokio::task::spawn_blocking(move || {
-            JsonStateStore { root }.heartbeat_blocking(&worker, &role, &ticket, &now)
+            JsonStateStore { root }.heartbeat_blocking(&worker, &role, &ticket, &caps, &now)
         })
         .await
         .map_err(|e| PortError::Backend(e.to_string()))?

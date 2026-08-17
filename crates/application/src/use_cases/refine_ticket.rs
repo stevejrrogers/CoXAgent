@@ -122,6 +122,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RefineTicketUseCas
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(150),
             escalation_level: 0,
+            label: None,
         };
         let outcome = self.engine.run(request).await?;
         if !outcome.succeeded() {
@@ -172,6 +173,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RefineTicketUseCas
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(120),
             escalation_level: 0,
+            label: None,
         };
         match self.engine.run(request).await {
             Ok(o) if o.succeeded() => o.stdout.trim().to_owned(),

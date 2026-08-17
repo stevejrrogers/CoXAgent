@@ -96,6 +96,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDesignSystemUseCase<S, E> {
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(1200),
             escalation_level: 0,
+            label: None,
         }
     }
 }
@@ -149,6 +150,7 @@ mod tests {
                 trace: String::new(),
                 session_id: None,
                 sandbox: SandboxStatus::default(),
+                engine: String::new(),
             })
         }
     }

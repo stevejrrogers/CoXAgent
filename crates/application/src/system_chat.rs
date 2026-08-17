@@ -140,7 +140,12 @@ impl SystemChat {
         ("approvals", "what is waiting on a human"),
     ];
 
-    fn project_sub_channel(p: &ProjectRef, ctx: &ChatContext, suffix: &str, topic: &str) -> Channel {
+    fn project_sub_channel(
+        p: &ProjectRef,
+        ctx: &ChatContext,
+        suffix: &str,
+        topic: &str,
+    ) -> Channel {
         let parent = ChatContext::project_channel_id(p);
         let mut ch = Self::project_channel(p, ctx);
         ch.id = format!("{parent}-{suffix}");

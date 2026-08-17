@@ -43,6 +43,12 @@ pub struct RunnerHandle {
     step: AtomicBool,
     resume: Notify,
     status: Mutex<RunnerSnapshot>,
+    /// Agent CLIs found on THIS machine's PATH, injected by the composition root
+    /// (detection is an infrastructure concern). Reported on every heartbeat so
+    /// a hub that will never have an agent CLI of its own can still tell the
+    /// dashboard which engines the team can actually run, which models its
+    /// opencode reaches, and whether its git/forge credentials really work.
+    caps: crate::ports::outbound::WorkerCaps,
 }
 
 impl Default for RunnerHandle {
@@ -60,6 +66,7 @@ impl Default for RunnerHandle {
                 operator: None,
                 host: None,
             }),
+            caps: crate::ports::outbound::WorkerCaps::default(),
         }
     }
 }
@@ -70,6 +77,20 @@ impl RunnerHandle {
         Self::default()
     }
 
+    /// Declare what this machine can run (composition root only): the agent CLIs
+    /// on its PATH and the `provider/model` pairs its opencode can reach.
+    #[must_use]
+    pub fn with_capabilities(mut self, caps: crate::ports::outbound::WorkerCaps) -> Self {
+        self.caps = caps;
+        self
+    }
+
+    /// What this machine can do, as reported on every heartbeat.
+    #[must_use]
+    pub fn caps(&self) -> &crate::ports::outbound::WorkerCaps {
+        &self.caps
+    }
+
     /// Resume continuous running.
     pub fn resume(&self) {
         self.mode.store(RUNNING, Ordering::SeqCst);
@@ -77,7 +98,15 @@ impl RunnerHandle {
         self.resume.notify_waiters();
     }
 
-    /// Pause after the current cycle.
+    /// Whether the runner is currently paused — polled by the cycle BETWEEN
+    /// phases so a user's Pause takes effect at the next phase boundary (after
+    /// the in-flight engine call), not after the whole multi-agent cycle.
+    #[must_use]
+    pub fn is_paused(&self) -> bool {
+        self.mode.load(Ordering::SeqCst) == PAUSED
+    }
+
+    /// Pause: no new phases start; the in-flight engine call finishes first.
     pub fn pause(&self) {
         self.mode.store(PAUSED, Ordering::SeqCst);
         self.set_mode_label("paused");
@@ -196,10 +225,16 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
                 let (role, note) = phase
                     .lock()
                     .map_or_else(|_| ("idle".to_owned(), String::new()), |p| p.clone());
+                // Only a runner actually mid-phase belongs in the registry from
+                // here. This loop also backs the hub's own built-in runner,
+                // which sits paused by default — beating while idle filled the
+                // registry with a phantom worker (no engines, no work) on every
+                // hub. A headless operator advertises itself from `run_loop`
+                // instead, which is the process that really has the agent CLIs.
                 if role != "idle" {
                     let now = crate::state::now_rfc3339();
                     let _ = store
-                        .heartbeat_worker(&h.worker_id(), &role, &note, &now)
+                        .heartbeat_worker(&h.worker_id(), &role, &note, h.caps(), &now)
                         .await;
                 }
             }
@@ -220,11 +255,18 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
             None => h.clear_active(),
         }
         let (store, worker) = (std::sync::Arc::clone(&store), h.worker_id());
+        let caps = h.caps().clone();
         tokio::spawn(async move {
             let now = crate::state::now_rfc3339();
-            let _ = store.heartbeat_worker(&worker, &role, &note, &now).await;
+            let _ = store
+                .heartbeat_worker(&worker, &role, &note, &caps, &now)
+                .await;
         });
     }));
+    {
+        let h = std::sync::Arc::clone(&handle);
+        cycle_uc.set_pause_check(std::sync::Arc::new(move || h.is_paused()));
+    }
     let breaker_store = cycle_uc.store();
     let mut cycle = 0u64;
     // Circuit breaker: engine-infrastructure outages (revoked auth, network
@@ -249,6 +291,21 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
         };
 
         cycle += 1;
+        // Hot-reload the engine/config at the cycle boundary when coxagent.json
+        // changed (a Settings save) — this is the HUB's runner path, so without
+        // this only headless `coxagent run` picked up edits without a restart.
+        // On a reload, drop the per-role observed-engine records: they describe
+        // the OLD stack, and the dashboard kept showing "copilot" on cards long
+        // after the user had switched everything to claude.
+        if cycle_uc.maybe_reload() {
+            let store = cycle_uc.store();
+            let _ = crate::ports::outbound::mutate_state(store.as_ref(), |s| {
+                s.spend.engine_by_role.clear();
+                s.spend.operator_by_role.clear();
+                Ok(())
+            })
+            .await;
+        }
         // Stamp the live operator identity so ticket claims are owned by whoever
         // resumed this runner, on this host.
         cycle_uc.set_worker(handle.worker_id());
@@ -269,6 +326,12 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
 
         if report.over_budget {
             tracing::warn!("budget cap reached — pausing loop");
+            cycle_uc
+                .notify(
+                    "loop_paused",
+                    "loop paused: spend cap reached".to_owned(),
+                )
+                .await;
             handle.pause();
             continue;
         }
@@ -291,6 +354,38 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
             let engine = cycle_uc.engine_id().to_owned();
             let first = infra_faults.first().map(|e| (*e).clone());
             let fault_count = infra_errors;
+            // Webhook mirror of the chat announcements below: fires only on the
+            // open/close EDGE, so a night-long outage is one message, not one
+            // per cycle.
+            let was_open = breaker_store.load().await.is_ok_and(|s| {
+                s.engine_incidents.iter().any(|i| i.engine == engine)
+            });
+            if let Some(detail) = &first {
+                if !was_open && fault_count >= 2 {
+                    cycle_uc
+                        .notify(
+                            "engine_incident",
+                            format!("{engine} failed {fault_count} runs this cycle: {detail}"),
+                        )
+                        .await;
+                }
+            }
+            // Life is EVIDENCE, not absence of failure: a cycle that shipped
+            // something, or whose failures were all task-shaped (the engine
+            // answered and was wrong), proves the engine lives. A SILENT cycle
+            // — nothing ran, nothing failed — proves nothing: the 2026-08-17
+            // OAuth death opened an incident at 01:33 and the next empty cycle
+            // closed it again, so the hub spent the night dead with a clean
+            // dashboard and no webhook.
+            let engine_alive = progressed || (infra_errors == 0 && !report.errors.is_empty());
+            if first.is_none() && was_open && engine_alive {
+                cycle_uc
+                    .notify(
+                        "engine_recovered",
+                        format!("{engine} is answering again — work resumes"),
+                    )
+                    .await;
+            }
             let _ = crate::ports::outbound::mutate_state(breaker_store.as_ref(), move |s| {
                 if let Some(detail) = &first {
                     let already = s.engine_incidents.iter().any(|i| i.engine == engine);
@@ -307,11 +402,11 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
                         );
                         s.post_chat_in("SYSTEM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
                     }
-                } else {
-                    // The engine answered this cycle: nothing infra-shaped
-                    // failed. That is the promise the banner makes, so it is
-                    // what closes it — waiting for the team to also SHIP would
-                    // leave a stale alert up through a quiet backlog.
+                } else if engine_alive {
+                    // The engine PROVABLY answered this cycle (work landed, or
+                    // failures were task-shaped). Only that closes the banner —
+                    // an idle cycle with zero runs closes nothing, or an
+                    // overnight outage clears its own alarm (2026-08-17).
                     if let Some(inc) = s.close_engine_incident(&engine) {
                         let msg = format!(
                             "✅ {engine} is answering again after {} failed run(s) — resolved, \
@@ -325,9 +420,22 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
             })
             .await;
         }
-        if !progressed && infra_errors >= 2 {
+        // Streak bookkeeping. Reset only on REAL signal that the engine lives:
+        // work shipped, or runs that failed for non-infra reasons (the engine
+        // answered, the task was wrong). A SILENT cycle — nothing claimed,
+        // nothing failed — keeps the streak: it used to reset it, and with the
+        // leader lease rotating across three runners no process ever saw three
+        // loud cycles in a row, so the loop spun all night against a dead
+        // provider without ever tripping this breaker.
+        // ONE infra fault in a no-progress cycle counts: overnight the dead
+        // engine produced exactly one fault per cycle (a single DEV attempt),
+        // so a >=2 threshold meant the streak never grew and the loop spun
+        // dead until morning (2026-08-17). Three consecutive such cycles are
+        // still required before the pause — a lone transient blip cycle gets
+        // reset by the next alive cycle.
+        if !progressed && infra_errors >= 1 {
             infra_streak += 1;
-        } else {
+        } else if progressed || (infra_errors == 0 && !report.errors.is_empty()) {
             infra_streak = 0;
         }
         if infra_streak >= 3 {
@@ -344,6 +452,14 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
             })
             .await;
             infra_streak = 0;
+            cycle_uc
+                .notify(
+                    "loop_paused",
+                    "loop paused: engine infrastructure looks DOWN (auth/network) after 3 \
+                     empty cycles — fix the outage, then Resume"
+                        .to_owned(),
+                )
+                .await;
             handle.pause();
             continue;
         }

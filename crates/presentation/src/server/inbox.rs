@@ -7,7 +7,24 @@
 
 use super::*;
 
+/// Whether the signed-in caller may take a gate decision, and who they are.
+///
+/// `None` means refuse. On a hub with no accounts configured every request IS
+/// the operator — the gate cannot mean anything there, so it stands aside.
+pub(super) async fn gate_principal(
+    app: &AppState,
+    headers: &axum::http::HeaderMap,
+    allowed: fn(coxagent_application::AuthRole) -> bool,
+) -> Option<String> {
+    let Some(auth) = app.auth.clone() else {
+        return Some("operator".to_owned());
+    };
+    let user = resolve_principal(&auth, headers).await?;
+    allowed(user.role).then_some(user.username)
+}
+
 /// GET `/api/projects/:pid/inbox` — the caller's "waiting for me" queue.
+#[allow(clippy::too_many_lines)] // one linear pass building each inbox item kind
 pub(super) async fn inbox_ep(
     State(app): State<AppState>,
     Path(pid): Path<String>,
@@ -19,6 +36,16 @@ pub(super) async fn inbox_ep(
     let me = principal_name(&app, &headers)
         .await
         .unwrap_or_else(|| "operator".to_owned());
+    // The caller's role decides which items they may ACT on — but every item is
+    // still SHOWN to everyone, so the whole team sees the queue and only the
+    // right role gets an enabled button. Open mode (no auth) is the operator,
+    // who may do everything.
+    let my_role = match app.auth.clone() {
+        Some(auth) => resolve_principal(&auth, &headers)
+            .await
+            .map_or(coxagent_application::auth::AuthRole::Viewer, |u| u.role),
+        None => coxagent_application::auth::AuthRole::Super,
+    };
     let cfg = std::fs::read_to_string(&p.config_path)
         .ok()
         .and_then(|t| serde_json::from_str::<Config>(&t).ok())
@@ -31,6 +58,28 @@ pub(super) async fn inbox_ep(
     let mut items: Vec<serde_json::Value> = Vec::new();
     for t in &state.tickets {
         let id = t.id().to_string();
+        // Cost gate: a ticket whose estimated run cost exceeds the approval
+        // threshold is HELD until a person okays the spend. Surface every held
+        // ticket here — otherwise they pile up invisibly and the whole queue
+        // stalls before any of it reaches DEV (the "spins but never ships" bug).
+        if let Some(est) = state.cost_holds.get(&id) {
+            // Only while the ticket is still awaiting work — a hold left on a
+            // ticket that was since rejected/finished is stale and must not keep
+            // showing up as something to approve.
+            let live = matches!(
+                t.status(),
+                coxagent_domain::Status::Pending | coxagent_domain::Status::Ready
+            );
+            if live && !state.cost_approved.contains(&id) {
+                items.push(serde_json::json!({
+                    "kind": "cost_approve", "ticket": id, "title": t.title(),
+                    "priority": format!("{:?}", t.priority()).to_lowercase(),
+                    "estimate_usd": est,
+                    "role": "PO", "can_act": my_role.can_approve_ready(),
+                }));
+                continue;
+            }
+        }
         // Ready-gate approvals: designed, waiting in Pending for a person.
         if human.gate_ready
             && t.status() == coxagent_domain::Status::Pending
@@ -39,6 +88,7 @@ pub(super) async fn inbox_ep(
             items.push(serde_json::json!({
                 "kind": "approve_ready", "ticket": id, "title": t.title(),
                 "priority": format!("{:?}", t.priority()).to_lowercase(),
+                "role": "BA/PO", "can_act": my_role.can_approve_ready(),
             }));
             continue;
         }
@@ -49,6 +99,7 @@ pub(super) async fn inbox_ep(
         {
             items.push(serde_json::json!({
                 "kind": "verify", "ticket": id, "title": t.title(),
+                "role": "QA", "can_act": my_role.can_verify(),
             }));
             continue;
         }
@@ -57,6 +108,7 @@ pub(super) async fn inbox_ep(
             items.push(serde_json::json!({
                 "kind": "assigned", "ticket": id, "title": t.title(),
                 "status": format!("{:?}", t.status()).to_lowercase(),
+                "role": "you", "can_act": true,
             }));
         }
     }
@@ -72,26 +124,44 @@ pub(super) async fn inbox_ep(
             items.push(serde_json::json!({
                 "kind": "auto_approved", "ticket": id, "title": t.title(),
                 "minutes_left": undo_window.saturating_sub(age_min),
+                "role": "BA/PO", "can_act": my_role.can_approve_ready(),
             }));
         }
     }
     // Questions addressed to me (`@username`, or my bare username).
     for q in &state.questions {
         if q.answer.is_empty()
-            && (q.to.eq_ignore_ascii_case(&me)
-                || q.to.eq_ignore_ascii_case(&format!("@{me}")))
+            && (q.to.eq_ignore_ascii_case(&me) || q.to.eq_ignore_ascii_case(&format!("@{me}")))
         {
             items.push(serde_json::json!({
                 "kind": "question", "id": q.id, "ticket": q.ticket,
                 "from": q.from, "body": q.body,
                 "asked_at": q.asked_at, "escalated": q.escalated,
+                "role": "you", "can_act": true,
             }));
         }
+    }
+    // PRs the machine approved but refuses to land alone (`needs_human_eyes`):
+    // shown with the gate's REASON and one-click land/dismiss. Sourced from
+    // state so it works even on a hub with no forge credentials.
+    for (n, reason) in &state.human_holds {
+        let pr = state.open_prs.iter().find(|p| p.number == *n);
+        items.push(serde_json::json!({
+            "kind": "human_eyes", "number": n,
+            "title": pr.map(|p| p.title.clone()).unwrap_or_default(),
+            "url": pr.map(|p| p.url.clone()).unwrap_or_default(),
+            "reason": reason,
+            "role": "SA/dev", "can_act": my_role.can_review(),
+        }));
     }
     // PRs approved by the SA but held for human eyes.
     if let Some(forge) = &p.forge {
         if let Ok(prs) = forge.list_open_prs().await {
             for pr in prs {
+                // Already surfaced above with its hold reason.
+                if state.human_holds.contains_key(&pr.number) {
+                    continue;
+                }
                 let approved = state
                     .reviews
                     .iter()
@@ -100,12 +170,236 @@ pub(super) async fn inbox_ep(
                     items.push(serde_json::json!({
                         "kind": "review_pr", "number": pr.number,
                         "title": pr.title, "url": pr.url,
+                        "role": "SA/dev", "can_act": my_role.can_review(),
+                    }));
+                    continue;
+                }
+                // PRs the team has given up on. The fix ladder ends at "tell a
+                // human", which fired ONE notification and then skipped the PR
+                // every cycle forever — three of them sat open for a week that
+                // way, holding the queue against the WIP limit and pausing new
+                // dev work, while nothing on any screen said so. A dead end has
+                // to be visible, and it stays visible until the PR is gone.
+                let attempts = state.pr_fix_attempts.get(&pr.number).copied().unwrap_or(0);
+                let rescued = state.pr_rescues.get(&pr.number).copied().unwrap_or(0);
+                if attempts >= 3 && rescued >= 1 {
+                    items.push(serde_json::json!({
+                        "kind": "pr_stuck", "number": pr.number,
+                        "title": pr.title, "url": pr.url,
+                        "attempts": attempts,
+                        "mergeable": pr.mergeable,
+                        "role": "SA/dev", "can_act": my_role.can_review(),
+                    }));
+                } else if pr.mergeable {
+                    // Auto-merge held the PR for another gate (merged-result
+                    // verification, CI, a competing PR) but didn't abandon it:
+                    // the SA either asked for changes at an unmoved head or the
+                    // sweep skipped it, so it sat parked and invisible while the
+                    // user waited for a notification. If it is genuinely
+                    // landable now, surface it — the person is always told a
+                    // mergeable PR is waiting on them instead of silently
+                    // letting it squat the queue.
+                    items.push(serde_json::json!({
+                        "kind": "review_pr", "number": pr.number,
+                        "title": pr.title, "url": pr.url,
+                        "held": true,
+                        "role": "SA/dev", "can_act": my_role.can_review(),
                     }));
                 }
             }
         }
     }
     Json(serde_json::json!({ "user": me, "items": items })).into_response()
+}
+
+/// GET `/api/projects/:pid/attachment?key=…` — stream one attachment's bytes
+/// from blob storage (MinIO/S3 or the local blob dir) with its content type.
+pub(super) async fn attachment_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let key = params.get("key").cloned().unwrap_or_default();
+    if key.is_empty() || key.contains("..") {
+        return (axum::http::StatusCode::BAD_REQUEST, "bad key").into_response();
+    }
+    let Some(storage) = &p.storage else {
+        return (axum::http::StatusCode::CONFLICT, "no blob storage configured").into_response();
+    };
+    // The record on the ticket is the authority for the content type; fall
+    // back to octet-stream for keys nothing references (e.g. pruned tickets).
+    let ct = p
+        .store
+        .load()
+        .await
+        .ok()
+        .and_then(|s| {
+            s.ticket_attachments
+                .values()
+                .flatten()
+                .find(|a| a.key == key)
+                .map(|a| a.content_type.clone())
+        })
+        .unwrap_or_else(|| "application/octet-stream".to_owned());
+    match storage.get(&key).await {
+        Ok(bytes) => (
+            [
+                (axum::http::header::CONTENT_TYPE, ct),
+                // Never let a stored SVG/HTML run script in the dashboard origin.
+                (
+                    axum::http::header::CONTENT_SECURITY_POLICY,
+                    "default-src 'none'; style-src 'unsafe-inline'".to_owned(),
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(e) => (axum::http::StatusCode::NOT_FOUND, e.to_string()).into_response(),
+    }
+}
+
+/// POST `/api/projects/:pid/ticket/:id/attachments?name=…` — a person uploads
+/// an attachment (raw bytes body, `Content-Type` header carries the MIME).
+pub(super) async fn upload_attachment_ep(
+    State(app): State<AppState>,
+    Path((pid, id)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let me = principal_name(&app, &headers)
+        .await
+        .unwrap_or_else(|| "operator".to_owned());
+    let name = params.get("name").cloned().unwrap_or_default();
+    let safe = |s: &str| -> String {
+        s.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect()
+    };
+    let name = safe(&name);
+    if name.is_empty() || body.is_empty() {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            "name query param and a non-empty body are required",
+        )
+            .into_response();
+    }
+    let ct = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_owned();
+    let Some(storage) = &p.storage else {
+        return (axum::http::StatusCode::CONFLICT, "no blob storage configured").into_response();
+    };
+    let key = format!("uploads/{}/{}", safe(&id), name);
+    if let Err(e) = storage.put(&key, &body, &ct).await {
+        return internal_error(&e.to_string());
+    }
+    let rec = coxagent_application::state::TicketAttachment {
+        name,
+        key: key.clone(),
+        content_type: ct,
+        by: me,
+        at: coxagent_application::state::now_rfc3339(),
+    };
+    let saved = coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        s.ticket_attachments
+            .entry(id.clone())
+            .or_default()
+            .push(rec.clone());
+        Ok(())
+    })
+    .await;
+    match saved {
+        Ok(()) => Json(serde_json::json!({ "ok": true, "attachment": rec })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// POST `/api/projects/:pid/pr/:number/human` — a person decides a PR the
+/// machine held for human eyes. `{"action":"approve"}` lands it via the forge
+/// (this IS the human the gate waited for); `{"action":"dismiss"}` clears the
+/// Inbox entry and leaves the PR for handling on the forge itself.
+pub(super) async fn human_pr_ep(
+    State(app): State<AppState>,
+    Path((pid, number)): Path<(String, u64)>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<HumanPrReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Some(me) = gate_principal(&app, &headers, coxagent_application::AuthRole::can_review).await
+    else {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            "your role may not take this decision",
+        )
+            .into_response();
+    };
+    match req.action.as_str() {
+        "approve" => {
+            let Some(forge) = &p.forge else {
+                return (
+                    axum::http::StatusCode::CONFLICT,
+                    "this hub has no forge access — merge it on the forge directly",
+                )
+                    .into_response();
+            };
+            if let Err(e) = forge.merge_pr(number).await {
+                return (
+                    axum::http::StatusCode::BAD_GATEWAY,
+                    format!("merge failed: {e}"),
+                )
+                    .into_response();
+            }
+        }
+        "dismiss" => {}
+        other => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("action must be approve or dismiss, got {other}"),
+            )
+                .into_response()
+        }
+    }
+    let verb = if req.action == "approve" {
+        "landed"
+    } else {
+        "dismissed the hold on"
+    };
+    let note = format!("🧑‍⚖️ @{me} {verb} PR #{number} (held for human eyes).");
+    if coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        s.human_holds.remove(&number);
+        s.log_activity("USER", &format!("{me} {verb} PR #{number}"), None);
+        s.post_comment(&me, &note, None);
+        Ok(())
+    })
+    .await
+    .is_err()
+    {
+        return internal_error("store write failed");
+    }
+    Json(serde_json::json!({ "ok": true, "action": req.action })).into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct HumanPrReq {
+    #[serde(default)]
+    pub(super) action: String,
 }
 
 /// POST `/api/projects/:pid/ticket/:id/ready` — a person approves a designed
@@ -115,7 +409,15 @@ pub(super) async fn human_ready_ep(
     Path((pid, id)): Path<(String, String)>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
-    human_transition(&app, &pid, &id, &headers, coxagent_domain::Status::Ready).await
+    human_transition(
+        &app,
+        &pid,
+        &id,
+        &headers,
+        coxagent_domain::Status::Ready,
+        coxagent_application::AuthRole::can_approve_ready,
+    )
+    .await
 }
 
 /// POST `/api/projects/:pid/ticket/:id/verify` — a person renders the QA
@@ -125,7 +427,63 @@ pub(super) async fn human_verify_ep(
     Path((pid, id)): Path<(String, String)>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
-    human_transition(&app, &pid, &id, &headers, coxagent_domain::Status::Verified).await
+    human_transition(
+        &app,
+        &pid,
+        &id,
+        &headers,
+        coxagent_domain::Status::Verified,
+        coxagent_application::AuthRole::can_verify,
+    )
+    .await
+}
+
+/// POST `/api/projects/:pid/ticket/:id/send-back` — the verify gate's other
+/// answer: this fix is not demonstrated, do it again.
+///
+/// Approving was the only button. A reviewer who found no evidence could
+/// comment "there is no evidence" and watch nothing happen: the ticket stayed
+/// in `Fixed`, out of the dev queue, waiting for a verdict the reviewer had
+/// already reached. The reason travels with it as a comment, which is what
+/// steers the next attempt.
+pub(super) async fn send_back_ep(
+    State(app): State<AppState>,
+    Path((pid, id)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+    body: Option<Json<super::work::RejectReq>>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Some(me) = gate_principal(&app, &headers, coxagent_application::AuthRole::can_verify).await
+    else {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            "your role may not take this decision",
+        )
+            .into_response();
+    };
+    let reason = body.map(|Json(r)| r.reason).unwrap_or_default();
+    let Ok(mut state) = p.store.load().await else {
+        return internal_error("load failed");
+    };
+    let Some(t) = state.tickets.iter_mut().find(|t| t.id().as_str() == id) else {
+        return (axum::http::StatusCode::NOT_FOUND, "no such ticket").into_response();
+    };
+    if let Err(e) = t.transition_to(coxagent_domain::Role::User, coxagent_domain::Status::Open) {
+        return (axum::http::StatusCode::CONFLICT, e.to_string()).into_response();
+    }
+    let note = if reason.trim().is_empty() {
+        format!("↩️ {id} sent back by @{me}: the fix is not demonstrated.")
+    } else {
+        format!("↩️ {id} sent back by @{me}: {}", reason.trim())
+    };
+    state.log_activity("USER", "verification refused", Some(id.clone()));
+    state.post_comment(&me, &note, Some(id));
+    match p.store.save(&state).await {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
 }
 
 async fn human_transition(
@@ -134,13 +492,21 @@ async fn human_transition(
     id: &str,
     headers: &axum::http::HeaderMap,
     to: coxagent_domain::Status,
+    allowed: fn(coxagent_application::AuthRole) -> bool,
 ) -> axum::response::Response {
     let Some(p) = app.project(pid).await else {
         return not_found();
     };
-    let me = principal_name(app, headers)
-        .await
-        .unwrap_or_else(|| "operator".to_owned());
+    // The gate exists to put a QUALIFIED person in front of the decision. Any
+    // signed-in account could take it before — including a Viewer, whose whole
+    // definition is read-only.
+    let Some(me) = gate_principal(app, headers, allowed).await else {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            "your role may not take this decision",
+        )
+            .into_response();
+    };
     let Ok(mut state) = p.store.load().await else {
         return internal_error("load failed");
     };
@@ -166,7 +532,11 @@ async fn human_transition(
         );
     }
     state.auto_approved_at.remove(id);
-    state.log_activity("USER", &format!("{me} moved ticket to {label}"), Some(id.to_owned()));
+    state.log_activity(
+        "USER",
+        &format!("{me} moved ticket to {label}"),
+        Some(id.to_owned()),
+    );
     state.post_comment(
         "USER",
         &format!("🧑‍⚖️ @{me} approved {id} → {label}."),
@@ -225,9 +595,21 @@ pub(super) async fn undo_approval_ep(
     let Some(p) = app.project(&pid).await else {
         return not_found();
     };
-    let me = principal_name(&app, &headers)
-        .await
-        .unwrap_or_else(|| "operator".to_owned());
+    // Undo reverses an approval and retires the learned rule behind it — the
+    // same weight as approving, so the same qualification.
+    let Some(me) = gate_principal(
+        &app,
+        &headers,
+        coxagent_application::AuthRole::can_approve_ready,
+    )
+    .await
+    else {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            "your role may not take this decision",
+        )
+            .into_response();
+    };
     let Ok(mut state) = p.store.load().await else {
         return internal_error("load failed");
     };
@@ -242,7 +624,10 @@ pub(super) async fn undo_approval_ep(
         return (axum::http::StatusCode::NOT_FOUND, "no such ticket").into_response();
     };
     let shape = coxagent_application::use_cases::approval_risk::shape_key(t);
-    if let Err(e) = t.transition_to(coxagent_domain::Role::User, coxagent_domain::Status::Pending) {
+    if let Err(e) = t.transition_to(
+        coxagent_domain::Role::User,
+        coxagent_domain::Status::Pending,
+    ) {
         return (axum::http::StatusCode::CONFLICT, e.to_string()).into_response();
     }
     state.approval_samples.push(

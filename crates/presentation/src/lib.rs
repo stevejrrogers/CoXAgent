@@ -6,11 +6,13 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod cli;
+pub mod middleware;
 pub mod server;
 
 pub use cli::{parse, Cli, CodegraphQuery, Command};
 pub use server::{
-    serve_full, HubExtras, NewProjectReq, ProjectFactory, ProjectHandle, ProjectRemover,
+    serve_full, BrokenProject, HubExtras, NewProjectReq, ProjectFactory, ProjectHandle,
+    ProjectRemover,
 };
 
 use coxagent_application::state::ProjectState;

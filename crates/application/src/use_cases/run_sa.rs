@@ -134,9 +134,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
                 let awaiting = state
                     .tickets
                     .iter()
-                    .filter(|t| {
-                        t.status() == Status::Pending && t.design().technical.is_some()
-                    })
+                    .filter(|t| t.status() == Status::Pending && t.design().technical.is_some())
                     .count();
                 if awaiting >= 6 {
                     return Ok(None);
@@ -165,7 +163,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             .map_or("", coxagent_domain::Ticket::title)
             .to_owned();
 
-        let memory = crate::prompts::team_memory_block(&state.decisions, &state.lessons);
+        // Team-wide memory PLUS this ticket's own portable brief — so a
+        // re-design reads what a prior DEV/TEST run on this exact ticket learned,
+        // regardless of which engine produced it.
+        let memory = format!(
+            "{}{}",
+            crate::prompts::team_memory_block(&state.decisions, &state.lessons),
+            crate::prompts::ticket_brief_block(&state, id.as_str()),
+        );
         // The architect is meant to be the encyclopedia: it cannot arbitrate a
         // design for a product whose own wiki, docs and solved tickets it has
         // never been shown.
@@ -185,7 +190,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
         .await;
         let outcome = self
             .engine
-            .run(self.build_request(&id, &title, &memory, &knowledge).await)
+            .run(
+                self.build_request(
+                    &id,
+                    &title,
+                    &memory,
+                    &knowledge,
+                    &crate::prompts::human_steering_block(&state, id.as_str()),
+                )
+                .await,
+            )
             .await?;
         if !outcome.succeeded() {
             self.store.release_stage(&id, "sa", &worker).await.ok();
@@ -195,19 +209,83 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             ))
             .into());
         }
+        // Persist any BRIEF: notes SA left for the next role/engine (durable,
+        // engine-agnostic ticket memory).
+        let briefs = crate::prompts::extract_brief_notes(&outcome.stdout);
+        if !briefs.is_empty() {
+            let (key, briefs) = (id.to_string(), briefs);
+            let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+                for b in &briefs {
+                    s.journal_note(&key, &format!("SA: {b}"));
+                }
+                Ok(())
+            })
+            .await;
+        }
         let design = match parse_design(&outcome.stdout) {
             Ok(d) => d,
             Err(first) => {
-                let fixed = crate::use_cases::repair_json(
-                    self.engine.as_ref(),
-                    &outcome.stdout,
-                    "a JSON object with the technical design fields",
-                    &self.work_dir,
-                )
-                .await;
-                let Some(Ok(repaired)) = fixed.as_deref().map(parse_design) else {
+                // Flash-tier models occasionally degenerate on long token-dense
+                // output (word-salad inside the JSON), which `parse_design`
+                // rejects. Instead of giving up on one salvage pass, retry with
+                // feedback and escalate the model tier — the same recipe as
+                // run_dev::self_heal_compile. The parse error plus the failed
+                // raw output are fed back so each retry knows exactly what to
+                // fix; later attempts run a stronger model when a ladder is
+                // configured. Falls back to Corrupt after N attempts so a
+                // genuinely bad call still surfaces as a failure.
+                let mut raw = outcome.stdout.clone();
+                let mut parse_err = first;
+                let mut repaired: Option<DesignOutput> = None;
+                for attempt in 1_u32..=3 {
+                    let req = AgentRequest {
+                        role: Role::Sa,
+                        system_prompt: prompts::system_prompt(prompts::SA),
+                        task_prompt: format!(
+                            "The design below for {id} did not parse as the required JSON \
+                             object (a technical design with {{\"approach\":\"...\", \
+                             \"alternatives\":\"...\", \"files\":[...], \"api_contract\":\"...\", \
+                             \"data_changes\":\"...\", \"test_plan\":\"...\"}}). \
+                             Parse error: {parse_err}\n\nRepair it into VALID design JSON — \
+                             preserve the content, fix the structure only. Output ONLY the JSON \
+                             object, no prose, no code fences.\n\nFAILED OUTPUT:\n{}",
+                            &raw[..raw.len().min(8000)]
+                        ),
+                        work_dir: self.work_dir.clone(),
+                        timeout: Duration::from_secs(120),
+                        escalation_level: u8::try_from(attempt.saturating_sub(1)).unwrap_or(3),
+                        label: Some(id.to_string()),
+                    };
+                    match self.engine.run(req).await {
+                        Ok(o) if o.succeeded() => match parse_design(&o.stdout) {
+                            Ok(d) => {
+                                repaired = Some(d);
+                                break;
+                            }
+                            Err(e) => {
+                                parse_err = e;
+                                raw = o.stdout;
+                                tracing::warn!(
+                                    "SA design repair attempt {attempt} for {id} still unparseable: {parse_err}"
+                                );
+                            }
+                        },
+                        Ok(o) => {
+                            tracing::warn!(
+                                "SA design repair attempt {attempt} for {id} failed: {}",
+                                o.stderr.chars().take(200).collect::<String>()
+                            );
+                            break;
+                        }
+                        Err(e) => {
+                            tracing::warn!("SA design repair attempt {attempt} for {id} error: {e}");
+                            break;
+                        }
+                    }
+                }
+                let Some(repaired) = repaired else {
                     self.store.release_stage(&id, "sa", &worker).await.ok();
-                    return Err(PortError::Corrupt(format!("SA output: {first}")).into());
+                    return Err(PortError::Corrupt(format!("SA output: {parse_err}")).into());
                 };
                 repaired
             }
@@ -307,6 +385,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             work_dir: self.work_dir.clone(),
             timeout: std::time::Duration::from_secs(600),
             escalation_level: 1,
+            label: Some(id.to_string()),
         };
         let out = self.engine.run(request).await.ok()?;
         if !out.succeeded() {
@@ -383,6 +462,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             work_dir: self.work_dir.clone(),
             timeout: std::time::Duration::from_secs(300),
             escalation_level: 1, // the critic runs on the stronger ladder model
+            label: Some(id.to_string()),
         };
         let critique = match self.engine.run(critique_req).await {
             Ok(o) if o.succeeded() => o.stdout.trim().to_owned(),
@@ -402,6 +482,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             work_dir: self.work_dir.clone(),
             timeout: std::time::Duration::from_secs(600),
             escalation_level: 0,
+            label: Some(id.to_string()),
         };
         match self.engine.run(revise_req).await {
             Ok(o) if o.succeeded() => parse_design(&o.stdout).unwrap_or(design),
@@ -415,6 +496,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
         title: &str,
         memory: &str,
         knowledge: &str,
+        steering: &str,
     ) -> AgentRequest {
         let _choice = self.config.engine.resolve(Role::Sa);
         let context_block = self
@@ -428,7 +510,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             role: Role::Sa,
             system_prompt: prompts::system_prompt(prompts::SA),
             task_prompt: format!(
-                "Design feature {id}: {title}{context_block}{stack}{}{}{knowledge}{memory}",
+                "Design feature {id}: {title}{context_block}{stack}{}{}{knowledge}{memory}{steering}{}",
                 prompts::focus_block(self.files.as_deref(), &self.work_dir, title).await,
                 prompts::repo_map_block(
                     self.files.as_deref(),
@@ -436,10 +518,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
                     self.config.workflow.token_saver,
                 )
                 .await,
+                prompts::BRIEF_PROTOCOL,
             ),
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(1200),
             escalation_level: 0,
+            label: Some(id.to_string()),
         }
     }
 }
@@ -504,6 +588,7 @@ mod tests {
                 trace: String::new(),
                 session_id: None,
                 sandbox: SandboxStatus::default(),
+                engine: String::new(),
             })
         }
     }

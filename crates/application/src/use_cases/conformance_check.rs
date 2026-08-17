@@ -173,13 +173,11 @@ mod tests {
     async fn files_bug_for_typescript_server_drift() {
         let root = std::path::PathBuf::from("/w");
         let store = Arc::new(MemStore::default());
-        let uc = RunConformanceUseCase::new(
-            Arc::clone(&store),
-            root.clone(),
-            vec![rust_server_rule()],
-        )
-        .with_files(Some(Arc::new(FixedFiles(vec![root
-            .join("server/src/index.ts")]))));
+        let uc =
+            RunConformanceUseCase::new(Arc::clone(&store), root.clone(), vec![rust_server_rule()])
+                .with_files(Some(Arc::new(FixedFiles(vec![
+                    root.join("server/src/index.ts")
+                ]))));
         let filed = uc.execute().await.expect("run");
         assert!(!filed.is_empty(), "should file drift bugs");
 

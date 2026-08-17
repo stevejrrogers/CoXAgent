@@ -152,23 +152,56 @@ async function saveGoal(){
 function toggleProjMenu(e){e.stopPropagation();const m=document.getElementById("proj-menu");if(m.classList.contains("open")){closeProjMenu();return;}renderProjMenu();m.classList.add("open");}
 function closeProjMenu(){document.getElementById("proj-menu").classList.remove("open");}
 document.addEventListener("click",e=>{const pk=document.querySelector(".projpick");if(pk&&!pk.contains(e.target))closeProjMenu();});
+// Projects the hub could not load (a coxagent.json it cannot parse). They are
+// listed but never selectable — there is no store, runner or route behind one,
+// so switching to it would only produce 404s (COX-B043).
+let BROKEN_PROJECTS=[];
+// Ids already announced this page load: loadProjects() re-runs on every create,
+// rename and delete, and a broken config is a boot-time fact that has not
+// changed since the last toast — announcing it again is noise, not news.
+const BROKEN_ANNOUNCED=new Set();
+function announceBroken(){
+  for(const b of BROKEN_PROJECTS){
+    if(BROKEN_ANNOUNCED.has(b.id))continue;
+    BROKEN_ANNOUNCED.add(b.id);
+    toasty(`Project "${b.name||b.id}" did not load: ${b.error||"invalid config"}`,"err");
+  }
+}
+// esc() leaves quotes alone, which is fine between tags but not INSIDE an
+// attribute — and a serde message routinely carries them ("invalid type:
+// string \"twenty\""), so a raw error in title="…" would close the attribute.
+const escAttr=s=>esc(s).replace(/"/g,"&quot;");
+function brokenProjMenuHtml(){
+  if(!BROKEN_PROJECTS.length)return "";
+  return '<div class="projitem" style="cursor:default;color:var(--muted);font-size:11px">Not loaded — fix the config, then restart the hub</div>'+
+    BROKEN_PROJECTS.map(p=>`<div class="projitem" style="cursor:not-allowed;opacity:.75" title="${escAttr(p.error||"")}">
+    <span class="pi-mk" style="background:var(--card2)"><i class="ti ti-alert-triangle"></i></span>
+    <span class="pi-meta"><span class="pi-name">${esc(p.name||p.id)}</span><span class="pi-sub">${esc(p.config_path||p.id)}</span></span></div>`).join("");
+}
 function renderProjMenu(){
   const m=document.getElementById("proj-menu");
-  if(!PROJECTS.length){m.innerHTML='<div class="projitem" style="cursor:default;color:var(--muted)">No projects yet</div>';return;}
+  if(!PROJECTS.length&&!BROKEN_PROJECTS.length){m.innerHTML='<div class="projitem" style="cursor:default;color:var(--muted)">No projects yet</div>';return;}
   m.innerHTML=PROJECTS.map(p=>`<div class="projitem${p.id===PID?' sel':''}" onclick="switchProject('${esc(p.id)}')">
     <span class="pi-mk">${esc(projInitial(p))}</span>
     <span class="pi-meta"><span class="pi-name">${esc(p.name)}</span><span class="pi-sub">${p.alias?esc(p.alias):esc(p.id)}</span></span>
     <i class="ti ti-check pi-check"></i>
-    <i class="ti ti-trash pi-del" title="Remove project" onclick="event.stopPropagation();deleteProject('${esc(p.id)}')"></i></div>`).join("");
+    <i class="ti ti-trash pi-del" title="Remove project" onclick="event.stopPropagation();deleteProject('${esc(p.id)}')"></i></div>`).join("")
+    +brokenProjMenuHtml();
 }
 async function loadProjects(){
   let list=[];try{list=await(await fetch("/api/projects")).json();}catch(e){}
-  PROJECTS=list;
+  // A project that failed to load is absent from every other API — keep it out
+  // of PROJECTS (which drives selection everywhere) but SHOW it, so an
+  // unparseable config reads as "this project is broken, here is the file"
+  // instead of "this project vanished" (COX-B043).
+  BROKEN_PROJECTS=list.filter(p=>p&&p.broken);
+  PROJECTS=list.filter(p=>p&&!p.broken);
+  announceBroken();
   // System chat + meetings are WORKSPACE-level: connect the live socket even
   // with zero projects, so invites/reminders/rings always reach the user.
-  if(!list.length){renderProjBtn();initChatBackground();return;}
+  if(!PROJECTS.length){renderProjBtn();initChatBackground();return;}
   const saved=localStorage.getItem("coxpid");
-  PID=(saved&&list.some(p=>p.id===saved))?saved:list[0].id;
+  PID=(saved&&PROJECTS.some(p=>p.id===saved))?saved:PROJECTS[0].id;
   renderProjBtn();
   loadBudget();loadComments();connect();initChatBackground();
 }
@@ -320,9 +353,26 @@ async function deleteProject(id){
   }catch(e){toasty("Network error","err");}
 }
 let ME=null;
+const NEXT_KEY="cox_next";
+// Where the guest was trying to go when the auth gate intercepted them. The
+// explicit ?next=<path> query param wins; otherwise we keep whatever hash or
+// search the URL already carried. Saved so a successful login can return them
+// there even when the redirect reloads (fresh location.hash) in between.
+function rememberDestination(){
+  try{
+    const q=new URLSearchParams(location.search);
+    const next=q.get("next"); // already percent-decoded by URLSearchParams
+    // Accept either /path or #fragment form; otherwise keep whatever hash/search
+    // the URL already carries so a reload between gate and login still returns.
+    const target=(typeof next==="string"&&(next.startsWith("/")||next.startsWith("#")))
+      ?next
+      :((location.hash+location.search)||"/");
+    if(target&&target!=="/")sessionStorage.setItem(NEXT_KEY,target);
+  }catch(e){}
+}
 async function boot(){
-  let r;try{r=await fetch("/api/auth/me");}catch(e){showLogin();return;}
-  if(r.status===401){showLogin();return;}
+  let r;try{r=await fetch("/api/auth/me");}catch(e){rememberDestination();showLogin();return;}
+  if(r.status===401){rememberDestination();showLogin();return;}
   try{ME=await r.json();}catch(e){ME={auth:false};}
   try{updateSegments();}catch(e){}
   startApp();
@@ -337,34 +387,69 @@ function startApp(){
   ensureNotifPermission();
   checkAppUpdate();setInterval(checkAppUpdate,5*60*1000);
   window.addEventListener("focus",()=>checkAppUpdate());
-  fetch("/api/health").then(r=>r.json()).then(h=>{const b=document.getElementById("brand-ver");if(b&&h.version)b.textContent="v"+h.version;}).catch(()=>{});
+  // Health is one cheap JSON with the hub's version in it: poll it, keep the
+  // brand chip honest, and reload the window when the hub upgrades under it.
+  const pollHealth=()=>fetch("/api/health").then(r=>r.json()).then(h=>{
+    const b=document.getElementById("brand-ver");if(b&&h.version)b.textContent="v"+h.version;
+    hubUpgradeReload(h.version);
+  }).catch(()=>{});
+  pollHealth();setInterval(pollHealth,30*1000);
   setTimeout(centerContent,200);
 }
 const AGENT_CLIS={claude:{label:"Claude Code",desc:"Anthropic's coding agent",install:"curl -fsSL https://claude.ai/install.sh | bash",docs:"https://claude.com/claude-code"},
   opencode:{label:"opencode",desc:"open-source multi-model agent",install:"curl -fsSL https://opencode.ai/install | bash",docs:"https://opencode.ai"}};
+// Which machine each engine was found on: "hub" for the server's own PATH, else
+// the runner that reported it. Lets the wizard say "installed · luton@mac"
+// instead of implying it sits on the machine you are reading this from.
+function engineHosts(list){
+  const m={};
+  for(const e of (list||[])){ if(e&&e.name) m[String(e.name).toLowerCase()]=e.where||"hub"; }
+  return m;
+}
 async function checkAgentSetup(force){
   let list=[];try{list=await(await fetch("/api/engines")).json();}catch(e){}
   const have=new Set((list||[]).map(e=>e.name.toLowerCase()));
-  window._engines=have;
+  window._engines=have; window._engineHosts=engineHosts(list);
   const dismissed=localStorage.getItem("coxSetupDone")==="1";
   const runnable=[...have].some(n=>n==="claude"||n==="opencode");
   if(runnable)localStorage.setItem("coxSetupDone","1");
-  // If engines list is empty (Docker/no CLI), auto-dismiss so dashboard works
-  // without showing the setup wizard on every login.
-  if(have.size===0){localStorage.setItem("coxSetupDone","1");}
+  // An empty list used to be auto-dismissed, because a hub in a container
+  // detected nothing and nagged every login. /api/engines now also reports what
+  // each live runner found on ITS machine, so empty finally means what it says:
+  // no agent CLI anywhere on this team. That is precisely when the guide helps.
   if(!force&&(runnable||dismissed))return;
   renderSetupWizard(have);
   document.getElementById("ov-setup").classList.add("open");
 }
+// Which OS is reading this page. The shell one-liners below are macOS/Linux
+// only; on Windows they are worse than useless — they look like something you
+// could paste. There the download page is the honest primary path.
+function setupPlatform(){
+  const s=(navigator.userAgentData&&navigator.userAgentData.platform)||navigator.platform||"";
+  if(/win/i.test(s))return "windows";
+  if(/mac/i.test(s))return "macos";
+  return "linux";
+}
 function renderSetupWizard(have){
+  const win=setupPlatform()==="windows";
   const rows=Object.entries(AGENT_CLIS).map(([k,c])=>{
     const ok=have.has(k);
+    // Where an engine was found matters once runners are remote: "installed"
+    // on someone else's machine is not something to install again here.
+    const on=(window._engineHosts&&window._engineHosts[k])||"";
+    const pill=ok
+      ?`<span class="setpill on">installed${on&&on!=="hub"?" · "+esc(workerLabel(on,Object.values(window._engineHosts||{}))):""}</span>`
+      :'<span class="setpill">not found</span>';
+    const dl=`<a href="${c.docs}" target="_blank" rel="noopener" class="setlink"><i class="ti ti-download" style="font-size:12px"></i> Download for ${win?"Windows":setupPlatform()==="macos"?"macOS":"Linux"}</a>`;
     return `<div class="setrow ${ok?'ok':''}">
       <div class="setmk">${ok?'<i class="ti ti-check"></i>':'<i class="ti ti-download"></i>'}</div>
-      <div style="flex:1;min-width:0"><div class="setname">${esc(c.label)} ${ok?'<span class="setpill on">installed</span>':'<span class="setpill">not found</span>'}</div>
+      <div style="flex:1;min-width:0"><div class="setname">${esc(c.label)} ${pill}</div>
         <div class="setdesc">${esc(c.desc)}</div>
-        ${ok?'':`<div class="setcmd"><code id="cmd-${k}">${esc(c.install)}</code><button onclick="copyCmd('${k}')" title="Copy"><i class="ti ti-copy"></i></button></div>
-          <a href="${c.docs}" target="_blank" rel="noopener" class="setlink">Installation guide <i class="ti ti-external-link" style="font-size:12px"></i></a>`}</div></div>`;
+        ${ok?'':(win
+          ?`${dl}<div class="setdesc" style="margin-top:6px">The one-line installer is macOS/Linux only.</div>`
+          :`<div class="setcmd"><code id="cmd-${k}">${esc(c.install)}</code><button onclick="copyCmd('${k}')" title="Copy"><i class="ti ti-copy"></i></button></div>
+            <div style="display:flex;gap:12px;flex-wrap:wrap">${dl}
+            <a href="${c.docs}" target="_blank" rel="noopener" class="setlink">Installation guide <i class="ti ti-external-link" style="font-size:12px"></i></a></div>`)}</div></div>`;
   }).join("");
   const anyOk=[...have].some(n=>n==="claude"||n==="opencode");
   document.getElementById("setup-body").innerHTML=`
@@ -383,6 +468,7 @@ async function recheckAgents(){
   const btn=document.getElementById("set-recheck");const old=btn.innerHTML;btn.innerHTML='<i class="ti ti-loader-2"></i> Checking…';
   let list=[];try{list=await(await fetch("/api/engines")).json();}catch(e){}
   const have=new Set((list||[]).map(e=>e.name.toLowerCase()));window._engines=have;
+  window._engineHosts=engineHosts(list);
   renderSetupWizard(have);btn.innerHTML=old;
   if([...have].some(n=>n==="claude"||n==="opencode")){localStorage.setItem("coxSetupDone","1");}
 }
@@ -410,13 +496,23 @@ async function doLogin(){
     }
     document.getElementById("lg-pass").value="";document.getElementById("lg-totp").value="";
     document.getElementById("lg-totp-row").style.display="none";
+    // Return a guest to where they were headed before the gate intercepted
+    // them (see rememberDestination): navigate there once auth succeeds.
+    const next=sessionStorage.getItem(NEXT_KEY);
+    sessionStorage.removeItem(NEXT_KEY);
     await boot();
+    // A guest who asked for ?next=<hash> lands back on that view once signed
+    // in; an invalid/nonexistent fragment safely falls through to overview.
+    if(next){
+      const frag=(next.indexOf("#")>=0)?next.slice(next.indexOf("#")+1).split("?")[0]:"";
+      if(frag&&TITLES[frag])nav(frag);
+    }
   }catch(e){err.textContent="Network error.";}
 }
 async function doLogout(){try{await fetch("/api/auth/logout",{method:"POST"});}catch(e){}location.reload();}
 // Role capabilities (mirror of AuthRole in the backend).
 const LEAD_ROLES=["director","manager","techlead","dslead","dalead"];
-const ROLE_LABELS={super:"Super Admin",admin:"Admin",director:"Director",manager:"Manager",techlead:"Tech.Lead",dslead:"DS.Lead",dalead:"DA.Lead",ba:"BA",fe:"FE",be:"BE",aie:"AIE",ds:"DS",da:"DA",de:"DE",reviewer:"Reviewer",viewer:"Viewer"};
+const ROLE_LABELS={super:"Super Admin",admin:"Admin",director:"Director",manager:"Manager",techlead:"Tech.Lead",dslead:"DS.Lead",dalead:"DA.Lead",ba:"BA",po:"PO",sa:"SA",sm:"SM",qa:"QA",fe:"FE",be:"BE",aie:"AIE",ds:"DS",da:"DA",de:"DE",reviewer:"Reviewer",viewer:"Viewer"};
 function roleLabel(r){return ROLE_LABELS[r]||r;}
 function roleCanWrite(r){return r!=="viewer";}
 function roleCanCreateChannel(r){return r==="super"||r==="admin"||LEAD_ROLES.includes(r);}
@@ -1170,14 +1266,12 @@ async function openAgent(role,worker){
     :'<div class="empty">no recorded actions yet</div>';
   const body=document.getElementById("agent-transcript");
   body.innerHTML='<div class="wl-empty"><i class="ti ti-loader-2"></i> loading…</div>';
-  AGENT_LOG_LAST=null;   // force a fresh render for this role/operator
+  AGENT_LOG_SIGS=[];   // force a fresh render for this role/operator
   document.getElementById("ov-agent").classList.add("open");
   AGENT_LOG_ROLE=role.toLowerCase().replace(/-/g,"_");  // serde key: DEV-FEATURE→dev_feature
-  await pollAgentLog();               // first fetch now
-  clearInterval(AGENT_LOG_TIMER);
-  AGENT_LOG_TIMER=setInterval(pollAgentLog,1500);  // then live every 1.5s
+  restartAgentLog();
 }
-let AGENT_LOG_TIMER=null, AGENT_LOG_ROLE=null, AGENT_LOG_WORKER="", AGENT_LOG_LAST=null;
+let AGENT_LOG_ES=null, AGENT_LOG_ROLE=null, AGENT_LOG_WORKER="", AGENT_LOG_BUF="", AGENT_LOG_LIVE=false, AGENT_LOG_DONE=false, AGENT_LOG_INIT=false, AGENT_LOG_SIGS=[];
 // Icon + colour for a tool name, so every engine's tool calls read at a glance.
 // A tool call, said in words: "Read run_chat_reply.rs:400-500" instead of a
 // truncated JSON blob. Long absolute paths collapse to the part a reader
@@ -1206,6 +1300,10 @@ function wlSay(name,args){
   if(n==="bash"){
     let c=String(a.command||"").replace(/\s+/g," ").trim();
     if(!c)c=raw.replace(/^\{|\}$/g,"").replace(/\s+/g," ").slice(0,92);
+    // Strip the boilerplate that fronts almost every agent command — a
+    // `cd <worktree> &&` prefix and absolute tool paths — so the meaningful
+    // part shows: "cargo test -p …" not "cd /tmp/pr-review-b043 && /opt/…".
+    c=c.replace(/^cd\s+\S+\s*&&\s*/,"").replace(/\/\S*\/(cargo|npm|npx|node|git|python3?|sed|grep|rg)\b/g,"$1");
     return {verb:"Run",detail:c.length>92?c.slice(0,92)+"…":(c||"(command not logged)")};
   }
   if(n==="grep")return {verb:"Search",detail:[a.pattern,a.path?"in "+wlShortPath(a.path):""].filter(Boolean).join(" ")};
@@ -1213,6 +1311,10 @@ function wlSay(name,args){
   if(n==="webfetch")return {verb:"Fetch",detail:a.url||""};
   if(n==="task"||n==="agent")return {verb:"Delegate",detail:a.description||""};
   if(n==="todowrite")return {verb:"Update plan",detail:""};
+  if(n==="reportfindings"||n==="structuredoutput"){
+    const v=a.decision||a.verdict||"";
+    return {verb:"Review verdict",detail:v?String(v).replace(/_/g," "):""};
+  }
   // Unknown tool: keep the name, show the first meaningful argument.
   const first=Object.entries(a).find(([,v])=>typeof v==="string"&&v.trim());
   return {verb:name,detail:first?String(first[1]).slice(0,80):""};
@@ -1271,8 +1373,13 @@ function parseWorklog(raw){
     if(s.startsWith("💬")){ flush(); cur={k:"msg",text:s.slice(2).replace(/^\s+/,"")}; continue; }
     if(s.startsWith("🔧")){ flush(); const m=s.slice(2).trim(); const i=m.indexOf("(");
       items.push({k:"tool",name:i>=0?m.slice(0,i):m,args:i>=0?m.slice(i+1).replace(/\)$/,""):""}); continue; }
-    const rm=s.match(/^\s*↳\s*result\s*\(([^)]*)\)/);
-    if(rm){ flush(); items.push({k:"result",info:rm[1]}); continue; }
+    // Result line: the backend now emits a human summary ("↳ ✓ 220 passed");
+    // the older "↳ result (396 chars)" form is still parsed for old logs.
+    const rm=s.match(/^\s*↳\s*(.+?)\s*$/);
+    if(rm){ flush(); const old=rm[1].match(/^result\s*\(([^)]*)\)$/); items.push({k:"result",info:old?old[1]:rm[1],body:[]}); continue; }
+    // Preview line (actual output, indented with ┆): attach to the last result.
+    const pv=s.match(/^\s*┆ ?(.*)$/);
+    if(pv){ const last=items[items.length-1]; if(last&&last.k==="result"){ (last.body=last.body||[]).push(pv[1]); } continue; }
     // continuation / plain text
     if(cur&&cur.k==="msg") cur.text+="\n"+s;
     else if(s.trim()) cur={k:"msg",text:s};
@@ -1280,46 +1387,156 @@ function parseWorklog(raw){
   flush();
   return items;
 }
-function renderWorklog(items,live){
-  const parts=items.map(it=>{
-    if(it.k==="meta") return `<div class="wl-item wl-meta"><i class="ti ti-player-play"></i> ${esc(it.text)}</div>`;
-    if(it.k==="end")  return `<div class="wl-item wl-end"><span><i class="ti ti-circle-check"></i> run finished</span></div>`;
-    if(it.k==="tool"){ const m=wlToolMeta(it.name);
-      // Harness-control calls read like errors to a person ("ScheduleWakeup
-      // {stop:true}"?!) — annotate them in plain language instead.
-      const note=wlHarnessNote(it.name,it.args);
-      if(note) return `<div class="wl-item wl-tool"><span class="wl-chip"><i class="ti ti-clock-pause wl-tic" style="color:var(--muted)"></i><span class="wl-tname">${esc(note)}</span></span></div>`;
-      const said=wlSay(it.name,it.args);
-      return `<div class="wl-item wl-tool"><span class="wl-chip"><i class="ti ${m.ic} wl-tic" style="color:var(${m.col})"></i><span class="wl-tname">${esc(said.verb)}</span>${said.detail?`<span class="wl-targs">${esc(said.detail)}</span>`:""}</span></div>`; }
-    if(it.k==="result") return `<div class="wl-item wl-result"><span class="wl-rin"><i class="ti ti-corner-down-right"></i> ${esc(it.info)}</span></div>`;
-    return `<div class="wl-item wl-msg"><span class="wl-ic"><i class="ti ti-sparkles"></i></span><div class="wl-body">${wlFmt(it.text)}</div></div>`;
-  });
-  if(live) parts.push(`<div class="wl-typing"><span class="wl-ic"><i class="ti ti-sparkles"></i></span><span class="dots"><i></i><i></i><i></i></span></div>`);
-  return parts.join("");
+// A review/structured-output line is often the model's final answer dumped as
+// raw JSON — `{"decision":"approve","summary":"…"}`. Rendered verbatim it is a
+// wall of braces; parse it into a verdict badge + the summary as prose.
+function wlVerdictCard(text){
+  const t=String(text||"").trim();
+  if(!t.startsWith("{"))return null;
+  let o;try{o=JSON.parse(t);}catch(e){return null;}
+  if(!o||typeof o!=="object")return null;
+  // A solution-architect plan object: {"approach":…,"files":[…],"api_contract":…,…}.
+  // Rendered verbatim it is a wall of braces — show the approach as prose and
+  // tuck the rest behind a toggle so the live log reads like a plan, not JSON.
+  if(typeof o.approach==="string" && o.approach.trim()){
+    const files=Array.isArray(o.files)?o.files.filter(Boolean):[];
+    const rows=[];
+    for(const key of ["api_contract","data_changes","test_plan"]){
+      const v=o[key];
+      if(typeof v==="string"&&v.trim()) rows.push([key.replace(/_/g," "),v.trim()]);
+    }
+    const chips=files.length?`<div class="wl-verdict-files">${files.map(f=>`<span class="wl-file">${esc(f)}</span>`).join("")}</div>`:"";
+    const details=rows.length?`<details class="wl-verdict-detail"><summary>plan details</summary>${rows.map(([k,v])=>`<div class="wl-verdict-row"><b>${esc(k)}</b> ${wlFmt(v)}</div>`).join("")}</details>`:"";
+    return `<div class="wl-item wl-msg"><span class="wl-ic"><i class="ti ti-gavel"></i></span>
+      <div class="wl-body"><span class="wl-verdict" style="background:color-mix(in srgb,var(--accent2) 14%,transparent);color:var(--accent2)">Approach</span>
+      <div class="wl-verdict-sum">${wlFmt(o.approach)}</div>${chips}${details}</div></div>`;
+  }
+  if(!/"(decision|verdict)"/.test(t))return null;
+  const d=String(o.decision||o.verdict||"").toLowerCase();
+  if(!d)return null;
+  const summary=o.summary||o.reason||o.rationale||"";
+  const ok=/approve|pass|verified|accept|merge/.test(d);
+  const bad=/reject|request_changes|request-changes|fail|block|deny/.test(d);
+  const col=ok?"--green":(bad?"--red":"--amber");
+  const label=d.replace(/_/g," ").replace(/\b\w/g,c=>c.toUpperCase());
+  return `<div class="wl-item wl-msg"><span class="wl-ic"><i class="ti ti-gavel"></i></span>
+    <div class="wl-body"><span class="wl-verdict" style="background:color-mix(in srgb,var(${col}) 15%,transparent);color:var(${col})">${esc(label)}</span>
+    ${summary?`<div class="wl-verdict-sum">${wlFmt(String(summary))}</div>`:""}</div></div>`;
 }
-async function pollAgentLog(){
-  if(!AGENT_LOG_ROLE)return;
+// One worklog item → its HTML. Extracted from renderWorklog so the live-log
+// renderer can re-render a single changing item without touching its stable
+// siblings (which keeps the user's scroll position and stops the full-render
+// "refresh" flicker on every SSE push).
+function wlItemHtml(it){
+  if(it.k==="meta") return `<i class="ti ti-player-play"></i> ${esc(it.text)}`;
+  if(it.k==="end")  return `<span><i class="ti ti-circle-check"></i> run finished</span>`;
+  if(it.k==="tool"){ const m=wlToolMeta(it.name);
+    // Harness-control calls read like errors to a person ("ScheduleWakeup
+    // {stop:true}"?!) — annotate them in plain language instead.
+    const note=wlHarnessNote(it.name,it.args);
+    if(note) return `<span class="wl-chip"><i class="ti ti-clock-pause wl-tic" style="color:var(--muted)"></i><span class="wl-tname">${esc(note)}</span></span>`;
+    const said=wlSay(it.name,it.args);
+    return `<span class="wl-chip"><i class="ti ${m.ic} wl-tic" style="color:var(${m.col})"></i><span class="wl-tname">${esc(said.verb)}</span>${said.detail?`<span class="wl-targs">${esc(said.detail)}</span>`:""}</span>`; }
+  if(it.k==="result"){
+    const body=(it.body||[]).filter(x=>x!=null);
+    const head=`<i class="ti ti-corner-down-right"></i> ${esc(it.info)}`;
+    if(!body.length) return `<span class="wl-rin">${head}</span>`;
+    // The real output, revealed on click — a summary you can open, not a
+    // dead-end count.
+    return `<details class="wl-out"><summary class="wl-rin">${head} <span class="wl-more">show output</span></summary><pre class="wl-pre">${esc(body.join("\n"))}</pre></details>`;
+  }
+  const card=wlVerdictCard(it.text);
+  if(card) return card;
+  return `<span class="wl-ic"><i class="ti ti-sparkles"></i></span><div class="wl-body">${wlFmt(it.text)}</div>`;
+}
+// A content signature for one parsed item — two renders with the same signature
+// produce identical DOM, so the live renderer can leave them untouched.
+function wlItemSig(it){
+  if(!it) return "";
+  return it.k+"|"+it.name+"|"+it.info+"|"+it.args+"|"+(it.text||"")+"|"+(it.body||[]).join("\n");
+}
+// Real-time live log over SSE: the hub tails the engine's local live file and
+// pushes new bytes down as `init` + `line` events (one global api() scope).
+function restartAgentLog(){
+  closeAgentLog();
+  AGENT_LOG_BUF=""; AGENT_LOG_LIVE=false; AGENT_LOG_DONE=false; AGENT_LOG_INIT=false; AGENT_LOG_SIGS=[];
+  const url=api("/agent-log/stream?role="+encodeURIComponent(AGENT_LOG_ROLE)+(AGENT_LOG_WORKER?"&worker="+encodeURIComponent(AGENT_LOG_WORKER):""));
+  const es=new EventSource(url);
+  AGENT_LOG_ES=es;
+  es.addEventListener("init",e=>{
+    try{const d=JSON.parse(e.data); if(d)AGENT_LOG_LIVE=!!d.live; AGENT_LOG_BUF="";}catch(_){}
+    renderAgentLog(true);
+  });
+  es.addEventListener("line",e=>{
+    try{const d=JSON.parse(e.data);
+      if(d&&d.text){
+        AGENT_LOG_BUF+=d.text;
+        // A complete run pings "end" — stop the typing dots.
+        if(/\b—\s*run finished/.test(d.text))AGENT_LOG_DONE=true;
+      }}catch(_){}
+    scheduleAgentLog();
+  });
+  // Endpoint gone/error — drop the stream; the open button reconnects.
+  es.onerror=()=>{try{es.close()}catch(_){} AGENT_LOG_ES=null;};
+}
+function renderAgentLog(force){
   const body=document.getElementById("agent-transcript");
   const badge=document.getElementById("agent-live-badge");
-  try{
-    const url="/agent-log?role="+encodeURIComponent(AGENT_LOG_ROLE)+(AGENT_LOG_WORKER?"&worker="+encodeURIComponent(AGENT_LOG_WORKER):"");
-    const d=await(await fetch(api(url))).json();
-    if(badge)badge.style.display=d.live?"inline-block":"none";
-    const raw=(d.log||"").trim();
-    // Skip the DOM churn (and preserve the user's scroll) when nothing changed.
-    const sig=raw+"|"+(d.live?1:0);
-    if(sig===AGENT_LOG_LAST)return;
-    AGENT_LOG_LAST=sig;
-    const atBottom=body.scrollHeight-body.scrollTop-body.clientHeight<60;
-    if(!raw){
-      body.innerHTML='<div class="wl-empty"><i class="ti ti-moon-stars"></i> this agent hasn\'t run yet</div>';
-      return;
-    }
-    body.innerHTML=renderWorklog(parseWorklog(raw),d.live);
-    if(atBottom)body.scrollTop=body.scrollHeight;   // follow the tail
-  }catch(e){}
+  if(badge)badge.style.display=AGENT_LOG_LIVE?"inline-block":"none";
+  const items=parseWorklog(AGENT_LOG_BUF);
+  const atBottom=body.scrollHeight-body.scrollTop-body.clientHeight<40;
+  if(items.length===0){
+    // Keep any "hasn't run yet" placeholder unless this is a fresh open.
+    if(!AGENT_LOG_INIT){ body.innerHTML='<div class="wl-empty"><i class="ti ti-moon-stars"></i> this agent hasn\'t run yet</div>'; }
+    AGENT_LOG_INIT=AGENT_LOG_INIT||true; AGENT_LOG_SIGS=[]; updateTyping(body);
+    return;
+  }
+  AGENT_LOG_INIT=true;
+  // Reconcile the parsed items against the existing children: only the item
+  // whose signature changed (the still-being-written tail) gets rebuilt, so
+  // stable items above keep their DOM nodes and the user's scroll is preserved.
+  let touched=false;
+  for(let i=0;i<items.length;i++){
+    const sig=wlItemSig(items[i]);
+    if(AGENT_LOG_SIGS[i]===sig) continue;
+    const nd=document.createElement("div");
+    nd.className="wl-item wl-"+items[i].k;
+    nd.innerHTML=wlItemHtml(items[i]);
+    if(body.children[i]) body.replaceChild(nd, body.children[i]);
+    else body.appendChild(nd);
+    AGENT_LOG_SIGS[i]=sig;
+    touched=true;
+  }
+  // File rotated/truncated → drop children that no longer parse.
+  while(body.children.length>items.length) body.removeChild(body.lastChild);
+  AGENT_LOG_SIGS.length=items.length;
+  updateTyping(body);
+  // Only auto-scroll when the user is already pinned to the bottom.
+  if(touched && (force||atBottom)) body.scrollTop=body.scrollHeight;
 }
-function closeAgent(){clearInterval(AGENT_LOG_TIMER);AGENT_LOG_TIMER=null;AGENT_LOG_ROLE=null;AGENT_LOG_WORKER="";close_('ov-agent');}
+function updateTyping(body){
+  const typing=body.querySelector(":scope > .wl-typing");
+  const want=AGENT_LOG_LIVE&&!AGENT_LOG_DONE;
+  if(want&&!typing){
+    const n=document.createElement("div");
+    n.className="wl-typing";
+    n.innerHTML='<span class="wl-ic"><i class="ti ti-sparkles"></i></span><span class="dots"><i></i><i></i><i></i></span>';
+    body.appendChild(n);
+  } else if(!want&&typing){ typing.remove(); }
+}
+// Coalesce many rapid SSE pushes (the tailer can fire several per second) into
+// at most one DOM render per animation frame — that's what kills the "struggles,
+// keeps refreshing" feeling instead of re-rendering on every tiny chunk.
+let AGENT_LOG_RAF=0;
+function scheduleAgentLog(){
+  if(AGENT_LOG_RAF) return;
+  AGENT_LOG_RAF=requestAnimationFrame(()=>{ AGENT_LOG_RAF=0; renderAgentLog(false); });
+}
+function closeAgentLog(){
+  if(AGENT_LOG_RAF){ cancelAnimationFrame(AGENT_LOG_RAF); AGENT_LOG_RAF=0; }
+  if(AGENT_LOG_ES){try{AGENT_LOG_ES.close()}catch(_){} AGENT_LOG_ES=null;}
+}
+function closeAgent(){closeAgentLog();AGENT_LOG_ROLE=null;AGENT_LOG_WORKER="";close_('ov-agent');}
 async function openTranscript(enc,name){
   document.getElementById("tr-title").textContent=name;
   document.getElementById("tr-body").textContent="loading…";

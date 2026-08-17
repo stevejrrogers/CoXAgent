@@ -184,6 +184,80 @@ impl SqlAuthService {
         }
     }
 
+    /// Read a live session's username from the in-memory cache, pruning it when
+    /// expired. `None` when the token is unknown locally or past its deadline.
+    fn cached_username(&self, token: &str) -> Option<String> {
+        let mut sessions = self.sessions.lock().ok()?;
+        let session = sessions.get(token)?;
+        if session.expires <= Instant::now() {
+            sessions.remove(token);
+            return None;
+        }
+        Some(session.user.username.clone())
+    }
+
+    /// Pull a session the local cache is missing from the shared durable store,
+    /// populate the cache, and return its username. `None` when no live session
+    /// exists there either.
+    ///
+    /// This is what makes the four-service split validate correctly: the gateway
+    /// mints the login cookie and writes the session to the shared store, but a
+    /// realtime (or a second gateway replica) that was already running never saw
+    /// it — `load_sessions` only snapshots the store at startup. Without this
+    /// per-request hydration those peers answer 401 for every cookie issued
+    /// after they booted (the `/events` SSE stream on realtime being the visible
+    /// symptom).
+    async fn hydrate_session(&self, token: &str) -> Option<String> {
+        let now = unix_now();
+        if self.redis.is_some() {
+            let mut c = self.redis_conn().await?;
+            let js = redis::cmd("GET")
+                .arg(session_key(token))
+                .query_async::<Option<String>>(&mut c)
+                .await
+                .ok()??;
+            let rec = serde_json::from_str::<SessionRec>(&js).ok()?;
+            if rec.expires <= now {
+                return None;
+            }
+            let username = rec.username.clone();
+            self.cache_session(
+                token.to_owned(),
+                rec.username,
+                role_from(&rec.role),
+                rec.label,
+                rec.at,
+                rec.expires.saturating_sub(now),
+            );
+            return Some(username);
+        }
+        // No Redis: the durable copy is the Postgres `auth_sessions` table.
+        let client = self.client().await.ok()?;
+        let now_i = i64::try_from(now).unwrap_or(i64::MAX);
+        let row = client
+            .query_opt(
+                "SELECT username, role, expires, label, at FROM auth_sessions WHERE token = $1 AND expires > $2",
+                &[&token, &now_i],
+            )
+            .await
+            .ok()??;
+        let username: String = row.get(0);
+        let role = role_from(&row.get::<_, String>(1));
+        let expires_unix: i64 = row.get(2);
+        let label: String = row.get(3);
+        let at: String = row.get(4);
+        let remaining = u64::try_from((expires_unix - now_i).max(0)).unwrap_or(0);
+        self.cache_session(
+            token.to_owned(),
+            username.clone(),
+            role,
+            label,
+            at,
+            remaining,
+        );
+        Some(username)
+    }
+
     /// Restore non-expired sessions into the in-memory cache so a hub restart
     /// keeps everyone logged in. Reads from Redis when configured, else Postgres.
     async fn load_sessions(&self) {
@@ -559,14 +633,11 @@ impl AuthPort for SqlAuthService {
     }
 
     async fn user_for(&self, token: &str) -> Option<AuthUser> {
-        let username = {
-            let mut sessions = self.sessions.lock().ok()?;
-            let session = sessions.get(token)?;
-            if session.expires <= Instant::now() {
-                sessions.remove(token);
-                return None;
-            }
-            session.user.username.clone()
+        // Local cache first; on a miss, hydrate from the shared store so a cookie
+        // minted by a peer instance after we started still validates here.
+        let username = match self.cached_username(token) {
+            Some(u) => u,
+            None => self.hydrate_session(token).await?,
         };
         // Resolve the account FRESH per request (same fix as the file store):
         // the session snapshot made role promotions and membership grants
@@ -642,6 +713,44 @@ impl AuthPort for SqlAuthService {
             .await
             .ok()?;
         Some(secret)
+    }
+
+    /// Harvest a personal bearer token at login time on the same self-service
+    /// path as `/my/tokens` (`user:{name}:{...}` prefix), bound to the user's OWN
+    /// role. Idempotent per user: once one exists we neither re-mint nor re-issue
+    /// the plaintext (only its hash is stored), so `Some` comes back exactly on
+    /// first harvest and `None` thereafter without erroring — matching how every
+    /// other token secret in this store is returned only once.
+    async fn auto_issue_personal_token(&self, username: &str) -> Option<String> {
+        let prefix = format!("user:{}:", username.to_ascii_lowercase());
+        let client = self.client().await.ok()?;
+        // Idempotent: an existing personal token for this user wins; do not mint a duplicate.
+        if client
+            .query_opt(
+                "SELECT 1 FROM auth_tokens WHERE label LIKE $1",
+                &[&format!("{prefix}%")],
+            )
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            return None;
+        }
+        // Bind to the caller's own stored role — never an elevation.
+        let role_str = client
+            .query_opt(
+                "SELECT role FROM auth_users WHERE username = $1",
+                &[&username],
+            )
+            .await
+            .ok()
+            .flatten()?
+            .get::<_, Option<String>>(0)?;
+        // Same path as create_my_token_ep(): mint via create_token under the
+        // user-prefixed label; a deterministic label keeps re-login idempotent.
+        self.create_token(&format!("{prefix}remote-store"), role_from(&role_str))
+            .await
     }
 
     async fn list_tokens(&self) -> Vec<TokenInfo> {

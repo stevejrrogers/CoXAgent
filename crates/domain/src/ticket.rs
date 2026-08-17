@@ -9,67 +9,9 @@ use crate::ids::TicketId;
 use crate::transitions::{can_transition, field_permitted, transition_allowed};
 use serde::{Deserialize, Serialize};
 
-/// The single ticket kind, discriminated by `type` (anti-Jira: one entity).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TicketType {
-    Feature,
-    Bug,
-    Chore,
-}
-
-/// Three-level priority — deliberately coarse.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Priority {
-    Low,
-    Medium,
-    High,
-}
-
-/// Coarse sizing used for the SA design gate (small can auto-pass).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Complexity {
-    Small,
-    Medium,
-    Large,
-}
-
-/// Lifecycle status. Feature/chore and bug share `InProgress` and `Rejected`;
-/// the transition table keeps the two lifecycles distinct per [`TicketType`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Status {
-    // Feature / chore lifecycle
-    Pending,
-    Ready,
-    InProgress,
-    Done,
-    Documented,
-    Rejected,
-    // Bug lifecycle
-    Open,
-    Fixed,
-    Verified,
-}
-
-/// The nine team roles plus `User` (super-PO) and `System` (automated bookkeeping).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Role {
-    Ba,
-    Po,
-    Sm,
-    Sa,
-    Pd,
-    DevBug,
-    DevFeature,
-    Test,
-    Docs,
-    User,
-    System,
-}
+// Value objects live in `kinds`; re-exported here so existing paths like
+// `crate::ticket::{Status, TicketType}` keep resolving without a cycle.
+pub use crate::kinds::{Complexity, Priority, Role, Status, TicketType};
 
 /// Technical design authored by SA. Presence gates `Pending -> Ready`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +43,51 @@ pub struct Design {
     pub ux: Option<UxDesign>,
 }
 
+/// The status of a single test case as verified by the TEST agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TestCaseStatus {
+    /// Not yet verified.
+    Pending,
+    /// The TEST agent marked this case as passing its acceptance criterion.
+    Passed,
+    /// The TEST agent found the case failing (this is usually a bug in the
+    /// ticket's own DoD, distinct from a separately-filed bug ticket).
+    Failed,
+}
+
+fn default_pending() -> TestCaseStatus {
+    TestCaseStatus::Pending
+}
+
+/// Optional per-test-case proof attached when the TEST agent verifies a case.
+/// A real captured image (project media URL) and/or a short reproducible note.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaseEvidence {
+    /// Project media URL of a captured screenshot (e.g. `/api/projects/../media/...`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    /// Who/what verified it, or how to reproduce.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// RFC3339 timestamp the evidence was captured.
+    #[serde(default)]
+    pub at: String,
+}
+
+/// One test case on a ticket — the executable form of an acceptance
+/// criterion — carrying its own verdict and optional evidence. Kept aligned
+/// with `acceptance_criteria` by the agents; each case is marked pass/fail by
+/// the TEST agent when it verifies the ticket.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TestCase {
+    pub description: String,
+    #[serde(default = "default_pending")]
+    pub status: TestCaseStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<CaseEvidence>,
+}
+
 /// The ticket aggregate root. Fields are private; all access is via methods so
 /// no code path can produce an inconsistent ticket.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,6 +107,11 @@ pub struct Ticket {
     /// Up to 5 acceptance criteria — the checklist that defines "done".
     #[serde(default)]
     acceptance_criteria: Vec<String>,
+    /// The ticket's test cases — one per acceptance criterion (kept in sync by
+    /// the agents), each carrying its own pass/fail verdict and per-case
+    /// evidence. Persisted with `serde(default)` so old tickets load clean.
+    #[serde(default)]
+    test_cases: Vec<TestCase>,
     /// Worker that holds the in-progress claim (`account@host`), or `None` when
     /// unclaimed. Set atomically when the ticket enters `InProgress`; cleared on
     /// completion or release. Lets concurrent runners on a shared backlog avoid
@@ -174,6 +166,7 @@ impl Ticket {
             parent_id: None,
             depends_on: Vec::new(),
             acceptance_criteria: Vec::new(),
+            test_cases: Vec::new(),
             claimed_by: None,
             claimed_at: None,
             assignee: None,
@@ -200,6 +193,107 @@ impl Ticket {
             .filter(|c| !c.is_empty())
             .take(5)
             .collect();
+    }
+
+    /// The ticket's test cases — one per acceptance criterion, each carrying
+    /// its own verdict and optional per-case evidence.
+    #[must_use]
+    pub fn test_cases(&self) -> &[TestCase] {
+        &self.test_cases
+    }
+
+    /// Reconcile `test_cases` against the current `acceptance_criteria`:
+    /// drop stale cases, add newly-appeared criteria as `Pending`, and keep
+    /// the verdict/evidence of cases that still exist. Call before persisting
+    /// after criteria change, or at load time.
+    pub fn sync_test_cases_from_acceptance(&mut self) {
+        let mut next: Vec<TestCase> = Vec::with_capacity(self.acceptance_criteria.len());
+        for ac in &self.acceptance_criteria {
+            match self.test_cases.iter().find(|t| t.description == *ac) {
+                Some(existing) => next.push(existing.clone()),
+                None => next.push(TestCase {
+                    description: ac.clone(),
+                    status: TestCaseStatus::Pending,
+                    evidence: None,
+                }),
+            }
+        }
+        self.test_cases = next;
+    }
+
+    /// Seed `test_cases` from the acceptance criteria, preserving any existing
+    /// verdict/evidence for criteria that already have a case. No-op when the
+    /// ticket already has as many cases as criteria.
+    pub fn ensure_test_cases_from_acceptance(&mut self) {
+        // In sync only when every case matches its criterion in order. A length
+        // match alone is NOT enough — if criteria were edited to new text (same
+        // count) the old descriptions would otherwise shadow the new ones and
+        // `set_test_case_result` would silently fail to match.
+        let in_sync = self.test_cases.len() == self.acceptance_criteria.len()
+            && self
+                .test_cases
+                .iter()
+                .zip(&self.acceptance_criteria)
+                .all(|(tc, ac)| tc.description == *ac);
+        if in_sync {
+            return;
+        }
+        self.sync_test_cases_from_acceptance();
+    }
+
+    /// Mark one test case pass (or fail, `passed=false`) by its description,
+    /// attaching optional per-case evidence (an image URL + reproducible note)
+    /// and a capture timestamp. A `None` image keeps any image already attached
+    /// so a verdict-only pass never erases an existing screenshot. Returns
+    /// `false` when no case matched.
+    pub fn set_test_case_result(
+        &mut self,
+        description: &str,
+        passed: bool,
+        note: Option<String>,
+        image: Option<String>,
+        at: String,
+    ) -> bool {
+        let Some(tc) = self
+            .test_cases
+            .iter_mut()
+            .find(|t| t.description == description)
+        else {
+            return false;
+        };
+        tc.status = if passed {
+            TestCaseStatus::Passed
+        } else {
+            TestCaseStatus::Failed
+        };
+        let keep_image = image.or_else(|| tc.evidence.as_ref().and_then(|e| e.image.clone()));
+        tc.evidence = Some(CaseEvidence {
+            image: keep_image,
+            note,
+            at,
+        });
+        true
+    }
+
+    /// Attach a captured screenshot URL to a test case's evidence without
+    /// changing its verdict (the TEST agent already marked pass/fail; this is
+    /// the cycle's deterministic screenshot pass filling in the image). Returns
+    /// `false` when no case matched.
+    pub fn set_test_case_image(&mut self, description: &str, image: String, at: String) -> bool {
+        let Some(tc) = self
+            .test_cases
+            .iter_mut()
+            .find(|t| t.description == description)
+        else {
+            return false;
+        };
+        let note = tc.evidence.as_ref().and_then(|e| e.note.clone());
+        tc.evidence = Some(CaseEvidence {
+            image: Some(image),
+            note,
+            at,
+        });
+        true
     }
 
     // --- Accessors ---
@@ -264,7 +358,11 @@ impl Ticket {
     /// Route this ticket to a human (empty clears back to the agent pool).
     pub fn assign_to_human(&mut self, username: &str) {
         let u = username.trim();
-        self.assignee = if u.is_empty() { None } else { Some(u.to_owned()) };
+        self.assignee = if u.is_empty() {
+            None
+        } else {
+            Some(u.to_owned())
+        };
     }
 
     /// RFC3339 time the current claim was taken, or `None` when unclaimed.
@@ -673,5 +771,91 @@ mod tests {
             t.clarify(Role::Ba, "   ").is_err(),
             "blank is not a clarification"
         );
+    }
+
+    #[test]
+    fn ensure_syncs_when_criteria_content_changes_same_count() {
+        let mut t = feature(false);
+        t.set_acceptance_criteria(vec!["old ac".to_owned()]);
+        t.ensure_test_cases_from_acceptance();
+        assert_eq!(t.test_cases().len(), 1);
+        assert_eq!(t.test_cases()[0].description, "old ac");
+        // Criteria edited to NEW text but still one entry: length alone is not
+        // enough — ensure must resync so the case tracks the new criterion.
+        t.set_acceptance_criteria(vec!["new ac".to_owned()]);
+        t.ensure_test_cases_from_acceptance();
+        assert_eq!(t.test_cases().len(), 1);
+        assert_eq!(t.test_cases()[0].description, "new ac");
+        assert_eq!(t.test_cases()[0].status, TestCaseStatus::Pending);
+    }
+
+    #[test]
+    fn set_result_keeps_attached_image_when_none_supplied() {
+        let mut t = feature(false);
+        t.set_acceptance_criteria(vec!["ac one".to_owned()]);
+        t.ensure_test_cases_from_acceptance();
+        assert!(
+            t.set_test_case_result(
+                "ac one",
+                true,
+                Some("verified".to_owned()),
+                None,
+                "t1".into(),
+            ),
+            "verdict without image still matches"
+        );
+        // Later the cycle attaches a screenshot, then a re-run's verdict
+        // (image=None) must NOT wipe it.
+        assert!(t.set_test_case_image("ac one", "/api/.../shot.png".into(), "t2".into()));
+        assert_eq!(
+            t.test_cases()[0]
+                .evidence
+                .as_ref()
+                .unwrap()
+                .image
+                .as_deref(),
+            Some("/api/.../shot.png")
+        );
+        assert!(t.set_test_case_result(
+            "ac one",
+            false,
+            Some("now failing".to_owned()),
+            None,
+            "t3".into()
+        ));
+        let ev = t.test_cases()[0].evidence.as_ref().unwrap();
+        assert_eq!(
+            ev.image.as_deref(),
+            Some("/api/.../shot.png"),
+            "image survives a verdict-only re-run"
+        );
+        assert_eq!(ev.note.as_deref(), Some("now failing"));
+        assert_eq!(t.test_cases()[0].status, TestCaseStatus::Failed);
+    }
+
+    #[test]
+    fn set_result_overwrites_image_when_one_supplied() {
+        let mut t = feature(false);
+        t.set_acceptance_criteria(vec!["ac".to_owned()]);
+        t.ensure_test_cases_from_acceptance();
+        assert!(t.set_test_case_result("ac", true, None, Some("/old.png".into()), "t1".into()));
+        assert!(t.set_test_case_result("ac", true, None, Some("/new.png".into()), "t2".into()));
+        assert_eq!(
+            t.test_cases()[0]
+                .evidence
+                .as_ref()
+                .unwrap()
+                .image
+                .as_deref(),
+            Some("/new.png")
+        );
+    }
+
+    #[test]
+    fn set_result_false_when_no_case_matches() {
+        let mut t = feature(false);
+        t.set_acceptance_criteria(vec!["ac".to_owned()]);
+        t.ensure_test_cases_from_acceptance();
+        assert!(!t.set_test_case_result("does not exist", true, None, None, "t1".into()));
     }
 }

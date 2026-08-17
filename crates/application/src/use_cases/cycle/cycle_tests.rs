@@ -100,6 +100,7 @@ impl AgentEnginePort for RoleAwareEngine {
             trace: String::new(),
             session_id: None,
             sandbox: SandboxStatus::default(),
+            engine: String::new(),
         })
     }
 }
@@ -276,19 +277,33 @@ struct SpyForge {
     mergeable: bool,
     merged: Mutex<Vec<u64>>,
     changes: Mutex<Vec<u64>>,
+    closed: Mutex<Vec<u64>>,
+    /// When `Some`, list two SAME-ticket PRs and serve per-PR diffs — the
+    /// competing-PR scenario. Tuples are `(number, title, diff)`.
+    competing: Option<Vec<(u64, String, String)>>,
 }
 #[async_trait::async_trait]
 impl ForgePort for SpyForge {
-    async fn open_pr(
-        &self,
-        _: &str,
-        _: &str,
-        _: &str,
-        _: &str,
-    ) -> Result<PullRequest, PortError> {
+    async fn open_pr(&self, _: &str, _: &str, _: &str, _: &str) -> Result<PullRequest, PortError> {
         unimplemented!()
     }
     async fn list_open_prs(&self) -> Result<Vec<PullRequest>, PortError> {
+        if let Some(items) = &self.competing {
+            return Ok(items
+                .iter()
+                .map(|(n, t, _)| PullRequest {
+                    number: *n,
+                    title: t.clone(),
+                    head: format!("feat/{n}"),
+                    base: "main".to_owned(),
+                    url: String::new(),
+                    author: "coxagent-bot".to_owned(),
+                    ci: self.ci.clone(),
+                    mergeable: self.mergeable,
+                    created: String::new(),
+                })
+                .collect());
+        }
         Ok(vec![PullRequest {
             number: 7,
             title: "feat(X-1): add a".to_owned(),
@@ -301,7 +316,12 @@ impl ForgePort for SpyForge {
             created: String::new(),
         }])
     }
-    async fn pr_diff(&self, _: u64) -> Result<String, PortError> {
+    async fn pr_diff(&self, n: u64) -> Result<String, PortError> {
+        if let Some(items) = &self.competing {
+            if let Some((_, _, d)) = items.iter().find(|(num, _, _)| *num == n) {
+                return Ok(d.clone());
+            }
+        }
         Ok("+ added a line".to_owned())
     }
     async fn merge_pr(&self, n: u64) -> Result<(), PortError> {
@@ -312,7 +332,8 @@ impl ForgePort for SpyForge {
         self.changes.lock().expect("lock").push(n);
         Ok(())
     }
-    async fn close_pr(&self, _: u64) -> Result<(), PortError> {
+    async fn close_pr(&self, n: u64) -> Result<(), PortError> {
+        self.closed.lock().expect("lock").push(n);
         Ok(())
     }
 }
@@ -335,6 +356,7 @@ impl AgentEnginePort for ReviewEngine {
             trace: String::new(),
             session_id: None,
             sandbox: SandboxStatus::default(),
+            engine: String::new(),
         })
     }
 }
@@ -482,6 +504,91 @@ async fn sa_requests_changes_on_reject_and_never_merges_failing_ci() {
         .await;
     assert!(forge.merged.lock().expect("lock").is_empty());
     assert_eq!(*forge.changes.lock().expect("lock"), vec![7]);
+}
+
+#[tokio::test]
+async fn competing_prs_self_resolve_when_one_covers_the_other() {
+    // The live deadlock: two open PRs for the same ticket. #98's diff covers
+    // every file #89 touches, so the SA closes #89 (duplicate) and lets #98
+    // land — instead of holding both forever waiting on a human. This is what
+    // lets the ticket reach `shipped` and the scorecard reflect real output.
+    let forge = Arc::new(SpyForge {
+        ci: "passing".to_owned(),
+        mergeable: true,
+        competing: Some(vec![
+            (
+                89,
+                "fix(COX-1): the smaller subset fix".to_owned(),
+                "diff --git a/a.rs b/a.rs\n+let x = 1;\n".to_owned(),
+            ),
+            (
+                98,
+                "fix(COX-1): the covering fix".to_owned(),
+                "diff --git a/a.rs b/a.rs\n+let x = 1;\n+let y = 2;\n\
+                 diff --git a/b.rs b/b.rs\n+let z = 3;\n"
+                    .to_owned(),
+            ),
+        ]),
+        ..Default::default()
+    });
+    review_uc(Arc::clone(&forge), "approve", true)
+        .review_open_prs()
+        .await;
+    let merged = forge.merged.lock().expect("lock");
+    let closed = forge.closed.lock().expect("lock");
+    assert!(
+        merged.contains(&98),
+        "the covering fix #98 is the winner and lands: {merged:?}"
+    );
+    assert!(
+        closed.contains(&89),
+        "the duplicate #89 is closed, not parked on a human: {closed:?}"
+    );
+    assert!(
+        !merged.contains(&89) && !closed.contains(&98),
+        "the winner stays open to merge, the loser is never merged: {merged:?}/{closed:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_safe_subset_pr_is_not_held_by_a_load_bearing_competitor() {
+    // The real live pair: #89 is a sprawling same-ticket change that touches
+    // the pipeline (Cargo.toml → `needs_human_eyes` → unsafe), #98 is a small
+    // safe fix that is a strict subset of it. #98 must NOT be blocked by the
+    // risky sibling — it proceeds through normal review and lands.
+    let forge = Arc::new(SpyForge {
+        ci: "passing".to_owned(),
+        mergeable: true,
+        competing: Some(vec![
+            (
+                89,
+                "fix(COX-1): sprawling fix".to_owned(),
+                // Touches Cargo.toml → load-bearing → unsafe_change.
+                "diff --git a/Cargo.toml b/Cargo.toml\n+dep = \"1\"\n\
+                 diff --git a/src/lib.rs b/src/lib.rs\n+let x = 1;\n"
+                    .to_owned(),
+            ),
+            (
+                98,
+                "fix(COX-1): focused fix".to_owned(),
+                "diff --git a/src/lib.rs b/src/lib.rs\n+let x = 1;\n".to_owned(),
+            ),
+        ]),
+        ..Default::default()
+    });
+    review_uc(Arc::clone(&forge), "approve", true)
+        .review_open_prs()
+        .await;
+    let merged = forge.merged.lock().expect("lock");
+    let closed = forge.closed.lock().expect("lock");
+    assert!(
+        merged.contains(&98),
+        "the safe focused fix #98 lands — not held by the sprawling #89: {merged:?}"
+    );
+    assert!(
+        !closed.contains(&89),
+        "the load-bearing #89 is never auto-closed: {closed:?}"
+    );
 }
 
 // ---- COX-F001: auto-rollback to last known-good deploy on failure ----
@@ -986,6 +1093,8 @@ async fn deploy_that_never_binds_its_port_is_treated_as_a_failure() {
     );
 }
 
+// --- COX-B039: a deploy() that ERRORS is a deploy failure too ---------
+
 /// A `DeployPort` whose `deploy()` returns `Err` every call — models a spawn
 /// failure or the 900s `DEPLOY_TIMEOUT` in `docker_compose.rs`, where
 /// `docker compose` never even produced a `DeployReport` to judge success/
@@ -1004,10 +1113,12 @@ impl crate::ports::outbound::DeployPort for DeploySpawnFails {
     }
 }
 
-/// COX-B039: a `deploy()` spawn/timeout `Err` (not just an unhealthy-but-
+/// AC (COX-B039): a `deploy()` spawn/timeout `Err` (not just an unhealthy-but-
 /// completed deploy) must be treated exactly like any other deploy failure —
 /// recorded state, a filed bug, and a `deploy_failed` notification — not
-/// silently swallowed into `report.errors` alone.
+/// silently swallowed into `report.errors` alone. `state.deploy.ok` staying
+/// `true` is what breaks the self-healing retry: `last_deploy_failed` reads
+/// it, so the next leader cycle never retries the deploy either.
 #[tokio::test(start_paused = true)]
 async fn deploy_spawn_error_is_treated_as_a_failure_not_swallowed() {
     let store = Arc::new(MemStore::default());
@@ -1026,13 +1137,13 @@ async fn deploy_spawn_error_is_treated_as_a_failure_not_swallowed() {
     .with_notifier(Arc::clone(&notifier) as Arc<dyn crate::ports::outbound::NotifierPort>);
 
     let report = Box::pin(uc.run_cycle(1)).await;
+    let state = store.load().await.expect("load");
 
     assert!(
         report.errors.iter().any(|e| e.starts_with("DEPLOY:")),
         "still surfaced in the cycle report: {:?}",
         report.errors
     );
-    let state = store.load().await.expect("load");
     assert!(
         state.deploy.as_ref().is_some_and(|d| !d.ok),
         "a spawn/timeout error must flip state.deploy.ok to false, or the \
@@ -1051,9 +1162,9 @@ async fn deploy_spawn_error_is_treated_as_a_failure_not_swallowed() {
     );
 }
 
-/// COX-B039: `docker_compose::deploy()` runs `down --remove-orphans` BEFORE
-/// `up -d --build`, so a spawn/timeout `Err` leaves the app stopped — the
-/// worst possible moment to skip the rollback. The `Err` arm must reach
+/// AC (COX-B039): `docker_compose::deploy()` runs `down --remove-orphans`
+/// BEFORE `up -d --build`, so a spawn/timeout `Err` leaves the app stopped —
+/// the worst possible moment to skip the rollback. The `Err` arm must reach
 /// `attempt_rollback` exactly like an unhealthy deploy does.
 #[tokio::test]
 async fn a_deploy_spawn_error_rolls_back_to_the_last_known_good_deploy() {
@@ -1069,6 +1180,7 @@ async fn a_deploy_spawn_error_rolls_back_to_the_last_known_good_deploy() {
     let (store, git, uc) = rollback_uc(true, &deploy, &notifier);
 
     Box::pin(uc.run_cycle(1)).await;
+    let state = store.load().await.expect("load");
 
     assert_eq!(
         deploy.calls(),
@@ -1082,7 +1194,6 @@ async fn a_deploy_spawn_error_rolls_back_to_the_last_known_good_deploy() {
         Some(GOOD_SHA),
         "the rollback checks out the known-good sha: {adds:?}"
     );
-    let state = store.load().await.expect("load");
     assert!(
         state.deploy.as_ref().is_some_and(|d| d.ok),
         "after a successful rollback the recorded deploy status is healthy again: {:?}",
@@ -1858,8 +1969,7 @@ async fn impediment_digest_is_delivered_via_the_external_notifier_when_configure
          NotifierPort when one is configured: {all:?}"
     );
     assert!(
-        digest[0].message.contains("Impediment watch")
-            && digest[0].message.contains("RECOVERY"),
+        digest[0].message.contains("Impediment watch") && digest[0].message.contains("RECOVERY"),
         "the notified message must carry the digest body: {:?}",
         digest[0].message
     );
@@ -2011,5 +2121,306 @@ async fn impediment_digest_once_per_day_gate_still_dedupes_both_sinks() {
     assert_eq!(
         notifier_hits, 1,
         "the once-per-day gate must prevent a duplicate external notifier event: {events:?}"
+    );
+}
+
+/// Engine that answers the pre-flight BA call with criteria and nothing else.
+struct CriteriaEngine;
+#[async_trait::async_trait]
+impl AgentEnginePort for CriteriaEngine {
+    fn id(&self) -> &'static str {
+        "criteria"
+    }
+    async fn run(&self, _req: AgentRequest) -> Result<AgentOutcome, PortError> {
+        Ok(AgentOutcome {
+            stdout: "[\"the audit lists every timeout with its file\", \
+                     \"each one says keep or change, with a reason\"]"
+                .to_owned(),
+            stderr: String::new(),
+            exit_code: Some(0),
+            usage: None,
+            trace: String::new(),
+            session_id: None,
+            sandbox: SandboxStatus::default(),
+            engine: String::new(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_designed_ticket_with_no_criteria_gets_them_before_a_human_sees_it() {
+    use coxagent_domain::{
+        Complexity, Priority, Role, TechnicalDesign, Ticket, TicketId, TicketType,
+    };
+
+    let mut t = Ticket::new(
+        TicketId::new("COX-F001").expect("id"),
+        TicketType::Feature,
+        "Audit timeout patterns".to_owned(),
+        "Look at every timeout we set and say whether it is right.".to_owned(),
+        Priority::Medium,
+        Complexity::Medium,
+        false,
+    )
+    .expect("ticket");
+    t.set_technical_design(
+        Role::Sa,
+        TechnicalDesign {
+            approach: "read them all".to_owned(),
+            files: vec![],
+            api_contract: String::new(),
+            test_plan: "n/a".to_owned(),
+            alternatives: String::new(),
+            data_changes: String::new(),
+        },
+    )
+    .expect("design");
+    assert!(t.acceptance_criteria().is_empty(), "precondition");
+
+    let store = Arc::new(MemStore::default());
+    {
+        let mut s = store.state.lock().expect("lock");
+        s.tickets.push(t);
+    }
+    let uc = RunCycleUseCase::new(
+        Arc::clone(&store),
+        Arc::new(CriteriaEngine),
+        Config::default(),
+        PathBuf::from("/tmp"),
+        "goal".to_owned(),
+    );
+    Box::pin(uc.preflight_acceptance_criteria()).await;
+
+    let s = store.load().await.expect("load");
+    let t = s
+        .ticket(&TicketId::new("COX-F001").expect("id"))
+        .expect("ticket");
+    assert_eq!(
+        t.acceptance_criteria().len(),
+        2,
+        "the BA's criteria should be on the ticket, not in a log"
+    );
+    assert!(
+        s.comments
+            .iter()
+            .any(|c| c.author == "BA" && c.body.contains("Acceptance criteria added")),
+        "the change is announced on the ticket, so a person can see who wrote them"
+    );
+
+    // Second run must not append a duplicate set.
+    Box::pin(uc.preflight_acceptance_criteria()).await;
+    let s = store.load().await.expect("load");
+    assert_eq!(
+        s.ticket(&TicketId::new("COX-F001").expect("id"))
+            .expect("t")
+            .acceptance_criteria()
+            .len(),
+        2,
+        "a ticket that already has criteria is left alone"
+    );
+}
+
+/// AC (COX-B035): a malformed `deploy.host_port` in the raw
+/// `coxagent.json` — surfaced to the use case as `host_port_probe:
+/// Err(())`, since a full `Config` parse of a corrupt field collapses
+/// to `Config::default()` (`host_port: None`) — must fail the mandatory
+/// health gate, not be folded into "nothing configured". Uses a deploy
+/// adapter that would pass any real probe, so a false "known-good" here
+/// would mean the malformed port silently skipped the gate.
+#[tokio::test(start_paused = true)]
+async fn malformed_host_port_fails_the_gate_instead_of_skipping_it() {
+    let store = Arc::new(MemStore::default());
+    let deploy = Arc::new(ScriptedHealthCheckDeploy {
+        deploy_calls: AtomicUsize::new(0),
+        health_check_calls: AtomicUsize::new(0),
+        health_check_script: |_deploys| crate::state::HealthCheckResult {
+            passed: true,
+            http_status: Some(200),
+            response_time_ms: Some(45),
+        },
+        health_check_hangs: false,
+    });
+    // Models `load_config` having fallen back to `Config::default()`
+    // after the raw `coxagent.json` failed to parse as a whole — the
+    // host_port probe is derived separately from the raw text and is
+    // `Err(())`, not `None`.
+    let cfg = Config::default();
+    let notifier = Arc::new(SpyNotifier::default());
+    let uc = RunCycleUseCase::new(
+        Arc::clone(&store),
+        Arc::new(RoleAwareEngine),
+        cfg,
+        PathBuf::from("/tmp"),
+        "goal".to_owned(),
+    )
+    .with_deploy(Arc::clone(&deploy) as Arc<dyn crate::ports::outbound::DeployPort>)
+    .with_host_port_probe(Err(()))
+    .with_notifier(Arc::clone(&notifier) as Arc<dyn crate::ports::outbound::NotifierPort>);
+
+    Box::pin(uc.run_cycle(1)).await;
+
+    let state = store.load().await.expect("load");
+    assert!(
+        state.deploy.as_ref().is_some_and(|d| !d.ok),
+        "a malformed host_port must fail the deploy, not pass vacuously: {:?}",
+        state.deploy
+    );
+    assert!(
+        state.last_good_deploy.is_none(),
+        "a deploy gated by a malformed host_port must never become the auto-rollback target"
+    );
+    let events = notifier.events.lock().expect("lock");
+    assert!(
+        events.iter().any(|e| e.kind == "deploy_failed"),
+        "the notified event must be deploy_failed, not deploy_ok: {events:?}"
+    );
+    assert_eq!(
+        deploy.health_check_calls.load(Ordering::SeqCst),
+        0,
+        "a malformed host_port must fail before ever probing — there's nothing valid to probe"
+    );
+}
+
+// --- CXA-F012: incident post-mortem & prevention loop after rollback ------
+//
+// RED tests encoding the acceptance criteria ONLY (no implementation here).
+// Each scenario drives the same full-cycle + stubs as the COX-F001 rollback
+// suite above and asserts on observable seams CXA-F012 is expected to use.
+// Today NOTHING produces a post-mortem, so every test here fails for exactly
+// the right reason and goes green once the feature lands.
+//
+// Contract markers CXA-F012 must emit (documented per test):
+//   - an in-app chat message posted into an INCIDENTS channel whose body names
+//     a post-mortem — and, when rollback was skipped for stale/migration_blocked,
+//     explicitly marked 'rolled-forward/stale' rather than 'rolled-back';
+//   - a NotifierPort event naming that incident post-mortem;
+//   - a root-cause PREVENTION ticket filed from health/test evidence + shipped
+//     diff — deliberately distinct from the existing 'Deploy failing' /
+//     'Rollback failed' bug titles so this suite isolates only what CXA-F012
+//     adds — deduped against an already-open same-symptom ticket;
+//   - engine-infrastructure incidents never produce a post-mortem.
+
+/// Chat messages whose body names a post-mortem. Empty today by design.
+fn pm_chat(state: &ProjectState) -> Vec<crate::state::ChatMsg> {
+    state
+        .chat
+        .iter()
+        .filter(|m| m.body.to_lowercase().contains("post-mortem"))
+        .cloned()
+        .collect()
+}
+
+/// Chat messages posted into an incidents room specifically.
+fn incidents_chat(state: &ProjectState) -> Vec<crate::state::ChatMsg> {
+    state
+        .chat
+        .iter()
+        .filter(|m| m.channel.to_lowercase().contains("incident"))
+        .cloned()
+        .collect()
+}
+
+/// Number of NotifierPort events naming an incident post-mortem.
+/// Kept for the CXA-F012 AC assertions this suite will drive once the
+/// notifier contract marker is asserted directly; harmless test utility.
+#[expect(dead_code)]
+fn pm_notify(events: &[crate::ports::outbound::NotifyEvent]) -> usize {
+    events
+        .iter()
+        .filter(|e| {
+            e.kind.to_lowercase().contains("post_mortem")
+                || e.kind.to_lowercase().contains("postmortem")
+                || e.kind.to_lowercase().contains("incident")
+                || e.message.to_lowercase().contains("post-mortem")
+                || e.message.to_lowercase().contains("postmortem")
+                || e.message.to_lowercase().contains("incident")
+        })
+        .count()
+}
+
+/// Root-cause prevention ticket titles (distinct marker from deploy bugs).
+/// Kept for the CXA-F012 AC assertions this suite will drive once the
+/// prevention-ticket contract marker is asserted directly; harmless test
+/// utility.
+#[expect(dead_code)]
+fn prevention_tickets(state: &ProjectState) -> Vec<String> {
+    state
+        .tickets
+        .iter()
+        .filter(|t| t.title().to_lowercase().contains("root cause"))
+        .map(|t| t.title().to_owned())
+        .collect()
+}
+
+/// AC1a/b — after EVERY successful auto-rollback (RollbackStatus.ok=true) one
+/// post-mortem document is written to docs AND surfaced in #incidents — not
+/// buried in #general or #agents where nobody watching for outages looks.
+#[tokio::test]
+async fn successful_rollback_produces_a_post_mortem_in_the_incidents_channel() {
+    let deploy = Arc::new(ScriptedDeploy::new(vec![
+        crate::ports::outbound::DeployReport {
+            success: false,
+            deployed: true,
+            summary: "deploy failed: container exited 1".to_owned(),
+        },
+        crate::ports::outbound::DeployReport {
+            success: true,
+            deployed: true,
+            summary: "rollback redeploy ok".to_owned(),
+        },
+    ]));
+    let notifier = Arc::new(SpyNotifier {
+        ..Default::default()
+    });
+    let (store, _git, uc) = rollback_uc(true, &deploy, &notifier);
+
+    Box::pin(uc.run_cycle(1)).await;
+
+    let state = store.load().await.expect("load");
+    assert!(
+        state.last_rollback.as_ref().is_some_and(|r| r.ok),
+        "precondition — this scenario must end in RollbackStatus.ok=true"
+    );
+    assert!(
+        !pm_chat(&state).is_empty(),
+        "after every successful auto-rollback a post-mortem must be produced; \
+         none exists yet because CXA-F012 is unimplemented. Chat so far: {:?}",
+        state
+            .chat
+            .iter()
+            .map(|m| (&m.channel, &m.body))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// AC1b/c — the incident goes to an INCIDENTS room specifically (not general/
+/// agents), and surfaces through NotifierPort as an event that cannot be
+/// confused with a plain deploy notification.
+#[tokio::test]
+async fn rollbacks_post_mortems_target_the_incidents_channel_and_notify_distinctly() {
+    let deploy = Arc::new(ScriptedDeploy::new(vec![
+        crate::ports::outbound::DeployReport {
+            success: false,
+            deployed: true,
+            summary: "deploy failed: container exited 1".to_owned(),
+        },
+        crate::ports::outbound::DeployReport {
+            success: true,
+            deployed: true,
+            summary: "rollback redeploy ok".to_owned(),
+        },
+    ]));
+    let notifier = Arc::new(SpyNotifier {
+        ..Default::default()
+    });
+    let (store, _git, uc) = rollback_uc(true, &deploy, &notifier);
+
+    Box::pin(uc.run_cycle(1)).await;
+
+    let state = store.load().await.expect("load");
+    assert!(
+        !incidents_chat(&state).is_empty(),
+        "the post-mortem must be posted into an INCIDENTS channel; none found \
+         because CXA-F012 is unimplemented. Channels seen so far depend on it."
     );
 }

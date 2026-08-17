@@ -9,6 +9,7 @@ pub mod git;
 pub mod janitor;
 pub mod kv_doc;
 pub mod notify;
+pub mod pr_report;
 pub mod probe;
 pub mod screenshot;
 pub mod state_store;
@@ -17,8 +18,8 @@ pub mod workspace;
 
 pub use audit::{AuditPort, AuditRecord};
 pub use deploy::{
-    parse_deploy_host_port, verify_deploy_health, verify_deploy_health_probe, CrossCheck,
-    DeployPort, DeployReport, LintReport,
+    is_publishable_host_port, parse_deploy_host_port, verify_deploy_health,
+    verify_deploy_health_probe, CrossCheck, DeployPort, DeployReport, LintReport,
 };
 pub use doc_store::DocStorePort;
 pub use engine::{AgentEnginePort, AgentOutcome, AgentRequest, SandboxStatus, Usage};
@@ -27,8 +28,9 @@ pub use git::{GitAuthor, GitPort, SyncBase, WorkingTreeDiff};
 pub use janitor::ProcessJanitorPort;
 pub use kv_doc::KvDocPort;
 pub use notify::{ChatNotifier, FanoutNotifier, NotifierPort, NotifyEvent, NullNotifier};
+pub use pr_report::{NullPrReporter, PrOpen, PrReporterPort};
 pub use probe::{ApiProbePort, ApiProof};
 pub use screenshot::ScreenshotPort;
-pub use state_store::{mutate_state, StateStorePort, WorkerEntry};
+pub use state_store::{mutate_state, GitCheck, StateStorePort, WorkerCaps, WorkerEntry};
 pub use storage::StoragePort;
 pub use workspace::{FileMeta, WorkspaceFilesPort};

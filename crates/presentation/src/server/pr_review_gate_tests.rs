@@ -18,28 +18,34 @@ fn pr_path(action: &str) -> String {
     format!("/api/projects/acme/prs/42/{action}")
 }
 
-/// The individual-contributor tier: may write project data, may not review.
+/// Product/analysis/QA roles: may write project data, may NOT review a PR.
+/// Per the gate map "PR thì dev và SA duyệt" these four are the ones held back;
+/// developers review (below).
 const MEMBER_TIER: &[AuthRole] = &[
     AuthRole::Ba,
+    AuthRole::Po,
+    AuthRole::Qa,
+    AuthRole::Sm,
+];
+
+/// Roles that review PRs: Super/Admin, the lead tier, the legacy Reviewer, the
+/// SA, and every developer.
+const REVIEWER_TIER: &[AuthRole] = &[
+    AuthRole::Super,
+    AuthRole::Admin,
+    AuthRole::Reviewer,
+    AuthRole::Sa,
+    AuthRole::Director,
+    AuthRole::Manager,
+    AuthRole::TechLead,
+    AuthRole::DsLead,
+    AuthRole::DaLead,
     AuthRole::Fe,
     AuthRole::Be,
     AuthRole::Aie,
     AuthRole::Ds,
     AuthRole::Da,
     AuthRole::De,
-];
-
-/// Roles the documented policy admits to review: "Admin, leads, and the
-/// legacy Reviewer" (plus hub-wide Super).
-const REVIEWER_TIER: &[AuthRole] = &[
-    AuthRole::Super,
-    AuthRole::Admin,
-    AuthRole::Reviewer,
-    AuthRole::Director,
-    AuthRole::Manager,
-    AuthRole::TechLead,
-    AuthRole::DsLead,
-    AuthRole::DaLead,
 ];
 
 /// The ticket's repro: a Member-tier user who IS a member of the project
@@ -99,7 +105,10 @@ fn member_tier_still_writes_everything_that_is_not_a_pr_action() {
 #[test]
 fn viewer_is_refused_both_review_actions_and_ordinary_writes() {
     assert!(!write_gate_ok(AuthRole::Viewer, &pr_path("merge")));
-    assert!(!write_gate_ok(AuthRole::Viewer, "/api/projects/acme/tickets"));
+    assert!(!write_gate_ok(
+        AuthRole::Viewer,
+        "/api/projects/acme/tickets"
+    ));
 }
 
 /// Every role is on exactly one side of the PR gate, and the two sides
@@ -132,4 +141,31 @@ fn only_the_pr_route_is_treated_as_a_review_action() {
     assert!(!is_pr_review_path("/api/projects/acme/tickets"));
     assert!(!is_pr_review_path("/api/projects/acme/prs"));
     assert!(!is_pr_review_path("/api/health"));
+}
+
+#[test]
+fn the_raw_store_rpc_is_not_an_ordinary_write() {
+    use coxagent_application::auth::AuthRole;
+    let store = "/api/projects/cox/store";
+    assert!(is_store_rpc_path(store));
+    assert!(
+        !is_store_rpc_path("/api/projects/cox/store/x"),
+        "only the exact RPC path gets the stricter gate"
+    );
+    // A member may write project data through the shaped endpoints, but a raw
+    // whole-state save would let them forge any gate decision.
+    for role in [AuthRole::Fe, AuthRole::Be, AuthRole::Ba, AuthRole::De] {
+        assert!(role.can_write(), "{role:?} still writes normally");
+        assert!(
+            !write_gate_ok(role, store),
+            "{role:?} must not save raw state"
+        );
+    }
+    for role in [AuthRole::Super, AuthRole::Admin, AuthRole::TechLead] {
+        assert!(write_gate_ok(role, store));
+    }
+    // Same bar for the runner's PR-report sibling, whose project id travels in
+    // the body where the URL membership check cannot see it.
+    assert!(!write_gate_ok(AuthRole::Fe, "/api/pr-report"));
+    assert!(write_gate_ok(AuthRole::Admin, "/api/pr-report"));
 }

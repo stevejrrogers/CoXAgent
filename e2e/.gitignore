@@ -1,4 +1,14 @@
 node_modules/
 test-results/
 .state/
+.state-auth/
 playwright-report/
+
+# Local runtime snapshots of hub state (spaces/system_chat/workspace) written
+# by a live coxagent boot during test runs — machine-local, never fixtures.
+backups/
+
+# Throwaway account file a pre-fix run-server.sh left here (the auth store is
+# derived from --state-dir's PARENT). run-server.sh now clears it; this keeps a
+# stray one from ever being committed as if it were a fixture.
+auth.json

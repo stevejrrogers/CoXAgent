@@ -3,7 +3,7 @@
 //! Kept in the application layer because `schema_version` is a persistence
 //! concern; the domain stays free of it.
 
-use coxagent_domain::{SemVer, Ticket, TicketId};
+use coxagent_domain::{DebtSignal, SemVer, Ticket, TicketId};
 use serde::{Deserialize, Serialize};
 
 mod chat;
@@ -47,6 +47,10 @@ pub const AGENTS_CHANNEL: &str = "agents";
 /// Where work waiting on a PERSON is announced. Separate from `agents` so a
 /// human can watch decisions without reading the whole machine's chatter.
 pub const APPROVALS_CHANNEL: &str = "approvals";
+/// Where incident post-mortems land (CXA-F012): a single room for outage
+/// analysis so someone watching for service problems isn't sifting `#general`
+/// or re-reading routine deploy chatter.
+pub const INCIDENTS_CHANNEL: &str = "incidents";
 
 fn general_channel() -> String {
     GENERAL_CHANNEL.to_owned()
@@ -96,6 +100,22 @@ pub struct ProjectState {
     /// The SA agent's latest review verdict per open PR (by number).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reviews: Vec<PrReview>,
+    /// Open pull requests as reported by the runner over HTTP. The runner owns
+    /// the forge credentials, so the hub only ever reads this list back for the
+    /// Review tab — it never lists PRs itself.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub open_prs: Vec<crate::ports::outbound::PrOpen>,
+    /// PRs the SA approved but held for a person (`needs_human_eyes`): PR
+    /// number → why the machine refused to land it alone. Surfaced in the
+    /// Inbox with approve/dismiss; entries for PRs no longer open are pruned
+    /// on every open-PR sync.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub human_holds: std::collections::BTreeMap<u64, String>,
+    /// Attachments per ticket id (PD design images, screenshots) — the bytes
+    /// live in blob storage (`StoragePort`: MinIO/S3 or the local blob dir);
+    /// this holds the records the UI lists.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub ticket_attachments: std::collections::BTreeMap<String, Vec<TicketAttachment>>,
     /// Team chat: human-to-human messages among the people on the project.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chat: Vec<ChatMsg>,
@@ -116,6 +136,17 @@ pub struct ProjectState {
     /// and nest even before it holds a page — Confluence-style spaces/pages.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub doc_folders: Vec<String>,
+    /// Per-page refresh bookkeeping (page id → mark), so the idle-cycle Wiki
+    /// refresher does not re-run the SAME page every cycle: a just-refreshed page
+    /// cools down, and a page whose rewrite keeps failing the structure gate is
+    /// parked (needs a human/redesign) instead of burning a call forever — the
+    /// root of the DOCS run churn.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub doc_refresh: std::collections::BTreeMap<String, DocRefreshMark>,
+    /// Per-cycle scorecards (bounded, newest last) — the deterministic
+    /// stability/cost/effectiveness grade the dashboard charts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cycle_scores: Vec<CycleScore>,
     /// Lessons the team learned in past retros — fed back into agent prompts so
     /// the team actually improves over time (kept bounded, newest last).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -137,6 +168,16 @@ pub struct ProjectState {
     /// forward, so sprints keep rolling regardless of restarts.
     #[serde(default)]
     pub sprint_cycle: u64,
+    /// Persistent, restart-safe project-cycle counter — the authoritative cycle
+    /// number, advanced once per leader cycle and reused for scoring + cadence.
+    /// The per-process counter resets to 1 every worker launch, so both the
+    /// scorecard key and the `% N` cadence (codegraph, debt sweep, BA, scrum
+    /// topic) drifted after a restart. This counter lives in state, only moves
+    /// forward, and is unbounded (it is NOT truncated by the cycle_scores 100-cap),
+    /// so cadence positions and `sweeps_done` values stay consistent across
+    /// restarts. Non-leader runners ignore it — their reports are un-scored.
+    #[serde(default)]
+    pub cycle: u64,
     /// The PO's goal for the upcoming sprint (human-set from the Scrum view). When
     /// set it becomes the sprint goal on the next roll-over and steers the BA's
     /// proposals, so the team works toward what the PO asked for — not just
@@ -158,6 +199,15 @@ pub struct ProjectState {
     /// `pr_fix_attempts` when the PR closes.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub pr_sessions: std::collections::BTreeMap<u64, String>,
+    /// Engine conversation id per ticket work-session, keyed `"<ticket>/<role>"`
+    /// (e.g. `COX-B002/dev_bug`). When a DEV agent RE-ENTERS a ticket it already
+    /// worked (a retry, or after a parked question is answered), it resumes this
+    /// conversation instead of re-reading the code cold. Resume routes to the
+    /// role's configured engine; a session minted by a different engine (a prior
+    /// failover) simply fails to resume and falls back to a cold run — a session
+    /// id is engine-native, so this is safe, just a missed optimization.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub ticket_sessions: std::collections::BTreeMap<String, String>,
     /// Tickets held for HUMAN cost approval: estimated run cost exceeded
     /// `workflow.approve_over_usd`. Value = the estimate shown to the human.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -167,6 +217,14 @@ pub struct ProjectState {
     /// measured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clippy_baseline: Option<u64>,
+    /// Debt findings from the most recent debt-sweep run, persisted so a sweep
+    /// and its outcomes are auditable across cycles.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub debt_signals: Vec<DebtSignal>,
+    /// Cycle numbers on which a debt-sweep was already filed, so a sweep is not
+    /// re-filed for the same cycle after a restart.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sweeps_done: Vec<u64>,
     /// Merged PR numbers already synced into ticket state (human merges on
     /// the forge must reflect back exactly once).
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
@@ -298,7 +356,23 @@ pub struct ProjectState {
     /// Outcome of the most recent auto-rollback attempt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_rollback: Option<RollbackStatus>,
+    /// Rolling incident history (CXA-F012): one post-mortem per deploy
+    /// revision or incident, newest last, capped so a long outage storm cannot
+    /// grow state without bound. The durable inspection record that links a
+    /// rollback to its root-cause prevention ticket and team lesson.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub incidents: Vec<IncidentRecord>,
+    /// Commit shas blacklisted from known-good promotion (CXA-F012): after a
+    /// rollback the failing sha is pinned here so the self-healing loop cannot
+    /// re-promote the SAME broken commit every cycle until its root-cause bug
+    /// is verified. Consult-only against state — no git ref changes.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub rolled_back_commits: std::collections::BTreeSet<String>,
 }
+
+/// Cap on how many incident records are kept (newest first). One per deploy
+/// revision means a storm of failures still stays bounded and readable.
+pub const MAX_INCIDENTS: usize = 12;
 
 impl Default for ProjectState {
     fn default() -> Self {
@@ -322,22 +396,31 @@ impl Default for ProjectState {
             deploy: None,
             comments: Vec::new(),
             reviews: Vec::new(),
+            open_prs: Vec::new(),
+            human_holds: std::collections::BTreeMap::new(),
+            ticket_attachments: std::collections::BTreeMap::new(),
             chat: Vec::new(),
             channels: Vec::new(),
             design_system: None,
             milestones: Vec::new(),
             docs: Vec::new(),
             doc_folders: Vec::new(),
+            doc_refresh: std::collections::BTreeMap::new(),
+            cycle_scores: Vec::new(),
             lessons: Vec::new(),
             decisions: Vec::new(),
             refactor_mode: false,
             sprint_cycle: 0,
+            cycle: 0,
             sprint_goal: String::new(),
             last_digest_day: String::new(),
             pr_fix_attempts: std::collections::BTreeMap::new(),
             pr_sessions: std::collections::BTreeMap::new(),
+            ticket_sessions: std::collections::BTreeMap::new(),
             cost_holds: std::collections::BTreeMap::new(),
             clippy_baseline: None,
+            debt_signals: Vec::new(),
+            sweeps_done: Vec::new(),
             seen_merged_prs: std::collections::BTreeSet::new(),
             seen_closed_prs: std::collections::BTreeSet::new(),
             cost_approved: std::collections::BTreeSet::new(),
@@ -363,6 +446,8 @@ impl Default for ProjectState {
             in_rollback: false,
             last_good_deploy: None,
             last_rollback: None,
+            incidents: Vec::new(),
+            rolled_back_commits: std::collections::BTreeSet::new(),
         }
     }
 }
@@ -638,6 +723,30 @@ impl ProjectState {
         if overflow > 0 {
             self.reviews.drain(0..overflow);
         }
+    }
+
+    /// Insert or replace a reported open PR, keeping the list to recent entries.
+    pub fn upsert_open_pr(&mut self, pr: crate::ports::outbound::PrOpen) {
+        if let Some(existing) = self.open_prs.iter_mut().find(|p| p.number == pr.number) {
+            *existing = pr;
+        } else {
+            self.open_prs.push(pr);
+        }
+        let overflow = self.open_prs.len().saturating_sub(50);
+        if overflow > 0 {
+            self.open_prs.drain(0..overflow);
+        }
+    }
+
+    /// Replace the whole reported open-PR list (e.g. a runner refresh).
+    pub fn set_open_prs(&mut self, prs: Vec<crate::ports::outbound::PrOpen>) {
+        let mut v = prs;
+        v.truncate(50);
+        self.open_prs = v;
+        // A hold on a PR that is no longer open is stale — merged or closed
+        // elsewhere; prune so the Inbox never asks about a decided PR.
+        self.human_holds
+            .retain(|n, _| self.open_prs.iter().any(|p| p.number == *n));
     }
 
     /// Toggle `user`'s `emoji` reaction on comment `id`; returns the updated

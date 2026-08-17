@@ -6,6 +6,25 @@
 
 use super::*;
 
+/// Most exception tickets routed to one person at a time — beyond this a
+/// parked ticket stays unassigned (a systemic failure, not personal work).
+const MAX_ROUTED: usize = 5;
+
+/// How many not-yet-finished tickets are already routed to `owner`.
+fn routed_open_count(s: &crate::state::ProjectState, owner: Option<&str>) -> usize {
+    use coxagent_domain::Status;
+    s.tickets
+        .iter()
+        .filter(|t| {
+            owner == t.assignee()
+                && !matches!(
+                    t.status(),
+                    Status::Done | Status::Verified | Status::Documented | Status::Rejected
+                )
+        })
+        .count()
+}
+
 impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
     /// Count a failed attempt on `id`; at the 3rd, park it with a visible note
     /// so a human decides instead of the team burning tokens forever.
@@ -96,18 +115,35 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                     ),
                     Some(key.clone()),
                 );
-                // Exception routing: parked work is by definition the hardest
-                // problem on the board — hand it to the configured person, so
-                // it lands in their inbox instead of rotting in a comment.
+                // Exception routing, CAPPED at MAX_ROUTED: a systemic failure
+                // parks tickets by the dozen — routing them all buried the owner
+                // under 58 assignments in one night, and assigned tickets are
+                // invisible to agents, so the flood also starved DEV. Past the
+                // cap the ticket parks unassigned.
+                let routed_already = routed_open_count(s, route_to.as_deref());
                 if let Some(owner) = &route_to {
-                    if let Some(t) = s.ticket_mut(id) {
-                        t.assign_to_human(owner);
+                    if routed_already < MAX_ROUTED {
+                        if let Some(t) = s.ticket_mut(id) {
+                            t.assign_to_human(owner);
+                        }
+                        s.post_comment(
+                            "SYSTEM",
+                            &format!(
+                                "🧑‍💻 {id} routed to @{owner} (workflow.human.route_exceptions_to)."
+                            ),
+                            Some(key.clone()),
+                        );
+                    } else {
+                        s.post_comment(
+                            "SYSTEM",
+                            &format!(
+                                "⛔ {id} parked (NOT routed — @{owner} already has {routed_already} \
+                                 routed tickets; likely a systemic failure, fix the cause and the \
+                                 parked set clears together)."
+                            ),
+                            Some(key.clone()),
+                        );
                     }
-                    s.post_comment(
-                        "SYSTEM",
-                        &format!("🧑‍💻 {id} routed to @{owner} (workflow.human.route_exceptions_to)."),
-                        Some(key.clone()),
-                    );
                 }
             }
             Ok(())

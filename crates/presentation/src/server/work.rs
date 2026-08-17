@@ -33,6 +33,7 @@ pub(super) async fn analyze_goal_ep(
         work_dir,
         timeout: std::time::Duration::from_secs(120),
         escalation_level: 0,
+        label: None,
     };
     match engine.run(request).await {
         Ok(o) if o.succeeded() => {
@@ -151,6 +152,7 @@ pub(super) async fn ba_analyze(
         work_dir: p.work_dir.clone(),
         timeout: std::time::Duration::from_secs(120),
         escalation_level: 0,
+        label: None,
     };
     let outcome = match p.engine.run(request).await {
         Ok(o) if o.succeeded() => o,
@@ -351,9 +353,21 @@ pub(super) async fn reject_ticket(
     // a pre-flight check so the same shape never reaches an inbox again
     // (docs/ADAPTIVE_APPROVAL.md).
     let reason = body.map(|Json(r)| r.reason).unwrap_or_default();
-    let me = principal_name(&app, &headers)
-        .await
-        .unwrap_or_else(|| "operator".to_owned());
+    // Rejecting is the same gate decision as approving, taken the other way —
+    // and it teaches the learner, so it needs the same qualification.
+    let Some(me) = super::inbox::gate_principal(
+        &app,
+        &headers,
+        coxagent_application::AuthRole::can_approve_ready,
+    )
+    .await
+    else {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            "your role may not take this decision",
+        )
+            .into_response();
+    };
     if let Some(t) = state.tickets.iter().find(|t| t.id() == &tid) {
         let shape = coxagent_application::use_cases::approval_risk::shape_key(t);
         state.approval_samples.push(
@@ -367,7 +381,11 @@ pub(super) async fn reject_ticket(
         );
     }
     if !reason.trim().is_empty() {
-        state.post_comment("USER", &format!("🚫 Rejected: {}", reason.trim()), Some(id.clone()));
+        state.post_comment(
+            "USER",
+            &format!("🚫 Rejected: {}", reason.trim()),
+            Some(id.clone()),
+        );
     }
     let Some(ticket) = state.ticket_mut(&tid) else {
         return (axum::http::StatusCode::NOT_FOUND, "no such ticket").into_response();
@@ -378,6 +396,10 @@ pub(super) async fn reject_ticket(
     ) {
         return (axum::http::StatusCode::CONFLICT, e.to_string()).into_response();
     }
+    // A rejected ticket is not awaiting work — drop any cost hold so it stops
+    // showing as a spend to approve.
+    state.cost_holds.remove(&id);
+    state.cost_approved.remove(&id);
     state.log_activity("USER", "rejected ticket", Some(id));
     match p.store.save(&state).await {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
@@ -572,8 +594,36 @@ pub(super) async fn control_ep(
         _ => resolve_username(&app, &headers).await,
     };
     let operator = format!("{account}@{}", machine_host());
+    // Ownership gate: a run belongs to whoever started it. Only that user — or
+    // an admin/root — may pause, stop, or step it. Anyone else pressing Start
+    // while someone's run is live only records THEIR desired-run intent (their
+    // own operator picks it up); it never hijacks or relabels the live run.
+    let (owner, live) = {
+        let s = p.runner.snapshot();
+        (s.operator, s.mode == "running")
+    };
+    let owns = match app.auth.clone() {
+        None => true, // open mode: single-user local
+        Some(auth) => {
+            let caller = resolve_principal(&auth, &headers).await;
+            caller.as_ref().is_some_and(|u| {
+                matches!(
+                    u.role,
+                    coxagent_application::auth::AuthRole::Super
+                        | coxagent_application::auth::AuthRole::Admin
+                ) || owner
+                        .as_deref()
+                        .map_or(true, |o| o.eq_ignore_ascii_case(&u.username))
+            })
+        }
+    };
     match action.as_str() {
         "resume" => {
+            if live && !owns {
+                // Someone else's run is live: just start MY operator.
+                let _ = p.store.set_desired(&operator, true).await;
+                return Json(p.runner.snapshot()).into_response();
+            }
             p.runner.set_operator(&account, &machine_host());
             p.runner.resume();
             // Persist this operator's intent so reopening the app auto-resumes
@@ -582,6 +632,16 @@ pub(super) async fn control_ep(
         }
         // Pause/stop are local to this operator and persist the stopped intent,
         // so a reopen stays idle instead of auto-resuming.
+        "pause" | "step" | "stop" if !owns => {
+            let who = owner.unwrap_or_default();
+            return (
+                axum::http::StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": format!("this run belongs to {who} — only they or an admin can {action} it")
+                })),
+            )
+                .into_response();
+        }
         "pause" => {
             p.runner.pause();
             let _ = p.store.set_desired(&operator, false).await;
@@ -621,9 +681,14 @@ pub(super) async fn operator_control_ep(
     if let Some(auth) = app.auth.clone() {
         let caller = resolve_principal(&auth, &headers).await;
         let account = operator.split('@').next().unwrap_or("");
-        let allowed = caller
-            .as_ref()
-            .is_some_and(|u| u.role.can_manage() || u.username.eq_ignore_ascii_case(account));
+        // Admin/root manage everyone; leads and below only their own operator.
+        let allowed = caller.as_ref().is_some_and(|u| {
+            matches!(
+                u.role,
+                coxagent_application::auth::AuthRole::Super
+                    | coxagent_application::auth::AuthRole::Admin
+            ) || u.username.eq_ignore_ascii_case(account)
+        });
         if !allowed {
             return (
                 axum::http::StatusCode::FORBIDDEN,
@@ -674,6 +739,92 @@ pub(super) async fn set_sprint_goal_ep(
     .await
     {
         Ok(()) => Json(serde_json::json!({ "ok": true, "goal": goal })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Pull tickets into the sprint that is already running, or drop them from it.
+///
+/// The automatic commit is capacity-based and happens once, at roll-over. A
+/// person deciding mid-sprint that something belongs in it (or no longer does)
+/// had no way to say so — the scope was whatever the machine picked.
+pub(super) async fn sprint_scope_ep(
+    State(app): State<AppState>,
+    Path((pid, action)): Path<(String, String)>,
+    Json(req): Json<SprintScopeReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let adding = match action.as_str() {
+        "commit" => true,
+        "drop" => false,
+        _ => return (StatusCode::BAD_REQUEST, "action must be commit or drop").into_response(),
+    };
+    let ids: Vec<coxagent_domain::TicketId> = req
+        .tickets
+        .iter()
+        .filter_map(|t| coxagent_domain::TicketId::new(t.trim()).ok())
+        .collect();
+    if ids.is_empty() {
+        return (StatusCode::BAD_REQUEST, "no valid ticket ids").into_response();
+    }
+    let mut changed = 0usize;
+    // Ids the board has never heard of: a typo, or a stale page acting on a
+    // ticket that has since gone. Saying "ok" to that hides the mistake.
+    let mut unknown: Vec<String> = Vec::new();
+    match coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        for id in &ids {
+            if s.ticket(id).is_none() {
+                unknown.push(id.to_string());
+                continue;
+            }
+            let hit = if adding {
+                coxagent_application::sprint::commit_ticket(s, id)
+            } else {
+                coxagent_application::sprint::uncommit_ticket(s, id)
+            };
+            if hit {
+                changed += 1;
+            }
+        }
+        Ok(())
+    })
+    .await
+    {
+        Ok(()) if changed == 0 && !unknown.is_empty() => (
+            StatusCode::BAD_REQUEST,
+            format!("no such ticket: {}", unknown.join(", ")),
+        )
+            .into_response(),
+        Ok(()) => Json(serde_json::json!({ "ok": true, "changed": changed, "unknown": unknown }))
+            .into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Close the running sprint NOW and open the next one, instead of waiting for
+/// the window to elapse. The closed sprint is archived exactly as a timed
+/// roll-over archives it, so the velocity history stays one shape.
+pub(super) async fn sprint_close_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let cycle = p.runner.snapshot().cycle;
+    let mut opened = None;
+    match coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        opened = coxagent_application::sprint::close_now(s, cycle);
+        Ok(())
+    })
+    .await
+    {
+        Ok(()) => match opened {
+            Some(n) => Json(serde_json::json!({ "ok": true, "sprint": n })).into_response(),
+            None => (StatusCode::BAD_REQUEST, "no sprint is running").into_response(),
+        },
         Err(e) => internal_error(&e.to_string()),
     }
 }

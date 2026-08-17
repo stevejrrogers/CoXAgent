@@ -30,6 +30,7 @@ tempfile.workspace = true
 
 [dev-dependencies]
 reqwest.workspace = true
+async-trait.workspace = true
 
 [lints]
 workspace = true

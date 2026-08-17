@@ -107,14 +107,18 @@ pub(super) async fn chat_post_ep(
         // fell into the void. Trigger on an explicit mention or a question
         // mark; plain chatter stays human-to-human (no engine burn).
         let lower = body.to_lowercase();
-        let wants_team = lower.contains("@team")
-            || lower.contains("@cox")
-            || body.contains('?');
+        let wants_team = lower.contains("@team") || lower.contains("@cox") || body.contains('?');
         let from_human = !user.eq_ignore_ascii_case("system");
         if wants_team && from_human {
             let msg = body.to_owned();
             let reply_channel = channel.clone();
             let p2 = p.clone();
+            // The author's role, so a gate command typed in chat honours the
+            // same role map as the Inbox. Open mode (no auth) = None = operator.
+            let actor_role = match app.auth.clone() {
+                Some(auth) => resolve_principal(&auth, &headers).await.map(|u| u.role),
+                None => None,
+            };
             let cfg = std::fs::read_to_string(&p2.config_path)
                 .ok()
                 .and_then(|t| serde_json::from_str::<Config>(&t).ok())
@@ -128,7 +132,8 @@ pub(super) async fn chat_post_ep(
                     cfg.workflow.language,
                 )
                 .with_files(p2.files.clone())
-                .with_reply_channel(Some(reply_channel));
+                .with_reply_channel(Some(reply_channel))
+                .with_actor_role(actor_role);
                 let _ = uc.execute(&msg).await;
             });
         }
@@ -1093,15 +1098,24 @@ pub(super) async fn chat_socket(
 pub(super) async fn chat_reply_ep(
     State(app): State<AppState>,
     Path(pid): Path<String>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<ChatReplyReq>,
 ) -> axum::response::Response {
     let Some(p) = app.project(&pid).await else {
         return not_found();
     };
+    let actor_role = match app.auth.clone() {
+        Some(auth) => resolve_principal(&auth, &headers).await.map(|u| u.role),
+        None => None,
+    };
     let msg = req.message.trim();
     if msg.is_empty() {
         return Json(serde_json::json!({ "ok": true })).into_response();
     }
+    // One raw read feeds both the `Config` parse and the host-port probe, so
+    // a malformed `deploy.host_port` can't drift from what `Config` saw and
+    // fails the mandatory health gate (COX-B035) instead of silently
+    // skipping it via `Config::default()`'s `host_port: None`.
     let raw_cfg = std::fs::read_to_string(&p.config_path).ok();
     let cfg = raw_cfg
         .as_deref()
@@ -1121,11 +1135,11 @@ pub(super) async fn chat_reply_ep(
         cfg.workflow.token_saver,
         cfg.workflow.language,
     )
-    .with_files(p.files.clone());
+    .with_files(p.files.clone())
+    .with_actor_role(actor_role);
     if let Some(d) = &p.deploy {
         uc = uc
             .with_deploy(Arc::clone(d))
-            .with_host_port(cfg.deploy.host_port)
             .with_host_port_probe(host_port_probe);
     }
     if let Some(f) = &p.forge {

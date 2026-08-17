@@ -24,6 +24,18 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         self.sweep_stale_prs().await;
         // 1. Rebase open PRs onto the moving base.
         if let Ok(prs) = forge.list_open_prs().await {
+            // Mirror the open queue into state: the Review page (and the inbox's
+            // held-PR items) read `state.open_prs`, and nothing else writes it —
+            // the page sat empty while three PRs waited on the forge.
+            {
+                let mirror: Vec<crate::ports::outbound::PrOpen> =
+                    prs.iter().cloned().map(Into::into).collect();
+                let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+                    s.set_open_prs(mirror.clone());
+                    Ok(())
+                })
+                .await;
+            }
             let mut rebased: Vec<u64> = Vec::new();
             for pr in prs.iter().filter(|p| p.base == target).take(8) {
                 let Some(git) = &self.git else { continue };
@@ -59,13 +71,38 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     continue;
                 }
                 if run(vec!["checkout".into(), "-B".into(), pr.head.clone(), local]).await
-                    && run(vec!["merge".into(), base_ref, "--no-edit".into()]).await
+                    && run(vec!["merge".into(), base_ref.clone(), "--no-edit".into()]).await
                 {
                     if run(vec!["push".into(), "origin".into(), pr.head.clone()]).await {
                         rebased.push(pr.number);
                     }
                 } else {
-                    let _ = run(vec!["merge".into(), "--abort".into()]).await;
+                    // A PR already open that the moving base has made conflicted
+                    // must be resolved HERE, not parked — otherwise the queue
+                    // hangs at CONFLICTING with nobody holding the pen (the same
+                    // law that governs a fresh PR in commit_for_ticket). List
+                    // the unmerged files and let the DEV engine read both sides,
+                    // preserving both intents; abort only when that genuinely
+                    // cannot complete.
+                    let (_, out) = git
+                        .raw(&self.work_dir, &["diff", "--name-only", "--diff-filter=U"])
+                        .await;
+                    let files: Vec<String> = out
+                        .lines()
+                        .filter(|l| !l.trim().is_empty())
+                        .map(str::to_owned)
+                        .collect();
+                    let resolved = !files.is_empty()
+                        && self
+                            .resolve_merge_in_progress(&pr.head, &target, &files)
+                            .await;
+                    if resolved {
+                        if run(vec!["push".into(), "origin".into(), pr.head.clone()]).await {
+                            rebased.push(pr.number);
+                        }
+                    } else {
+                        let _ = run(vec!["merge".into(), "--abort".into()]).await;
+                    }
                 }
                 let _ = run(vec!["checkout".into(), target.clone()]).await;
             }
@@ -230,25 +267,40 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     }
                     s.ticket_fail_attempts.remove(&ticket);
                     s.ticket_journal.remove(&ticket);
+                    // Merged into main — the DEV work-session for this ticket is
+                    // truly finished now (not at DEV-Done, which a review can
+                    // still bounce back). Drop it so a future ticket never
+                    // resumes a merged conversation.
+                    let sess_prefix = format!("{ticket}/");
+                    s.ticket_sessions
+                        .retain(|k, _| !k.starts_with(&sess_prefix));
                     let mut note = None;
                     let Ok(tid) = coxagent_domain::TicketId::new(&ticket) else {
                         return Ok(());
                     };
                     if let Some(t) = s.ticket_mut(&tid) {
-                        use coxagent_domain::{Role as R, Status};
-                        // Walk the LEGAL transition path with the proper
-                        // actors — Open→Fixed directly does not exist, which
-                        // silently stranded merged tickets Open (night bug).
+                        use coxagent_domain::{Role as R, Status, TicketType};
+                        // Walk the LEGAL transition path with the proper actors
+                        // — Open→Fixed directly does not exist, which silently
+                        // stranded merged tickets Open (night bug). The terminal
+                        // state depends on the TICKET TYPE, not the status: an
+                        // in-progress bug goes to Fixed via DevBug, but an
+                        // in-progress feature/chore goes to Done via DevFeature
+                        // — trying DevBug→Fixed there failed forever, left the
+                        // merged ticket InProgress, and DEV re-implemented work
+                        // that was already on main (COX-C012, twice).
+                        let bug = t.ticket_type() == TicketType::Bug;
+                        let (role, terminal) = if bug {
+                            (R::DevBug, Status::Fixed)
+                        } else {
+                            (R::DevFeature, Status::Done)
+                        };
                         let moved = match t.status() {
-                            Status::Open => {
-                                t.transition_to(R::DevBug, Status::InProgress).is_ok()
-                                    && t.transition_to(R::DevBug, Status::Fixed).is_ok()
+                            Status::Open | Status::Ready => {
+                                t.transition_to(role, Status::InProgress).is_ok()
+                                    && t.transition_to(role, terminal).is_ok()
                             }
-                            Status::InProgress => t.transition_to(R::DevBug, Status::Fixed).is_ok(),
-                            Status::Ready => {
-                                t.transition_to(R::DevFeature, Status::InProgress).is_ok()
-                                    && t.transition_to(R::DevFeature, Status::Done).is_ok()
-                            }
+                            Status::InProgress => t.transition_to(role, terminal).is_ok(),
                             _ => false,
                         };
                         if moved {
@@ -373,6 +425,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             work_dir: self.work_dir.clone(),
             timeout: std::time::Duration::from_secs(900),
             escalation_level: 0,
+            label: None,
         };
         let out = match self.engine.run(request).await {
             Ok(o) if o.succeeded() => o.stdout.trim().to_owned(),
@@ -573,6 +626,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 work_dir: self.work_dir.clone(),
                 timeout: std::time::Duration::from_secs(1800),
                 escalation_level: 0,
+                label: None,
             };
             let ok = matches!(self.engine.run(request).await, Ok(o) if o.succeeded());
             if let Some(git) = &self.git {
@@ -649,10 +703,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let Ok(state) = self.store.load().await else {
             return;
         };
+        let reviews = self.reporter().fetch_reviews().await;
         let stale_secs = self.config.workflow.pr_stale_days() * 86_400;
         for pr in prs {
-            let Some(review) = state
-                .reviews
+            let Some(review) = reviews
                 .iter()
                 .find(|r| r.number == pr.number && r.decision == "request_changes")
             else {
@@ -668,9 +722,44 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             if cur != review.head_sha {
                 continue;
             }
-            // Never touch work a human is deliberately sitting on.
+            // A PR that committed the agents' own scratch is wrong by
+            // construction — and the pollution is exactly what pushes it past
+            // the size bound below, so it stops being auto-landable AND
+            // auto-closable and parks forever. Close it first: the ticket goes
+            // back to the queue and is redone from a clean base.
             if let Ok(diff) = forge.pr_diff(pr.number).await {
-                if crate::use_cases::merge_policy::needs_human_eyes(&diff).is_some() {
+                if let Some(path) = crate::use_cases::merge_policy::commits_scratch(&diff) {
+                    let note = format!(
+                        "Closing: this branch commits `{path}` — agent scratch that does not \
+                         belong in the product's history. No review round fixes that. The work \
+                         is not lost: the ticket returns to the queue and is redone on a fresh \
+                         branch off current main."
+                    );
+                    let _ = forge.comment_pr(pr.number, &note).await;
+                    if forge.close_pr(pr.number).await.is_ok() {
+                        self.announce_pr_close(
+                            pr.number,
+                            &pr.title,
+                            &format!(
+                                "stale + commits agent scratch ({path}); ticket returns to the queue"
+                            ),
+                        )
+                        .await;
+                        self.log_git(&format!(
+                            "stale sweep: closed PR #{} — commits scratch ({path})",
+                            pr.number
+                        ))
+                        .await;
+                    }
+                    continue;
+                }
+                // Never touch work a human is deliberately sitting on.
+                if crate::use_cases::merge_policy::needs_human_eyes(
+                    &diff,
+                    self.config.git.max_changed_lines,
+                )
+                .is_some()
+                {
                     continue;
                 }
             }

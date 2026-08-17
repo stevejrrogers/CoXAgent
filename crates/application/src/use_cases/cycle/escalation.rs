@@ -106,6 +106,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     work_dir: self.work_dir.clone(),
                     timeout: std::time::Duration::from_secs(900),
                     escalation_level: 0,
+                    label: None,
                 })
                 .await;
             let answer = match out {
@@ -153,6 +154,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                         work_dir: self.work_dir.clone(),
                         timeout: std::time::Duration::from_secs(600),
                         escalation_level: 0,
+                        label: None,
                     })
                     .await
                 {
@@ -332,6 +334,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             timeout: std::time::Duration::from_secs(900),
             // A ticket three attempts deep has earned the stronger model.
             escalation_level: 1,
+            label: Some(id.clone()),
         };
         let out = match self.engine.run(request).await {
             Ok(o) if o.succeeded() => o.stdout.trim().chars().take(1200).collect::<String>(),
@@ -396,8 +399,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 if !(q.is_open() && q.to.starts_with('@')) || q.escalated {
                     continue;
                 }
-                let age_min = super::seconds_since(&q.asked_at)
-                    .map_or(0, |secs| secs / 60);
+                let age_min = super::seconds_since(&q.asked_at).map_or(0, |secs| secs / 60);
                 if age_min >= sla_min {
                     q.escalated = true;
                     escalations.push(format!(

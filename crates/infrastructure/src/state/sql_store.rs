@@ -7,7 +7,7 @@
 //! concurrency (a monotonic `revision`) rejects lost updates from two writers.
 
 use async_trait::async_trait;
-use coxagent_application::ports::outbound::{StateStorePort, WorkerEntry};
+use coxagent_application::ports::outbound::{StateStorePort, WorkerCaps, WorkerEntry};
 use coxagent_application::state::{ProjectState, SCHEMA_VERSION};
 use coxagent_application::PortError;
 use coxagent_domain::{Role, TicketId};
@@ -36,7 +36,17 @@ CREATE TABLE IF NOT EXISTS project_coord (
     PRIMARY KEY (project_id, kind, coord_key)
 );
 ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS role TEXT;
-ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS ticket TEXT;";
+ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS ticket TEXT;
+-- Worker registry: the agent CLIs that runner found on its own PATH, comma
+-- separated. The hub cannot detect these for a remote runner.
+ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS engines TEXT;
+-- Worker registry: `provider/model` pairs that runner's opencode can reach,
+-- newline separated. Custom providers exist only in the user's own CLI config.
+ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS models TEXT;
+-- Worker registry: JSON result of probing git + forge access on that machine.
+ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS gitcheck TEXT;
+-- Worker registry: that machine's OS + developer tooling, as JSON.
+ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS tooling TEXT;";
 
 /// Leader lease lifetime (seconds) — a runner must renew within this or another
 /// takes over. Matches the JSON store.
@@ -173,43 +183,33 @@ impl StateStorePort for SqlStateStore {
     }
 
     async fn save(&self, state: &ProjectState) -> Result<(), PortError> {
-        state
-            .validate()
-            .map_err(|e| PortError::Corrupt(format!("refusing to save invalid state: {e}")))?;
-        let value =
-            serde_json::to_value(state).map_err(|e| PortError::Backend(format!("encode: {e}")))?;
+        // Legacy path kept intact for older callers who never captured a version.
+        self.persist_at_revision(state.clone(), None).await
+    }
 
+    async fn save_expecting(
+        &self,
+        state: &ProjectState,
+        expected_revision: Option<i64>,
+    ) -> Result<(), PortError> {
+        // Cross-process optimistic concurrency carried over REST/gateway calls:
+        // use exactly what THIS caller loaded rather than re-reading at write time.
+        self.persist_at_revision(state.clone(), expected_revision)
+            .await
+    }
+
+    async fn current_version(&self) -> Result<Option<i64>, PortError> {
         let client = self.client().await?;
-        // Optimistic concurrency: insert when absent, otherwise bump the
-        // revision only if it has not moved since we last read it. A concurrent
-        // writer that advanced the revision makes this affect zero rows.
-        let (expected, _) = self.load_versioned().await?;
-        let rows = client
-            .execute(
-                "INSERT INTO project_state (project_id, schema_version, revision, data)
-                 VALUES ($1, $2, 1, $3)
-                 ON CONFLICT (project_id) DO UPDATE
-                    SET data = EXCLUDED.data,
-                        schema_version = EXCLUDED.schema_version,
-                        revision = project_state.revision + 1,
-                        updated_at = now()
-                    WHERE project_state.revision = $4",
-                &[
-                    &self.project_id,
-                    &i32::try_from(state.schema_version).unwrap_or(i32::MAX),
-                    &value,
-                    &expected,
-                ],
+        let row = client
+            .query_opt(
+                "SELECT revision FROM project_state WHERE project_id = $1",
+                &[&self.project_id],
             )
             .await
-            .map_err(|e| PortError::Backend(format!("upsert: {e}")))?;
-        if rows == 0 {
-            return Err(PortError::Conflict(
-                "state changed since last read (concurrent writer)".to_owned(),
-            ));
-        }
-        self.mirror_save(state).await;
-        Ok(())
+            .map_err(|e| PortError::Backend(format!("select rev: {e}")))?;
+        // An absent row has not been written yet -> baseline revision 0 matches
+        // [`Self::persist_at_revision`]'s first insert (`revision = 1`).
+        Ok(Some(row.map_or(0_i64, |r| r.get::<_, i64>(0))))
     }
 
     async fn claim_ticket(
@@ -290,19 +290,43 @@ impl StateStorePort for SqlStateStore {
         worker: &str,
         role: &str,
         ticket: &str,
+        caps: &WorkerCaps,
         now: &str,
     ) -> Result<(), PortError> {
         if let Some(r) = &self.redis {
-            return r.heartbeat_worker(worker, role, ticket, now).await;
+            return r.heartbeat_worker(worker, role, ticket, caps, now).await;
         }
         let client = self.client().await?;
+        let engines_csv = caps.engines.join(",");
+        let models_csv = caps.models.join("\n");
         client
             .execute(
-                "INSERT INTO project_coord (project_id, kind, coord_key, worker, at, role, ticket)
-                 VALUES ($1, 'worker', $2, $2, now(), $3, $4)
+                "INSERT INTO project_coord
+                    (project_id, kind, coord_key, worker, at, role, ticket,
+                     engines, models, gitcheck, tooling)
+                 VALUES ($1, 'worker', $2, $2, now(), $3, $4, $5, $6, $7, $8)
                  ON CONFLICT (project_id, kind, coord_key) DO UPDATE
-                    SET at = now(), role = EXCLUDED.role, ticket = EXCLUDED.ticket",
-                &[&self.project_id, &worker, &role, &ticket],
+                    SET at = now(), role = EXCLUDED.role, ticket = EXCLUDED.ticket,
+                        engines = EXCLUDED.engines, models = EXCLUDED.models,
+                        gitcheck = EXCLUDED.gitcheck, tooling = EXCLUDED.tooling",
+                &[
+                    &self.project_id,
+                    &worker,
+                    &role,
+                    &ticket,
+                    &engines_csv,
+                    &models_csv,
+                    &caps
+                        .git
+                        .as_ref()
+                        .and_then(|g| serde_json::to_string(g).ok())
+                        .unwrap_or_default(),
+                    &caps
+                        .tooling
+                        .as_ref()
+                        .and_then(|t| serde_json::to_string(t).ok())
+                        .unwrap_or_default(),
+                ],
             )
             .await
             .map_err(|e| PortError::Backend(format!("heartbeat: {e}")))?;
@@ -317,7 +341,9 @@ impl StateStorePort for SqlStateStore {
         let rows = client
             .query(
                 "SELECT worker, coalesce(role,''), coalesce(ticket,''),
-                        to_char(at, 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')
+                        to_char(at, 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),
+                        coalesce(engines,''), coalesce(models,''),
+                        coalesce(gitcheck,''), coalesce(tooling,'')
                    FROM project_coord
                   WHERE project_id = $1 AND kind = 'worker'
                     AND at > now() - make_interval(secs => $2)
@@ -333,6 +359,20 @@ impl StateStorePort for SqlStateStore {
                 role: r.get(1),
                 ticket: r.get(2),
                 at: r.get(3),
+                engines: r
+                    .get::<_, String>(4)
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect(),
+                models: r
+                    .get::<_, String>(5)
+                    .lines()
+                    .filter(|s| !s.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect(),
+                git: serde_json::from_str(&r.get::<_, String>(6)).ok(),
+                tooling: serde_json::from_str(&r.get::<_, String>(7)).ok(),
             })
             .collect())
     }
@@ -416,4 +456,59 @@ impl SqlStateStore {
             .map_err(|e| PortError::Backend(format!("lease upsert: {e}")))?;
         Ok(row.is_some_and(|r| r.get::<_, String>(0) == worker))
     }
+
+    /// Validate, encode and CAS-persist one snapshot against a caller-chosen
+    /// expected revision.
+    ///
+    /// Optimistic concurrency: insert when absent, otherwise bump the revision
+    /// only if it has not moved past what this writer expected. When
+    /// `expected_revision` is supplied it is used directly as the predicate — two
+    /// writers racing across process boundaries both check against what THEY each
+    /// loaded, so a stale writer affects zero rows and gets a [`PortError::Conflict`].
+    /// When `None`, fall back to re-reading at write time (the historical default,
+    /// sound for intra-process writers sharing one store instance).
+    async fn persist_at_revision(
+        &self,
+        state: ProjectState,
+        expected_revision: Option<i64>,
+    ) -> Result<(), PortError> {
+        state.validate().map_err(|e| {
+            PortError::Corrupt(format!("refusing to save invalid state: {e}"))
+        })?;
+        let value = serde_json::to_value(&state)
+            .map_err(|e| PortError::Backend(format!("encode: {e}")))?;
+
+        let client = self.client().await?;
+        let expected = match expected_revision {
+            Some(rev) => rev,
+            None => self.load_versioned().await?.0,
+        };
+        let rows = client
+            .execute(
+                "INSERT INTO project_state (project_id, schema_version, revision, data)
+                 VALUES ($1, $2, 1, $3)
+                 ON CONFLICT (project_id) DO UPDATE
+                    SET data = EXCLUDED.data,
+                        schema_version = EXCLUDED.schema_version,
+                        revision = project_state.revision + 1,
+                        updated_at = now()
+                    WHERE project_state.revision = $4",
+                &[
+                    &self.project_id,
+                    &i32::try_from(state.schema_version).unwrap_or(i32::MAX),
+                    &value,
+                    &expected,
+                ],
+            )
+            .await
+            .map_err(|e| PortError::Backend(format!("upsert: {e}")))?;
+        if rows == 0 {
+            return Err(PortError::Conflict(
+                "state changed since last read (concurrent writer)".to_owned(),
+            ));
+        }
+        self.mirror_save(&state).await;
+        Ok(())
+    }
+
 }

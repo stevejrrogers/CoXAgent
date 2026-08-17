@@ -23,6 +23,7 @@ pub mod run_grooming;
 pub mod run_milestones;
 pub mod run_pd;
 pub mod run_planning;
+pub mod run_releases;
 pub mod run_reviews;
 pub mod run_sa;
 pub mod run_standup;
@@ -52,8 +53,16 @@ pub use run_grooming::RunGroomingUseCase;
 pub use run_milestones::RunMilestonesUseCase;
 pub use run_pd::RunPdUseCase;
 pub use run_planning::RunPlanningUseCase;
+pub use run_releases::RunReleasesUseCase;
 pub use run_reviews::{RunArchitectureAuditUseCase, RunDocsAuditUseCase};
 pub use run_sa::RunSaUseCase;
 pub use run_standup::RunStandupUseCase;
 pub use run_test::RunTestUseCase;
 pub use runner::{run_forever, RunnerHandle, RunnerSnapshot};
+
+#[cfg(test)]
+mod mod_guard_tests;
+#[cfg(test)]
+mod run_releases_tdd_tests;
+#[cfg(test)]
+mod run_releases_tests;

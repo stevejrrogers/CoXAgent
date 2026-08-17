@@ -14,7 +14,7 @@ const UCOLS=[
   ["shipped","Shipped","--teal",["documented","verified"]],
 ];
 const ROLES=["ba","po","sm","sa","pd","dev_bug","dev_feature","test","docs"];
-const MODELS={claude:["sonnet","opus","haiku"],scripted:["n/a"],mock:["n/a"],opencode:null,hermes:["hermes-3-llama-3.1-70b","hermes-2-pro-mistral-7b"],gemini:["gemini-2.5-pro","gemini-2.5-flash","gemini-2.0-flash"],codex:["gpt-4o","gpt-5","gpt-4"]};
+const MODELS={claude:["sonnet","opus","haiku"],copilot:["auto","claude-sonnet-4.6","claude-sonnet-4.5","claude-haiku-4.5","gpt-5.4","gpt-5.4-mini","gpt-5.3-codex","gemini-3.1-pro-preview","grok-4.5"],scripted:["n/a"],mock:["n/a"],opencode:null,hermes:["hermes-3-llama-3.1-70b","hermes-2-pro-mistral-7b"],gemini:["gemini-2.5-pro","gemini-2.5-flash","gemini-2.0-flash"],codex:["gpt-4o","gpt-5","gpt-4"]};
 // Common opencode provider/model choices (it accepts any, incl. local ollama).
 const OPENCODE_PROVIDERS=[{id:"anthropic",label:"Anthropic"},{id:"openai",label:"OpenAI"},{id:"google",label:"Google"},{id:"openrouter",label:"OpenRouter"},{id:"groq",label:"Groq"},{id:"deepseek",label:"DeepSeek"},{id:"ollama",label:"Ollama (local)"},{id:"mistral",label:"Mistral"}];
 let OC_MODELS=["claude-sonnet-4-5","claude-opus-4-1","gpt-5","gpt-4o","gemini-2.5-pro","gemini-2.5-flash","llama3.1","qwen2.5-coder","mixtral-8x7b","deepseek-v3","deepseek-r1"];
@@ -99,6 +99,27 @@ function nav(v){
    if(v==="settings")loadSettings(); else if(v==="calendar"){if(!Array.isArray(MEETINGS))MEETINGS=[];loadMeetings().then(renderCalendar).catch(()=>{MEETINGS=[];renderCalendar();});} else if(v==="discuss"){loadComments();} else if(v==="docs"){loadDocs();} else if(v==="people"){renderPeople();} else if(v==="audit"){renderAudit();} else if(v==="access"){renderAccess();} else if(v==="roadmap"){renderRoadmap();} else if(v==="review"){renderReview();} else if(v==="inbox"){renderInbox();} else if(v==="codemap"){renderCodeMap();} else if(v==="team"){loadAgentEvals();renderActive();} else if(v==="terminal"){openTerminal();} else renderActive();
    setTimeout(centerContent,50);}
 function initials(r){return r.replace("DEV-","").slice(0,2);}
+// A hostname as a person would say it: "Lutons-MacBook-Pro.local" -> "MacBook
+// Pro". Drops the mDNS suffix, the dashes, and the owner's own name, which the
+// account beside it already said.
+function prettyHost(h,account){
+  let s=String(h||"").replace(/\.local\.?$/i,"").replace(/[-_]+/g," ").trim();
+  const a=String(account||"").trim();
+  if(a){const own=new RegExp("^"+a.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")+"(?:'?s)?\\s+","i");s=s.replace(own,"");}
+  return s.trim()||String(h||"");
+}
+// Label a worker id (`account@host`) for display. The machine is named only
+// when it actually tells two workers apart — always printing it makes every row
+// longer in the common case (one person, one machine) while saying nothing.
+function workerLabel(who,all){
+  const s=String(who||""); const at=s.indexOf("@");
+  if(at<0)return s;
+  const account=s.slice(0,at), host=s.slice(at+1);
+  const hosts=new Set((all||[]).map(String)
+    .filter(w=>w.slice(0,w.indexOf("@"))===account&&w.includes("@"))
+    .map(w=>w.slice(w.indexOf("@")+1)));
+  return hosts.size>1?account+" · "+prettyHost(host,account):account;
+}
 function metricsFrom(s){const t=s.tickets||[],h=s.history||[],isF=x=>x.type!=="bug";
   return {shipped:t.filter(x=>isF(x)&&(x.status==="done"||x.status==="documented")).length,
     inflight:t.filter(x=>isF(x)&&(x.status==="ready"||x.status==="in_progress")).length,
@@ -372,6 +393,31 @@ function actIcon(action){const s=(action||"").toLowerCase();
   return"point";}
 function relTime(at){if(!at)return"";const d=new Date(at.replace(" ","T"));const s=(Date.now()-d.getTime())/1000;
   if(s<60)return"just now";if(s<3600)return Math.floor(s/60)+"m ago";if(s<86400)return Math.floor(s/3600)+"h ago";return Math.floor(s/86400)+"d ago";}
+// The per-cycle scorecard table: newest first, each cycle graded A–D by the
+// backend (deterministic, zero tokens). The grade colors match intuition:
+// A shipped, B useful, C idle-but-clean, D churn/incident.
+function renderCycleScores(s){
+  const el=document.getElementById("cycle-scores");if(!el)return;
+  const rows=(s.cycle_scores||[]).slice(-12).reverse();
+  if(!rows.length){el.innerHTML='<div class="empty">no cycles scored yet</div>';return;}
+  const gc={A:"var(--green)",B:"var(--accent2)",C:"var(--muted)",D:"var(--red)"};
+  el.innerHTML='<table class="scoretbl"><thead><tr><th></th><th>cycle</th><th>shipped</th><th>useful/runs</th><th>cost</th><th>errors</th><th>when</th></tr></thead><tbody>'+
+    rows.map(r=>{
+      // Per-phase breakdown (secs + $) as a hover title — where the cycle went.
+      const secs=r.phase_secs||{},cost=r.phase_cost||{};
+      const keys=[...new Set([...Object.keys(secs),...Object.keys(cost)])];
+      const brk=keys.map(k=>{
+        const t=secs[k]?(secs[k]>=60?Math.round(secs[k]/60)+'m':secs[k]+'s'):'';
+        const c=cost[k]?('$'+cost[k].toFixed(2)):'';
+        return k+': '+[t,c].filter(Boolean).join(' · ');
+      }).join('\n');
+      return `<tr title="${esc(brk)}">
+      <td><span class="grade" style="background:color-mix(in srgb,${gc[r.grade]||'var(--muted)'} 16%,transparent);color:${gc[r.grade]||'var(--muted)'}">${esc(r.grade)}</span></td>
+      <td>#${r.cycle}</td><td>${r.shipped||0}</td><td>${r.useful||0}/${r.runs||0}</td>
+      <td>${r.cost_usd?('$'+r.cost_usd.toFixed(2)):'—'}</td>
+      <td>${(r.errors||0)+(r.incidents?(' · '+r.incidents+'⛔'):'')}</td>
+      <td style="color:var(--dim)">${esc((r.at||'').slice(11,16))}</td></tr>`;}).join("")+'</tbody></table>';
+}
 function actItem(a){const col=cvar(AC[a.agent]||"--muted");
   return `<div class="tlrow"><div class="tl-node" style="--nc:${col}"><i class="ti ti-${actIcon(a.action)}"></i></div>
     <div class="tl-body"><div class="tl-line"><span class="tl-who" style="color:${col}">${esc(a.agent)}</span> <span class="tl-act">${esc(a.action)}</span>${a.ticket?` <span class="tk" onclick="showTicket('${esc(a.ticket)}')" style="cursor:pointer">${esc(a.ticket)}</span>`:''}</div>
@@ -437,6 +483,15 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
       const col=cvar(c);const st=stat[r]||{n:0,tk:new Set(),last:null};
       const roleKey=r.toLowerCase().replace(/-/g,"_");
       const cost=(spend.by_role||{})[roleKey]||0;
+      // The engine this role ACTUALLY ran on (post-failover) and the user whose
+      // runner last ran it — both last-wins from the spend meter. Until a first
+      // run has finished (the meter folds at run END — a long run would leave
+      // the badge blank for an hour), fall back to the CONFIGURED engine for
+      // the role: that is the engine being launched right now, short of a
+      // failover, and the observed value replaces it as soon as one lands.
+      const engCfg=(window._cfg&&_cfg.engine)?(((_cfg.engine.per_role||{})[roleKey]||{}).engine||( _cfg.engine.default||{}).engine||""):"";
+      const eng=(spend.engine_by_role||{})[roleKey]||engCfg;
+      const lastOp=(spend.operator_by_role||{})[roleKey]||"";
       // Live "working now" from the SHARED registry — EVERY team (this hub or
       // another machine) running this agent, so one card shows N users at once.
       const localActive=(window.RUNNER&&RUNNER.mode==="running")?(RUNNER.active_role||"").replace(/_/g,"-").toUpperCase():"";
@@ -453,7 +508,9 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
       let cur=null,live=working;
       if(r==="DEV-FEATURE"||r==="DEV-BUG"){const w=inProg.find(t=>r==="DEV-BUG"?t.type==="bug":t.type!=="bug");if(w){cur=w.id;}}
       if(!cur&&st.last&&st.last.ticket)cur=st.last.ticket;
-      const short=w=>(w||'').split('@')[0];
+      // Name the machine only when this account runs on more than one.
+      const allWho=runners.map(x=>x.who);
+      const short=w=>workerLabel(w,allWho);
       const taskChip=(note,tid,cls)=>`<span class="ag-task ${cls}"${tid?` onclick="event.stopPropagation();showTicket('${tid}')" style="cursor:pointer"`:''}>${note?esc(note):''}${tid?`<span class="tid">${esc(tid)}</span>`:''}</span>`;
       let statusHtml;
       if(working){
@@ -463,16 +520,20 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
         statusHtml=`<div class="ag-now"><i class="ti ti-loader-2 att-spin"></i> working now${runners.length>1?`<span class="ag-nteams">${runners.length} teams</span>`:''}</div>
           <div class="ag-runs">${rows}</div>`;
       }else{
-        statusHtml=`<div class="ag-last"><i class="ti ti-point"></i> ${cur?'last touched':'idle'}</div>
+        statusHtml=`<div class="ag-last"><i class="ti ti-point"></i> ${cur?'last touched':'idle'}${lastOp?` · <span class="ag-by" title="${esc(lastOp)}"><i class="ti ti-user-cog"></i> ${esc(workerLabel(lastOp,[lastOp]))}</span>`:''}</div>
           ${cur?taskChip('',cur,'idle'):''}`;
       }
+      // Which engine CLI this role is really on — copilot/opencode/claude/… —
+      // stamped from the run that actually happened, so failover shows through.
+      const engBadge=eng?`<span class="ag-eng" title="engine actually running this agent">${esc(eng)}</span>`:'';
       return `<div class="agent ${live?'run':''}" onclick="openAgent('${r}')" style="cursor:pointer">
         <div class="ag-head"><div class="av" style="background:${col}22;color:${col}">${initials(r)}<span class="sr"></span></div>
-          <div class="ag-id"><div class="rl">${r}</div><div class="ds">${d}</div></div>
+          <div class="ag-id"><div class="rl">${r}${engBadge}</div><div class="ds">${d}</div></div>
           <i class="ti ti-terminal-2 ag-term"></i></div>
         <div class="agstats"><span title="actions"><i class="ti ti-bolt"></i> ${st.n}</span><span title="tickets touched"><i class="ti ti-ticket"></i> ${st.tk.size}</span>${cost>0?`<span title="cost"><i class="ti ti-coin"></i> ${money(cost)}</span>`:''}</div>
         <div class="ag-status">${statusHtml}</div></div>`;}).join("");
     renderDupWarn(s);
+    renderCycleScores(s);
     renderTeamsOnline();
     renderSessions();
     if(ME&&ME.role==="admin")renderTeamPeople();
@@ -499,23 +560,19 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
     renderTranscripts();
   }else if(CUR==="insights"){
     const sp=s.spend||{by_role:{}};const tok=(sp.input_tokens||0)+(sp.output_tokens||0);
-    // Counterfactual (what it would cost WITHOUT the token-saver) comes from a
-    // cached fetch — cards render in ONE pass, no flash-then-replace.
+    // These KPIs are the real measured totals — no counterfactual. The old
+    // "không nén ~$X" subtitle scaled a 200-sample char saving against the
+    // lifetime token total: mismatched units and scope, so it read as ~1.4%
+    // and looked fabricated. The token-saver's true, honest ratio lives in its
+    // own panel below (78% off the output it actually compressed).
     const drawKpis=()=>{
-      let subTok="",subCost="";
-      const ts=window._tsCache;
-      if(ts&&ts.saved>0&&tok>0){
-        const wouldTok=tok+Math.round(ts.saved/4);
-        subTok="không nén: ~"+fmtK(wouldTok);
-        subCost="không nén: ~"+money((sp.total_cost_usd||0)*(wouldTok/tok));
-      }
       setHTML(document.getElementById("cost-kpis"),
-        [kpi("Total spend",money(sp.total_cost_usd),subCost),kpi("Tokens",fmtK(tok),subTok),kpi("Runs",sp.runs||0)].join(""));
+        [kpi("Total spend",money(sp.total_cost_usd)),kpi("Tokens",fmtK(tok)),kpi("Runs",sp.runs||0)].join(""));
     };
     drawKpis();
     if(!window._tsCacheAt||Date.now()-window._tsCacheAt>60000){
       window._tsCacheAt=Date.now();
-      fetch("/api/token-saver").then(r=>r.json()).then(ts=>{window._tsCache=ts;if(CUR==="insights")drawKpis();}).catch(()=>{});
+      fetch("/api/token-saver").then(r=>r.json()).then(ts=>{window._tsCache=ts;if(CUR==="insights")renderTokenSaver();}).catch(()=>{});
     }
     const roles=Object.entries(sp.by_role||{}).sort((a,b)=>b[1]-a[1]);
     const max=roles.length?roles[0][1]:1;

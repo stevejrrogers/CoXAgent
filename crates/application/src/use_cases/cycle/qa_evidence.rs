@@ -239,6 +239,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             work_dir: self.work_dir.clone(),
             timeout: std::time::Duration::from_secs(600),
             escalation_level: 0,
+            label: Some(ticket.to_string()),
         };
         let Ok(o) = self.engine.run(request).await else {
             return;
@@ -311,5 +312,69 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         })
         .await;
         true
+    }
+
+    /// Screenshot pass: attach a real screenshot to each UI ticket's test cases
+    /// that TEST already marked pass/fail but which still lack an image. Runs
+    /// right after the TEST engine so every verdict gets visual per-case proof.
+    /// Deterministic (ScreenshotPort) and best-effort — no browser, no storage,
+    /// or nothing to attach just skips.
+    pub(super) async fn attach_test_case_screenshots(&self) {
+        let Some(port) = self.config.deploy.host_port else {
+            return;
+        };
+        let (Some(shot), Some(storage)) = (&self.shot, &self.storage) else {
+            return;
+        };
+        let Ok(state) = self.store.load().await else {
+            return;
+        };
+        let targets: Vec<(TicketId, Vec<String>)> = state
+            .tickets
+            .iter()
+            .filter(|t| t.has_ui())
+            .filter_map(|t| {
+                let missing: Vec<String> = t
+                    .test_cases()
+                    .iter()
+                    .filter(|tc| {
+                        tc.status != coxagent_domain::ticket::TestCaseStatus::Pending
+                            && tc.evidence.as_ref().map_or(true, |e| e.image.is_none())
+                    })
+                    .map(|tc| tc.description.clone())
+                    .collect();
+                (!missing.is_empty()).then(|| (t.id().clone(), missing))
+            })
+            .collect();
+
+        let pid = self.config_project_label();
+        for (ticket, missing) in &targets {
+            let Some(bytes) = shot.capture(&format!("http://127.0.0.1:{port}/")).await else {
+                continue;
+            };
+            let file = format!("evidence-{ticket}-cases.png");
+            if storage
+                .put(&format!("proj/{pid}/{file}"), &bytes, "image/png")
+                .await
+                .is_err()
+            {
+                continue;
+            }
+            let url = format!("/api/projects/{pid}/media/{file}");
+            let at = crate::state::now_rfc3339();
+            let Ok(mut st) = self.store.load().await else {
+                continue;
+            };
+            let Some(t) = st.ticket_mut(ticket) else {
+                continue;
+            };
+            let mut changed = false;
+            for desc in missing {
+                changed |= t.set_test_case_image(desc, url.clone(), at.clone());
+            }
+            if changed {
+                let _ = self.store.save(&st).await;
+            }
+        }
     }
 }
