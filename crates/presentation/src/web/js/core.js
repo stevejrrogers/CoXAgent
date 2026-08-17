@@ -402,12 +402,21 @@ function renderCycleScores(s){
   if(!rows.length){el.innerHTML='<div class="empty">no cycles scored yet</div>';return;}
   const gc={A:"var(--green)",B:"var(--accent2)",C:"var(--muted)",D:"var(--red)"};
   el.innerHTML='<table class="scoretbl"><thead><tr><th></th><th>cycle</th><th>shipped</th><th>useful/runs</th><th>cost</th><th>errors</th><th>when</th></tr></thead><tbody>'+
-    rows.map(r=>`<tr>
+    rows.map(r=>{
+      // Per-phase breakdown (secs + $) as a hover title — where the cycle went.
+      const secs=r.phase_secs||{},cost=r.phase_cost||{};
+      const keys=[...new Set([...Object.keys(secs),...Object.keys(cost)])];
+      const brk=keys.map(k=>{
+        const t=secs[k]?(secs[k]>=60?Math.round(secs[k]/60)+'m':secs[k]+'s'):'';
+        const c=cost[k]?('$'+cost[k].toFixed(2)):'';
+        return k+': '+[t,c].filter(Boolean).join(' · ');
+      }).join('\n');
+      return `<tr title="${esc(brk)}">
       <td><span class="grade" style="background:color-mix(in srgb,${gc[r.grade]||'var(--muted)'} 16%,transparent);color:${gc[r.grade]||'var(--muted)'}">${esc(r.grade)}</span></td>
       <td>#${r.cycle}</td><td>${r.shipped||0}</td><td>${r.useful||0}/${r.runs||0}</td>
       <td>${r.cost_usd?('$'+r.cost_usd.toFixed(2)):'—'}</td>
       <td>${(r.errors||0)+(r.incidents?(' · '+r.incidents+'⛔'):'')}</td>
-      <td style="color:var(--dim)">${esc((r.at||'').slice(11,16))}</td></tr>`).join("")+'</tbody></table>';
+      <td style="color:var(--dim)">${esc((r.at||'').slice(11,16))}</td></tr>`;}).join("")+'</tbody></table>';
 }
 function actItem(a){const col=cvar(AC[a.agent]||"--muted");
   return `<div class="tlrow"><div class="tl-node" style="--nc:${col}"><i class="ti ti-${actIcon(a.action)}"></i></div>

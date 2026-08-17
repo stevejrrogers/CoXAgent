@@ -274,9 +274,10 @@ impl ClaudeEngine {
         }
         cmd.stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        // `sandbox` is re-bound to what the OS ACTUALLY applied: a Seatbelt
-        // profile it refused to apply leaves the outcome reporting `Refused`,
-        // never a confinement that never happened (COX-B016).
+        // The status comes BACK from the spawn: a host whose Seatbelt refused
+        // the profile on every attempt downgrades it to `Denied`, so the
+        // outcome reports a run that never happened instead of a confined one
+        // (COX-B016).
         let (mut child, sandbox) = crate::proc::spawn_confined(&mut cmd, sandbox)
             .await
             .map_err(|e| PortError::Backend(format!("spawn claude: {e}")))?;

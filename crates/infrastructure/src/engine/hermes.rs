@@ -59,9 +59,10 @@ impl AgentEnginePort for HermesEngine {
             .arg(prompt)
             .current_dir(&request.work_dir)
             .stdin(std::process::Stdio::null());
-        // `sandbox` is re-bound to what the OS ACTUALLY applied: a Seatbelt
-        // profile it refused to apply leaves the outcome reporting `Refused`,
-        // never a confinement that never happened (COX-B016).
+        // The status comes BACK from the spawn: on a host whose Seatbelt
+        // refuses to apply the profile, `sandbox` downgrades to `Denied` and
+        // the outcome says the run never ran confined rather than claiming a
+        // confinement that never took effect (COX-B016).
         let (output, sandbox) = crate::proc::output_confined(&mut cmd, sandbox)
             .await
             .map_err(|e| PortError::Backend(format!("spawn hermes: {e}")))?;

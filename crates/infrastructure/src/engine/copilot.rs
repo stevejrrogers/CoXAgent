@@ -52,8 +52,9 @@ impl CopilotEngine {
     }
 
     /// Spawn `cmd`, stream its JSONL stdout to the live log line-by-line, and
-    /// return the raw stdout, exit code, and stderr. Same shape as the opencode
-    /// adapter's exec so both feed the dashboard's live view identically.
+    /// return the raw stdout, exit code, stderr and the confinement actually
+    /// applied. Same shape as the opencode adapter's exec so both feed the
+    /// dashboard's live view identically.
     async fn exec(
         &self,
         mut cmd: Command,
@@ -61,9 +62,9 @@ impl CopilotEngine {
         timeout: std::time::Duration,
         sandbox: SandboxStatus,
     ) -> Result<StreamedRun, PortError> {
-        // `sandbox` is re-bound to what the OS ACTUALLY applied: a Seatbelt
-        // profile it refused to apply leaves the outcome reporting `Refused`,
-        // never a confinement that never happened (COX-B016).
+        // The status comes BACK from the spawn: `Denied` when this host's
+        // Seatbelt refused the profile every time, so the outcome never claims
+        // a confinement that was not applied (COX-B016).
         let (mut child, sandbox) = crate::proc::spawn_confined(&mut cmd, sandbox)
             .await
             .map_err(|e| PortError::Backend(format!("spawn copilot: {e}")))?;
@@ -121,21 +122,18 @@ impl CopilotEngine {
         }
         Ok(StreamedRun {
             stdout: raw,
-            code: status.code(),
+            exit_code: status.code(),
             stderr,
             sandbox,
         })
     }
 }
 
-/// One streamed Copilot run: its raw stdout, exit code, stderr — and the write
-/// confinement that ACTUALLY applied, which `spawn_confined` downgrades when
-/// the OS refused to apply the profile (COX-B016). Carrying it out of `exec`
-/// is what stops the caller stamping the REQUESTED confinement onto an outcome
-/// the sandbox never produced.
+/// One streamed Copilot run: what the CLI produced, plus the write confinement
+/// that was actually in force while it produced it.
 struct StreamedRun {
     stdout: String,
-    code: Option<i32>,
+    exit_code: Option<i32>,
     stderr: String,
     sandbox: SandboxStatus,
 }
@@ -247,7 +245,7 @@ impl AgentEnginePort for CopilotEngine {
         }
         let StreamedRun {
             stdout,
-            code,
+            exit_code: code,
             stderr,
             sandbox,
         } = self.exec(cmd, live, request.timeout, sandbox).await?;
@@ -316,7 +314,7 @@ impl AgentEnginePort for CopilotEngine {
         let live = crate::engine::live::live_path(work_dir, &crate::engine::role_key(role), None);
         let StreamedRun {
             stdout,
-            code,
+            exit_code: code,
             stderr,
             sandbox,
         } = self.exec(cmd, live, timeout, sandbox).await?;

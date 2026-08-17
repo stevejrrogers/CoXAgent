@@ -33,12 +33,6 @@ pub fn is_infra_fault(why: &str) -> bool {
         "rate limit",
         "overloaded",
         "529",
-        // Host sandbox. macOS Seatbelt can refuse to apply a profile that it
-        // accepted a moment earlier (COX-B013/B016); `sandbox-exec` then exits
-        // before the agent runs, so there is no attempt to attribute to the
-        // ticket — counting it as one parks innocent work exactly the way the
-        // spend-limit message above did.
-        "sandbox_apply",
         // Network.
         "connection refused",
         "connection reset",
@@ -54,6 +48,11 @@ pub fn is_infra_fault(why: &str) -> bool {
         "socket hang up",
         "no route to host",
         "temporary failure in name resolution",
+        // The host OS, not the agent: macOS Seatbelt refuses `sandbox_apply()`
+        // in bursts (COX-B013/COX-B016), so `sandbox-exec` exits 71 before the
+        // agent CLI ever runs and the only trace is this stderr line. Without
+        // it the ticket is charged for a failure whose work never started.
+        "sandbox_apply",
     ]
     .iter()
     .any(|p| low.contains(p))
@@ -81,9 +80,9 @@ mod tests {
             // it reaches us through stdout, not stderr.
             "PO milestones engine failed: Failed to authenticate: OAuth session expired and \
              could not be refreshed",
-            // COX-B016: the OS refused to apply the Seatbelt profile, so the
-            // agent never ran. Blaming the ticket for it burns its attempts on
-            // work that was never attempted.
+            // COX-B016: macOS refused to apply the Seatbelt profile, so the
+            // agent never ran. Verbatim from `sandbox-exec` on this repo's own
+            // dev hosts, where it hits ~40% of runs in bursts.
             "sandbox-exec: sandbox_apply: Operation not permitted",
         ] {
             assert!(is_infra_fault(why), "{why:?} must be infra");
