@@ -260,6 +260,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // left COX-B006 parked while its merged fix sat on main.
         if let Ok(merged) = forge.recently_merged().await {
             for (number, head) in merged {
+                // A merged release PR (`release/vX.Y.Z`) gets its tag now —
+                // the merge IS the release; the tag is its immutable mark.
+                if head.starts_with("release/v") {
+                    self.tag_merged_release(&head).await;
+                }
                 let ticket = head.rsplit('/').next().unwrap_or(&head).to_owned();
                 let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
                     if s.seen_merged_prs.contains(&number) {

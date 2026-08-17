@@ -35,6 +35,7 @@ mod forge_review;
 mod ops;
 mod qa_evidence;
 mod recovery;
+mod release_cut;
 
 /// Local, non-pushed ref updated after every deploy that passes both
 /// `deploy()` and `run_tests()` — auto-rollback's source of truth for "last
@@ -125,18 +126,6 @@ fn parse_cargo_version(text: &str) -> Option<String> {
         }
     }
     None
-}
-
-/// The version to reconcile `state_ver` down to, or `None` when there is no
-/// drift to correct. Returns `repo_ver` when state has optimistically bumped
-/// ahead of what the tree declares; `None` when state is at or behind reality
-/// or `repo_ver` is unparseable.
-fn reconcile_target(
-    state_ver: &coxagent_domain::SemVer,
-    repo_ver: &str,
-) -> Option<coxagent_domain::SemVer> {
-    let repo = coxagent_domain::SemVer::parse(repo_ver).ok()?;
-    (state_ver > &repo).then_some(repo)
 }
 
 /// The composition root's engine-rebuild hook: `Some(new parts)` only when the
@@ -449,13 +438,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         .await;
     }
 
-    /// Reconcile the state's `current_version` against the version the checked-out
-    /// tree actually declares. The version is bumped optimistically when a DEV
-    /// ticket completes locally — *before* its PR merges. If that PR is later
-    /// rejected or closed, `state.current_version` stays a phantom release no
-    /// build carries. This pass pulls it back to reality, but only when it is
-    /// provably safe: no ticket is mid-flight (in-progress/claimed/fixed pending
-    /// PR), so nothing is actively bumping the version.
+    /// Mirror the state's `current_version` from the version the checked-out
+    /// tree declares — BOTH directions. The manifest on main is the single
+    /// source of truth (only the release flow changes it); the dashboard
+    /// number is a reflection, never an opinion. Historically DEV bumped the
+    /// state optimistically pre-merge (phantom releases this pass clawed
+    /// back); that bump is gone, and any residual drift — stale mirror behind
+    /// a repo release, or a leftover phantom — converges here.
     async fn reconcile_version(&self) {
         let Some(files) = self.files.clone() else {
             return;
@@ -471,32 +460,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let Ok(mut state) = self.store.load().await else {
             return;
         };
-        // Never stomp active work: if a ticket is claimed/in-flight it may be
-        // mid-bump; wait for it to resolve.
-        let ticket_in_flight = state.tickets.iter().any(|t| {
-            matches!(
-                t.status(),
-                coxagent_domain::ticket::Status::InProgress
-                    | coxagent_domain::ticket::Status::Fixed
-            )
-        });
-        if ticket_in_flight {
-            return;
-        }
         let state_ver = state.current_version.clone();
-        // What version should state be reconciled to, or None when no drift.
-        // Purely a function of (state version, repo version) — the in-flight
-        // guard above already ruled out active work.
-        if let Some(target) = reconcile_target(&state_ver, &repo_ver) {
-            tracing::warn!(
-                "reconcile: state version {} ahead of repo {} with no work in flight — reverting",
-                state_ver,
-                repo_ver
-            );
-            state.current_version = target.clone();
+        let Ok(repo) = coxagent_domain::SemVer::parse(&repo_ver) else {
+            return;
+        };
+        if repo != state_ver {
+            state.current_version = repo.clone();
             state.log_activity(
                 "SYSTEM",
-                &format!("reconciled version {state_ver} → {target} (phantom bump, no PR merged)"),
+                &format!("version mirror synced {state_ver} → {repo} (manifest on main is truth)"),
                 None,
             );
             let _ = self.store.save(&state).await;
@@ -765,6 +737,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // Forge hygiene: rebase open PRs onto the moving base + learn
             // from PRs a human closed without merging.
             self.forge_hygiene().await;
+            // Release cut (the ONLY place the version moves): on cadence, scan
+            // commits since the last tag and open the human-gated release PR.
+            self.maybe_cut_release().await;
             // Stop starting, start finishing: review + merge the PR queue at
             // the TOP of the cycle. This used to run at the very end — after
             // codegraph, ceremonies and the (tens-of-minutes) dev phases — so
@@ -1545,7 +1520,7 @@ mod marker_tests {
 
 #[cfg(test)]
 mod version_reconcile_tests {
-    use super::{parse_cargo_version, reconcile_target};
+    use super::parse_cargo_version;
     use coxagent_domain::SemVer;
 
     #[test]
@@ -1568,20 +1543,6 @@ mod version_reconcile_tests {
     fn missing_or_garbage_version_is_none() {
         assert_eq!(parse_cargo_version("[package]\nname=\"x\"\n"), None);
         assert_eq!(parse_cargo_version("version = \"not-a-version\"\n"), None);
-    }
-
-    #[test]
-    fn reconciles_only_when_state_is_ahead() {
-        // State ahead of repo → reconcile DOWN to repo.
-        assert_eq!(
-            reconcile_target(&SemVer::new(2, 23, 0), "2.22.0"),
-            Some(SemVer::new(2, 22, 0))
-        );
-        // State at or behind reality → no-op.
-        assert_eq!(reconcile_target(&SemVer::new(2, 22, 0), "2.22.0"), None);
-        assert_eq!(reconcile_target(&SemVer::new(2, 21, 0), "2.22.0"), None);
-        // Unparseable repo version → no-op (cannot guess).
-        assert_eq!(reconcile_target(&SemVer::new(2, 23, 0), "garbage"), None);
     }
 
     #[test]
