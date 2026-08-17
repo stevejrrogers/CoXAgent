@@ -1,0 +1,70 @@
+name: Visual QA
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  visual-qa:
+    name: Visual QA
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # End-to-end budget marker: the whole build -> test -> compare -> ticket ->
+    # comment chain must finish under 7 minutes (<420s) wall-clock; every stage
+    # declares its own timeout-minutes cap so a slow runner fails fast.
+    env:
+      COXAGENT_PORT: "8101"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Playwright browsers (budget)
+        timeout-minutes: 3
+        run: npx playwright install --with-deps chromium
+
+      - name: Build coxagent binary (budget)
+        timeout-minutes: 4
+        run: cargo build --bin coxagent
+
+      - name: Run screenshot suite against committed baselines (budget)
+        if: always()
+        timeout-minutes: 6
+        working-directory: e2e
+        run: |
+          sh ./run-server.sh ${COXAGENT_PORT} &
+          npx playwright test
+
+      - name: Auto-file Bug tickets for regressions (budget)
+        if: failure()
+        timeout-minutes: 3
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}} Visual QA regression"
+          acceptance="Each diff must match its committed baseline under tolerance"
+          body=$(printf "View/OS regression.\nBaseline URL: %s\nDiff URL: %s\nPR link: %s\nAcceptance criteria: %s" \
+            "${SERVER_URL}/baseline" "${SERVER_URL}/diff" "${{ github.event.pull_request.html_url }}" "$acceptance")
+          ticket_id=$(gh issue create --repo "${{ github.repository }}" --title "$title" --body "$body")
+          echo "filed {ticket_id}: $ticket_id"
+
+      - name: Comment on PR linking filed tickets
+        if: failure()
+        timeout-minutes: 2
+        run: |
+          gh pr comment "${{ github.event.pull_request.number }}" \\
+            --body "Visual QA regression Bug filed: {ticket_id}"
+
+      - name: Upload screenshot evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-evidence
+          path: e2e/test-results/
