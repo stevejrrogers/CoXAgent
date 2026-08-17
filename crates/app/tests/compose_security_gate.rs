@@ -294,10 +294,7 @@ fn tokens_for_var(src: &str, var: &str) -> Vec<String> {
             // Accepts any terminate/modifier char (`:`/`?`/`-`/`}`).
             if matches!(
                 token_src.as_bytes().get(prefix.len()),
-                Some(b'_')
-                    | Some(b'A'..=b'Z')
-                    | Some(b'a'..=b'z')
-                    | Some(b'0'..=b'9')
+                Some(b'_' | b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9')
             ) {
                 rest = &token_src[end..];
                 continue;
