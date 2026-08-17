@@ -27,7 +27,18 @@ pub fn transition_allowed(ticket_type: TicketType, from: Status, to: Status) -> 
         ),
         TicketType::Bug => matches!(
             (from, to),
-            (Open, InProgress | Rejected) | (InProgress, Fixed) | (Fixed, Verified | Open) // Fixed -> Open = reopen after failed regression
+            // Open -> Rejected = filed in error / duplicate caught before work.
+            // InProgress -> Rejected = the automated not-reproducible close: a
+            // bug pass that ends with no reproduction on a green tree (or is a
+            // duplicate already fixed under another ticket) must be able to
+            // CLOSE instead of re-queue. Historically that mid-work close did
+            // not exist, so the phantom-bug guard's System Rejected transition
+            // failed, the ticket bounced back into the queue, and a
+            // not-reproducible bug burned a fresh full investigation every
+            // sprint (the CXA-B002/B003/B004 loop).
+            (Open, InProgress | Rejected)
+                | (InProgress, Fixed | Rejected)
+                | (Fixed, Verified | Open) // Fixed -> Open = reopen after failed regression
         ),
     }
 }
@@ -118,6 +129,31 @@ mod tests {
             TicketType::Bug,
             Status::Done,
             Status::Documented
+        ));
+    }
+
+    #[test]
+    fn bug_in_progress_can_be_rejected_by_system() {
+        // The phantom-bug guard closes a non-reproducible / duplicate bug
+        // mid-work via the System role. InProgress -> Rejected must be a legal
+        // bug edge or that close fails and the ticket loops forever.
+        assert!(transition_allowed(
+            TicketType::Bug,
+            Status::InProgress,
+            Status::Rejected
+        ));
+        assert!(can_transition(
+            Role::System,
+            Status::InProgress,
+            Status::Rejected
+        ));
+        // DEV does NOT get the close: the guard deliberately routes the
+        // not-reproducible verdict through System so a dev can't self-close
+        // and burn through the sprint.
+        assert!(!can_transition(
+            Role::DevBug,
+            Status::InProgress,
+            Status::Rejected
         ));
     }
 

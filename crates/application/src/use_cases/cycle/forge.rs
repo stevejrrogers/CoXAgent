@@ -7,6 +7,7 @@
 use super::RunCycleUseCase;
 use crate::ports::outbound::{AgentEnginePort, AgentRequest, GitAuthor, StateStorePort};
 use coxagent_domain::TicketId;
+use std::path::PathBuf;
 
 impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// Ship a just-completed ticket through the git flow, when enabled:
@@ -108,7 +109,24 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .unwrap_or_else(|| id.to_string());
 
         let branch = format!("{}{id}", self.config.git.branch_prefix);
-        if let Err(e) = git.checkout_branch(&self.work_dir, &branch).await {
+        // Self-heal: an earlier agent run may have left a worktree behind that
+        // is still squatting this branch (abandoned opencode temp checkouts are
+        // never `worktree remove`d). Git then refuses every checkout of the
+        // branch and the ticket is mis-assigned forever. Release the leftover
+        // worktree once and retry before giving up.
+        let mut result = git.checkout_branch(&self.work_dir, &branch).await;
+        if let Err(err) = &result {
+            if let Some(collision) = worktree_path_in_use(&err.to_string()) {
+                self.log_git(&format!(
+                    "branch {branch} held by leftover worktree {} — releasing and retrying",
+                    collision.display()
+                ))
+                .await;
+                let _ = git.worktree_remove(&self.work_dir, &collision).await;
+                result = git.checkout_branch(&self.work_dir, &branch).await;
+            }
+        }
+        if let Err(e) = result {
             self.log_git(&format!("branch {branch} failed: {e}")).await;
             return;
         }
@@ -365,6 +383,21 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     }
 }
 
+/// Extract the path of a worktree that git says is squatting a branch, from its
+/// "already used by worktree at '<path>'" diagnostic. Pure string parsing — no
+/// IO — so it is unit-testable without any port double. Used to release a
+/// leftover worktree and retry a branch checkout.
+fn worktree_path_in_use(err: &str) -> Option<PathBuf> {
+    let marker = "is already used by worktree at '";
+    let start = err.find(marker)? + marker.len();
+    let path = err[start..].split('\'').next()?;
+    if path.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(path))
+    }
+}
+
 /// The tickets whose finished-but-uncommitted residue an end-of-cycle sweep may
 /// ship: those whose Definition-of-Done formally passed (`Done` feature/chore,
 /// `Fixed` bug). Ordered oldest-first so stranded work ships in commit order.
@@ -394,7 +427,7 @@ fn unshipped_candidates(state: &crate::state::ProjectState) -> Vec<(TicketId, &'
 
 #[cfg(test)]
 mod tests {
-    use super::unshipped_candidates;
+    use super::{unshipped_candidates, worktree_path_in_use};
     use crate::state::ProjectState;
     use coxagent_domain::{
         Complexity, Priority, Role, Status, TechnicalDesign, Ticket, TicketId, TicketType,
@@ -486,5 +519,25 @@ mod tests {
                 (TicketId::new("B-001").expect("id"), "feat"),
             ]
         );
+    }
+
+    #[test]
+    fn worktree_path_in_use_extracts_the_colliding_path_from_git_error() {
+        let err = "fatal: 'feat/CXA-B043' is already used by worktree at \
+                   '/private/var/folders/8c/p43zxq5n49q853zck6hywldm0000gn/T/opencode/wt-b043'";
+        assert_eq!(
+            worktree_path_in_use(err).map(|p| p.to_string_lossy().into_owned()),
+            Some(
+                "/private/var/folders/8c/p43zxq5n49q853zck6hywldm0000gn/T/opencode/wt-b043"
+                    .to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn worktree_path_in_use_is_none_when_not_a_worktree_collision() {
+        assert!(worktree_path_in_use("fatal: cannot lock ref").is_none());
+        assert!(worktree_path_in_use("branch already exists").is_none());
+        assert!(worktree_path_in_use("already used by worktree at ''").is_none());
     }
 }

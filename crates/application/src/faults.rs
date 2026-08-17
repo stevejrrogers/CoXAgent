@@ -6,6 +6,26 @@
 //! DEV failure counter and the runner's circuit breaker consult this one
 //! predicate so the two can never drift apart.
 
+/// An AUTH-class death: revoked/expired credentials. Unlike a transient blip
+/// this never heals on its own — a person must re-login — so the alarm fires
+/// on the FIRST sighting instead of waiting for the breaker to count cycles
+/// (the 2026-08-17 OAuth death burned an hour before anything shouted).
+#[must_use]
+pub fn is_auth_death(why: &str) -> bool {
+    let low = why.to_lowercase();
+    [
+        "oauth",
+        "authenticate",
+        "401",
+        "unauthorized",
+        "revoked",
+        "invalid api key",
+        "api key not",
+    ]
+    .iter()
+    .any(|m| low.contains(m))
+}
+
 /// Whether `why` looks like an infrastructure fault rather than a genuine
 /// task failure. An EMPTY message is treated as infra too: every observed
 /// engine-side outage (401, network drop) surfaced with empty stderr, while
@@ -48,6 +68,11 @@ pub fn is_infra_fault(why: &str) -> bool {
         "socket hang up",
         "no route to host",
         "temporary failure in name resolution",
+        // The host OS, not the agent: macOS Seatbelt refuses `sandbox_apply()`
+        // in bursts (COX-B013/COX-B016), so `sandbox-exec` exits 71 before the
+        // agent CLI ever runs and the only trace is this stderr line. Without
+        // it the ticket is charged for a failure whose work never started.
+        "sandbox_apply",
     ]
     .iter()
     .any(|p| low.contains(p))
@@ -75,6 +100,10 @@ mod tests {
             // it reaches us through stdout, not stderr.
             "PO milestones engine failed: Failed to authenticate: OAuth session expired and \
              could not be refreshed",
+            // COX-B016: macOS refused to apply the Seatbelt profile, so the
+            // agent never ran. Verbatim from `sandbox-exec` on this repo's own
+            // dev hosts, where it hits ~40% of runs in bursts.
+            "sandbox-exec: sandbox_apply: Operation not permitted",
         ] {
             assert!(is_infra_fault(why), "{why:?} must be infra");
         }

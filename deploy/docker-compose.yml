@@ -11,8 +11,8 @@ services:
     image: minio/minio
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: ${S3_ACCESS_KEY}
-      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY}
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:?MinIO access-key must be set}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:?MinIO credential must be set}
     volumes:
       - minio:/data
     restart: unless-stopped
@@ -20,8 +20,8 @@ services:
   mongo:
     image: mongo:7
     environment:
-      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER}
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD}
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:?MongoDB root user must be set}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:?MongoDB root secret must be set}
     volumes:
       - mongo:/data/db
     restart: unless-stopped
@@ -31,13 +31,13 @@ services:
   db:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: ${PG_USER}
-      POSTGRES_PASSWORD: ${PG_PASSWORD}
+      POSTGRES_USER: ${PG_USER:?Postgres role must be set}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?Postgres superuser secret must be set}
       POSTGRES_DB: coxagent
     volumes:
       - db:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${PG_USER}"]
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:?Postgres role must be set}"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -57,7 +57,7 @@ services:
     command:
       - -n
       - --use-auth-secret
-      - --static-auth-secret=${TURN_SECRET}
+      - --static-auth-secret=${TURN_SECRET:?coturn shared-secret must be set}
       - --realm=coxagent
       - --no-tls
       - --no-dtls
@@ -72,23 +72,23 @@ services:
       dockerfile: deploy/Dockerfile
     environment:
       COXAGENT_HOST: 0.0.0.0
-      COXAGENT_ADMIN_USER: ${ADMIN_USER}
-      COXAGENT_ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      COXAGENT_ADMIN_USER: ${ADMIN_USER:?superuser login must be set}
+      COXAGENT_ADMIN_PASSWORD: ${COXAGENT_ADMIN_PASSWORD:?a strong super-admin secret must be set}
       # File storage → MinIO (over the internal docker network).
       COXAGENT_S3_ENDPOINT: http://minio:9000
       COXAGENT_S3_BUCKET: coxagent
-      COXAGENT_S3_ACCESS_KEY: ${S3_ACCESS_KEY}
-      COXAGENT_S3_SECRET_KEY: ${S3_SECRET_KEY}
+      COXAGENT_S3_ACCESS_KEY: ${S3_ACCESS_KEY:?MinIO access-key must be set}
+      COXAGENT_S3_SECRET_KEY: ${S3_SECRET_KEY:?MinIO credential must be set}
       # Documentation store → MongoDB (server-side system of record for docs).
-      COXAGENT_MONGO_URL: mongodb://${MONGO_USER}:${MONGO_PASSWORD}@mongo:27017/?authSource=admin
+      COXAGENT_MONGO_URL: mongodb://${MONGO_USER:?MongoDB root user must be set}:${MONGO_PASSWORD:?MongoDB root secret must be set}@mongo:27017/?authSource=admin
       COXAGENT_MONGO_DB: coxagent
       # Shared state → Postgres; ephemeral coordination → Redis. Set both on every
       # hub/machine so N teams coordinate (claim tickets, elect a leader) safely.
-      COXAGENT_DB_DSN: postgres://${PG_USER}:${PG_PASSWORD}@db:5432/coxagent
+      COXAGENT_DB_DSN: postgres://${PG_USER:?Postgres role must be set}:${PG_PASSWORD:?Postgres superuser secret must be set}@db:5432/coxagent
       COXAGENT_REDIS_URL: redis://redis:6379
       # TURN for calls — the browser reaches coturn at the PUBLIC IP directly.
       COXAGENT_TURN_URL: turn:${PUBLIC_IP}:3478
-      COXAGENT_TURN_SECRET: ${TURN_SECRET}
+      COXAGENT_TURN_SECRET: ${TURN_SECRET:?coturn shared-secret must be set}
       COXAGENT_REGISTRY: /data/registry.json
     volumes:
       - appdata:/data
