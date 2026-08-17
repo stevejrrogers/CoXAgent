@@ -61,3 +61,7 @@ test-results/
 .build/
 opencode.json
 .coxagent-worktrees/
+# Nested scratch repo a merge-test worker creates; must never be swept into a
+# PR as a gitlink (that broke CI + the visual-qa gate). See PRs #220/#223/#224.
+mergetest/
+/mergetest/
