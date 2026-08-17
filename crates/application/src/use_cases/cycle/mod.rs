@@ -873,10 +873,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 .errors
                 .push("SA/PD: design paused — merge-queue recovery, conflicts first".to_owned());
         } else {
-        if self.pause_requested() {
-            report.errors.push("cycle cut short — paused by user".to_owned());
-            return report;
-        }
+            if self.pause_requested() {
+                report
+                    .errors
+                    .push("cycle cut short — paused by user".to_owned());
+                return report;
+            }
             match self.sa().execute().await {
                 Ok(id) => report.sa_readied = id,
                 Err(e) => report.errors.push(format!("SA: {e}")),
@@ -902,10 +904,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
 
         if !queue_full {
-        if self.pause_requested() {
-            report.errors.push("cycle cut short — paused by user".to_owned());
-            return report;
-        }
+            if self.pause_requested() {
+                report
+                    .errors
+                    .push("cycle cut short — paused by user".to_owned());
+                return report;
+            }
             match self.dev(DevMode::Bug).execute().await {
                 Ok(id) => {
                     if let Some(tid) = &id {
@@ -923,7 +927,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 .push("DEV-FEATURE: paused by self-tuning — burning down bugs first".to_owned());
         }
         if self.pause_requested() {
-            report.errors.push("cycle cut short — paused by user".to_owned());
+            report
+                .errors
+                .push("cycle cut short — paused by user".to_owned());
             return report;
         }
         if self.config.workflow.feature_dev_enabled && !queue_full && !bugs_first {
@@ -1170,9 +1176,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // it — PO & SA weigh in, SM decides, and a decision can spawn a
             // ticket. Posts land in the Scrum feed.
             if self.pause_requested() {
-            report.errors.push("cycle cut short — paused by user".to_owned());
-            return report;
-        }
+                report
+                    .errors
+                    .push("cycle cut short — paused by user".to_owned());
+                return report;
+            }
             self.scrum_discussion(&report, cycle).await;
         }
         self.report_idle();
@@ -1291,7 +1299,6 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         self.files = files;
         self
     }
-
 
     /// The engine this cycle drives, for outage reporting.
     pub fn engine_id(&self) -> &'static str {
@@ -1462,8 +1469,10 @@ mod cycle_counter_tests {
     fn resumes_from_an_existing_runner_local_counter() {
         // A project whose persistent counter was seeded by an older local
         // counter (e.g. it ran 42 cycles before this field existed).
-        let mut s = ProjectState::default();
-        s.cycle = 42;
+        let mut s = ProjectState {
+            cycle: 42,
+            ..Default::default()
+        };
         assert_eq!(advance_project_cycle(&mut s), 43);
         assert_eq!(advance_project_cycle(&mut s), 44);
     }
@@ -1487,8 +1496,10 @@ mod cycle_counter_tests {
     #[test]
     fn never_regresses_the_persistent_counter() {
         // The counter only moves forward — it never wraps or renumbers.
-        let mut s = ProjectState::default();
-        s.cycle = u64::MAX - 1;
+        let mut s = ProjectState {
+            cycle: u64::MAX - 1,
+            ..Default::default()
+        };
         assert_eq!(advance_project_cycle(&mut s), u64::MAX);
         // Saturates rather than wrapping to 0 (which would collide with cadence).
         assert_eq!(advance_project_cycle(&mut s), u64::MAX);

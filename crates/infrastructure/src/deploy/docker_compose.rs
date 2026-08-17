@@ -1294,8 +1294,6 @@ mod tests {
     /// The deploy port-eviction decision routes through the single shared
     /// reclaimability policy (`crate::deploy::reclaimable`), whose own unit
     /// tests own the full blast-radius matrix — live hub, shared infra,
-    /// case-insensitivity and foreign projects.
-
     /// Regression guard for CXA-B010 + CXA-B017: every site that runs compose
     /// against this repo's secret-bearing docker-compose.yml must seed
     /// PG_PASSWORD and COXAGENT_ADMIN_PASSWORD with valid, non-blank values. If

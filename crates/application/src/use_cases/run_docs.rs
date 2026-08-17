@@ -350,9 +350,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
                 break;
             };
             if attempt > 1 {
-                tracing::warn!(
-                    "DOCS gate attempt {attempt} for {id} still failing: {missing}"
-                );
+                tracing::warn!("DOCS gate attempt {attempt} for {id} still failing: {missing}");
             }
             let fixup = format!(
                 "Your page for {id} is missing required parts: {missing}.\n\nOutput the COMPLETE \

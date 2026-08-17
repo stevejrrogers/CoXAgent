@@ -4,8 +4,8 @@
 use super::{diff_has_conflict_markers, ReviewVerdict, RunCycleUseCase};
 use crate::ports::outbound::{AgentEnginePort, AgentRequest, StateStorePort};
 use crate::use_cases::merge_policy::{
-    changed_files, competing_pr, needs_human_eyes, CompeteCandidate, CompeteOutcome,
-    resolve_competing,
+    changed_files, competing_pr, needs_human_eyes, resolve_competing, CompeteCandidate,
+    CompeteOutcome,
 };
 use std::fmt::Write as _;
 
@@ -373,7 +373,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                             continue;
                         }
                     }
-                    CompeteOutcome::Proceed { winner, unsafe_other } => {
+                    CompeteOutcome::Proceed {
+                        winner,
+                        unsafe_other,
+                    } => {
                         // The current PR is a SAFE, small subset of a
                         // load-bearing same-ticket competitor. It is not held
                         // hostage by that risk — it proceeds to the normal
@@ -387,13 +390,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                                  the safe candidate is not this PR. Close one or fold this in."
                             );
                             let _ = forge.request_changes(pr.number, &reason).await;
-                            self.record_review(
-                                pr.number,
-                                "request_changes",
-                                &reason,
-                                &head_sha,
-                            )
-                            .await;
+                            self.record_review(pr.number, "request_changes", &reason, &head_sha)
+                                .await;
                             self.log_git(&format!(
                                 "SA held PR #{}: competes with #{other}",
                                 pr.number
@@ -434,7 +432,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                         // alone: a change this large, or one that edits how the
                         // project builds and deploys itself, gets a human even
                         // when every gate is green.
-                        if let Some(why) = needs_human_eyes(&diff, self.config.git.max_changed_lines) {
+                        if let Some(why) =
+                            needs_human_eyes(&diff, self.config.git.max_changed_lines)
+                        {
                             let msg = format!(
                                 "Approved, but not auto-merging: {why}. Ask a human to land this."
                             );
@@ -446,10 +446,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                             self.reporter().report_hold(pr.number, &why).await;
                             self.notify(
                                 "human_eyes",
-                                format!(
-                                    "PR #{} approved but held for a human: {why}",
-                                    pr.number
-                                ),
+                                format!("PR #{} approved but held for a human: {why}", pr.number),
                             )
                             .await;
                             self.log_git(&format!(

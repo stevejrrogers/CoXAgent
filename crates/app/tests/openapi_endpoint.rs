@@ -14,7 +14,12 @@ async fn serve(port: u16) {
     };
     let audit: Arc<dyn coxagent_application::ports::outbound::AuditPort> =
         Arc::new(coxagent_infrastructure::MemoryAuditSink::default());
-    tokio::spawn(coxagent_presentation::serve_full(vec![], port, audit, extras));
+    tokio::spawn(coxagent_presentation::serve_full(
+        vec![],
+        port,
+        audit,
+        extras,
+    ));
     let client = reqwest::Client::new();
     for _ in 0..50 {
         if client
@@ -42,10 +47,16 @@ async fn openapi_endpoint_serves_a_valid_openapi_document() {
     assert_eq!(resp.status(), 200, "openapi.json must answer 200");
     let body: serde_json::Value = resp.json().await.expect("openapi body is JSON");
     assert!(
-        body["openapi"].as_str().unwrap_or_default().starts_with("3."),
+        body["openapi"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("3."),
         "the document declares an OpenAPI 3.x version"
     );
     assert_eq!(body["info"]["title"], "CoXAgent Hub API");
     let paths = body["paths"].as_object().expect("paths object");
-    assert!(!paths.is_empty(), "spec describes at least one service route");
+    assert!(
+        !paths.is_empty(),
+        "spec describes at least one service route"
+    );
 }

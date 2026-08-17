@@ -1468,10 +1468,7 @@ mod tests {
         async fn is_repo(&self, _work_dir: &std::path::Path) -> bool {
             unimplemented!("unused by tree_fingerprint")
         }
-        async fn current_branch(
-            &self,
-            _work_dir: &std::path::Path,
-        ) -> Result<String, PortError> {
+        async fn current_branch(&self, _work_dir: &std::path::Path) -> Result<String, PortError> {
             unimplemented!("unused by tree_fingerprint")
         }
         async fn checkout_branch(

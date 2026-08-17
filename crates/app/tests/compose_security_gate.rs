@@ -252,8 +252,7 @@ fn repo_root() -> PathBuf {
 
 fn read_file(rel: &str) -> String {
     let path = repo_root().join(rel);
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
 // ---------------------------------------------------------------------------
@@ -365,7 +364,10 @@ fn insecure_fallback_on_password_key_is_caught() {
 
 #[test]
 fn changeme_fallback_is_caught() {
-    let src = db_compose("${COXAGENT_ADMIN_PASSWORD:-changeme}", "127.0.0.1:5432:5432");
+    let src = db_compose(
+        "${COXAGENT_ADMIN_PASSWORD:-changeme}",
+        "127.0.0.1:5432:5432",
+    );
     let findings = check("docker-compose.yml", &src);
     assert!(
         !findings.is_empty(),
@@ -466,8 +468,14 @@ fn bare_host_port_on_datastore_is_caught() {
         "a bare `5432:5432` on a datastore must be caught"
     );
     let why = &findings[0].why;
-    assert!(why.contains("0.0.0.0"), "finding must mention 0.0.0.0: {why}");
-    assert!(why.contains("127.0.0.1"), "finding must suggest 127.0.0.1: {why}");
+    assert!(
+        why.contains("0.0.0.0"),
+        "finding must mention 0.0.0.0: {why}"
+    );
+    assert!(
+        why.contains("127.0.0.1"),
+        "finding must suggest 127.0.0.1: {why}"
+    );
 }
 
 #[test]
@@ -537,7 +545,10 @@ fn bare_minio_port_is_caught() {
 
 #[test]
 fn clean_compose_passes_both_rules() {
-    let src = db_compose("${PG_PASSWORD:?PG_PASSWORD is required}", "127.0.0.1:5432:5432");
+    let src = db_compose(
+        "${PG_PASSWORD:?PG_PASSWORD is required}",
+        "127.0.0.1:5432:5432",
+    );
     let findings = check("docker-compose.yml", &src);
     assert!(
         findings.is_empty(),
