@@ -61,3 +61,8 @@ test-results/
 .build/
 opencode.json
 .coxagent-worktrees/
+
+# Scratch "merge test" clones — nested repos get swept into PRs as a gitlink
+# (mode 160000) and break CI + the visual-qa gate. See PRs #220/#223/#224.
+mergetest/
+/mergetest/
