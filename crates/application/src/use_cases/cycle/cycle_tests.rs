@@ -135,7 +135,8 @@ async fn one_cycle_carries_a_feature_from_proposal_to_done() {
 
     let state = store.load().await.expect("load");
     assert_eq!(state.tickets[0].status(), Status::Documented);
-    assert_eq!(state.current_version.to_string(), "0.1.0");
+    // Shipping a ticket does not move the version — the release flow owns it.
+    assert_eq!(state.current_version.to_string(), "0.0.0");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -2279,7 +2280,6 @@ async fn malformed_host_port_fails_the_gate_instead_of_skipping_it() {
         0,
         "a malformed host_port must fail before ever probing — there's nothing valid to probe"
     );
-
 }
 
 // --- CXA-F012: incident post-mortem & prevention loop after rollback ------
@@ -2326,14 +2326,17 @@ fn incidents_chat(state: &ProjectState) -> Vec<crate::state::ChatMsg> {
 /// notifier contract marker is asserted directly; harmless test utility.
 #[expect(dead_code)]
 fn pm_notify(events: &[crate::ports::outbound::NotifyEvent]) -> usize {
-    events.iter().filter(|e| {
+    events
+        .iter()
+        .filter(|e| {
             e.kind.to_lowercase().contains("post_mortem")
                 || e.kind.to_lowercase().contains("postmortem")
                 || e.kind.to_lowercase().contains("incident")
                 || e.message.to_lowercase().contains("post-mortem")
                 || e.message.to_lowercase().contains("postmortem")
                 || e.message.to_lowercase().contains("incident")
-    }).count()
+        })
+        .count()
 }
 
 /// Root-cause prevention ticket titles (distinct marker from deploy bugs).
@@ -2342,7 +2345,9 @@ fn pm_notify(events: &[crate::ports::outbound::NotifyEvent]) -> usize {
 /// utility.
 #[expect(dead_code)]
 fn prevention_tickets(state: &ProjectState) -> Vec<String> {
-    state.tickets.iter()
+    state
+        .tickets
+        .iter()
         .filter(|t| t.title().to_lowercase().contains("root cause"))
         .map(|t| t.title().to_owned())
         .collect()
@@ -2365,7 +2370,9 @@ async fn successful_rollback_produces_a_post_mortem_in_the_incidents_channel() {
             summary: "rollback redeploy ok".to_owned(),
         },
     ]));
-    let notifier = Arc::new(SpyNotifier { ..Default::default() });
+    let notifier = Arc::new(SpyNotifier {
+        ..Default::default()
+    });
     let (store, _git, uc) = rollback_uc(true, &deploy, &notifier);
 
     Box::pin(uc.run_cycle(1)).await;
@@ -2379,7 +2386,11 @@ async fn successful_rollback_produces_a_post_mortem_in_the_incidents_channel() {
         !pm_chat(&state).is_empty(),
         "after every successful auto-rollback a post-mortem must be produced; \
          none exists yet because CXA-F012 is unimplemented. Chat so far: {:?}",
-        state.chat.iter().map(|m| (&m.channel, &m.body)).collect::<Vec<_>>()
+        state
+            .chat
+            .iter()
+            .map(|m| (&m.channel, &m.body))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -2400,7 +2411,9 @@ async fn rollbacks_post_mortems_target_the_incidents_channel_and_notify_distinct
             summary: "rollback redeploy ok".to_owned(),
         },
     ]));
-    let notifier = Arc::new(SpyNotifier { ..Default::default() });
+    let notifier = Arc::new(SpyNotifier {
+        ..Default::default()
+    });
     let (store, _git, uc) = rollback_uc(true, &deploy, &notifier);
 
     Box::pin(uc.run_cycle(1)).await;

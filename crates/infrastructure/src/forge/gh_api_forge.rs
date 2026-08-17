@@ -94,7 +94,10 @@ impl GhApiForge {
     /// omits both, so each is fetched once (open PR counts are WIP-bounded, so
     /// this stays a handful of calls).
     async fn enrich(&self, raw: &serde_json::Value) -> PullRequest {
-        let number = raw.get("number").and_then(serde_json::Value::as_u64).unwrap_or(0);
+        let number = raw
+            .get("number")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
         let head_ref = raw
             .pointer("/head/ref")
             .and_then(serde_json::Value::as_str)
@@ -118,14 +121,22 @@ impl GhApiForge {
         let ci = self.ci_rollup(&head_sha).await;
         PullRequest {
             number,
-            title: raw.get("title").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned(),
+            title: raw
+                .get("title")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
             head: head_ref,
             base: raw
                 .pointer("/base/ref")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default()
                 .to_owned(),
-            url: raw.get("html_url").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned(),
+            url: raw
+                .get("html_url")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
             author: raw
                 .pointer("/user/login")
                 .and_then(serde_json::Value::as_str)
@@ -133,7 +144,11 @@ impl GhApiForge {
                 .to_owned(),
             ci,
             mergeable,
-            created: raw.get("created_at").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned(),
+            created: raw
+                .get("created_at")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
         }
     }
 
@@ -147,7 +162,9 @@ impl GhApiForge {
             return "none".to_owned();
         };
         let runs = v.get("check_runs").and_then(serde_json::Value::as_array);
-        let Some(runs) = runs else { return "none".to_owned() };
+        let Some(runs) = runs else {
+            return "none".to_owned();
+        };
         if runs.is_empty() {
             return "none".to_owned();
         }
@@ -187,7 +204,9 @@ async fn json_or_err(resp: reqwest::Response, what: &str) -> Result<serde_json::
             .map_err(|e| PortError::Backend(format!("github {what}: parse {e}")))
     } else {
         let snip: String = text.chars().take(200).collect();
-        Err(PortError::Backend(format!("github {what}: {status} {snip}")))
+        Err(PortError::Backend(format!(
+            "github {what}: {status} {snip}"
+        )))
     }
 }
 
@@ -308,32 +327,60 @@ impl ForgePort for GhApiForge {
         // Formal reviews (approve / request-changes with a body) plus issue
         // comments — the same "what to change" a DEV agent reads back.
         let mut out = Vec::new();
-        if let Ok(v) = self.get_json(&format!("pulls/{number}/reviews?per_page=100")).await {
+        if let Ok(v) = self
+            .get_json(&format!("pulls/{number}/reviews?per_page=100"))
+            .await
+        {
             if let Some(arr) = v.as_array() {
                 for r in arr {
-                    let body = r.get("body").and_then(serde_json::Value::as_str).unwrap_or_default();
+                    let body = r
+                        .get("body")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
                     if body.trim().is_empty() {
                         continue;
                     }
                     out.push(PrFeedback {
-                        author: r.pointer("/user/login").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned(),
+                        author: r
+                            .pointer("/user/login")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
                         body: body.to_owned(),
-                        at: r.get("submitted_at").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned(),
+                        at: r
+                            .get("submitted_at")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
                     });
                 }
             }
         }
-        if let Ok(v) = self.get_json(&format!("issues/{number}/comments?per_page=100")).await {
+        if let Ok(v) = self
+            .get_json(&format!("issues/{number}/comments?per_page=100"))
+            .await
+        {
             if let Some(arr) = v.as_array() {
                 for c in arr {
-                    let body = c.get("body").and_then(serde_json::Value::as_str).unwrap_or_default();
+                    let body = c
+                        .get("body")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
                     if body.trim().is_empty() {
                         continue;
                     }
                     out.push(PrFeedback {
-                        author: c.pointer("/user/login").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned(),
+                        author: c
+                            .pointer("/user/login")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
                         body: body.to_owned(),
-                        at: c.get("created_at").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned(),
+                        at: c
+                            .get("created_at")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
                     });
                 }
             }
@@ -377,8 +424,14 @@ mod tests {
             {"number":1,"merged_at":"2026-01-01T00:00:00Z","head":{"ref":"a"}},
             {"number":2,"merged_at":null,"head":{"ref":"b"}},
         ]);
-        assert_eq!(number_and_head(&list, Some(true)), vec![(1, "a".to_owned())]);
-        assert_eq!(number_and_head(&list, Some(false)), vec![(2, "b".to_owned())]);
+        assert_eq!(
+            number_and_head(&list, Some(true)),
+            vec![(1, "a".to_owned())]
+        );
+        assert_eq!(
+            number_and_head(&list, Some(false)),
+            vec![(2, "b".to_owned())]
+        );
         assert_eq!(number_and_head(&list, None).len(), 2);
     }
 }

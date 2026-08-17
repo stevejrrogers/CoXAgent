@@ -472,11 +472,11 @@ impl SqlStateStore {
         state: ProjectState,
         expected_revision: Option<i64>,
     ) -> Result<(), PortError> {
-        state.validate().map_err(|e| {
-            PortError::Corrupt(format!("refusing to save invalid state: {e}"))
-        })?;
-        let value = serde_json::to_value(&state)
-            .map_err(|e| PortError::Backend(format!("encode: {e}")))?;
+        state
+            .validate()
+            .map_err(|e| PortError::Corrupt(format!("refusing to save invalid state: {e}")))?;
+        let value =
+            serde_json::to_value(&state).map_err(|e| PortError::Backend(format!("encode: {e}")))?;
 
         let client = self.client().await?;
         let expected = match expected_revision {
@@ -510,5 +510,4 @@ impl SqlStateStore {
         self.mirror_save(&state).await;
         Ok(())
     }
-
 }
