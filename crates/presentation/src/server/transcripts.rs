@@ -248,25 +248,34 @@ pub(super) async fn agent_log_stream_ep(
     // Tail loop → channel → SSE stream. The engine writes locally so each poll
     // is a cheap `stat` + read; no engine-specific protocol involved.
     let offset_init = offset;
-    let (tx, rx) = tokio::sync::mpsc::channel::<Result<axum::response::sse::Event, std::convert::Infallible>>(64);
+    let (tx, rx) = tokio::sync::mpsc::channel::<
+        Result<axum::response::sse::Event, std::convert::Infallible>,
+    >(64);
     let send_init = !pending.is_empty();
     std::thread::spawn(move || {
         let send = |tx: &tokio::sync::mpsc::Sender<_>, e: axum::response::sse::Event| {
             tx.blocking_send(Ok(e)).is_err()
         };
         if send_init {
-            if send(&tx, axum::response::sse::Event::default()
-                .event("init")
-                .data(serde_json::json!({
-                    "offset": offset_init,
-                    "role": role,
-                    "live": live_flag,
-                }).to_string())) {
+            if send(
+                &tx,
+                axum::response::sse::Event::default().event("init").data(
+                    serde_json::json!({
+                        "offset": offset_init,
+                        "role": role,
+                        "live": live_flag,
+                    })
+                    .to_string(),
+                ),
+            ) {
                 return;
             }
-            if send(&tx, axum::response::sse::Event::default()
-                .event("line")
-                .data(serde_json::json!({ "text": std::mem::take(&mut pending) }).to_string())) {
+            if send(
+                &tx,
+                axum::response::sse::Event::default()
+                    .event("line")
+                    .data(serde_json::json!({ "text": std::mem::take(&mut pending) }).to_string()),
+            ) {
                 return;
             }
         }
@@ -281,9 +290,12 @@ pub(super) async fn agent_log_stream_ep(
                 let (text, o) = read_live_upto(&live, after);
                 after = o;
                 if !text.is_empty()
-                    && send(&tx, axum::response::sse::Event::default()
-                        .event("line")
-                        .data(serde_json::json!({ "text": text }).to_string()))
+                    && send(
+                        &tx,
+                        axum::response::sse::Event::default()
+                            .event("line")
+                            .data(serde_json::json!({ "text": text }).to_string()),
+                    )
                 {
                     break;
                 }
@@ -366,7 +378,10 @@ mod live_log_tests {
     // would have: role `dev` picking up `dev_feature`'s live log.
     #[test]
     fn role_prefix_does_not_bleed_into_a_longer_role() {
-        assert_eq!(live_role_suffix("dev_feature__cox-f01__root.log", "dev"), None);
+        assert_eq!(
+            live_role_suffix("dev_feature__cox-f01__root.log", "dev"),
+            None
+        );
         assert_eq!(live_role_suffix("developer.log", "dev"), None);
     }
 
