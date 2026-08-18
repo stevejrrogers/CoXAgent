@@ -68,12 +68,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let Some(deploy) = &self.deploy else {
             return true;
         };
-        // A malformed `host_port` (COX-B035) must fail the gate, not be
-        // treated as unconfigured — see `host_port_probe`.
-        match self.host_port_probe {
-            Ok(port) => crate::ports::outbound::verify_deploy_health(deploy, port).await,
-            Err(()) => false,
-        }
+        crate::ports::outbound::verify_deploy_health_probe(deploy, self.host_port_probe).await
     }
     /// Detailed post-deploy health check (COX-F005): poll the app's health
     /// endpoint via [`crate::ports::outbound::DeployPort::wait_healthy`] for
