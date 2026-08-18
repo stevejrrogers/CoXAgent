@@ -88,29 +88,48 @@ jobs:
           script: |
             const fs = require('fs');
             const out = 'e2e/.playwright-report.json';
+
+            function readFailures() {
+              try {
+                return JSON.parse(fs.readFileSync(out, 'utf8'));
+              } catch (_) {
+                return null; // unparseable report — fall through to generic message
+              }
+            }
+
             let body;
             if (fs.existsSync(out)) {
-              const rep = JSON.parse(fs.readFileSync(out, 'utf8'));
-              const fails = [];
-              for (const s of rep.suites) {
-                for (const f of (s.specs || [])) {
-                  for (const t of f.tests) {
-                    for (const r of t.results || []) {
-                      if (r.status === 'failed') fails.push(f.title);
+              const rep = readFailures();
+              if (!rep) {
+                body =
+                  `## Visual QA failed\n\nThe run produced a report that could not be parsed.\n` +
+                  `See run #${context.runNumber} artifacts.`;
+              } else {
+                const fails = [];
+                for (const s of rep.suites || []) {
+                  for (const f of s.specs || []) {
+                    for (const t of f.tests || []) {
+                      for (const r of t.results || []) {
+                        if (r.status === 'failed') fails.push(f.title);
+                      }
                     }
                   }
                 }
+                body =
+                  `## Visual QA failed\n\n${fails.length} test(s) exceeded the 2% screenshot tolerance.\n\n` +
+                  `Failing spec(s):\n${fails.map((x) => '- ' + x).join('\n')}\n\n` +
+                  `Diff images and screenshots are in the artifacts you can download from GitHub Actions UI: Visual QA workflow run #${context.runNumber}.`;
               }
-              const count = fails.length;
-              body = `## Visual QA failed\n\n${count} test(s) exceeded the 2% screenshot tolerance.\n\n` +
-                `Failing spec(s):\n${fails.map((x) => '- ' + x).join('\n')}\n\n` +
-                `Diff images and screenshots are in the run artifacts you can download from GitHub Actions UI (#${context.runNumber}).`;
             } else {
-              body = `## Visual QA failed\n\nThe run reported failures but produced no JSON report.\nSee run #${context.runNumber} artifacts.`;
+              body =
+                `## Visual QA failed\n\nThe run reported failures but produced no JSON report.\n` +
+                `See run #${context.runNumber} artifacts.`;
             }
+
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
               body,
             });
+

@@ -51,7 +51,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let _ = git.raw(wd, &["fetch", "origin", &base, "--tags"]).await;
         // Commits since the last v* tag (or everything, first release).
         let (has_tag, tag) = git
-            .raw(wd, &["describe", "--tags", "--abbrev=0", "--match", "v*", &format!("origin/{base}")])
+            .raw(
+                wd,
+                &[
+                    "describe",
+                    "--tags",
+                    "--abbrev=0",
+                    "--match",
+                    "v*",
+                    &format!("origin/{base}"),
+                ],
+            )
             .await;
         let range = if has_tag {
             format!("{}..origin/{base}", tag.trim())
@@ -89,8 +99,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             Ok(pr) => {
                 let pr = pr.number;
                 let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
-                    s.daily_jobs
-                        .insert("release_cut".to_owned(), today.clone());
+                    s.daily_jobs.insert("release_cut".to_owned(), today.clone());
                     s.post_chat_in(
                         "SM",
                         &format!(
@@ -133,7 +142,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .join(".coxagent-worktrees")
             .join(format!("release-cut-{next}"));
         let _ = git
-            .raw(wd, &["worktree", "remove", "--force", &wt.to_string_lossy()])
+            .raw(
+                wd,
+                &["worktree", "remove", "--force", &wt.to_string_lossy()],
+            )
             .await;
         let (ok, _) = git
             .raw(
@@ -174,7 +186,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             false
         };
         let _ = git
-            .raw(wd, &["worktree", "remove", "--force", &wt.to_string_lossy()])
+            .raw(
+                wd,
+                &["worktree", "remove", "--force", &wt.to_string_lossy()],
+            )
             .await;
         pushed
     }
@@ -198,7 +213,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             return; // already tagged
         }
         let (ok, _) = git
-            .raw(wd, &["tag", "-a", &tag, "-m", &tag, &format!("origin/{base}")])
+            .raw(
+                wd,
+                &["tag", "-a", &tag, "-m", &tag, &format!("origin/{base}")],
+            )
             .await;
         if ok && git.raw(wd, &["push", "origin", &tag]).await.0 {
             let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
