@@ -1299,7 +1299,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                         // non-infra "error" would ding the scorecard, so mark
                         // progress-equivalent through bugs_filed-free report by
                         // recording a documented no-op instead.
-                        report.errors.push("canary: engine answered — recovering".to_owned());
+                        report
+                            .errors
+                            .push("canary: engine answered — recovering".to_owned());
                     }
                     Ok(o) => report
                         .errors

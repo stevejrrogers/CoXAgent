@@ -294,10 +294,7 @@ fn tokens_for_var(src: &str, var: &str) -> Vec<String> {
             // Accepts any terminate/modifier char (`:`/`?`/`-`/`}`).
             if matches!(
                 token_src.as_bytes().get(prefix.len()),
-                Some(b'_')
-                    | Some(b'A'..=b'Z')
-                    | Some(b'a'..=b'z')
-                    | Some(b'0'..=b'9')
+                Some(b'_' | b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9')
             ) {
                 rest = &token_src[end..];
                 continue;
@@ -341,7 +338,6 @@ fn check_cxa_required_vars(path: &str, src: &str) -> Vec<Finding> {
     }
     findings
 }
-
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -696,7 +692,11 @@ fn cxa_compose(pg_user: &str, pg_password: &str, redis_password: &str) -> String
 fn bare_required_vars_are_caught() {
     let src = cxa_compose("${PG_USER}", "${PG_PASSWORD}", "${REDIS_PASSWORD}");
     let findings = check_cxa_required_vars("deploy/docker-compose.cxa.yml", &src);
-    assert_eq!(findings.len(), 3, "all three bare refs must be flagged: {findings:#?}");
+    assert_eq!(
+        findings.len(),
+        3,
+        "all three bare refs must be flagged: {findings:#?}"
+    );
     for var in CXA_REQUIRED_VARS {
         assert!(
             findings.iter().any(|f| f.context.contains(var)),
@@ -735,7 +735,9 @@ fn missing_required_var_is_caught() {
     let src = cxa_compose("${PG_USER}", "", "");
     let findings = check_cxa_required_vars("deploy/docker-compose.cxa.yml", &src);
     let missing_passwd = findings.iter().any(|f| f.context.contains("PG_PASSWORD"));
-    let missing_redis = findings.iter().any(|f| f.context.contains("REDIS_PASSWORD"));
+    let missing_redis = findings
+        .iter()
+        .any(|f| f.context.contains("REDIS_PASSWORD"));
     assert!(
         missing_passwd && missing_redis,
         "dropping PG_PASSWORD / REDIS_PASSWORD entirely must be caught (only \
@@ -763,5 +765,3 @@ fn prefix_sibling_does_not_cause_false_positive() {
         "a differently-named sibling var must not be flagged: {findings:#?}"
     );
 }
-
-

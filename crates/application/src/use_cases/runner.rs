@@ -372,7 +372,9 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
                     cycle_uc
                         .notify(
                             "engine_incident",
-                            format!("{engine} failed {fault_count} run(s) this cycle: {detail}{hint}"),
+                            format!(
+                                "{engine} failed {fault_count} run(s) this cycle: {detail}{hint}"
+                            ),
                         )
                         .await;
                 }
