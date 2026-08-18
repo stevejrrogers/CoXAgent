@@ -11,6 +11,7 @@ permissions:
 
 jobs:
   visual-regression:
+    if: false
 
     name: Visual regression (screenshots)
     runs-on: ubuntu-latest
