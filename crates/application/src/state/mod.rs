@@ -229,6 +229,12 @@ pub struct ProjectState {
     /// the forge must reflect back exactly once).
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub seen_merged_prs: std::collections::BTreeSet<u64>,
+    /// When each ticket last had a PR MERGE (ticket id → RFC3339). Feeds the
+    /// fix-on-fix brake: a second PR for a ticket merged within the last day
+    /// is the stacked-chain smell (B036→B044, B065 twice in one night) — it
+    /// waits for a person instead of auto-landing another layer.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub ticket_last_merge: std::collections::BTreeMap<String, String>,
     /// Closed-without-merge PR numbers already processed into lessons, so a
     /// human rejection is learned from exactly once.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
@@ -432,6 +438,7 @@ impl Default for ProjectState {
             debt_signals: Vec::new(),
             sweeps_done: Vec::new(),
             seen_merged_prs: std::collections::BTreeSet::new(),
+            ticket_last_merge: std::collections::BTreeMap::new(),
             seen_closed_prs: std::collections::BTreeSet::new(),
             swept_tickets: std::collections::BTreeSet::new(),
             cost_approved: std::collections::BTreeSet::new(),
