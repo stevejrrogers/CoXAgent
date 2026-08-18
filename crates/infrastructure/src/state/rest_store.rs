@@ -223,6 +223,7 @@ impl StateStorePort for RestStateStore {
             "ticket": ticket,
             "engines": caps.engines,
             "models": caps.models,
+            "version": caps.version,
             "git": caps.git.as_ref().map(|g| serde_json::to_string(g).unwrap_or_default()),
             "tooling": caps.tooling.as_ref().map(|t| serde_json::to_string(t).unwrap_or_default()),
             "now": now

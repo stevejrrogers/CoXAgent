@@ -193,8 +193,12 @@ mod tests {
         assert!(is_quota_wall("401 Unauthorized: invalid api key"));
         // The exact CLI strings that stalled the whole team on a dead engine
         // while a live one sat idle — none carried a 401 on the direct path.
-        assert!(is_quota_wall("Failed to authenticate. API Error: 401 OAuth access token has been revoked."));
-        assert!(is_quota_wall("Failed to authenticate: OAuth session expired and could not be refreshed"));
+        assert!(is_quota_wall(
+            "Failed to authenticate. API Error: 401 OAuth access token has been revoked."
+        ));
+        assert!(is_quota_wall(
+            "Failed to authenticate: OAuth session expired and could not be refreshed"
+        ));
         assert!(!is_quota_wall("compile error: missing semicolon"));
     }
 

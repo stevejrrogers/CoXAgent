@@ -2330,6 +2330,73 @@ mod deploy_secret_tests {
         let _ = std::fs::remove_dir_all(&proj);
         let _ = std::fs::remove_dir_all(&secret_root);
     }
+
+    /// CXA-B040 regression guard: a SUPERSEDED path-keyed store left behind for
+    /// THIS project must be retired even when every required secret is now supplied
+    /// externally (so nothing needs a fallback seed this pass). origin/main only
+    /// adopted+expired inside the fallback-generation branch; without this hook an
+    /// obsolete duplicate of live credentials lingered on disk forever precisely in
+    /// the fully-externally-configured upgrade case CXA-B040 names.
+    #[test]
+    fn superseded_path_keyed_store_is_retired_even_when_fully_externally_supplied() {
+        let proj = std::env::temp_dir().join(format!("cxab040-ext-proj-{}", std::process::id()));
+        let secret_root =
+            std::env::temp_dir().join(format!("cxab040-ext-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&proj);
+        let _ = std::fs::remove_dir_all(&secret_root);
+        std::fs::create_dir_all(&proj).expect("mkdir");
+
+        // Operator now supplies every required secret via <project>/.env, so resolution
+        // has nothing missing and would otherwise take the early-return shortcut.
+        std::fs::write(
+            proj.join(".env"),
+            "PG_PASSWORD=external-pg\nCOXAGENT_ADMIN_PASSWORD=external-admin\n",
+        )
+        .expect("write dot_env");
+
+        // Pre-upgrade state: only the OLD path-hash store holds live-looking creds;
+        // today's name-derived store does not exist yet.
+        let mut old_store: HashMap<String, String> = HashMap::new();
+        old_store.insert("PG_PASSWORD".to_owned(), "stable-b031-password".to_owned());
+        old_store.insert(
+            "COXAGENT_ADMIN_PASSWORD".to_owned(),
+            "stable-b031-admin".to_owned(),
+        );
+        write_stored_secrets(legacy_key_file(&secret_root, &proj).as_path(), &old_store);
+        assert!(
+            legacy_key_file(&secret_root, &proj).exists(),
+            "premise: superseded legacy store present"
+        );
+
+        // No required secret is missing -> no fallback is generated...
+        let resolved = resolve_deploy_secrets_in(&proj, &secret_root);
+        assert!(
+            resolved.is_empty(),
+            "fully-externally-supplied project must resolve NO fallback secrets"
+        );
+
+        // ...but its obsolete path-keyed duplicate must be gone AND its live values
+        // durably owned by today's name-derived store — never lost mid-migration.
+        assert!(
+            !legacy_key_file(&secret_root, &proj).exists(),
+            "superseded path-keyed store must be removed even when all secrets are external \
+             (CXA-B040)"
+        );
+        let modern = read_stored_secrets(store_file(&secret_root, &proj).as_path());
+        assert_eq!(
+            modern.get("PG_PASSWORD").map(String::as_str),
+            Some("stable-b031-password"),
+            "legacy value must be durably owned by today's store"
+        );
+        assert_eq!(
+            modern.get("COXAGENT_ADMIN_PASSWORD").map(String::as_str),
+            Some("stable-b031-admin"),
+            "legacy value must be durably owned by today's store"
+        );
+
+        let _ = std::fs::remove_dir_all(&proj);
+        let _ = std::fs::remove_dir_all(&secret_root);
+    }
 }
 
 impl DockerComposeDeploy {
