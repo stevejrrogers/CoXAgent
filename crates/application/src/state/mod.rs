@@ -233,6 +233,16 @@ pub struct ProjectState {
     /// human rejection is learned from exactly once.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub seen_closed_prs: std::collections::BTreeSet<u64>,
+    /// Ticket ids the end-of-cycle ship sweep has already committed and pushed
+    /// a branch for. The sweep is otherwise a pure function of status
+    /// (`Fixed`/`Done` + unassigned), so a shipped ticket would be re-selected
+    /// every cycle forever — re-cloning its work, re-opening duplicate PRs, and
+    /// (when the worktree is dirty from those rejected attempts) logging the
+    /// same `checkout` failure each time. Recording the sweep here makes it
+    /// idempotent in truth, not just in happy-path theory: a shipped ticket is
+    /// shipped once.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub swept_tickets: std::collections::BTreeSet<String>,
     /// Tickets a human approved to run despite the cost estimate.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub cost_approved: std::collections::BTreeSet<String>,
@@ -423,6 +433,7 @@ impl Default for ProjectState {
             sweeps_done: Vec::new(),
             seen_merged_prs: std::collections::BTreeSet::new(),
             seen_closed_prs: std::collections::BTreeSet::new(),
+            swept_tickets: std::collections::BTreeSet::new(),
             cost_approved: std::collections::BTreeSet::new(),
             tuning: Tuning::default(),
             ticket_evidence: std::collections::BTreeMap::new(),

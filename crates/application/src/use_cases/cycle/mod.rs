@@ -1526,7 +1526,7 @@ mod cycle_counter_tests {
         // counter (e.g. it ran 42 cycles before this field existed).
         let mut s = ProjectState {
             cycle: 42,
-            ..Default::default()
+            ..ProjectState::default()
         };
         assert_eq!(advance_project_cycle(&mut s), 43);
         assert_eq!(advance_project_cycle(&mut s), 44);
@@ -1553,7 +1553,7 @@ mod cycle_counter_tests {
         // The counter only moves forward — it never wraps or renumbers.
         let mut s = ProjectState {
             cycle: u64::MAX - 1,
-            ..Default::default()
+            ..ProjectState::default()
         };
         assert_eq!(advance_project_cycle(&mut s), u64::MAX);
         // Saturates rather than wrapping to 0 (which would collide with cadence).
