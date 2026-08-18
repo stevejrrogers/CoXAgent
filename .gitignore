@@ -60,3 +60,19 @@ test-results/
 # SwiftPM build dir (companion)
 .build/
 opencode.json
+.coxagent-worktrees/
+
+# Python bytecode caches — never commit compiled artifacts (they were swept
+# into a branch once and polluted a merge). Rebuilt at runtime by the interpreter.
+__pycache__/
+**/__pycache__/
+*.pyc
+
+# Self-upgrade runtime state: written by deploy/self-upgrade.sh each run.
+.coxagent-self-upgrade/*.log
+.coxagent-self-upgrade/deployed-sha.tmp
+
+# Scratch "merge test" clones — nested repos get swept into PRs as a gitlink
+# (mode 160000) and break CI + the visual-qa gate. See PRs #220/#223/#224.
+mergetest/
+/mergetest/

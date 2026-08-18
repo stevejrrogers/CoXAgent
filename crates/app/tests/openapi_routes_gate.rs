@@ -67,15 +67,16 @@ fn every_registered_service_route_is_documented_in_openapi() {
             .into_iter()
             .filter(|p| is_service_path(p))
             .collect();
-    let documented: BTreeSet<String> =
-        quoted_args(&read("crates/presentation/src/server/openapi.rs"), "\n    route(")
-            .into_iter()
-            .filter(|p| is_service_path(p))
-            .collect();
+    let documented: BTreeSet<String> = quoted_args(
+        &read("crates/presentation/src/server/openapi.rs"),
+        "\n    route(",
+    )
+    .into_iter()
+    .filter(|p| is_service_path(p))
+    .collect();
 
     assert_eq!(
-        registered,
-        documented,
+        registered, documented,
         "ROUTES in crates/presentation/src/server/openapi.rs must mirror exactly \
          what serve_full() registers; add missing routes or drop orphans"
     );

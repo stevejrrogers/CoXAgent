@@ -125,8 +125,10 @@ pub(super) async fn metrics_summary_ep(
         Ok(state) => {
             let today = now_rfc3339();
             let day = today.get(..10).unwrap_or("").to_owned();
-            Json(coxagent_application::metrics_health::compute_cycle_perf(&state, &day))
-                .into_response()
+            Json(coxagent_application::metrics_health::compute_cycle_perf(
+                &state, &day,
+            ))
+            .into_response()
         }
         Err(e) => internal_error(&e.to_string()),
     }
@@ -150,8 +152,10 @@ pub(super) async fn metrics_trends_ep(
         Ok(state) => {
             let today = now_rfc3339();
             let day = today.get(..10).unwrap_or("").to_owned();
-            Json(coxagent_application::metrics_health::compute_trends(&state, days, &day))
-                .into_response()
+            Json(coxagent_application::metrics_health::compute_trends(
+                &state, days, &day,
+            ))
+            .into_response()
         }
         Err(e) => internal_error(&e.to_string()),
     }
