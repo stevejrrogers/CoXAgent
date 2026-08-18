@@ -9,6 +9,10 @@ use std::path::Path;
 use std::time::Duration;
 use tokio::process::Command;
 
+// Deploy may tear down only what [`reclaimable_compose_project`] allows — see
+// that shared policy for why port-eviction must never touch the live hub.
+use super::reclaimable::reclaimable_compose_project;
+
 const COMPOSE_FILES: &[&str] = &[
     "docker-compose.yml",
     "docker-compose.yaml",
@@ -590,30 +594,6 @@ async fn compose_project_on_port(port: &str) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
-/// Whether the deploy may `down` a compose project that is squatting one of the
-/// agent's host ports. This is the blast-radius guard for the port-eviction
-/// self-heal: only agent-managed preview projects (`cox-{parent}-{dir}`) may be
-/// evicted. The live hub (`coxagent` / `coxagent-*`) and shared infra
-/// (`cox-infra`) are NEVER evocable — downing either is a self-inflicted outage,
-/// exactly the class of bug where an agent deploy took the whole control plane
-/// down trying to free a port it thought it owned.
-fn evictable_project(project: &str) -> bool {
-    // `compose_project_name` always yields `cox-<parent>-<dir>`, so an
-    // evocable preview is recognisable by its `cox-` prefix — provided it is
-    // NOT the live hub. `coxagent` and anything starting with `coxagent` (the
-    // production project plus any of its service containers) are protected, as
-    // is shared shared infrastructure (`cox-infra`).
-    let lower = project.to_ascii_lowercase();
-    if lower == "cox-infra"
-        || lower == "coxagent"
-        || lower.starts_with("coxagent")
-        || lower.starts_with("cox-infra")
-    {
-        return false;
-    }
-    lower.starts_with("cox-")
-}
-
 /// Clamp every container of this compose project to a CPU/memory budget via
 /// `docker update`, regardless of what the agent-authored compose file says —
 /// a runaway service (busy loop, leak) can then never take the whole host.
@@ -1157,7 +1137,7 @@ impl DeployPort for DockerComposeDeploy {
         // Safety: `compose_project_name` always yields `cox-<parent>-<dir>`,
         // but double-check it can never collide with the live hub project
         // before we `down --remove-orphans` anything.
-        if !evictable_project(&proj) {
+        if !reclaimable_compose_project(&proj) {
             return Err(PortError::Backend(format!(
                 "refusing to deploy project `{proj}` — collides with the live hub"
             )));
@@ -1227,7 +1207,7 @@ impl DeployPort for DockerComposeDeploy {
                 // to free the port — that is a self-inflicted outage, not a
                 // port eviction. Only agent preview projects (`cox-...`) are
                 // evictable; anything else is reported as a collision.
-                if !evictable_project(&project) {
+                if !reclaimable_compose_project(&project) {
                     break;
                 }
                 let _ = Command::new("docker")
@@ -1310,37 +1290,9 @@ impl DeployPort for DockerComposeDeploy {
 mod tests {
     use super::*;
 
-    /// The port-eviction blast-radius guard: agent preview projects are
-    /// evictable, the live hub and shared infra are not.
-    #[test]
-    fn evictable_project_protects_the_live_hub_and_infra() {
-        assert!(
-            evictable_project("cox-cxa-codebase"),
-            "agent preview evictable"
-        );
-        assert!(
-            evictable_project("cox-my-project-preview"),
-            "any cox-<parent>-<dir> preview evictable"
-        );
-        // The live hub and anything sharing its prefix are NEVER evictable —
-        // downing them is the self-inflicted outage we guard against.
-        assert!(!evictable_project("coxagent"), "live hub protected");
-        assert!(
-            !evictable_project("coxagent-gateway"),
-            "hub service protected"
-        );
-        assert!(!evictable_project("cox-infra"), "shared infra protected");
-        assert!(
-            !evictable_project("cox-infra-db"),
-            "shared infra child protected"
-        );
-        // A non-preview project on our port is a collision, not an eviction.
-        assert!(
-            !evictable_project("someone-elses-stack"),
-            "foreign project protected"
-        );
-    }
-
+    /// The deploy port-eviction decision routes through the single shared
+    /// reclaimability policy (`crate::deploy::reclaimable`), whose own unit
+    /// tests own the full blast-radius matrix — live hub, shared infra,
     /// Regression guard for CXA-B010 + CXA-B017: every site that runs compose
     /// against this repo's secret-bearing docker-compose.yml must seed
     /// PG_PASSWORD and COXAGENT_ADMIN_PASSWORD with valid, non-blank values. If
@@ -2370,6 +2322,73 @@ mod deploy_secret_tests {
             legacy_key_file(&secret_root, &proj).exists(),
             "F(old) must survive a best-effort persist failure; expiry may only run AFTER durable \
              success (CXA-B044)"
+        );
+
+        let _ = std::fs::remove_dir_all(&proj);
+        let _ = std::fs::remove_dir_all(&secret_root);
+    }
+
+    /// CXA-B040 regression guard: a SUPERSEDED path-keyed store left behind for
+    /// THIS project must be retired even when every required secret is now supplied
+    /// externally (so nothing needs a fallback seed this pass). origin/main only
+    /// adopted+expired inside the fallback-generation branch; without this hook an
+    /// obsolete duplicate of live credentials lingered on disk forever precisely in
+    /// the fully-externally-configured upgrade case CXA-B040 names.
+    #[test]
+    fn superseded_path_keyed_store_is_retired_even_when_fully_externally_supplied() {
+        let proj = std::env::temp_dir().join(format!("cxab040-ext-proj-{}", std::process::id()));
+        let secret_root =
+            std::env::temp_dir().join(format!("cxab040-ext-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&proj);
+        let _ = std::fs::remove_dir_all(&secret_root);
+        std::fs::create_dir_all(&proj).expect("mkdir");
+
+        // Operator now supplies every required secret via <project>/.env, so resolution
+        // has nothing missing and would otherwise take the early-return shortcut.
+        std::fs::write(
+            proj.join(".env"),
+            "PG_PASSWORD=external-pg\nCOXAGENT_ADMIN_PASSWORD=external-admin\n",
+        )
+        .expect("write dot_env");
+
+        // Pre-upgrade state: only the OLD path-hash store holds live-looking creds;
+        // today's name-derived store does not exist yet.
+        let mut old_store: HashMap<String, String> = HashMap::new();
+        old_store.insert("PG_PASSWORD".to_owned(), "stable-b031-password".to_owned());
+        old_store.insert(
+            "COXAGENT_ADMIN_PASSWORD".to_owned(),
+            "stable-b031-admin".to_owned(),
+        );
+        write_stored_secrets(legacy_key_file(&secret_root, &proj).as_path(), &old_store);
+        assert!(
+            legacy_key_file(&secret_root, &proj).exists(),
+            "premise: superseded legacy store present"
+        );
+
+        // No required secret is missing -> no fallback is generated...
+        let resolved = resolve_deploy_secrets_in(&proj, &secret_root);
+        assert!(
+            resolved.is_empty(),
+            "fully-externally-supplied project must resolve NO fallback secrets"
+        );
+
+        // ...but its obsolete path-keyed duplicate must be gone AND its live values
+        // durably owned by today's name-derived store — never lost mid-migration.
+        assert!(
+            !legacy_key_file(&secret_root, &proj).exists(),
+            "superseded path-keyed store must be removed even when all secrets are external \
+             (CXA-B040)"
+        );
+        let modern = read_stored_secrets(store_file(&secret_root, &proj).as_path());
+        assert_eq!(
+            modern.get("PG_PASSWORD").map(String::as_str),
+            Some("stable-b031-password"),
+            "legacy value must be durably owned by today's store"
+        );
+        assert_eq!(
+            modern.get("COXAGENT_ADMIN_PASSWORD").map(String::as_str),
+            Some("stable-b031-admin"),
+            "legacy value must be durably owned by today's store"
         );
 
         let _ = std::fs::remove_dir_all(&proj);

@@ -42,9 +42,10 @@ fn has_open_chore(state: &crate::state::ProjectState) -> bool {
 #[must_use]
 fn has_rejected_sweep(state: &crate::state::ProjectState) -> bool {
     use coxagent_domain::ticket::Status;
-    state.tickets.iter().any(|t| {
-        t.title().starts_with("Debt sweep") && t.status() == Status::Rejected
-    })
+    state
+        .tickets
+        .iter()
+        .any(|t| t.title().starts_with("Debt sweep") && t.status() == Status::Rejected)
 }
 
 /// Pure decision rule for whether THIS tick should produce a scheduled tech-debt

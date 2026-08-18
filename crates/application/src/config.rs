@@ -724,6 +724,12 @@ pub struct ReleasesConfig {
     /// no matter how many milestones have been reached.
     #[serde(default)]
     pub enabled: bool,
+    /// Cadence of the automated release cut (days between cuts; 0 = off).
+    /// Every cut scans conventional commits since the last `v*` tag, decides
+    /// the bump (feat → minor, else patch; major is a human call), and opens
+    /// a release PR that a person lands from the Inbox. The merge tags it.
+    #[serde(default)]
+    pub cut_every_days: u64,
 }
 
 /// Version of the persisted `coxagent.json` schema this build understands.
