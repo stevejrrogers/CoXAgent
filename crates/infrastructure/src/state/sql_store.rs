@@ -373,6 +373,10 @@ impl StateStorePort for SqlStateStore {
                     .collect(),
                 git: serde_json::from_str(&r.get::<_, String>(6)).ok(),
                 tooling: serde_json::from_str(&r.get::<_, String>(7)).ok(),
+                // No schema column yet — SQL-backed hubs report no version
+                // until a migration adds one (redis-coordinated setups carry
+                // it through the redis entry regardless).
+                version: String::new(),
             })
             .collect())
     }

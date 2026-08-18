@@ -381,6 +381,12 @@ pub(crate) async fn build_project(
 
     // Leader runner: singleton phases (BA, PO, standup, etc.)
     {
+        // The leader's feedback-fix / SA-rescue git ops get their OWN worktree,
+        // mirroring what every concurrency slot already gets for DEV. The main
+        // checkout is dirty mid-cycle, so git ops there abort and the merge
+        // queue spins forever; the feedback tree shares repo refs, so branch
+        // checkout/commit/push land normally.
+        let feedback_worktree = worktree_at(work_dir.clone(), &format!("{id}-feedback"));
         let leader = RunCycleUseCase::new(
             Arc::clone(&store),
             engine.clone(),
@@ -412,7 +418,8 @@ pub(crate) async fn build_project(
             coxagent_infrastructure::FsWorkspaceFiles::new(),
         )))
         .with_janitor(Some(Arc::new(coxagent_infrastructure::OsProcessJanitor)))
-        .with_reloader(mk_reloader());
+        .with_reloader(mk_reloader())
+        .with_feedback_workdir(feedback_worktree);
         let leader = if let Some(ref f) = forge {
             leader.with_forge(Arc::clone(f))
         } else {
@@ -500,6 +507,58 @@ pub(crate) async fn build_project(
         }
     }
 
+    // Self-upgrade (dogfood CD, opt-in): every 15 min a DETACHED script checks
+    // origin/<base> for a commit newer than the deployed hub, builds it in a
+    // temp worktree, swaps this very binary (backup kept), restarts, and rolls
+    // back if the new hub fails its health check. Detached because a process
+    // cannot be trusted to finish replacing itself.
+    if config.deploy.self_upgrade {
+        let script = work_dir.join("deploy").join("self-upgrade.sh");
+        let repo = work_dir.clone();
+        let base = config.git.default_branch.clone();
+        if let Ok(target) = std::env::current_exe() {
+            let port = std::env::var("COXAGENT_PORT")
+                .ok()
+                .and_then(|p| p.parse::<u16>().ok())
+                .unwrap_or(4000);
+            let _ = &script; // superseded: the script comes from origin, not the clone
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(900)).await;
+                    // Heartbeat: proof the watcher is alive, distinguishable
+                    // from "script ran and had nothing to do" (which is
+                    // silent by design). The hub's own logs are swallowed by
+                    // the app shell, so this file is the only observable.
+                    let hb = repo.join(".coxagent-self-upgrade");
+                    let _ = std::fs::create_dir_all(&hb);
+                    let _ = std::fs::write(
+                        hb.join("watcher-heartbeat"),
+                        format!("{:?}\n", std::time::SystemTime::now()),
+                    );
+                    // Run the LATEST script straight from origin/<base> via
+                    // `git show` — reading it from the clone was a
+                    // chicken-and-egg: a clone that predates the script never
+                    // upgrades, and therefore never gets the script.
+                    let cmd = "git -C \"$1\" fetch -q origin \"$4\" && \
+                         git -C \"$1\" show \"origin/$4:deploy/self-upgrade.sh\" 2>/dev/null \
+                         | bash -s -- \"$1\" \"$2\" \"$3\" \"$4\"";
+                    let _ = std::process::Command::new("bash")
+                        .arg("-c")
+                        .arg(cmd)
+                        .arg("self-upgrade") // $0
+                        .arg(&repo)
+                        .arg(&target)
+                        .arg(port.to_string())
+                        .arg(&base)
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn();
+                }
+            });
+            tracing::info!("[{id}] self-upgrade watcher armed (every 15 min)");
+        }
+    }
+
     let config_path = state_dir
         .parent()
         .unwrap_or(state_dir)
@@ -526,6 +585,15 @@ pub(crate) async fn build_project(
             coxagent_infrastructure::FsWorkspaceFiles::new(),
         )),
         deploy: Some(Arc::new(DockerComposeDeploy::new())),
+        storage: Some(build_storage().await.unwrap_or_else(|| {
+            Arc::new(coxagent_infrastructure::storage::LocalStorage::new(
+                std::env::var_os("HOME")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_default()
+                    .join("CoXAgent")
+                    .join("blobs"),
+            ))
+        })),
     })
 }
 
@@ -617,6 +685,7 @@ pub(crate) async fn local_caps(
     coxagent_application::ports::outbound::WorkerCaps {
         engines: detected_engines().into_iter().map(|(n, _)| n).collect(),
         models: detected_models(),
+        version: env!("CARGO_PKG_VERSION").to_owned(),
         tooling: Some(detected_tooling()),
         git: if config.git.enabled && !config.git.repo.is_empty() {
             Some(

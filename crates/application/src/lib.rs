@@ -11,6 +11,7 @@ pub mod conformance;
 pub mod error;
 pub mod faults;
 pub mod metrics;
+pub mod metrics_health;
 pub mod parsing;
 pub mod policy;
 pub mod ports;
@@ -27,8 +28,8 @@ pub mod verify_cache;
 
 pub use auth::{AuthPort, AuthRole, AuthUser, LoginResult, TokenInfo};
 pub use config::{
-    BudgetCaps, Config, DeployConfig, EngineChoice, EngineKind, EngineMapping, LiveBudget, Mode,
-    PolicyConfig, WorkflowConfig,
+    BudgetCaps, Config, CoverageConfig, DeployConfig, EngineChoice, EngineKind, EngineMapping,
+    LiveBudget, Mode, PolicyConfig, WorkflowConfig, CONFIG_SCHEMA_VERSION,
 };
 pub use config_parse::{parse_config, ConfigParseError};
 pub use error::{AppError, PortError};

@@ -260,11 +260,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // left COX-B006 parked while its merged fix sat on main.
         if let Ok(merged) = forge.recently_merged().await {
             for (number, head) in merged {
+                // A merged release PR (`release/vX.Y.Z`) gets its tag now —
+                // the merge IS the release; the tag is its immutable mark.
+                if head.starts_with("release/v") {
+                    self.tag_merged_release(&head).await;
+                }
                 let ticket = head.rsplit('/').next().unwrap_or(&head).to_owned();
                 let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
                     if s.seen_merged_prs.contains(&number) {
                         return Ok(());
                     }
+                    // Stamp the merge time — the fix-on-fix brake reads it.
+                    s.ticket_last_merge
+                        .insert(ticket.clone(), crate::state::now_rfc3339());
                     s.ticket_fail_attempts.remove(&ticket);
                     s.ticket_journal.remove(&ticket);
                     // Merged into main — the DEV work-session for this ticket is
@@ -401,6 +409,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .chars()
             .take(12_000)
             .collect();
+        // Run the SA rescue in the leader's ISOLATED feedback worktree — the
+        // shared checkout is dirty mid-cycle, so branch switching there aborts
+        // and the rescue never lands (the stuck PR spins forever). The tree
+        // shares repo refs, so checkout/commit/push work as on the main tree.
+        let fix_dir = self
+            .feedback_work_dir
+            .clone()
+            .unwrap_or_else(|| self.work_dir.clone());
         let request = crate::ports::outbound::AgentRequest {
             role: coxagent_domain::Role::Sa,
             system_prompt: crate::prompts::system_prompt(crate::prompts::SA),
@@ -422,7 +438,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 h = pr.head,
                 t = pr.title,
             ),
-            work_dir: self.work_dir.clone(),
+            work_dir: fix_dir.clone(),
             timeout: std::time::Duration::from_secs(900),
             escalation_level: 0,
             label: None,
@@ -433,7 +449,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         };
         // The SA may have switched branches while fixing — repark the checkout.
         if let Some(git) = &self.git {
-            let _ = git.checkout_branch(&self.work_dir, self.flow_base()).await;
+            let _ = git.checkout_branch(&fix_dir, self.flow_base()).await;
         }
         let say = |msg: String| {
             let store = Arc::clone(&self.store);
@@ -737,6 +753,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     );
                     let _ = forge.comment_pr(pr.number, &note).await;
                     if forge.close_pr(pr.number).await.is_ok() {
+                        self.announce_pr_close(
+                            pr.number,
+                            &pr.title,
+                            &format!(
+                                "stale + commits agent scratch ({path}); ticket returns to the queue"
+                            ),
+                        )
+                        .await;
                         self.log_git(&format!(
                             "stale sweep: closed PR #{} — commits scratch ({path})",
                             pr.number
@@ -746,7 +770,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     continue;
                 }
                 // Never touch work a human is deliberately sitting on.
-                if crate::use_cases::merge_policy::needs_human_eyes(&diff).is_some() {
+                if crate::use_cases::merge_policy::needs_human_eyes(
+                    &diff,
+                    self.config.git.max_changed_lines,
+                )
+                .is_some()
+                {
                     continue;
                 }
             }

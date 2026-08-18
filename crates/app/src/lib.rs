@@ -643,6 +643,7 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
             deploy: DeployConfig::default(),
             policy: PolicyConfig::default(),
             releases: ReleasesConfig::default(),
+            coverage: coxagent_application::config::CoverageConfig::default(),
         },
         logs_dir(&base),
         None,
@@ -1387,10 +1388,27 @@ pub(crate) fn worktree_at(work_dir: PathBuf, slug: &str) -> PathBuf {
     if !is_repo {
         return work_dir;
     }
-    let slug: String = slug
+    let sanitized: String = slug
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
+    // Key the worktree to THIS repo, not just the caller's slug. Sanitizing
+    // collapses distinct ids onto one name ("my.app" and "my-app"), and the
+    // headless slug (operator@host) carries no project at all — either way two
+    // projects sharing a parent dir would silently reuse each other's worktree
+    // (an agent then edits the WRONG repo). A short hash of the canonical repo
+    // path makes the name unique per repo; both callers flow through here.
+    let repo_key = {
+        use std::hash::{Hash as _, Hasher as _};
+        let canon = std::fs::canonicalize(&work_dir).unwrap_or_else(|_| work_dir.clone());
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        canon.hash(&mut h);
+        format!(
+            "{:08x}",
+            u32::try_from(h.finish() & u64::from(u32::MAX)).unwrap_or(0)
+        )
+    };
+    let slug = format!("{sanitized}-{repo_key}");
     // Sibling of the repo, so it is never inside the tree the agent commits.
     let wt = work_dir
         .parent()

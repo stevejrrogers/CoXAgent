@@ -131,6 +131,7 @@ fn priority_rank(p: Priority) -> u8 {
 ///  - bugs still `Open` — dedicated bug work outranks the board, and
 ///  - Kanban mode (no sprint open) — there is no sprint to be out of scope
 ///    for, so any ready ticket is fair game.
+///
 /// In Scrum mode a feature/chore the PO/SM has not committed is out of scope:
 /// DEV must ask to have it added before picking it up.
 #[must_use]
@@ -248,7 +249,10 @@ mod tests {
             sprint: Some(sprint(&["CXA-F001"])),
             ..ProjectState::default()
         };
-        assert!(in_dev_scope(&state, &TicketId::new("CXA-F001").expect("id")));
+        assert!(in_dev_scope(
+            &state,
+            &TicketId::new("CXA-F001").expect("id")
+        ));
     }
 
     #[test]
@@ -259,7 +263,10 @@ mod tests {
             sprint: Some(sprint(&["CXA-F004"])),
             ..ProjectState::default()
         };
-        assert!(!in_dev_scope(&state, &TicketId::new("CXA-F023").expect("id")));
+        assert!(!in_dev_scope(
+            &state,
+            &TicketId::new("CXA-F023").expect("id")
+        ));
     }
 
     #[test]
@@ -269,7 +276,10 @@ mod tests {
             ..ProjectState::default()
         };
         // No sprint at all — still workable because it is an emergency bug.
-        assert!(in_dev_scope(&state, &TicketId::new("CXA-B002").expect("id")));
+        assert!(in_dev_scope(
+            &state,
+            &TicketId::new("CXA-B002").expect("id")
+        ));
     }
 
     #[test]
@@ -279,7 +289,10 @@ mod tests {
             ..ProjectState::default()
         };
         // Kanban mode (no sprint): no ceremony, any ready feature is workable.
-        assert!(in_dev_scope(&state, &TicketId::new("CXA-F001").expect("id")));
+        assert!(in_dev_scope(
+            &state,
+            &TicketId::new("CXA-F001").expect("id")
+        ));
     }
 
     #[test]
@@ -289,6 +302,9 @@ mod tests {
             sprint: Some(sprint(&["CXA-F001"])),
             ..ProjectState::default()
         };
-        assert!(in_dev_scope(&state, &TicketId::new("CXA-F001").expect("id")));
+        assert!(in_dev_scope(
+            &state,
+            &TicketId::new("CXA-F001").expect("id")
+        ));
     }
 }
