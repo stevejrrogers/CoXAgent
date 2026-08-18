@@ -12,7 +12,7 @@ permissions:
 jobs:
   visual-regression:
 
-    name: Visual regression (screenshots)
+    name: Visual QA
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
