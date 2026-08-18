@@ -576,6 +576,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let msg = format!("🗑️ auto-closed PR #{number} (\"{title}\") — {why}");
         let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
             s.post_chat_in("SA", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+            // The app closed this PR itself. Mark it so `forge_hygiene`'s
+            // closed-unmerged pass does NOT misread our own action as a human
+            // rejection and force a redesign loop. Only externally-closed PRs
+            // (a real person) must trigger that signal.
+            s.seen_closed_prs.insert(number);
             Ok(())
         })
         .await;
