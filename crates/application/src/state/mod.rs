@@ -229,10 +229,26 @@ pub struct ProjectState {
     /// the forge must reflect back exactly once).
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub seen_merged_prs: std::collections::BTreeSet<u64>,
+    /// When each ticket last had a PR MERGE (ticket id → RFC3339). Feeds the
+    /// fix-on-fix brake: a second PR for a ticket merged within the last day
+    /// is the stacked-chain smell (B036→B044, B065 twice in one night) — it
+    /// waits for a person instead of auto-landing another layer.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub ticket_last_merge: std::collections::BTreeMap<String, String>,
     /// Closed-without-merge PR numbers already processed into lessons, so a
     /// human rejection is learned from exactly once.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub seen_closed_prs: std::collections::BTreeSet<u64>,
+    /// Ticket ids the end-of-cycle ship sweep has already committed and pushed
+    /// a branch for. The sweep is otherwise a pure function of status
+    /// (`Fixed`/`Done` + unassigned), so a shipped ticket would be re-selected
+    /// every cycle forever — re-cloning its work, re-opening duplicate PRs, and
+    /// (when the worktree is dirty from those rejected attempts) logging the
+    /// same `checkout` failure each time. Recording the sweep here makes it
+    /// idempotent in truth, not just in happy-path theory: a shipped ticket is
+    /// shipped once.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub swept_tickets: std::collections::BTreeSet<String>,
     /// Tickets a human approved to run despite the cost estimate.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub cost_approved: std::collections::BTreeSet<String>,
@@ -422,7 +438,9 @@ impl Default for ProjectState {
             debt_signals: Vec::new(),
             sweeps_done: Vec::new(),
             seen_merged_prs: std::collections::BTreeSet::new(),
+            ticket_last_merge: std::collections::BTreeMap::new(),
             seen_closed_prs: std::collections::BTreeSet::new(),
+            swept_tickets: std::collections::BTreeSet::new(),
             cost_approved: std::collections::BTreeSet::new(),
             tuning: Tuning::default(),
             ticket_evidence: std::collections::BTreeMap::new(),
