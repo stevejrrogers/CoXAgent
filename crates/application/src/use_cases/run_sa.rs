@@ -117,12 +117,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             // starved design forever on a hybrid board: 16 pre-gate Ready
             // tickets meant the SA never designed the tickets humans were
             // actually waiting to approve.
+            // Count only tickets DEV can actually pull: in the current sprint
+            // scope. Out-of-scope Ready tickets (committed to a future sprint,
+            // parked pre-gate, or simply not committed) must not count as
+            // runway — otherwise a stale out-of-scope ready queue starves the
+            // in-scope tickets the team is actually waiting to ship.
             let runway = state
                 .tickets
                 .iter()
                 .filter(|t| {
-                    t.status() == Status::Ready
-                        || (t.status() == Status::Pending && t.design().technical.is_some())
+                    let in_scope = crate::selection::in_dev_scope(&state, t.id());
+                    in_scope
+                        && (t.status() == Status::Ready
+                            || (t.status() == Status::Pending && t.design().technical.is_some()))
                 })
                 .count();
             if runway >= 6 && !self.config.workflow.human.gate_ready {
@@ -278,7 +285,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
                             break;
                         }
                         Err(e) => {
-                            tracing::warn!("SA design repair attempt {attempt} for {id} error: {e}");
+                            tracing::warn!(
+                                "SA design repair attempt {attempt} for {id} error: {e}"
+                            );
                             break;
                         }
                     }
@@ -554,7 +563,7 @@ mod tests {
     use crate::ports::outbound::{AgentOutcome, SandboxStatus};
     use crate::state::ProjectState;
     use crate::use_cases::{AddTicketInput, AddTicketUseCase};
-    use coxagent_domain::{Complexity, Priority, TicketType};
+    use coxagent_domain::{Complexity, Priority, Ticket, TicketType};
     use std::sync::Mutex;
 
     #[derive(Default)]
@@ -649,5 +658,73 @@ mod tests {
     async fn no_pending_feature_returns_none() {
         let store = Arc::new(MemStore::default());
         assert!(uc(store, "{}").execute().await.expect("run").is_none());
+    }
+
+    fn ready_feature(id: &str) -> Ticket {
+        let mut t = Ticket::new(
+            TicketId::new(id).expect("id"),
+            TicketType::Feature,
+            "ready",
+            "",
+            Priority::High,
+            Complexity::Small,
+            false,
+        )
+        .expect("ticket");
+        t.set_technical_design(Role::Sa, TechnicalDesign::default())
+            .expect("design");
+        t.transition_to(Role::Sa, Status::Ready).expect("ready");
+        t
+    }
+
+    #[tokio::test]
+    async fn in_scope_pending_is_designed_despite_out_of_scope_ready_runway() {
+        // Regression: out-of-scope Ready tickets must NOT count toward the
+        // design-WIP cap. Six out-of-scope Ready tickets previously starved SA
+        // from designing the in-scope ticket the sprint is actually waiting to
+        // ship (run: sprint stuck ~180 empty cycles because DEV had no in-scope
+        // ready work and SA would not design it).
+        let in_scope = Ticket::new(
+            TicketId::new("CXA-F001").expect("id"),
+            TicketType::Feature,
+            "in-scope",
+            "",
+            Priority::High,
+            Complexity::Small,
+            false,
+        )
+        .expect("ticket");
+        let mut tickets = vec![in_scope];
+        for i in 100..107 {
+            tickets.push(ready_feature(&format!("CXA-F{i}")));
+        }
+        let state = ProjectState {
+            tickets,
+            sprint: Some(crate::state::Sprint {
+                number: 1,
+                goal: String::new(),
+                started_cycle: 0,
+                length_cycles: 10,
+                committed: vec![TicketId::new("CXA-F001").expect("id")],
+                started_at: String::new(),
+            }),
+            ..ProjectState::default()
+        };
+        let store = Arc::new(MemStore {
+            state: Mutex::new(state),
+        });
+        let out = r#"{"approach":"do it","files":["a.rs"],"api_contract":"","data_changes":"","test_plan":"t","ux":null}"#;
+        let id = uc(Arc::clone(&store), out).execute().await.expect("run");
+        assert_eq!(
+            id,
+            Some(TicketId::new("CXA-F001").expect("id")),
+            "SA must design the in-scope ticket despite the out-of-scope ready runway"
+        );
+        let state = store.load().await.expect("load");
+        let designed = state
+            .ticket(&TicketId::new("CXA-F001").expect("id"))
+            .expect("ticket");
+        assert_eq!(designed.status(), Status::Ready);
+        assert!(designed.design().technical.is_some());
     }
 }
