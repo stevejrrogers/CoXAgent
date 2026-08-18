@@ -122,10 +122,48 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     collision.display()
                 ))
                 .await;
-                let _ = git
-                    .worktree_remove(&self.work_dir, &collision)
-                    .await;
+                let _ = git.worktree_remove(&self.work_dir, &collision).await;
                 result = git.checkout_branch(&self.work_dir, &branch).await;
+            }
+        }
+        // Second escalation: `worktree_remove` cannot release a *main* working
+        // tree — git refuses with "is a main working tree". That is exactly the
+        // branch-squatting case a leftover checkout in the repo's primary
+        // worktree causes (e.g. the shared codebase left sitting on a feature
+        // branch). If the squatter is clean, relocate it onto the base branch to
+        // free the branch; if it has uncommitted work, do NOT destroy it — log
+        // and bail so the drain loop surfaces the ticket later instead of
+        // retrying a doomed checkout every cycle.
+        if let Err(err) = &result {
+            if let Some(collision) = worktree_path_in_use(&err.to_string()) {
+                let base = self.flow_base().to_owned();
+                let clean = git
+                    .working_tree(&collision)
+                    .await
+                    .is_ok_and(|wt| wt.changed_paths.is_empty());
+                if clean {
+                    let (ok, _) = git.raw(&collision, &["checkout", &base]).await;
+                    if ok {
+                        self.log_git(&format!(
+                            "released {branch}: relocated clean worktree {} onto {base}",
+                            collision.display()
+                        ))
+                        .await;
+                        result = git.checkout_branch(&self.work_dir, &branch).await;
+                    } else {
+                        self.log_git(&format!(
+                            "branch {branch} squatter {} is clean but relocation onto {base} failed",
+                            collision.display()
+                        ))
+                        .await;
+                    }
+                } else {
+                    self.log_git(&format!(
+                        "branch {branch} still held by non-removable worktree {} with uncommitted work — skipping this cycle",
+                        collision.display()
+                    ))
+                    .await;
+                }
             }
         }
         if let Err(e) = result {

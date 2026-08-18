@@ -135,7 +135,8 @@ async fn one_cycle_carries_a_feature_from_proposal_to_done() {
 
     let state = store.load().await.expect("load");
     assert_eq!(state.tickets[0].status(), Status::Documented);
-    assert_eq!(state.current_version.to_string(), "0.1.0");
+    // Shipping a ticket does not move the version — the release flow owns it.
+    assert_eq!(state.current_version.to_string(), "0.0.0");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

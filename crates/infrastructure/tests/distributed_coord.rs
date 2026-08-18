@@ -128,6 +128,7 @@ async fn worker_registry_carries_machine_capabilities(
                 // A CUSTOM provider: it exists only in this user's opencode
                 // config, so no built-in list and no other machine can know it.
                 models: vec!["bizbrain/DeepSeek-V4-Pro".to_owned()],
+                version: env!("CARGO_PKG_VERSION").to_owned(),
                 // Push works, pull requests do not — the split that a hub-side
                 // probe cannot see, because it holds neither credential.
                 git: Some(GitCheck {

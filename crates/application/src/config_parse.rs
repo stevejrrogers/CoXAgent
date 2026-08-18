@@ -54,13 +54,15 @@ pub fn parse_config(text: &str) -> Result<Config, ConfigParseError> {
     // accepted, never silently re-defaulted into this build's view of
     // defaults. A document that omits `schema_version` predates the anchor and
     // is prior-version state, which loads fine.
-    let header: serde_json::Value =
-        serde_json::from_str(text).map_err(|err| ConfigParseError {
-            field: WHOLE_DOCUMENT.to_owned(),
-            detail: err.to_string(),
-        })?;
+    let header: serde_json::Value = serde_json::from_str(text).map_err(|err| ConfigParseError {
+        field: WHOLE_DOCUMENT.to_owned(),
+        detail: err.to_string(),
+    })?;
 
-    if let Some(schema_version) = header.get("schema_version").and_then(serde_json::Value::as_u64) {
+    if let Some(schema_version) = header
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+    {
         if schema_version > u64::from(crate::config::CONFIG_SCHEMA_VERSION) {
             return Err(ConfigParseError {
                 field: "schema_version".to_owned(),

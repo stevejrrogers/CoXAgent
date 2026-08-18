@@ -727,7 +727,10 @@ pub async fn serve_full(
         .route("/api/projects/:pid/store", post(store_rpc::store_rpc_ep))
         .route("/api/projects/:pid/state", get(state_ep))
         .route("/api/projects/:pid/metrics", get(metrics_ep))
-        .route("/api/projects/:pid/metrics/summary", get(metrics_summary_ep))
+        .route(
+            "/api/projects/:pid/metrics/summary",
+            get(metrics_summary_ep),
+        )
         .route("/api/projects/:pid/metrics/trends", get(metrics_trends_ep))
         .route("/api/projects/:pid/agent-evals", get(agent_evals_ep))
         .route("/api/projects/:pid/runner", get(runner_ep))
@@ -904,11 +907,17 @@ pub async fn serve_full(
     // Applies a per-IP sliding-window limit to all /api/auth/ routes.
     // COXAGENT_TRUST_PROXY=1 reads the client IP from X-Forwarded-For (LB
     // topology); default is TCP peer address (safe for direct exposure).
-    let trust_proxy =
-        std::env::var("COXAGENT_TRUST_PROXY").ok().as_deref() == Some("1");
+    let trust_proxy = std::env::var("COXAGENT_TRUST_PROXY").ok().as_deref() == Some("1");
     let limiter = Arc::new(RateLimiter::new());
     let app = app.layer(axum::middleware::from_fn(move |req, next| {
-        rate_limit_mw(req, next, Arc::clone(&limiter), AUTH_RATE_MAX, AUTH_RATE_WINDOW, trust_proxy)
+        rate_limit_mw(
+            req,
+            next,
+            Arc::clone(&limiter),
+            AUTH_RATE_MAX,
+            AUTH_RATE_WINDOW,
+            trust_proxy,
+        )
     }));
 
     // Bind loopback by default (safe for local use); a container sets
@@ -1105,6 +1114,8 @@ fn internal_error(msg: &str) -> axum::response::Response {
 
 #[cfg(test)]
 mod avatar_media_security_tests;
+#[cfg(test)]
+mod cors_rate_limit_tests;
 #[cfg(test)]
 mod pr_preview_tests;
 #[cfg(test)]
