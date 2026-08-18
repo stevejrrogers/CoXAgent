@@ -1121,6 +1121,10 @@ pub(super) async fn chat_reply_ep(
         .as_deref()
         .and_then(|t| serde_json::from_str::<Config>(t).ok())
         .unwrap_or_default();
+    // Independently parsed from the SAME raw text (COX-B035): distinguishes
+    // "no host_port configured" from "host_port present but malformed",
+    // which `cfg.deploy.host_port` alone cannot once a corrupt config has
+    // already collapsed to `Config::default()` above.
     let host_port_probe = raw_cfg.as_deref().map_or(Ok(None), |t| {
         coxagent_application::ports::outbound::parse_deploy_host_port(t)
     });

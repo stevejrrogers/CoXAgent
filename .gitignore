@@ -61,7 +61,7 @@ test-results/
 .build/
 opencode.json
 
-# Per-agent git worktree checkouts for other slots; never committed.
+# Per-agent git worktrees: whole checkouts with their own target/, tens of GB.
 .coxagent-worktrees/
 
 # Python bytecode caches — never commit compiled artifacts (they were swept
