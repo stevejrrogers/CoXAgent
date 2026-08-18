@@ -34,24 +34,26 @@ fn finding(file: &str, why: String) -> Finding {
     Finding {
         file: file.to_string(),
         why,
-   }
+    }
 }
 
 /// Whether any job in this workflow declares `name:` exactly "Visual QA".
 fn has_visual_qa_named_job(src: &str) -> bool {
-   src.lines().any(|l| l.trim() == "name: Visual QA")
+    src.lines().any(|l| l.trim() == "name: Visual QA")
 }
 
 /// Whether any job runs on macOS.
 fn has_macos_job(src: &str) -> bool {
-   src.lines().any(|l| l.trim_start().starts_with("runs-on:")
-       && l.contains("macos"))
+    src.lines()
+        .any(|l| l.trim_start().starts_with("runs-on:") && l.contains("macos"))
 }
 
 /// Whether pull_request/push both target main.
 fn triggers_main(src: &str) -> bool {
-   src.contains("pull_request") && src.contains("push")
-       && src.contains("branches") && src.contains("main")
+    src.contains("pull_request")
+        && src.contains("push")
+        && src.contains("branches")
+        && src.contains("main")
 }
 
 /// Validate a whole workflow document. Empty findings == healthy.
@@ -80,8 +82,8 @@ fn check_workflow(path: &str, src: &str) -> Vec<Finding> {
              merges are actually gated"
                 .to_string(),
         ));
-   }
-   out
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -130,25 +132,36 @@ fn a_job_named_visual_qa_is_accepted() {
     let src = "name: Visual QA\non:\n  pull_request:\n    branches: [main]\n\
                \x20 push:\n\x20   branches: [main]\njobs:\n  vqa:\n\
                \x20   runs-on: macos-latest\n";
-   assert!(has_visual_qa_named_job(src), "a job named `Visual QA` must be accepted");
+    assert!(
+        has_visual_qa_named_job(src),
+        "a job named `Visual QA` must be accepted"
+    );
 }
 
 #[test]
 fn missing_named_job_is_caught() {
-   // Only ci + desktop workflows existed before the fix: no job emits Visual QA.
-   let src = "name: CI\njobs:\n  check:\n\x20   runs-on: ubuntu-latest\n";
-   assert!(!has_visual_qa_named_job(src), "CI without a Visual QA job must be flagged");
+    // Only ci + desktop workflows existed before the fix: no job emits Visual QA.
+    let src = "name: CI\njobs:\n  check:\n\x20   runs-on: ubuntu-latest\n";
+    assert!(
+        !has_visual_qa_named_job(src),
+        "CI without a Visual QA job must be flagged"
+    );
 }
 
 #[test]
 fn linux_only_run_is_caught() {
-   let src = "name: Visual QA\njobs:\n  vqa:\n\x20   runs-on: ubuntu-latest\n";
-   assert!(!has_macos_job(src), "a non-macOS runner cannot pass darwin goldens");
+    let src = "name: Visual QA\njobs:\n  vqa:\n\x20   runs-on: ubuntu-latest\n";
+    assert!(
+        !has_macos_job(src),
+        "a non-macOS runner cannot pass darwin goldens"
+    );
 }
 
 #[test]
 fn missing_main_push_trigger_is_caught() {
-   let src = "name: Visual QA\njobs:\n  vqa:\n\x20   runs-on: macos-latest\n";
-   assert!(!triggers_main(src), "must trigger on pull_request and push to main");
+    let src = "name: Visual QA\njobs:\n  vqa:\n\x20   runs-on: macos-latest\n";
+    assert!(
+        !triggers_main(src),
+        "must trigger on pull_request and push to main"
+    );
 }
-
