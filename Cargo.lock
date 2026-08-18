@@ -602,6 +602,7 @@ dependencies = [
  "coxagent-application",
  "coxagent-contracts",
  "coxagent-domain",
+ "coxagent-infrastructure",
  "futures-util",
  "hmac 0.12.1",
  "portable-pty",
@@ -613,6 +614,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-stream",
+ "tower",
  "tower-http 0.5.2",
  "tracing",
 ]

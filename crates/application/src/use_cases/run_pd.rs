@@ -264,8 +264,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
     /// into blob storage and CONSUME the file (so a re-run never re-attaches).
     /// Pure orchestration: all I/O goes through the files + storage ports.
     async fn ingest_design_files(&self, id: &TicketId) -> Vec<crate::state::TicketAttachment> {
-        let (Some(files), Some(storage)) = (self.files.as_deref(), self.storage.as_deref())
-        else {
+        let (Some(files), Some(storage)) = (self.files.as_deref(), self.storage.as_deref()) else {
             return Vec::new();
         };
         let dir = self
