@@ -493,6 +493,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 )
                 .await;
             if forge.close_pr(pr.number).await.is_ok() {
+                let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                    s.seen_closed_prs.insert(pr.number);
+                    Ok(())
+                })
+                .await;
                 say(format!(
                     "🧯 SM→SA rescue PR #{}: SA kết luận ĐÓNG (đã bị thay thế/sai hướng).",
                     pr.number
@@ -806,7 +811,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     pr.title
                 );
                 let _ = forge.comment_pr(pr.number, &note).await;
-                let _ = forge.close_pr(pr.number).await;
+                if forge.close_pr(pr.number).await.is_ok() {
+                    let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                        s.seen_closed_prs.insert(pr.number);
+                        Ok(())
+                    })
+                    .await;
+                }
                 self.log_git(&format!("stale sweep: closed idle PR #{}", pr.number))
                     .await;
             }
