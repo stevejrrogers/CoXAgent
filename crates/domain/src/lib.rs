@@ -7,6 +7,7 @@ pub mod debt;
 pub mod error;
 pub mod events;
 pub mod ids;
+pub mod kinds;
 pub mod ticket;
 pub mod transitions;
 pub mod version;
@@ -15,7 +16,8 @@ pub use debt::{DebtSignal, DebtSignalKind};
 pub use error::DomainError;
 pub use events::{DesignPart, DomainEvent, EventKind};
 pub use ids::{TicketId, WorkerId};
-pub use ticket::{
-    Complexity, Design, Priority, Role, Status, TechnicalDesign, Ticket, TicketType, UxDesign,
-};
+// Value objects (kind/priority/sizing/status/role) come from `kinds`; the
+// aggregate and its design structs come from `ticket`.
+pub use kinds::{Complexity, Priority, Role, Status, TicketType};
+pub use ticket::{Design, TechnicalDesign, Ticket, UxDesign};
 pub use version::{Bump, SemVer};

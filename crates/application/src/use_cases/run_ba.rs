@@ -412,6 +412,7 @@ mod tests {
                 trace: String::new(),
                 session_id: None,
                 sandbox: SandboxStatus::default(),
+                engine: String::new(),
             })
         }
     }
@@ -494,6 +495,7 @@ mod tests {
                         trace: String::new(),
                         session_id: None,
                         sandbox: SandboxStatus::default(),
+                        engine: String::new(),
                     }),
                     // No repair available: any SM call fails outright, so
                     // repair_json yields None and we fall through to salvage.
@@ -543,6 +545,7 @@ mod tests {
                     trace: String::new(),
                     session_id: None,
                     sandbox: SandboxStatus::default(),
+                    engine: String::new(),
                 })
             }
         }

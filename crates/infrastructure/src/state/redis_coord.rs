@@ -124,6 +124,7 @@ impl RedisCoord {
             models: caps.models.clone(),
             git: caps.git.clone(),
             tooling: caps.tooling.clone(),
+            version: caps.version.clone(),
         })
         .unwrap_or_default();
         redis::cmd("SET")

@@ -39,6 +39,15 @@ impl<E: AgentEnginePort> AgentEnginePort for MeteringEngine<E> {
     async fn run(&self, request: AgentRequest) -> Result<AgentOutcome, PortError> {
         let role = role_key(request.role);
         let outcome = self.inner.run(request).await?;
+        // Record which engine actually ran this role (stamped by FailoverEngine),
+        // even when usage is unknown — the dashboard shows the live engine per
+        // agent regardless of whether cost came back.
+        if !outcome.engine.is_empty() {
+            if let Ok(mut m) = self.meter.lock() {
+                m.engine_by_role
+                    .insert(role.clone(), outcome.engine.clone());
+            }
+        }
         if let Some(u) = outcome.usage {
             if let Ok(mut m) = self.meter.lock() {
                 m.total_cost_usd += u.cost_usd;
@@ -56,6 +65,7 @@ impl<E: AgentEnginePort> AgentEnginePort for MeteringEngine<E> {
 
     async fn resume_run(
         &self,
+        role: coxagent_domain::Role,
         session_id: &str,
         follow_up: &str,
         work_dir: &std::path::Path,
@@ -63,7 +73,7 @@ impl<E: AgentEnginePort> AgentEnginePort for MeteringEngine<E> {
     ) -> Result<AgentOutcome, PortError> {
         let outcome = self
             .inner
-            .resume_run(session_id, follow_up, work_dir, timeout)
+            .resume_run(role, session_id, follow_up, work_dir, timeout)
             .await?;
         if let Some(u) = outcome.usage {
             if let Ok(mut m) = self.meter.lock() {
@@ -100,6 +110,15 @@ impl<E: AgentEnginePort> MeteringEngine<E> {
             SandboxStatus::Unavailable(reason) => {
                 m.unconfined_requested_runs += 1;
                 m.last_sandbox_status = format!("unavailable: {reason}");
+            }
+            // Neither confined nor unconfined: the mechanism refused to apply
+            // and the agent never ran at all (COX-B016). Counted apart so a
+            // host stuck refusing Seatbelt is visible as an OS problem instead
+            // of hiding inside the agent's own failure rate.
+            SandboxStatus::Denied(via) => {
+                m.sandbox_denied_runs += 1;
+                m.last_sandbox_status =
+                    format!("denied by {via}: the profile never applied, the run never started");
             }
         }
     }
@@ -140,6 +159,7 @@ mod tests {
                 trace: String::new(),
                 session_id: None,
                 sandbox: SandboxStatus::NotRequested,
+                engine: "priced".to_owned(),
             })
         }
     }
@@ -170,5 +190,42 @@ mod tests {
         assert!((m.total_cost_usd - 0.30).abs() < 1e-9);
         assert!((m.by_role["dev_feature"] - 0.20).abs() < 1e-9);
         assert!((m.by_role["docs"] - 0.10).abs() < 1e-9);
+    }
+
+    /// One engine that always reports the confinement it is told to.
+    struct Sandboxed(SandboxStatus);
+    #[async_trait]
+    impl AgentEnginePort for Sandboxed {
+        fn id(&self) -> &'static str {
+            "sandboxed"
+        }
+        async fn run(&self, _r: AgentRequest) -> Result<AgentOutcome, PortError> {
+            Ok(AgentOutcome {
+                sandbox: self.0,
+                exit_code: Some(71),
+                ..AgentOutcome::default()
+            })
+        }
+    }
+
+    /// COX-B016: a run the OS refused to sandbox is neither a confined run nor
+    /// an unconfined one — counting it as either hides an OS fault inside the
+    /// numbers operators use to check that confinement is working.
+    #[tokio::test]
+    async fn a_denied_sandbox_is_metered_apart_from_confined_and_unconfined_runs() {
+        let meter: Meter = Arc::new(Mutex::new(Spend::default()));
+        let denied = Sandboxed(SandboxStatus::Denied("seatbelt"));
+        let eng = MeteringEngine::new(denied, Arc::clone(&meter));
+        eng.run(req(Role::DevBug)).await.unwrap();
+
+        let m = meter.lock().unwrap();
+        assert_eq!(m.sandbox_denied_runs, 1);
+        assert_eq!(m.confined_runs, 0, "nothing ran confined");
+        assert_eq!(m.unconfined_requested_runs, 0, "nothing ran at all");
+        assert!(
+            m.last_sandbox_status.contains("denied by seatbelt"),
+            "{}",
+            m.last_sandbox_status
+        );
     }
 }

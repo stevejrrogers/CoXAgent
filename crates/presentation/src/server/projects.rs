@@ -34,7 +34,10 @@ pub(super) async fn project_forge_account(app: &AppState, pid: &str) -> Option<S
     Some(cfg.git.account)
 }
 
-/// List projects (id, name, alias, version, ticket count) in registration order.
+/// List projects (id, name, alias, version, ticket count) in registration
+/// order, then the registered projects that failed to load — flagged `broken`
+/// with the reason, so a config error is visible in the dashboard instead of
+/// only in the hub log (COX-B043).
 pub(super) async fn list_projects(State(app): State<AppState>) -> impl IntoResponse {
     let order = app.order.read().await.clone();
     let mut out = Vec::new();
@@ -48,9 +51,13 @@ pub(super) async fn list_projects(State(app): State<AppState>) -> impl IntoRespo
                 "id": p.id, "name": p.name, "alias": p.alias,
                 "version": version, "tickets": tickets,
                 "mode": p.runner.snapshot().mode,
+                // Stated on every entry, not just the broken ones: a client
+                // that must not select a broken project reads one field.
+                "broken": false,
             }));
         }
     }
+    out.extend(broken_entries(&app.broken));
     Json(out)
 }
 
@@ -292,4 +299,51 @@ pub(super) fn project_language(p: &ProjectHandle) -> coxagent_application::confi
         .map_or(coxagent_application::config::Language::En, |c| {
             c.workflow.language
         })
+}
+
+/// The project brief agents are seeded with (`project_context.md`): its `Goal`
+/// section plus the full markdown, so the dashboard can surface what the team
+/// is actually building toward.
+pub(super) async fn context_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let md = tokio::fs::read_to_string(&p.context_path)
+        .await
+        .unwrap_or_default();
+    Json(serde_json::json!({ "goal": extract_goal(&md), "full": md })).into_response()
+}
+
+/// Post an on-demand daily digest (shipped/spend/sprint at a glance) into the
+/// project's team chat and return it — the `/digest` slash command.
+pub(super) async fn digest_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Ok(state) = p.store.load().await else {
+        return internal_error("load failed");
+    };
+    let now = coxagent_application::state::now_rfc3339();
+    let digest = coxagent_application::metrics::digest_markdown(&state, &now);
+    drop(state);
+    let res = coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        s.post_chat_in(
+            "COX",
+            &format!("📰 {digest}"),
+            coxagent_application::state::AGENTS_CHANNEL,
+            Vec::new(),
+        );
+        Ok(())
+    })
+    .await;
+    match res {
+        Ok(()) => Json(serde_json::json!({ "ok": true, "digest": digest })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
 }

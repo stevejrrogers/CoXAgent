@@ -29,6 +29,15 @@ pub struct Spend {
     /// so each user's token spend is measurable even though they share a project.
     #[serde(default)]
     pub by_operator: std::collections::BTreeMap<String, OperatorSpend>,
+    /// The engine CLI each role most recently RAN ON (`copilot`, `opencode`, …),
+    /// last-wins. This is the engine actually observed (post-failover), not the
+    /// one config named — so the dashboard shows the live engine per agent.
+    #[serde(default)]
+    pub engine_by_role: std::collections::BTreeMap<String, String>,
+    /// The operator (`account@host`) whose runner last ran each role, last-wins —
+    /// so an idle agent card can still name which user it belongs to.
+    #[serde(default)]
+    pub operator_by_role: std::collections::BTreeMap<String, String>,
     /// Runs whose file writes were actually confined (Seatbelt/bwrap).
     #[serde(default)]
     pub confined_runs: u64,
@@ -36,6 +45,11 @@ pub struct Spend {
     /// this host, so the run executed unconfined.
     #[serde(default)]
     pub unconfined_requested_runs: u64,
+    /// Runs the confinement mechanism refused to apply (macOS Seatbelt's
+    /// `sandbox_apply()` denial, COX-B016): the agent never started, so these
+    /// are neither confined nor unconfined runs — they are an OS fault.
+    #[serde(default)]
+    pub sandbox_denied_runs: u64,
     /// Human-readable status of the most recent run's confinement (e.g.
     /// `"confined via bwrap"`, `"unavailable: bwrap not found on PATH"`),
     /// surfaced on the dashboard.
@@ -72,6 +86,54 @@ pub struct OperatorSpend {
     pub runs: u64,
 }
 
+/// One cycle's deterministic scorecard — computed from the report and the spend
+/// delta at the cycle boundary, zero tokens spent. What "was this cycle worth
+/// its cost?" looks like as data instead of a feeling.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CycleScore {
+    pub cycle: u64,
+    pub at: String,
+    /// Engine runs this cycle, and how many produced a recorded outcome
+    /// (ticket moved / design saved / bug filed / doc written). The gap is
+    /// churn — the 4,439-idle-DOCS-runs class of waste.
+    pub runs: u64,
+    pub useful: u64,
+    /// USD metered this cycle.
+    pub cost_usd: f64,
+    /// Tickets shipped this cycle (feature done + bug fixed).
+    pub shipped: u64,
+    /// Engine incidents open at the end of the cycle.
+    pub incidents: u64,
+    /// Cycle errors reported (excluding informational pauses).
+    pub errors: u64,
+    /// A–D verdict, precomputed so every consumer grades identically.
+    pub grade: String,
+    /// Wall-clock seconds spent per phase (role label → secs) this cycle —
+    /// where the minutes went, so cadence tuning has data instead of feeling.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub phase_secs: std::collections::BTreeMap<String, u64>,
+    /// USD metered per role this cycle — where the money went.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub phase_cost: std::collections::BTreeMap<String, f64>,
+}
+
+impl CycleScore {
+    /// Deterministic grade: shipped work is an A; useful-majority activity a B;
+    /// idle-but-clean a C; churn or incidents a D.
+    #[must_use]
+    pub fn grade_of(shipped: u64, runs: u64, useful: u64, incidents: u64, errors: u64) -> String {
+        if incidents > 0 || (runs >= 4 && useful == 0) {
+            "D".to_owned()
+        } else if shipped > 0 {
+            "A".to_owned()
+        } else if runs > 0 && useful.saturating_mul(2) >= runs && errors == 0 {
+            "B".to_owned()
+        } else {
+            "C".to_owned()
+        }
+    }
+}
+
 /// A sprint (scrum mode): a fixed window of cycles with a goal and a committed
 /// set of tickets. Kanban mode leaves this `None`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +143,12 @@ pub struct Sprint {
     pub started_cycle: u64,
     pub length_cycles: u64,
     pub committed: Vec<TicketId>,
+    /// When this sprint opened (RFC3339). Rollover requires BOTH the cycle
+    /// window and a minimum wall-clock age: cycles shrank from ~30 min to ~90 s
+    /// as the loop got faster, and a cycle-only window burned through 500
+    /// seven-minute "sprints" in two days — ceremony noise with no meaning.
+    #[serde(default)]
+    pub started_at: String,
 }
 
 /// A closed sprint's outcome — the velocity history.
@@ -107,6 +175,22 @@ pub struct PrReview {
     /// commits burns an engine call to repeat the same comment.
     #[serde(default)]
     pub head_sha: String,
+}
+
+/// One ticket attachment (a PD design image, a screenshot): the record the UI
+/// lists. The bytes live in blob storage (`StoragePort`) under `key`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TicketAttachment {
+    /// Human file name ("login-mockup.svg").
+    pub name: String,
+    /// Opaque storage key; echoed back to the attachment fetch endpoint.
+    pub key: String,
+    /// MIME type ("image/svg+xml").
+    pub content_type: String,
+    /// Who attached it ("PD", or a username).
+    pub by: String,
+    /// RFC3339 timestamp.
+    pub at: String,
 }
 
 /// A product milestone — a named delivery target that one or more sprints work

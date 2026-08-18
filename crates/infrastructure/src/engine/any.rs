@@ -2,7 +2,9 @@
 //! the composition root can pick an engine from config without boxing a trait
 //! object. Add a variant here when a new engine adapter lands.
 
-use crate::engine::{ClaudeEngine, CopilotEngine, HermesEngine, McpAccess, OpencodeEngine, ScriptedEngine};
+use crate::engine::{
+    ClaudeEngine, CopilotEngine, HermesEngine, McpAccess, OpencodeEngine, ScriptedEngine,
+};
 use async_trait::async_trait;
 use coxagent_application::config::{EngineChoice, EngineKind};
 use coxagent_application::ports::outbound::{
@@ -106,17 +108,33 @@ impl AgentEnginePort for AnyEngine {
 
     async fn resume_run(
         &self,
+        role: coxagent_domain::Role,
         session_id: &str,
         follow_up: &str,
         work_dir: &std::path::Path,
         timeout: std::time::Duration,
     ) -> Result<AgentOutcome, PortError> {
         match self {
-            AnyEngine::Opencode(e) => e.resume_run(session_id, follow_up, work_dir, timeout).await,
-            AnyEngine::Claude(e) => e.resume_run(session_id, follow_up, work_dir, timeout).await,
-            AnyEngine::Hermes(e) => e.resume_run(session_id, follow_up, work_dir, timeout).await,
-            AnyEngine::Copilot(e) => e.resume_run(session_id, follow_up, work_dir, timeout).await,
-            AnyEngine::Scripted(e) => e.resume_run(session_id, follow_up, work_dir, timeout).await,
+            AnyEngine::Opencode(e) => {
+                e.resume_run(role, session_id, follow_up, work_dir, timeout)
+                    .await
+            }
+            AnyEngine::Claude(e) => {
+                e.resume_run(role, session_id, follow_up, work_dir, timeout)
+                    .await
+            }
+            AnyEngine::Hermes(e) => {
+                e.resume_run(role, session_id, follow_up, work_dir, timeout)
+                    .await
+            }
+            AnyEngine::Copilot(e) => {
+                e.resume_run(role, session_id, follow_up, work_dir, timeout)
+                    .await
+            }
+            AnyEngine::Scripted(e) => {
+                e.resume_run(role, session_id, follow_up, work_dir, timeout)
+                    .await
+            }
         }
     }
 }

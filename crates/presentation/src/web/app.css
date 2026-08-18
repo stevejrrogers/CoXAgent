@@ -14,7 +14,10 @@
   html,body{margin:0;height:100%}
   body{background:var(--bg);color:var(--text);font-family:Inter,-apple-system,system-ui,sans-serif;font-size:14px;display:flex;-webkit-font-smoothing:antialiased}
   .ti{font-size:18px;line-height:1;vertical-align:-2px}
-  .side{width:246px;flex-shrink:0;height:100vh;position:sticky;top:0;background:var(--panel);border-right:1px solid var(--border);display:flex;flex-direction:column;padding:18px 16px;gap:6px}
+  /* overflow-y:auto — the nav outgrew short viewports; without it the
+     overflowing items pushed the BODY into a scroll, shoving the whole app
+     (composer included) off-screen instead of scrolling just the rail. */
+  .side{width:246px;flex-shrink:0;height:100vh;position:sticky;top:0;background:var(--panel);border-right:1px solid var(--border);display:flex;flex-direction:column;padding:18px 16px;gap:6px;overflow-y:auto}
   .brand{display:flex;align-items:center;gap:11px;padding:4px 6px 14px}
   .brand .mk{width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg,#22D3EE,#0E7490);display:flex;align-items:center;justify-content:center;color:#fff;font-size:19px}
   .brand .nm{font-weight:600;font-size:15px} .brand .tg{font-size:11px;color:var(--dim)}
@@ -174,6 +177,18 @@
   .wl-verdict{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.3px;
     text-transform:uppercase;padding:2px 9px;border-radius:7px;margin-bottom:4px}
   .wl-verdict-sum{font-size:13px;line-height:1.6;color:var(--text)}
+  /* a solution-architect plan, rendered as prose + chips instead of raw JSON */
+  .wl-verdict-files{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px}
+  .wl-file{font-family:ui-monospace,monospace;font-size:11px;color:var(--accent2);
+    background:var(--card);border:1px solid var(--border2);border-radius:6px;padding:1px 7px}
+  .wl-verdict-detail{margin-top:6px}
+  .wl-verdict-detail summary{cursor:pointer;list-style:none;color:var(--accent2);font-size:11px;
+    font-weight:700;letter-spacing:.2px;text-transform:uppercase;display:inline-flex;align-items:center;gap:4px}
+  .wl-verdict-detail summary::-webkit-details-marker{display:none}
+  .wl-verdict-detail:not([open]) summary::after{content:" ▸"}
+  .wl-verdict-detail[open] summary::after{content:" ▾"}
+  .wl-verdict-row{font-size:12.5px;line-height:1.55;color:var(--text);margin-top:5px;word-break:break-word}
+  .wl-verdict-row b{color:var(--dim);font-weight:700;text-transform:uppercase;font-size:10.5px;letter-spacing:.06em;margin-right:6px}
   /* tool call + result share a subtle vertical rail under the message column */
   .wl-tool{padding:5px 0 5px 38px;position:relative}
   .wl-tool::before,.wl-result::before{content:"";position:absolute;left:13px;top:0;bottom:0;width:1.5px;background:var(--border)}
@@ -818,7 +833,10 @@
   .av{width:42px;height:42px;border-radius:12px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;position:relative}
   .av .sr{position:absolute;right:-2px;bottom:-2px;width:12px;height:12px;border-radius:50%;border:2px solid var(--card);background:var(--dim)}
   .agent.run .av .sr{background:var(--green);animation:pulse 1.6s infinite}
-  .agent .rl{font-size:14px;font-weight:600;letter-spacing:-.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .agent .rl{font-size:14px;font-weight:600;letter-spacing:-.01em;display:flex;align-items:center;gap:7px;flex-wrap:wrap;row-gap:3px}
+  /* engine badge: which CLI (copilot/opencode/claude) actually runs this agent.
+     Never clipped — it wraps under the role name when the card runs narrow. */
+  .ag-eng{flex-shrink:0;font-size:10px;font-weight:600;letter-spacing:.02em;text-transform:lowercase;font-family:ui-monospace,monospace;color:var(--accent2);background:color-mix(in srgb,var(--accent2) 14%,transparent);border:1px solid color-mix(in srgb,var(--accent2) 30%,transparent);border-radius:6px;padding:1px 6px;line-height:1.4}
   .agent .ds{font-size:12px;color:var(--dim);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .agent.run{border-color:color-mix(in srgb,var(--green) 42%,var(--border));box-shadow:0 0 0 1px color-mix(in srgb,var(--green) 20%,transparent)}
   /* status block: its own zone under a hairline divider */
@@ -1009,6 +1027,14 @@
   .aclist{margin-top:8px;display:flex;flex-direction:column;gap:6px}
   .acitem{display:flex;gap:8px;align-items:flex-start;font-size:13px;color:var(--text);line-height:1.5;background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:7px 11px}
   .acitem i{color:var(--accent2);font-size:15px;margin-top:1px;flex:none}
+  .tclist{margin-top:8px;display:flex;flex-direction:column;gap:8px}
+  .tcitem{display:flex;flex-direction:column;gap:6px;background:var(--card2);border:1px solid var(--border);border-radius:9px;padding:9px 11px}
+  .tcrow{display:flex;gap:8px;align-items:center}
+  .tcrow>i{font-size:15px;flex:none}
+  .tcdesc{font-size:13px;color:var(--text);line-height:1.5}
+  .tcnote{margin-left:23px;font-size:12px;color:var(--muted);line-height:1.5;white-space:pre-wrap}
+  .tcimg{margin-left:23px;max-width:300px;border-radius:8px;overflow:hidden;border:1px solid var(--border);cursor:zoom-in}
+  .tcimg img{display:block;width:100%;max-height:220px;object-fit:cover}
   .agstats{display:flex;gap:12px;margin:6px 0 2px;font-size:11.5px;color:var(--muted)}
   .agstats span{display:inline-flex;align-items:center;gap:4px}
   .agstats i{font-size:13px;color:var(--accent2)}
@@ -1662,3 +1688,32 @@ textarea.np-in{resize:vertical;line-height:1.5}
      DIRECT MESSAGES label between its chevron and its count. */
   .chatside .chanrail-hd{justify-content:flex-start}
   .chatside .chanrail-hd > span:first-of-type{margin-right:2px}
+  /* Mermaid diagrams in Wiki pages / ticket descriptions: the fence renders as
+     a live SVG; keep it on the card background, centered, and let a wide
+     sequence diagram scroll inside its own box instead of the page. */
+  .md pre.mermaid{background:var(--card);border:1px solid var(--border2);border-radius:10px;padding:14px;overflow-x:auto;display:flex;justify-content:center}
+  .md pre.mermaid svg{max-width:100%;height:auto}
+  /* Cycle scorecard table (Agents view) */
+  .scoretbl{width:100%;border-collapse:collapse;font-size:12.5px}
+  .scoretbl th{text-align:left;color:var(--dim);font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:.04em;padding:6px 10px;border-bottom:1px solid var(--border)}
+  .scoretbl td{padding:7px 10px;border-bottom:1px solid var(--border2)}
+  .scoretbl tr:last-child td{border-bottom:none}
+  .scoretbl .grade{display:inline-block;min-width:22px;text-align:center;font-weight:700;border-radius:6px;padding:2px 6px;font-size:12px}
+
+/* Ticket design attachments (PD mockups + uploads) */
+.att-grid{display:flex;flex-wrap:wrap;gap:10px;margin-top:8px}
+.att-card{display:flex;flex-direction:column;gap:4px;width:150px;text-decoration:none;color:var(--muted);font-size:11px;border:1px solid var(--border);border-radius:9px;padding:6px;background:var(--card2);transition:border-color .15s}
+.att-card:hover{border-color:var(--accent2)}
+.att-card img{width:100%;height:96px;object-fit:contain;border-radius:6px;background:var(--card)}
+.att-card span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.att-card.att-file{flex-direction:row;align-items:center;width:auto;padding:8px 12px}
+
+/* Cost-per-ship FinOps digest under the scorecard */
+.cps{margin-top:10px;border-top:1px solid var(--border);padding-top:8px}
+.cps-head{font-size:12px;color:var(--muted);margin-bottom:6px}
+.cps-head b{color:var(--text)}
+.cps-row{display:flex;align-items:center;gap:8px;margin:3px 0}
+.cps-lbl{width:90px;font-size:11px;color:var(--dim);text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cps-bar{height:8px;border-radius:4px;background:var(--accent2);opacity:.65;min-width:4px}
+.cps-val{font-size:11px;color:var(--muted)}
+.tso-skew{font-size:10px;color:var(--amber);background:color-mix(in srgb,var(--amber) 12%,transparent);border-radius:6px;padding:1px 6px;white-space:nowrap}

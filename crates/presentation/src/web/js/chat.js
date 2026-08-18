@@ -1839,9 +1839,31 @@ async function showTicket(id){
     <div class="mrow"><span class="lbl">Blocked by</span>${depChips(t.depends_on)}</div>
     <div class="mrow"><span class="lbl">Blocks</span>${depChips((STATE.tickets||[]).filter(x=>(x.depends_on||[]).includes(t.id)).map(x=>x.id))}</div>
     <div class="mrow" style="display:block"><span class="lbl">Description</span><div class="doc-body md" style="margin-top:7px;color:var(--muted);line-height:1.6;font-size:13px">${t.description?mdRender(t.description):'—'}</div></div>
-    <div class="mrow" style="display:block"><span class="lbl">Acceptance criteria</span>${ac.length?`<div class="aclist">${ac.map(c=>`<div class="acitem"><i class="ti ti-square-check"></i> ${esc(c)}</div>`).join("")}</div>`:'<div style="margin-top:6px;color:var(--dim);font-size:12px">— none defined yet</div>'}</div>`;
+    <div class="mrow" style="display:block"><span class="lbl">Acceptance criteria</span>${ac.length?`<div class="aclist">${ac.map(c=>`<div class="acitem"><i class="ti ti-square-check"></i> ${esc(c)}</div>`).join("")}</div>`:'<div style="margin-top:6px;color:var(--dim);font-size:12px">— none defined yet</div>'}</div>`
+    +(function(){const tcs=t.test_cases||[];if(!tcs.length)return '';
+      return `<div class="mrow" style="display:block;border:none"><span class="lbl">Test cases</span><div class="tclist">${tcs.map(tc=>{
+        const st=tc.status||'pending';
+        const badge={passed:['var(--green)','ti-circle-check','Passed'],failed:['var(--red)','ti-circle-x','Failed'],pending:['var(--dim)','ti-clock','Pending']}[st]||['var(--dim)','ti-clock','Pending'];
+        const img=tc.evidence&&tc.evidence.image?`<div class="tcimg"><img src="${esc(tc.evidence.image)}" alt="case screenshot" onclick="window.open('${esc(tc.evidence.image)}','_blank')" loading="lazy"></div>`:'';
+        const note=tc.evidence&&tc.evidence.note?`<div class="tcnote">${esc(tc.evidence.note)}</div>`:'';
+        return `<div class="tcitem"><div class="tcrow"><i class="ti ${badge[1]}" style="color:${badge[0]}"></i><span style="color:${badge[0]};font-weight:700;font-size:11px;text-transform:uppercase">${badge[2]}</span><div class="tcdesc">${esc(tc.description)}</div></div>${img}${note}</div>`;
+      }).join("")}</div></div>`;})()
   if(tech)h+=`<div class="mrow" style="display:block;border:none"><span class="lbl">Technical spec</span><pre>${esc(tech.approach)}\nfiles: ${esc((tech.files||[]).join(", "))}\napi: ${esc(tech.api_contract)}\ntest: ${esc(tech.test_plan)}</pre></div>`;
   if(ux)h+=`<div class="mrow" style="display:block;border:none"><span class="lbl">UI/UX spec</span><pre>${esc(ux.user_flow)}\nscreens: ${esc((ux.screens||[]).join(", "))}</pre></div>`;
+  // Design attachments: PD mockups + user uploads. Bytes come from blob
+  // storage via the attachment endpoint; records live on the state.
+  {const atts=((window.STATE&&STATE.ticket_attachments)||{})[t.id]||[];
+   const grid=atts.map(a=>{
+     const u=api("/attachment?key="+encodeURIComponent(a.key));
+     const isImg=(a.content_type||"").startsWith("image/");
+     return isImg
+       ?`<a href="${esc(u)}" target="_blank" class="att-card" title="${esc(a.name)} · ${esc(a.by)}"><img src="${esc(u)}" alt="${esc(a.name)}" loading="lazy"><span>${esc(a.name)}</span></a>`
+       :`<a href="${esc(u)}" target="_blank" class="att-card att-file" title="${esc(a.name)} · ${esc(a.by)}"><i class="ti ti-file"></i><span>${esc(a.name)}</span></a>`;
+   }).join("");
+   h+=`<div class="mrow" style="display:block;border:none"><span class="lbl">Design & attachments</span>
+     <div class="att-grid" id="att-grid">${grid||'<div style="color:var(--dim);font-size:12px;margin-top:6px">— none yet (PD attaches mockups here)</div>'}</div>
+     <input type="file" id="att-file" style="display:none" onchange="uploadAttachment('${t.id}',this)">
+     <button class="tk-btn" style="margin-top:8px" onclick="document.getElementById('att-file').click()"><i class="ti ti-paperclip"></i> Attach file</button></div>`;}
   const canWork=["pending","ready","open"].includes(t.status);
   if(t.cost_hold!=null&&!t.cost_approved)h+=`<div class="mrow" style="display:block;border:1px solid var(--amber);border-radius:9px;padding:10px 12px;background:color-mix(in srgb,var(--amber) 9%,transparent)"><span style="color:var(--amber);font-weight:700"><i class="ti ti-currency-dollar"></i> Held for cost approval</span><div style="font-size:12.5px;color:var(--muted);margin-top:4px">Estimated ~$${(+t.cost_hold).toFixed(2)}/run exceeds the approval gate. Agents will skip this ticket until you approve it.</div><button class="pri" style="margin-top:8px" onclick="approveCost('${t.id}')"><i class="ti ti-check"></i> Approve run</button></div>`;
   h+=`<div class="tk-actions">
@@ -1856,7 +1878,24 @@ async function showTicket(id){
     <div class="tkc-wrap">${mdToolbar('tkc-input')}<div class="tkc-compose"><input id="tkc-input" placeholder="Add a comment…  (**markdown** · Enter to post · @ to mention)" onkeydown="if(!imeEnter(event)&&event.key==='Enter')postTicketComment('${t.id}')"><button class="pri" onclick="postTicketComment('${t.id}')"><i class="ti ti-send"></i></button></div></div></div>`;
   body.innerHTML=h;
   fillAssignSelect();
-  renderTicketComments(t.id);}
+  renderTicketComments(t.id);
+  // Ticket descriptions can carry ```mermaid fences too (SA designs often do).
+  if(typeof renderMermaidIn==="function")renderMermaidIn(body);}
+// Upload one attachment: raw bytes body, MIME in Content-Type, name in query.
+async function uploadAttachment(id,input){
+  const f=input.files&&input.files[0];if(!f)return;
+  if(f.size>25*1024*1024){toasty("Max 25MB","err");return;}
+  try{
+    const r=await fetch(api("/ticket/"+encodeURIComponent(id)+"/attachments?name="+encodeURIComponent(f.name)),
+      {method:"POST",headers:{"Content-Type":f.type||"application/octet-stream"},body:f});
+    if(!r.ok){toasty(await r.text()||"Upload failed","err");return;}
+    toasty("Attached "+f.name,"ok");
+    // The state snapshot refreshes on its own tick; reflect immediately.
+    const rec=(await r.json()).attachment;
+    if(window.STATE){(STATE.ticket_attachments=STATE.ticket_attachments||{});(STATE.ticket_attachments[id]=STATE.ticket_attachments[id]||[]).push(rec);}
+    showTicket(id);
+  }catch(e){toasty("Network error","err");}
+}
 async function fillAssignSelect(){
   const sel=document.getElementById("tk-assign-sel");if(!sel)return;
   try{const members=await(await fetch(api("/members"))).json();
@@ -1946,7 +1985,30 @@ async function loadSettings(){
       <div class="settab" data-p="mcp"><div id="mcp-panel"></div></div>`;
     window._setTab="mcp";renderMcpPanel();return;
   }
-  let cfg={};try{cfg=await(await fetch(api("/config"))).json();}catch(e){}window._cfg=cfg;
+  // A coxagent.json the hub cannot read is NOT an empty config (COX-B050).
+  // Rendering the form anyway would seed it from defaults, and Save PUTs the
+  // whole document back — so one typo'd field would be written over every
+  // other setting on disk, governance policy included. Show what broke and
+  // render no form: there is nothing safe to save until the file is fixed.
+  let cfg=null,cfgErr=null;
+  try{const r=await fetch(api("/config"));const b=await r.json();if(r.ok)cfg=b;else cfgErr=b;}
+  catch(e){cfgErr={error:"the hub could not be reached"};}
+  window._cfg=cfg;
+  if(cfgErr){
+    document.getElementById("settings-body").innerHTML=`
+      <div class="panel" style="border-color:var(--red)">
+        <div style="color:var(--red);font-weight:600;margin-bottom:6px">
+          <i class="ti ti-alert-triangle"></i> coxagent.json could not be read</div>
+        <div style="font-size:13px;line-height:1.6">
+          ${cfgErr.field?`The field <code>${esc(cfgErr.field)}</code> holds a value this project's settings cannot represent.`:""}
+          <div style="margin-top:4px;opacity:.8">${esc(cfgErr.error||"")}</div>
+          <div style="margin-top:10px">Settings are hidden on purpose: saving them would write defaults
+          over every other setting in the file, including the model allowlist and forbidden paths.
+          Fix the file on disk, then reload.</div>
+        </div>
+      </div>`;
+    window._setTab=null;return;
+  }
   let td={tools:[]};try{td=await(await fetch("/api/tooling")).json();}catch(e){}
   let ga={};try{ga=await(await fetch(api("/git/auth"))).json();}catch(e){}
   const tools=td.tools||[];const missing=tools.filter(t=>!t.present).length;
@@ -2024,7 +2086,14 @@ async function loadSettings(){
     <div class="settab" data-p="workflow" hidden>
       <div class="panel frm">
         <div class="fr"><span class="lbl">Mode</span><select id="wf-mode"><option value="kanban" ${wf.mode!=='scrum'?'selected':''}>kanban</option><option value="scrum" ${wf.mode==='scrum'?'selected':''}>scrum</option></select><span class="hint">scrum groups cycles into sprints</span></div>
-        <div class="fr"><span class="lbl">Sprint length</span><input id="wf-sp" type="number" min="1" value="${wf.sprint_length_cycles??10}" style="width:90px"/><span class="hint">cycles per sprint</span></div>
+        <div class="fr"><span class="lbl">Sprint length</span>
+          <select id="wf-su" onchange="document.getElementById('wf-sp-days').style.display=this.value==='days'?'':'none';document.getElementById('wf-sp').style.display=this.value==='cycles'?'':'none';">
+            <option value="days" ${wf.sprint_unit!=='cycles'?'selected':''}>days</option>
+            <option value="cycles" ${wf.sprint_unit==='cycles'?'selected':''}>cycles</option>
+          </select>
+          <input id="wf-sp-days" type="number" min="1" value="${wf.sprint_length_days??1}" style="width:90px;${wf.sprint_unit==='cycles'?'display:none':''}"/>
+          <input id="wf-sp" type="number" min="1" value="${wf.sprint_length_cycles??10}" style="width:90px;${wf.sprint_unit==='cycles'?'':'display:none'}"/>
+          <span class="hint">days = wall-clock sprints (recommended — cycles speed up and slow down); cycles = roll on the loop counter</span></div>
         <div class="fr"><span class="lbl">BA every N cycles</span><input id="wf-ba" type="number" min="0" value="${wf.ba_every_n_cycles??4}" style="width:90px"/><span class="hint">0 disables BA</span></div>
         <div class="fr"><span class="lbl">Feature dev</span><select id="wf-fd"><option value="true" ${wf.feature_dev_enabled!==false?'selected':''}>enabled</option><option value="false" ${wf.feature_dev_enabled===false?'selected':''}>disabled</option></select></div>
         <div class="fr"><span class="lbl">Ops monitor</span><select id="wf-ops"><option value="true" ${wf.ops_monitor!==false?'selected':''}>on</option><option value="false" ${wf.ops_monitor===false?'selected':''}>off</option></select><span class="hint">pings the deployed app; files a bug + alerts on an outage</span></div>
@@ -2035,6 +2104,7 @@ async function loadSettings(){
         <div class="fr"><span class="lbl">Escalation ladder</span><input id="en-esc" placeholder="engine defaults (claude → opus; opencode → custom providers first)" value="${esc(((cfg.engine||{}).escalation||[]).join(', '))}" style="min-width:280px"><span class="hint">comma-separated models tried on RETRIES of a failed ticket, strongest last</span></div>
         <div class="fr"><span class="lbl">Scrum language</span><select id="wf-lang"><option value="en" ${wf.language!=='vi'?'selected':''}>English</option><option value="vi" ${wf.language==='vi'?'selected':''}>Tiếng Việt</option></select><span class="hint">standup, planning, grooming &amp; retro speak this language</span></div>
         <div class="fr"><span class="lbl">Sleep seconds</span><input id="wf-sl" type="number" min="0" value="${wf.sleep_seconds??30}" style="width:90px"/><span class="hint">between cycles</span></div>
+        <div class="fr"><span class="lbl">Concurrency</span><input id="wf-cc" type="number" min="1" max="16" value="${wf.concurrency??1}" style="width:90px"/><span class="hint">parallel workers per role (dev/test/docs) — 1 = serial; higher runs several tickets of a role at once via per-ticket leases</span></div>
         <div class="fr"><span class="lbl">Budget — total (USD)</span><input id="wf-bg" type="number" min="0" step="0.5" value="${wf.budget_usd??''}" placeholder="unlimited" style="width:100px" ${wf.budget_usd==null?'disabled':''}/>
           <label class="hint" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" id="wf-bg-unl" ${wf.budget_usd==null?'checked':''} onchange="document.getElementById('wf-bg').disabled=this.checked;if(this.checked)document.getElementById('wf-bg').value='';"> unlimited</label>
           <span class="hint">lifetime cap · pauses loop · <b style="color:var(--accent2)">applies live</b></span></div>
@@ -2074,6 +2144,7 @@ async function loadSettings(){
         <div class="fr"><span class="lbl">Open PR/MR</span><select id="git-pr"><option value="true" ${git.auto_pr!==false?'selected':''}>automatically after push</option><option value="false" ${git.auto_pr===false?'selected':''}>manual</option></select></div>
         <div class="fr"><span class="lbl">Auto-review</span><select id="git-ar"><option value="true" ${git.auto_review!==false?'selected':''}>on — the SA agent reviews every PR &amp; suggests</option><option value="false" ${git.auto_review===false?'selected':''}>off — no automatic review</option></select><span class="hint">SA deep-dives each PR and posts approve / request-changes as a suggestion</span></div>
         <div class="fr"><span class="lbl">Auto-merge</span><select id="git-am"><option value="false" ${!git.auto_merge?'selected':''}>off — you merge from the Review tab</option><option value="true" ${git.auto_merge?'selected':''}>on — SA approves &amp; merges automatically</option></select><span class="hint">On: SA merges on approve (never on failing CI). Off: approval is only a suggestion; request-changes still loops back to the agent to fix.</span></div>
+        <div class="fr"><span class="lbl">Require CI</span><select id="git-ci"><option value="true" ${git.require_ci!==false?'selected':''}>on — failing/pending CI blocks review &amp; merge</option><option value="false" ${git.require_ci===false?'selected':''}>off — ignore CI (e.g. Actions billing down); local gates carry the review</option></select><span class="hint">Turn off when CI is unavailable for reasons that aren't the code — the SA still runs the diff review and local test gates.</span></div>
       </div>
     </div>
     <div class="settab" data-p="mcp" hidden><div id="mcp-panel"></div></div>
@@ -2116,7 +2187,7 @@ async function loadSettings(){
         <button class="gc-btn" onclick="openWebhooks()" style="margin-top:6px"><i class="ti ti-webhook"></i> Manage webhooks</button>
       </div>
     </div>
-    <div class="set-footer"><button class="save" onclick="saveSettings()"><i class="ti ti-device-floppy"></i> Save changes</button><span id="save-note"></span><span class="set-foothint">Other settings apply on the next restart</span></div>`;
+    <div class="set-footer"><button class="save" onclick="saveSettings()"><i class="ti ti-device-floppy"></i> Save changes</button><span id="save-note"></span><span class="set-foothint">Engine &amp; model changes apply on the next cycle — no restart</span></div>`;
   setSetTab(window._setTab==="workspace"?"engines":(window._setTab||"engines"));}
 function copyText(btn,text){navigator.clipboard&&navigator.clipboard.writeText(text);
   const old=btn.innerHTML;btn.innerHTML='<i class="ti ti-check"></i>';setTimeout(()=>{btn.innerHTML=old;},1200);}
