@@ -283,6 +283,7 @@ impl JsonStateStore {
             models: caps.models.clone(),
             git: caps.git.clone(),
             tooling: caps.tooling.clone(),
+            version: caps.version.clone(),
         });
         let outcome = self.write_coord(&coord);
         drop(lock);

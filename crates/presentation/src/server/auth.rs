@@ -195,6 +195,9 @@ pub(super) async fn auth_mw(
     if path == "/"
         || path == "/api/health"
         || path == "/api/auth/login"
+        // OpenAPI spec - public, like health: MCP clients and SDK generators
+        // must discover endpoints without holding a hub session.
+        || path == "/api/openapi.json"
         // Embedded static assets (vendored JS/CSS) — same trust level as "/".
         || path.starts_with("/assets/")
         // Installer downloads: same trust as the login page; the native

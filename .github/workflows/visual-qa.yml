@@ -1,0 +1,108 @@
+name: Visual QA
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  visual-regression:
+
+    name: Visual regression (screenshots)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build coxagent (debug binary used by e2e webServer)
+        run: cargo build --bin coxagent
+
+      - name: Install Playwright browsers + system deps (headless Chromium)
+        working-directory: e2e
+        run: npx playwright install chromium --with-deps
+
+      - name: Run visual-regression suite against committed snapshots
+        working-directory: e2e
+        shell: bash
+        run: |
+          set +e
+          npx playwright test --update-snapshots=off \
+            --reporter=json > .playwright-report.json 2> .playwright-stderr.txt
+          code=$?
+          exit "$code"
+
+      - name: Upload test artifacts (report + screenshot diffs)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-qa-results-${{ github.sha }}
+          path: |
+            e2e/test-results/
+            e2e/.playwright-report.json
+
+      # Failing PRs only. Read the JSON report to count failures and list failing
+      # specs, then comment with a link to the artifact containing diff images.
+      - name: Post failure summary to the PR thread
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const out = 'e2e/.playwright-report.json';
+
+            function readFailures() {
+              try {
+                return JSON.parse(fs.readFileSync(out, 'utf8'));
+              } catch (_) {
+                return null; // unparseable report — fall through to generic message
+              }
+            }
+
+            let body;
+            if (fs.existsSync(out)) {
+              const rep = readFailures();
+              if (!rep) {
+                body =
+                  `## Visual QA failed\n\nThe run produced a report that could not be parsed.\n` +
+                  `See run #${context.runNumber} artifacts.`;
+              } else {
+                const fails = [];
+                for (const s of rep.suites || []) {
+                  for (const f of s.specs || []) {
+                    for (const t of f.tests || []) {
+                      for (const r of t.results || []) {
+                        if (r.status === 'failed') fails.push(f.title);
+                      }
+                    }
+                  }
+                }
+                body =
+                  `## Visual QA failed\n\n${fails.length} test(s) exceeded the 2% screenshot tolerance.\n\n` +
+                  `Failing spec(s):\n${fails.map((x) => '- ' + x).join('\n')}\n\n` +
+                  `Diff images and screenshots are in the run artifacts:\nVisual QA workflow run #${context.runNumber}.`;
+              }
+            } else {
+              body =
+                `## Visual QA failed\n\nThe run reported failures but produced no JSON report.\n` +
+                `See run #${context.runNumber} artifacts.`;
+            }
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
+

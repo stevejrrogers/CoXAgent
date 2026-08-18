@@ -181,7 +181,10 @@ mod tests {
         for _ in 0..MAX {
             assert!(rl.check("carol", MAX, WINDOW, t0));
         }
-        assert!(!rl.check("carol", MAX, WINDOW, t0), "should be denied before roll-over");
+        assert!(
+            !rl.check("carol", MAX, WINDOW, t0),
+            "should be denied before roll-over"
+        );
 
         // Advance past the window — all previous hits expire.
         let t1 = t0 + WINDOW + Duration::from_millis(1);
