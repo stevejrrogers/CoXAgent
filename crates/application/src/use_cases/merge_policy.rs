@@ -93,6 +93,64 @@ pub fn needs_human_eyes(diff: &str, max_changed_lines: usize) -> Option<String> 
     ))
 }
 
+/// The substantive ADDED lines of a diff, grouped by target file — the
+/// evidence set for "did this change actually land on main?". Trivial lines
+/// (blank, braces, markers) prove nothing and are skipped.
+#[must_use]
+pub fn added_lines_by_file(diff: &str) -> Vec<(String, Vec<String>)> {
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    let mut current: Option<usize> = None;
+    for line in diff.lines() {
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            let file = rest
+                .split_whitespace()
+                .last()
+                .and_then(|n| n.strip_prefix("b/"))
+                .unwrap_or_default()
+                .to_owned();
+            out.push((file, Vec::new()));
+            current = Some(out.len() - 1);
+            continue;
+        }
+        if let (Some(i), Some(added)) = (current, line.strip_prefix('+')) {
+            if line.starts_with("+++") {
+                continue;
+            }
+            let t = added.trim();
+            // Only lines distinctive enough to be evidence.
+            if t.len() >= 12 && !t.starts_with("//") && !t.starts_with('*') {
+                out[i].1.push(t.to_owned());
+            }
+        }
+    }
+    out.retain(|(f, lines)| !f.is_empty() && !lines.is_empty());
+    out
+}
+
+/// Whether a PR's substance is PRESENT on main, judged from its added lines
+/// vs the current file contents (`read` returns a file's text on main, `None`
+/// when it does not exist). Deleted-only diffs and unreadable diffs return
+/// `false` — no evidence means NOT landed; closing a PR is the irreversible
+/// side, so it carries the burden of proof.
+pub fn diff_landed_on_main(diff: &str, mut read: impl FnMut(&str) -> Option<String>) -> bool {
+    let files = added_lines_by_file(diff);
+    if files.is_empty() {
+        return false;
+    }
+    let (mut total, mut found) = (0usize, 0usize);
+    for (file, lines) in files {
+        let content = read(&file).unwrap_or_default();
+        // Sample up to 20 lines per file — enough signal, bounded work.
+        for l in lines.iter().take(20) {
+            total += 1;
+            if content.contains(l.as_str()) {
+                found += 1;
+            }
+        }
+    }
+    total > 0 && found * 10 >= total * 8 // ≥80% of the evidence is on main
+}
+
 /// The files a PR diff touches, taken from its `diff --git` headers. A best
 /// effort: a diff whose headers we cannot name is conservatively treated as
 /// unparseable (empty list), which the resolver turns into a human hold rather
@@ -332,7 +390,7 @@ pub fn escalation_route(history: &str, spec_gap: bool) -> EscalationRoute {
 
 #[cfg(test)]
 mod merge_guard_tests {
-    use super::{commits_scratch, competing_pr, needs_human_eyes};
+    use super::{commits_scratch, competing_pr, diff_landed_on_main, needs_human_eyes};
 
     #[test]
     fn a_branch_that_committed_agent_scratch_is_named_for_it() {
@@ -409,6 +467,29 @@ mod merge_guard_tests {
         assert!(needs_human_eyes(ci, 3000)
             .expect("held")
             .contains(".github/workflows"));
+    }
+
+    #[test]
+    fn closing_a_pr_requires_proof_its_diff_landed_on_main() {
+        let diff = "diff --git a/src/a.rs b/src/a.rs\n+++ b/src/a.rs\n\
+                    +fn very_distinctive_function_name() {\n\
+                    +    let answer = compute_the_thing(42);\n";
+        // Substance present on main → superseded, closable.
+        let main_has_it =
+            "fn very_distinctive_function_name() {\n    let answer = compute_the_thing(42);\n}";
+        assert!(diff_landed_on_main(diff, |_| Some(main_has_it.to_owned())));
+        // Substance absent → NOT landed; closing would throw away real work
+        // (the #185–#196 mass-close of 2026-08-16).
+        assert!(!diff_landed_on_main(diff, |_| Some(
+            "fn unrelated() {}".to_owned()
+        )));
+        // File missing on main entirely → not landed.
+        assert!(!diff_landed_on_main(diff, |_| None));
+        // No evidence lines at all (empty/deletion-only diff) → not landed:
+        // the irreversible side carries the burden of proof.
+        assert!(!diff_landed_on_main("diff --git a/x b/x\n-gone\n", |_| {
+            Some(String::new())
+        }));
     }
 
     #[test]
@@ -503,7 +584,10 @@ mod merge_guard_tests {
         };
         assert!(matches!(
             super::resolve_competing(safe.clone(), pipeline.clone()),
-            super::CompeteOutcome::Proceed { winner: 1, unsafe_other: 2 }
+            super::CompeteOutcome::Proceed {
+                winner: 1,
+                unsafe_other: 2
+            }
         ));
         assert!(matches!(
             super::resolve_competing(pipeline, safe.clone()),
@@ -540,7 +624,9 @@ mod merge_guard_tests {
         // (where its own size gates still apply), while #89 stays for a human.
         let safe = super::CompeteCandidate {
             number: 98,
-            files: Some(vec!["crates/infrastructure/src/deploy/docker_compose.rs".to_owned()]),
+            files: Some(vec![
+                "crates/infrastructure/src/deploy/docker_compose.rs".to_owned()
+            ]),
             unsafe_change: false,
         };
         let unsafe_sprawl = super::CompeteCandidate {
