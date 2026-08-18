@@ -6,6 +6,26 @@
 //! DEV failure counter and the runner's circuit breaker consult this one
 //! predicate so the two can never drift apart.
 
+/// An AUTH-class death: revoked/expired credentials. Unlike a transient blip
+/// this never heals on its own — a person must re-login — so the alarm fires
+/// on the FIRST sighting instead of waiting for the breaker to count cycles
+/// (the 2026-08-17 OAuth death burned an hour before anything shouted).
+#[must_use]
+pub fn is_auth_death(why: &str) -> bool {
+    let low = why.to_lowercase();
+    [
+        "oauth",
+        "authenticate",
+        "401",
+        "unauthorized",
+        "revoked",
+        "invalid api key",
+        "api key not",
+    ]
+    .iter()
+    .any(|m| low.contains(m))
+}
+
 /// Whether `why` looks like an infrastructure fault rather than a genuine
 /// task failure. An EMPTY message is treated as infra too: every observed
 /// engine-side outage (401, network drop) surfaced with empty stderr, while

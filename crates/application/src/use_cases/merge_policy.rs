@@ -480,14 +480,16 @@ mod merge_guard_tests {
         assert!(diff_landed_on_main(diff, |_| Some(main_has_it.to_owned())));
         // Substance absent → NOT landed; closing would throw away real work
         // (the #185–#196 mass-close of 2026-08-16).
-        assert!(!diff_landed_on_main(diff, |_| Some("fn unrelated() {}".to_owned())));
+        assert!(!diff_landed_on_main(diff, |_| Some(
+            "fn unrelated() {}".to_owned()
+        )));
         // File missing on main entirely → not landed.
         assert!(!diff_landed_on_main(diff, |_| None));
         // No evidence lines at all (empty/deletion-only diff) → not landed:
         // the irreversible side carries the burden of proof.
-        assert!(!diff_landed_on_main("diff --git a/x b/x\n-gone\n", |_| Some(
-            String::new()
-        )));
+        assert!(!diff_landed_on_main("diff --git a/x b/x\n-gone\n", |_| {
+            Some(String::new())
+        }));
     }
 
     #[test]
@@ -582,7 +584,10 @@ mod merge_guard_tests {
         };
         assert!(matches!(
             super::resolve_competing(safe.clone(), pipeline.clone()),
-            super::CompeteOutcome::Proceed { winner: 1, unsafe_other: 2 }
+            super::CompeteOutcome::Proceed {
+                winner: 1,
+                unsafe_other: 2
+            }
         ));
         assert!(matches!(
             super::resolve_competing(pipeline, safe.clone()),
@@ -619,7 +624,9 @@ mod merge_guard_tests {
         // (where its own size gates still apply), while #89 stays for a human.
         let safe = super::CompeteCandidate {
             number: 98,
-            files: Some(vec!["crates/infrastructure/src/deploy/docker_compose.rs".to_owned()]),
+            files: Some(vec![
+                "crates/infrastructure/src/deploy/docker_compose.rs".to_owned()
+            ]),
             unsafe_change: false,
         };
         let unsafe_sprawl = super::CompeteCandidate {

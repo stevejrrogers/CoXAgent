@@ -189,6 +189,39 @@ gateway pods. Start with `cox-all`; split only when load asks for it.
   projects (never `cox-infra`) and prunes dangling images. Manual sweep:
   `./scripts/docker-clean.sh` (`--deep` adds builder cache).
 
+## Standalone CXA backend (`deploy/docker-compose.cxa.yml`)
+
+For running **only** Postgres + Redis as a shared backend for the *native CXA
+hub* on this host (not the full web stack). It uses its own project name
+(`cxa-backend`) and mounts CXA's existing data volume directly, so it never
+collides with the root compose or `local-infra`.
+
+```sh
+cd deploy
+cp .env.example .env     # fill in real secrets — do not reuse placeholders
+docker compose -f docker-compose.cxa.yml up -d
+```
+
+Required variables (`${VAR:?}` — compose fails fast if any is unset):
+
+| Var | Used by |
+|---|---|
+| `PG_USER` | `db` service — `POSTGRES_USER` + healthcheck |
+| `PG_PASSWORD` | `db` service — `POSTGRES_PASSWORD` |
+| `REDIS_PASSWORD` | `redis` service — redis auth (`--requirepass`) |
+
+Set them inline instead of `.env`, e.g.:
+
+```sh
+PG_USER=coxagent PG_PASSWORD=<secret> REDIS_PASSWORD=<secret> \
+  docker compose -f docker-compose.cxa.yml up -d
+```
+
+Host ports: Postgres on **127.0.0.1:5433**, Redis on **127.0.0.1:6379**
+(loopback-only; matching what the native hub expects in coordination.json).
+An unauthenticated Redis is an authentication bypass (live session keys), so
+never run with an empty password.
+
 ## Migrate to another machine
 
 Everything portable in one tarball + one command on the new machine:

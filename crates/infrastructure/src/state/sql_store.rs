@@ -373,6 +373,10 @@ impl StateStorePort for SqlStateStore {
                     .collect(),
                 git: serde_json::from_str(&r.get::<_, String>(6)).ok(),
                 tooling: serde_json::from_str(&r.get::<_, String>(7)).ok(),
+                // No schema column yet — SQL-backed hubs report no version
+                // until a migration adds one (redis-coordinated setups carry
+                // it through the redis entry regardless).
+                version: String::new(),
             })
             .collect())
     }
@@ -472,11 +476,11 @@ impl SqlStateStore {
         state: ProjectState,
         expected_revision: Option<i64>,
     ) -> Result<(), PortError> {
-        state.validate().map_err(|e| {
-            PortError::Corrupt(format!("refusing to save invalid state: {e}"))
-        })?;
-        let value = serde_json::to_value(&state)
-            .map_err(|e| PortError::Backend(format!("encode: {e}")))?;
+        state
+            .validate()
+            .map_err(|e| PortError::Corrupt(format!("refusing to save invalid state: {e}")))?;
+        let value =
+            serde_json::to_value(&state).map_err(|e| PortError::Backend(format!("encode: {e}")))?;
 
         let client = self.client().await?;
         let expected = match expected_revision {
@@ -510,5 +514,4 @@ impl SqlStateStore {
         self.mirror_save(&state).await;
         Ok(())
     }
-
 }

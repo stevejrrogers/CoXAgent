@@ -49,6 +49,10 @@ pub struct WorkerEntry {
     /// agents actually run on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tooling: Option<serde_json::Value>,
+    /// The coxagent build this runner reports (see [`WorkerCaps::version`]) —
+    /// the dashboard flags a worker trailing the hub's own version.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub version: String,
 }
 
 /// The outcome of probing git + forge access from the machine that will run
@@ -96,6 +100,11 @@ pub struct WorkerCaps {
     pub models: Vec<String>,
     pub git: Option<GitCheck>,
     pub tooling: Option<serde_json::Value>,
+    /// The coxagent build this worker runs (`CARGO_PKG_VERSION`). The hub
+    /// self-upgrades but remote headless workers do not — a worker whose
+    /// version trails the hub is running OLD orchestration rules (pre-fix
+    /// sweeps, no canary…), and that skew must be visible, not silent.
+    pub version: String,
 }
 
 /// Atomic read-modify-write with retry: load the state, apply `f`, and save. If

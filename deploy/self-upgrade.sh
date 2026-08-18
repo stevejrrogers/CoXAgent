@@ -93,6 +93,24 @@ done
 if [ -n "$ok" ]; then
   echo "$NEW_SHA" > "$SHA_FILE"
   log "UPGRADED to $NEW_SHA (hub answering on :$PORT)"
+  # A restarted hub comes up PAUSED — an upgrade must not put the team to
+  # sleep until a person notices. Resume every project. Credentials come from
+  # the hub's own admin-password file via stdin, never argv.
+  PW_FILE="$HOME/CoXAgent/admin-password"
+  if [ -f "$PW_FILE" ]; then
+    PW=$(cat "$PW_FILE")
+    JAR=$(mktemp)
+    printf '{"username":"root","password":"%s"}' "$PW" \
+      | curl -sf -m 5 -c "$JAR" -X POST "http://localhost:$PORT/api/auth/login" \
+          -H 'content-type: application/json' -d @- >/dev/null 2>&1
+    for pid in $(curl -sf -m 5 -b "$JAR" "http://localhost:$PORT/api/projects" 2>/dev/null \
+                   | tr ',' '\n' | sed -n 's/.*"id":"\([^"]*\)".*/\1/p'); do
+      curl -sf -m 5 -b "$JAR" -X POST \
+        "http://localhost:$PORT/api/projects/$pid/control/resume" >/dev/null 2>&1 \
+        && log "resumed project $pid after upgrade"
+    done
+    rm -f "$JAR"
+  fi
 else
   log "HEALTH CHECK FAILED — rolling back to previous binary"
   cp -X "$TARGET.prev" "$TARGET" 2>>"$LOG"

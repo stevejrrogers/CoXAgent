@@ -350,9 +350,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
                 break;
             };
             if attempt > 1 {
-                tracing::warn!(
-                    "DOCS gate attempt {attempt} for {id} still failing: {missing}"
-                );
+                tracing::warn!("DOCS gate attempt {attempt} for {id} still failing: {missing}");
             }
             let fixup = format!(
                 "Your page for {id} is missing required parts: {missing}.\n\nOutput the COMPLETE \
@@ -453,6 +451,39 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
 /// own prose is not a gate.
 #[must_use]
 pub fn docs_gate_failures(raw: &str, work_dir: &std::path::Path) -> Option<String> {
+    // A page that OPENS with first-person process narration ("I'll start by
+    // reading the repo map...", "Let me search...") is the agent's stream of
+    // consciousness, not a document. It sails past every substring check below
+    // because it *talks about* a valid page (it names the headings and real
+    // files) instead of being one — that is how a narration got persisted as a
+    // live page. The mechanical tell: a real page opens with structure (a
+    // `#`/`##` heading, a `**Keywords:**` line, or a short title), never with
+    // the agent narrating its own work. Check the opening line only, so a doc
+    // that ends with a stray note is still accepted.
+    const NARRATION_OPENS: [&str; 22] = [
+        "I'll",
+        "I’ll",
+        "i'll",
+        "I'm",
+        "I’m",
+        "i'm",
+        "I will",
+        "Let me",
+        "let me",
+        "Let's",
+        "Let’s",
+        "let's",
+        "Now I",
+        "now I",
+        "I need to",
+        "i need to",
+        "I'd like",
+        "I want to",
+        "Here is my",
+        "Here's my",
+        "All facts confirmed",
+        "Note: I",
+    ];
     let body = parse_folder_hint(raw).1;
     let text = body.trim();
     let mut missing: Vec<&str> = Vec::new();
@@ -473,6 +504,14 @@ pub fn docs_gate_failures(raw: &str, work_dir: &std::path::Path) -> Option<Strin
     let mut problems: Vec<String> = Vec::new();
     if !missing.is_empty() {
         problems.push(format!("missing headings: {}", missing.join(", ")));
+    }
+    if let Some(first) = text.lines().find(|l| !l.trim().is_empty()) {
+        let f = first.trim_start();
+        if let Some(nar) = NARRATION_OPENS.iter().find(|t| f.starts_with(**t)) {
+            problems.push(format!(
+                "page opens with first-person narration (`{nar}`), not a document"
+            ));
+        }
     }
     if !text.to_lowercase().contains("**keywords:**") {
         problems.push("no `**Keywords:**` line (nothing to search on)".to_owned());
@@ -991,6 +1030,33 @@ mod docs_gate_tests {
         let dir = fixture_repo("nopath");
         let why = docs_gate_failures(&page, &dir).expect("must be rejected");
         assert!(why.contains("no real file paths"), "{why}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn first_person_agent_narration_is_rejected() {
+        // A live page once stored the agent's whole stream of consciousness —
+        // "I'll start by reading the repo map... Let me search... Now I
+        // understand..." — because it *mentions* every heading and cites real
+        // files, so every substring check passed while no document was saved.
+        // The page must be rejected on its opening line alone.
+        let narration = format!(
+            "I'll start by reading the repo map and finding the real files.\n\
+             Let me search for the ticket and related files.\n\n\
+             {}\n\n\
+             All headings verified: ## Overview, ## How it works, ## Usage, \
+             ## Interface, ## Configuration, ## Edge cases and limits, ## Code map, \
+             ## Related. The `**Keywords:**` line is present.\n\
+             All Code map entries are confirmed real files: \
+             crates/application/src/ports/outbound/deploy.rs.",
+            "## Overview\nFiller. ".repeat(60)
+        );
+        let dir = fixture_repo("narration");
+        let why = docs_gate_failures(&narration, &dir).expect("must be rejected");
+        assert!(
+            why.contains("first-person narration"),
+            "expected narration rejection, got: {why}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

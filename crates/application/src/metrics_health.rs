@@ -583,7 +583,8 @@ mod tests {
     fn trends_build_a_day_series_after_three_cycles() {
         let mut s = ProjectState::default();
         for n in [1u64, 2u64, 3u64] {
-            s.cycle_scores.push(cycle(n, "2026-07-30T00:00:00Z", 2.0, 1));
+            s.cycle_scores
+                .push(cycle(n, "2026-07-30T00:00:00Z", 2.0, 1));
         }
         s.history.push(DeployRecord {
             version: SemVer::new(1, 0, 0),
@@ -593,7 +594,11 @@ mod tests {
         });
         let tr = compute_trends(&s, 5, "2026-08-03");
         assert!(!tr.insufficient_data);
-        let d = tr.points.iter().find(|p| p.day == "2026-07-30").expect("day");
+        let d = tr
+            .points
+            .iter()
+            .find(|p| p.day == "2026-07-30")
+            .expect("day");
         assert!((d.spend_usd - 6.0).abs() < f64::EPSILON);
         assert!((d.velocity - 1.0).abs() < f64::EPSILON);
     }
