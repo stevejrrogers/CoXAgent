@@ -340,7 +340,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                                  lost; the winner proceeds through review."
                             );
                             let _ = forge.comment_pr(loser, &note).await;
-                            let _ = forge.close_pr(loser).await;
+                            if forge.close_pr(loser).await.is_ok() {
+                                let _ =
+                                    crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                                        s.seen_closed_prs.insert(loser);
+                                        Ok(())
+                                    })
+                                    .await;
+                            }
                             if loser == pr.number {
                                 self.log_git(&format!(
                                     "SA resolved competing PRs: closed #{loser} (duplicate), \
