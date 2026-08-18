@@ -456,16 +456,13 @@ fn services_without_unless_stopped(src: &str) -> Vec<String> {
         Ok(v) => v,
         Err(_) => return vec!["<unparseable yaml>".to_string()],
     };
-    let Some(services) = doc.get("services").and_then(serde_yaml::Value::as_mapping)
-    else {
+    let Some(services) = doc.get("services").and_then(serde_yaml::Value::as_mapping) else {
         return vec!["no services map".to_string()];
     };
     services
         .iter()
         .filter_map(|(name, body)| {
-            if body.get("restart").and_then(serde_yaml::Value::as_str)
-                == Some("unless-stopped")
-            {
+            if body.get("restart").and_then(serde_yaml::Value::as_str) == Some("unless-stopped") {
                 None
             } else {
                 Some(name.as_str().unwrap_or("<unnamed>").to_string())
@@ -482,8 +479,7 @@ fn root_compose_every_service_self_recovers() {
     assert!(
         offenders.is_empty(),
         "root docker-compose.yml services must declare `restart: unless-stopped` \
-         (CXA-B065): {:?}",
-        offenders
+         (CXA-B065): {offenders:?}"
     );
 }
 
