@@ -34,11 +34,21 @@ log "autoheal watchdog started (pid $$)"
 while true; do
   if ! check; then
     log "ALERT: DB/Redis down or unresponsive — restarting stack"
-    if cd "$DEPLOY_DIR" && set -a && . "$ENV_FILE" && set +a && \
-       docker compose -f "$COMPOSE_FILE" up -d; then
-      log "OK: stack restart issued"
+    if cd "$DEPLOY_DIR" && set -a && . "$ENV_FILE" && set +a; then
+      # Graceful stop first (SIGTERM, 30s grace) so Postgres/Redis flush and
+      # exit clean instead of `up -d` recreating containers out from under a
+      # still-running (if wedged) process. Timeout-bound: a hung stop must not
+      # block the restart it's meant to enable.
+      if ! timeout 45 docker compose -f "$COMPOSE_FILE" stop -t 30; then
+        log "WARN: graceful stop timed out or failed — continuing to up -d anyway"
+      fi
+      if docker compose -f "$COMPOSE_FILE" up -d; then
+        log "OK: stack restart issued"
+      else
+        log "ERROR: compose up failed — will retry"
+      fi
     else
-      log "ERROR: compose up failed — will retry"
+      log "ERROR: could not load env — will retry"
     fi
     # give the stack time to come back after a restart, then verify liveness again.
     sleep 30

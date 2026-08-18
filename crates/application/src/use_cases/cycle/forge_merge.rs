@@ -270,6 +270,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     if s.seen_merged_prs.contains(&number) {
                         return Ok(());
                     }
+                    // Stamp the merge time — the fix-on-fix brake reads it.
+                    s.ticket_last_merge
+                        .insert(ticket.clone(), crate::state::now_rfc3339());
                     s.ticket_fail_attempts.remove(&ticket);
                     s.ticket_journal.remove(&ticket);
                     // Merged into main — the DEV work-session for this ticket is

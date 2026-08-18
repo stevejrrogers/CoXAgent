@@ -291,7 +291,9 @@ pub fn parse_deploy_host_port(raw_config: &str) -> Result<Option<u16>, ()> {
 /// check. No `host_port` configured means nothing to probe (matches
 /// `ops_monitor`'s own gate); a `deploy` port with no real check (default
 /// `DeployPort::health` impl) reports healthy immediately, same as before
-/// this gate existed.
+/// this gate existed. Port `0` is neither of those: it is in `u16` range but
+/// nothing can ever connect to it, so it fails the gate at once with a config
+/// diagnostic instead of being polled to exhaustion (COX-B042).
 ///
 /// # Errors
 /// Never returns an error — an unreachable/failing health check, and a probe
@@ -302,6 +304,19 @@ pub async fn verify_deploy_health(deploy: &Arc<dyn DeployPort>, host_port: Optio
     let Some(port) = host_port else {
         return true;
     };
+    // `Some(0)` is corrupt config, not a dead app: probing it would spend the
+    // whole polling window and then report "the app never bound its port",
+    // which is indistinguishable from a real app bug. Fail immediately and
+    // name the actual cause. Configs read from disk are healed at load time
+    // (`heal_host_port`); this guards every other way a `Config` is built.
+    if port == 0 {
+        tracing::error!(
+            "deploy.host_port is 0, which is not a connectable TCP port — failing the \
+             deploy health gate on the config, not on the app; set a real port in \
+             coxagent.json"
+        );
+        return false;
+    }
     for attempt in 0..ATTEMPTS {
         // A probe that can't run is NOT evidence the app is up: treat it as
         // unhealthy, exactly like `DeployPort::health_check`'s own default.
@@ -315,6 +330,24 @@ pub async fn verify_deploy_health(deploy: &Arc<dyn DeployPort>, host_port: Optio
         }
     }
     false
+}
+
+/// Run [`verify_deploy_health`] against a probe port that may itself be
+/// invalid (COX-B025/COX-B026/COX-B035): every call site that reads
+/// `deploy.host_port` from raw config text via [`parse_deploy_host_port`]
+/// (rather than trusting `Config::deploy.host_port`, which cannot tell
+/// "absent" from "malformed" once deserialization has already defaulted it
+/// away) runs the result through this so a corrupt port fails the gate
+/// outright instead of being treated as "nothing configured" — which would
+/// pass unconditionally and report a dead app as healthy.
+pub async fn verify_deploy_health_probe(
+    deploy: &Arc<dyn DeployPort>,
+    probe: Result<Option<u16>, ()>,
+) -> bool {
+    match probe {
+        Ok(port) => verify_deploy_health(deploy, port).await,
+        Err(()) => false,
+    }
 }
 
 #[cfg(test)]
@@ -587,6 +620,53 @@ mod tests {
             probing.probes.load(Ordering::SeqCst),
             1,
             "a healthy app must not be re-polled"
+        );
+    }
+
+    // --- COX-B042: `host_port: 0` is not a valid TCP port ------------------
+
+    /// `0` deserializes fine as a `u16` — it is in range — but it is not a
+    /// port anything can ever connect to. It must be treated the same as any
+    /// other corrupt `host_port` (negative/float/string), not folded into
+    /// "nothing configured", or `verify_deploy_health_probe` would probe a
+    /// port that can never bind and fail every deploy forever instead of
+    /// rejecting the config outright.
+    #[test]
+    fn a_zero_host_port_is_rejected_rather_than_treated_as_unconfigured() {
+        assert_eq!(
+            super::parse_deploy_host_port(r#"{"deploy":{"host_port":0}}"#),
+            Err(()),
+            "host_port 0 must be rejected as corrupt config, not accepted as a real port"
+        );
+    }
+
+    /// The gate itself, reached by any caller whose `Config` holds `Some(0)`
+    /// without passing through `parse_deploy_host_port` (the cycle's default
+    /// `host_port_probe` is `Ok(config.deploy.host_port)`). Port 0 can never
+    /// accept a connection, so probing it burns the whole polling window and
+    /// then blames the app. It must fail at once, without probing.
+    #[tokio::test(start_paused = true)]
+    async fn a_zero_host_port_fails_the_gate_at_once_instead_of_being_probed() {
+        let probing = Arc::new(FakeDeploy {
+            healthy: true, // even a would-be-healthy adapter must not be asked
+            probes: AtomicUsize::new(0),
+        });
+        let deploy: Arc<dyn DeployPort> = Arc::clone(&probing) as Arc<dyn DeployPort>;
+        let started = tokio::time::Instant::now();
+
+        assert!(
+            !super::verify_deploy_health(&deploy, Some(0)).await,
+            "host_port 0 is corrupt config — the gate must fail, not pass vacuously"
+        );
+        assert_eq!(
+            probing.probes.load(Ordering::SeqCst),
+            0,
+            "a port nothing can bind must not be probed at all"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the gate must reject 0 immediately, not poll it to exhaustion; took {:?}",
+            started.elapsed()
         );
     }
 }
