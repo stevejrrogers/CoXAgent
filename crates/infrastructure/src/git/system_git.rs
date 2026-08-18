@@ -78,7 +78,11 @@ fn base64_encode(input: &[u8]) -> String {
 }
 
 /// `git` with extra environment (for token-authenticated HTTPS).
-async fn git_with_env(dir: &Path, args: &[&str], env: &[(String, String)]) -> Result<String, PortError> {
+async fn git_with_env(
+    dir: &Path,
+    args: &[&str],
+    env: &[(String, String)],
+) -> Result<String, PortError> {
     let mut cmd = Command::new("git");
     cmd.args(args).current_dir(dir).stdin(Stdio::null());
     for (k, v) in env {
@@ -242,7 +246,9 @@ impl GitPort for SystemGit {
             Some(env) => git_with_env(work_dir, &["push", "-u", "origin", branch], &env)
                 .await
                 .map(|_| ()),
-            None => git(work_dir, &["push", "-u", "origin", branch]).await.map(|_| ()),
+            None => git(work_dir, &["push", "-u", "origin", branch])
+                .await
+                .map(|_| ()),
         }
     }
 
@@ -374,7 +380,10 @@ mod tests {
         assert_eq!(base64_encode(b"foo"), "Zm9v");
         assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
         // The exact shape used for the git Basic-auth header.
-        assert_eq!(base64_encode(b"x-access-token:t"), "eC1hY2Nlc3MtdG9rZW46dA==");
+        assert_eq!(
+            base64_encode(b"x-access-token:t"),
+            "eC1hY2Nlc3MtdG9rZW46dA=="
+        );
     }
 
     #[test]
@@ -384,9 +393,16 @@ mod tests {
         let env = git_token_env().expect("token env");
         std::env::remove_var("COXAGENT_GH_TOKEN");
         assert!(env.iter().any(|(k, _)| k == "GIT_CONFIG_KEY_0"));
-        let val = &env.iter().find(|(k, _)| k == "GIT_CONFIG_VALUE_0").unwrap().1;
+        let val = &env
+            .iter()
+            .find(|(k, _)| k == "GIT_CONFIG_VALUE_0")
+            .unwrap()
+            .1;
         assert!(val.starts_with("Authorization: Basic "));
-        assert!(!val.contains("secret123"), "raw token must not appear verbatim");
+        assert!(
+            !val.contains("secret123"),
+            "raw token must not appear verbatim"
+        );
     }
 
     async fn init_repo(dir: &Path) {

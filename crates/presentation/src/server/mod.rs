@@ -50,6 +50,7 @@ mod hub_docs;
 mod inbox;
 mod manage;
 mod meetings;
+mod openapi;
 mod people;
 mod pr_listing;
 mod projects;
@@ -78,6 +79,7 @@ use hub_docs::*;
 use inbox::*;
 use manage::*;
 use meetings::*;
+use openapi::*;
 use people::*;
 use pr_listing::*;
 use projects::*;
@@ -150,6 +152,9 @@ pub struct ProjectHandle {
     /// Deploy adapter, so on-demand actions (e.g. a chat "deploy" request) can
     /// build & run the app.
     pub deploy: Option<Arc<dyn coxagent_application::ports::outbound::DeployPort>>,
+    /// Blob storage (MinIO/S3 or the local blob dir) for ticket attachments
+    /// and evidence media.
+    pub storage: Option<Arc<dyn coxagent_application::ports::outbound::StoragePort>>,
     /// Workspace file access for on-demand reviews; injected by the
     /// composition root so this layer stays free of infrastructure.
     pub files: Option<Arc<dyn coxagent_application::ports::outbound::WorkspaceFilesPort>>,
@@ -595,6 +600,7 @@ pub async fn serve_full(
             get(|| async { ([("content-type", "application/javascript")], XTERM_FIT_JS) }),
         )
         .route("/api/health", get(health))
+        .route("/api/openapi.json", get(openapi_ep))
         .route("/api/mcp", post(mcp_ep))
         .route("/api/app/latest", get(app_latest_ep))
         .route("/api/app/download/:file", get(app_download_ep))
@@ -721,6 +727,11 @@ pub async fn serve_full(
         .route("/api/projects/:pid/store", post(store_rpc::store_rpc_ep))
         .route("/api/projects/:pid/state", get(state_ep))
         .route("/api/projects/:pid/metrics", get(metrics_ep))
+        .route(
+            "/api/projects/:pid/metrics/summary",
+            get(metrics_summary_ep),
+        )
+        .route("/api/projects/:pid/metrics/trends", get(metrics_trends_ep))
         .route("/api/projects/:pid/agent-evals", get(agent_evals_ep))
         .route("/api/projects/:pid/runner", get(runner_ep))
         .route("/api/projects/:pid/workers", get(workers_ep))
@@ -801,6 +812,13 @@ pub async fn serve_full(
             post(approve_cost),
         )
         .route("/api/projects/:pid/inbox", get(inbox_ep))
+        .route("/api/projects/:pid/pr/:number/human", post(human_pr_ep))
+        .route("/api/projects/:pid/attachment", get(attachment_ep))
+        .route(
+            "/api/projects/:pid/ticket/:id/attachments",
+            post(upload_attachment_ep)
+                .layer(axum::extract::DefaultBodyLimit::max(25 * 1024 * 1024)),
+        )
         .route("/api/projects/:pid/ticket/:id/ready", post(human_ready_ep))
         .route(
             "/api/projects/:pid/ticket/:id/verify",
@@ -864,6 +882,10 @@ pub async fn serve_full(
         .route("/api/projects/:pid/prs/:num/diff", get(pr_diff_ep))
         .route("/api/projects/:pid/prs/:num/:action", post(pr_action_ep))
         .route("/api/projects/:pid/agent-log", get(agent_log_ep))
+        .route(
+            "/api/projects/:pid/agent-log/stream",
+            get(agent_log_stream_ep),
+        )
         .route("/api/projects/:pid/transcripts", get(list_transcripts))
         .route("/api/projects/:pid/transcripts/:name", get(get_transcript))
         .route("/api/projects/:pid/events", get(events_ep))
@@ -885,11 +907,17 @@ pub async fn serve_full(
     // Applies a per-IP sliding-window limit to all /api/auth/ routes.
     // COXAGENT_TRUST_PROXY=1 reads the client IP from X-Forwarded-For (LB
     // topology); default is TCP peer address (safe for direct exposure).
-    let trust_proxy =
-        std::env::var("COXAGENT_TRUST_PROXY").ok().as_deref() == Some("1");
+    let trust_proxy = std::env::var("COXAGENT_TRUST_PROXY").ok().as_deref() == Some("1");
     let limiter = Arc::new(RateLimiter::new());
     let app = app.layer(axum::middleware::from_fn(move |req, next| {
-        rate_limit_mw(req, next, Arc::clone(&limiter), AUTH_RATE_MAX, AUTH_RATE_WINDOW, trust_proxy)
+        rate_limit_mw(
+            req,
+            next,
+            Arc::clone(&limiter),
+            AUTH_RATE_MAX,
+            AUTH_RATE_WINDOW,
+            trust_proxy,
+        )
     }));
 
     // Bind loopback by default (safe for local use); a container sets

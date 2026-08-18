@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+coxagent-infrastructure = { path = "../infrastructure" }
 redis = { workspace = true }
 coxagent-contracts = { path = "../contracts" }
 coxagent-domain.workspace = true

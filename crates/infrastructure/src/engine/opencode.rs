@@ -361,7 +361,10 @@ impl OpencodeEngine {
         sandbox: SandboxStatus,
     ) -> Result<AgentOutcome, PortError> {
         let mut cmd = cmd;
-        let mut child = crate::proc::spawn_confined(&mut cmd, sandbox)
+        // The status comes BACK from the spawn: `Denied` when this host's
+        // Seatbelt refused the profile every time, so the outcome never claims
+        // a confinement that was not applied (COX-B016).
+        let (mut child, sandbox) = crate::proc::spawn_confined(&mut cmd, sandbox)
             .await
             .map_err(|e| PortError::Backend(format!("spawn opencode: {e}")))?;
         let out = child
@@ -966,7 +969,11 @@ mod tests {
                 system_prompt: "s".into(),
                 task_prompt: "t".into(),
                 work_dir: dir.clone(),
-                timeout: std::time::Duration::from_secs(20),
+                // Generous on purpose (CXA-B041): this spawns a real child via
+                // the production path, and a one-line echo can still outlast a
+                // tight wall-clock budget when CI is heavily loaded. The test
+                // asserts argv/env plumbing only — latency is irrelevant.
+                timeout: std::time::Duration::from_secs(120),
                 escalation_level: 0,
                 label: None,
             })

@@ -123,6 +123,36 @@ fn priority_rank(p: Priority) -> u8 {
     }
 }
 
+/// Is `id` inside the DEV work scope for the current sprint?
+///
+/// Real-world rule: DEV only pulls tickets the team committed to this sprint
+/// (PO/SM aligned via the sprint-board action). Two things stay in scope
+/// regardless:
+///  - bugs still `Open` — dedicated bug work outranks the board, and
+///  - Kanban mode (no sprint open) — there is no sprint to be out of scope
+///    for, so any ready ticket is fair game.
+///
+/// In Scrum mode a feature/chore the PO/SM has not committed is out of scope:
+/// DEV must ask to have it added before picking it up.
+#[must_use]
+pub fn in_dev_scope(state: &ProjectState, id: &TicketId) -> bool {
+    // Emergency bugs are always workable, sprint or not.
+    if matches!(
+        state.ticket(id),
+        Some(t) if matches!((t.ticket_type(), t.status()), (TicketType::Bug, Status::Open))
+    ) {
+        return true;
+    }
+    // Kanban mode (no sprint open): no scope ceremony — DEV may pull any
+    // ready ticket.
+    let Some(sprint) = state.sprint.as_ref() else {
+        return true;
+    };
+    // Scrum mode: features/chores only get worked when the team committed
+    // them to this sprint (PO/SM aligned via the sprint-board action).
+    sprint.committed.contains(id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,5 +211,100 @@ mod tests {
     #[test]
     fn no_ready_feature_returns_none() {
         assert!(next_ready_feature(&ProjectState::default()).is_none());
+    }
+
+    // Ticket::new creates bugs already in `Open`.
+    fn open_bug(id: &str) -> Ticket {
+        Ticket::new(
+            TicketId::new(id).expect("id"),
+            TicketType::Bug,
+            "b",
+            "",
+            Priority::High,
+            Complexity::Small,
+            false,
+        )
+        .expect("ticket")
+    }
+
+    fn sprint(committed: &[&str]) -> crate::state::Sprint {
+        crate::state::Sprint {
+            number: 1,
+            goal: String::new(),
+            started_cycle: 0,
+            length_cycles: 10,
+            committed: committed
+                .iter()
+                .copied()
+                .filter_map(|c| TicketId::new(c).ok())
+                .collect(),
+            started_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn in_scope_committed_feature_is_workable() {
+        let state = ProjectState {
+            tickets: vec![ready_feature("CXA-F001", Priority::High)],
+            sprint: Some(sprint(&["CXA-F001"])),
+            ..ProjectState::default()
+        };
+        assert!(in_dev_scope(
+            &state,
+            &TicketId::new("CXA-F001").expect("id")
+        ));
+    }
+
+    #[test]
+    fn out_of_scope_ready_feature_is_blocked() {
+        let state = ProjectState {
+            tickets: vec![ready_feature("CXA-F023", Priority::High)],
+            // Sprint committed something else; F023 was never PO/SM-aligned.
+            sprint: Some(sprint(&["CXA-F004"])),
+            ..ProjectState::default()
+        };
+        assert!(!in_dev_scope(
+            &state,
+            &TicketId::new("CXA-F023").expect("id")
+        ));
+    }
+
+    #[test]
+    fn open_bug_is_always_in_scope() {
+        let state = ProjectState {
+            tickets: vec![open_bug("CXA-B002")],
+            ..ProjectState::default()
+        };
+        // No sprint at all — still workable because it is an emergency bug.
+        assert!(in_dev_scope(
+            &state,
+            &TicketId::new("CXA-B002").expect("id")
+        ));
+    }
+
+    #[test]
+    fn no_sprint_means_kanban_features_are_in_scope() {
+        let state = ProjectState {
+            tickets: vec![ready_feature("CXA-F001", Priority::High)],
+            ..ProjectState::default()
+        };
+        // Kanban mode (no sprint): no ceremony, any ready feature is workable.
+        assert!(in_dev_scope(
+            &state,
+            &TicketId::new("CXA-F001").expect("id")
+        ));
+    }
+
+    #[test]
+    fn committed_feature_is_in_scope_under_sprint() {
+        let state = ProjectState {
+            tickets: vec![ready_feature("CXA-F001", Priority::High)],
+            sprint: Some(sprint(&["CXA-F001"])),
+            ..ProjectState::default()
+        };
+        assert!(in_dev_scope(
+            &state,
+            &TicketId::new("CXA-F001").expect("id")
+        ));
     }
 }
