@@ -1,4 +1,0 @@
-2026-08-17 01:47:27 UPGRADED to 9aad21d64d1613562f10ef04f8cfdee196384038 (hub answering on :4000)
-2026-08-17 02:00:00 MANUAL UPGRADE to 0aa831d (v2.27.0, hub answering on :4000)
-2026-08-17 02:20:27 MANUAL UPGRADE to 3bb2c11 (v2.28.0, hub answering on :4000)
-deployed 2026-08-16T23:44:22Z SHA=3bb2c11787e052b3a592290a165eea8587a46345 v2.28.0+fix(ops.rs slot-stash)
