@@ -105,7 +105,11 @@ async fn ac3_ac4_rate_limit_covers_every_api_auth_route_not_just_login() {
 #[tokio::test]
 async fn ac5_allowlisted_origin_under_limit_reaches_auth_handler_with_cors_headers() {
     let response = test_router(100, Duration::from_secs(60))
-        .oneshot(method_request("POST", "/api/auth/login", Some(ALLOWED_ORIGIN)))
+        .oneshot(method_request(
+            "POST",
+            "/api/auth/login",
+            Some(ALLOWED_ORIGIN),
+        ))
         .await
         .unwrap();
 
