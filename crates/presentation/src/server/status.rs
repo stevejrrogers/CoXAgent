@@ -112,6 +112,55 @@ pub(super) async fn metrics_ep(
     }
 }
 
+/// Cycle-performance health overlay for the dashboard Overview panel (CXA-F018).
+/// Same auth surface as `/metrics`: project membership via `auth_mw`.
+pub(super) async fn metrics_summary_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    match p.store.load().await {
+        Ok(state) => {
+            let today = now_rfc3339();
+            let day = today.get(..10).unwrap_or("").to_owned();
+            Json(coxagent_application::metrics_health::compute_cycle_perf(
+                &state, &day,
+            ))
+            .into_response()
+        }
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Day-by-day time-series for line charts (AC3). `?days=N` bounds the window;
+/// defaults to 14 when absent or unparsable.
+pub(super) async fn metrics_trends_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let days = q
+        .get("days")
+        .and_then(|d| d.parse::<usize>().ok())
+        .unwrap_or(14);
+    match p.store.load().await {
+        Ok(state) => {
+            let today = now_rfc3339();
+            let day = today.get(..10).unwrap_or("").to_owned();
+            Json(coxagent_application::metrics_health::compute_trends(
+                &state, days, &day,
+            ))
+            .into_response()
+        }
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
 /// The shared worker registry: every team (`account@host`) currently online for
 /// this project, across all machines. Powers the dashboard's cross-machine view.
 pub(super) async fn workers_ep(
