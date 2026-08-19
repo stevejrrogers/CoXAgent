@@ -320,7 +320,7 @@ fn changelog(next: &str, subjects: &[String]) -> String {
 
 /// Whole days between two `YYYY-MM-DD` stamps (0 on parse trouble — which
 /// blocks a re-cut rather than spamming one).
-fn days_between(a: &str, b: &str) -> u64 {
+pub(super) fn days_between(a: &str, b: &str) -> u64 {
     let parse = |s: &str| {
         let fmt = time::macros::format_description!("[year]-[month]-[day]");
         time::Date::parse(s, &fmt).ok()
