@@ -149,6 +149,65 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 )
             }
         };
+        // Orientation block: the facts every DEV session otherwise SPENDS API
+        // rounds discovering by hand (`git status`, `ls`, probing the design's
+        // files one by one — four exploratory rounds observed per session,
+        // each replaying the whole context). Computed here for the cost of a
+        // few port calls, so the FIRST model turn is already oriented.
+        let orientation = {
+            use std::fmt::Write as _;
+            let mut s = String::new();
+            if let Some(git) = &self.git {
+                let (ok, branch) = git
+                    .raw(&self.work_dir, &["rev-parse", "--abbrev-ref", "HEAD"])
+                    .await;
+                if ok {
+                    let _ = write!(s, "\n## Workspace orientation\nbranch: {}", branch.trim());
+                }
+                let (ok, status) = git.raw(&self.work_dir, &["status", "--porcelain"]).await;
+                if ok {
+                    let lines: Vec<&str> = status.lines().take(20).collect();
+                    if lines.is_empty() {
+                        s.push_str("\nworking tree: clean");
+                    } else {
+                        let _ = write!(s, "\nworking tree (dirty):\n{}", lines.join("\n"));
+                    }
+                }
+            }
+            let listed: Vec<String> = ticket
+                .and_then(|t| t.design().technical.as_ref())
+                .map(|d| d.files.clone())
+                .unwrap_or_default();
+            if let Some(fs) = self.files.as_deref() {
+                for f in listed.iter().filter(|f| !f.trim().is_empty()).take(12) {
+                    match fs.stat(&self.work_dir.join(f)).await {
+                        Some(m) => {
+                            {
+                            let _ = write!(s, "\ndesign file {f}: exists, {} bytes", m.size);
+                        }
+                        }
+                        None => {
+                            let _ = write!(s, "\ndesign file {f}: MISSING");
+                        }
+                    }
+                }
+            }
+            if s.is_empty() {
+                s
+            } else {
+                s.push_str(
+                    "\nTrust this block instead of re-running ls/git status to orient yourself.\n",
+                );
+                s
+            }
+        };
+        // The repo map exists to ORIENT a session that has no target; when the
+        // SA design already names real files, the map is dead weight replayed
+        // into every API round of the session — skip it.
+        let design_names_real_files = ticket
+            .and_then(|t| t.design().technical.as_ref())
+            .is_some_and(|d| d.files.iter().any(|f| !f.trim().is_empty()))
+            && stale_design.is_empty();
         AgentRequest {
             role: self.mode.role(),
             // The system prompt stays BYTE-IDENTICAL across every DEV run of a
@@ -158,7 +217,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             // exists only for UI tickets) belongs in the task prompt below.
             system_prompt: prompts::system_prompt(prompts::DEV),
             task_prompt: format!(
-                "Ticket {id}: {title}\n{}{stale_design}\nImplement it now.{stack}{deploy}{design}{context_block}{}{history}{knowledge}{}{}{}{steering}{journal}{asking}{}",
+                "Ticket {id}: {title}\n{}{stale_design}{orientation}\nImplement it now.{stack}{deploy}{design}{context_block}{}{history}{knowledge}{}{}{}{steering}{journal}{asking}{}",
                 ticket_brief(ticket),
                 prompts::focus_block(
                     self.files.as_deref(),
@@ -171,12 +230,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                     ),
                 )
                 .await,
-                prompts::repo_map_block(
-                    self.files.as_deref(),
-                    &self.work_dir,
-                    self.config.workflow.token_saver,
-                )
-                .await,
+                if design_names_real_files {
+                    String::new()
+                } else {
+                    prompts::repo_map_block(
+                        self.files.as_deref(),
+                        &self.work_dir,
+                        self.config.workflow.token_saver,
+                    )
+                    .await
+                },
                 prompts::team_memory_block_relevant(
                     &state.decisions,
                     &state.lessons,
