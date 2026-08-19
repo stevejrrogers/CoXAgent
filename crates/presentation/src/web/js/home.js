@@ -398,18 +398,30 @@ function renderDiscuss(){
   document.getElementById("disc-title").textContent=want?want:"Team channel";
   document.getElementById("disc-sub").textContent=want?"thread for this ticket":"standups, decisions & threads";
   const msgs=(STATE.comments||[]).filter(c=>want?c.ticket===want:!c.ticket);
+  // Agent-to-agent Q&A (blocker → the right role → answer) happens in
+  // state.questions and was invisible here — the team looked mute while 40
+  // questions got asked AND answered. Surface them as timeline events.
+  const qs=(STATE.questions||[]).filter(q=>want?q.ticket===want:true).slice(-8).map(q=>({
+    at:q.asked_at||"",author:q.from||"?",
+    body:`❓ ${q.from} → ${q.to}: ${q.body}${q.answer?` — ✅ ${String(q.answer).slice(0,120)}`:' — ⏳ waiting'}`,
+    _qa:true,ticket:q.ticket||null}));
+  const merged=msgs.concat(qs).sort((a,b)=>String(a.at).localeCompare(String(b.at)));
   const box=document.getElementById("disc-thread");
   const me=(ME&&ME.username)||"";
   // Re-render only when the thread actually changed — otherwise every 1s SSE
   // tick would rebuild the DOM and yank the scroll position to the bottom.
-  const sig=want+":"+msgs.length+":"+(msgs.length?(msgs[msgs.length-1].at||""):"");
+  const sig=want+":"+merged.length+":"+(merged.length?(merged[merged.length-1].at||""):"");
   if(box.dataset.sig===sig)return;
   // Keep the reading position unless the user is already at the bottom.
   const atBottom=box.scrollHeight-box.scrollTop-box.clientHeight<80;
   box.dataset.sig=sig;
-  if(!msgs.length){box.innerHTML='<div class="chatempty"><i class="ti ti-messages"></i><div>No messages yet</div><span>Send a message, or spin up an agent discussion.</span></div>';return;}
+  if(!merged.length){box.innerHTML='<div class="chatempty"><i class="ti ti-messages"></i><div>No messages yet</div><span>Send a message, or spin up an agent discussion.</span></div>';return;}
   let lastDay="";
-  box.innerHTML=msgs.map(c=>{
+  box.innerHTML=merged.map(c=>{
+    if(c._qa){ // agent-to-agent Q&A → timeline pill
+      const t=c.at||"";const time=t.slice(11,16);
+      return `<div class="cevent"><span class="cev-pill" style="--ec:var(--amber)"><i class="ti ti-help-circle"></i> ${esc(c.body)}<span class="cev-t">${esc(time)}</span></span></div>`;
+    }
     const t=c.at||"";const day=t.slice(0,10);const time=t.slice(11,16);
     let sep="";
     if(day&&day!==lastDay){lastDay=day;sep=`<div class="chatday"><span>${esc(day)}</span></div>`;}
