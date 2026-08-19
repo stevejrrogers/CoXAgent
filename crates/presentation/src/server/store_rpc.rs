@@ -274,10 +274,16 @@ pub(super) async fn store_rpc_ep(
     let Some(p) = app.project(&pid).await else {
         return super::not_found();
     };
-    if let Some(auth) = &app.auth {
-        if super::resolve_principal(auth, &headers).await.is_none() {
-            return (axum::http::StatusCode::UNAUTHORIZED, "sign in first").into_response();
-        }
+    // P5a defense-in-depth: when hub auth is configured every op needs a valid
+    // principal — mirroring chat/inbox/etc. The route-level `auth_mw` already
+    // rejects anonymous traffic while /store sits under it; this keeps access
+    // gated even if /store ever moves out from under that middleware.
+    let authorized = match &app.auth {
+        Some(auth) => super::resolve_principal(auth, &headers).await.is_some(),
+        None => true,
+    };
+    if !authorized {
+        return (axum::http::StatusCode::UNAUTHORIZED, "sign in first").into_response();
     }
     match q.op.as_str() {
         "load" => op_load(&p).await,

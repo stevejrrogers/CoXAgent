@@ -1295,6 +1295,7 @@ async function openAgent(role,worker){
   restartAgentLog();
 }
 let AGENT_LOG_ES=null, AGENT_LOG_ROLE=null, AGENT_LOG_WORKER="", AGENT_LOG_BUF="", AGENT_LOG_LIVE=false, AGENT_LOG_DONE=false, AGENT_LOG_INIT=false, AGENT_LOG_SIGS=[];
+let AGENT_LOG_RETRIES=0, AGENT_LOG_RETRY_TIMER=null;
 // Icon + colour for a tool name, so every engine's tool calls read at a glance.
 // A tool call, said in words: "Read run_chat_reply.rs:400-500" instead of a
 // truncated JSON blob. Long absolute paths collapse to the part a reader
@@ -1480,13 +1481,27 @@ function wlItemSig(it){
 }
 // Real-time live log over SSE: the hub tails the engine's local live file and
 // pushes new bytes down as `init` + `line` events (one global api() scope).
-function restartAgentLog(){
+// isRetry=true on an auto-reconnect attempt: keeps the backoff counter and
+// buffered text instead of wiping the view back to "loading…" on every retry.
+function restartAgentLog(isRetry){
+  if(AGENT_LOG_RETRY_TIMER){ clearTimeout(AGENT_LOG_RETRY_TIMER); AGENT_LOG_RETRY_TIMER=null; }
   closeAgentLog();
-  AGENT_LOG_BUF=""; AGENT_LOG_LIVE=false; AGENT_LOG_DONE=false; AGENT_LOG_INIT=false; AGENT_LOG_SIGS=[];
+  if(isRetry){
+    // Attempt is in flight — leave "RECONNECTING…" showing instead of
+    // hiding it here, or a slow/hanging connect would read as recovered
+    // for however long it takes to actually fail or succeed.
+    showAgentLogError(true);
+  } else {
+    AGENT_LOG_BUF=""; AGENT_LOG_LIVE=false; AGENT_LOG_DONE=false; AGENT_LOG_INIT=false; AGENT_LOG_SIGS=[];
+    AGENT_LOG_RETRIES=0;
+    showAgentLogError(false);
+  }
   const url=api("/agent-log/stream?role="+encodeURIComponent(AGENT_LOG_ROLE)+(AGENT_LOG_WORKER?"&worker="+encodeURIComponent(AGENT_LOG_WORKER):""));
   const es=new EventSource(url);
   AGENT_LOG_ES=es;
   es.addEventListener("init",e=>{
+    AGENT_LOG_RETRIES=0;
+    showAgentLogError(false);
     try{const d=JSON.parse(e.data); if(d)AGENT_LOG_LIVE=!!d.live; AGENT_LOG_BUF="";}catch(_){}
     renderAgentLog(true);
   });
@@ -1499,8 +1514,24 @@ function restartAgentLog(){
       }}catch(_){}
     scheduleAgentLog();
   });
-  // Endpoint gone/error — drop the stream; the open button reconnects.
-  es.onerror=()=>{try{es.close()}catch(_){} AGENT_LOG_ES=null;};
+  // Endpoint gone (404 on an old server) or the connection dropped mid-stream —
+  // show it immediately, then retry with capped exponential backoff. A native
+  // EventSource auto-retries too, but silently and on a fixed interval; closing
+  // it ourselves and driving the retry lets the UI actually say what's wrong.
+  es.onerror=()=>{
+    try{es.close()}catch(_){}
+    AGENT_LOG_ES=null;
+    showAgentLogError(true);
+    const delay=Math.min(30000, 1000*(2**AGENT_LOG_RETRIES));
+    AGENT_LOG_RETRIES++;
+    AGENT_LOG_RETRY_TIMER=setTimeout(()=>{ if(AGENT_LOG_ROLE) restartAgentLog(true); }, delay);
+  };
+}
+function showAgentLogError(on){
+  const b=document.getElementById("agent-err-badge");
+  if(!b)return;
+  if(on){ b.textContent=AGENT_LOG_RETRIES>0?"● RECONNECTING…":"● STREAM LOST"; b.style.display="inline-block"; }
+  else { b.style.display="none"; }
 }
 function renderAgentLog(force){
   const body=document.getElementById("agent-transcript");
@@ -1559,7 +1590,15 @@ function closeAgentLog(){
   if(AGENT_LOG_RAF){ cancelAnimationFrame(AGENT_LOG_RAF); AGENT_LOG_RAF=0; }
   if(AGENT_LOG_ES){try{AGENT_LOG_ES.close()}catch(_){} AGENT_LOG_ES=null;}
 }
-function closeAgent(){closeAgentLog();AGENT_LOG_ROLE=null;AGENT_LOG_WORKER="";close_('ov-agent');}
+// Fully stop the stream (modal close): unlike restartAgentLog's internal
+// closeAgentLog call, this also cancels any pending reconnect so a closed
+// modal doesn't keep retrying in the background.
+function stopAgentLog(){
+  if(AGENT_LOG_RETRY_TIMER){ clearTimeout(AGENT_LOG_RETRY_TIMER); AGENT_LOG_RETRY_TIMER=null; }
+  closeAgentLog();
+  showAgentLogError(false);
+}
+function closeAgent(){stopAgentLog();AGENT_LOG_ROLE=null;AGENT_LOG_WORKER="";close_('ov-agent');}
 async function openTranscript(enc,name){
   document.getElementById("tr-title").textContent=name;
   document.getElementById("tr-body").textContent="loading…";

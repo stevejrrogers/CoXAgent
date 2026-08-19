@@ -294,10 +294,7 @@ fn tokens_for_var(src: &str, var: &str) -> Vec<String> {
             // Accepts any terminate/modifier char (`:`/`?`/`-`/`}`).
             if matches!(
                 token_src.as_bytes().get(prefix.len()),
-                Some(b'_')
-                    | Some(b'A'..=b'Z')
-                    | Some(b'a'..=b'z')
-                    | Some(b'0'..=b'9')
+                Some(b'_' | b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9')
             ) {
                 rest = &token_src[end..];
                 continue;
@@ -341,7 +338,6 @@ fn check_cxa_required_vars(path: &str, src: &str) -> Vec<Finding> {
     }
     findings
 }
-
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -437,6 +433,64 @@ fn cxa_backend_compose_enforces_required_vars() {
             .collect::<Vec<_>>()
             .join("\n")
     );
+}
+
+// ---------------------------------------------------------------------------
+// CXA-B065 — root web-app stack must self-recover so port 8101 stays up.
+//
+// Regression guard for an incident where a host/Docker restart (or a SIGKILL,
+// exit 137) left the app container down for ~11h because neither `db` nor
+// `coxagent` declared a restart policy and autoheal only covered cxa-backend.
+// Every service on the host-published web-app stack must opt into Docker's own
+// auto-restart (`restart: unless-stopped`) so it recovers without manual ops.
+//
+// A plain value-check over parsed YAML — no evaluation of Docker semantics —
+// which is exactly right for a gate that reads source files rather than live
+// containers: it FAILS if anyone removes or weakens the policy in this file.
+// ---------------------------------------------------------------------------
+
+/// Return every service in `src` whose top-level `restart` is not set to
+/// `unless-stopped`, keyed by service name.
+fn services_without_unless_stopped(src: &str) -> Vec<String> {
+    let doc: serde_yaml::Value = match serde_yaml::from_str(src) {
+        Ok(v) => v,
+        Err(_) => return vec!["<unparseable yaml>".to_string()],
+    };
+    let Some(services) = doc.get("services").and_then(serde_yaml::Value::as_mapping) else {
+        return vec!["no services map".to_string()];
+    };
+    services
+        .iter()
+        .filter_map(|(name, body)| {
+            if body.get("restart").and_then(serde_yaml::Value::as_str) == Some("unless-stopped") {
+                None
+            } else {
+                Some(name.as_str().unwrap_or("<unnamed>").to_string())
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn root_compose_every_service_self_recovers() {
+    // CXA-B065 regression — fails against any edit that drops or weakens the
+    // restart policy that keeps port 8101 alive across host/Docker restarts.
+    let offenders = services_without_unless_stopped(&read_file("docker-compose.yml"));
+    assert!(
+        offenders.is_empty(),
+        "root docker-compose.yml services must declare `restart: unless-stopped` \
+         (CXA-B065): {offenders:?}"
+    );
+}
+
+#[test]
+fn missing_unless_stopped_is_reported() {
+    // Prove the guard bites: a service with no restart policy is flagged, while
+    // one with `restart: unless-stopped` is accepted.
+    let src = "services:\n  db:\n    image: postgres\n  coxagent:\n\
+               \x20   image: coxagent\n\
+               \x20   restart: unless-stopped\n";
+    assert_eq!(services_without_unless_stopped(src), vec!["db".to_string()]);
 }
 
 // ---------------------------------------------------------------------------
@@ -696,7 +750,11 @@ fn cxa_compose(pg_user: &str, pg_password: &str, redis_password: &str) -> String
 fn bare_required_vars_are_caught() {
     let src = cxa_compose("${PG_USER}", "${PG_PASSWORD}", "${REDIS_PASSWORD}");
     let findings = check_cxa_required_vars("deploy/docker-compose.cxa.yml", &src);
-    assert_eq!(findings.len(), 3, "all three bare refs must be flagged: {findings:#?}");
+    assert_eq!(
+        findings.len(),
+        3,
+        "all three bare refs must be flagged: {findings:#?}"
+    );
     for var in CXA_REQUIRED_VARS {
         assert!(
             findings.iter().any(|f| f.context.contains(var)),
@@ -735,7 +793,9 @@ fn missing_required_var_is_caught() {
     let src = cxa_compose("${PG_USER}", "", "");
     let findings = check_cxa_required_vars("deploy/docker-compose.cxa.yml", &src);
     let missing_passwd = findings.iter().any(|f| f.context.contains("PG_PASSWORD"));
-    let missing_redis = findings.iter().any(|f| f.context.contains("REDIS_PASSWORD"));
+    let missing_redis = findings
+        .iter()
+        .any(|f| f.context.contains("REDIS_PASSWORD"));
     assert!(
         missing_passwd && missing_redis,
         "dropping PG_PASSWORD / REDIS_PASSWORD entirely must be caught (only \
@@ -763,5 +823,3 @@ fn prefix_sibling_does_not_cause_false_positive() {
         "a differently-named sibling var must not be flagged: {findings:#?}"
     );
 }
-
-
