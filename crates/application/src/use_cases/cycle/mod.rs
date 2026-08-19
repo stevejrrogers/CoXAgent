@@ -36,6 +36,7 @@ mod ops;
 mod qa_evidence;
 mod recovery;
 mod release_cut;
+mod trend;
 
 /// Local, non-pushed ref updated after every deploy that passes both
 /// `deploy()` and `run_tests()` — auto-rollback's source of truth for "last
@@ -756,6 +757,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // Release cut (the ONLY place the version moves): on cadence, scan
             // commits since the last tag and open the human-gated release PR.
             self.maybe_cut_release().await;
+            // The strategic eye: once a week, read the numbers nobody's queue
+            // surfaces (inflow vs outflow, failure hotspots, grade/cost
+            // direction) and propose — never decide — system-level work.
+            self.trend_sentinel().await;
             // Stop starting, start finishing: review + merge the PR queue at
             // the TOP of the cycle. This used to run at the very end — after
             // codegraph, ceremonies and the (tens-of-minutes) dev phases — so
