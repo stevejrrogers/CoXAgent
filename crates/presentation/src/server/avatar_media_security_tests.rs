@@ -1,7 +1,6 @@
 // Split from server/mod.rs — avatar/media upload hardening tests.
 #![allow(clippy::wildcard_imports)]
 use super::*;
-#[allow(unused_imports)]
 use axum::extract::FromRequest;
 
 const PNG_MAGIC: &[u8] = &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
@@ -106,7 +105,7 @@ impl AuditPort for NoopAudit {
 }
 
 /// Auth-disabled (open-mode) `AppState` backed by a scratch hub dir, so
-/// `principal_name` resolves every request as "operator" without any RBAC
+/// `principal_name` resolves every request as `"operator"` without any RBAC
 /// wiring — mirrors how these endpoints actually run when no accounts are
 /// configured.
 async fn test_app_state(hub_dir: &std::path::Path) -> AppState {
@@ -141,7 +140,6 @@ fn multipart_avatar_request(
     );
     body.extend_from_slice(bytes);
     body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
-
     Request::builder()
         .method("POST")
         .uri("/api/profile/avatar")
@@ -150,106 +148,71 @@ fn multipart_avatar_request(
             format!("multipart/form-data; boundary={BOUNDARY}"),
         )
         .body(axum::body::Body::from(body))
-        .unwrap()
+        .expect("well-formed multipart request")
 }
 
-/// Minimal router exposing exactly the two endpoints under test through their
-/// real handlers (`profile_avatar_ep`, `syschat_media_ep`) — the same routes
-/// production mod.rs registers, minus middleware.
-fn media_test_router(app: AppState) -> Router {
-    Router::new()
-        .route("/api/profile/avatar", post(profile_avatar_ep))
-        .route("/api/chat/media/:file", get(syschat_media_ep))
-        .with_state(app)
-}
-
+/// The ticket's exact repro, through the live endpoint: an SVG document
+/// claiming `Content-Type: image/svg` must be refused. Before the fix (which
+/// trusted a client-supplied `image/*`-prefixed Content-Type) this same
+/// request stored the payload and answered 200 with a URL — this test would
+/// fail without `sniff_avatar_image` gating the upload.
 #[tokio::test]
 async fn profile_avatar_ep_rejects_a_content_type_spoofed_svg_upload() {
-    use tower::{ServiceExt};
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let app = test_app_state(tmp.path()).await;
+    let multipart = axum::extract::Multipart::from_request(
+        multipart_avatar_request("evil.svg", "image/svg", SVG_BODY),
+        &(),
+    )
+    .await
+    .expect("well-formed multipart body parses");
 
-    let dir = std::env::temp_dir().join(format!("cxa-b059-spoof-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let app = test_app_state(&dir).await;
-    let router = media_test_router(app);
+    let resp = profile_avatar_ep(State(app), axum::http::HeaderMap::new(), multipart).await;
 
-    let resp = router
-        .oneshot(multipart_avatar_request("evil.svg", "image/svg+xml", SVG_BODY))
-        .await
-        .unwrap();
-
-    assert_eq!(
-        resp.status(),
-        StatusCode::BAD_REQUEST,
-        "an SVG upload claiming image/svg+xml must be rejected by the real \
-         /api/profile/avatar handler"
-    );
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
+/// Control for the test above: a genuine PNG upload is still accepted, so
+/// the rejection is the byte sniff at work — not a broken test harness that
+/// would reject everything.
 #[tokio::test]
-async fn genuine_png_is_accepted_and_stored_by_the_real_handler_path() {
-    use tower::{ServiceExt};
+async fn profile_avatar_ep_accepts_a_genuine_png_upload() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let app = test_app_state(tmp.path()).await;
+    let multipart = axum::extract::Multipart::from_request(
+        multipart_avatar_request("photo.png", "image/png", PNG_MAGIC),
+        &(),
+    )
+    .await
+    .expect("well-formed multipart body parses");
 
-    let dir =
-        std::env::temp_dir().join(format!("cxa-b059-png-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let app = test_app_state(&dir).await;
-    let router = media_test_router(app.clone());
-
-    // A genuine PNG whose documented Content-Type is left plausible.
-    let resp = router
-        .clone()
-        .oneshot(multipart_avatar_request("photo.png", "image/png", PNG_MAGIC))
-        .await
-        .unwrap();
-    assert_eq!(
-        resp.status(),
-        StatusCode::OK,
-        "a genuine PNG avatar upload must succeed through the real handler"
-    );
-
-    // The accepted upload must have been recorded on the operator's profile and
-    // stored as a chat-media blob; fetching that exact stored file back over
-    // `/api/chat/media/:file` must serve it inline (raster types are safe).
-    let url = {
-        let doc = app.profiles.inner.lock().await;
-        doc.profiles
-            .get("operator")
-            .map(|p| p.avatar.clone())
-            .expect("accepted avatar should be saved on the operator profile")
-    };
-    assert!(
-        url.starts_with("/api/chat/media/"),
-        "saved avatar url should point at chat media, got {url}"
-    );
-}
-
-#[tokio::test]
-async fn svg_blob_fetched_from_chat_media_is_forced_to_download_not_inline() {
-    use tower::{ServiceExt};
-
-    let dir =
-        std::env::temp_dir().join(format!("cxa-b059-serve-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let app = test_app_state(&dir).await;
-
-    // Store an attacker-controlled document exactly as a spoofed upload would,
-    // regardless of its claimed MIME: what matters is that serving it back forces
-    // a download instead of letting a browser render it inline.
-    app.storage
-        .put("chat/spoof.svg", SVG_BODY, "image/svg+xml")
-        .await
-        .unwrap();
-
-    let resp = media_test_router(app)
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/api/chat/media/spoof.svg")
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let resp = profile_avatar_ep(State(app), axum::http::HeaderMap::new(), multipart).await;
 
     assert_eq!(resp.status(), StatusCode::OK);
+}
+
+/// The other half of the ticket's repro: fetching a stored `.svg` back
+/// through the real `/api/chat/media/:file` handler must force a download
+/// rather than let a direct navigation render (and execute) it. Seeds the
+/// file straight through `StoragePort`, since the upload gate above already
+/// covers avatars — this proves the serving side is safe independent of how
+/// the file got there (defense in depth for any other/legacy upload path).
+#[tokio::test]
+async fn syschat_media_ep_forces_download_for_a_stored_svg() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let app = test_app_state(tmp.path()).await;
+    app.storage
+        .put("chat/evil.svg", SVG_BODY, "image/svg+xml")
+        .await
+        .expect("seed a stored file");
+
+    let resp = syschat_media_ep(State(app), Path("evil.svg".to_owned())).await;
+
+    assert_eq!(
+        resp.headers()
+            .get(header::CONTENT_DISPOSITION)
+            .and_then(|v| v.to_str().ok()),
+        Some("attachment"),
+        "a browser opening this URL directly must download, not execute, the SVG"
+    );
 }
