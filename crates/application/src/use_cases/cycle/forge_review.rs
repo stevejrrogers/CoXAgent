@@ -340,7 +340,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                                  lost; the winner proceeds through review."
                             );
                             let _ = forge.comment_pr(loser, &note).await;
-                            let _ = forge.close_pr(loser).await;
+                            if forge.close_pr(loser).await.is_ok() {
+                                let _ = crate::ports::outbound::mutate_state(
+                                    self.store.as_ref(),
+                                    |s| {
+                                        s.seen_closed_prs.insert(loser);
+                                        Ok(())
+                                    },
+                                )
+                                .await;
+                            }
                             if loser == pr.number {
                                 self.log_git(&format!(
                                     "SA resolved competing PRs: closed #{loser} (duplicate), \
@@ -431,9 +440,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                         // Size and blast radius the machine should not decide
                         // alone: a change this large, or one that edits how the
                         // project builds and deploys itself, gets a human even
-                        // when every gate is green.
+                        // when every gate is green. The fix-on-fix brake joins
+                        // the same hold: a SECOND PR for a ticket that merged
+                        // within the last day is the stacked-chain smell
+                        // (B036→B044; B065 landed twice in one night) — the
+                        // machine does not auto-land another layer on a fix
+                        // it just landed.
+                        let fix_on_fix = self.fix_on_fix_hold(&pr.title).await;
                         if let Some(why) =
                             needs_human_eyes(&diff, self.config.git.max_changed_lines)
+                                .or(fix_on_fix)
                         {
                             let msg = format!(
                                 "Approved, but not auto-merging: {why}. Ask a human to land this."
@@ -535,6 +551,24 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
         self.reporter().fetch_reviews().await.iter().any(|r| {
             r.number == number && r.decision == "request_changes" && r.head_sha == head_sha
+        })
+    }
+
+    /// The fix-on-fix brake: `Some(reason)` when this PR's ticket already had
+    /// a PR MERGE within the last 24h. A second layer landing that fast means
+    /// the first fix missed the mechanism — a person should look before the
+    /// chain grows (B036→B044 was nine layers; B065 landed twice in a night).
+    async fn fix_on_fix_hold(&self, pr_title: &str) -> Option<String> {
+        let tid = crate::use_cases::merge_policy::ticket_id_in(pr_title)?;
+        let state = self.store.load().await.ok()?;
+        let at = state.ticket_last_merge.get(&tid)?;
+        let age = crate::use_cases::cycle::seconds_since(at)?;
+        (age < 24 * 3600).then(|| {
+            format!(
+                "{tid} already merged a PR {}h ago — a second layer this fast usually \
+                 means the first fix missed the mechanism",
+                age / 3600
+            )
         })
     }
 

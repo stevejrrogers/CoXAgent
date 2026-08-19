@@ -31,6 +31,11 @@ permissions:
 
 jobs:
   visual-regression:
+    # GHA is disabled for this private repo — see "ci: disable GitHub Actions"
+    # on main. Keep 'if: false' so no hosted run is attempted (matches ci.yml /
+    # desktop.yml). Re-enable by removing this line when a paid plan or public repo.
+    if: false
+
     # This display name IS the required-check that protected main gates on.
     name: Visual QA
     # Runs macOS because e2e golden screenshots are committed as *-darwin.png;

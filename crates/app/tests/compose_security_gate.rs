@@ -436,6 +436,64 @@ fn cxa_backend_compose_enforces_required_vars() {
 }
 
 // ---------------------------------------------------------------------------
+// CXA-B065 — root web-app stack must self-recover so port 8101 stays up.
+//
+// Regression guard for an incident where a host/Docker restart (or a SIGKILL,
+// exit 137) left the app container down for ~11h because neither `db` nor
+// `coxagent` declared a restart policy and autoheal only covered cxa-backend.
+// Every service on the host-published web-app stack must opt into Docker's own
+// auto-restart (`restart: unless-stopped`) so it recovers without manual ops.
+//
+// A plain value-check over parsed YAML — no evaluation of Docker semantics —
+// which is exactly right for a gate that reads source files rather than live
+// containers: it FAILS if anyone removes or weakens the policy in this file.
+// ---------------------------------------------------------------------------
+
+/// Return every service in `src` whose top-level `restart` is not set to
+/// `unless-stopped`, keyed by service name.
+fn services_without_unless_stopped(src: &str) -> Vec<String> {
+    let doc: serde_yaml::Value = match serde_yaml::from_str(src) {
+        Ok(v) => v,
+        Err(_) => return vec!["<unparseable yaml>".to_string()],
+    };
+    let Some(services) = doc.get("services").and_then(serde_yaml::Value::as_mapping) else {
+        return vec!["no services map".to_string()];
+    };
+    services
+        .iter()
+        .filter_map(|(name, body)| {
+            if body.get("restart").and_then(serde_yaml::Value::as_str) == Some("unless-stopped") {
+                None
+            } else {
+                Some(name.as_str().unwrap_or("<unnamed>").to_string())
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn root_compose_every_service_self_recovers() {
+    // CXA-B065 regression — fails against any edit that drops or weakens the
+    // restart policy that keeps port 8101 alive across host/Docker restarts.
+    let offenders = services_without_unless_stopped(&read_file("docker-compose.yml"));
+    assert!(
+        offenders.is_empty(),
+        "root docker-compose.yml services must declare `restart: unless-stopped` \
+         (CXA-B065): {offenders:?}"
+    );
+}
+
+#[test]
+fn missing_unless_stopped_is_reported() {
+    // Prove the guard bites: a service with no restart policy is flagged, while
+    // one with `restart: unless-stopped` is accepted.
+    let src = "services:\n  db:\n    image: postgres\n  coxagent:\n\
+               \x20   image: coxagent\n\
+               \x20   restart: unless-stopped\n";
+    assert_eq!(services_without_unless_stopped(src), vec!["db".to_string()]);
+}
+
+// ---------------------------------------------------------------------------
 // Synthetic fixtures — prove each rule bites independently.
 // ---------------------------------------------------------------------------
 
