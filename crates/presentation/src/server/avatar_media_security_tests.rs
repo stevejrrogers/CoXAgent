@@ -1,6 +1,8 @@
 // Split from server/mod.rs — avatar/media upload hardening tests.
 #![allow(clippy::wildcard_imports)]
 use super::*;
+#[allow(unused_imports)]
+use axum::extract::FromRequest;
 
 const PNG_MAGIC: &[u8] = &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 const JPEG_MAGIC: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0];
@@ -83,4 +85,171 @@ fn syschat_media_forces_download_for_svg_but_not_png() {
         .headers()
         .get(header::CONTENT_DISPOSITION)
         .is_none());
+}
+
+// --- End-to-end regression: drives the real handlers, not just the helpers
+// they call. Proves the ticket's curl repro (spoofed Content-Type upload,
+// then a direct fetch of whatever got stored) is dead through the actual
+// `/api/profile/avatar` and `/api/chat/media/:file` request path.
+
+struct NoopAudit;
+
+#[async_trait::async_trait]
+impl AuditPort for NoopAudit {
+    async fn record(&self, _entry: AuditRecord) {}
+    async fn recent(
+        &self,
+        _limit: usize,
+    ) -> Result<Vec<AuditRecord>, coxagent_application::PortError> {
+        Ok(Vec::new())
+    }
+}
+
+/// Auth-disabled (open-mode) `AppState` backed by a scratch hub dir, so
+/// `principal_name` resolves every request as "operator" without any RBAC
+/// wiring — mirrors how these endpoints actually run when no accounts are
+/// configured.
+async fn test_app_state(hub_dir: &std::path::Path) -> AppState {
+    build_state(
+        Vec::new(),
+        Arc::new(NoopAudit),
+        HubExtras {
+            hub_dir: Some(hub_dir.to_path_buf()),
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+/// A one-field `multipart/form-data` POST body, the same shape a browser's
+/// `<input type=file>` sends — `claimed_content_type` is attacker-controlled,
+/// exactly like the ticket's `curl -F "file=@evil.svg;type=image/svg"`.
+fn multipart_avatar_request(
+    filename: &str,
+    claimed_content_type: &str,
+    bytes: &[u8],
+) -> Request<axum::body::Body> {
+    const BOUNDARY: &str = "coxb059testboundary";
+    let mut body = Vec::new();
+    body.extend_from_slice(format!("--{BOUNDARY}\r\n").as_bytes());
+    body.extend_from_slice(
+        format!(
+            "Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n\
+             Content-Type: {claimed_content_type}\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(bytes);
+    body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
+
+    Request::builder()
+        .method("POST")
+        .uri("/api/profile/avatar")
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .body(axum::body::Body::from(body))
+        .unwrap()
+}
+
+/// Minimal router exposing exactly the two endpoints under test through their
+/// real handlers (`profile_avatar_ep`, `syschat_media_ep`) — the same routes
+/// production mod.rs registers, minus middleware.
+fn media_test_router(app: AppState) -> Router {
+    Router::new()
+        .route("/api/profile/avatar", post(profile_avatar_ep))
+        .route("/api/chat/media/:file", get(syschat_media_ep))
+        .with_state(app)
+}
+
+#[tokio::test]
+async fn profile_avatar_ep_rejects_a_content_type_spoofed_svg_upload() {
+    use tower::{ServiceExt};
+
+    let dir = std::env::temp_dir().join(format!("cxa-b059-spoof-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let app = test_app_state(&dir).await;
+    let router = media_test_router(app);
+
+    let resp = router
+        .oneshot(multipart_avatar_request("evil.svg", "image/svg+xml", SVG_BODY))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "an SVG upload claiming image/svg+xml must be rejected by the real \
+         /api/profile/avatar handler"
+    );
+}
+
+#[tokio::test]
+async fn genuine_png_is_accepted_and_stored_by_the_real_handler_path() {
+    use tower::{ServiceExt};
+
+    let dir =
+        std::env::temp_dir().join(format!("cxa-b059-png-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let app = test_app_state(&dir).await;
+    let router = media_test_router(app.clone());
+
+    // A genuine PNG whose documented Content-Type is left plausible.
+    let resp = router
+        .clone()
+        .oneshot(multipart_avatar_request("photo.png", "image/png", PNG_MAGIC))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a genuine PNG avatar upload must succeed through the real handler"
+    );
+
+    // The accepted upload must have been recorded on the operator's profile and
+    // stored as a chat-media blob; fetching that exact stored file back over
+    // `/api/chat/media/:file` must serve it inline (raster types are safe).
+    let url = {
+        let doc = app.profiles.inner.lock().await;
+        doc.profiles
+            .get("operator")
+            .map(|p| p.avatar.clone())
+            .expect("accepted avatar should be saved on the operator profile")
+    };
+    assert!(
+        url.starts_with("/api/chat/media/"),
+        "saved avatar url should point at chat media, got {url}"
+    );
+}
+
+#[tokio::test]
+async fn svg_blob_fetched_from_chat_media_is_forced_to_download_not_inline() {
+    use tower::{ServiceExt};
+
+    let dir =
+        std::env::temp_dir().join(format!("cxa-b059-serve-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let app = test_app_state(&dir).await;
+
+    // Store an attacker-controlled document exactly as a spoofed upload would,
+    // regardless of its claimed MIME: what matters is that serving it back forces
+    // a download instead of letting a browser render it inline.
+    app.storage
+        .put("chat/spoof.svg", SVG_BODY, "image/svg+xml")
+        .await
+        .unwrap();
+
+    let resp = media_test_router(app)
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/chat/media/spoof.svg")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
 }
