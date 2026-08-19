@@ -56,7 +56,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                      sprint so DEV can pull work."
                 );
                 state.log_activity("PO", "committed backlog to an empty sprint", None);
-                state.post_chat_in("PO", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+                state.post_comment("PO", &msg, None);
             }
             let _ = self.store.save(&state).await;
             return;
