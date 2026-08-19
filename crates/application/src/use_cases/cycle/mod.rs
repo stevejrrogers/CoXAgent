@@ -463,13 +463,26 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// back); that bump is gone, and any residual drift — stale mirror behind
     /// a repo release, or a leftover phantom — converges here.
     async fn reconcile_version(&self) {
-        let Some(files) = self.files.clone() else {
+        // Read the manifest from ORIGIN/<base>, never the local tree: the
+        // leader lease rotates across runners whose worktrees sit at DIFFERENT
+        // commits (slots stay detached at their claim base), so reading each
+        // runner's own checkout made the mirror ping-pong between versions
+        // every minute (2.26.1↔2.26.4, 2026-08-19 night). Origin is the same
+        // for everyone.
+        let Some(git) = &self.git else {
             return;
         };
-        let cargo = self.work_dir.join("Cargo.toml");
-        let Some(text) = files.read(&cargo).await else {
+        let base = self.flow_base();
+        let _ = git.raw(&self.work_dir, &["fetch", "-q", "origin", base]).await;
+        let (ok, text) = git
+            .raw(
+                &self.work_dir,
+                &["show", &format!("origin/{base}:Cargo.toml")],
+            )
+            .await;
+        if !ok {
             return;
-        };
+        }
         let Some(repo_ver) = parse_cargo_version(&text) else {
             return;
         };
