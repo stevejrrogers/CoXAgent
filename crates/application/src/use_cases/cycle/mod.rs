@@ -149,14 +149,6 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     probe: Option<Arc<dyn crate::ports::outbound::ApiProbePort>>,
     storage: Option<Arc<dyn crate::ports::outbound::StoragePort>>,
     deploy: Option<Arc<dyn DeployPort>>,
-    /// The published `host_port` to probe for the mandatory post-deploy
-    /// health gate, or `Err` when the raw `coxagent.json`'s
-    /// `deploy.host_port` is present but malformed (COX-B035). Defaults to
-    /// `Ok(config.deploy.host_port)`; callers reading the raw config
-    /// separately (to fail closed on a malformed value the `Config` parse
-    /// itself may have folded into a default) override it via
-    /// [`Self::with_host_port_probe`].
-    host_port_probe: Result<Option<u16>, ()>,
     notifier: Option<Arc<dyn crate::ports::outbound::NotifierPort>>,
     /// Reporter that pushes PR/review activity to the hub over HTTP. The runner
     /// is the sole holder of forge credentials, so the hub must be told what it
@@ -198,6 +190,17 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     /// Whether the `sandbox_unsupported` warning has already fired — posted
     /// once per project per process lifetime, never once per cycle.
     sandbox_warned: AtomicBool,
+    /// The health-gate probe port, independently parsed from `coxagent.json`'s
+    /// raw text via [`crate::ports::outbound::parse_deploy_host_port`] where a
+    /// caller has that text available. Kept separate from
+    /// `config.deploy.host_port` because that field cannot distinguish
+    /// "absent" from "malformed" once `Config` deserialization has already
+    /// folded a corrupt value into `Config::default()`; `Err(())` means the
+    /// raw value was present but invalid and must fail the gate rather than
+    /// pass vacuously (COX-B035). Defaults to `Ok(config.deploy.host_port)`
+    /// so callers that never independently parse the raw config keep today's
+    /// behavior.
+    host_port_probe: Result<Option<u16>, ()>,
 }
 
 impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
@@ -237,6 +240,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             caps: crate::ports::outbound::WorkerCaps::default(),
             sandbox_warned: AtomicBool::new(false),
         }
+    }
+
+    /// Override the health-gate probe port with one parsed independently
+    /// from `coxagent.json`'s raw text (see
+    /// [`crate::ports::outbound::parse_deploy_host_port`]) — distinguishes
+    /// "no `host_port` configured" from "`host_port` present but invalid",
+    /// which `Config::deploy.host_port` alone cannot tell apart once a
+    /// corrupt config has already collapsed to `Config::default()`
+    /// (COX-B035).
+    #[must_use]
+    pub fn with_host_port_probe(mut self, probe: Result<Option<u16>, ()>) -> Self {
+        self.host_port_probe = probe;
+        self
     }
 
     /// Set this runner's identity (`account@host`), used as the ticket claim
@@ -594,17 +610,6 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     #[must_use]
     pub fn with_deploy(mut self, deploy: Arc<dyn DeployPort>) -> Self {
         self.deploy = Some(deploy);
-        self
-    }
-
-    /// Override the post-deploy health-gate probe port (COX-B035): pass
-    /// `Err(())` when the raw `coxagent.json` names a malformed
-    /// `deploy.host_port`, so the gate fails closed instead of the default
-    /// (`Ok(config.deploy.host_port)`) treating a `Config`-parse fallback's
-    /// `None` as "nothing configured".
-    #[must_use]
-    pub fn with_host_port_probe(mut self, probe: Result<Option<u16>, ()>) -> Self {
-        self.host_port_probe = probe;
         self
     }
 
@@ -1299,7 +1304,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                         // non-infra "error" would ding the scorecard, so mark
                         // progress-equivalent through bugs_filed-free report by
                         // recording a documented no-op instead.
-                        report.errors.push("canary: engine answered — recovering".to_owned());
+                        report
+                            .errors
+                            .push("canary: engine answered — recovering".to_owned());
                     }
                     Ok(o) => report
                         .errors
@@ -1524,7 +1531,7 @@ mod cycle_counter_tests {
         // counter (e.g. it ran 42 cycles before this field existed).
         let mut s = ProjectState {
             cycle: 42,
-            ..Default::default()
+            ..ProjectState::default()
         };
         assert_eq!(advance_project_cycle(&mut s), 43);
         assert_eq!(advance_project_cycle(&mut s), 44);
@@ -1551,7 +1558,7 @@ mod cycle_counter_tests {
         // The counter only moves forward — it never wraps or renumbers.
         let mut s = ProjectState {
             cycle: u64::MAX - 1,
-            ..Default::default()
+            ..ProjectState::default()
         };
         assert_eq!(advance_project_cycle(&mut s), u64::MAX);
         // Saturates rather than wrapping to 0 (which would collide with cadence).

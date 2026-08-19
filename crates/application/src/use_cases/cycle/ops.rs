@@ -68,12 +68,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let Some(deploy) = &self.deploy else {
             return true;
         };
-        // A malformed `host_port` (COX-B035) must fail the gate, not be
-        // treated as unconfigured — see `host_port_probe`.
-        match self.host_port_probe {
-            Ok(port) => crate::ports::outbound::verify_deploy_health(deploy, port).await,
-            Err(()) => false,
-        }
+        crate::ports::outbound::verify_deploy_health_probe(deploy, self.host_port_probe).await
     }
     /// Detailed post-deploy health check (COX-F005): poll the app's health
     /// endpoint via [`crate::ports::outbound::DeployPort::wait_healthy`] for
@@ -581,6 +576,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let msg = format!("🗑️ auto-closed PR #{number} (\"{title}\") — {why}");
         let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
             s.post_chat_in("SA", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+            // The app closed this PR itself. Mark it so `forge_hygiene`'s
+            // closed-unmerged pass does NOT misread our own action as a human
+            // rejection and force a redesign loop. Only externally-closed PRs
+            // (a real person) must trigger that signal.
+            s.seen_closed_prs.insert(number);
             Ok(())
         })
         .await;

@@ -1,7 +1,8 @@
 // Part of the composition root split by concern — see lib.rs.
 #![allow(clippy::wildcard_imports)]
 //! Wiring: everything that turns config into live adapters — stores, auth,
-//! engines, storage, MCP access, and the config self-healing.
+//! engines, storage, MCP access. Config loading/self-heal lives in
+//! `config_load.rs`.
 
 use super::*;
 
@@ -83,8 +84,6 @@ pub(crate) async fn make_store(
     }
 }
 
-/// Load `coxagent.json` from the workspace root (parent of the state dir), or
-/// fall back to defaults. Config lives beside the state, written by `onboard`.
 /// Load the shared coordination backend (Postgres state DSN + Redis URL) from
 /// `<base>/coordination.json` into the environment, unless already set. Lets the
 /// Finder-launched app join the distributed backend without env plumbing.

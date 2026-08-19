@@ -23,9 +23,7 @@
 use std::path::{Path, PathBuf};
 
 fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
 }
 
 fn read(path: &Path) -> Option<String> {
@@ -77,7 +75,10 @@ fn scan_tree(dir: &Path, needles: &[&str]) -> Vec<String> {
     for e in entries.flatten() {
         let p = e.path();
         if p.is_dir() {
-            if !p.file_name().is_some_and(|n| SKIP.contains(&n.to_string_lossy().as_ref())) {
+            if !p
+                .file_name()
+                .is_some_and(|n| SKIP.contains(&n.to_string_lossy().as_ref()))
+            {
                 hits.extend(scan_tree(&p, needles));
             }
             continue;
@@ -140,12 +141,16 @@ fn ac2_regression_tickets_carry_all_payload_fields() {
         panic!("AC2 fail — no Visual-QA workflow to perform regression auto-filing");
     };
     let required = [
-        "baseline",             // baseline screenshot URL for the comparison
-        "diff",                 // diff/screenshot URL proving the regression
-        "pull_request",         // context to build the PR link back to
-        "acceptance",           // acceptance-criteria prose carried on the ticket
+        "baseline",     // baseline screenshot URL for the comparison
+        "diff",         // diff/screenshot URL proving the regression
+        "pull_request", // context to build the PR link back to
+        "acceptance",   // acceptance-criteria prose carried on the ticket
     ];
-    let missing: Vec<&str> = required.iter().copied().filter(|n| !workflow.contains(n)).collect();
+    let missing: Vec<&str> = required
+        .iter()
+        .copied()
+        .filter(|n| !workflow.contains(n))
+        .collect();
     assert!(
         missing.is_empty(),
         "AC2 fail — regression Bug tickets must carry every field but these markers \
@@ -168,7 +173,14 @@ fn ac3_pr_comment_links_to_filed_ticket_ids() {
     );
     // The comment must embed the auto-filed ticket id(s), i.e. it references a
     // dynamic issue/ticket number rather than fixed prose only.
-    let id_markers = ["{id}", "{ticket_id}", "#{", "issue_number", "bamboo.id", ".id"];
+    let id_markers = [
+        "{id}",
+        "{ticket_id}",
+        "#{",
+        "issue_number",
+        "bamboo.id",
+        ".id",
+    ];
     assert!(
         id_markers.iter().any(|tok| workflow.contains(tok)),
         "AC3 fail — the PR-comment step never references an auto-filed ticket ID; \
@@ -214,7 +226,8 @@ fn ac5_pipeline_completes_in_under_seven_minutes() {
          cap; an unbounded build/test/compare chain cannot be held under 7 minutes"
     );
     assert!(
-        workflow.contains("under 7 minutes") || workflow.contains("< 420")
+        workflow.contains("under 7 minutes")
+            || workflow.contains("< 420")
             || workflow.matches("budget").count() > 0,
         "AC5 fail — no explicit sub-seven-minute budget marker is declared for the \
          end-to-end run; expected 'under 7 minutes' or equivalent on the pipeline"
