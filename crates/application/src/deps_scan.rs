@@ -302,18 +302,17 @@ pub const MASTER_EPIC_ID: &str = "DEP-AUDIT-001";
 /// re-running a scan never duplicates an already-filed proposal.
 ///
 /// The mapping must be INJECTIVE over every possible package name: two distinct
-/// dependencies can never share an id regardless of which ones happen to appear
-/// together in one pass or any earlier pass has filed ([CXA-B089]). A lossy rule
-/// that replaces every non-alphanumeric char with '-' collapses unrelated scoped /
-/// nested / dotted names onto the same id (`@scope/pkg`, dotted and hyphenated
-/// spellings all become indistinguishable), so whichever finding sorts first wins,
-/// every colliding sibling is silently skipped as-if-duplicate even though it was
-/// flagged, and none of its evidence is ever recorded under its own key.
+/// dependencies can never share an id, regardless of which ones appear together
+/// in any single pass or were filed earlier ([CXA-B089]). A lossy rule that maps
+/// every non-alphanumeric char to '-' collapses unrelated scoped / dotted /
+/// hyphenated names onto one id (`@scope/pkg`, `.`- vs `-`-separated spellings,
+/// ...); whichever finding sorts first wins it and each colliding sibling is
+/// silently skipped as-if-duplicate even though it was flagged — its remediation
+/// and its evidence are lost forever.
 ///
-/// To stay collision-free while keeping ordinary crate / npm / poetry identifiers —
-/// which are overwhelmingly ASCII alphanumerics — readable on sight, letters and
-/// digits are emitted verbatim and every other byte becomes an unambiguous,
-/// fixed-width token that cannot be produced by joining other outputs together.
+/// So letters/digits are emitted verbatim (most crate/npm/poetry names stay
+/// readable) and every other byte becomes an unambiguous fixed-width token that
+/// no concatenation of other outputs can reproduce.
 fn ticket_id_for(dep: &str) -> String {
     let mut out = String::from("DEP");
     for b in dep.as_bytes() {
@@ -620,6 +619,18 @@ version = \"0.9.0\"
                 "evidence recorded under its own key for {id}"
             );
         }
+
+        // A later pass over persisted state must neither silently re-drop a
+        // still-flagged colliding dep nor duplicate an already-filed one.
+        let original_tickets = state.tickets.len();
+        let original_evidence = state.ticket_evidence.len();
+        let refiled = apply_findings(&mut state, &findings);
+        assert!(
+            refiled.is_empty(),
+            "must not duplicate on re-run: {refiled:?}"
+        );
+        assert_eq!(state.tickets.len(), original_tickets);
+        assert_eq!(state.ticket_evidence.len(), original_evidence);
     }
 
     #[test]
