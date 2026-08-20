@@ -1839,9 +1839,31 @@ async function showTicket(id){
     <div class="mrow"><span class="lbl">Blocked by</span>${depChips(t.depends_on)}</div>
     <div class="mrow"><span class="lbl">Blocks</span>${depChips((STATE.tickets||[]).filter(x=>(x.depends_on||[]).includes(t.id)).map(x=>x.id))}</div>
     <div class="mrow" style="display:block"><span class="lbl">Description</span><div class="doc-body md" style="margin-top:7px;color:var(--muted);line-height:1.6;font-size:13px">${t.description?mdRender(t.description):'—'}</div></div>
-    <div class="mrow" style="display:block"><span class="lbl">Acceptance criteria</span>${ac.length?`<div class="aclist">${ac.map(c=>`<div class="acitem"><i class="ti ti-square-check"></i> ${esc(c)}</div>`).join("")}</div>`:'<div style="margin-top:6px;color:var(--dim);font-size:12px">— none defined yet</div>'}</div>`;
+    <div class="mrow" style="display:block"><span class="lbl">Acceptance criteria</span>${ac.length?`<div class="aclist">${ac.map(c=>`<div class="acitem"><i class="ti ti-square-check"></i> ${esc(c)}</div>`).join("")}</div>`:'<div style="margin-top:6px;color:var(--dim);font-size:12px">— none defined yet</div>'}</div>`
+    +(function(){const tcs=t.test_cases||[];if(!tcs.length)return '';
+      return `<div class="mrow" style="display:block;border:none"><span class="lbl">Test cases</span><div class="tclist">${tcs.map(tc=>{
+        const st=tc.status||'pending';
+        const badge={passed:['var(--green)','ti-circle-check','Passed'],failed:['var(--red)','ti-circle-x','Failed'],pending:['var(--dim)','ti-clock','Pending']}[st]||['var(--dim)','ti-clock','Pending'];
+        const img=tc.evidence&&tc.evidence.image?`<div class="tcimg"><img src="${esc(tc.evidence.image)}" alt="case screenshot" onclick="window.open('${esc(tc.evidence.image)}','_blank')" loading="lazy"></div>`:'';
+        const note=tc.evidence&&tc.evidence.note?`<div class="tcnote">${esc(tc.evidence.note)}</div>`:'';
+        return `<div class="tcitem"><div class="tcrow"><i class="ti ${badge[1]}" style="color:${badge[0]}"></i><span style="color:${badge[0]};font-weight:700;font-size:11px;text-transform:uppercase">${badge[2]}</span><div class="tcdesc">${esc(tc.description)}</div></div>${img}${note}</div>`;
+      }).join("")}</div></div>`;})()
   if(tech)h+=`<div class="mrow" style="display:block;border:none"><span class="lbl">Technical spec</span><pre>${esc(tech.approach)}\nfiles: ${esc((tech.files||[]).join(", "))}\napi: ${esc(tech.api_contract)}\ntest: ${esc(tech.test_plan)}</pre></div>`;
   if(ux)h+=`<div class="mrow" style="display:block;border:none"><span class="lbl">UI/UX spec</span><pre>${esc(ux.user_flow)}\nscreens: ${esc((ux.screens||[]).join(", "))}</pre></div>`;
+  // Design attachments: PD mockups + user uploads. Bytes come from blob
+  // storage via the attachment endpoint; records live on the state.
+  {const atts=((window.STATE&&STATE.ticket_attachments)||{})[t.id]||[];
+   const grid=atts.map(a=>{
+     const u=api("/attachment?key="+encodeURIComponent(a.key));
+     const isImg=(a.content_type||"").startsWith("image/");
+     return isImg
+       ?`<a href="${esc(u)}" target="_blank" class="att-card" title="${esc(a.name)} · ${esc(a.by)}"><img src="${esc(u)}" alt="${esc(a.name)}" loading="lazy"><span>${esc(a.name)}</span></a>`
+       :`<a href="${esc(u)}" target="_blank" class="att-card att-file" title="${esc(a.name)} · ${esc(a.by)}"><i class="ti ti-file"></i><span>${esc(a.name)}</span></a>`;
+   }).join("");
+   h+=`<div class="mrow" style="display:block;border:none"><span class="lbl">Design & attachments</span>
+     <div class="att-grid" id="att-grid">${grid||'<div style="color:var(--dim);font-size:12px;margin-top:6px">— none yet (PD attaches mockups here)</div>'}</div>
+     <input type="file" id="att-file" style="display:none" onchange="uploadAttachment('${t.id}',this)">
+     <button class="tk-btn" style="margin-top:8px" onclick="document.getElementById('att-file').click()"><i class="ti ti-paperclip"></i> Attach file</button></div>`;}
   const canWork=["pending","ready","open"].includes(t.status);
   if(t.cost_hold!=null&&!t.cost_approved)h+=`<div class="mrow" style="display:block;border:1px solid var(--amber);border-radius:9px;padding:10px 12px;background:color-mix(in srgb,var(--amber) 9%,transparent)"><span style="color:var(--amber);font-weight:700"><i class="ti ti-currency-dollar"></i> Held for cost approval</span><div style="font-size:12.5px;color:var(--muted);margin-top:4px">Estimated ~$${(+t.cost_hold).toFixed(2)}/run exceeds the approval gate. Agents will skip this ticket until you approve it.</div><button class="pri" style="margin-top:8px" onclick="approveCost('${t.id}')"><i class="ti ti-check"></i> Approve run</button></div>`;
   h+=`<div class="tk-actions">
@@ -1859,6 +1881,21 @@ async function showTicket(id){
   renderTicketComments(t.id);
   // Ticket descriptions can carry ```mermaid fences too (SA designs often do).
   if(typeof renderMermaidIn==="function")renderMermaidIn(body);}
+// Upload one attachment: raw bytes body, MIME in Content-Type, name in query.
+async function uploadAttachment(id,input){
+  const f=input.files&&input.files[0];if(!f)return;
+  if(f.size>25*1024*1024){toasty("Max 25MB","err");return;}
+  try{
+    const r=await fetch(api("/ticket/"+encodeURIComponent(id)+"/attachments?name="+encodeURIComponent(f.name)),
+      {method:"POST",headers:{"Content-Type":f.type||"application/octet-stream"},body:f});
+    if(!r.ok){toasty(await r.text()||"Upload failed","err");return;}
+    toasty("Attached "+f.name,"ok");
+    // The state snapshot refreshes on its own tick; reflect immediately.
+    const rec=(await r.json()).attachment;
+    if(window.STATE){(STATE.ticket_attachments=STATE.ticket_attachments||{});(STATE.ticket_attachments[id]=STATE.ticket_attachments[id]||[]).push(rec);}
+    showTicket(id);
+  }catch(e){toasty("Network error","err");}
+}
 async function fillAssignSelect(){
   const sel=document.getElementById("tk-assign-sel");if(!sel)return;
   try{const members=await(await fetch(api("/members"))).json();

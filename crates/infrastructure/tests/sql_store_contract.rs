@@ -5,7 +5,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use coxagent_application::ports::outbound::StateStorePort;
-use coxagent_application::state::{ProjectState};
+use coxagent_application::state::ProjectState;
 use coxagent_application::PortError;
 use coxagent_domain::{Complexity, Priority, SemVer, Ticket, TicketId, TicketType};
 use coxagent_infrastructure::SqlStateStore;
@@ -115,39 +115,37 @@ async fn sql_store_rejects_stale_revision_write_with_conflict() {
     let theirs = ProjectState {
         current_version: SemVer::new(2, 1, 0),
         tickets: vec![sample_ticket("F003-002")],
-         ..ProjectState::default()
-     };
-     store
-         .save_expecting(&theirs, Some(1))
-         .await
-         .expect("concurrent writer saves against its own held rev");
-     assert_eq!(
-         store.current_version().await.expect("after concurrent"),
-         Some(2)
-     );
+        ..ProjectState::default()
+    };
+    store
+        .save_expecting(&theirs, Some(1))
+        .await
+        .expect("concurrent writer saves against its own held rev");
+    assert_eq!(
+        store.current_version().await.expect("after concurrent"),
+        Some(2)
+    );
 
-     // We still hold rev 1 but the row is now at 2. A blind save would clobber
-     // their update; with the guard it must conflict and change nothing.
-     let ours_stale = ProjectState {
-         current_version: SemVer::new(2, 2, 0),
-         tickets: vec![sample_ticket("F003-003")],
-         ..ProjectState::default()
-     };
-     match store.save_expecting(&ours_stale, Some(1)).await {
-         Err(PortError::Conflict(_)) => {}
-         other => panic!("expected Conflict for stale rev-1 write over rev-2 row — got {other:?}"),
-     }
+    // We still hold rev 1 but the row is now at 2. A blind save would clobber
+    // their update; with the guard it must conflict and change nothing.
+    let ours_stale = ProjectState {
+        current_version: SemVer::new(2, 2, 0),
+        tickets: vec![sample_ticket("F003-003")],
+        ..ProjectState::default()
+    };
+    match store.save_expecting(&ours_stale, Some(1)).await {
+        Err(PortError::Conflict(_)) => {}
+        other => panic!("expected Conflict for stale rev-1 write over rev-2 row — got {other:?}"),
+    }
 
-     // The rejected write changed nothing — their winning state survives.
-     let final_state = store.load().await.expect("reload after rejected write");
-     assert_eq!(final_state.tickets.len(), 1);
-     assert_eq!(final_state.tickets[0].id().as_str(), "F003-002");
+    // The rejected write changed nothing — their winning state survives.
+    let final_state = store.load().await.expect("reload after rejected write");
+    assert_eq!(final_state.tickets.len(), 1);
+    assert_eq!(final_state.tickets[0].id().as_str(), "F003-002");
 
-     // Retrying with the CURRENT revision (reload-then-save) converges cleanly.
-     store
-         .save_expecting(&ours_stale, Some(2))
-         .await
-         .expect("retry with current revision succeeds");
- }
-
-
+    // Retrying with the CURRENT revision (reload-then-save) converges cleanly.
+    store
+        .save_expecting(&ours_stale, Some(2))
+        .await
+        .expect("retry with current revision succeeds");
+}
