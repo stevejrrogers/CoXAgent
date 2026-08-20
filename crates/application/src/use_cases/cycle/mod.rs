@@ -174,6 +174,10 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     /// Polled between phases: `true` = the user pressed Pause, stop starting
     /// new phases and end this cycle early. `None` (tests/headless) = never.
     pause_check: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
+    /// Whether this runner competes for the project leader lease (default
+    /// true). Worker slots co-located with a primary runner set false — see
+    /// the election comment in `run_cycle`.
+    leader_election: bool,
     /// Per-phase wall-clock tracker: `report()` marks each phase switch, the
     /// scorecard drains the totals at cycle end. `(current phase, since)` plus
     /// accumulated seconds per phase label.
@@ -236,6 +240,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             phase: None,
             reloader: None,
             pause_check: None,
+            leader_election: true,
             phase_track: Mutex::new((None, std::collections::BTreeMap::new())),
             worker: String::new(),
             caps: crate::ports::outbound::WorkerCaps::default(),
@@ -678,7 +683,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             self.worker.clone()
         };
         let now = crate::state::now_rfc3339();
-        let leader = self.store.acquire_leader(&me, &now).await.unwrap_or(true);
+        // Leader election stays MACHINE-level (each machine's primary runner
+        // competes, so a dead machine hands ceremonies to another — the
+        // multi-user requirement). Worker SLOTS on the same machine never
+        // compete: the lease rotating across co-located slots produced the
+        // scorecard-numbering and version-ping-pong bugs, and a worker whose
+        // machine is alive has a primary runner right next to it.
+        let leader = if self.leader_election {
+            self.store.acquire_leader(&me, &now).await.unwrap_or(true)
+        } else {
+            false
+        };
         // Authoritative cycle number: the persistent, project-wide counter the
         // leader advances once per cycle. Scoring *and* cadence key off this,
         // NOT the per-process local number — so restarts / leader handovers
@@ -1314,6 +1329,28 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .file_name()
             .and_then(|n| n.to_str())
             .is_some_and(|n| n.contains("-slot-"))
+    }
+
+    /// Turn leader-lease competition off for co-located worker slots.
+    #[must_use]
+    pub fn with_leader_election(mut self, enabled: bool) -> Self {
+        self.leader_election = enabled;
+        self
+    }
+
+    /// One dedicated REVIEW pass — the P1 job of the event-dispatch plan
+    /// (docs/proposals/event-dispatch.md): forge hygiene + PR review/merge +
+    /// feedback fixes, on their own fast loop so a one-hour DEV phase never
+    /// delays a ripe PR by a whole cycle. Reuses the full gate stack
+    /// (landed-proof, fix-on-fix brake, human-eyes, competing-PR resolver).
+    /// Callers gate on pause; this gates on quiet hours and open incidents.
+    pub async fn run_review_pass(&self) {
+        if self.quiet_hours_block().await || self.engine_incident_open().await {
+            return;
+        }
+        self.forge_hygiene().await;
+        self.review_open_prs().await;
+        self.address_pr_feedback().await;
     }
 
     /// Drain the per-phase wall-clock totals (closing any open phase) — called
