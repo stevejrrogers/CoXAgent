@@ -1,0 +1,1 @@
+{"at":"2026-08-18-2234","engine":"claude","pass":7,"total":7,"tasks":[{"task":"design-json","pass":true},{"task":"fix-off-by-one","pass":true},{"task":"multi-file-fix","pass":true},{"task":"review-planted-bug","pass":true},{"task":"root-cause","pass":true},{"task":"spot-the-race","pass":true},{"task":"tradeoff-constraint","pass":true}]}

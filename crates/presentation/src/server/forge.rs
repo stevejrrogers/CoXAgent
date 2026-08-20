@@ -699,10 +699,11 @@ pub(super) async fn git_pv(dir: &std::path::Path, args: &[&str]) -> Result<(), S
 }
 
 /// Parse `deploy.host_port` out of a project's raw `coxagent.json` for the
-/// preview health-gate probe. Thin wrapper over the shared
-/// [`coxagent_application::ports::outbound::parse_deploy_host_port`] — every
-/// deploy call site (cycle, chat, PR preview) parses a malformed `host_port`
-/// the same way (COX-B025/COX-B026/COX-B035).
+/// preview health-gate probe (COX-B025/COX-B026). Thin alias over the shared
+/// [`coxagent_application::ports::outbound::parse_deploy_host_port`] — see
+/// its doc for the full contract — kept so call sites here read naturally as
+/// "preview" concerns; every deploy call site (cycle, chat, PR preview)
+/// parses a malformed `host_port` the same way (COX-B035).
 pub(super) fn parse_preview_host_port(raw_config: &str) -> Result<Option<u16>, ()> {
     coxagent_application::ports::outbound::parse_deploy_host_port(raw_config)
 }
@@ -710,15 +711,14 @@ pub(super) fn parse_preview_host_port(raw_config: &str) -> Result<Option<u16>, (
 /// Run the mandatory post-deploy health gate (COX-B004/COX-B009) for a probe
 /// port that may be invalid (COX-B025/COX-B026): a corrupt `host_port` fails
 /// the gate outright rather than being treated as "nothing configured",
-/// which would pass unconditionally and report a dead app as LIVE.
+/// which would pass unconditionally and report a dead app as LIVE. Thin
+/// alias over the shared
+/// [`coxagent_application::ports::outbound::verify_deploy_health_probe`].
 pub(super) async fn run_preview_health_gate(
     deploy: &Arc<dyn coxagent_application::ports::outbound::DeployPort>,
     probe_port: Result<Option<u16>, ()>,
 ) -> bool {
-    match probe_port {
-        Ok(port) => coxagent_application::ports::outbound::verify_deploy_health(deploy, port).await,
-        Err(()) => false,
-    }
+    coxagent_application::ports::outbound::verify_deploy_health_probe(deploy, probe_port).await
 }
 
 /// Deploy a PR's branch so the human can SEE the change running before

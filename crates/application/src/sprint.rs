@@ -143,27 +143,59 @@ pub fn commit_ticket(state: &mut ProjectState, id: &TicketId) -> bool {
     true
 }
 
-/// Refill an open sprint whose committed set is EMPTY from the open backlog.
+/// Refill a running sprint's scope when it would otherwise idle DEV.
 ///
-/// Rollover commits capacity once; a sprint that opened onto an empty backlog
-/// stays empty even as tickets become Ready mid-sprint — and under the
-/// sprint-scope DEV gate that is silent starvation: a full queue, an idle
-/// team, and nothing on any screen saying why. Returns how many tickets were
-/// committed (0 = sprint absent, already scoped, or backlog still empty).
+/// Two cases, both silent starvation under the sprint-scope DEV gate:
+///   1. The committed set is EMPTY — even as tickets become Ready mid-sprint,
+///      nothing is scoped until rollover (a full queue, an idle team).
+///   2. The committed set is bug-only while READY features sit outside it — a
+///      bug-heavy sprint that, without intervention, never gives DEV-FEATURE
+///      scoped work (the same lock-out `open_backlog`'s reserved feature slot
+///      prevents at rollover, healed here mid-sprint for an already-open one).
+///
+/// Returns how many tickets were committed (0 = nothing needed).
 pub fn refill_empty_scope(state: &mut ProjectState) -> usize {
-    let needs_scope = state
+    // Case 1: a genuinely empty committed set — pull the whole backlog in.
+    if state
         .sprint
         .as_ref()
-        .is_some_and(|s| s.committed.is_empty());
-    if !needs_scope {
+        .is_some_and(|s| s.committed.is_empty())
+    {
+        let backlog = open_backlog(state);
+        let n = backlog.len();
+        if let Some(sprint) = &mut state.sprint {
+            sprint.committed = backlog;
+        }
+        return n;
+    }
+    // Case 2: committed but feature-less — reserve one ready feature (the
+    // live starvation: sprint #561 was bug-only while 44 features sat Ready).
+    let has_feature = state.sprint.as_ref().is_some_and(|s| {
+        s.committed.iter().any(|id| {
+            state
+                .ticket(id)
+                .is_some_and(|t| matches!(t.ticket_type(), TicketType::Feature | TicketType::Chore))
+        })
+    });
+    if has_feature {
         return 0;
     }
-    let backlog = open_backlog(state);
-    let Some(sprint) = &mut state.sprint else {
-        return 0;
-    };
-    sprint.committed = backlog;
-    sprint.committed.len()
+    let committed: Vec<&TicketId> = state
+        .sprint
+        .as_ref()
+        .map(|s| s.committed.iter().collect())
+        .unwrap_or_default();
+    if let Some(ready) = state.tickets.iter().find(|t| {
+        matches!(t.ticket_type(), TicketType::Feature | TicketType::Chore)
+            && t.status() == Status::Ready
+            && !committed.contains(&t.id())
+    }) {
+        if let Some(sprint) = &mut state.sprint {
+            sprint.committed.push(ready.id().clone());
+            return 1;
+        }
+    }
+    0
 }
 
 /// Drop a ticket from the running sprint — scope a sprint DOWN mid-flight
@@ -206,12 +238,39 @@ fn goal_from(state: &ProjectState, committed: &[TicketId]) -> String {
 /// looked idle ("sprint không work gì hết") while two DEVs were mid-fix.
 /// Open bugs commit first (they outrank new work), then features/chores.
 fn open_backlog(state: &ProjectState) -> Vec<TicketId> {
-    let mut picked: Vec<TicketId> = state
+    let cap = sprint_capacity(state);
+    // A bug-heavy backlog must not lock FEATURE work out of every sprint:
+    // reserve one slot for a READY feature/chore so DEV-FEATURE always has
+    // something scoped to build. Without this, any sprint where open bugs do
+    // not fit within capacity commits only bugs and ready features starve
+    // under the sprint-scope gate — a full Ready queue, yet an idle dev.
+    let mut picked: Vec<TicketId> = Vec::new();
+    if let Some(ready) = state
+        .tickets
+        .iter()
+        .find(|t| {
+            matches!(t.ticket_type(), TicketType::Feature | TicketType::Chore)
+                && t.status() == Status::Ready
+        })
+        .map(|t| t.id().clone())
+    {
+        picked.push(ready);
+    }
+    // Open bugs get the next seats, but only within remaining capacity — the
+    // reserved feature slot above is never displaced by bug pressure.
+    let mut bug_budget = cap.saturating_sub(picked.len());
+    for t in state
         .tickets
         .iter()
         .filter(|t| t.ticket_type() == TicketType::Bug && t.status() == Status::Open)
-        .map(|t| t.id().clone())
-        .collect();
+    {
+        if bug_budget == 0 {
+            break;
+        }
+        picked.push(t.id().clone());
+        bug_budget -= 1;
+    }
+    // Remaining capacity: the rest of the actionable features/chores.
     picked.extend(
         state
             .tickets
@@ -223,9 +282,10 @@ fn open_backlog(state: &ProjectState) -> Vec<TicketId> {
                         Status::Done | Status::Documented | Status::Rejected
                     )
             })
+            .take(cap.saturating_sub(picked.len()))
             .map(|t| t.id().clone()),
     );
-    picked.into_iter().take(sprint_capacity(state)).collect()
+    picked
 }
 
 /// How much to commit to one sprint: what the team has actually been finishing,
@@ -267,7 +327,7 @@ pub fn done_count(state: &ProjectState) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coxagent_domain::{Complexity, Priority, Ticket, TicketType};
+    use coxagent_domain::{Complexity, Priority, Role, TechnicalDesign, Ticket, TicketType};
 
     fn feature(id: &str) -> Ticket {
         Ticket::new(
@@ -280,6 +340,27 @@ mod tests {
             false,
         )
         .expect("t")
+    }
+
+    fn bug(id: &str) -> Ticket {
+        Ticket::new(
+            TicketId::new(id).expect("id"),
+            TicketType::Bug,
+            "b",
+            "",
+            Priority::High,
+            Complexity::Small,
+            false,
+        )
+        .expect("t")
+    }
+
+    fn ready_feature(id: &str) -> Ticket {
+        let mut t = feature(id);
+        t.set_technical_design(Role::Sa, TechnicalDesign::default())
+            .expect("design");
+        t.transition_to(Role::Sa, Status::Ready).expect("ready");
+        t
     }
 
     #[test]
@@ -310,6 +391,70 @@ mod tests {
         // No sprint at all (Kanban): nothing to do.
         state.sprint = None;
         assert_eq!(refill_empty_scope(&mut state), 0);
+    }
+
+    #[test]
+    fn a_bug_only_sprint_refills_a_ready_feature_mid_flight() {
+        // Sprint #561 symptom: committed is non-empty (bugs) but feature-less,
+        // while 44 features sit Ready — DEV-FEATURE silently starves. The old
+        // refill only handled the EMPTY set; this heals the bug-only case too.
+        let mut state = ProjectState {
+            tickets: vec![bug("B001"), ready_feature("F001")],
+            ..ProjectState::default()
+        };
+        advance(&mut state, 1, SprintPolicy::Cycles(10));
+        // The rollover now reserves F001 (open_backlog change), so simulate an
+        // OLD bug-only sprint that predates the fix.
+        let f1 = TicketId::new("F001").expect("id");
+        state
+            .sprint
+            .as_mut()
+            .expect("sprint")
+            .committed
+            .retain(|c| c != &f1);
+        assert!(
+            refill_empty_scope(&mut state) >= 1,
+            "a bug-only sprint must pull in a ready feature so DEV-FEATURE runs"
+        );
+        let s = state.sprint.as_ref().expect("sprint");
+        assert!(
+            s.committed.contains(&f1),
+            "committed set must now hold the ready feature"
+        );
+        // Idempotent: a sprint that already has feature scope is left alone.
+        assert_eq!(refill_empty_scope(&mut state), 0);
+    }
+
+    #[test]
+    fn a_bug_heavy_backlog_still_reserves_a_ready_feature_slot() {
+        // A fresh state commits to 6 (FLOOR*2). A bug-heavy backlog used to
+        // fill every seat with open bugs, locking a ready feature out of the
+        // sprint entirely — an idle DEV-FEATURE with a full Ready queue. The
+        // reserved feature slot prevents that.
+        let state = ProjectState {
+            tickets: vec![ready_feature("F001"), bug("B001"), bug("B002"), bug("B003")],
+            ..ProjectState::default()
+        };
+        let committed = open_backlog(&state);
+        assert!(
+            committed.contains(&TicketId::new("F001").expect("id")),
+            "a ready feature must keep a scout seat even under bug pressure"
+        );
+        // The reserved feature is NOT displaced: it sits at the front.
+        assert_eq!(committed[0], TicketId::new("F001").expect("id"));
+    }
+
+    #[test]
+    fn no_ready_feature_means_bugs_take_the_whole_backlog() {
+        let state = ProjectState {
+            tickets: vec![bug("B001"), bug("B002"), bug("B003"), bug("B004")],
+            ..ProjectState::default()
+        };
+        let committed = open_backlog(&state);
+        assert!(
+            committed.iter().all(|id| id.to_string().starts_with("B")),
+            "without a ready feature, the sprint is bugs-only"
+        );
     }
 
     #[test]
