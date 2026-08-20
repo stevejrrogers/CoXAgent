@@ -38,6 +38,10 @@ pub struct Spend {
     /// so an idle agent card can still name which user it belongs to.
     #[serde(default)]
     pub operator_by_role: std::collections::BTreeMap<String, String>,
+    /// Characters of prompt SENT per role (system + task), summed — the
+    /// measurement that makes prompt trimming data-driven instead of guesswork.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub prompt_chars_by_role: std::collections::BTreeMap<String, u64>,
     /// Runs whose file writes were actually confined (Seatbelt/bwrap).
     #[serde(default)]
     pub confined_runs: u64,

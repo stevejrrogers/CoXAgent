@@ -51,11 +51,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             let refilled = crate::sprint::refill_empty_scope(&mut state);
             if refilled > 0 {
                 let msg = format!(
-                    "📋 Sprint scope was empty while {refilled} ticket(s) sat ready — \
-                     PO committed them to the current sprint so DEV can pull work."
+                    "📋 Sprint scope held no ready feature work while {refilled} \
+                     ticket(s) sat ready — PO committed them to the current \
+                     sprint so DEV can pull work."
                 );
                 state.log_activity("PO", "committed backlog to an empty sprint", None);
-                state.post_chat_in("PO", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+                state.post_comment("PO", &msg, None);
             }
             let _ = self.store.save(&state).await;
             return;
