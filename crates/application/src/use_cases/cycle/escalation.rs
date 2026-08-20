@@ -364,18 +364,25 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // The next DEV run reads the journal, so the rescue lands where
             // the work happens instead of only in a chat message.
             s.journal_note(&id, &format!("{who} rescue: {out}"));
+            // Number the rescue so a second one for the same ticket reads as a
+            // distinct action instead of a byte-for-byte repeat — two identical
+            // messages in the stream is how the SM chat reads as spam. The
+            // `claimed` closure above already bumped this counter, so the
+            // current value IS the attempt number (1, then 2).
+            let attempt = s.ticket_redesigns.get(&id).copied().unwrap_or(1);
             let msg = match route {
                 EscalationRoute::Spec => format!(
-                    "🧯 SM→BA: {id} bị 3 lần đỏ vì spec chưa rõ — BA đã viết lại yêu cầu, \
-                     DEV làm lại. Đỏ tiếp là chuyển người quyết."
+                    "🧯 SM→BA (rescues {attempt}): {id} bị 3 lần đỏ vì spec chưa rõ — BA đã \
+                     viết lại yêu cầu, DEV làm lại. Đỏ tiếp là chuyển người quyết."
                 ),
                 EscalationRoute::Mechanical => format!(
-                    "🧯 SM→SA: {id} bị 3 lần đỏ ở cổng chất lượng (lint/test) chứ không phải \
-                     thiết kế — SA đưa cách gỡ đúng chỗ đó. Đỏ tiếp là chuyển người quyết."
+                    "🧯 SM→SA (rescues {attempt}): {id} bị 3 lần đỏ ở cổng chất lượng (lint/test) \
+                     chứ không phải thiết kế — SA đưa cách gỡ đúng chỗ đó. Đỏ tiếp là \
+                     chuyển người quyết."
                 ),
                 EscalationRoute::Design => format!(
-                    "🧯 SM→SA: {id} được RE-DESIGN sau 3 build đỏ — DEV thử lại với hướng mới. \
-                     Đỏ tiếp là chuyển người quyết."
+                    "🧯 SM→SA (rescues {attempt}): {id} được RE-DESIGN sau 3 build đỏ — DEV thử \
+                     lại với hướng mới. Đỏ tiếp là chuyển người quyết."
                 ),
             };
             s.post_comment("SM", &msg, Some(id.clone()));

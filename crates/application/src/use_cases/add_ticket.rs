@@ -60,7 +60,7 @@ impl<S: StateStorePort + ?Sized> AddTicketUseCase<S> {
 /// # Errors
 /// Propagates [`DomainError`] from id construction (unreachable in practice
 /// since the formatted string is always non-empty, but kept honest).
-fn mint_id(
+pub(crate) fn mint_id(
     ticket_type: TicketType,
     state: &crate::state::ProjectState,
 ) -> Result<TicketId, AppError> {

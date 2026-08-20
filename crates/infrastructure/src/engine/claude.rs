@@ -274,7 +274,11 @@ impl ClaudeEngine {
         }
         cmd.stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        let mut child = crate::proc::spawn_confined(&mut cmd, sandbox)
+        // The status comes BACK from the spawn: a host whose Seatbelt refused
+        // the profile on every attempt downgrades it to `Denied`, so the
+        // outcome reports a run that never happened instead of a confined one
+        // (COX-B016).
+        let (mut child, sandbox) = crate::proc::spawn_confined(&mut cmd, sandbox)
             .await
             .map_err(|e| PortError::Backend(format!("spawn claude: {e}")))?;
         let out = child
@@ -630,15 +634,19 @@ mod tests {
     #[test]
     fn tool_result_summary_reads_as_an_outcome_not_a_byte_count() {
         assert_eq!(
-            summarize_tool_result("   Compiling…\ntest result: ok. 220 passed; 0 failed; 0 ignored"),
+            summarize_tool_result(
+                "   Compiling…\ntest result: ok. 220 passed; 0 failed; 0 ignored"
+            ),
             "✓ 220 passed"
         );
         assert_eq!(
             summarize_tool_result("test result: FAILED. 2 passed; 1 failed; 0 ignored"),
             "✗ 1 failed"
         );
-        assert!(summarize_tool_result("error[E0433]: cannot find `x`\nerror: aborting")
-            .starts_with("✗ 2 error"));
+        assert!(
+            summarize_tool_result("error[E0433]: cannot find `x`\nerror: aborting")
+                .starts_with("✗ 2 error")
+        );
         // A source dump full of `.map_err`/`Error` must NOT read as failures.
         assert_eq!(
             summarize_tool_result("fn f() -> Result<(), Error> { x.map_err(|e| e)?; Ok(()) }"),
@@ -646,9 +654,15 @@ mod tests {
         );
         // A git fatal is shown as itself.
         assert!(summarize_tool_result("fatal: path 'x.rs' does not exist").starts_with("✗ fatal:"));
-        assert_eq!(summarize_tool_result("warning: unused variable `y`"), "⚠ 1 warning");
+        assert_eq!(
+            summarize_tool_result("warning: unused variable `y`"),
+            "⚠ 1 warning"
+        );
         assert_eq!(summarize_tool_result("a\nb\nc"), "3 lines");
-        assert_eq!(summarize_tool_result("crates/app/src/lib.rs:42"), "crates/app/src/lib.rs:42");
+        assert_eq!(
+            summarize_tool_result("crates/app/src/lib.rs:42"),
+            "crates/app/src/lib.rs:42"
+        );
         assert_eq!(summarize_tool_result("   "), "done (no output)");
     }
 
@@ -753,7 +767,11 @@ mod tests {
                 system_prompt: "sys".to_owned(),
                 task_prompt: "task".to_owned(),
                 work_dir: dir.clone(),
-                timeout: std::time::Duration::from_secs(10),
+                // Generous on purpose (CXA-B041): this spawns a real child via
+                // the production path, and a one-line echo can still outlast a
+                // tight wall-clock budget when CI is heavily loaded. The test
+                // asserts argv/env plumbing only — latency is irrelevant.
+                timeout: std::time::Duration::from_secs(120),
                 escalation_level: 0,
                 label: None,
             })
