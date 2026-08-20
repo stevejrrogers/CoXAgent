@@ -300,12 +300,41 @@ pub const MASTER_EPIC_ID: &str = "DEP-AUDIT-001";
 
 /// A unique, deterministic ticket id for a remediation — one per dependency so
 /// re-running a scan never duplicates an already-filed proposal.
+///
+/// The mapping must be INJECTIVE over every possible package name: two distinct
+/// dependencies can never share an id regardless of which ones happen to appear
+/// together in one pass or any earlier pass has filed ([CXA-B089]). A lossy rule
+/// that replaces every non-alphanumeric char with '-' collapses unrelated scoped /
+/// nested / dotted names onto the same id (`@scope/pkg`, dotted and hyphenated
+/// spellings all become indistinguishable), so whichever finding sorts first wins,
+/// every colliding sibling is silently skipped as-if-duplicate even though it was
+/// flagged, and none of its evidence is ever recorded under its own key.
+///
+/// To stay collision-free while keeping ordinary crate / npm / poetry identifiers —
+/// which are overwhelmingly ASCII alphanumerics — readable on sight, letters and
+/// digits are emitted verbatim and every other byte becomes an unambiguous,
+/// fixed-width token that cannot be produced by joining other outputs together.
 fn ticket_id_for(dep: &str) -> String {
-    let sanitized: String = dep
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    format!("DEP-{sanitized}")
+    let mut out = String::from("DEP");
+    for b in dep.as_bytes() {
+        if b.is_ascii_alphanumeric() {
+            out.push(*b as char);
+        } else {
+            out.push('<');
+            push_hex_byte(&mut out, *b);
+            out.push('>');
+        }
+    }
+    out
+}
+
+/// Append one byte as two fixed-width lowercase hex digits.
+fn push_hex_byte(out: &mut String, byte: u8) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let nibbles = [byte >> 4, byte & 0x0f];
+    for nibble in nibbles {
+        out.push(HEX[nibble as usize] as char);
+    }
 }
 
 /// Create the master epic once, so every remediation links to the same umbrella.
@@ -539,5 +568,65 @@ version = \"0.9.0\"
         assert_eq!(apply_findings(&mut state, &findings).len(), 1);
         // A second pass must not duplicate an already-filed proposal.
         assert!(apply_findings(&mut state, &findings).is_empty());
+    }
+
+    #[test]
+    fn distinct_deps_whose_lossy_sanitized_ids_collide_each_file_their_own_ticket() {
+        // Regression for CXA-B089. Under the old lossy sanitizer, '.' and '-'
+        // both became '-', so 'a.b' and 'a-b' collapsed onto one id and whichever
+        // finding sorted first won it — the other dependency's remediation (and
+        // its evidence) was silently dropped every pass even though it was flagged.
+        let locks = vec![(
+            "package-lock.json".to_string(),
+            r#"{
+  "packages": {
+    "node_modules/a.b": { "version": "1.0.0" },
+    "node_modules/a-b": { "version": "1.0.0" }
+  }
+}"#
+            .to_string(),
+        )];
+        let mut registry = BTreeMap::new();
+        registry.insert("a.b".to_string(), "2.0.0".to_string());
+        registry.insert("a-b".to_string(), "3.0.0".to_string());
+        let findings = scan_locks(&locks, &registry, &BTreeMap::new());
+        assert_eq!(findings.len(), 2, "both flagged deps must surface");
+
+        let mut state = ProjectState::default();
+        let ids = apply_findings(&mut state, &findings);
+
+        assert_eq!(
+            ids.len(),
+            2,
+            "each colliding dependency must get its own ticket"
+        );
+        // Distinct dependencies must never share a ticket id...
+        assert_ne!(ids[0], ids[1]);
+        // ...and each id must map back to exactly its own package (never cross-wired).
+        for id in &ids {
+            let t = state.ticket(id).expect("filed ticket");
+            let title = t.title();
+            assert!(
+                title.contains("a.b") || title.contains("a-b"),
+                "unexpected title {title:?}"
+            );
+            if title.contains("a.b") {
+                assert!(!title.contains("a-b"), "{title:?} cross-wired two deps");
+            } else {
+                assert!(!title.contains("a.b"), "{title:?} cross-wired two deps");
+            }
+            assert!(
+                state.ticket_evidence.contains_key(id.as_str()),
+                "evidence recorded under its own key for {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn scoped_names_get_distinct_ids_from_flat_spellings() {
+        // '@scope/pkg' and a plain dotted/hyphenated spelling once shared '-' runs.
+        let pkg_a = ticket_id_for("@scope/pkg");
+        let pkg_b = ticket_id_for("-scope-pkg");
+        assert_ne!(pkg_a, pkg_b);
     }
 }
