@@ -452,7 +452,7 @@ mod tests {
         };
         let committed = open_backlog(&state);
         assert!(
-            committed.iter().all(|id| id.to_string().starts_with("B")),
+            committed.iter().all(|id| id.to_string().starts_with('B')),
             "without a ready feature, the sprint is bugs-only"
         );
     }
