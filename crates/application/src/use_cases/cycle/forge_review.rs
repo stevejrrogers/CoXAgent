@@ -341,12 +341,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                             );
                             let _ = forge.comment_pr(loser, &note).await;
                             if forge.close_pr(loser).await.is_ok() {
-                                let _ =
-                                    crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                                let _ = crate::ports::outbound::mutate_state(
+                                    self.store.as_ref(),
+                                    |s| {
                                         s.seen_closed_prs.insert(loser);
                                         Ok(())
-                                    })
-                                    .await;
+                                    },
+                                )
+                                .await;
                             }
                             if loser == pr.number {
                                 self.log_git(&format!(
@@ -445,8 +447,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                         // machine does not auto-land another layer on a fix
                         // it just landed.
                         let fix_on_fix = self.fix_on_fix_hold(&pr.title).await;
-                        if let Some(why) = needs_human_eyes(&diff, self.config.git.max_changed_lines)
-                            .or(fix_on_fix)
+                        if let Some(why) =
+                            needs_human_eyes(&diff, self.config.git.max_changed_lines)
+                                .or(fix_on_fix)
                         {
                             let msg = format!(
                                 "Approved, but not auto-merging: {why}. Ask a human to land this."
