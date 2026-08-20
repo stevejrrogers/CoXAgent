@@ -118,42 +118,122 @@ impl Stack {
     }
 }
 
-/// What an automated pass should do about one container squatting HOST_PORT, as
-/// a pure function of that container's compose-project ownership label so every
-/// branch is deterministically testable without invoking docker.
+/// What an automated pass should do about one container squatting HOST_PORT,
+/// decided purely over its recoverable identifiers so every branch is
+/// deterministically testable without invoking docker.
 #[derive(Debug, PartialEq)]
 enum Eviction {
     /// The holder belongs to a reclaimable agent-preview compose project —
     /// tear that whole project down to release the port cleanly.
     ComposeProject(String),
-    /// The holder has no compose label (a raw `docker run`) — stop just it by id.
+    /// An unlabelled holder positively identified as OUR OWN reclaimable
+    /// agent-preview (`docker run --name cox--…`) — stop just it by id.
     RawContainer(String),
 }
 
-fn classify_holder(owner: Option<&str>, id: String) -> Option<Eviction> {
-    match owner {
-        Some(project) if reclaimable(project) => Some(Eviction::ComposeProject(project.to_owned())),
-        // A protected/foreign compose project is never touched; there may be another
-        // squatter sharing :8101 (IPv4+IPv6), so this returns only this one's verdict.
-        Some(_non_reclaimable) => None,
-        None => Some(Eviction::RawContainer(id)),
+/// The field separator between recoverable identifiers in one inspect pass —
+/// a control char no docker identifier can contain.
+const IDENT_SEP: char = '\u{1e}';
+
+/// Recoverable ownership identifiers of one running holder, fetched together so
+/// classification needs exactly one `docker inspect` per squatter even when the
+/// compose-project label is absent (the raw `docker run` case this guard exists
+/// for).
+///
+/// Nothing here is read from disk or spawned ad-hoc; [`inspect_holder`] takes
+/// one snapshot of the outside world and every subsequent decision is a pure
+/// function over it (see the IO discipline in AGENTS.md).
+#[derive(Debug)]
+struct HolderIdentity {
+    /// `.Config.Labels["com.docker.compose.project"]`, empty when unlabelled.
+    owner_project: String,
+    /// The holder's docker name with any leading `/` stripped, so both identity
+    /// fields share one normalized shape before any decision reads them.
+    container_name: String,
+}
+
+impl HolderIdentity {
+    fn new(inspect_output: &str) -> Option<Self> {
+        let mut parts = inspect_output.split(IDENT_SEP);
+        let owner_project = parts.next().unwrap_or_default().trim().to_owned();
+        // Trim fully, then drop a single leading '/': docker emits names like
+        // "/nginx\n", and surrounding whitespace must never reach a policy
+        // comparison later.
+        let container_name = parts
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .strip_prefix('/')
+            .unwrap_or_default()
+            .to_owned();
+        // A holder with no recoverable identity at all (no project label, no
+        // usable name) cannot be proven to be ours; surface as "no identity"
+        // so classification declines to touch it.
+        if owner_project.is_empty() && container_name.is_empty() {
+            return None;
+        }
+        Some(Self {
+            owner_project,
+            container_name,
+        })
     }
 }
 
-fn inspect_project_of(id: &str) -> Option<String> {
+fn inspect_holder(id: &str) -> Option<HolderIdentity> {
     Command::new("docker")
         .args([
             "inspect",
             "--format",
-            "{{ index .Config.Labels \"com.docker.compose.project\" }}",
+            "{{ index .Config.Labels \"com.docker.compose.project\" }}{IDENT_SEP}{{ index .Name }}",
             id,
         ])
         .output()
         .ok()
-        .and_then(|o| {
-            let name = String::from_utf8_lossy(&o.stdout).trim().to_owned();
-            (!name.is_empty()).then_some(name)
-        })
+        // A dead squatter races between `ps` and `inspect`; treat it as gone —
+        // nothing left to evict, and _not_ a reason to fail the whole smoke pass.
+        .and_then(|o| HolderIdentity::new(&String::from_utf8_lossy(&o.stdout)))
+}
+
+/// What one squatting holder should be done with, as a pure function of its
+/// recovered identity so every branch is deterministically testable without
+/// invoking docker.
+///
+/// The single source of truth for which *names* are ours is [`reclaimable`]
+/// (itself mirroring production's `reclaimable_compose_project`, per the note on
+/// that fn). That predicate is applied here to whichever identity field actually
+/// carries an ownership claim:
+///
+/// * A compose holder (`owner_project` set) — evictable iff its project is a
+///   reclaimable agent-preview; a protected or foreign project is never touched.
+/// * An unlabelled raw holder (`owner_project` empty) — only evicted by id if
+///   its container **name** itself proves it to be a reclaimable agent-preview.
+///   This closes CXA-B083: previously any raw container on :8101 was stopped by
+///   id regardless of what it was, so a live hub / db / foreign service launched
+///   via plain `docker run -p 8101:…` could be silently killed. Now anonymous and
+///   foreign holders — and anything named like our protected control plane — are
+///   left strictly alone.
+fn classify_holder(identity: &HolderIdentity, id: String) -> Option<Eviction> {
+    if !identity.owner_project.is_empty() {
+        return if reclaimable(&identity.owner_project) {
+            Some(Eviction::ComposeProject(identity.owner_project.clone()))
+        } else {
+            // A protected/foreign compose project is never touched; there may be
+            // another squatter sharing :8101 (IPv4+IPv6), so this returns only
+            // this one's verdict.
+            None
+        };
+    }
+    // `container_name` is already normalized (trimmed, leading `/` stripped)
+    // by `HolderIdentity::new`; an empty value means no usable name to judge.
+    if identity.container_name.is_empty() {
+        // No owner label and no usable name → cannot prove ownership → leave alone.
+        return None;
+    }
+    if reclaimable(&identity.container_name) {
+        Some(Eviction::RawContainer(id))
+    } else {
+        None
+    }
 }
 
 fn execute_eviction(action: Eviction) {
@@ -171,7 +251,10 @@ fn execute_eviction(action: Eviction) {
 
 fn clear_host_port() {
     for id in holders_on_host_port() {
-        if let Some(action) = classify_holder(inspect_project_of(&id).as_deref(), id.clone()) {
+        let Some(identity) = inspect_holder(&id) else {
+            continue;
+        };
+        if let Some(action) = classify_holder(&identity, id.clone()) {
             execute_eviction(action);
         }
     }
@@ -230,17 +313,29 @@ async fn compose_stack_comes_up_and_answers_on_the_published_port() {
     );
 }
 
-/// The eviction decision is pure over an ownership label; verify every branch
-/// without invoking docker, and pin that protected infrastructure can never be
-/// classified as downed — a regression here would be a self-inflicted outage.
+/// The eviction decision is pure over the recovered identity; verify every
+/// branch without invoking docker, and pin that protected infrastructure can
+/// never be classified as downed — a regression here would be a self-inflicted
+/// outage (this module's stated intent: 'the live hub ... NEVER touched').
 #[cfg(test)]
 mod classify_tests {
-    use super::{classify_holder, Eviction};
+    use super::{classify_holder, Eviction, HolderIdentity};
+
+    /// Build a holder from raw inspect fields: `owner_project` is
+    /// `.Config.Labels["com.docker.compose.project"]` (empty for unlabelled raw
+    /// containers); `container_name` mirrors docker's `.Name` after our own
+    /// strip of its leading `/`.
+    fn holder(owner_project: &str, container_name: &str) -> HolderIdentity {
+        HolderIdentity {
+            owner_project: owner_project.to_owned(),
+            container_name: container_name.to_owned(),
+        }
+    }
 
     #[test]
     fn reclaimable_agent_preview_is_torn_down_as_a_project() {
         assert_eq!(
-            classify_holder(Some("cox--other-worktree"), "abc".to_owned()),
+            classify_holder(&holder("cox--other-worktree", "ignored"), "abc".to_owned()),
             Some(Eviction::ComposeProject("cox--other-worktree".to_owned()))
         );
     }
@@ -248,7 +343,7 @@ mod classify_tests {
     #[test]
     fn foreign_non_preview_project_is_left_alone() {
         assert_eq!(
-            classify_holder(Some("someone-elses-stack"), "abc".to_owned()),
+            classify_holder(&holder("someone-elses-stack", "ignored"), "abc".to_owned()),
             None
         );
     }
@@ -273,7 +368,7 @@ mod classify_tests {
             "Cox-Infra-Db",
         ] {
             assert_eq!(
-                classify_holder(Some(owner), "abc".to_owned()),
+                classify_holder(&holder(owner, "ignored"), "abc".to_owned()),
                 None,
                 "{owner} must never be evicted"
             );
@@ -281,10 +376,98 @@ mod classify_tests {
     }
 
     #[test]
-    fn raw_container_with_no_label_is_stopped_by_id() {
+    fn reclaimable_raw_preview_container_is_stopped_by_id() {
+        // An unlabelled `docker run --name cox--slot-b-hub -p 8101:… …` left by an
+        // earlier aborted run IS ours to clear.
         assert_eq!(
-            classify_holder(None, "deadbeef".to_owned()),
+            classify_holder(&holder("", "cox--slot-b-hub"), "deadbeef".to_owned()),
             Some(Eviction::RawContainer("deadbeef".to_owned()))
         );
+    }
+
+    #[test]
+    fn anonymous_raw_container_is_left_strictly_alone() {
+        // CXA-B083 regression guard: an unlabelled holder with no recoverable
+        // identity at all must NOT be force-stopped by id. This is exactly what a
+        // bare `docker run -p 8101:<port> <image>` produces once we stop reading a
+        // name where none exists.
+        let anonymous = HolderIdentity {
+            owner_project: String::new(),
+            container_name: String::new(),
+        };
+        assert_eq!(classify_holder(&anonymous, "deadbeef".to_owned()), None);
+    }
+
+    #[test]
+    fn foreign_raw_container_is_not_stopped_by_id() {
+        // The REPRO from CXA-B083 verbatim: `docker run -d -p 8101:80 nginx`
+        // squats :8101 with no compose label and no agent-owned name. It is not
+        // ours — it must survive untouched instead of being stopped by id.
+        for foreign in ["nginx", "my-app", "someone-svc"] {
+            assert_eq!(
+                classify_holder(&holder("", foreign), "abc".to_owned()),
+                None,
+                "{foreign} is not ours and must never be stopped"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_container_named_like_protected_infra_is_not_stopped() {
+        // Even an unlabelled container whose NAME claims our control plane —
+        // e.g. someone ran `docker run --name coxagent-db … -p 8101:` directly —
+        // is protected exactly like its compose counterpart, not stopped by id.
+        for protected in ["coxagent-hub", "coxagent-db", "cox-infra-redis"] {
+            assert_eq!(
+                classify_holder(&holder("", protected), "abc".to_owned()),
+                None,
+                "{protected} must never be stopped even as a raw container"
+            );
+        }
+    }
+}
+
+/// `HolderIdentity::new` is the one place raw inspect output is turned into a
+/// normalized decision input; pin its splitting, trimming and slash-stripping so
+/// silent breakage of that parsing can never resurface as an eviction bug.
+#[cfg(test)]
+mod parse_tests {
+    use super::{HolderIdentity, IDENT_SEP};
+
+    #[test]
+    fn splits_project_and_strips_leading_slash_from_name() {
+        // Mirrors real `docker inspect --format` stdout: label, separator,
+        // then a docker-style `/name` with the trailing newline docker appends.
+        let raw = format!("cox--slot-a-hub{IDENT_SEP}/hub_1\n");
+        let parsed = HolderIdentity::new(&raw);
+        assert!(parsed.is_some(), "both fields present");
+        let identity = parsed.unwrap();
+        assert_eq!(identity.owner_project, "cox--slot-a-hub");
+        assert_eq!(identity.container_name, "hub_1");
+    }
+
+    #[test]
+    fn unlabelled_holder_yields_only_a_name() {
+        let parsed = HolderIdentity::new(&format!("{IDENT_SEP}/nginx\n"));
+        assert!(parsed.is_some(), "name present");
+        let identity = parsed.unwrap();
+        assert!(identity.owner_project.is_empty());
+        assert_eq!(identity.container_name, "nginx");
+    }
+
+    #[test]
+    fn labelled_holder_with_no_recoverable_name_is_still_some() {
+        let parsed =
+            HolderIdentity::new(&format!("someone-elses-stack{IDENT_SEP}\n"));
+        assert!(parsed.is_some(), "label present");
+        let identity = parsed.unwrap();
+        assert_eq!(identity.owner_project, "someone-elses-stack");
+        assert!(identity.container_name.is_empty());
+    }
+
+    #[test]
+    fn anonymous_inspect_output_yields_no_identity() {
+        // Both fields empty → nothing to judge ownership from → declined entirely.
+        assert!(HolderIdentity::new("\n").is_none());
     }
 }
