@@ -117,12 +117,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             // starved design forever on a hybrid board: 16 pre-gate Ready
             // tickets meant the SA never designed the tickets humans were
             // actually waiting to approve.
+            // Count only tickets DEV can actually pull: in the current sprint
+            // scope. Out-of-scope Ready tickets (committed to a future sprint,
+            // parked pre-gate, or simply not committed) must not count as
+            // runway — otherwise a stale out-of-scope ready queue starves the
+            // in-scope tickets the team is actually waiting to ship.
             let runway = state
                 .tickets
                 .iter()
                 .filter(|t| {
-                    t.status() == Status::Ready
-                        || (t.status() == Status::Pending && t.design().technical.is_some())
+                    let in_scope = crate::selection::in_dev_scope(&state, t.id());
+                    in_scope
+                        && (t.status() == Status::Ready
+                            || (t.status() == Status::Pending && t.design().technical.is_some()))
                 })
                 .count();
             if runway >= 6 && !self.config.workflow.human.gate_ready {
@@ -225,16 +232,69 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
         let design = match parse_design(&outcome.stdout) {
             Ok(d) => d,
             Err(first) => {
-                let fixed = crate::use_cases::repair_json(
-                    self.engine.as_ref(),
-                    &outcome.stdout,
-                    "a JSON object with the technical design fields",
-                    &self.work_dir,
-                )
-                .await;
-                let Some(Ok(repaired)) = fixed.as_deref().map(parse_design) else {
+                // Flash-tier models occasionally degenerate on long token-dense
+                // output (word-salad inside the JSON), which `parse_design`
+                // rejects. Instead of giving up on one salvage pass, retry with
+                // feedback and escalate the model tier — the same recipe as
+                // run_dev::self_heal_compile. The parse error plus the failed
+                // raw output are fed back so each retry knows exactly what to
+                // fix; later attempts run a stronger model when a ladder is
+                // configured. Falls back to Corrupt after N attempts so a
+                // genuinely bad call still surfaces as a failure.
+                let mut raw = outcome.stdout.clone();
+                let mut parse_err = first;
+                let mut repaired: Option<DesignOutput> = None;
+                for attempt in 1_u32..=3 {
+                    let req = AgentRequest {
+                        role: Role::Sa,
+                        system_prompt: prompts::system_prompt(prompts::SA),
+                        task_prompt: format!(
+                            "The design below for {id} did not parse as the required JSON \
+                             object (a technical design with {{\"approach\":\"...\", \
+                             \"alternatives\":\"...\", \"files\":[...], \"api_contract\":\"...\", \
+                             \"data_changes\":\"...\", \"test_plan\":\"...\"}}). \
+                             Parse error: {parse_err}\n\nRepair it into VALID design JSON — \
+                             preserve the content, fix the structure only. Output ONLY the JSON \
+                             object, no prose, no code fences.\n\nFAILED OUTPUT:\n{}",
+                            &raw[..raw.len().min(8000)]
+                        ),
+                        work_dir: self.work_dir.clone(),
+                        timeout: Duration::from_secs(120),
+                        escalation_level: u8::try_from(attempt.saturating_sub(1)).unwrap_or(3),
+                        label: Some(id.to_string()),
+                    };
+                    match self.engine.run(req).await {
+                        Ok(o) if o.succeeded() => match parse_design(&o.stdout) {
+                            Ok(d) => {
+                                repaired = Some(d);
+                                break;
+                            }
+                            Err(e) => {
+                                parse_err = e;
+                                raw = o.stdout;
+                                tracing::warn!(
+                                    "SA design repair attempt {attempt} for {id} still unparseable: {parse_err}"
+                                );
+                            }
+                        },
+                        Ok(o) => {
+                            tracing::warn!(
+                                "SA design repair attempt {attempt} for {id} failed: {}",
+                                o.stderr.chars().take(200).collect::<String>()
+                            );
+                            break;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "SA design repair attempt {attempt} for {id} error: {e}"
+                            );
+                            break;
+                        }
+                    }
+                }
+                let Some(repaired) = repaired else {
                     self.store.release_stage(&id, "sa", &worker).await.ok();
-                    return Err(PortError::Corrupt(format!("SA output: {first}")).into());
+                    return Err(PortError::Corrupt(format!("SA output: {parse_err}")).into());
                 };
                 repaired
             }
@@ -503,7 +563,7 @@ mod tests {
     use crate::ports::outbound::{AgentOutcome, SandboxStatus};
     use crate::state::ProjectState;
     use crate::use_cases::{AddTicketInput, AddTicketUseCase};
-    use coxagent_domain::{Complexity, Priority, TicketType};
+    use coxagent_domain::{Complexity, Priority, Ticket, TicketType};
     use std::sync::Mutex;
 
     #[derive(Default)]
@@ -598,5 +658,73 @@ mod tests {
     async fn no_pending_feature_returns_none() {
         let store = Arc::new(MemStore::default());
         assert!(uc(store, "{}").execute().await.expect("run").is_none());
+    }
+
+    fn ready_feature(id: &str) -> Ticket {
+        let mut t = Ticket::new(
+            TicketId::new(id).expect("id"),
+            TicketType::Feature,
+            "ready",
+            "",
+            Priority::High,
+            Complexity::Small,
+            false,
+        )
+        .expect("ticket");
+        t.set_technical_design(Role::Sa, TechnicalDesign::default())
+            .expect("design");
+        t.transition_to(Role::Sa, Status::Ready).expect("ready");
+        t
+    }
+
+    #[tokio::test]
+    async fn in_scope_pending_is_designed_despite_out_of_scope_ready_runway() {
+        // Regression: out-of-scope Ready tickets must NOT count toward the
+        // design-WIP cap. Six out-of-scope Ready tickets previously starved SA
+        // from designing the in-scope ticket the sprint is actually waiting to
+        // ship (run: sprint stuck ~180 empty cycles because DEV had no in-scope
+        // ready work and SA would not design it).
+        let in_scope = Ticket::new(
+            TicketId::new("CXA-F001").expect("id"),
+            TicketType::Feature,
+            "in-scope",
+            "",
+            Priority::High,
+            Complexity::Small,
+            false,
+        )
+        .expect("ticket");
+        let mut tickets = vec![in_scope];
+        for i in 100..107 {
+            tickets.push(ready_feature(&format!("CXA-F{i}")));
+        }
+        let state = ProjectState {
+            tickets,
+            sprint: Some(crate::state::Sprint {
+                number: 1,
+                goal: String::new(),
+                started_cycle: 0,
+                length_cycles: 10,
+                committed: vec![TicketId::new("CXA-F001").expect("id")],
+                started_at: String::new(),
+            }),
+            ..ProjectState::default()
+        };
+        let store = Arc::new(MemStore {
+            state: Mutex::new(state),
+        });
+        let out = r#"{"approach":"do it","files":["a.rs"],"api_contract":"","data_changes":"","test_plan":"t","ux":null}"#;
+        let id = uc(Arc::clone(&store), out).execute().await.expect("run");
+        assert_eq!(
+            id,
+            Some(TicketId::new("CXA-F001").expect("id")),
+            "SA must design the in-scope ticket despite the out-of-scope ready runway"
+        );
+        let state = store.load().await.expect("load");
+        let designed = state
+            .ticket(&TicketId::new("CXA-F001").expect("id"))
+            .expect("ticket");
+        assert_eq!(designed.status(), Status::Ready);
+        assert!(designed.design().technical.is_some());
     }
 }

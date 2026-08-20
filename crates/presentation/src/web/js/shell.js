@@ -1230,9 +1230,15 @@ async function renderTeamsOnline(){
       const acct=(w.worker||'').split('@')[0].toLowerCase();
       const mine=!ME||(ME.role==="admin")||((ME.username||'').toLowerCase()===acct);
       const stopBtn=mine?`<button class="tso-stop" title="Stop this operator (idles it — saves its tokens)" onclick="stopOperator('${esc(w.worker)}')"><i class="ti ti-player-stop"></i></button>`:'';
+      // Version skew: the hub self-upgrades but remote workers don't — a
+      // worker on an older build runs OLD orchestration rules. Flag it.
+      const hubV=(window.STATE&&STATE.current_version)?String(STATE.current_version):"";
+      const skew=w.version&&hubV&&w.version!==hubV
+        ?`<span class="tso-skew" title="worker runs v${esc(w.version)}, hub is v${esc(hubV)} — update this machine's coxagent">⚠ v${esc(w.version)}</span>`:'';
       return `<div class="tso"><span class="tso-dot"></span><span class="tso-id">${esc(w.worker)}</span>`
         +`<span class="tso-role ${busy?'lead':''}">${esc(role.replace(/_/g,'-').toUpperCase())}</span>`
         +(w.ticket?`<span class="tso-tk">${esc(w.ticket)}</span>`:'')
+        +skew
         +stopBtn
         +`</div>`;
     }).join("")+`</div></div>`;
@@ -1266,14 +1272,13 @@ async function openAgent(role,worker){
     :'<div class="empty">no recorded actions yet</div>';
   const body=document.getElementById("agent-transcript");
   body.innerHTML='<div class="wl-empty"><i class="ti ti-loader-2"></i> loading…</div>';
-  AGENT_LOG_LAST=null;   // force a fresh render for this role/operator
+  AGENT_LOG_SIGS=[];   // force a fresh render for this role/operator
   document.getElementById("ov-agent").classList.add("open");
   AGENT_LOG_ROLE=role.toLowerCase().replace(/-/g,"_");  // serde key: DEV-FEATURE→dev_feature
-  await pollAgentLog();               // first fetch now
-  clearInterval(AGENT_LOG_TIMER);
-  AGENT_LOG_TIMER=setInterval(pollAgentLog,1500);  // then live every 1.5s
+  restartAgentLog();
 }
-let AGENT_LOG_TIMER=null, AGENT_LOG_ROLE=null, AGENT_LOG_WORKER="", AGENT_LOG_LAST=null;
+let AGENT_LOG_ES=null, AGENT_LOG_ROLE=null, AGENT_LOG_WORKER="", AGENT_LOG_BUF="", AGENT_LOG_LIVE=false, AGENT_LOG_DONE=false, AGENT_LOG_INIT=false, AGENT_LOG_SIGS=[];
+let AGENT_LOG_RETRIES=0, AGENT_LOG_RETRY_TIMER=null;
 // Icon + colour for a tool name, so every engine's tool calls read at a glance.
 // A tool call, said in words: "Read run_chat_reply.rs:400-500" instead of a
 // truncated JSON blob. Long absolute paths collapse to the part a reader
@@ -1394,8 +1399,26 @@ function parseWorklog(raw){
 // wall of braces; parse it into a verdict badge + the summary as prose.
 function wlVerdictCard(text){
   const t=String(text||"").trim();
-  if(!t.startsWith("{")||!/"(decision|verdict)"/.test(t))return null;
+  if(!t.startsWith("{"))return null;
   let o;try{o=JSON.parse(t);}catch(e){return null;}
+  if(!o||typeof o!=="object")return null;
+  // A solution-architect plan object: {"approach":…,"files":[…],"api_contract":…,…}.
+  // Rendered verbatim it is a wall of braces — show the approach as prose and
+  // tuck the rest behind a toggle so the live log reads like a plan, not JSON.
+  if(typeof o.approach==="string" && o.approach.trim()){
+    const files=Array.isArray(o.files)?o.files.filter(Boolean):[];
+    const rows=[];
+    for(const key of ["api_contract","data_changes","test_plan"]){
+      const v=o[key];
+      if(typeof v==="string"&&v.trim()) rows.push([key.replace(/_/g," "),v.trim()]);
+    }
+    const chips=files.length?`<div class="wl-verdict-files">${files.map(f=>`<span class="wl-file">${esc(f)}</span>`).join("")}</div>`:"";
+    const details=rows.length?`<details class="wl-verdict-detail"><summary>plan details</summary>${rows.map(([k,v])=>`<div class="wl-verdict-row"><b>${esc(k)}</b> ${wlFmt(v)}</div>`).join("")}</details>`:"";
+    return `<div class="wl-item wl-msg"><span class="wl-ic"><i class="ti ti-gavel"></i></span>
+      <div class="wl-body"><span class="wl-verdict" style="background:color-mix(in srgb,var(--accent2) 14%,transparent);color:var(--accent2)">Approach</span>
+      <div class="wl-verdict-sum">${wlFmt(o.approach)}</div>${chips}${details}</div></div>`;
+  }
+  if(!/"(decision|verdict)"/.test(t))return null;
   const d=String(o.decision||o.verdict||"").toLowerCase();
   if(!d)return null;
   const summary=o.summary||o.reason||o.rationale||"";
@@ -1407,55 +1430,158 @@ function wlVerdictCard(text){
     <div class="wl-body"><span class="wl-verdict" style="background:color-mix(in srgb,var(${col}) 15%,transparent);color:var(${col})">${esc(label)}</span>
     ${summary?`<div class="wl-verdict-sum">${wlFmt(String(summary))}</div>`:""}</div></div>`;
 }
-function renderWorklog(items,live){
-  const parts=items.map(it=>{
-    if(it.k==="meta") return `<div class="wl-item wl-meta"><i class="ti ti-player-play"></i> ${esc(it.text)}</div>`;
-    if(it.k==="end")  return `<div class="wl-item wl-end"><span><i class="ti ti-circle-check"></i> run finished</span></div>`;
-    if(it.k==="tool"){ const m=wlToolMeta(it.name);
-      // Harness-control calls read like errors to a person ("ScheduleWakeup
-      // {stop:true}"?!) — annotate them in plain language instead.
-      const note=wlHarnessNote(it.name,it.args);
-      if(note) return `<div class="wl-item wl-tool"><span class="wl-chip"><i class="ti ti-clock-pause wl-tic" style="color:var(--muted)"></i><span class="wl-tname">${esc(note)}</span></span></div>`;
-      const said=wlSay(it.name,it.args);
-      return `<div class="wl-item wl-tool"><span class="wl-chip"><i class="ti ${m.ic} wl-tic" style="color:var(${m.col})"></i><span class="wl-tname">${esc(said.verb)}</span>${said.detail?`<span class="wl-targs">${esc(said.detail)}</span>`:""}</span></div>`; }
-    if(it.k==="result"){
-      const body=(it.body||[]).filter(x=>x!=null);
-      const head=`<i class="ti ti-corner-down-right"></i> ${esc(it.info)}`;
-      if(!body.length) return `<div class="wl-item wl-result"><span class="wl-rin">${head}</span></div>`;
-      // The real output, revealed on click — a summary you can open, not a
-      // dead-end count.
-      return `<div class="wl-item wl-result"><details class="wl-out"><summary class="wl-rin">${head} <span class="wl-more">show output</span></summary><pre class="wl-pre">${esc(body.join("\n"))}</pre></details></div>`;
-    }
-    const card=wlVerdictCard(it.text);
-    if(card) return card;
-    return `<div class="wl-item wl-msg"><span class="wl-ic"><i class="ti ti-sparkles"></i></span><div class="wl-body">${wlFmt(it.text)}</div></div>`;
-  });
-  if(live) parts.push(`<div class="wl-typing"><span class="wl-ic"><i class="ti ti-sparkles"></i></span><span class="dots"><i></i><i></i><i></i></span></div>`);
-  return parts.join("");
+// One worklog item → its HTML. Extracted from renderWorklog so the live-log
+// renderer can re-render a single changing item without touching its stable
+// siblings (which keeps the user's scroll position and stops the full-render
+// "refresh" flicker on every SSE push).
+function wlItemHtml(it){
+  if(it.k==="meta") return `<i class="ti ti-player-play"></i> ${esc(it.text)}`;
+  if(it.k==="end")  return `<span><i class="ti ti-circle-check"></i> run finished</span>`;
+  if(it.k==="tool"){ const m=wlToolMeta(it.name);
+    // Harness-control calls read like errors to a person ("ScheduleWakeup
+    // {stop:true}"?!) — annotate them in plain language instead.
+    const note=wlHarnessNote(it.name,it.args);
+    if(note) return `<span class="wl-chip"><i class="ti ti-clock-pause wl-tic" style="color:var(--muted)"></i><span class="wl-tname">${esc(note)}</span></span>`;
+    const said=wlSay(it.name,it.args);
+    return `<span class="wl-chip"><i class="ti ${m.ic} wl-tic" style="color:var(${m.col})"></i><span class="wl-tname">${esc(said.verb)}</span>${said.detail?`<span class="wl-targs">${esc(said.detail)}</span>`:""}</span>`; }
+  if(it.k==="result"){
+    const body=(it.body||[]).filter(x=>x!=null);
+    const head=`<i class="ti ti-corner-down-right"></i> ${esc(it.info)}`;
+    if(!body.length) return `<span class="wl-rin">${head}</span>`;
+    // The real output, revealed on click — a summary you can open, not a
+    // dead-end count.
+    return `<details class="wl-out"><summary class="wl-rin">${head} <span class="wl-more">show output</span></summary><pre class="wl-pre">${esc(body.join("\n"))}</pre></details>`;
+  }
+  const card=wlVerdictCard(it.text);
+  if(card) return card;
+  return `<span class="wl-ic"><i class="ti ti-sparkles"></i></span><div class="wl-body">${wlFmt(it.text)}</div>`;
 }
-async function pollAgentLog(){
-  if(!AGENT_LOG_ROLE)return;
+// A content signature for one parsed item — two renders with the same signature
+// produce identical DOM, so the live renderer can leave them untouched.
+function wlItemSig(it){
+  if(!it) return "";
+  return it.k+"|"+it.name+"|"+it.info+"|"+it.args+"|"+(it.text||"")+"|"+(it.body||[]).join("\n");
+}
+// Real-time live log over SSE: the hub tails the engine's local live file and
+// pushes new bytes down as `init` + `line` events (one global api() scope).
+// isRetry=true on an auto-reconnect attempt: keeps the backoff counter and
+// buffered text instead of wiping the view back to "loading…" on every retry.
+function restartAgentLog(isRetry){
+  if(AGENT_LOG_RETRY_TIMER){ clearTimeout(AGENT_LOG_RETRY_TIMER); AGENT_LOG_RETRY_TIMER=null; }
+  closeAgentLog();
+  if(isRetry){
+    // Attempt is in flight — leave "RECONNECTING…" showing instead of
+    // hiding it here, or a slow/hanging connect would read as recovered
+    // for however long it takes to actually fail or succeed.
+    showAgentLogError(true);
+  } else {
+    AGENT_LOG_BUF=""; AGENT_LOG_LIVE=false; AGENT_LOG_DONE=false; AGENT_LOG_INIT=false; AGENT_LOG_SIGS=[];
+    AGENT_LOG_RETRIES=0;
+    showAgentLogError(false);
+  }
+  const url=api("/agent-log/stream?role="+encodeURIComponent(AGENT_LOG_ROLE)+(AGENT_LOG_WORKER?"&worker="+encodeURIComponent(AGENT_LOG_WORKER):""));
+  const es=new EventSource(url);
+  AGENT_LOG_ES=es;
+  es.addEventListener("init",e=>{
+    AGENT_LOG_RETRIES=0;
+    showAgentLogError(false);
+    try{const d=JSON.parse(e.data); if(d)AGENT_LOG_LIVE=!!d.live; AGENT_LOG_BUF="";}catch(_){}
+    renderAgentLog(true);
+  });
+  es.addEventListener("line",e=>{
+    try{const d=JSON.parse(e.data);
+      if(d&&d.text){
+        AGENT_LOG_BUF+=d.text;
+        // A complete run pings "end" — stop the typing dots.
+        if(/\b—\s*run finished/.test(d.text))AGENT_LOG_DONE=true;
+      }}catch(_){}
+    scheduleAgentLog();
+  });
+  // Endpoint gone (404 on an old server) or the connection dropped mid-stream —
+  // show it immediately, then retry with capped exponential backoff. A native
+  // EventSource auto-retries too, but silently and on a fixed interval; closing
+  // it ourselves and driving the retry lets the UI actually say what's wrong.
+  es.onerror=()=>{
+    try{es.close()}catch(_){}
+    AGENT_LOG_ES=null;
+    showAgentLogError(true);
+    const delay=Math.min(30000, 1000*(2**AGENT_LOG_RETRIES));
+    AGENT_LOG_RETRIES++;
+    AGENT_LOG_RETRY_TIMER=setTimeout(()=>{ if(AGENT_LOG_ROLE) restartAgentLog(true); }, delay);
+  };
+}
+function showAgentLogError(on){
+  const b=document.getElementById("agent-err-badge");
+  if(!b)return;
+  if(on){ b.textContent=AGENT_LOG_RETRIES>0?"● RECONNECTING…":"● STREAM LOST"; b.style.display="inline-block"; }
+  else { b.style.display="none"; }
+}
+function renderAgentLog(force){
   const body=document.getElementById("agent-transcript");
   const badge=document.getElementById("agent-live-badge");
-  try{
-    const url="/agent-log?role="+encodeURIComponent(AGENT_LOG_ROLE)+(AGENT_LOG_WORKER?"&worker="+encodeURIComponent(AGENT_LOG_WORKER):"");
-    const d=await(await fetch(api(url))).json();
-    if(badge)badge.style.display=d.live?"inline-block":"none";
-    const raw=(d.log||"").trim();
-    // Skip the DOM churn (and preserve the user's scroll) when nothing changed.
-    const sig=raw+"|"+(d.live?1:0);
-    if(sig===AGENT_LOG_LAST)return;
-    AGENT_LOG_LAST=sig;
-    const atBottom=body.scrollHeight-body.scrollTop-body.clientHeight<60;
-    if(!raw){
-      body.innerHTML='<div class="wl-empty"><i class="ti ti-moon-stars"></i> this agent hasn\'t run yet</div>';
-      return;
-    }
-    body.innerHTML=renderWorklog(parseWorklog(raw),d.live);
-    if(atBottom)body.scrollTop=body.scrollHeight;   // follow the tail
-  }catch(e){}
+  if(badge)badge.style.display=AGENT_LOG_LIVE?"inline-block":"none";
+  const items=parseWorklog(AGENT_LOG_BUF);
+  const atBottom=body.scrollHeight-body.scrollTop-body.clientHeight<40;
+  if(items.length===0){
+    // Keep any "hasn't run yet" placeholder unless this is a fresh open.
+    if(!AGENT_LOG_INIT){ body.innerHTML='<div class="wl-empty"><i class="ti ti-moon-stars"></i> this agent hasn\'t run yet</div>'; }
+    AGENT_LOG_INIT=AGENT_LOG_INIT||true; AGENT_LOG_SIGS=[]; updateTyping(body);
+    return;
+  }
+  AGENT_LOG_INIT=true;
+  // Reconcile the parsed items against the existing children: only the item
+  // whose signature changed (the still-being-written tail) gets rebuilt, so
+  // stable items above keep their DOM nodes and the user's scroll is preserved.
+  let touched=false;
+  for(let i=0;i<items.length;i++){
+    const sig=wlItemSig(items[i]);
+    if(AGENT_LOG_SIGS[i]===sig) continue;
+    const nd=document.createElement("div");
+    nd.className="wl-item wl-"+items[i].k;
+    nd.innerHTML=wlItemHtml(items[i]);
+    if(body.children[i]) body.replaceChild(nd, body.children[i]);
+    else body.appendChild(nd);
+    AGENT_LOG_SIGS[i]=sig;
+    touched=true;
+  }
+  // File rotated/truncated → drop children that no longer parse.
+  while(body.children.length>items.length) body.removeChild(body.lastChild);
+  AGENT_LOG_SIGS.length=items.length;
+  updateTyping(body);
+  // Only auto-scroll when the user is already pinned to the bottom.
+  if(touched && (force||atBottom)) body.scrollTop=body.scrollHeight;
 }
-function closeAgent(){clearInterval(AGENT_LOG_TIMER);AGENT_LOG_TIMER=null;AGENT_LOG_ROLE=null;AGENT_LOG_WORKER="";close_('ov-agent');}
+function updateTyping(body){
+  const typing=body.querySelector(":scope > .wl-typing");
+  const want=AGENT_LOG_LIVE&&!AGENT_LOG_DONE;
+  if(want&&!typing){
+    const n=document.createElement("div");
+    n.className="wl-typing";
+    n.innerHTML='<span class="wl-ic"><i class="ti ti-sparkles"></i></span><span class="dots"><i></i><i></i><i></i></span>';
+    body.appendChild(n);
+  } else if(!want&&typing){ typing.remove(); }
+}
+// Coalesce many rapid SSE pushes (the tailer can fire several per second) into
+// at most one DOM render per animation frame — that's what kills the "struggles,
+// keeps refreshing" feeling instead of re-rendering on every tiny chunk.
+let AGENT_LOG_RAF=0;
+function scheduleAgentLog(){
+  if(AGENT_LOG_RAF) return;
+  AGENT_LOG_RAF=requestAnimationFrame(()=>{ AGENT_LOG_RAF=0; renderAgentLog(false); });
+}
+function closeAgentLog(){
+  if(AGENT_LOG_RAF){ cancelAnimationFrame(AGENT_LOG_RAF); AGENT_LOG_RAF=0; }
+  if(AGENT_LOG_ES){try{AGENT_LOG_ES.close()}catch(_){} AGENT_LOG_ES=null;}
+}
+// Fully stop the stream (modal close): unlike restartAgentLog's internal
+// closeAgentLog call, this also cancels any pending reconnect so a closed
+// modal doesn't keep retrying in the background.
+function stopAgentLog(){
+  if(AGENT_LOG_RETRY_TIMER){ clearTimeout(AGENT_LOG_RETRY_TIMER); AGENT_LOG_RETRY_TIMER=null; }
+  closeAgentLog();
+  showAgentLogError(false);
+}
+function closeAgent(){stopAgentLog();AGENT_LOG_ROLE=null;AGENT_LOG_WORKER="";close_('ov-agent');}
 async function openTranscript(enc,name){
   document.getElementById("tr-title").textContent=name;
   document.getElementById("tr-body").textContent="loading…";
