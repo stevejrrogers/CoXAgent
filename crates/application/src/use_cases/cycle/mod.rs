@@ -1209,6 +1209,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
         self.report_idle();
 
+        // A slot worker that produced nothing this cycle is idle. Reclaim the
+        // disk its regenerable build cache occupies — a busy multi-slot team
+        // otherwise leaks tens of GB per worktree with no path back (slot
+        // worktrees are materialize-or-reuse and never removed, so
+        // `worktree_remove`'s cache purge never fires for them). Only the
+        // non-leader slot workers do this; the leader's checkout is shared and
+        // safe to keep warm, and the purge is best-effort anyway.
+        if !leader && !report.did_work() {
+            self.maybe_purge_idle_slot_target();
+        }
+
         report.over_budget = self.record_activity(&report, leader).await;
         if report.over_budget {
             self.notify(
@@ -1269,6 +1280,40 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     ) -> Self {
         self.janitor = janitor;
         self
+    }
+
+    /// Evict this slot worker's regenerable build cache once it went idle.
+    ///
+    /// Slot worktrees (`cxa-<id>-slot-<n>-*`) are materialize-or-reuse and
+    /// live for the runner's lifetime, so the cache purge inside
+    /// `worktree_remove` (which only fires for transient worktrees) never
+    /// reaches them — an idle slot's `target/` would regrow to tens of GB and
+    /// stay forever. When this cycle produced no work for this slot, its cache
+    /// has no owner running right now, so it is safe to drop; the cost is just
+    /// a cold rebuild when the slot next claims a ticket. Best-effort and
+    /// never fatal.
+    fn maybe_purge_idle_slot_target(&self) {
+        // Guard: only ever purge a slot worker's own tree. The leader's
+        // checkout and the feedback tree are shared/kept warm and must not be
+        // evicted. The purge path goes through the janitor port (never a
+        // direct `std::fs` in a use case) and is scoped to exactly
+        // `<work_dir>/target`; nothing else is touched.
+        if !self.is_slot_worktree() {
+            return;
+        }
+        if let Some(janitor) = &self.janitor {
+            janitor.purge_target_cache(&self.work_dir);
+        }
+    }
+
+    /// Whether `work_dir` belongs to a concurrency slot worker
+    /// (`cxa-<id>-slot-<n>-<hash>`) rather than the leader's shared checkout
+    /// or the feedback tree.
+    fn is_slot_worktree(&self) -> bool {
+        self.work_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.contains("-slot-"))
     }
 
     /// Drain the per-phase wall-clock totals (closing any open phase) — called
