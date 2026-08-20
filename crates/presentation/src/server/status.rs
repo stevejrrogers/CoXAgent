@@ -78,9 +78,22 @@ pub(super) fn lite_state_value(state: &coxagent_application::ProjectState) -> se
     // reach members exclusively via the WebSocket / REST list, both of which
     // enforce membership.
     if let Some(chat) = v.get_mut("chat").and_then(serde_json::Value::as_array_mut) {
+        // All four BUILT-IN channels are public by construction (`#general`
+        // for people, `#agents`/`#approvals`/`#incidents` for the machine's
+        // announcements). Filtering the snapshot down to `#general` alone made
+        // the SM's coordination invisible — the dashboard looked like a team
+        // that never talks. Only user-created channels (which carry member
+        // lists) stay off the broadcast.
+        const PUBLIC: [&str; 4] = [
+            coxagent_application::GENERAL_CHANNEL,
+            coxagent_application::state::AGENTS_CHANNEL,
+            coxagent_application::state::APPROVALS_CHANNEL,
+            coxagent_application::state::INCIDENTS_CHANNEL,
+        ];
         chat.retain(|m| {
-            m.get("channel").and_then(serde_json::Value::as_str)
-                == Some(coxagent_application::GENERAL_CHANNEL)
+            m.get("channel")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|c| PUBLIC.contains(&c))
         });
     }
     v
@@ -108,6 +121,55 @@ pub(super) async fn metrics_ep(
     };
     match p.store.load().await {
         Ok(state) => Json(metrics::compute(&state)).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Cycle-performance health overlay for the dashboard Overview panel (CXA-F018).
+/// Same auth surface as `/metrics`: project membership via `auth_mw`.
+pub(super) async fn metrics_summary_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    match p.store.load().await {
+        Ok(state) => {
+            let today = now_rfc3339();
+            let day = today.get(..10).unwrap_or("").to_owned();
+            Json(coxagent_application::metrics_health::compute_cycle_perf(
+                &state, &day,
+            ))
+            .into_response()
+        }
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Day-by-day time-series for line charts (AC3). `?days=N` bounds the window;
+/// defaults to 14 when absent or unparsable.
+pub(super) async fn metrics_trends_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let days = q
+        .get("days")
+        .and_then(|d| d.parse::<usize>().ok())
+        .unwrap_or(14);
+    match p.store.load().await {
+        Ok(state) => {
+            let today = now_rfc3339();
+            let day = today.get(..10).unwrap_or("").to_owned();
+            Json(coxagent_application::metrics_health::compute_trends(
+                &state, days, &day,
+            ))
+            .into_response()
+        }
         Err(e) => internal_error(&e.to_string()),
     }
 }

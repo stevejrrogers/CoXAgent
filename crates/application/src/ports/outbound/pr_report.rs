@@ -62,6 +62,10 @@ pub trait PrReporterPort: Send + Sync {
     /// The runner rendered a review verdict on a PR — persist it.
     async fn report_review(&self, number: u64, decision: &str, summary: &str, head_sha: &str);
 
+    /// The runner approved a PR but held it for a person (`needs_human_eyes`)
+    /// — persist the reason so the hub can surface it in the Inbox.
+    async fn report_hold(&self, number: u64, reason: &str);
+
     /// Fetch the reviews currently persisted, so the runner can avoid
     /// re-reviewing a head it already marked `request_changes`.
     async fn fetch_reviews(&self) -> Vec<PrReview>;
@@ -75,6 +79,7 @@ pub struct NullPrReporter;
 impl PrReporterPort for NullPrReporter {
     async fn report_pr(&self, _pr: PrOpen) {}
     async fn report_review(&self, _number: u64, _decision: &str, _summary: &str, _head_sha: &str) {}
+    async fn report_hold(&self, _number: u64, _reason: &str) {}
     async fn fetch_reviews(&self) -> Vec<PrReview> {
         Vec::new()
     }

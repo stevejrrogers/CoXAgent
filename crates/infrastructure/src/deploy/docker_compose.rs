@@ -9,6 +9,10 @@ use std::path::Path;
 use std::time::Duration;
 use tokio::process::Command;
 
+// Deploy may tear down only what [`reclaimable_compose_project`] allows — see
+// that shared policy for why port-eviction must never touch the live hub.
+use super::reclaimable::reclaimable_compose_project;
+
 const COMPOSE_FILES: &[&str] = &[
     "docker-compose.yml",
     "docker-compose.yaml",
@@ -21,6 +25,11 @@ const DEPLOY_TIMEOUT: Duration = Duration::from_secs(900);
 /// `${VAR:?}` interpolation (COX-C012): the root docker-compose.yml needs both
 /// or `up` dies before starting anything — the CXA-B010 symptom.
 const REQUIRED_SECRET_KEYS: &[&str] = &["PG_PASSWORD", "COXAGENT_ADMIN_PASSWORD"];
+
+/// Prefix of the ownership-stamp first line [`write_stored_secrets_owned`] writes
+/// into a store file (CXA-B043), which [`read_owner_stamp`] reads back so adoption
+/// can refuse credentials authored by a differently-named project sharing this dir.
+const OWNER_STAMP_PREFIX: &str = "# owner=";
 
 /// A cryptographically-random 32-char fallback secret. Used ONLY when an
 /// operator configured no value anywhere — never a baked constant, so no reader
@@ -106,13 +115,22 @@ fn resolve_deploy_secrets_in(
         &dot_env,
     );
     if missing.is_empty() {
+        // CXA-B040: retiring a SUPERSEDED path-keyed store must not be gated behind "a fallback was
+        // needed". When an operator now supplies EVERY required secret externally we short-circuit above,
+        // so without this explicit call an obsolete path-keyed duplicate (from CXA-B031-era software)
+        // holding live credentials would linger unreferenced forever — never adopted into the canonical
+        // store and never removed ([CXA-B044] ordering still holds: deletion is gated on durable persist).
+        retire_superseded_path_keyed_store(secret_root, work_dir);
         return Vec::new();
     }
     // CXA-B036 migration: an already-deployed pre-CXA-B032 app stored its fallback secrets under a
     // path-derived filename; adopt them here so the first post-upgrade cycle reuses exactly what
     // initialised pgdata instead of regenerating and resurrecting DB/admin auth failure.
     let mut stored = read_stored_secrets(&store_file(secret_root, work_dir));
-    adopt_legacy_cxb031_secrets(secret_root, work_dir, &mut stored);
+    // CXA-B044: adoption only REPORTS whether it converged; it never deletes (deleting inside adoption
+    // would race persistence and could lose both stores). Expiry is deferred until we have durably
+    // persisted the very values convergence depends on, below.
+    let legacy_converged = adopt_legacy_cxb031_secrets(secret_root, work_dir, &mut stored);
     let mut resolved: Vec<(String, String)> = Vec::with_capacity(missing.len());
     for key in missing {
         let value = match stored.get(key) {
@@ -122,7 +140,18 @@ fn resolve_deploy_secrets_in(
         stored.insert(key.to_owned(), value.clone());
         resolved.push((key.to_owned(), value));
     }
-    write_stored_secrets(&store_file(secret_root, work_dir), &stored);
+    // Only a durable commit may authorise removal of the legacy source ([CXA-B044]): if this write
+    // fails (best-effort), F(old)[`cxb031_store_file`] stays in place so the next pass re-adopts and
+    // retries — never both stores gone at once.
+    let owner = compose_project_name(work_dir);
+    if write_stored_secrets_owned(
+        &store_file(secret_root, work_dir),
+        Some(owner.as_str()),
+        &stored,
+    ) && legacy_converged
+    {
+        expire_converged_legacy_store(&cxb031_store_file(secret_root, work_dir));
+    }
     resolved
 }
 
@@ -230,34 +259,167 @@ fn cxb031_store_file(
 
 /// Adopt secrets that CXA-B031-era code persisted under its OLD path-derived key.
 ///
-/// This is the CXA-B036 migration bridge. CXA-B032 changed [`store_file`] from hashing the
-/// canonicalised absolute path (B031) to hashing the compose project name so secret stability tracks
-/// docker's named pgdata volume (`<project>_db`) instead of disk location. The switch left any
-/// ALREADY-DEPLOYED unconfigured app orphaned on its first post-upgrade cycle: PG_PASSWORD sat at
-/// B031's path-derived filename while resolution read only B032's name-derived one, found nothing,
+/// This is the CXA-B036/CXA-B039 migration bridge. CXA-B032 changed [`store_file`] from hashing
+/// the canonicalised absolute path (B031) to hashing the compose project name so secret stability
+/// tracks docker's named pgdata volume (`<project>_db`) instead of disk location. The switch left
+/// any ALREADY-DEPLOYED unconfigured app orphaned on its first post-upgrade cycle: PG_PASSWORD sat
+/// at B031's path-derived filename while resolution read only B032's name-derived one, found nothing,
 /// generated a fresh value — and Postgres kept talking to a pgdata volume initialised with B031's
-/// value, resurrecting DB/admin auth failure on exactly the deployments this ticket exists to
+/// value, resurrecting DB/admin auth failure on exactly the deployments these tickets exist to
 /// stabilise.
 ///
-/// When requested keys are missing at their current (name-derived) location but a legacy store,
-/// computed for THIS SAME work dir under B031's scheme, holds them:
+/// CXA-B036 adopted legacy values ONLY while nothing existed yet at the current (name-derived)
+/// location; if ANY intervening deploy cycle between B032 and B036 had already minted fresh random
+/// values into F(new) (PG_PASSWORD P != V), it bailed out early and never consulted F(old) — so V,
+/// which alone matches initialized pgdata, was lost permanently even though F(old)==V still sat on
+/// disk. That is CXA-B039: adoption must recover V regardless of whether F(new) is empty or holds a
+/// divergent pre-fix value.
 ///
-/// * both derivations are deterministic functions of `work_dir`, so resolving an in-place upgrade
-///   always finds precisely which file B031 wrote for it;
-/// * relocation semantics are preserved — adoption is keyed by an UNRELOCATED checkout's own path,
-///   so it cannot drag a value across hosts; a genuinely relocated app simply falls through fresh.
+/// The rule here is PER-KEY preference for this SAME work dir's legacy store:
+///
+/// * both derivations are deterministic functions of `work_dir`, so an in-place upgrade always finds
+///   precisely which file B031 wrote for it;
+/// * presence of F(old) at TODAY'S canonicalised path is itself proof this checkout was NOT relocated —
+///   adoption therefore cannot drag a value across hosts; a genuinely relocated app simply falls
+///   through fresh, exactly as before;
+/// * when F(new) already holds a DIFFERENT value for the same required key we PREFER V, because V is
+///   the historical anchor that initialised pgdata — P only ever appeared via an intervening buggy-era
+///   cycle regenerating against initialized data;
+/// * this converges in ONE pass and cannot rotate forever: [`resolve_deploy_secrets_in`] writes every
+///   adopted key straight back into F(new) (its modern home), so immediately after the first fixed run
+///   both files hold equal values and stay equal thereafter;
+///
+/// ## CXA-B044 ordering constraint (read before touching expiry)
+///
+/// Removal of F(old)[`cxb031_store_file`] must NEVER happen inside this function. Adoption only mutates an
+/// in-memory HashMap; nothing is durably written to modern [`store_file`] until [`resolve_deploy_secrets_in`]
+/// calls [`write_stored_secrets`] well AFTER this returns. If convergence deletion fired here (as pre-CXA-B044
+/// it did), a best-effort persist failure or a crash between adoption and persist would lose BOTH stores at
+/// once — recreating exactly the auth-failure regression class ([CXA-B036]/[CXA-B039]) this chain exists to fix.
+///
+/// So instead adoption RECORDS whether convergence was reached and returns that verdict; only after its caller has,
+/// downstream, successfully persisted [`write_stored_secrets`] does [`expire_converged_legacy_store`] delete anything.
 fn adopt_legacy_cxb031_secrets(
     secret_root: &std::path::Path,
     work_dir: &std::path::Path,
     stored: &mut std::collections::HashMap<String, String>,
-) {
-    // Only merge legacy values in when nothing is stored yet — never override an existing value.
-    if !stored.is_empty() {
+) -> bool {
+    let legacy_path = cxb031_store_file(secret_root, work_dir);
+    let legacy = read_stored_secrets(&legacy_path);
+    if legacy.is_empty() {
+        return false;
+    }
+    // CXA-B043: never adopt creds authored by a differently-named project sharing this dir.
+    if matches!(
+        read_owner_stamp(&legacy_path),
+        Some(author) if author != compose_project_name(work_dir)
+    ) {
+        return false;
+    }
+    for (k, v) in &legacy {
+        // Prefer the pre-switch value whenever it differs from / is absent from what resolution just
+        // read at today's name-derived location — recovering exactly what initialised pgdata.
+        if stored.get(k) != Some(v) {
+            stored.insert(k.clone(), v.clone());
+        }
+    }
+
+    // Verdict only — never delete here ([CXA-B044]). "Converged" means adoption absorbed a NON-EMPTY
+    // legacy store AND every key it carried now sits verbatim where resolution will persist it; callers
+    // gate actual deletion on having durably written those very values to F(new), so removal can never
+    // outrun persistence (see [`expire_converged_legacy_store`]).
+    !legacy.is_empty() && legacy.iter().all(|(k, v)| stored.get(k) == Some(v))
+}
+
+/// CXA-B042 + CXA-B044 completion boundary: remove an ALREADY-CONVERGED AND DURABLY-PERSISTED legacy store file.
+///
+/// This must only be called AFTER [`write_stored_secrets`] has successfully persisted the identical values to
+/// modern [`store_file`]. The atomic temp-sibling + rename in [`write_stored_secrets`] guarantees that once it
+/// returns success the committed bytes ARE exactly what we asked for ([CXA-B044]); because convergence requires
+/// every key of F(old)[`cxb031_store_file`] present-matching under that durable content, deleting leaves nothing
+/// unique behind — while retaining B042's contract that a later legit rotation cannot be resurrected by stale V.
+///
+/// Best-effort like all IO here; a failed/unwritable deletion simply retries next converging pass.
+fn expire_converged_legacy_store(path: &std::path::Path) {
+    let _ = std::fs::remove_file(path);
+}
+
+/// Retire a SUPERSEDED path-keyed secret store left behind for THIS project by an
+/// earlier software version — even on a pass where NO fallback secret is needed.
+///
+/// CXA-B032/B033 moved persistence onto per-compose-project NAME-keyed files; anything an old build
+/// stored under its obsolete SHA-of-absolute-path filename ([`cxb031_store_file`]) is therefore
+/// unreferenced yet still holds live DB/admin credentials at rest forever — a duplicate plaintext copy.
+/// When such a file exists for this same checkout we adopt any value our canonical store does not already
+/// know (so pgdata-initialized creds are not regenerated), persist them durably into [`store_file`], then
+/// DELETE the obsolete file so no duplicate credential remains on disk (CXA-B040).
+///
+/// Unlike [`adopt_legacy_cxb031_secrets`] — which only runs once a fallback is needed, inside
+/// [`resolve_deploy_secrets_in`] — this runs in the empty-missing shortcut, so the duplicate is removed
+/// on every post-upgrade resolution pass, including one where the operator supplies every required secret
+/// externally and would otherwise skip adoption/expiry entirely (CXA-B040).
+///
+/// Deletion is gated exactly like [`expire_converged_legacy_store`] ([CXA-B044]): only after the adopted values are
+/// DURABLY persisted into our canonical store do we remove the legacy file, so we can never lose live credentials
+/// before they are owned by their new location. The CXA-B043 ownership-stamp rule applies too: we never adopt or delete
+/// a legacy file authored by a differently-named project sharing this directory.
+///
+/// Best-effort like all persistence here: failures are logged via [`tracing`], never fatal to a deploy.
+fn retire_superseded_path_keyed_store(secret_root: &std::path::Path, work_dir: &std::path::Path) {
+    let legacy_path = cxb031_store_file(secret_root, work_dir);
+
+    // Nothing superseded anywhere? No-op without touching host state.
+    if !legacy_path.exists() {
         return;
     }
-    let legacy_path = cxb031_store_file(secret_root, work_dir);
+
+    // Never adopt or delete creds authored by a differently-named project sharing this dir (CXA-B043).
+    if matches!(
+        read_owner_stamp(&legacy_path),
+        Some(author) if author != compose_project_name(work_dir)
+    ) {
+        tracing::debug!(
+            "skipping superseded secret store {} owned by another project",
+            legacy_path.display()
+        );
+        return;
+    }
+
+    // Merge every legacy value into our canonical store WITHOUT ever overriding one we already own there —
+    // operator-configured or previously-adopted creds win.
+    let mut merged = read_stored_secrets(&store_file(secret_root, work_dir));
     for (k, v) in read_stored_secrets(&legacy_path) {
-        stored.insert(k, v);
+        merged.entry(k).or_insert(v);
+    }
+
+    // Persist durably first; only once our canonical store owns every adopted value is it safe to remove the
+    // superseded duplicate — deleting first could strand live creds ([CXA-B044]). We persist unconditionally so an
+    // owner stamp lands even when nothing was newly adopted (the caller wants the pre-existing dup GONE regardless).
+    let owner = compose_project_name(work_dir);
+    let durable = write_stored_secrets_owned(
+        &store_file(secret_root, work_dir),
+        Some(owner.as_str()),
+        &merged,
+    );
+    if durable {
+        match std::fs::remove_file(&legacy_path) {
+            Ok(()) => tracing::info!(
+                "removed superseded path-keyed deploy secret store {} after adopting its \
+                 values into {}",
+                legacy_path.display(),
+                store_file(secret_root, work_dir).display()
+            ),
+            Err(e) => tracing::warn!(
+                "adopted values from superseded secret store {} but could not remove it: {e}",
+                legacy_path.display()
+            ),
+        }
+    } else {
+        tracing::warn!(
+            "could not durably persist adoption from superseded secret store {}; leaving \
+             it in place until adoption succeeds so no live credential is lost",
+            legacy_path.display()
+        );
     }
 }
 
@@ -282,22 +444,70 @@ fn read_stored_secrets(path: &std::path::Path) -> std::collections::HashMap<Stri
         .collect()
 }
 
+/// Read the ownership stamp embedded by [`write_stored_secrets_owned`] as the
+/// first line of a store file (CXA-B043). Returns the owning compose project
+/// name, or `None` when the file predates stamping / is absent / unreadable.
+fn read_owner_stamp(path: &std::path::Path) -> Option<String> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    contents.lines().next().and_then(|line| {
+        line.trim()
+            .strip_prefix(OWNER_STAMP_PREFIX)
+            .map(str::trim)
+            .filter(|o| !o.is_empty())
+            .map(ToOwned::to_owned)
+    })
+}
+
 /// Persist a project's generated secrets into the out-of-tree store so later
 /// deploy cycles reuse them ([resolve_deploy_secrets_in]). Writes atomically
 /// via a temp sibling + rename so a crash mid-write can never leave a half-
 /// written secret file that reads back as empty, and hardens permissions to
 /// owner-only since these are credentials at rest.
+///
+/// Returns whether the values were committed DURABLY (`true`) or not (`false`,
+/// best-effort IO failed somewhere before or during rename). Only a successful
+/// atomic rename counts as durable; any earlier failure leaves no modern-store
+/// change behind and drops its temp sibling ([CXA-B044]). Callers MUST treat
+/// non-`true` as "nothing durable exists yet" — e.g. deleting an adopted legacy
+/// source after this would risk losing both stores.
+///
+/// Production persistence goes through [`write_stored_secrets_owned`] (which stamps
+/// ownership); this unstamped form survives for writing fixtures / pre-stamp stores
+/// in [`mod deploy_secret_tests`].
+#[cfg(test)]
 fn write_stored_secrets(
     path: &std::path::Path,
     secrets: &std::collections::HashMap<String, String>,
-) {
+) -> bool {
+    persist_store(path, None, secrets)
+}
+
+pub(crate) fn write_stored_secrets_owned(
+    path: &std::path::Path,
+    owner: Option<&str>,
+    secrets: &std::collections::HashMap<String, String>,
+) -> bool {
+    persist_store(path, owner, secrets)
+}
+
+fn persist_store(
+    path: &std::path::Path,
+    owner_stamp: Option<&str>,
+    secrets: &std::collections::HashMap<String, String>,
+) -> bool {
     let Some(parent) = path.parent() else {
-        return;
+        return false;
     };
     if std::fs::create_dir_all(parent).is_err() {
-        return;
+        return false;
     }
     let mut body = String::new();
+    // CXA-B043 ownership stamp first line (when owned), before any KEY=VALUE line.
+    if let Some(owner) = owner_stamp {
+        body.push_str(OWNER_STAMP_PREFIX);
+        body.push_str(owner);
+        body.push('\n');
+    }
     for (k, v) in secrets {
         body.push_str(k);
         body.push('=');
@@ -313,13 +523,16 @@ fn write_stored_secrets(
         std::process::id()
     ));
     if std::fs::write(&tmp, body.as_bytes()).is_err() {
-        return;
+        return false;
     }
     set_secret_perms(&tmp);
-    // Best-effort store: never fail a deploy because we could not persist;
-    // drop the temp so no stray secret file is left behind.
-    if std::fs::rename(&tmp, path).is_err() {
+    // Best-effort store: never fail a deploy because we could not persist; drop the temp so no
+    // stray secret file is left behind. Only a successful atomic rename counts as durable.
+    if std::fs::rename(&tmp, path).is_ok() {
+        true
+    } else {
         let _ = std::fs::remove_file(&tmp);
+        false
     }
 }
 
@@ -379,30 +592,6 @@ async fn compose_project_on_port(port: &str) -> Option<String> {
         .ok()?;
     let name = String::from_utf8_lossy(&out.stdout).trim().to_owned();
     (!name.is_empty()).then_some(name)
-}
-
-/// Whether the deploy may `down` a compose project that is squatting one of the
-/// agent's host ports. This is the blast-radius guard for the port-eviction
-/// self-heal: only agent-managed preview projects (`cox-{parent}-{dir}`) may be
-/// evicted. The live hub (`coxagent` / `coxagent-*`) and shared infra
-/// (`cox-infra`) are NEVER evocable — downing either is a self-inflicted outage,
-/// exactly the class of bug where an agent deploy took the whole control plane
-/// down trying to free a port it thought it owned.
-fn evictable_project(project: &str) -> bool {
-    // `compose_project_name` always yields `cox-<parent>-<dir>`, so an
-    // evocable preview is recognisable by its `cox-` prefix — provided it is
-    // NOT the live hub. `coxagent` and anything starting with `coxagent` (the
-    // production project plus any of its service containers) are protected, as
-    // is shared shared infrastructure (`cox-infra`).
-    let lower = project.to_ascii_lowercase();
-    if lower == "cox-infra"
-        || lower == "coxagent"
-        || lower.starts_with("coxagent")
-        || lower.starts_with("cox-infra")
-    {
-        return false;
-    }
-    lower.starts_with("cox-")
 }
 
 /// Clamp every container of this compose project to a CPU/memory budget via
@@ -948,7 +1137,7 @@ impl DeployPort for DockerComposeDeploy {
         // Safety: `compose_project_name` always yields `cox-<parent>-<dir>`,
         // but double-check it can never collide with the live hub project
         // before we `down --remove-orphans` anything.
-        if !evictable_project(&proj) {
+        if !reclaimable_compose_project(&proj) {
             return Err(PortError::Backend(format!(
                 "refusing to deploy project `{proj}` — collides with the live hub"
             )));
@@ -1018,7 +1207,7 @@ impl DeployPort for DockerComposeDeploy {
                 // to free the port — that is a self-inflicted outage, not a
                 // port eviction. Only agent preview projects (`cox-...`) are
                 // evictable; anything else is reported as a collision.
-                if !evictable_project(&project) {
+                if !reclaimable_compose_project(&project) {
                     break;
                 }
                 let _ = Command::new("docker")
@@ -1101,36 +1290,10 @@ impl DeployPort for DockerComposeDeploy {
 mod tests {
     use super::*;
 
-    /// The port-eviction blast-radius guard: agent preview projects are
-    /// evictable, the live hub and shared infra are not.
-    #[test]
-    fn evictable_project_protects_the_live_hub_and_infra() {
-        assert!(
-            evictable_project("cox-cxa-codebase"),
-            "agent preview evictable"
-        );
-        assert!(
-            evictable_project("cox-my-project-preview"),
-            "any cox-<parent>-<dir> preview evictable"
-        );
-        // The live hub and anything sharing its prefix are NEVER evictable —
-        // downing them is the self-inflicted outage we guard against.
-        assert!(!evictable_project("coxagent"), "live hub protected");
-        assert!(
-            !evictable_project("coxagent-gateway"),
-            "hub service protected"
-        );
-        assert!(!evictable_project("cox-infra"), "shared infra protected");
-        assert!(
-            !evictable_project("cox-infra-db"),
-            "shared infra child protected"
-        );
-        // A non-preview project on our port is a collision, not an eviction.
-        assert!(
-            !evictable_project("someone-elses-stack"),
-            "foreign project protected"
-        );
-    }
+    /// The deploy port-eviction decision routes through the single shared
+    /// reclaimability policy (`crate::deploy::reclaimable`), whose own unit
+    /// tests own the full blast-radius matrix — live hub, shared infra,
+    /// case-insensitivity and foreign projects.
 
     /// Regression guard for CXA-B010 + CXA-B017: every site that runs compose
     /// against this repo's secret-bearing docker-compose.yml must seed
@@ -1504,7 +1667,8 @@ mod cross_check_tests {
 mod deploy_secret_tests {
     use super::{
         compose_project_name, cxb031_store_file as legacy_key_file, missing_required_secrets,
-        random_secret, read_dot_env, resolve_deploy_secrets_in, store_file, write_stored_secrets,
+        random_secret, read_dot_env, read_stored_secrets, resolve_deploy_secrets_in, store_file,
+        write_stored_secrets, write_stored_secrets_owned,
     };
     use std::collections::{HashMap, HashSet};
 
@@ -1524,10 +1688,8 @@ mod deploy_secret_tests {
     #[cfg(unix)]
     fn mode_for_test(path: &std::path::Path) -> u32 {
         use std::os::unix::fs::PermissionsExt as _;
-        std::fs::metadata(path)
-            .map_or(0, |m| m.permissions().mode() & 0o777)
+        std::fs::metadata(path).map_or(0, |m| m.permissions().mode() & 0o777)
     }
-
 
     /// The core decision rule (CXA-B017): a key configured by the operator —
     /// via process env OR a project-dir `.env` — is left alone (never overridden
@@ -1881,6 +2043,358 @@ mod deploy_secret_tests {
             "world-readable store must be remediated even when no fallback persists \
              this pass (CXA-B038)"
         );
+    }
+
+    /// CXA-B040 regression guard: a SUPERSEDED path-keyed secret store left behind for THIS project
+    /// by an earlier software version must have its live value adopted into our canonical NAME-keyed
+    /// store AND its duplicate plaintext file REMOVED — even when every required secret is now supplied
+    /// externally, so resolution would otherwise take the empty-missing shortcut and never reach
+    /// [`adopt_legacy_cxb031_secrets`]/[`expire_converged_legacy_store`] (which only run in the fallback
+    /// path). Without this fix an obsolete duplicate holding live credentials lingers unreferenced on disk forever.
+    #[test]
+    fn superseded_path_keyed_store_is_adopted_and_removed_even_when_all_secrets_are_external() {
+        let proj = std::env::temp_dir().join(format!("cxab040-proj-{}", std::process::id()));
+        let secret_root =
+            std::env::temp_dir().join(format!("cxab040-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&proj);
+        let _ = std::fs::remove_dir_all(&secret_root);
+        std::fs::create_dir_all(&proj).expect("mkdir");
+
+        // Operator fully configures both required secrets -> resolution needs NO fallback.
+        std::fs::write(
+            proj.join(".env"),
+            "PG_PASSWORD=external-pg\nCOXAGENT_ADMIN_PASSWORD=external-admin\n",
+        )
+        .expect("write dot_env");
+
+        // B031-era on-disk state: ONLY an obsolete path-keyed store exists for THIS checkout,
+        // carrying a live credential that initialized pgdata.
+        let mut legacy: HashMap<String, String> = HashMap::new();
+        legacy.insert("PG_PASSWORD".to_owned(), "stable-b031-password".to_owned());
+        write_stored_secrets(legacy_key_file(&secret_root, &proj).as_path(), &legacy);
+        let legacy_path = legacy_key_file(&secret_root, &proj);
+        assert!(legacy_path.exists(), "premise: superseded store present");
+
+        // Resolution resolves nothing (everything supplied externally)...
+        let resolved = resolve_deploy_secrets_in(&proj, &secret_root);
+        assert!(
+            resolved.is_empty(),
+            "fully-externally-supplied project must resolve NO fallback secrets"
+        );
+
+        // ...yet still adopts into the canonical store and removes the obsolete duplicate.
+        assert!(
+            !legacy_path.exists(),
+            "superseded path-keyed store must be removed after adoption even when no \
+             fallback was needed (CXA-B040)"
+        );
+        assert_eq!(
+            read_stored_secrets(store_file(&secret_root, &proj).as_path()).get("PG_PASSWORD"),
+            Some(&"stable-b031-password".to_string()),
+            "the obsolete duplicate's live credential must be adopted into the canonical store \
+             before the superseded file is removed (CXA-B040)"
+        );
+
+        let _ = std::fs::remove_dir_all(&proj);
+        let _ = std::fs::remove_dir_all(&secret_root);
+    }
+
+    /// INTERVENING B032-era deploy cycle already wrote a divergent fresh value P into today's
+    /// name-derived store. CXA-B036's migration bailed out entirely once `stored` (read only from the
+    /// name-derived file) was non-empty, so it never consulted F(old)==V; PG_PASSWORD then stayed at
+    /// P permanently against pgdata initialised with V — persistent auth failure.
+    ///
+    /// Stages the exact repro state 'F(new) non-empty wrong + F(old)==correct' and asserts resolution
+    /// recovers V, AND that a second resolve is stable (no churn) — proving recovery converges instead
+    /// of rotating the secret every pass.
+    #[test]
+    fn post_upgrade_cycle_recovers_legacy_value_even_when_new_store_is_non_empty() {
+        let proj = std::env::temp_dir().join(format!("cxab039-proj-{}", std::process::id()));
+        let secret_root =
+            std::env::temp_dir().join(format!("cxab039-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&proj);
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        let _ = std::fs::remove_dir_all(&secret_root);
+
+        // Pre-switch original: only F(old) holds what initialised pgdata.
+        let mut old_store: HashMap<String, String> = HashMap::new();
+        old_store.insert("PG_PASSWORD".to_owned(), "correct-v".to_owned());
+        write_stored_secrets(legacy_key_file(&secret_root, &proj).as_path(), &old_store);
+
+        // Intervening B032-era cycle minted a divergent value into F(new); without CXA-B039 this
+        // would make adoption bail out early and keep `P != V` forever.
+        let mut new_store: HashMap<String, String> = HashMap::new();
+        new_store.insert("PG_PASSWORD".to_owned(), "divergent-p".to_owned());
+        write_stored_secrets(store_file(&secret_root, &proj).as_path(), &new_store);
+
+        let first = resolve_deploy_secrets_in(&proj, &secret_root);
+        let first_pg = first
+            .iter()
+            .find(|(k, _)| k == "PG_PASSWORD")
+            .map(|(_, v)| v.clone())
+            .expect("unconfigured app must resolve a PG_PASSWORD");
+        assert_eq!(
+            first_pg, "correct-v",
+            "must recover the pre-switch value that initialised pgdata over a divergent \
+             intervening-cycle value (CXA-B039)"
+        );
+
+        // Recovery must converge: a second resolve yields the same recovered V, never rotating it.
+        let second = resolve_deploy_secrets_in(&proj, &secret_root);
+        assert_eq!(
+            first, second,
+            "recovered secrets must be stable across cycles"
+        );
+
+        let _ = std::fs::remove_dir_all(&proj);
+        let _ = std::fs::remove_dir_all(&secret_root);
+    }
+
+    /// CXA-B043 regression guard: adoption must NOT drag ANOTHER project's credentials into
+    /// this one when their path-keyed legacy store is reused by a differently-named compose
+    /// project sharing this directory over time under one secret_root.
+    ///
+    /// Two distinct apps need only occupy one canonicalised absolute path across history plus
+    /// one shared deploy-secrets root; whoever moves in last finds THAT other app's pre-switch
+    /// value at today's F(old). With no ownership signal we would absorb it as our own — seeding
+    /// wrong PG_PASSWORD against OUR volume. The fix stamps every persisted store with its owning
+    /// compose project ([`write_stored_secrets_owned`]) and refuses to adopt any legacy file whose
+    /// stamp names a DIFFERENT project than today's [`compose_project_name`]; a self-stamped or
+    /// unstamped (pre-stamp-era) file remains eligible so genuine in-place migration still works.
+    #[test]
+    fn cross_project_legacy_store_is_not_adopted_but_own_is() {
+        let proj = std::env::temp_dir().join(format!("cxab043-proj-{}", std::process::id()));
+        let secret_root =
+            std::env::temp_dir().join(format!("cxab043-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&proj);
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        let _ = std::fs::remove_dir_all(&secret_root);
+
+        // Another app (different compose name) previously deployed in THIS directory and left its
+        // credential at today's path-derived legacy filename, stamped with ITS owner identity.
+        let mut foreign: HashMap<String, String> = HashMap::new();
+        foreign.insert(
+            "PG_PASSWORD".to_owned(),
+            "foreign-other-app-secret".to_owned(),
+        );
+        write_stored_secrets_owned(
+            legacy_key_file(&secret_root, &proj).as_path(),
+            Some("cox-some-other-parent-app"),
+            &foreign,
+        );
+
+        // This checkout must NOT adopt that other app's credential as its own.
+        let resolved = resolve_deploy_secrets_in(&proj, &secret_root);
+        let pg = resolved
+            .iter()
+            .find(|(k, _)| k == "PG_PASSWORD")
+            .map(|(_, v)| v.clone())
+            .expect("unconfigured app must resolve a PG_PASSWORD");
+        assert_ne!(
+            pg, "foreign-other-app-secret",
+            "must not adopt credentials authored by a differently-named project sharing this \
+             directory (CXA-B043)"
+        );
+
+        // A self-authored (same compose identity) stamped legacy store IS adopted — proving the gate
+        // only blocks cross-project reuse, never legitimate in-place migration of this same app.
+        write_stored_secrets_owned(
+            legacy_key_file(&secret_root, &proj).as_path(),
+            Some(compose_project_name(&proj).as_str()),
+            &foreign,
+        );
+        let self_resolved = resolve_deploy_secrets_in(&proj, &secret_root);
+        assert_eq!(
+            self_resolved
+                .iter()
+                .find(|(k, _)| k == "PG_PASSWORD")
+                .map(|(_, v)| v.clone())
+                .as_deref(),
+            Some("foreign-other-app-secret"),
+            "a legacy store stamped by THIS compose project is still adopted"
+        );
+    }
+
+    /// CXA-B042 regression guard: once adoption converges (every key in F(old) matches what resolution
+    /// persists into F(new)), the legacy store must be EXPIRED as a durable completion boundary. Without
+    /// that, an admin who later deletes ONLY F(new) to force rotation of compromised credentials would
+    /// have the stale V resurrected from F(old) on every subsequent cycle, defeating rotation forever.
+    #[test]
+    fn after_migration_converges_deleting_the_modern_store_regenerates_and_survives() {
+        let proj = std::env::temp_dir().join(format!("cxab042-proj-{}", std::process::id()));
+        let secret_root =
+            std::env::temp_dir().join(format!("cxab042-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&proj);
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        let _ = std::fs::remove_dir_all(&secret_root);
+
+        // Pre-switch state: only F(old) holds what initialised pgdata.
+        let mut old_store: HashMap<String, String> = HashMap::new();
+        old_store.insert("PG_PASSWORD".to_owned(), "stale-legacy-password".to_owned());
+        write_stored_secrets(legacy_key_file(&secret_root, &proj).as_path(), &old_store);
+
+        // First resolve adopts V and expires F(old), leaving only the modern store.
+        let first = resolve_deploy_secrets_in(&proj, &secret_root);
+        assert_eq!(
+            first
+                .iter()
+                .find(|(k, _)| k == "PG_PASSWORD")
+                .map(|(_, v)| v.clone())
+                .as_deref(),
+            Some("stale-legacy-password"),
+            "adoption must still recover the legacy value on the first pass"
+        );
+        assert!(
+            !legacy_key_file(&secret_root, &proj).exists(),
+            "converged legacy store must be expired as a completion boundary (CXA-B042)"
+        );
+
+        // Admin deletes ONLY the modern store to force regeneration of a compromised credential.
+        std::fs::remove_file(store_file(&secret_root, &proj)).expect("rm modern store");
+
+        // Second resolve must NOT resurrect stale V — there is no legacy file left to revive it —
+        // so PG_PASSWORD regenerates and persists for good.
+        let second = resolve_deploy_secrets_in(&proj, &secret_root);
+        assert_ne!(
+            second
+                .iter()
+                .find(|(k, _)| k == "PG_PASSWORD")
+                .map(|(_, v)| v.clone())
+                .as_deref(),
+            Some("stale-legacy-password"),
+            "after expiry a rotation must not be reverted by stale legacy values"
+        );
+        assert!(
+            store_file(&secret_root, &proj).exists(),
+            "regenerated secret must persist into the modern store"
+        );
+
+        let _ = std::fs::remove_dir_all(&proj);
+        let _ = std::fs::remove_dir_all(&secret_root);
+    }
+
+    /// CXA-B044 regression guard: convergence expiry must NEVER outrun persistence. Pre-CXA-B044,
+    /// `adopt_legacy_cxb031_secrets` deleted F(old) unconditionally on its own pass — BEFORE
+    /// `write_stored_secrets` persisted anything to F(new). If that persist then failed (best-effort:
+    /// disk full, permissions, rename mid-window) or the process crashed between adoption and persist,
+    /// BOTH stores were gone and the next cycle regenerated random secrets against initialized pgdata —
+    /// resurrecting exactly the CXA-B036/B039 auth-failure class this chain exists to fix.
+    ///
+    /// Here we force the modern persist to FAIL by planting a DIRECTORY where F(new)'s final atomic
+    /// rename would land (renaming a regular file onto an existing directory always errors), while a
+    /// valid F(old)==V still sits on disk. Resolution must STILL recover V into memory, but must NOT
+    /// delete F(old): both stores must never be lost at once.
+    #[test]
+    fn legacy_store_survives_a_modern_persist_failure() {
+        let proj = std::env::temp_dir().join(format!("cxab044-proj-{}", std::process::id()));
+        let secret_root =
+            std::env::temp_dir().join(format!("cxab044-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&proj);
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        let _ = std::fs::remove_dir_all(&secret_root);
+
+        // Pre-switch state: only F(old) holds what initialised pgdata.
+        let mut old_store: HashMap<String, String> = HashMap::new();
+        old_store.insert("PG_PASSWORD".to_owned(), "value-v".to_owned());
+        write_stored_secrets(legacy_key_file(&secret_root, &proj).as_path(), &old_store);
+
+        // Sabotage modern persistence: make store_file()'s target an EXISTING DIRECTORY so the atomic
+        // temp-sibling -> target rename fails deterministically (EISDIR/ENOTEMPTY on darwin+linux).
+        let modern_path = store_file(&secret_root, &proj);
+        assert!(
+            !modern_path.exists(),
+            "test premise broken: modern store should not exist yet"
+        );
+        std::fs::create_dir(&modern_path).expect("plant dir over modern store path");
+
+        // Resolution still recovers V into its returned secrets...
+        let resolved = resolve_deploy_secrets_in(&proj, &secret_root);
+        assert_eq!(
+            resolved
+                .iter()
+                .find(|(k, _)| k == "PG_PASSWORD")
+                .map(|(_, v)| v.clone())
+                .as_deref(),
+            Some("value-v"),
+            "adoption must still recover the legacy value even when persistence fails"
+        );
+
+        // ...but MUST NOT expire F(old): losing both stores at once is exactly what CXA-B044 forbids.
+        assert!(
+            legacy_key_file(&secret_root, &proj).exists(),
+            "F(old) must survive a best-effort persist failure; expiry may only run AFTER durable \
+             success (CXA-B044)"
+        );
+
+        let _ = std::fs::remove_dir_all(&proj);
+        let _ = std::fs::remove_dir_all(&secret_root);
+    }
+
+    /// CXA-B040 regression guard: a SUPERSEDED path-keyed store left behind for
+    /// THIS project must be retired even when every required secret is now supplied
+    /// externally (so nothing needs a fallback seed this pass). origin/main only
+    /// adopted+expired inside the fallback-generation branch; without this hook an
+    /// obsolete duplicate of live credentials lingered on disk forever precisely in
+    /// the fully-externally-configured upgrade case CXA-B040 names.
+    #[test]
+    fn superseded_path_keyed_store_is_retired_even_when_fully_externally_supplied() {
+        let proj = std::env::temp_dir().join(format!("cxab040-ext-proj-{}", std::process::id()));
+        let secret_root =
+            std::env::temp_dir().join(format!("cxab040-ext-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&proj);
+        let _ = std::fs::remove_dir_all(&secret_root);
+        std::fs::create_dir_all(&proj).expect("mkdir");
+
+        // Operator now supplies every required secret via <project>/.env, so resolution
+        // has nothing missing and would otherwise take the early-return shortcut.
+        std::fs::write(
+            proj.join(".env"),
+            "PG_PASSWORD=external-pg\nCOXAGENT_ADMIN_PASSWORD=external-admin\n",
+        )
+        .expect("write dot_env");
+
+        // Pre-upgrade state: only the OLD path-hash store holds live-looking creds;
+        // today's name-derived store does not exist yet.
+        let mut old_store: HashMap<String, String> = HashMap::new();
+        old_store.insert("PG_PASSWORD".to_owned(), "stable-b031-password".to_owned());
+        old_store.insert(
+            "COXAGENT_ADMIN_PASSWORD".to_owned(),
+            "stable-b031-admin".to_owned(),
+        );
+        write_stored_secrets(legacy_key_file(&secret_root, &proj).as_path(), &old_store);
+        assert!(
+            legacy_key_file(&secret_root, &proj).exists(),
+            "premise: superseded legacy store present"
+        );
+
+        // No required secret is missing -> no fallback is generated...
+        let resolved = resolve_deploy_secrets_in(&proj, &secret_root);
+        assert!(
+            resolved.is_empty(),
+            "fully-externally-supplied project must resolve NO fallback secrets"
+        );
+
+        // ...but its obsolete path-keyed duplicate must be gone AND its live values
+        // durably owned by today's name-derived store — never lost mid-migration.
+        assert!(
+            !legacy_key_file(&secret_root, &proj).exists(),
+            "superseded path-keyed store must be removed even when all secrets are external \
+             (CXA-B040)"
+        );
+        let modern = read_stored_secrets(store_file(&secret_root, &proj).as_path());
+        assert_eq!(
+            modern.get("PG_PASSWORD").map(String::as_str),
+            Some("stable-b031-password"),
+            "legacy value must be durably owned by today's store"
+        );
+        assert_eq!(
+            modern.get("COXAGENT_ADMIN_PASSWORD").map(String::as_str),
+            Some("stable-b031-admin"),
+            "legacy value must be durably owned by today's store"
+        );
+
+        let _ = std::fs::remove_dir_all(&proj);
+        let _ = std::fs::remove_dir_all(&secret_root);
     }
 }
 
