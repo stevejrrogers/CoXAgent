@@ -402,12 +402,42 @@ function renderCycleScores(s){
   if(!rows.length){el.innerHTML='<div class="empty">no cycles scored yet</div>';return;}
   const gc={A:"var(--green)",B:"var(--accent2)",C:"var(--muted)",D:"var(--red)"};
   el.innerHTML='<table class="scoretbl"><thead><tr><th></th><th>cycle</th><th>shipped</th><th>useful/runs</th><th>cost</th><th>errors</th><th>when</th></tr></thead><tbody>'+
-    rows.map(r=>`<tr>
+    rows.map(r=>{
+      // Per-phase breakdown (secs + $) as a hover title — where the cycle went.
+      const secs=r.phase_secs||{},cost=r.phase_cost||{};
+      const keys=[...new Set([...Object.keys(secs),...Object.keys(cost)])];
+      const brk=keys.map(k=>{
+        const t=secs[k]?(secs[k]>=60?Math.round(secs[k]/60)+'m':secs[k]+'s'):'';
+        const c=cost[k]?('$'+cost[k].toFixed(2)):'';
+        return k+': '+[t,c].filter(Boolean).join(' · ');
+      }).join('\n');
+      return `<tr title="${esc(brk)}">
       <td><span class="grade" style="background:color-mix(in srgb,${gc[r.grade]||'var(--muted)'} 16%,transparent);color:${gc[r.grade]||'var(--muted)'}">${esc(r.grade)}</span></td>
       <td>#${r.cycle}</td><td>${r.shipped||0}</td><td>${r.useful||0}/${r.runs||0}</td>
       <td>${r.cost_usd?('$'+r.cost_usd.toFixed(2)):'—'}</td>
       <td>${(r.errors||0)+(r.incidents?(' · '+r.incidents+'⛔'):'')}</td>
-      <td style="color:var(--dim)">${esc((r.at||'').slice(11,16))}</td></tr>`).join("")+'</tbody></table>';
+      <td style="color:var(--dim)">${esc((r.at||'').slice(11,16))}</td></tr>`;}).join("")+'</tbody></table>'
+    +costPerShip(s.cycle_scores||[]);
+}
+// 7-day FinOps digest from the scorecard: cost per role + the headline number
+// "cost per shipped ticket" — the KPI the engine-per-role tuning aims at.
+function costPerShip(scores){
+  const cutoff=Date.now()-7*86400000;
+  const rows=scores.filter(r=>r.at&&new Date(r.at).getTime()>=cutoff);
+  if(!rows.length)return "";
+  let shipped=0,total=0;const byRole={};
+  for(const r of rows){
+    shipped+=r.shipped||0;total+=r.cost_usd||0;
+    for(const[k,v]of Object.entries(r.phase_cost||{}))byRole[k]=(byRole[k]||0)+v;
+  }
+  if(total<0.005)return "";
+  const roles=Object.entries(byRole).sort((a,b)=>b[1]-a[1]).slice(0,6);
+  const per=shipped?("$"+(total/shipped).toFixed(2)):"∞ (nothing shipped)";
+  return `<div class="cps"><div class="cps-head">7 days · $${total.toFixed(2)} spent · ${shipped} shipped · <b>${per}/ship</b></div>
+    <div class="cps-bars">${roles.map(([k,v])=>{
+      const w=Math.max(4,Math.round(v/total*100));
+      return `<div class="cps-row" title="$${v.toFixed(2)}"><span class="cps-lbl">${esc(k)}</span><div class="cps-bar" style="width:${w}%"></div><span class="cps-val">$${v.toFixed(2)}</span></div>`;
+    }).join("")}</div></div>`;
 }
 function actItem(a){const col=cvar(AC[a.agent]||"--muted");
   return `<div class="tlrow"><div class="tl-node" style="--nc:${col}"><i class="ti ti-${actIcon(a.action)}"></i></div>

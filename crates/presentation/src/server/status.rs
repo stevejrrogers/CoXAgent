@@ -78,9 +78,22 @@ pub(super) fn lite_state_value(state: &coxagent_application::ProjectState) -> se
     // reach members exclusively via the WebSocket / REST list, both of which
     // enforce membership.
     if let Some(chat) = v.get_mut("chat").and_then(serde_json::Value::as_array_mut) {
+        // All four BUILT-IN channels are public by construction (`#general`
+        // for people, `#agents`/`#approvals`/`#incidents` for the machine's
+        // announcements). Filtering the snapshot down to `#general` alone made
+        // the SM's coordination invisible — the dashboard looked like a team
+        // that never talks. Only user-created channels (which carry member
+        // lists) stay off the broadcast.
+        const PUBLIC: [&str; 4] = [
+            coxagent_application::GENERAL_CHANNEL,
+            coxagent_application::state::AGENTS_CHANNEL,
+            coxagent_application::state::APPROVALS_CHANNEL,
+            coxagent_application::state::INCIDENTS_CHANNEL,
+        ];
         chat.retain(|m| {
-            m.get("channel").and_then(serde_json::Value::as_str)
-                == Some(coxagent_application::GENERAL_CHANNEL)
+            m.get("channel")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|c| PUBLIC.contains(&c))
         });
     }
     v
@@ -125,8 +138,10 @@ pub(super) async fn metrics_summary_ep(
         Ok(state) => {
             let today = now_rfc3339();
             let day = today.get(..10).unwrap_or("").to_owned();
-            Json(coxagent_application::metrics_health::compute_cycle_perf(&state, &day))
-                .into_response()
+            Json(coxagent_application::metrics_health::compute_cycle_perf(
+                &state, &day,
+            ))
+            .into_response()
         }
         Err(e) => internal_error(&e.to_string()),
     }
@@ -150,8 +165,10 @@ pub(super) async fn metrics_trends_ep(
         Ok(state) => {
             let today = now_rfc3339();
             let day = today.get(..10).unwrap_or("").to_owned();
-            Json(coxagent_application::metrics_health::compute_trends(&state, days, &day))
-                .into_response()
+            Json(coxagent_application::metrics_health::compute_trends(
+                &state, days, &day,
+            ))
+            .into_response()
         }
         Err(e) => internal_error(&e.to_string()),
     }

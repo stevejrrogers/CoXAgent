@@ -2,11 +2,11 @@ FOLDER: Engineering
 
 # Optimistic Concurrency Control for Cross-Runner Store Saves
 
-**Keywords:** state store, optimistic concurrency, revision, CAS, lost update, save_expecting, current_version, RestStateStore, SqlStateStore, PortError::Conflict
+**Keywords:** state store, optimistic concurrency, revision, CAS, lost update, save_expecting, current_version, mutate_state, RestStateStore, SqlStateStore, PortError::Conflict
 
 ## Overview
 
-CXA-F003 closes a lost-update hole in the project state store: when two runners (or one runner and an operator) work on the same project across process or machine boundaries, each writer that re-reads at write time could both succeed and silently clobber each other's changes. The fix adds a monotonic `revision` to the Postgres aggregate row and threads that version token through the port (`save_expecting`, `current_version`) and across REST so a stale writer is rejected with a conflict instead of overwriting newer data. It is for every adapter implementer of `StateStorePort` and any client that wants stale-write protection over REST.
+CXA-F003 closes a lost-update hole in the project state store: when two runners (or one runner and an operator) work on the same project across process or machine boundaries, each writer that re-reads at write time could both succeed and silently clobber each other's changes. The fix adds a monotonic `revision` to the Postgres aggregate row and threads that version token through the port (`save_expecting`, `current_version`) and across REST so a stale writer is rejected with a conflict instead of overwriting newer data. It is for every adapter implementer of [`StateStorePort`](crates/application/src/ports/outbound/state_store.rs) and any client that wants stale-write protection over REST.
 
 ## How it works
 
@@ -15,7 +15,7 @@ The durable aggregate lives as one JSONB row per project keyed by `project_id`, 
 1. A caller reads state via `load()`, capturing its current revision through `current_version()`.
 2. To persist guarded against staleness it calls `save_expecting(&state, Some(rev))`, where `rev` is exactly what that caller saw when it loaded.
 3. On Postgres this becomes [`SqlStateStore::persist_at_revision`](crates/infrastructure/src/state/sql_store.rs)'s atomic UPSERT:
-   ```
+   ```sql
    INSERT INTO project_state (project_id, schema_version=..., revision=1, data=...) VALUES (...)
    ON CONFLICT (project_id) DO UPDATE
       SET data = EXCLUDED.data,
@@ -32,7 +32,6 @@ Cross-machine coordination around claims is separate but adjacent: [`SqlStateSto
 The REST gateway ([store_rpc.rs](crates/presentation/src/server/store_rpc.rs)) exposes three relevant ops: `version` returns the current revision; `save` accepts an optional body field `revision`, forwards it via [`save_expecting`], and maps any resulting conflict to HTTP **409** so a REST-fronted runner retries its read-modify-write; older clients omitting the field keep legacy semantics (`None`, no guard).
 
 Callers wanting retry-on-conflict use the free helper function [`mutate_state<S,F>`](crates/application/src/ports/outbound/state_store.rs), which loops up to 12 times: load, apply a mutator, save; on `PortError::Conflict` it reloads and re-applies against fresh state until convergence or exhaustion.
-
 
 ## Usage
 
@@ -113,6 +112,24 @@ All decisions remain pure functions over DB results behind ports — no direct I
 
 ## Code map
 
-These are the real files implementing CXA-F003 (all touched by commit "feat(CXA-F003): Optimistic concurrency control for cross-runner store saves"):
+The real files implementing CXA-F003:
 
-crates/application/src/ports/outbound/mod.rst omitted line --- list follows:
+crates/application/src/ports/outbound/state_store.rs — the [`StateStorePort`] trait: `save_expecting`, `current_version` (with default no-op fallbacks), and the free retry helper `mutate_state`.
+crates/application/src/error.rs — [`PortError::Conflict`] variant returned on stale writes.
+crates/infrastructure/src/state/sql_store.rs — Postgres adapter: atomic UPSERT `persist_at_revision`, revision bump, row-count conflict detection, idempotent schema migration.
+crates/infrastructure/src/state/json_store.rs — file-backed fallback; does NOT override the new methods (no guard).
+crates/infrastructure/src/state/rest_store.rs — REST client adapter forwarding captured revisions and mapping remote HTTP 409 CONFLICT to PortError::Conflict.
+crates/infrastructure/src/state/mod.rs — re-exports of the state-store module surface.
+crates/presentation/src/server/store_rpc.rs — REST gateway `/api/projects/:pid/store`: op=load / version / save with optional revision field.
+
+Tests (integration, gated on COXAGENT_TEST_PG_DSN):
+crates/infrastructure/tests/sql_store_contract.rs — contract test asserting a stale-revision write is rejected with Conflict while current-revision retry converges.
+crates/infrastructure/tests/distributed_coord.rs — cross-machine claim coordination test (adjacent lease behaviour, not revision CAS).
+
+## Related
+
+- CXA-F001 / state-store REST integration work in `.claude/handoff-rest-runner.md` — this ticket's read-modify-write retry lands on top of that transport; read the hand-off before touching store_rpc.rs or auth hardening.
+- [`StateStorePort`](crates/application/src/ports/outbound/state_store.rs) shares its file with the Redis coordinator wiring; claim/stage/leader leases live in crates/infrastructure/src/state/{redis_coord.rs, any_store.rs}.
+- API gateway route docs and shape checks for `/api/projects/:pid/store` are governed by gitnexus route_map / api_impact (`gitnexus://repo/cxa/...`) since store_rpc consumers span presentation and application.
+- The hexagonal IO-discipline guard (crates/app/tests/hexagonal_gate.rs) continues to enforce that all adapters above stay behind ports.
+

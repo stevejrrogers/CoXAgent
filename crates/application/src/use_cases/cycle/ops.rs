@@ -68,12 +68,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let Some(deploy) = &self.deploy else {
             return true;
         };
-        // A malformed `host_port` (COX-B035) must fail the gate, not be
-        // treated as unconfigured — see `host_port_probe`.
-        match self.host_port_probe {
-            Ok(port) => crate::ports::outbound::verify_deploy_health(deploy, port).await,
-            Err(()) => false,
-        }
+        crate::ports::outbound::verify_deploy_health_probe(deploy, self.host_port_probe).await
     }
     /// Detailed post-deploy health check (COX-F005): poll the app's health
     /// endpoint via [`crate::ports::outbound::DeployPort::wait_healthy`] for
@@ -570,5 +565,168 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             })
             .await
             .ok()
+    }
+
+    /// Announce an automated PR close where PEOPLE look — the team channel and
+    /// the webhook — never just a comment on the PR itself. Twelve PRs died
+    /// silently in one night (#185–#196) because the close only wrote to
+    /// GitHub and the activity log; an irreversible act done by a machine must
+    /// be loud enough to challenge.
+    pub(super) async fn announce_pr_close(&self, number: u64, title: &str, why: &str) {
+        let msg = format!("🗑️ auto-closed PR #{number} (\"{title}\") — {why}");
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+            s.post_chat_in("SA", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+            // The app closed this PR itself. Mark it so `forge_hygiene`'s
+            // closed-unmerged pass does NOT misread our own action as a human
+            // rejection and force a redesign loop. Only externally-closed PRs
+            // (a real person) must trigger that signal.
+            s.seen_closed_prs.insert(number);
+            Ok(())
+        })
+        .await;
+        self.notify("pr_closed", msg).await;
+    }
+
+    /// Pre-cycle git tree hygiene — undo the wreckage an engine death leaves
+    /// behind, BEFORE any git op this cycle trips over it:
+    ///
+    /// - a SLOT worktree sitting on a named branch (worktrees must stay
+    ///   detached, or they hold `main`/feature branches hostage) → detach;
+    /// - a SLOT worktree with uncommitted residue (an engine died mid-edit)
+    ///   that would otherwise block every future checkout → stash the WIP with
+    ///   a named marker;
+    /// - the LEADER tree dirty on a feature branch (half-written edits block
+    ///   every checkout) → stash the WIP with a named marker and return to the
+    ///   base branch;
+    /// - the LEADER's local base carrying commits origin does not have (an
+    ///   agent merged a feature branch into local base by mistake) → keep them
+    ///   on a `backup/…` branch and hard-reset base to origin.
+    ///
+    /// Best-effort: every step logs what it did; a failure never stops the
+    /// cycle. Pure orchestration over `GitPort::raw` — no direct IO here.
+    pub(super) async fn tree_hygiene(&self) {
+        let Some(git) = &self.git else { return };
+        let wd = &self.work_dir;
+        if !self.config.git.enabled || !git.is_repo(wd).await {
+            return;
+        }
+        let base = {
+            let t = self.config.git.target_branch.trim();
+            if t.is_empty() {
+                self.config.git.default_branch.clone()
+            } else {
+                t.to_owned()
+            }
+        };
+        let branch = git.current_branch(wd).await.unwrap_or_default();
+        let is_slot = wd
+            .components()
+            .any(|c| c.as_os_str() == ".coxagent-worktrees");
+        if is_slot {
+            // Slots must stay detached; holding a branch blocks every other
+            // tree from checking it out.
+            if !branch.is_empty() && branch != "HEAD" {
+                let (ok, _) = git.raw(wd, &["checkout", "--detach"]).await;
+                if ok {
+                    self.log_git(&format!(
+                        "hygiene: slot worktree released branch {branch} (detached)"
+                    ))
+                    .await;
+                }
+            }
+            // A slot left with uncommitted residue (an engine died mid-edit)
+            // is the SAME trap as the leader tree: every later `checkout` of a
+            // new branch fails with "local changes would be overwritten" and
+            // the ticket is mis-assigned forever. Stash the WIP with a named
+            // marker so the slot is clean for the next checkout.
+            let (_, status) = git.raw(wd, &["status", "--porcelain"]).await;
+            if !status.trim().is_empty() {
+                let (ok, _) = git
+                    .raw(
+                        wd,
+                        &[
+                            "stash",
+                            "push",
+                            "-u",
+                            "-m",
+                            "hygiene: slot WIP (engine died mid-edit)",
+                        ],
+                    )
+                    .await;
+                if ok {
+                    self.log_git("hygiene: stashed slot WIP — recover with `git stash list`")
+                        .await;
+                }
+            }
+            return;
+        }
+        // Leader-tree hygiene lives in its own method to keep tree_hygiene lean.
+        self.tree_hygiene_leader(git, wd, &base, &branch).await;
+    }
+
+    /// Leader-tree hygiene: orphan WIP on a feature branch -> stash + back to
+    /// base; local base ahead of origin -> backup + reset. Pure orchestration
+    /// over `GitPort::raw`; a failure never stops the cycle.
+    async fn tree_hygiene_leader(
+        &self,
+        git: &Arc<dyn GitPort>,
+        wd: &std::path::Path,
+        base: &str,
+        branch: &str,
+    ) {
+        // Leader tree. 1) Orphan WIP on a feature branch → stash + back to base.
+        let (_, status) = git.raw(wd, &["status", "--porcelain"]).await;
+        let dirty = !status.trim().is_empty();
+        if dirty && !branch.is_empty() && branch != base {
+            let msg = format!("hygiene: orphan WIP on {branch} (engine died mid-run)");
+            let (ok, _) = git.raw(wd, &["stash", "push", "-u", "-m", &msg]).await;
+            if ok {
+                self.log_git(&format!(
+                    "hygiene: stashed orphan WIP from {branch} — recover with `git stash list`"
+                ))
+                .await;
+            }
+        }
+        if !branch.is_empty() && branch != base && branch != "HEAD" {
+            let (ok, _) = git.raw(wd, &["checkout", base]).await;
+            if !ok {
+                // Base may be held by a stray worktree; a detached base is
+                // still a working position for the cycle.
+                let _ = git
+                    .raw(wd, &["checkout", "--detach", &format!("origin/{base}")])
+                    .await;
+            }
+        }
+        // 2) Local base polluted with commits origin lacks → backup + reset.
+        let _ = git.raw(wd, &["fetch", "origin", base]).await;
+        let (ok, ahead) = git
+            .raw(
+                wd,
+                &["rev-list", "--count", &format!("origin/{base}..{base}")],
+            )
+            .await;
+        let ahead: u64 = if ok {
+            ahead.trim().parse().unwrap_or(0)
+        } else {
+            0
+        };
+        if ahead > 0 {
+            let backup = format!("backup/{base}-hygiene");
+            let _ = git.raw(wd, &["branch", "-f", &backup, base]).await;
+            // Reset only moves the base ref when we actually sit on it.
+            let cur = git.current_branch(wd).await.unwrap_or_default();
+            if cur == base {
+                let (ok, _) = git
+                    .raw(wd, &["reset", "--hard", &format!("origin/{base}")])
+                    .await;
+                if ok {
+                    self.log_git(&format!(
+                        "hygiene: local {base} had {ahead} commit(s) origin lacks — \
+                         kept on {backup}, reset to origin/{base}"
+                    ))
+                    .await;
+                }
+            }
+        }
     }
 }

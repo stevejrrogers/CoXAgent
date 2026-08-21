@@ -699,10 +699,11 @@ pub(super) async fn git_pv(dir: &std::path::Path, args: &[&str]) -> Result<(), S
 }
 
 /// Parse `deploy.host_port` out of a project's raw `coxagent.json` for the
-/// preview health-gate probe. Thin wrapper over the shared
-/// [`coxagent_application::ports::outbound::parse_deploy_host_port`] — every
-/// deploy call site (cycle, chat, PR preview) parses a malformed `host_port`
-/// the same way (COX-B025/COX-B026/COX-B035).
+/// preview health-gate probe (COX-B025/COX-B026). Thin alias over the shared
+/// [`coxagent_application::ports::outbound::parse_deploy_host_port`] — see
+/// its doc for the full contract — kept so call sites here read naturally as
+/// "preview" concerns; every deploy call site (cycle, chat, PR preview)
+/// parses a malformed `host_port` the same way (COX-B035).
 pub(super) fn parse_preview_host_port(raw_config: &str) -> Result<Option<u16>, ()> {
     coxagent_application::ports::outbound::parse_deploy_host_port(raw_config)
 }
@@ -710,15 +711,14 @@ pub(super) fn parse_preview_host_port(raw_config: &str) -> Result<Option<u16>, (
 /// Run the mandatory post-deploy health gate (COX-B004/COX-B009) for a probe
 /// port that may be invalid (COX-B025/COX-B026): a corrupt `host_port` fails
 /// the gate outright rather than being treated as "nothing configured",
-/// which would pass unconditionally and report a dead app as LIVE.
+/// which would pass unconditionally and report a dead app as LIVE. Thin
+/// alias over the shared
+/// [`coxagent_application::ports::outbound::verify_deploy_health_probe`].
 pub(super) async fn run_preview_health_gate(
     deploy: &Arc<dyn coxagent_application::ports::outbound::DeployPort>,
     probe_port: Result<Option<u16>, ()>,
 ) -> bool {
-    match probe_port {
-        Ok(port) => coxagent_application::ports::outbound::verify_deploy_health(deploy, port).await,
-        Err(()) => false,
-    }
+    coxagent_application::ports::outbound::verify_deploy_health_probe(deploy, probe_port).await
 }
 
 /// Deploy a PR's branch so the human can SEE the change running before
@@ -976,9 +976,33 @@ pub(super) async fn pr_report_ep(
         }
         return Json(serde_json::json!({ "ok": true, "review": number })).into_response();
     }
+    if let Some(h) = body.get("hold") {
+        let number = h
+            .get("number")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let reason = h
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned();
+        if number == 0 {
+            return (StatusCode::BAD_REQUEST, "bad hold: number required").into_response();
+        }
+        if mutate_state(p.store.as_ref(), |s| {
+            s.human_holds.insert(number, reason.clone());
+            Ok(())
+        })
+        .await
+        .is_err()
+        {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "store write failed").into_response();
+        }
+        return Json(serde_json::json!({ "ok": true, "hold": number })).into_response();
+    }
     (
         StatusCode::BAD_REQUEST,
-        "expected {project, pr} or {project, review}",
+        "expected {project, pr}, {project, review} or {project, hold}",
     )
         .into_response()
 }

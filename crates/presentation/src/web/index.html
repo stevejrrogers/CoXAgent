@@ -253,7 +253,7 @@
         <div id="agent-picker" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px"></div>
         <div class="sec" style="margin-top:10px">Recent actions</div>
         <div id="agent-acts" class="panel" style="max-height:16vh;overflow:auto"></div>
-        <div class="sec" style="margin-top:12px;display:flex;align-items:center;gap:8px">Work log <span id="agent-live-badge" style="font-size:10px;font-weight:700;padding:1px 7px;border-radius:5px;background:color-mix(in srgb,var(--green) 22%,transparent);color:var(--green);display:none">● LIVE</span> <span style="font-size:11px;color:var(--dim);font-weight:400">· what the agent is doing, step by step</span></div>
+        <div class="sec" style="margin-top:12px;display:flex;align-items:center;gap:8px">Work log <span id="agent-live-badge" style="font-size:10px;font-weight:700;padding:1px 7px;border-radius:5px;background:color-mix(in srgb,var(--green) 22%,transparent);color:var(--green);display:none">● LIVE</span> <span id="agent-err-badge" style="font-size:10px;font-weight:700;padding:1px 7px;border-radius:5px;background:color-mix(in srgb,var(--red) 22%,transparent);color:var(--red);display:none"></span> <span style="font-size:11px;color:var(--dim);font-weight:400">· what the agent is doing, step by step</span></div>
         <div id="agent-transcript" class="worklog"><div class="wl-empty"><i class="ti ti-loader-2"></i> loading…</div></div>
       </div></div>
       <div class="ov" id="ov-transcript" onclick="if(event.target===this)close_('ov-transcript')"><div class="modal" style="max-width:760px">

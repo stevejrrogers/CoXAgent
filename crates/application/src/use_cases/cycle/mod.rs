@@ -25,6 +25,7 @@ mod debt_sweep;
 mod escalation;
 mod preflight;
 mod scrum;
+mod sm_watch;
 mod wiring;
 
 mod forge;
@@ -34,9 +35,8 @@ mod forge_review;
 mod ops;
 mod qa_evidence;
 mod recovery;
-
-/// How often (in sprints) the SA runs a whole-system architecture review.
-const ARCH_REVIEW_EVERY_SPRINTS: u32 = 8;
+mod release_cut;
+mod trend;
 
 /// Local, non-pushed ref updated after every deploy that passes both
 /// `deploy()` and `run_tests()` — auto-rollback's source of truth for "last
@@ -129,18 +129,6 @@ fn parse_cargo_version(text: &str) -> Option<String> {
     None
 }
 
-/// The version to reconcile `state_ver` down to, or `None` when there is no
-/// drift to correct. Returns `repo_ver` when state has optimistically bumped
-/// ahead of what the tree declares; `None` when state is at or behind reality
-/// or `repo_ver` is unparseable.
-fn reconcile_target(
-    state_ver: &coxagent_domain::SemVer,
-    repo_ver: &str,
-) -> Option<coxagent_domain::SemVer> {
-    let repo = coxagent_domain::SemVer::parse(repo_ver).ok()?;
-    (state_ver > &repo).then_some(repo)
-}
-
 /// The composition root's engine-rebuild hook: `Some(new parts)` only when the
 /// on-disk config changed since last asked (see [`RunCycleUseCase::with_reloader`]).
 pub type Reloader<E> = Arc<dyn Fn() -> Option<(Config, Arc<E>, Arc<Mutex<Spend>>)> + Send + Sync>;
@@ -151,20 +139,17 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     engine: Arc<E>,
     config: Config,
     work_dir: PathBuf,
+    /// Isolated git worktree for leader feedback-fix / SA-rescue git ops, so
+    /// those never collide with the shared leader checkout's dirty, mid-cycle
+    /// state. `None` falls back to `work_dir` (tests / non-repo). Mirrors how
+    /// each concurrency slot already gets its own tree for DEV.
+    feedback_work_dir: Option<PathBuf>,
     context: String,
     meter: Option<Arc<Mutex<Spend>>>,
     shot: Option<Arc<dyn crate::ports::outbound::ScreenshotPort>>,
     probe: Option<Arc<dyn crate::ports::outbound::ApiProbePort>>,
     storage: Option<Arc<dyn crate::ports::outbound::StoragePort>>,
     deploy: Option<Arc<dyn DeployPort>>,
-    /// The published `host_port` to probe for the mandatory post-deploy
-    /// health gate, or `Err` when the raw `coxagent.json`'s
-    /// `deploy.host_port` is present but malformed (COX-B035). Defaults to
-    /// `Ok(config.deploy.host_port)`; callers reading the raw config
-    /// separately (to fail closed on a malformed value the `Config` parse
-    /// itself may have folded into a default) override it via
-    /// [`Self::with_host_port_probe`].
-    host_port_probe: Result<Option<u16>, ()>,
     notifier: Option<Arc<dyn crate::ports::outbound::NotifierPort>>,
     /// Reporter that pushes PR/review activity to the hub over HTTP. The runner
     /// is the sole holder of forge credentials, so the hub must be told what it
@@ -186,6 +171,21 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     /// Rebuild hook for hot-reloading engine+config on a file change (set by
     /// the composition root; `None` in tests).
     reloader: Option<Reloader<E>>,
+    /// Polled between phases: `true` = the user pressed Pause, stop starting
+    /// new phases and end this cycle early. `None` (tests/headless) = never.
+    pause_check: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
+    /// Whether this runner competes for the project leader lease (default
+    /// true). Worker slots co-located with a primary runner set false — see
+    /// the election comment in `run_cycle`.
+    leader_election: bool,
+    /// Per-phase wall-clock tracker: `report()` marks each phase switch, the
+    /// scorecard drains the totals at cycle end. `(current phase, since)` plus
+    /// accumulated seconds per phase label.
+    #[allow(clippy::type_complexity)]
+    phase_track: Mutex<(
+        Option<(String, std::time::Instant)>,
+        std::collections::BTreeMap<String, u64>,
+    )>,
     /// This runner's identity (`account@host`) — recorded as the ticket claim
     /// owner so concurrent runners on a shared backlog never collide.
     worker: String,
@@ -195,6 +195,17 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     /// Whether the `sandbox_unsupported` warning has already fired — posted
     /// once per project per process lifetime, never once per cycle.
     sandbox_warned: AtomicBool,
+    /// The health-gate probe port, independently parsed from `coxagent.json`'s
+    /// raw text via [`crate::ports::outbound::parse_deploy_host_port`] where a
+    /// caller has that text available. Kept separate from
+    /// `config.deploy.host_port` because that field cannot distinguish
+    /// "absent" from "malformed" once `Config` deserialization has already
+    /// folded a corrupt value into `Config::default()`; `Err(())` means the
+    /// raw value was present but invalid and must fail the gate rather than
+    /// pass vacuously (COX-B035). Defaults to `Ok(config.deploy.host_port)`
+    /// so callers that never independently parse the raw config keep today's
+    /// behavior.
+    host_port_probe: Result<Option<u16>, ()>,
 }
 
 impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
@@ -211,6 +222,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             engine,
             config,
             work_dir,
+            feedback_work_dir: None,
             context,
             meter: None,
             shot: None,
@@ -227,10 +239,26 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             forge: None,
             phase: None,
             reloader: None,
+            pause_check: None,
+            leader_election: true,
+            phase_track: Mutex::new((None, std::collections::BTreeMap::new())),
             worker: String::new(),
             caps: crate::ports::outbound::WorkerCaps::default(),
             sandbox_warned: AtomicBool::new(false),
         }
+    }
+
+    /// Override the health-gate probe port with one parsed independently
+    /// from `coxagent.json`'s raw text (see
+    /// [`crate::ports::outbound::parse_deploy_host_port`]) — distinguishes
+    /// "no `host_port` configured" from "`host_port` present but invalid",
+    /// which `Config::deploy.host_port` alone cannot tell apart once a
+    /// corrupt config has already collapsed to `Config::default()`
+    /// (COX-B035).
+    #[must_use]
+    pub fn with_host_port_probe(mut self, probe: Result<Option<u16>, ()>) -> Self {
+        self.host_port_probe = probe;
+        self
     }
 
     /// Set this runner's identity (`account@host`), used as the ticket claim
@@ -260,6 +288,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     pub fn with_reloader(mut self, reloader: Reloader<E>) -> Self {
         self.reloader = Some(reloader);
         self
+    }
+
+    /// Install the runner's pause probe (composition root only).
+    pub fn set_pause_check(&mut self, check: std::sync::Arc<dyn Fn() -> bool + Send + Sync>) {
+        self.pause_check = Some(check);
+    }
+
+    /// Whether the user has asked to pause — checked between phases so Pause
+    /// cuts the cycle at the next boundary instead of after the whole cycle.
+    fn pause_requested(&self) -> bool {
+        self.pause_check.as_ref().is_some_and(|c| c())
     }
 
     /// Apply a pending config change if the reload hook reports one. Called by
@@ -313,6 +352,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// Report the agent about to run (live "working now"). `note` is a short
     /// context like a ticket id; empty when there's none.
     fn report(&self, role: &str, note: &str) {
+        // Phase switch: bank the previous phase's elapsed time.
+        if let Ok(mut t) = self.phase_track.lock() {
+            let now = std::time::Instant::now();
+            if let Some((prev, since)) = t.0.take() {
+                *t.1.entry(prev).or_default() += since.elapsed().as_secs();
+            }
+            t.0 = Some((role.to_owned(), now));
+        }
         if let Some(p) = &self.phase {
             p(Some((role.to_owned(), note.to_owned())));
         }
@@ -337,6 +384,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     #[must_use]
     pub fn with_git(mut self, git: Arc<dyn GitPort>) -> Self {
         self.git = Some(git);
+        self
+    }
+
+    /// Attach an isolated feedback/SA-rescue worktree so leader git ops for
+    /// the merge queue run outside the (possibly dirty) shared checkout. See
+    /// `feedback_work_dir`.
+    #[must_use]
+    pub fn with_feedback_workdir(mut self, dir: PathBuf) -> Self {
+        self.feedback_work_dir = Some(dir);
         self
     }
 
@@ -404,21 +460,34 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         .await;
     }
 
-    /// Reconcile the state's `current_version` against the version the checked-out
-    /// tree actually declares. The version is bumped optimistically when a DEV
-    /// ticket completes locally — *before* its PR merges. If that PR is later
-    /// rejected or closed, `state.current_version` stays a phantom release no
-    /// build carries. This pass pulls it back to reality, but only when it is
-    /// provably safe: no ticket is mid-flight (in-progress/claimed/fixed pending
-    /// PR), so nothing is actively bumping the version.
+    /// Mirror the state's `current_version` from the version the checked-out
+    /// tree declares — BOTH directions. The manifest on main is the single
+    /// source of truth (only the release flow changes it); the dashboard
+    /// number is a reflection, never an opinion. Historically DEV bumped the
+    /// state optimistically pre-merge (phantom releases this pass clawed
+    /// back); that bump is gone, and any residual drift — stale mirror behind
+    /// a repo release, or a leftover phantom — converges here.
     async fn reconcile_version(&self) {
-        let Some(files) = self.files.clone() else {
+        // Read the manifest from ORIGIN/<base>, never the local tree: the
+        // leader lease rotates across runners whose worktrees sit at DIFFERENT
+        // commits (slots stay detached at their claim base), so reading each
+        // runner's own checkout made the mirror ping-pong between versions
+        // every minute (2.26.1↔2.26.4, 2026-08-19 night). Origin is the same
+        // for everyone.
+        let Some(git) = &self.git else {
             return;
         };
-        let cargo = self.work_dir.join("Cargo.toml");
-        let Some(text) = files.read(&cargo).await else {
+        let base = self.flow_base();
+        let _ = git.raw(&self.work_dir, &["fetch", "-q", "origin", base]).await;
+        let (ok, text) = git
+            .raw(
+                &self.work_dir,
+                &["show", &format!("origin/{base}:Cargo.toml")],
+            )
+            .await;
+        if !ok {
             return;
-        };
+        }
         let Some(repo_ver) = parse_cargo_version(&text) else {
             return;
         };
@@ -426,32 +495,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let Ok(mut state) = self.store.load().await else {
             return;
         };
-        // Never stomp active work: if a ticket is claimed/in-flight it may be
-        // mid-bump; wait for it to resolve.
-        let ticket_in_flight = state.tickets.iter().any(|t| {
-            matches!(
-                t.status(),
-                coxagent_domain::ticket::Status::InProgress
-                    | coxagent_domain::ticket::Status::Fixed
-            )
-        });
-        if ticket_in_flight {
-            return;
-        }
         let state_ver = state.current_version.clone();
-        // What version should state be reconciled to, or None when no drift.
-        // Purely a function of (state version, repo version) — the in-flight
-        // guard above already ruled out active work.
-        if let Some(target) = reconcile_target(&state_ver, &repo_ver) {
-            tracing::warn!(
-                "reconcile: state version {} ahead of repo {} with no work in flight — reverting",
-                state_ver,
-                repo_ver
-            );
-            state.current_version = target.clone();
+        let Ok(repo) = coxagent_domain::SemVer::parse(&repo_ver) else {
+            return;
+        };
+        if repo != state_ver {
+            state.current_version = repo.clone();
             state.log_activity(
                 "SYSTEM",
-                &format!("reconciled version {state_ver} → {target} (phantom bump, no PR merged)"),
+                &format!("version mirror synced {state_ver} → {repo} (manifest on main is truth)"),
                 None,
             );
             let _ = self.store.save(&state).await;
@@ -513,7 +565,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     }
 
     /// Emit an event to the notifier, if one is attached. Best-effort.
-    async fn notify(&self, kind: &str, message: String) {
+    pub(crate) async fn notify(&self, kind: &str, message: String) {
         if let Some(n) = &self.notifier {
             let project = self.config_project_label();
             n.notify(crate::ports::outbound::NotifyEvent {
@@ -580,17 +632,6 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         self
     }
 
-    /// Override the post-deploy health-gate probe port (COX-B035): pass
-    /// `Err(())` when the raw `coxagent.json` names a malformed
-    /// `deploy.host_port`, so the gate fails closed instead of the default
-    /// (`Ok(config.deploy.host_port)`) treating a `Config`-parse fallback's
-    /// `None` as "nothing configured".
-    #[must_use]
-    pub fn with_host_port_probe(mut self, probe: Result<Option<u16>, ()>) -> Self {
-        self.host_port_probe = probe;
-        self
-    }
-
     /// Run one cycle. Never returns `Err`: agent failures are collected into the
     /// report so the outer loop keeps going.
     #[allow(clippy::too_many_lines)] // a linear sequence of agent phases; splitting hurts readability
@@ -611,6 +652,26 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             return report;
         }
 
+        // Quiet hours: inside the configured UTC window no NEW engine calls
+        // start — overnight is when quota walls and sleeping laptops kill runs
+        // mid-edit with nobody watching. An open high-priority bug overrides
+        // (urgent work does not wait for morning). Not an error: the cycle
+        // just reports itself quiet, so the breaker and scorecard stay honest.
+        if self.quiet_hours_block().await {
+            return report;
+        }
+
+        // Canary mode: this engine has an OPEN incident. Running the full
+        // multi-phase cycle against a dead engine burns a claim/release/
+        // journal round per phase per minute ("engine infrastructure fault —
+        // attempt not counted" wallpaper). Instead run exactly ONE cheap probe
+        // phase: if the engine answers, the incident closes on the evidence
+        // and the next cycle is full; if not, one fault, not eight.
+        if self.engine_incident_open().await {
+            self.run_canary_probe(&mut report).await;
+            return report;
+        }
+
         // Coordinate concurrent runners: at most one leads the singleton phases
         // (BA/PO/design-system/deploy/TEST/review) that must run once per project,
         // not once per runner. Non-leaders still do per-ticket stages (SA/PD/DEV/
@@ -622,7 +683,42 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             self.worker.clone()
         };
         let now = crate::state::now_rfc3339();
-        let leader = self.store.acquire_leader(&me, &now).await.unwrap_or(true);
+        // Leader election stays MACHINE-level (each machine's primary runner
+        // competes, so a dead machine hands ceremonies to another — the
+        // multi-user requirement). Worker SLOTS on the same machine never
+        // compete: the lease rotating across co-located slots produced the
+        // scorecard-numbering and version-ping-pong bugs, and a worker whose
+        // machine is alive has a primary runner right next to it.
+        let leader = if self.leader_election {
+            self.store.acquire_leader(&me, &now).await.unwrap_or(true)
+        } else {
+            false
+        };
+        // Authoritative cycle number: the persistent, project-wide counter the
+        // leader advances once per cycle. Scoring *and* cadence key off this,
+        // NOT the per-process local number — so restarts / leader handovers
+        // neither renumber the scorecard nor reset the codegraph/debt/BA/scrum
+        // cadence. Falls back to the local number if the store hiccups.
+        let cycle = if leader {
+            // Advance the persistent project-cycle counter: load state, bump
+            // `state.cycle`, save, and use the advanced number. On any store
+            // hiccup fall back to the local number so a state problem never
+            // stalls a cycle.
+            match self.store.load().await {
+                Ok(mut s) => {
+                    // Pure, testable: seeds past existing scorecard history on
+                    // first use, then advances the persistent counter (see
+                    // `advance_project_cycle` below).
+                    let next = advance_project_cycle(&mut s);
+                    let _ = self.store.save(&s).await;
+                    next
+                }
+                Err(_) => cycle,
+            }
+        } else {
+            cycle
+        };
+        report.cycle = cycle;
         // Merge-queue recovery flag (set by the leader once the queue blows up).
         let mut recovery = false;
         // Human-queued execution jobs (force-merge …) run before anything else.
@@ -640,6 +736,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             )
             .await;
 
+        // Tree hygiene FIRST, every runner: an engine that died mid-run leaves
+        // the LEADER tree dirty on a feature branch or its local base polluted,
+        // and a SLOT worktree holding a branch hostage — then every later git
+        // op this cycle fails in a chain (the 2026-08-16 all-D night). Clean
+        // up before anything touches git.
+        self.tree_hygiene().await;
         // Keep the code map fresh so `.coxagent/REPO_MAP.md` reflects the tree
         // the agents are about to work on (best-effort, token-saver-gated).
         // Leader-only: it writes shared files under the repo.
@@ -662,6 +764,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             }
             // Scrum: open/roll over the sprint at the start of the cycle.
             self.advance_sprint_if_scrum(cycle).await;
+            // SM supervision (deterministic, zero tokens): police the sprint
+            // scope, route stalled committed work to the role that unblocks
+            // it, and descope what will not ship — the SM orchestrates the
+            // sprint instead of just announcing it.
+            self.sm_sprint_watch().await;
 
             // One digest per UTC day into the team chat: shipped/spend/sprint at
             // a glance, so the user doesn't need the dashboard open to keep up.
@@ -675,16 +782,23 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // Forge hygiene: rebase open PRs onto the moving base + learn
             // from PRs a human closed without merging.
             self.forge_hygiene().await;
+            // Release cut (the ONLY place the version moves): on cadence, scan
+            // commits since the last tag and open the human-gated release PR.
+            self.maybe_cut_release().await;
+            // The strategic eye: once a week, read the numbers nobody's queue
+            // surfaces (inflow vs outflow, failure hotspots, grade/cost
+            // direction) and propose — never decide — system-level work.
+            self.trend_sentinel().await;
             // Stop starting, start finishing: review + merge the PR queue at
             // the TOP of the cycle. This used to run at the very end — after
             // codegraph, ceremonies and the (tens-of-minutes) dev phases — so
             // mergeable PRs aged a whole cycle before anyone looked at them.
             self.review_open_prs().await;
             self.address_pr_feedback().await;
-            // Debt sweep cadence: every 10th cycle files ONE tech-debt chore
-            // (lint baseline, dead code, missing docs) if none is open — the
+            // Debt sweep cadence (configurable): every Nth cycle files ONE
+            // tech-debt chore (lint baseline, dead code, missing docs) — the
             // discipline of paying debt down on a schedule instead of never.
-            if cycle % 10 == 0 {
+            if cycle % self.config.workflow.cadence.debt_sweep_every_cycles() == 0 {
                 self.file_debt_sweep(cycle).await;
             }
 
@@ -798,6 +912,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 .errors
                 .push("SA/PD: design paused — merge-queue recovery, conflicts first".to_owned());
         } else {
+            if self.pause_requested() {
+                report
+                    .errors
+                    .push("cycle cut short — paused by user".to_owned());
+                return report;
+            }
             match self.sa().execute().await {
                 Ok(id) => report.sa_readied = id,
                 Err(e) => report.errors.push(format!("SA: {e}")),
@@ -823,6 +943,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
 
         if !queue_full {
+            if self.pause_requested() {
+                report
+                    .errors
+                    .push("cycle cut short — paused by user".to_owned());
+                return report;
+            }
             match self.dev(DevMode::Bug).execute().await {
                 Ok(id) => {
                     if let Some(tid) = &id {
@@ -838,6 +964,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             report
                 .errors
                 .push("DEV-FEATURE: paused by self-tuning — burning down bugs first".to_owned());
+        }
+        if self.pause_requested() {
+            report
+                .errors
+                .push("cycle cut short — paused by user".to_owned());
+            return report;
         }
         if self.config.workflow.feature_dev_enabled && !queue_full && !bugs_first {
             // Before building, make sure the next feature has a clear definition
@@ -1082,9 +1214,26 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // bug pile-up, or a periodic check-in), the team actually discusses
             // it — PO & SA weigh in, SM decides, and a decision can spawn a
             // ticket. Posts land in the Scrum feed.
+            if self.pause_requested() {
+                report
+                    .errors
+                    .push("cycle cut short — paused by user".to_owned());
+                return report;
+            }
             self.scrum_discussion(&report, cycle).await;
         }
         self.report_idle();
+
+        // A slot worker that produced nothing this cycle is idle. Reclaim the
+        // disk its regenerable build cache occupies — a busy multi-slot team
+        // otherwise leaks tens of GB per worktree with no path back (slot
+        // worktrees are materialize-or-reuse and never removed, so
+        // `worktree_remove`'s cache purge never fires for them). Only the
+        // non-leader slot workers do this; the leader's checkout is shared and
+        // safe to keep warm, and the purge is best-effort anyway.
+        if !leader && !report.did_work() {
+            self.maybe_purge_idle_slot_target();
+        }
 
         report.over_budget = self.record_activity(&report, leader).await;
         if report.over_budget {
@@ -1146,6 +1295,159 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     ) -> Self {
         self.janitor = janitor;
         self
+    }
+
+    /// Evict this slot worker's regenerable build cache once it went idle.
+    ///
+    /// Slot worktrees (`cxa-<id>-slot-<n>-*`) are materialize-or-reuse and
+    /// live for the runner's lifetime, so the cache purge inside
+    /// `worktree_remove` (which only fires for transient worktrees) never
+    /// reaches them — an idle slot's `target/` would regrow to tens of GB and
+    /// stay forever. When this cycle produced no work for this slot, its cache
+    /// has no owner running right now, so it is safe to drop; the cost is just
+    /// a cold rebuild when the slot next claims a ticket. Best-effort and
+    /// never fatal.
+    fn maybe_purge_idle_slot_target(&self) {
+        // Guard: only ever purge a slot worker's own tree. The leader's
+        // checkout and the feedback tree are shared/kept warm and must not be
+        // evicted. The purge path goes through the janitor port (never a
+        // direct `std::fs` in a use case) and is scoped to exactly
+        // `<work_dir>/target`; nothing else is touched.
+        if !self.is_slot_worktree() {
+            return;
+        }
+        if let Some(janitor) = &self.janitor {
+            janitor.purge_target_cache(&self.work_dir);
+        }
+    }
+
+    /// Whether `work_dir` belongs to a concurrency slot worker
+    /// (`cxa-<id>-slot-<n>-<hash>`) rather than the leader's shared checkout
+    /// or the feedback tree.
+    fn is_slot_worktree(&self) -> bool {
+        self.work_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.contains("-slot-"))
+    }
+
+    /// Turn leader-lease competition off for co-located worker slots.
+    #[must_use]
+    pub fn with_leader_election(mut self, enabled: bool) -> Self {
+        self.leader_election = enabled;
+        self
+    }
+
+    /// One dedicated REVIEW pass — the P1 job of the event-dispatch plan
+    /// (docs/proposals/event-dispatch.md): forge hygiene + PR review/merge +
+    /// feedback fixes, on their own fast loop so a one-hour DEV phase never
+    /// delays a ripe PR by a whole cycle. Reuses the full gate stack
+    /// (landed-proof, fix-on-fix brake, human-eyes, competing-PR resolver).
+    /// Callers gate on pause; this gates on quiet hours and open incidents.
+    pub async fn run_review_pass(&self) {
+        if self.quiet_hours_block().await || self.engine_incident_open().await {
+            return;
+        }
+        self.forge_hygiene().await;
+        self.review_open_prs().await;
+        self.address_pr_feedback().await;
+    }
+
+    /// Drain the per-phase wall-clock totals (closing any open phase) — called
+    /// once at cycle end by the scorecard.
+    pub(super) fn take_phase_secs(&self) -> std::collections::BTreeMap<String, u64> {
+        match self.phase_track.lock() {
+            Ok(mut t) => {
+                if let Some((prev, since)) = t.0.take() {
+                    *t.1.entry(prev).or_default() += since.elapsed().as_secs();
+                }
+                std::mem::take(&mut t.1)
+            }
+            Err(_) => std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Whether THIS runner's engine has an open incident recorded.
+    async fn engine_incident_open(&self) -> bool {
+        let engine = self.engine_id();
+        self.store
+            .load()
+            .await
+            .is_ok_and(|s| s.engine_incidents.iter().any(|i| i.engine == engine))
+    }
+
+    /// The one probe a canary cycle runs: a single DEV-BUG pass. If the engine
+    /// answers (success OR an ordinary task failure) the incident-close logic
+    /// sees evidence of life; if the engine is still dead, the cycle cost one
+    /// fault instead of a phase-by-phase burn.
+    async fn run_canary_probe(&self, report: &mut CycleReport) {
+        self.report("DEV-BUG", "canary probe (engine incident open)");
+        match self.dev(DevMode::Bug).execute().await {
+            Ok(Some(done)) => report.bug_fixed = Some(done),
+            // Nothing to claim proves nothing about the engine — without a
+            // fallback the incident could never close on an empty backlog.
+            // One minimal ping settles it either way.
+            Ok(None) => {
+                let ping = AgentRequest {
+                    role: coxagent_domain::Role::Sm,
+                    system_prompt: String::new(),
+                    task_prompt: "Reply with the single word OK.".to_owned(),
+                    work_dir: self.work_dir.clone(),
+                    timeout: std::time::Duration::from_secs(120),
+                    escalation_level: 0,
+                    label: Some("canary".to_owned()),
+                };
+                match self.engine.run(ping).await {
+                    Ok(o) if o.succeeded() => {
+                        // Alive: give the close logic its evidence via a
+                        // task-shaped no-op error-free signal — an explicit
+                        // non-infra "error" would ding the scorecard, so mark
+                        // progress-equivalent through bugs_filed-free report by
+                        // recording a documented no-op instead.
+                        report
+                            .errors
+                            .push("canary: engine answered — recovering".to_owned());
+                    }
+                    Ok(o) => report
+                        .errors
+                        .push(format!("canary probe: {}", o.failure_detail())),
+                    Err(e) => report.errors.push(format!("canary probe: {e}")),
+                }
+            }
+            Err(e) => report.errors.push(format!("canary probe: {e}")),
+        }
+        if let Some(p) = &self.phase {
+            p(None);
+        }
+    }
+
+    /// Whether this cycle must stay quiet: inside `workflow.quiet_hours_utc`
+    /// and no high-priority bug is open. Reads the wall clock from the same
+    /// RFC3339 source the rest of the state uses.
+    async fn quiet_hours_block(&self) -> bool {
+        let window = self.config.workflow.quiet_hours_utc.trim();
+        if window.is_empty() {
+            return false;
+        }
+        let now = crate::state::now_rfc3339();
+        // "YYYY-MM-DDTHH:MM:…" — minutes since UTC midnight.
+        let minutes = now
+            .get(11..13)
+            .zip(now.get(14..16))
+            .and_then(|(h, m)| Some(h.parse::<u32>().ok()? * 60 + m.parse::<u32>().ok()?));
+        let Some(minutes) = minutes else { return false };
+        if !crate::config::in_quiet_window(window, minutes) {
+            return false;
+        }
+        // Urgent work overrides: an open high-priority bug does not wait.
+        let urgent = self.store.load().await.is_ok_and(|s| {
+            s.tickets.iter().any(|t| {
+                t.ticket_type() == coxagent_domain::TicketType::Bug
+                    && t.status() == coxagent_domain::Status::Open
+                    && t.priority() == coxagent_domain::Priority::High
+            })
+        });
+        !urgent
     }
 
     /// Attach workspace-file access (team notes, memory indexes, maps).
@@ -1290,6 +1592,80 @@ fn apply_budget_warnings(
     (new_lifetime_warning, new_daily_warning)
 }
 
+/// Advance `state.cycle` — the persistent, restart-safe project-cycle counter —
+/// and return its new value. On a project whose scorecard already has history
+/// (loaded from before `state.cycle` existed), the counter is first seeded past
+/// that history so the scorecard dedupe gate (new cycle > scored max) doesn't
+/// drop the first N real cycles, and so cadence never renumbers onto values
+/// `sweeps_done` already recorded. Pure + testable; the leader calls it with
+/// its loaded state and persists the result.
+fn advance_project_cycle(state: &mut crate::state::ProjectState) -> u64 {
+    if state.cycle == 0 {
+        state.cycle = state
+            .cycle_scores
+            .iter()
+            .map(|c| c.cycle)
+            .max()
+            .unwrap_or(0);
+    }
+    state.cycle = state.cycle.saturating_add(1);
+    state.cycle
+}
+
+#[cfg(test)]
+mod cycle_counter_tests {
+    use super::advance_project_cycle;
+    use crate::state::ProjectState;
+
+    #[test]
+    fn fresh_project_starts_and_advances_from_one() {
+        let mut s = ProjectState::default();
+        assert_eq!(advance_project_cycle(&mut s), 1);
+        assert_eq!(advance_project_cycle(&mut s), 2);
+        assert_eq!(advance_project_cycle(&mut s), 3);
+    }
+
+    #[test]
+    fn resumes_from_an_existing_runner_local_counter() {
+        // A project whose persistent counter was seeded by an older local
+        // counter (e.g. it ran 42 cycles before this field existed).
+        let mut s = ProjectState {
+            cycle: 42,
+            ..ProjectState::default()
+        };
+        assert_eq!(advance_project_cycle(&mut s), 43);
+        assert_eq!(advance_project_cycle(&mut s), 44);
+    }
+
+    #[test]
+    fn seeds_past_existing_scorecard_history_on_first_use() {
+        // Migrated project: cycle_scores already has history but `state.cycle`
+        // is 0. The first advance must jump PAST the scored max so the dedupe
+        // gate doesn't suppress real fresh cycles.
+        use crate::state::CycleScore;
+        let mut s = ProjectState::default();
+        s.cycle_scores.push(CycleScore {
+            cycle: 42,
+            ..CycleScore::default()
+        });
+        assert_eq!(advance_project_cycle(&mut s), 43);
+        // Subsequent advances stay monotonic.
+        assert_eq!(advance_project_cycle(&mut s), 44);
+    }
+
+    #[test]
+    fn never_regresses_the_persistent_counter() {
+        // The counter only moves forward — it never wraps or renumbers.
+        let mut s = ProjectState {
+            cycle: u64::MAX - 1,
+            ..ProjectState::default()
+        };
+        assert_eq!(advance_project_cycle(&mut s), u64::MAX);
+        // Saturates rather than wrapping to 0 (which would collide with cadence).
+        assert_eq!(advance_project_cycle(&mut s), u64::MAX);
+    }
+}
+
 #[cfg(test)]
 mod marker_tests {
     use super::diff_has_conflict_markers;
@@ -1314,7 +1690,7 @@ mod marker_tests {
 
 #[cfg(test)]
 mod version_reconcile_tests {
-    use super::{parse_cargo_version, reconcile_target};
+    use super::parse_cargo_version;
     use coxagent_domain::SemVer;
 
     #[test]
@@ -1337,20 +1713,6 @@ mod version_reconcile_tests {
     fn missing_or_garbage_version_is_none() {
         assert_eq!(parse_cargo_version("[package]\nname=\"x\"\n"), None);
         assert_eq!(parse_cargo_version("version = \"not-a-version\"\n"), None);
-    }
-
-    #[test]
-    fn reconciles_only_when_state_is_ahead() {
-        // State ahead of repo → reconcile DOWN to repo.
-        assert_eq!(
-            reconcile_target(&SemVer::new(2, 23, 0), "2.22.0"),
-            Some(SemVer::new(2, 22, 0))
-        );
-        // State at or behind reality → no-op.
-        assert_eq!(reconcile_target(&SemVer::new(2, 22, 0), "2.22.0"), None);
-        assert_eq!(reconcile_target(&SemVer::new(2, 21, 0), "2.22.0"), None);
-        // Unparseable repo version → no-op (cannot guess).
-        assert_eq!(reconcile_target(&SemVer::new(2, 23, 0), "garbage"), None);
     }
 
     #[test]

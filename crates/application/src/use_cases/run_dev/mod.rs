@@ -2,7 +2,8 @@
 //!
 //! The orchestrator owns claim/release: it atomically claims a ticket
 //! (`Ready|Open -> InProgress` as `System`), runs the engine, and on success
-//! completes it (`-> Done` / `-> Fixed`) while bumping the version. The agent
+//! completes it (`-> Done` / `-> Fixed`). The version never moves here — the
+//! release flow owns it. The agent
 //! only does the coding; state moves are code, not prompt.
 
 use crate::config::Config;
@@ -10,7 +11,7 @@ use crate::error::{AppError, PortError};
 use crate::ports::outbound::{AgentEnginePort, AgentRequest, StateStorePort};
 use crate::selection::{open_bug_candidates, ready_feature_candidates};
 use crate::{prompts, state::ProjectState};
-use coxagent_domain::{Bump, Role, Status, TicketId};
+use coxagent_domain::{Role, Status, TicketId};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,9 +23,9 @@ mod gates;
 /// Which developer role to run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DevMode {
-    /// Fix the highest-priority open bug (`Open -> InProgress -> Fixed`, patch bump).
+    /// Fix the highest-priority open bug (`Open -> InProgress -> Fixed`).
     Bug,
-    /// Implement the next ready feature (`Ready -> InProgress -> Done`, minor bump).
+    /// Implement the next ready feature (`Ready -> InProgress -> Done`).
     Feature,
 }
 
@@ -33,13 +34,6 @@ impl DevMode {
         match self {
             DevMode::Bug => Role::DevBug,
             DevMode::Feature => Role::DevFeature,
-        }
-    }
-
-    fn bump(self) -> Bump {
-        match self {
-            DevMode::Bug => Bump::Patch,
-            DevMode::Feature => Bump::Minor,
         }
     }
 
@@ -170,17 +164,35 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         if !ok {
             return None;
         }
-        let (ok, status) = git.raw(&self.work_dir, &["status", "--porcelain"]).await;
+        let (ok, status) = git
+            .raw(
+                &self.work_dir,
+                &["status", "--porcelain", "--untracked-files=all"],
+            )
+            .await;
         if !ok {
             return None;
         }
         let mut dirty: Vec<crate::verify_cache::DirtyEntry> = Vec::new();
         for line in status.lines() {
+            // Rename/copy lines (status code R or C) read "old -> new"; the
+            // live path — the one whose mtime/size changes on a post-rename
+            // edit — is the part after the arrow, not the whole blob. Gate on
+            // the status code, not a literal " -> " search: an ordinary
+            // path can itself contain that text.
+            let is_rename_or_copy = line.get(0..2).is_some_and(|xy| xy.contains(['R', 'C']));
             let meta = match line.get(3..) {
-                Some(path) => files
-                    .stat(&self.work_dir.join(path.trim().trim_matches('"')))
-                    .await
-                    .map(|m| (m.size, m.modified_epoch)),
+                Some(rest) => {
+                    let path = if is_rename_or_copy {
+                        rest.rsplit_once(" -> ").map_or(rest, |(_, new)| new)
+                    } else {
+                        rest
+                    };
+                    files
+                        .stat(&self.work_dir.join(path.trim().trim_matches('"')))
+                        .await
+                        .map(|m| (m.size, m.modified_epoch))
+                }
                 None => None,
             };
             dirty.push((line.to_owned(), meta));
@@ -755,6 +767,31 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                             };
                             let _ = self.engine.run(repair).await;
                         }
+                        // The repair pass just edited code again — the earlier
+                        // green check is stale. Re-confirm the suite before
+                        // trusting this tree: skipping this let a lint fixup
+                        // silently break tests, and the green-cache below
+                        // would then mark_green() over a red suite for every
+                        // sibling runner this cycle (COX-B033).
+                        if let Ok(r) = deploy.run_tests_scoped(&self.work_dir, &changed).await {
+                            if !r.success {
+                                self.record_failure_at(
+                                    &id,
+                                    "clippy repair pass left the test suite red",
+                                    crate::state::FailureLayer::Gate,
+                                    "tests",
+                                    Vec::new(),
+                                )
+                                .await;
+                                self.release_claim(&id).await;
+                                return Err(PortError::Backend(format!(
+                                    "{:?} clippy repair broke tests on {id} — ticket returned \
+                                     to the queue",
+                                    self.mode
+                                ))
+                                .into());
+                            }
+                        }
                         let after_report = deploy.lint_report(&self.work_dir).await.ok().flatten();
                         let after = after_report.as_ref().map_or(count, |r| r.errors);
                         // Blame only what this change touched. The workspace
@@ -993,15 +1030,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         }
 
         // Complete under an atomic read-modify-write with retry: move to the
-        // terminal status, bump the version, record the deploy. A concurrent
-        // operator saving the shared state can't make us lose this completion
-        // (which would strand the ticket and waste tokens redoing it).
-        let (role, status, bump, id_c) = (
-            self.mode.role(),
-            self.mode.complete_status(),
-            self.mode.bump(),
-            id.clone(),
-        );
+        // terminal status and record the deploy. A concurrent operator saving
+        // the shared state can't make us lose this completion (which would
+        // strand the ticket and waste tokens redoing it).
+        let (role, status, id_c) = (self.mode.role(), self.mode.complete_status(), id.clone());
         crate::ports::outbound::mutate_state(self.store.as_ref(), |state| {
             transition(state, &id_c, role, status)
                 .map_err(|e| PortError::Corrupt(e.to_string()))?;
@@ -1014,8 +1046,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             state.ticket_journal.remove(&id_c.to_string());
             state.cost_holds.remove(&id_c.to_string());
             state.cost_approved.remove(&id_c.to_string());
-            let version = state.current_version.bumped(bump);
-            state.current_version = version.clone();
+            // The version does NOT move here. A ticket completing locally is
+            // not a release: bumping before the PR even merged minted phantom
+            // versions that reconcile_version then had to claw back. The
+            // version is owned by the release flow (manifest on main is the
+            // single source; state only mirrors it) — the deploy record below
+            // simply stamps the version the tree currently declares.
+            let version = state.current_version.clone();
             let title = state
                 .ticket(&id_c)
                 .map_or_else(String::new, |t| t.title().to_owned());
@@ -1171,10 +1208,18 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
     }
 
     fn candidates(&self, state: &ProjectState) -> Vec<TicketId> {
-        match self.mode {
+        let mut ids = match self.mode {
             DevMode::Bug => open_bug_candidates(state),
             DevMode::Feature => ready_feature_candidates(state),
-        }
+        };
+        // Real-world scope gate: DEV only pulls tickets the team committed to
+        // the current sprint (PO/SM aligned via the sprint-board action), plus
+        // emergency open bugs. In Kanban mode (no sprint open) any ready
+        // ticket stays in scope. A feature/chore the PO/SM has not committed
+        // to an open sprint is out of scope — DEV must ask to have it added
+        // before picking it up.
+        ids.retain(|id| crate::selection::in_dev_scope(state, id));
+        ids
     }
 }
 
@@ -1367,7 +1412,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn feature_dev_completes_and_bumps_minor() {
+    async fn feature_dev_completes_without_touching_the_version() {
         let store = Arc::new(MemStore {
             state: Mutex::new(ProjectState {
                 tickets: vec![ready_feature("FEAT-001")],
@@ -1386,7 +1431,8 @@ mod tests {
 
         let state = store.load().await.expect("load");
         assert_eq!(state.tickets[0].status(), Status::Done);
-        assert_eq!(state.current_version.to_string(), "0.1.0");
+        // The version does NOT move on ticket completion — releases own it.
+        assert_eq!(state.current_version.to_string(), "0.0.0");
         assert!(next_ready_feature(&state).is_none());
     }
 
@@ -1401,6 +1447,98 @@ mod tests {
             DevMode::Feature,
         );
         assert!(uc.execute().await.expect("run").is_none());
+    }
+
+    fn open_bug(id: &str) -> Ticket {
+        Ticket::new(
+            TicketId::new(id).expect("id"),
+            TicketType::Bug,
+            "b",
+            "",
+            Priority::High,
+            Complexity::Small,
+            false,
+        )
+        .expect("t")
+    }
+
+    /// Green on the pre-lint check, then RED once the clippy repair pass
+    /// edits the code a second time — the exact sequence COX-B033 covers:
+    /// a lint-fixup that quietly breaks a test must not slip past the gate.
+    struct ClippyRepairBreaksTests {
+        scoped_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ports::outbound::DeployPort for ClippyRepairBreaksTests {
+        async fn deploy(
+            &self,
+            _work_dir: &std::path::Path,
+        ) -> Result<crate::ports::outbound::DeployReport, PortError> {
+            Ok(crate::ports::outbound::DeployReport {
+                success: true,
+                deployed: false,
+                summary: String::new(),
+            })
+        }
+        async fn run_tests_scoped(
+            &self,
+            _work_dir: &std::path::Path,
+            _changed: &[String],
+        ) -> Result<crate::ports::outbound::DeployReport, PortError> {
+            let call = self
+                .scoped_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(crate::ports::outbound::DeployReport {
+                success: call == 0,
+                deployed: true,
+                summary: if call == 0 {
+                    "green".to_owned()
+                } else {
+                    "still broken after clippy repair".to_owned()
+                },
+            })
+        }
+        async fn lint_report(
+            &self,
+            _work_dir: &std::path::Path,
+        ) -> Result<Option<crate::ports::outbound::LintReport>, PortError> {
+            Ok(Some(crate::ports::outbound::LintReport {
+                errors: 5,
+                sample: String::new(),
+                files: Vec::new(),
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn clippy_repair_pass_is_reverified_against_the_test_suite() {
+        let mut state = ProjectState {
+            tickets: vec![open_bug("BUG-001")],
+            ..ProjectState::default()
+        };
+        state.clippy_baseline = Some(0); // so the first lint measurement (5) reads as a regression
+        let store = Arc::new(MemStore {
+            state: Mutex::new(state),
+        });
+        let deploy = Arc::new(ClippyRepairBreaksTests {
+            scoped_calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let uc = RunDevUseCase::new(
+            Arc::clone(&store),
+            Arc::new(OkEngine),
+            Config::default(),
+            PathBuf::from("/tmp"),
+            DevMode::Bug,
+        )
+        .with_verify(Some(deploy));
+
+        let err = uc.execute().await.expect_err("repair broke tests");
+        assert!(err.to_string().contains("clippy repair"), "{err}");
+
+        // The ticket must be back in the queue, not silently marked done.
+        let state = store.load().await.expect("load");
+        assert_eq!(state.tickets[0].status(), Status::Open);
     }
 
     #[test]
@@ -1418,5 +1556,158 @@ mod tests {
         // A bare marker with no real question is not a question.
         assert!(parse_ask("ASK BA: ?").is_none());
         assert!(parse_ask("no question here").is_none());
+    }
+
+    /// Shells to the real `git` binary — `tree_fingerprint` parses actual
+    /// `git status --porcelain` output, which the pure `verify_cache` unit
+    /// tests never exercise.
+    struct RealGit;
+    #[async_trait::async_trait]
+    impl crate::ports::outbound::GitPort for RealGit {
+        async fn raw(&self, work_dir: &std::path::Path, args: &[&str]) -> (bool, String) {
+            match std::process::Command::new("git")
+                .current_dir(work_dir)
+                .args(args)
+                .output()
+            {
+                Ok(out) => (
+                    out.status.success(),
+                    String::from_utf8_lossy(&out.stdout).into_owned(),
+                ),
+                Err(_) => (false, String::new()),
+            }
+        }
+        async fn is_repo(&self, _work_dir: &std::path::Path) -> bool {
+            unimplemented!("unused by tree_fingerprint")
+        }
+        async fn current_branch(&self, _work_dir: &std::path::Path) -> Result<String, PortError> {
+            unimplemented!("unused by tree_fingerprint")
+        }
+        async fn checkout_branch(
+            &self,
+            _work_dir: &std::path::Path,
+            _branch: &str,
+        ) -> Result<(), PortError> {
+            unimplemented!("unused by tree_fingerprint")
+        }
+        async fn commit_all(
+            &self,
+            _work_dir: &std::path::Path,
+            _message: &str,
+            _author: &crate::ports::outbound::GitAuthor,
+        ) -> Result<Option<String>, PortError> {
+            unimplemented!("unused by tree_fingerprint")
+        }
+        async fn push(&self, _work_dir: &std::path::Path, _branch: &str) -> Result<(), PortError> {
+            unimplemented!("unused by tree_fingerprint")
+        }
+        async fn sync_base(
+            &self,
+            _work_dir: &std::path::Path,
+            _base: &str,
+        ) -> Result<crate::ports::outbound::SyncBase, PortError> {
+            unimplemented!("unused by tree_fingerprint")
+        }
+        async fn abort_merge(&self, _work_dir: &std::path::Path) -> Result<(), PortError> {
+            unimplemented!("unused by tree_fingerprint")
+        }
+    }
+
+    /// Reads real filesystem metadata for the one method `tree_fingerprint`
+    /// calls; the rest are unused by this test.
+    struct RealFiles;
+    #[async_trait::async_trait]
+    impl crate::ports::outbound::WorkspaceFilesPort for RealFiles {
+        async fn read(&self, _path: &std::path::Path) -> Option<String> {
+            None
+        }
+        async fn write(&self, _path: &std::path::Path, _content: &str) -> bool {
+            false
+        }
+        async fn write_bytes(&self, _path: &std::path::Path, _bytes: &[u8]) -> bool {
+            false
+        }
+        async fn delete(&self, _path: &std::path::Path) -> bool {
+            false
+        }
+        async fn list(&self, _dir: &std::path::Path) -> Vec<crate::ports::outbound::FileMeta> {
+            vec![]
+        }
+        async fn stat(&self, path: &std::path::Path) -> Option<crate::ports::outbound::FileMeta> {
+            let m = std::fs::metadata(path).ok()?;
+            let modified_epoch = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_secs());
+            Some(crate::ports::outbound::FileMeta {
+                path: path.to_path_buf(),
+                modified_epoch,
+                size: m.len(),
+            })
+        }
+        async fn list_recursive(&self, _dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+            vec![]
+        }
+        async fn list_dirs(&self, _dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+            vec![]
+        }
+    }
+
+    /// Regression for COX-B063: COX-B031 hashed per-file (size, mtime) so
+    /// edits inside a new untracked dir invalidate the green cache, but a
+    /// renamed TRACKED file hits a different branch — `git status` prints one
+    /// `RM old -> new` line whose status-line text does not change between
+    /// edits, so the fingerprint must come from the new path's metadata, not
+    /// the raw "old -> new" text.
+    #[tokio::test]
+    async fn edit_after_rename_changes_the_fingerprint() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let dir = tmp.path();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .current_dir(dir)
+                .args(args)
+                .output()
+                .expect("git");
+            assert!(out.status.success(), "git {args:?} failed");
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@t.com"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(dir.join("tracked.rs"), "fn a() {}\n").expect("write");
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "init"]);
+        git(&["mv", "tracked.rs", "renamed.rs"]);
+        std::fs::write(dir.join("renamed.rs"), "fn a() {}\n// first edit\n").expect("write");
+
+        // Confirms the fixture actually hits the reported shape — one `RM old
+        // -> new` line — before trusting the fingerprint assertions below.
+        let status = git(&["status", "--porcelain", "--untracked-files=all"]);
+        assert_eq!(status.trim(), "RM tracked.rs -> renamed.rs");
+
+        let uc = RunDevUseCase::new(
+            Arc::new(MemStore::default()),
+            Arc::new(OkEngine),
+            Config::default(),
+            dir.to_path_buf(),
+            DevMode::Feature,
+        )
+        .with_git(Some(Arc::new(RealGit)))
+        .with_files(Some(Arc::new(RealFiles)));
+
+        let fp1 = uc.tree_fingerprint().await.expect("fp1");
+        std::fs::write(
+            dir.join("renamed.rs"),
+            "fn a() {}\n// second edit, different length entirely\n",
+        )
+        .expect("write");
+        let fp2 = uc.tree_fingerprint().await.expect("fp2");
+
+        assert_ne!(
+            fp1, fp2,
+            "editing renamed.rs again must invalidate the green cache"
+        );
     }
 }

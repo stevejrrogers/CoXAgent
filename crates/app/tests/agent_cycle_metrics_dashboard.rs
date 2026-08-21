@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use coxagent_application::config::BudgetCaps;
-use coxagent_application::ports::outbound::{AgentEnginePort, AgentOutcome, AgentRequest};
 use coxagent_application::ports::outbound::StateStorePort;
+use coxagent_application::ports::outbound::{AgentEnginePort, AgentOutcome, AgentRequest};
 use coxagent_application::state::CycleScore;
 use coxagent_application::{PortError, ProjectState};
 use coxagent_presentation::{HubExtras, ProjectHandle};
@@ -37,7 +37,9 @@ impl StateStorePort for MemStore {
 struct StubEngine;
 #[async_trait]
 impl AgentEnginePort for StubEngine {
-    fn id(&self) -> &'static str { "stub" }
+    fn id(&self) -> &'static str {
+        "stub"
+    }
     async fn run(&self, _rq: AgentRequest) -> Result<AgentOutcome, PortError> {
         unreachable!("metrics endpoints never run an engine")
     }
@@ -49,7 +51,9 @@ fn handle(id: &str, state: ProjectState) -> ProjectHandle {
         id: id.to_owned(),
         name: id.to_owned(),
         alias: id.to_owned(),
-        store: Arc::new(MemStore { state: Mutex::new(state) }),
+        store: Arc::new(MemStore {
+            state: Mutex::new(state),
+        }),
         runner: Arc::new(coxagent_application::use_cases::RunnerHandle::new()),
         config_path: dir.join("coxagent.json"),
         engine: Arc::new(StubEngine),
@@ -59,6 +63,7 @@ fn handle(id: &str, state: ProjectState) -> ProjectHandle {
         forge: None,
         deploy: None,
         files: None,
+        storage: None,
     }
 }
 
@@ -70,7 +75,8 @@ fn seeded_state(cycles_n: usize) -> ProjectState {
             "at": "2026-08-01T00:00:00Z",
             "runs": 1, "useful": 1, "cost_usd": 1.0,
             "shipped": 1, "incidents": 0, "errors": 0, "grade": "B"
-        })).unwrap();
+        }))
+        .unwrap();
         s.cycle_scores.push(cs);
     }
     s
@@ -85,10 +91,7 @@ async fn boot(handles: Vec<ProjectHandle>) -> tempfile::TempDir {
     let audit: Arc<dyn coxagent_application::ports::outbound::AuditPort> =
         Arc::new(coxagent_infrastructure::MemoryAuditSink::default());
     tokio::spawn(coxagent_presentation::serve_full(
-        handles,
-        PORT,
-        audit,
-        extras,
+        handles, PORT, audit, extras,
     ));
     let client = reqwest::Client::new();
     let health = format!("http://127.0.0.1:{PORT}/api/health");
