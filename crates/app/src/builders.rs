@@ -428,7 +428,13 @@ pub(crate) async fn build_project(
         let leader = if let Some(r) = build_pr_reporter(&config, auth, id, id).await {
             leader.with_reporter(r)
         } else {
-            leader
+            // Same-process hub: reviews/holds/latency write straight to the
+            // shared store — the Null fallback silently dropped them all.
+            leader.with_reporter(Arc::new(
+                coxagent_application::ports::outbound::StorePrReporter::new(
+                    Arc::clone(&store) as Arc<dyn coxagent_application::ports::outbound::StateStorePort>,
+                ),
+            ))
         };
         let wh = Arc::clone(&handle);
         tokio::spawn(async move { run_forever(wh, leader, sleep).await });
@@ -467,7 +473,14 @@ pub(crate) async fn build_project(
             let reviewer = if let Some(r) = build_pr_reporter(&config, auth, id, id).await {
                 reviewer.with_reporter(r)
             } else {
-                reviewer
+                // Same-process hub: reviews/holds/latency write straight to
+                // the shared store — the Null fallback silently dropped them.
+                reviewer.with_reporter(Arc::new(
+                    coxagent_application::ports::outbound::StorePrReporter::new(
+                        Arc::clone(&store)
+                            as Arc<dyn coxagent_application::ports::outbound::StateStorePort>,
+                    ),
+                ))
             };
             let rh = Arc::clone(&handle);
             tokio::spawn(async move {
@@ -544,7 +557,13 @@ pub(crate) async fn build_project(
         let worker = if let Some(r) = build_pr_reporter(&config, auth, id, id).await {
             worker.with_reporter(r)
         } else {
-            worker
+            // Same-process hub: reviews/holds/latency write straight to the
+            // shared store — the Null fallback silently dropped them all.
+            worker.with_reporter(Arc::new(
+                coxagent_application::ports::outbound::StorePrReporter::new(
+                    Arc::clone(&store) as Arc<dyn coxagent_application::ports::outbound::StateStorePort>,
+                ),
+            ))
         };
         let wh = Arc::clone(&handle);
         tokio::spawn(async move { run_forever(wh, worker, Duration::from_secs(5)).await });
@@ -950,7 +969,7 @@ pub(crate) async fn build_pr_reporter(
 ) -> Option<Arc<dyn coxagent_application::ports::outbound::PrReporterPort>> {
     let server_url = config.git.server_url.trim();
     if server_url.is_empty() {
-        return None;
+        return None; // in-process runners get a StorePrReporter from the caller
     }
     let token = match auth {
         Some(auth) => ensure_internal_pr_token(auth, identity).await?,
