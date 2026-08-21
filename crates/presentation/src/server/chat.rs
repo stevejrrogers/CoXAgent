@@ -71,7 +71,7 @@ pub(super) async fn chat_list_ep(
         .into_iter()
         .filter(|m| m.channel == channel)
         .collect();
-    Json(chat).into_response()
+    Json(paginate_tail(&chat, q.limit, q.before.as_deref())).into_response()
 }
 
 /// Post a team-chat message as the signed-in user. Any authenticated principal
