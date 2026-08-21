@@ -85,7 +85,7 @@ impl<S: StateStorePort> RunConformanceUseCase<S> {
             if existing.contains(&title.to_lowercase()) {
                 continue;
             }
-            let added = adder
+            let outcome = adder
                 .execute(AddTicketInput {
                     ticket_type: TicketType::Bug,
                     title,
@@ -96,7 +96,7 @@ impl<S: StateStorePort> RunConformanceUseCase<S> {
                     acceptance_criteria: Vec::new(),
                 })
                 .await;
-            match added {
+            match outcome {
                 Ok(id) => filed.push(id),
                 // Two drifts can share a theme in one sweep; the gate refusing
                 // the second is correct — skip it, never abort the sweep.
