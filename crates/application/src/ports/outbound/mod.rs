@@ -28,7 +28,7 @@ pub use git::{GitAuthor, GitPort, SyncBase, WorkingTreeDiff};
 pub use janitor::ProcessJanitorPort;
 pub use kv_doc::KvDocPort;
 pub use notify::{ChatNotifier, FanoutNotifier, NotifierPort, NotifyEvent, NullNotifier};
-pub use pr_report::{NullPrReporter, PrOpen, PrReporterPort};
+pub use pr_report::{NullPrReporter, PrOpen, PrReporterPort, StorePrReporter};
 pub use probe::{ApiProbePort, ApiProof};
 pub use screenshot::ScreenshotPort;
 pub use state_store::{mutate_state, GitCheck, StateStorePort, WorkerCaps, WorkerEntry};
