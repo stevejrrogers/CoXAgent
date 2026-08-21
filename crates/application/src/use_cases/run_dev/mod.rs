@@ -767,6 +767,31 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                             };
                             let _ = self.engine.run(repair).await;
                         }
+                        // The repair pass just edited code again — the earlier
+                        // green check is stale. Re-confirm the suite before
+                        // trusting this tree: skipping this let a lint fixup
+                        // silently break tests, and the green-cache below
+                        // would then mark_green() over a red suite for every
+                        // sibling runner this cycle (COX-B033).
+                        if let Ok(r) = deploy.run_tests_scoped(&self.work_dir, &changed).await {
+                            if !r.success {
+                                self.record_failure_at(
+                                    &id,
+                                    "clippy repair pass left the test suite red",
+                                    crate::state::FailureLayer::Gate,
+                                    "tests",
+                                    Vec::new(),
+                                )
+                                .await;
+                                self.release_claim(&id).await;
+                                return Err(PortError::Backend(format!(
+                                    "{:?} clippy repair broke tests on {id} — ticket returned \
+                                     to the queue",
+                                    self.mode
+                                ))
+                                .into());
+                            }
+                        }
                         let after_report = deploy.lint_report(&self.work_dir).await.ok().flatten();
                         let after = after_report.as_ref().map_or(count, |r| r.errors);
                         // Blame only what this change touched. The workspace
@@ -1422,6 +1447,98 @@ mod tests {
             DevMode::Feature,
         );
         assert!(uc.execute().await.expect("run").is_none());
+    }
+
+    fn open_bug(id: &str) -> Ticket {
+        Ticket::new(
+            TicketId::new(id).expect("id"),
+            TicketType::Bug,
+            "b",
+            "",
+            Priority::High,
+            Complexity::Small,
+            false,
+        )
+        .expect("t")
+    }
+
+    /// Green on the pre-lint check, then RED once the clippy repair pass
+    /// edits the code a second time — the exact sequence COX-B033 covers:
+    /// a lint-fixup that quietly breaks a test must not slip past the gate.
+    struct ClippyRepairBreaksTests {
+        scoped_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ports::outbound::DeployPort for ClippyRepairBreaksTests {
+        async fn deploy(
+            &self,
+            _work_dir: &std::path::Path,
+        ) -> Result<crate::ports::outbound::DeployReport, PortError> {
+            Ok(crate::ports::outbound::DeployReport {
+                success: true,
+                deployed: false,
+                summary: String::new(),
+            })
+        }
+        async fn run_tests_scoped(
+            &self,
+            _work_dir: &std::path::Path,
+            _changed: &[String],
+        ) -> Result<crate::ports::outbound::DeployReport, PortError> {
+            let call = self
+                .scoped_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(crate::ports::outbound::DeployReport {
+                success: call == 0,
+                deployed: true,
+                summary: if call == 0 {
+                    "green".to_owned()
+                } else {
+                    "still broken after clippy repair".to_owned()
+                },
+            })
+        }
+        async fn lint_report(
+            &self,
+            _work_dir: &std::path::Path,
+        ) -> Result<Option<crate::ports::outbound::LintReport>, PortError> {
+            Ok(Some(crate::ports::outbound::LintReport {
+                errors: 5,
+                sample: String::new(),
+                files: Vec::new(),
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn clippy_repair_pass_is_reverified_against_the_test_suite() {
+        let mut state = ProjectState {
+            tickets: vec![open_bug("BUG-001")],
+            ..ProjectState::default()
+        };
+        state.clippy_baseline = Some(0); // so the first lint measurement (5) reads as a regression
+        let store = Arc::new(MemStore {
+            state: Mutex::new(state),
+        });
+        let deploy = Arc::new(ClippyRepairBreaksTests {
+            scoped_calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let uc = RunDevUseCase::new(
+            Arc::clone(&store),
+            Arc::new(OkEngine),
+            Config::default(),
+            PathBuf::from("/tmp"),
+            DevMode::Bug,
+        )
+        .with_verify(Some(deploy));
+
+        let err = uc.execute().await.expect_err("repair broke tests");
+        assert!(err.to_string().contains("clippy repair"), "{err}");
+
+        // The ticket must be back in the queue, not silently marked done.
+        let state = store.load().await.expect("load");
+        assert_eq!(state.tickets[0].status(), Status::Open);
     }
 
     #[test]

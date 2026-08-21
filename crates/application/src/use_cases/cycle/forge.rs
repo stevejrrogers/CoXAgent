@@ -123,6 +123,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 ))
                 .await;
                 let _ = git.worktree_remove(&self.work_dir, &collision).await;
+                // Genuinely retry now that any colliding worktree is gone.
                 result = git.checkout_branch(&self.work_dir, &branch).await;
             }
         }
@@ -167,6 +168,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             }
         }
         let mut reconciled = false;
+
+
         if let Err(e) = result {
             // Self-heal 2 of 2 — reconcile residual tree debris: rejected-proposal
             // debris or leftover agent residue blocks even switching to this ticket's

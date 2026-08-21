@@ -110,6 +110,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     .filter(|p| p.title.contains("Resolve merge conflict on PR #"))
                 {
                     if forge.close_pr(p.number).await.is_ok() {
+                        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                            s.seen_closed_prs.insert(p.number);
+                            Ok(())
+                        })
+                        .await;
                         self.log_git(&format!(
                             "recovery: closed obsolete resolver PR #{} ({})",
                             p.number, p.title
