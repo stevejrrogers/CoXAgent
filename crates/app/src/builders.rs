@@ -1,7 +1,8 @@
 // Part of the composition root split by concern — see lib.rs.
 #![allow(clippy::wildcard_imports)]
 //! Wiring: everything that turns config into live adapters — stores, auth,
-//! engines, storage, MCP access, and the config self-healing.
+//! engines, storage, MCP access. Config loading/self-heal lives in
+//! `config_load.rs`.
 
 use super::*;
 
@@ -83,8 +84,6 @@ pub(crate) async fn make_store(
     }
 }
 
-/// Load `coxagent.json` from the workspace root (parent of the state dir), or
-/// fall back to defaults. Config lives beside the state, written by `onboard`.
 /// Load the shared coordination backend (Postgres state DSN + Redis URL) from
 /// `<base>/coordination.json` into the environment, unless already set. Lets the
 /// Finder-launched app join the distributed backend without env plumbing.
@@ -433,6 +432,59 @@ pub(crate) async fn build_project(
         };
         let wh = Arc::clone(&handle);
         tokio::spawn(async move { run_forever(wh, leader, sleep).await });
+
+        // Event-dispatch P1 (docs/proposals/event-dispatch.md): a DEDICATED
+        // review runner on its own fast loop, so a one-hour DEV phase never
+        // delays a ripe PR by a whole cycle. It reuses the full gate stack;
+        // duplicate work across machines is stopped by the per-PR review
+        // lease + head-sha guard. It respects Pause and stops with the hub.
+        if config.git.enabled && forge.is_some() {
+            let reviewer = RunCycleUseCase::new(
+                Arc::clone(&store),
+                engine.clone(),
+                config.clone(),
+                worktree_at(work_dir.clone(), &format!("{id}-review")),
+                context.clone(),
+            )
+            .with_leader_election(false)
+            .with_meter(meter.clone())
+            .with_live_budget(Arc::clone(&live_budget))
+            .with_deploy(Arc::new(DockerComposeDeploy::new()))
+            .with_host_port_probe(host_port_probe)
+            .with_git(Arc::new(coxagent_infrastructure::SystemGit::new()))
+            .with_files(Some(Arc::new(
+                coxagent_infrastructure::FsWorkspaceFiles::new(),
+            )));
+            let mut reviewer = reviewer;
+            reviewer.set_worker(format!("review@{}", worker_host()));
+            let reviewer = if let Some(ref f) = forge {
+                reviewer.with_forge(Arc::clone(f))
+            } else {
+                reviewer
+            };
+            let reviewer =
+                reviewer.with_notifier(build_notifier(Arc::clone(&store), webhook.clone()));
+            let reviewer = if let Some(r) = build_pr_reporter(&config, auth, id, id).await {
+                reviewer.with_reporter(r)
+            } else {
+                reviewer
+            };
+            let rh = Arc::clone(&handle);
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(90)).await;
+                    let snap = rh.snapshot();
+                    if snap.mode == "stopped" {
+                        break;
+                    }
+                    if snap.mode != "running" {
+                        continue; // paused — the review loop pauses with the team
+                    }
+                    reviewer.run_review_pass().await;
+                }
+            });
+            tracing::info!("[{id}] dedicated review runner armed (90s loop)");
+        }
     }
 
     tracing::info!(
@@ -453,6 +505,11 @@ pub(crate) async fn build_project(
             slot_dir,
             context.clone(),
         )
+        // Co-located slots never compete for the machine's leader lease —
+        // rotation across slots produced the scorecard-numbering and
+        // version-ping-pong bugs. Machine-level election (slot 0) remains,
+        // so multi-machine teams still fail ceremonies over.
+        .with_leader_election(false)
         .with_meter(meter.clone())
         .with_live_budget(Arc::clone(&live_budget))
         .with_deploy(Arc::new(DockerComposeDeploy::new()))
