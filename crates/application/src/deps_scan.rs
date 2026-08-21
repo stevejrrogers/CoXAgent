@@ -373,11 +373,33 @@ fn link_to_epic(ticket: &mut DomainTicket) {
 /// An urgent CVE becomes a high-priority Bug regardless of version age; any other flagged package
 /// becomes a low-priority Chore carrying current/latest versions and every affected lockfile.
 /// Both are pre-linked to the master epic via `depends_on`.
+/// Does some already-persisted ticket already represent this exact dependency?
+///
+/// Dedupe must not only match on `TicketId` equality. Ticket ids changed scheme
+/// once ([CXA-B089]): before that fix every non-alphanumeric collapsed to '-'
+/// ('@scope/pkg' -> 'DEP-scope-pkg'); after it they become fixed-width hex tokens
+/// ('DEP-scope-pkg' no longer matches '@scope/pkg', which is now 'DEP<40>scope<2f>pkg').
+/// On the first scan after upgrading, an old-format id no longer equals its new one,
+/// so exact-id matching alone would file a fresh duplicate while leaving the legacy
+/// ticket behind ([CXA-B093]). Every remediation records its originating scan context
+/// ("scan result" / "cve finding") whose detail starts with "<package>@" — we match on
+/// that instead of parsing ids, so a prior remediation is recognised across scheme
+/// boundaries.
+fn already_remediated_for(state: &ProjectState, dep: &str) -> bool {
+    let prefix = format!("{dep}@");
+    state.ticket_evidence.values().any(|list| {
+        list.iter()
+            .any(|e| e.kind == "dependency-scan" && e.detail.starts_with(&prefix))
+    })
+}
+
 fn propose_one(state: &mut ProjectState, finding: &ScanFinding) -> Option<TicketId> {
     let Ok(id) = TicketId::new(ticket_id_for(&finding.package)) else {
         return None;
     };
-    if state.tickets.iter().any(|t| t.id() == &id) {
+    if state.tickets.iter().any(|t| t.id() == &id)
+        || already_remediated_for(state, &finding.package)
+    {
         return None;
     }
     let files_block = finding.affected_files.join("\n");
@@ -639,5 +661,78 @@ version = \"0.9.0\"
         let pkg_a = ticket_id_for("@scope/pkg");
         let pkg_b = ticket_id_for("-scope-pkg");
         assert_ne!(pkg_a, pkg_b);
+    }
+
+    #[test]
+    fn upgrade_from_lossy_scheme_files_no_duplicate_for_already_remediated_scoped_dep() {
+        // Regression for CXA-B093. Before CXA-B089 collapsed non-alphanumerics into
+        // '-', '@scope/pkg' was remediated once under 'DEP-scope-pkg'. After switching
+        // to fixed-width hex tokens it now proposes 'DEP<40>scope<2f>pkg'. The first
+        // scan after upgrading must NOT file that as a second fresh duplicate while
+        // leaving the legacy ticket behind — the remediation is recognised by its scan
+        // evidence (which names the package), not by exact id.
+        //
+        // Reproduce persisted state exactly as pre-upgrade: a legacy ticket whose id is
+        // built from the OLD lossy rule, carrying its "scan result" evidence.
+        let mut state = ProjectState::default();
+        ensure_master_epic(&mut state);
+        let old_id = TicketId::new("DEP-scope-pkg".to_string()).expect("legacy id valid");
+        let Ok(mut legacy) = DomainTicket::new(
+            old_id.clone(),
+            TicketType::Chore,
+            "upgrade @scope/pkg (major)".to_string(),
+            "Dependency @scope/pkg: current 7.8.9 -> latest 9.0.0 (major, hold).\npackage-lock.json"
+                .to_string(),
+            Priority::Medium,
+            Complexity::Small,
+            false,
+        ) else {
+            panic!("legacy ticket constructible");
+        };
+        link_to_epic(&mut legacy);
+        state.tickets.push(legacy);
+        state.add_evidence(
+            old_id.as_str(),
+            "dependency-scan",
+            "scan result",
+            "@scope/pkg@7.8.9->9.0.0 tagged major",
+        );
+
+        // The finding for '@scope/pkg' now derives its NEW-scheme id on re-scan.
+        let mut registry = BTreeMap::new();
+        registry.insert("@scope/pkg".to_string(), "9.0.0".to_string());
+        let findings = scan_locks(
+            &[("package-lock.json".to_string(), NPM_SAMPLE.to_string())],
+            &registry,
+            &BTreeMap::new(),
+        );
+        assert!(
+            findings.iter().any(|f| f.package == "@scope/pkg"),
+            "post-upgrade scan still flags @scope/pkg"
+        );
+
+        let tickets_before = state.tickets.len();
+        let evidence_before = state.ticket_evidence.len();
+        let ids = apply_findings(&mut state, &findings);
+
+        // No duplicate remediation may be filed for the already-remediated dep...
+        assert!(
+            ids.iter().all(|id| id.as_str() != "DEP<40>scope<2f>pkg"),
+            "must not re-file @scope/pkg under its new id: {ids:?}"
+        );
+        assert_eq!(state.tickets.len(), tickets_before, "no new ticket created");
+        assert_eq!(
+            state.ticket_evidence.len(),
+            evidence_before,
+            "no new evidence recorded"
+        );
+
+        // ...but unrelated newly-flagged deps in the same pass still get filed.
+        let other_locks = vec![("Cargo.lock".to_string(), CARGO_SAMPLE.to_string())];
+        let mut other_registry = BTreeMap::new();
+        other_registry.insert("alpha".to_string(), "2.0.0".to_string());
+        let more = scan_locks(&other_locks, &other_registry, &BTreeMap::new());
+        let more_ids = apply_findings(&mut state, &more);
+        assert_eq!(more_ids.len(), 1, "unrelated dep still remediated");
     }
 }
