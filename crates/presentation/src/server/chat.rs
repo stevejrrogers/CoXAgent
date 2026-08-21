@@ -383,7 +383,7 @@ pub(super) async fn syschat_messages_ep(
         let Ok(state) = p.store.load().await else {
             return internal_error("load failed");
         };
-        return Json(paginate_tail(state.chat_in(&room), q.limit, q.before.as_deref()))
+        return Json(paginate_tail(&state.chat_in(&room), q.limit, q.before.as_deref()))
             .into_response();
     }
     let sc = app.syschat.inner.lock().await;
@@ -391,7 +391,7 @@ pub(super) async fn syschat_messages_ep(
         return Json(Vec::<coxagent_application::ChatMsg>::new()).into_response();
     }
     Json(paginate_tail(
-        sc.messages_in(&channel),
+        &sc.messages_in(&channel),
         q.limit,
         q.before.as_deref(),
     ))
@@ -402,7 +402,7 @@ pub(super) async fn syschat_messages_ep(
 /// only messages strictly OLDER than the `before` id (the load-more cursor).
 /// Order is preserved (oldest→newest within the returned window).
 fn paginate_tail(
-    msgs: Vec<coxagent_application::ChatMsg>,
+    msgs: &[coxagent_application::ChatMsg],
     limit: Option<usize>,
     before: Option<&str>,
 ) -> Vec<coxagent_application::ChatMsg> {
