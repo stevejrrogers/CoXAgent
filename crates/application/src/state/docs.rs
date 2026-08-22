@@ -222,6 +222,13 @@ mod tests {
     }
 
     #[test]
+    fn drops_empty_segments_from_leading_trailing_and_doubled_slashes() {
+        assert_eq!(wiki_folder_path("/Product/"), "product");
+        assert_eq!(wiki_folder_path("Product//Sub"), "product/sub");
+        assert_eq!(wiki_folder_path(""), "");
+    }
+
+    #[test]
     fn standard_doc_folder_output_normalizes_to_the_canonical_lowercase_slug() {
         assert_eq!(
             wiki_folder_path(super::standard_doc_folder(TicketType::Feature)),
