@@ -1,4 +1,4 @@
-FOLDER: Deployment
+FOLDER: -
 # Docker Compose Deploy Failure (CXA-B001)
 
 **Keywords:** docker compose, deploy failing, docker-desktop build details, host_port, deploy.host_port, compose project collision, cxa-backend, DockerComposeDeploy, DeployPort
@@ -12,10 +12,10 @@ CXA-B001 was an incident report — "Deploy failing: docker compose failed: View
 Every agent-managed codebase carrying a compose file (`docker-compose.yml|yaml`, `compose.yml|yaml`) deploys through one adapter:
 
 1. **Host port assignment** happens at onboarding via [`assign_host_port`](crates/app/src/host_port.rs), so one project never clashes with another on the same host; the chosen port persists as `deploy.host_port` in the project's `coxagent.json`.
-2. On config load ([`load_config_with_probe`](crates/app/src/config_load.rs)), [`heal_host_port`] rejects a non-publishable port and either fails the load naming that field (COX-B043) or heals explicit-null / absent to a free port.
-3. The run cycle calls [`DockerComposeDeploy::deploy(work_dir)`](crates/infrastructure/src/deploy/docker_compose.rs), which derives a deterministic project name ([`compose_project_name`], format `cox-<parent>-<dir>`), refuses if it collides with the live hub ([`evictable_project`]), resolves required `${VAR:?}` secrets once per pass ([`resolve_deploy_secrets_in`) then runs ``docker compose -p <proj> up -d --build``.
+2. On config load ([`load_config_with_probe`](crates/app/src/config_load.rs)) two distinct things happen: a `host_port` of the wrong type / out of range fails *parse* ([`config_parse::parse_config`], COX-B043) — config does not load, naming the field `deploy.host_port`. A value that does deserialize but is non-publishable (`0`), plus explicit-null and absent-key, is *healed* to a free port by [`heal_host_port()`](crates/app/src/config_load.rs).
+3. The run cycle calls [`DockerComposeDeploy::deploy(work_dir)`](crates/infrastructure/src/deploy/docker_compose.rs), which derives a deterministic project name ([`compose_project_name`], format `cox-<parent>-<dir>`), refuses if it collides with the live hub ([`evictable_project`]), resolves required `${VAR:?}` secrets once per pass ([`resolve_deploy_secrets_in()`](crates/infrastructure/src/deploy/docker_compose.rs)) then runs ``docker compose -p <proj> up -d --build``.
 4. On non-zero exit it self-heals once for "port is already allocated" by evicting only evictable preview projects; otherwise it surfaces ``format!("docker compose failed: {detail}")`` (line ~1299) — exactly what CXA-B001 quoted.
-5. A mandatory post-deploy probe polls `/` on the published port via [`verify_deploy_health(port)`] before any gate passes.
+5. A mandatory post-deploy probe runs before a deploy counts as successful. The run cycle polls `/` on the published port via [`run_health_check()`](crates/application/src/use_cases/cycle/ops.rs) → [`DeployPort::wait_healthy(port)`]; the yes/no rollback gate and every other call site go through the shared pure helper [`verify_deploy_health(deploy: &Arc<dyn DeployPort>, host_port: Option<u16>) -> bool`](crates/application/src/ports/outbound/deploy.rs).
 
 PR #62 landed two changes:
 
@@ -47,19 +47,19 @@ PG_USER=... PG_PASSWORD=... REDIS_PASSWORD=... \
 
 Interpreting failures you see:
 
-- An app-driven message beginning "docker compose failed:" means [`DockerComposeDeploy::deploy] saw non-zero exit from `up`.
+- An app-driven message beginning "docker compose failed:" means [`DockerComposeDeploy::deploy`](crates/infrastructure/src/deploy/docker_compose.rs) saw non-zero exit from `up`.
 - Local builds under Docker Desktop surface as "View build details:" plus ``docker-desktop://dashboard/build/<...>/<id>``; open that link to read which step broke.
 
 ## Interface
 
 Trait boundary (the decision side stays pure over what adapters return):
 
-- **Trait** [`DeployPort](crates/application/src/ports/outbound/deploy.rs): methods include `lint`, `lint_report`, `cross_target_check`, `run_tests(_scoped)`, `down`, [`health(port) -> bool]`, [`health_check(port)` → full status/time], [`ensure_daemon()`] (starts Docker Desktop on macOS via ``open -a Docker``), and [`deploy(work_dir)` → [[`DeployReport { success, deployed, summary }]`.
-- **Adapter** [`DockerComposeDeploy::new()`].
+- **Trait** [`DeployPort`](crates/application/src/ports/outbound/deploy.rs): methods include `lint`, `lint_report`, `cross_target_check`, `run_tests(_scoped)`, `down`, `health(port) -> bool`, `health_check(port)` (full status/time), `ensure_daemon()` (starts Docker Desktop on macOS via ``open -a Docker``), and `deploy(work_dir)` → `DeployReport { success, deployed, summary }`.
+- **Adapter** [`DockerComposeDeploy::new()`](crates/infrastructure/src/deploy/docker_compose.rs).
 - Host-port parsing / gating helpers:
-  - [``parse_deploy_host_port(raw_config) -> Result<Option<u16>, ()>``]
-  - [``is_publishable_host_port(port) -> bool``] (`port != 0`)
-  - [``verify_deploy_health(deploy, host_port) -> bool``]
+  - `parse_deploy_host_port(raw_config) -> Result<Option<u16>, ()>`
+  - `is_publishable_host_port(port) -> bool` (`port != 0`)
+  - `verify_deploy_health(deploy: &Arc<dyn DeployPort>, host_port: Option<u16>) -> bool`
 - Standalone backend layout keyed for CXA-B001:
   ```yaml
   # deploy/docker-compose.cxa.yml
@@ -112,12 +112,12 @@ Config-layer settings ([DeployConfig](crates/application/src/config.rs)):
 - crates/infrastructure/src/deploy/scoped_tests.rs — narrows a test run to what a change can reach.
 - crates/infrastructure/src/lib.rs — crate-level re-exports used by the composition root.
 - crates/application/src/ports/outbound/deploy.rs — trait `DeployPort` plus pure helpers `verify_deploy_health`, `parse_deploy_host_port`, `is_publishable_host_port`.
-- crates/app/builders.rs and crates/app/src/lib.rs — composition root wiring `.with_deploy(Arc::new(<adapter>::new()))`, where `<adapter>` is the deploy adapter from docker_compose.rs named in the first Code map bullet.
+- crates/app/src/builders.rs and crates/app/src/lib.rs — composition root wiring `.with_deploy(Arc::new(<adapter>::new()))`, where `<adapter>` is the deploy adapter from docker_compose.rs named in the first Code map bullet.
 
 - crates/app/src/host_port.rs — onboarding port assignment (`assign_host_port`) and `PORT_BASE`.
 - crates/app/src/config_load.rs — load-time heal/reject of host_port (`heal_host_port`).
 - crates/application/src/config.rs — `DeployConfig` struct (`enabled`, `host_port`, `auto_rollback`, `max_rollback_age_secs`, `health_check_timeout_secs`, `migration_detection_paths`).
-- crates/application/src/use_cases/cycle/mod.rs — TEST step calls deploy and files bugs (~line 936).
+- crates/application/src/use_cases/cycle/mod.rs — `RunCycleUseCase::execute` calls `deploy.deploy(&self.work_dir)` (line 963), runs the health gate + records/fails/bugs, drives `attempt_rollback` / `record_known_good`.
 - crates/application/src/use_cases/cycle/ops.rs — `file_deploy_bug`, `record_deploy`, `run_health_check`, `attempt_rollback`.
 
 ## Related
