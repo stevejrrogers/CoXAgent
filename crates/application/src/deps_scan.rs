@@ -400,6 +400,7 @@ fn already_remediated_for(state: &ProjectState, dep: &str, is_urgent_cve: bool) 
 /// An urgent CVE becomes a high-priority Bug regardless of version age; any other flagged package
 /// becomes a low-priority Chore carrying current/latest versions and every affected lockfile.
 /// Both are pre-linked to the master epic via `depends_on`.
+#[must_use]
 fn propose_one(state: &mut ProjectState, finding: &ScanFinding) -> Option<TicketId> {
     let Ok(id) = TicketId::new(ticket_id_for(&finding.package)) else {
         return None;
