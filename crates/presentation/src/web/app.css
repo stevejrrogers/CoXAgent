@@ -1724,3 +1724,8 @@ textarea.np-in{resize:vertical;line-height:1.5}
 .attlight img{max-width:92vw;max-height:84vh;border-radius:10px;background:#fff}
 .attlight iframe{width:88vw;height:84vh;border:none;border-radius:10px;background:#fff}
 .attlight-name{color:#dfe6ec;font-size:13px}
+.attlight-nav{position:absolute;top:50%;transform:translateY(-50%);width:44px;height:64px;
+  border:none;border-radius:10px;background:rgba(255,255,255,.12);color:#fff;font-size:30px;
+  cursor:pointer;line-height:1}
+.attlight-nav:hover{background:rgba(255,255,255,.24)}
+.attlight-nav.prev{left:14px}.attlight-nav.next{right:14px}
