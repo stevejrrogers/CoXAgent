@@ -147,6 +147,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 &["worktree", "remove", "--force", &wt.to_string_lossy()],
             )
             .await;
+        // Retry safety: a cut that COMMITTED but failed to push (network/auth
+        // down that minute) leaves the local branch behind, and `worktree add
+        // -b` then fails silently forever after — v2.27.0 sat orphaned for a
+        // day. The branch is re-derived from origin on every cut, so deleting
+        // a leftover loses nothing.
+        let _ = git.raw(wd, &["branch", "-D", branch]).await;
         let (ok, _) = git
             .raw(
                 wd,
@@ -320,7 +326,7 @@ fn changelog(next: &str, subjects: &[String]) -> String {
 
 /// Whole days between two `YYYY-MM-DD` stamps (0 on parse trouble — which
 /// blocks a re-cut rather than spamming one).
-fn days_between(a: &str, b: &str) -> u64 {
+pub(super) fn days_between(a: &str, b: &str) -> u64 {
     let parse = |s: &str| {
         let fmt = time::macros::format_description!("[year]-[month]-[day]");
         time::Date::parse(s, &fmt).ok()

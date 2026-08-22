@@ -576,6 +576,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let msg = format!("🗑️ auto-closed PR #{number} (\"{title}\") — {why}");
         let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
             s.post_chat_in("SA", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+            // The app closed this PR itself. Mark it so `forge_hygiene`'s
+            // closed-unmerged pass does NOT misread our own action as a human
+            // rejection and force a redesign loop. Only externally-closed PRs
+            // (a real person) must trigger that signal.
+            s.seen_closed_prs.insert(number);
             Ok(())
         })
         .await;
@@ -678,6 +683,20 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             if ok {
                 self.log_git(&format!(
                     "hygiene: stashed orphan WIP from {branch} — recover with `git stash list`"
+                ))
+                .await;
+            }
+        } else if dirty && branch == base {
+            // Residue ON the base blocks every branch checkout too — the
+            // repeating "checkout failed: The following untracked working
+            // tree files would be overwritten" (COX-B016/B080, hourly). This
+            // runs at the TOP of a cycle, before any phase edits — dirt here
+            // is leftovers, never live work.
+            let msg = format!("hygiene: untracked/dirty residue on {base}");
+            let (ok, _) = git.raw(wd, &["stash", "push", "-u", "-m", &msg]).await;
+            if ok {
+                self.log_git(&format!(
+                    "hygiene: stashed residue blocking checkouts on {base} — `git stash list`"
                 ))
                 .await;
             }
