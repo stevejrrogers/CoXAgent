@@ -28,13 +28,19 @@ SHA_FILE="$STATE_DIR/deployed-sha"
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"; }
 
-# One upgrade at a time; a stale lock (>30 min) is a dead run.
+# One upgrade at a time. Staleness is judged by whether the OWNING PROCESS is
+# alive, not by age: a cold build on a loaded machine can exceed any timer, and
+# an age-based takeover once put two instances into the same build worktree —
+# they destroyed each other's build and both "failed" in the same second.
 if [ -d "$LOCK" ]; then
-  age=$(( $(date +%s) - $(stat -f %m "$LOCK" 2>/dev/null || echo 0) ))
-  [ "$age" -lt 1800 ] && exit 0
+  owner=$(cat "$LOCK/pid" 2>/dev/null || echo "")
+  if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
+    exit 0 # a live run owns the lock — never take it over
+  fi
   rm -rf "$LOCK"
 fi
 mkdir "$LOCK" || exit 0
+echo $$ > "$LOCK/pid"
 trap 'rm -rf "$LOCK"' EXIT
 
 cd "$REPO_DIR" || exit 1
@@ -45,23 +51,35 @@ OLD_SHA=$(cat "$SHA_FILE" 2>/dev/null || echo "")
 
 log "upgrade candidate: ${OLD_SHA:-none} -> $NEW_SHA"
 
-# Build from a detached temp worktree so the working tree (agents may be
-# mid-edit in it) is never touched.
+# Build from a detached persistent worktree so the working tree (agents may be
+# mid-edit in it) is never touched. The worktree is KEPT between runs: its
+# target/ makes every upgrade after the first an incremental build (minutes,
+# not an hour on a loaded machine).
 BUILD_WT="$STATE_DIR/build-tree"
-git worktree remove --force "$BUILD_WT" >/dev/null 2>&1
-git worktree add --detach "$BUILD_WT" "$NEW_SHA" >>"$LOG" 2>&1 || { log "worktree add failed"; exit 1; }
+if [ -d "$BUILD_WT/.git" ] || [ -f "$BUILD_WT/.git" ]; then
+  git -C "$BUILD_WT" checkout --detach -f "$NEW_SHA" >>"$LOG" 2>&1 \
+    || { log "worktree checkout failed"; exit 1; }
+else
+  git worktree remove --force "$BUILD_WT" >/dev/null 2>&1
+  git worktree add --detach "$BUILD_WT" "$NEW_SHA" >>"$LOG" 2>&1 \
+    || { log "worktree add failed"; exit 1; }
+fi
 if ! (cd "$BUILD_WT" && cargo build --release --bin coxagent >>"$LOG" 2>&1); then
   log "BUILD FAILED for $NEW_SHA — keeping current hub"
-  git worktree remove --force "$BUILD_WT" >/dev/null 2>&1
   exit 1
 fi
 NEW_BIN="$BUILD_WT/target/release/coxagent"
 "$NEW_BIN" --version >>"$LOG" 2>&1 || { log "new binary does not run"; exit 1; }
 
-# Swap with a backup; the previous binary is the rollback.
-cp -X "$TARGET" "$TARGET.prev" 2>>"$LOG"
-cp -X "$NEW_BIN" "$TARGET" || { log "copy failed"; exit 1; }
-codesign --force --sign - "$TARGET" >>"$LOG" 2>&1
+# Swap ATOMICALLY via rename, never by overwriting in place: on macOS,
+# writing over an executing binary makes the kernel kill the old process with
+# "Taskgated Invalid Signature" (three crash reports, 2026-08-19/20). A rename
+# gives the new file a fresh inode while the running hub keeps executing its
+# old one until WE kill it in an orderly way below.
+cp -X "$NEW_BIN" "$TARGET.new" || { log "copy failed"; exit 1; }
+codesign --force --sign - "$TARGET.new" >>"$LOG" 2>&1
+mv -f "$TARGET" "$TARGET.prev" 2>>"$LOG"
+mv -f "$TARGET.new" "$TARGET" || { log "rename failed"; mv -f "$TARGET.prev" "$TARGET"; exit 1; }
 
 # Restart: kill the listener; the app shell respawns the binary.
 PID=$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | awk 'NR==2{print $2}')
@@ -80,6 +98,24 @@ done
 if [ -n "$ok" ]; then
   echo "$NEW_SHA" > "$SHA_FILE"
   log "UPGRADED to $NEW_SHA (hub answering on :$PORT)"
+  # A restarted hub comes up PAUSED — an upgrade must not put the team to
+  # sleep until a person notices. Resume every project. Credentials come from
+  # the hub's own admin-password file via stdin, never argv.
+  PW_FILE="$HOME/CoXAgent/admin-password"
+  if [ -f "$PW_FILE" ]; then
+    PW=$(cat "$PW_FILE")
+    JAR=$(mktemp)
+    printf '{"username":"root","password":"%s"}' "$PW" \
+      | curl -sf -m 5 -c "$JAR" -X POST "http://localhost:$PORT/api/auth/login" \
+          -H 'content-type: application/json' -d @- >/dev/null 2>&1
+    for pid in $(curl -sf -m 5 -b "$JAR" "http://localhost:$PORT/api/projects" 2>/dev/null \
+                   | tr ',' '\n' | sed -n 's/.*"id":"\([^"]*\)".*/\1/p'); do
+      curl -sf -m 5 -b "$JAR" -X POST \
+        "http://localhost:$PORT/api/projects/$pid/control/resume" >/dev/null 2>&1 \
+        && log "resumed project $pid after upgrade"
+    done
+    rm -f "$JAR"
+  fi
 else
   log "HEALTH CHECK FAILED — rolling back to previous binary"
   cp -X "$TARGET.prev" "$TARGET" 2>>"$LOG"
@@ -88,4 +124,3 @@ else
   [ -n "$NP" ] && kill "$NP" 2>/dev/null
   log "rollback issued; shell will respawn the previous hub"
 fi
-git worktree remove --force "$BUILD_WT" >/dev/null 2>&1

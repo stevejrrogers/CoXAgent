@@ -60,3 +60,22 @@ test-results/
 # SwiftPM build dir (companion)
 .build/
 opencode.json
+
+# Per-agent git worktrees: whole checkouts with their own target/, tens of GB.
+.coxagent-worktrees/
+
+# Python bytecode caches — never commit compiled artifacts (they were swept
+# into a branch once and polluted a merge). Rebuilt at runtime by the interpreter.
+__pycache__/
+**/__pycache__/
+*.pyc
+
+# Self-upgrade runtime state: written by deploy/self-upgrade.sh each run.
+.coxagent-self-upgrade/*.log
+.coxagent-self-upgrade/deployed-sha.tmp
+
+# Nested scratch repo / "merge test" clones a worker creates; must never be
+# swept into a PR as a gitlink (mode 160000) — that broke CI + the visual-qa
+# gate. See PRs #220/#223/#224.
+mergetest/
+/mergetest/

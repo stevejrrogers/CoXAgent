@@ -1,4 +1,4 @@
-FOLDER: -
+FOLDER: Configuration
 # Config struct and the missing "coverage" field build error (CXA-B004)
 
 **Keywords:** Config, coxagent.json, struct initializer, missing field, coverage, CoverageConfig, CONFIG_SCHEMA_VERSION, config_drift_gate, build failure
@@ -28,7 +28,7 @@ pub struct Config {
 }
 ```
 
-(It originally held seven sections; CXA-F021 added the eighth.) Because every section has both a serde default and most carry an explicit container-level default (`impl Default`), an absent section deserializes into its documented default instead of failing — but that only helps code paths that reach config through serde. A hand-written inline literal has no such protection.
+(It originally held seven sections; CXA-F021 added the eighth, landing as fix commit 3f8d8ec which resolved CXA-B004 on HEAD.) Because every section has both a serde default and most carry an explicit container-level default (`impl Default`), an absent section deserializes into its documented default instead of failing — but that only helps code paths that reach config through serde. A hand-written inline literal has no such protection.
 
 CXA-B004 existed because Rust construction rules are stricter than serde deserialization:
 
@@ -124,6 +124,14 @@ This ticket introduces no behaviour switch beyond what coxagent.json already gov
 - The presence vs absence of schema_version on disk changes whether parse_config refuses (= greater-than-supported) or accepts-and-migrates (= equal-to-or-absent).
 - Defaults for omitted coverage knobs come from default_coverage_enabled() -> true and default_coverage_threshold() -> 3 ; there are no other knobs affected by CXA-B004/CXA-F021.
 
+An example minimal coverage section inside coxagent.json:
+
+```json
+{
+  "coverage": { "enabled": true, "threshold": 3 }
+}
+```
+
 Because none appear as env vars or CLI flags by design — per-project settings belong in coxagent.json under governance-policy discipline — there is nothing further to configure here beyond editing that file.
 
 ## Edge cases and limits
@@ -131,7 +139,7 @@ Because none appear as env vars or CLI flags by design — per-project settings 
 - This ticket was fixed by adding coverage everywhere needed; it reproduces again only if someone adds another independent top-level section without updating those literals.
 - Only full non-spreaded literals break under Rust construction rules when fields change; spread-style (`..Default::default()`) literals never do.
 - Legacy/handwritten documents load by design because every section uses #[serde(default)] : an absent section differs from corrupt data.
-- A document written by a newer build carrying schema_version > CONFIG_SCHEMA_VERSION refuses to load outright — never accepted blind nor silently re-defaulted into today's view.
+- A document written by a newer build carrying schema_version > CONFIG_SCHEMA_VERSION refuses to load outright — never accepted blind nor silently re-defaulted into today's view (config_drift_gate AC3).
 - Line numbers drift constantly (~1710 lines total depending which side stated them). Never treat lib.rs line numbers as stable truth; always recompile against your own tree.
 - There is currently NO runtime consumer wiring CoverageConfig into gap detection yet — lib.rs only pins it to defaults; acceptance tests exercise round-trip/defaults/schema-drift/migration (see Code map). The pass logic itself lands separately under docs/TEST_COVERAGE_GAP_DETECTION.md .
 

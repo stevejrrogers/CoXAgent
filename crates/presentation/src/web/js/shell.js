@@ -387,6 +387,8 @@ function startApp(){
   ensureNotifPermission();
   checkAppUpdate();setInterval(checkAppUpdate,5*60*1000);
   window.addEventListener("focus",()=>checkAppUpdate());
+  // Refresh live review data when the tab regains focus, only if that view is up.
+  window.addEventListener("focus",()=>{if(CUR==="review")renderReview();});
   // Health is one cheap JSON with the hub's version in it: poll it, keep the
   // brand chip honest, and reload the window when the hub upgrades under it.
   const pollHealth=()=>fetch("/api/health").then(r=>r.json()).then(h=>{
@@ -690,18 +692,32 @@ async function mergeSweep(){
     if(CUR==="review")renderReview(); if(CUR==="overview")drainBanner("ov-drain");
   }catch(e){toasty("Network error","err");}
 }
+let reviewPollStarted=false;
+function reviewPollTick(){
+  // Only re-render while the Review tab is active AND the page is visible; never
+  // while another review action modal may be open (the guard just skips).
+  if(CUR!=="review")return;
+  if(document.hidden)return;
+  renderReview();
+}
 async function renderReview(){
   drainBanner("rv-drain");
   const el=document.getElementById("review-body");if(!el)return;
+  if(!reviewPollStarted){reviewPollStarted=true;setInterval(reviewPollTick,20*1000);}
   el.innerHTML='<div class="empty">loading pull requests…</div>';
   let d={};try{d=await(await fetch(api("/prs"))).json();}catch(e){el.innerHTML='<div class="empty">unable to load</div>';return;}
-  if(!d.configured){el.innerHTML=`<div class="rev-empty"><i class="ti ti-git-pull-request"></i><div>Git review isn't set up</div><span>Configure a repository in <a onclick="nav('settings')">Settings → Git &amp; version control</a> to open and review pull requests here.</span></div>`;return;}
   const prs=d.prs||[];
-  const head=`<div class="sec">Pull requests <span style="font-size:11px;color:var(--dim);font-weight:400">· ${prs.length} open${d.error?' · <span style="color:var(--red)">'+esc(d.error)+'</span>':''}</span></div>`;
+  if(!d.configured&&!prs.length){el.innerHTML=`<div class="rev-empty"><i class="ti ti-git-pull-request"></i><div>Git review isn't set up</div><span>Configure a repository in <a onclick="nav('settings')">Settings → Git &amp; version control</a> to open and review pull requests here.</span></div>`;return;}
+  const roNote=!d.configured?' · <b class="rev-ro-note"><i class="ti ti-lock"></i> read-only — configure git in Settings for actions</b>':'';
+  const head=`<div class="sec">Pull requests <span style="font-size:11px;color:var(--dim);font-weight:400">· ${prs.length} open${roNote}${d.error?' · <span style=\"color:var(--red)\">'+esc(d.error)+'</span>':''}</span></div>`;
   if(!prs.length){el.innerHTML=head+`<div class="rev-empty"><i class="ti ti-check"></i><div>No open pull requests</div><span>Agent-shipped tickets will appear here for review.</span></div>`;return;}
   const ciBadge=c=>{const m={passing:["passing","var(--green)","circle-check"],failing:["failing","var(--red)","circle-x"],pending:["CI running","var(--amber)","loader"],none:["no CI","var(--dim)","minus"]}[c]||["",""];
     return `<span class="rev-ci" style="color:${m[1]}"><i class="ti ti-${m[2]}"></i> ${m[0]}</span>`;};
-  const rev=canReview();
+  const configured=!!d.configured;
+  const rev=canReview()&&configured;
+  // When git is not configured we run read-only: hide every action control
+  // (including Diff) for every card.
+  const actsEnabled=configured;
   // The SA's review verdict (a suggestion when auto-merge is off).
   const reviewBanner=r=>{if(!r)return"";const ok=r.decision==="approve";
     return `<div class="rev-verdict ${ok?'ok':'chg'}"><i class="ti ti-${ok?'circle-check':'arrow-back-up'}"></i>
@@ -712,12 +728,13 @@ async function renderReview(){
         <div class="revtitle"><a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.title)}</a> <span class="revnum">#${p.number}</span></div>
         <div class="revmeta"><span class="revbranch"><i class="ti ti-git-branch"></i> ${esc(p.head)} → ${esc(p.base)}</span>
           ${ciBadge(p.ci)}
+          ${(p.review&&p.review.decision)?'':'<span class="rev-pending" style="display:inline-flex;align-items:center;gap:4px;color:var(--dim)"><i class="ti ti-clock"></i> awaiting review</span>'}
           ${p.mergeable?'':'<span class="rev-conflict"><i class="ti ti-alert-triangle"></i> conflicts</span>'}
           <span class="revby">by ${esc(p.author||'—')}</span></div>
         ${reviewBanner(p.review)}
       </div>
       <div class="revacts">
-        <button class="gc-btn" onclick="viewDiff(${p.number},'${esc(p.head)}')"><i class="ti ti-file-diff"></i> Diff</button>
+        ${actsEnabled?`<button class="gc-btn" onclick="viewDiff(${p.number},'${esc(p.head)}')"><i class="ti ti-file-diff"></i> Diff</button>`:''}
         ${rev?`<button class="gc-btn" title="Run THIS branch on the app port so you can see it before approving" onclick="prAction(${p.number},'preview')"><i class="ti ti-eye"></i> Preview</button>
         <button class="gc-btn" title="Stop the preview and restore the main build" onclick="prAction(${p.number},'preview-stop')"><i class="ti ti-eye-off"></i></button>
         <button class="gc-btn" onclick="prAction(${p.number},'request-changes')"><i class="ti ti-arrow-back-up"></i> Changes</button>
@@ -1230,9 +1247,15 @@ async function renderTeamsOnline(){
       const acct=(w.worker||'').split('@')[0].toLowerCase();
       const mine=!ME||(ME.role==="admin")||((ME.username||'').toLowerCase()===acct);
       const stopBtn=mine?`<button class="tso-stop" title="Stop this operator (idles it — saves its tokens)" onclick="stopOperator('${esc(w.worker)}')"><i class="ti ti-player-stop"></i></button>`:'';
+      // Version skew: the hub self-upgrades but remote workers don't — a
+      // worker on an older build runs OLD orchestration rules. Flag it.
+      const hubV=(window.STATE&&STATE.current_version)?String(STATE.current_version):"";
+      const skew=w.version&&hubV&&w.version!==hubV
+        ?`<span class="tso-skew" title="worker runs v${esc(w.version)}, hub is v${esc(hubV)} — update this machine's coxagent">⚠ v${esc(w.version)}</span>`:'';
       return `<div class="tso"><span class="tso-dot"></span><span class="tso-id">${esc(w.worker)}</span>`
         +`<span class="tso-role ${busy?'lead':''}">${esc(role.replace(/_/g,'-').toUpperCase())}</span>`
         +(w.ticket?`<span class="tso-tk">${esc(w.ticket)}</span>`:'')
+        +skew
         +stopBtn
         +`</div>`;
     }).join("")+`</div></div>`;
@@ -1272,6 +1295,7 @@ async function openAgent(role,worker){
   restartAgentLog();
 }
 let AGENT_LOG_ES=null, AGENT_LOG_ROLE=null, AGENT_LOG_WORKER="", AGENT_LOG_BUF="", AGENT_LOG_LIVE=false, AGENT_LOG_DONE=false, AGENT_LOG_INIT=false, AGENT_LOG_SIGS=[];
+let AGENT_LOG_RETRIES=0, AGENT_LOG_RETRY_TIMER=null;
 // Icon + colour for a tool name, so every engine's tool calls read at a glance.
 // A tool call, said in words: "Read run_chat_reply.rs:400-500" instead of a
 // truncated JSON blob. Long absolute paths collapse to the part a reader
@@ -1457,13 +1481,27 @@ function wlItemSig(it){
 }
 // Real-time live log over SSE: the hub tails the engine's local live file and
 // pushes new bytes down as `init` + `line` events (one global api() scope).
-function restartAgentLog(){
+// isRetry=true on an auto-reconnect attempt: keeps the backoff counter and
+// buffered text instead of wiping the view back to "loading…" on every retry.
+function restartAgentLog(isRetry){
+  if(AGENT_LOG_RETRY_TIMER){ clearTimeout(AGENT_LOG_RETRY_TIMER); AGENT_LOG_RETRY_TIMER=null; }
   closeAgentLog();
-  AGENT_LOG_BUF=""; AGENT_LOG_LIVE=false; AGENT_LOG_DONE=false; AGENT_LOG_INIT=false; AGENT_LOG_SIGS=[];
+  if(isRetry){
+    // Attempt is in flight — leave "RECONNECTING…" showing instead of
+    // hiding it here, or a slow/hanging connect would read as recovered
+    // for however long it takes to actually fail or succeed.
+    showAgentLogError(true);
+  } else {
+    AGENT_LOG_BUF=""; AGENT_LOG_LIVE=false; AGENT_LOG_DONE=false; AGENT_LOG_INIT=false; AGENT_LOG_SIGS=[];
+    AGENT_LOG_RETRIES=0;
+    showAgentLogError(false);
+  }
   const url=api("/agent-log/stream?role="+encodeURIComponent(AGENT_LOG_ROLE)+(AGENT_LOG_WORKER?"&worker="+encodeURIComponent(AGENT_LOG_WORKER):""));
   const es=new EventSource(url);
   AGENT_LOG_ES=es;
   es.addEventListener("init",e=>{
+    AGENT_LOG_RETRIES=0;
+    showAgentLogError(false);
     try{const d=JSON.parse(e.data); if(d)AGENT_LOG_LIVE=!!d.live; AGENT_LOG_BUF="";}catch(_){}
     renderAgentLog(true);
   });
@@ -1476,8 +1514,24 @@ function restartAgentLog(){
       }}catch(_){}
     scheduleAgentLog();
   });
-  // Endpoint gone/error — drop the stream; the open button reconnects.
-  es.onerror=()=>{try{es.close()}catch(_){} AGENT_LOG_ES=null;};
+  // Endpoint gone (404 on an old server) or the connection dropped mid-stream —
+  // show it immediately, then retry with capped exponential backoff. A native
+  // EventSource auto-retries too, but silently and on a fixed interval; closing
+  // it ourselves and driving the retry lets the UI actually say what's wrong.
+  es.onerror=()=>{
+    try{es.close()}catch(_){}
+    AGENT_LOG_ES=null;
+    showAgentLogError(true);
+    const delay=Math.min(30000, 1000*(2**AGENT_LOG_RETRIES));
+    AGENT_LOG_RETRIES++;
+    AGENT_LOG_RETRY_TIMER=setTimeout(()=>{ if(AGENT_LOG_ROLE) restartAgentLog(true); }, delay);
+  };
+}
+function showAgentLogError(on){
+  const b=document.getElementById("agent-err-badge");
+  if(!b)return;
+  if(on){ b.textContent=AGENT_LOG_RETRIES>0?"● RECONNECTING…":"● STREAM LOST"; b.style.display="inline-block"; }
+  else { b.style.display="none"; }
 }
 function renderAgentLog(force){
   const body=document.getElementById("agent-transcript");
@@ -1536,7 +1590,15 @@ function closeAgentLog(){
   if(AGENT_LOG_RAF){ cancelAnimationFrame(AGENT_LOG_RAF); AGENT_LOG_RAF=0; }
   if(AGENT_LOG_ES){try{AGENT_LOG_ES.close()}catch(_){} AGENT_LOG_ES=null;}
 }
-function closeAgent(){closeAgentLog();AGENT_LOG_ROLE=null;AGENT_LOG_WORKER="";close_('ov-agent');}
+// Fully stop the stream (modal close): unlike restartAgentLog's internal
+// closeAgentLog call, this also cancels any pending reconnect so a closed
+// modal doesn't keep retrying in the background.
+function stopAgentLog(){
+  if(AGENT_LOG_RETRY_TIMER){ clearTimeout(AGENT_LOG_RETRY_TIMER); AGENT_LOG_RETRY_TIMER=null; }
+  closeAgentLog();
+  showAgentLogError(false);
+}
+function closeAgent(){stopAgentLog();AGENT_LOG_ROLE=null;AGENT_LOG_WORKER="";close_('ov-agent');}
 async function openTranscript(enc,name){
   document.getElementById("tr-title").textContent=name;
   document.getElementById("tr-body").textContent="loading…";

@@ -38,13 +38,21 @@ impl<E: AgentEnginePort> AgentEnginePort for MeteringEngine<E> {
 
     async fn run(&self, request: AgentRequest) -> Result<AgentOutcome, PortError> {
         let role = role_key(request.role);
+        // Measure the prompt we SEND per role (chars ≈ tokens/3.5): prompt
+        // trimming without this number is guesswork — it names which role's
+        // briefing blocks are actually fat before anyone cuts one.
+        let prompt_chars = (request.system_prompt.len() + request.task_prompt.len()) as u64;
+        if let Ok(mut m) = self.meter.lock() {
+            *m.prompt_chars_by_role.entry(role.clone()).or_default() += prompt_chars;
+        }
         let outcome = self.inner.run(request).await?;
         // Record which engine actually ran this role (stamped by FailoverEngine),
         // even when usage is unknown — the dashboard shows the live engine per
         // agent regardless of whether cost came back.
         if !outcome.engine.is_empty() {
             if let Ok(mut m) = self.meter.lock() {
-                m.engine_by_role.insert(role.clone(), outcome.engine.clone());
+                m.engine_by_role
+                    .insert(role.clone(), outcome.engine.clone());
             }
         }
         if let Some(u) = outcome.usage {

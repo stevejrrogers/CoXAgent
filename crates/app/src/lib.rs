@@ -102,6 +102,7 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
             Ok(render_report(&state))
         }
         Command::Discover => Ok(render_discovery()),
+        Command::Probe { hub, project } => run_probe(&hub, &project).await,
         Command::Onboard {
             name,
             alias,
@@ -1047,7 +1048,9 @@ async fn run_loop(
                 "gitlab" => Some(Arc::new(coxagent_infrastructure::GlForge::new(
                     repo, base, wd,
                 ))),
-                "github" => Some(coxagent_infrastructure::github_forge(repo, base, wd, account)),
+                "github" => Some(coxagent_infrastructure::github_forge(
+                    repo, base, wd, account,
+                )),
                 _ => None,
             }
         } else {
@@ -1224,10 +1227,14 @@ async fn run_loop(
                 Ok((engine, meter)) => {
                     sleep = std::time::Duration::from_secs(reloaded.workflow.sleep_seconds);
                     uc.reload(reloaded, engine, meter);
-                    tracing::info!("config changed — engine reloaded and applied without a restart");
+                    tracing::info!(
+                        "config changed — engine reloaded and applied without a restart"
+                    );
                 }
                 Err(e) => {
-                    tracing::warn!("config changed but engine rebuild failed; keeping previous: {e}");
+                    tracing::warn!(
+                        "config changed but engine rebuild failed; keeping previous: {e}"
+                    );
                 }
             }
         }
@@ -1397,7 +1404,10 @@ pub(crate) fn worktree_at(work_dir: PathBuf, slug: &str) -> PathBuf {
         let canon = std::fs::canonicalize(&work_dir).unwrap_or_else(|_| work_dir.clone());
         let mut h = std::collections::hash_map::DefaultHasher::new();
         canon.hash(&mut h);
-        format!("{:08x}", u32::try_from(h.finish() & u64::from(u32::MAX)).unwrap_or(0))
+        format!(
+            "{:08x}",
+            u32::try_from(h.finish() & u64::from(u32::MAX)).unwrap_or(0)
+        )
     };
     let slug = format!("{sanitized}-{repo_key}");
     // Sibling of the repo, so it is never inside the tree the agent commits.
@@ -1456,6 +1466,50 @@ fn record_compression(before: usize, after: usize) {
         // and wrecked the stats. O_APPEND + a single small write is atomic.
         let _ = f.write_all(format!("{before} {after}\n").as_bytes());
     }
+}
+
+/// One-shot engine discovery + report for a machine that has agent CLIs on
+/// PATH (the dashboard host itself may not). Detects local engines and sends
+/// them through the hub's /store heartbeat so `/api/engines` populates without
+/// waiting for a full runner cycle.
+async fn run_probe(hub: &str, project: &str) -> Result<String, Box<dyn std::error::Error>> {
+    use crate::builders::{detected_engines, operator_token_path};
+    let caps = coxagent_application::ports::outbound::WorkerCaps {
+        engines: detected_engines().into_iter().map(|(n, _)| n).collect(),
+        ..Default::default()
+    };
+    if caps.engines.is_empty() {
+        return Ok("No agent engines detected on PATH.\n".to_owned());
+    }
+    let token = match std::env::var("COXAGENT_REMOTE_TOKEN") {
+        Ok(v) if !v.trim().is_empty() => Some(v.trim().to_owned()),
+        _ => match operator_token_path() {
+            Some(path) => std::fs::read_to_string(path)
+                .ok()
+                .map(|text| text.trim().to_owned())
+                .filter(|t| !t.is_empty()),
+            None => None,
+        },
+    };
+    let cfg = RestConfig {
+        base_url: hub.trim_end_matches('/').to_owned(),
+        project_id: project.to_owned(),
+        token,
+    };
+    let store = RestStateStore::new(cfg)?;
+    let worker = ["HOSTNAME", "HOST"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok())
+        .unwrap_or_else(|| "probe".to_owned());
+    let now = coxagent_application::state::now_rfc3339();
+    store
+        .heartbeat_worker(&worker, "probe", "", &caps, &now)
+        .await?;
+    Ok(format!(
+        "Detected {} engine(s) and reported them to {hub}: {}",
+        caps.engines.len(),
+        caps.engines.join(", ")
+    ))
 }
 
 fn render_discovery() -> String {
@@ -1615,10 +1669,10 @@ mod mcp_auth_tests {
 fn config_content_hash(state_dir: &Path) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
-    
+
     let root = state_dir.parent().unwrap_or(state_dir);
     let path = root.join("coxagent.json");
-    
+
     let content = std::fs::read_to_string(&path).unwrap_or_default();
     let mut hasher = DefaultHasher::new();
     content.hash(&mut hasher);

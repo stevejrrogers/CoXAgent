@@ -227,7 +227,11 @@ pub(super) async fn attachment_ep(
         return (axum::http::StatusCode::BAD_REQUEST, "bad key").into_response();
     }
     let Some(storage) = &p.storage else {
-        return (axum::http::StatusCode::CONFLICT, "no blob storage configured").into_response();
+        return (
+            axum::http::StatusCode::CONFLICT,
+            "no blob storage configured",
+        )
+            .into_response();
     };
     // The record on the ticket is the authority for the content type; fall
     // back to octet-stream for keys nothing references (e.g. pruned tickets).
@@ -302,7 +306,11 @@ pub(super) async fn upload_attachment_ep(
         .unwrap_or("application/octet-stream")
         .to_owned();
     let Some(storage) = &p.storage else {
-        return (axum::http::StatusCode::CONFLICT, "no blob storage configured").into_response();
+        return (
+            axum::http::StatusCode::CONFLICT,
+            "no blob storage configured",
+        )
+            .into_response();
     };
     let key = format!("uploads/{}/{}", safe(&id), name);
     if let Err(e) = storage.put(&key, &body, &ct).await {

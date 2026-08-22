@@ -18,6 +18,11 @@ pub struct AddTicketInput {
     pub acceptance_criteria: Vec<String>,
 }
 
+/// Marker prefix on the duplicate-refusal error, so best-effort callers that
+/// file MANY tickets (conformance drift, discussion outcomes) can skip a
+/// refused one instead of aborting the whole run.
+pub const DUPLICATE_REFUSED: &str = "duplicate ticket refused";
+
 /// Adds a new ticket to the project backlog.
 pub struct AddTicketUseCase<S: StateStorePort + ?Sized> {
     store: Arc<S>,
@@ -35,6 +40,35 @@ impl<S: StateStorePort + ?Sized> AddTicketUseCase<S> {
     /// - [`AppError::Port`] when load/save fails or the result is invalid.
     pub async fn execute(&self, input: AddTicketInput) -> Result<TicketId, AppError> {
         let mut state = self.store.load().await?;
+
+        // Duplicate gate at the ONE shared creation path. The BA's insert
+        // loop already dedupes, but discussion/sentinel/escalation tickets
+        // came through here unchecked — the SM's bug-backlog discussions
+        // filed five near-identical "bug triage" tickets in a week, each a
+        // different string, same ticket. Same predicate as the BA's
+        // (normalised match, near-paraphrase, ceremony-class).
+        let active: Vec<String> = state
+            .tickets
+            .iter()
+            .filter(|t| {
+                !matches!(
+                    t.status(),
+                    coxagent_domain::Status::Done
+                        | coxagent_domain::Status::Documented
+                        | coxagent_domain::Status::Rejected
+                        | coxagent_domain::Status::Verified
+                )
+            })
+            .map(|t| t.title().to_owned())
+            .collect();
+        if crate::parsing::duplicates_existing(&input.title, &active) {
+            return Err(crate::error::PortError::Backend(format!(
+                "{DUPLICATE_REFUSED}: \"{}\" matches an open ticket (same theme \
+                 already tracked)",
+                input.title
+            ))
+            .into());
+        }
 
         let id = mint_id(input.ticket_type, &state)?;
         let mut ticket = Ticket::new(
@@ -60,7 +94,7 @@ impl<S: StateStorePort + ?Sized> AddTicketUseCase<S> {
 /// # Errors
 /// Propagates [`DomainError`] from id construction (unreachable in practice
 /// since the formatted string is always non-empty, but kept honest).
-fn mint_id(
+pub(crate) fn mint_id(
     ticket_type: TicketType,
     state: &crate::state::ProjectState,
 ) -> Result<TicketId, AppError> {
@@ -117,9 +151,13 @@ mod tests {
     }
 
     fn input(ticket_type: TicketType) -> AddTicketInput {
+        input_titled(ticket_type, "T")
+    }
+
+    fn input_titled(ticket_type: TicketType, title: &str) -> AddTicketInput {
         AddTicketInput {
             ticket_type,
-            title: "T".to_owned(),
+            title: title.to_owned(),
             description: String::new(),
             priority: Priority::Medium,
             complexity: Complexity::Small,
@@ -133,14 +171,42 @@ mod tests {
         let store = Arc::new(MemStore::default());
         let uc = AddTicketUseCase::new(Arc::clone(&store));
 
-        let a = uc.execute(input(TicketType::Feature)).await.expect("a");
-        let b = uc.execute(input(TicketType::Feature)).await.expect("b");
-        let c = uc.execute(input(TicketType::Bug)).await.expect("c");
+        let a = uc
+            .execute(input_titled(TicketType::Feature, "alpha widget"))
+            .await
+            .expect("a");
+        let b = uc
+            .execute(input_titled(TicketType::Feature, "beta exporter"))
+            .await
+            .expect("b");
+        let c = uc
+            .execute(input_titled(TicketType::Bug, "gamma crash"))
+            .await
+            .expect("c");
 
         assert_eq!(a.as_str(), "F001");
         assert_eq!(b.as_str(), "F002");
         assert_eq!(c.as_str(), "B001");
         assert_eq!(store.load().await.expect("load").tickets.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn refuses_near_duplicate_titles_from_any_caller() {
+        let store = Arc::new(MemStore::default());
+        let uc = AddTicketUseCase::new(Arc::clone(&store));
+        uc.execute(input_titled(TicketType::Feature, "Bug triage and burn-down cadence"))
+            .await
+            .expect("first");
+        // A rephrasing of the same ceremony theme — the class that produced
+        // five near-identical tickets in one week — is refused.
+        assert!(uc
+            .execute(input_titled(
+                TicketType::Feature,
+                "Backlog triage: assess bug risk and burn down"
+            ))
+            .await
+            .is_err());
+        assert_eq!(store.load().await.expect("load").tickets.len(), 1);
     }
 
     #[tokio::test]

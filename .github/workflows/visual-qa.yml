@@ -1,0 +1,92 @@
+name: Visual QA
+
+# CXA-B062 regression guard · this workflow is what every dependent acceptance
+# criterion builds on. Without it no Playwright screenshots run on PRs, no
+# Visual-QA Bug tickets are ever filed automatically, and no merge-gate check enforces.
+#
+# Runs headless Chromium against committed golden screenshots with regeneration OFF,
+# then for regressions files a Bug through GitHub CLI and comments back on the PR with
+# a link to the evidence artifact / filed ticket.
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  visual-regression:
+    # One check job per PR -> paints one unambiguous green-or-red merge gate.
+    name: Visual regression (screenshots)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build coxagent binary used by e2e webServer
+        run: cargo build --bin coxagent
+
+      # Headless Chromium for screenshot comparison.
+      - name: Install Playwright browsers + system deps (headless Chromium)
+        working-directory: e2e
+        run: npx playwright install chromium --with-deps
+
+      # Regeneration OFF so committed goldens gate UI changes; failures surface as
+      # diffs instead of being silently blessed into new baselines.
+      - name: Run visual-regression suite against committed baselines
+        working-directory: e2e
+        shell: bash
+        run: |
+          set +e
+          npx playwright test --update-snapshots=off \
+            --reporter=json > .playwright-report.json 2> .playwright-stderr.txt
+          code=$?
+          exit "$code"
+
+      # Keep diff images + JSON report for every outcome so a failing PR is still inspectable.
+      - name: Upload screenshot evidence on every outcome
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-qa-results-${{ github.sha }}
+          path: |
+            e2e/test-results/
+            e2e/.playwright-report.json
+
+      # Failing PRs only (green runs post nothing). File a Bug through GitHub CLI
+      # so a regression surfaces as an actionable ticket; publish its URL as a step
+      # output for the comment step to consume (each `run` step is its own shell).
+      - name: Auto-file Bug tickets for regressions
+        id: file-bug
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}} Visual QA regression"
+          body=$(printf "View/OS regression detected by the Visual QA suite.\nPR link: %s\nArtifacts carry the diff images." \
+            "${{ github.event.pull_request.html_url }}")
+          bug_url=$(gh issue create --repo "${{ github.repository }}" --title "$title" --body "$body")
+          echo "bug_url=$bug_url" >> "$GITHUB_OUTPUT"
+
+      # Comment on the PR thread, gated on failure, linking the filed ticket's URL
+      # from the ticketing step so humans see exactly what was filed.
+      - name: Comment on PR linking filed tickets
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr comment "${{ github.event.pull_request.number }}" \
+            --body "Visual QA regression Bug filed at ${{ steps.file-bug.outputs.bug_url }}"
+
