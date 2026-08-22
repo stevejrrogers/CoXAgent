@@ -98,19 +98,30 @@ fn deps_satisfied(state: &ProjectState, ticket: &Ticket) -> bool {
     })
 }
 
-/// All tickets matching `pred`, best-first: priority desc, then id ascending.
+/// All tickets matching `pred`, priority-ordered: tickets committed to the
+/// current sprint first (the team's aligned work), then the rest best-first.
+/// Within each scope bucket: priority desc, then id ascending.
 fn candidates<F: Fn(&Ticket) -> bool>(state: &ProjectState, pred: F) -> Vec<TicketId> {
-    // Human-assigned tickets are a person's, end to end — never an agent
-    // candidate. The person hands one back by clearing the assignment.
+    // An assignee records WHO owns a ticket, it does not LOCK it out of the
+    // team's work. In this app the running agents are the operator's team, so
+    // a ticket assigned to the operator is prioritised work for them, not a
+    // walled-off lane — a human-assigned ticket can still be actioned by the
+    // team (the assignee flag is an ownership label, not a scheduler block).
     let mut matched: Vec<&Ticket> = state
         .tickets
         .iter()
-        .filter(|t| t.assignee().is_none() && pred(t))
+        .filter(|t| pred(t))
         .collect();
     matched.sort_by(|a, b| {
-        priority_rank(b.priority())
-            .cmp(&priority_rank(a.priority()))
-            .then_with(|| a.id().as_str().cmp(b.id().as_str()))
+        let a_in = in_dev_scope(state, a.id());
+        let b_in = in_dev_scope(state, b.id());
+        b_in
+            .cmp(&a_in) // in-scope first
+            .then_with(|| {
+                priority_rank(b.priority())
+                    .cmp(&priority_rank(a.priority()))
+                    .then_with(|| a.id().as_str().cmp(b.id().as_str()))
+            })
     });
     matched.into_iter().map(|t| t.id().clone()).collect()
 }
@@ -240,6 +251,54 @@ mod tests {
                 .collect(),
             started_at: String::new(),
         }
+    }
+
+    /// A `pending` feature with no technical design yet (the SA queue).
+    fn pending_feature_needing_design(id: &str, prio: Priority) -> Ticket {
+        Ticket::new(
+            TicketId::new(id).expect("id"),
+            TicketType::Feature,
+            "f",
+            "",
+            prio,
+            Complexity::Small,
+            false,
+        )
+        .expect("ticket")
+    }
+
+    #[test]
+    fn design_prefers_committed_feature_over_out_of_scope() {
+        // Same priority; the committed one must be picked first even though the
+        // out-of-scope one comes lexicographically earlier.
+        let state = ProjectState {
+            tickets: vec![
+                pending_feature_needing_design("CXA-F010", Priority::High),
+                pending_feature_needing_design("CXA-F003", Priority::High),
+            ],
+            sprint: Some(sprint(&["CXA-F010"])),
+            ..ProjectState::default()
+        };
+        assert_eq!(
+            next_feature_needing_design(&state).expect("some").as_str(),
+            "CXA-F010"
+        );
+    }
+
+    #[test]
+    fn design_falls_back_to_out_of_scope_when_no_committed_work() {
+        // No committed feature needs design but an out-of-scope one does — it
+        // is still designed so the pipeline isn't starved (the sprint cost-free
+        // fallback; DEV only ignores it because it isn't scoped).
+        let state = ProjectState {
+            tickets: vec![pending_feature_needing_design("CXA-F020", Priority::High)],
+            sprint: Some(sprint(&["CXA-F011"])),
+            ..ProjectState::default()
+        };
+        assert_eq!(
+            next_feature_needing_design(&state).expect("some").as_str(),
+            "CXA-F020"
+        );
     }
 
     #[test]
