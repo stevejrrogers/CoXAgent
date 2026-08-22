@@ -238,22 +238,37 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
     /// Ingest PD's dropped design files and record them on the ticket (with a
     /// comment), so the visuals show up beside the spec.
     async fn attach_design_images(&self, id: &TicketId) {
-        let recs = self.ingest_design_files(id).await;
-        if recs.is_empty() {
+        let (recs, rejected) = self.ingest_design_files(id).await;
+        if recs.is_empty() && rejected.is_empty() {
             return;
         }
         let n = recs.len();
         crate::ports::outbound::mutate_state(self.store.as_ref(), |state| {
-            state
-                .ticket_attachments
-                .entry(id.to_string())
-                .or_default()
-                .extend(recs.iter().cloned());
-            state.post_comment(
-                "PD",
-                &format!("🎨 attached {n} design image(s) to {id}."),
-                Some(id.to_string()),
-            );
+            if !recs.is_empty() {
+                state
+                    .ticket_attachments
+                    .entry(id.to_string())
+                    .or_default()
+                    .extend(recs.iter().cloned());
+            }
+            if !rejected.is_empty() {
+                state.post_comment(
+                    "PD",
+                    &format!(
+                        "🚫 skipped {} malformed/blank SVG(s) not attached to {id}: {}",
+                        rejected.len(),
+                        rejected.join(", ")
+                    ),
+                    Some(id.to_string()),
+                );
+            }
+            if n > 0 {
+                state.post_comment(
+                    "PD",
+                    &format!("🎨 attached {n} design image(s) to {id}."),
+                    Some(id.to_string()),
+                );
+            }
             Ok(())
         })
         .await
@@ -263,9 +278,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
     /// Sweep `.coxagent/design/<ticket>/` for SVG mockups PD wrote, push each
     /// into blob storage and CONSUME the file (so a re-run never re-attaches).
     /// Pure orchestration: all I/O goes through the files + storage ports.
-    async fn ingest_design_files(&self, id: &TicketId) -> Vec<crate::state::TicketAttachment> {
+    async fn ingest_design_files(
+        &self,
+        id: &TicketId,
+    ) -> (Vec<crate::state::TicketAttachment>, Vec<String>) {
         let (Some(files), Some(storage)) = (self.files.as_deref(), self.storage.as_deref()) else {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         };
         let dir = self
             .work_dir
@@ -273,6 +291,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
             .join("design")
             .join(id.as_str());
         let mut out = Vec::new();
+        let mut rejected = Vec::new();
         for meta in files.list(&dir).await {
             let name = meta
                 .path
@@ -288,6 +307,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
             let Some(body) = files.read(&path).await else {
                 continue;
             };
+            // Red gate for design artifacts: a mockup that is not renderable
+            // (malformed XML or blank) is a broken deliverable — reject it
+            // before attaching rather than showing the human a broken image.
+            if !renderable_svg(&body) {
+                tracing::warn!("rejecting malformed/blank SVG design file {name}");
+                rejected.push(name);
+                continue;
+            }
             let safe = |s: &str| -> String {
                 s.chars()
                     .map(|c| {
@@ -314,8 +341,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
                 Err(e) => tracing::warn!("could not store design file {name}: {e}"),
             }
         }
-        out
+        (out, rejected)
     }
+
+    /// Pure renderability gate for a downloaded SVG mockup.
 
     async fn build_request(
         &self,
@@ -340,7 +369,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
                  Also SAVE visual mockups of the key screens as standalone SVG files \
                  under `.coxagent/design/{id}/` (one file per screen, e.g. \
                  `login.svg` — real layout, labels and states, not a placeholder \
-                 box). They are attached to the ticket for the humans to review.\
+                 box). They are attached to the ticket for the humans to review, \
+                 so each SVG must be well-formed, renderable XML: quote every \
+                 attribute (`x=\"40\"`), use only XML entities (no `&middot;`/`&nbsp;`), \
+                 and contain real visible content — never an empty `<svg></svg>`. \
+                 Validate the file before finishing.\
                  {context_block}{knowledge}{memory}{steering}{}{}",
                 prompts::focus_block(self.files.as_deref(), &self.work_dir, title).await,
                 prompts::repo_map_block(
@@ -355,6 +388,100 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
             escalation_level: 0,
             label: Some(id.to_string()),
         }
+    }
+}
+
+/// Pure renderability gate for a downloaded SVG mockup. Detects the three
+/// concrete corruption classes the PD agent produces (HTML entities valid only
+/// in non-XML HTML, unquoted attribute values, and empty `<svg></svg>` stubs) so
+/// broken mockups never reach the human's view. No XML parser is a dependency,
+/// so this is a lightweight, self-contained well-formedness check that is
+/// deliberately conservative about the real corruption patterns rather than
+/// attempting full XML validation.
+fn renderable_svg(body: &str) -> bool {
+    let trimmed = body.trim_start();
+    if !trimmed.starts_with("<svg") {
+        return false;
+    }
+    if !body.trim_end().ends_with("</svg>") {
+        return false;
+    }
+    if regex_lite_like_named_entity(body) {
+        return false;
+    }
+    if has_unquoted_attribute(body) {
+        return false;
+    }
+    // Blank stub: body is <svg ...> </svg> with no real nested element. Look
+    // for any '<' between the opening tag's '>' and the closing </svg>; its
+    // ABSENCE means the SVG renders as an empty box, which is useless.
+    let rest = &body[..body.rfind("</svg>").unwrap_or(body.len())];
+    let open_end = rest.find('>').map(|i| i + 1).unwrap_or(rest.len());
+    let between = &rest[open_end..];
+    if !between.contains('<') {
+        return false;
+    }
+    true
+}
+
+/// Reject named entities (`&middot;`, `&nbsp;`, ...) that are invalid in XML,
+/// while allowing the five XML entities and numeric char refs (`&#183;`,
+/// `&#xA0;`). SVG in the SAVE files is XML, so HTML-only entities break it.
+fn regex_lite_like_named_entity(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let n = bytes.len();
+    let mut i = 0;
+    while i + 1 < n {
+        if bytes[i] == b'&' {
+            // Find the closing ';' within a short lookahead.
+            let end = (i + 2..n).take(12).find(|&j| bytes[j] == b';');
+            if let Some(end) = end {
+                let name = &s[i + 1..end];
+                if !name.starts_with('#')
+                    && !matches!(name, "amp" | "lt" | "gt" | "quot" | "apos")
+                {
+                    return true;
+                }
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Detect an unquoted attribute value (`<text x=40 y=52>`) by looking for `=`
+/// not followed by a quote, space, `>`, or `/` inside a tag. Legit SVG uses
+/// `x="40"`, so an unquoted one is the second corruption class.
+fn has_unquoted_attribute(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let n = bytes.len();
+    let mut i = 0;
+    while i < n {
+        if bytes[i] == b'=' {
+            if let Some(hit) = scan_unquoted_attr(&s[i..]) {
+                if hit {
+                    return true;
+                }
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Scan the run of characters immediately after a '='. Returns None if the
+/// '=' is immediately followed by a quote (quoted value), or Some(false) when
+/// it is structurally safe (end of input, whitespace, '>' or '/'). Returns
+/// Some(true) when the next non-'/' char is a bare value start — unquoted.
+fn scan_unquoted_attr(rest: &str) -> Option<bool> {
+    let b = rest.as_bytes();
+    if b.len() < 2 {
+        return None;
+    }
+    match b[1] {
+        b'"' | b'\'' => None,
+        b'>' | b'/' | b' ' | b'\t' | b'\n' | b'\r' => Some(false),
+        _ => Some(true),
     }
 }
 
@@ -470,5 +597,35 @@ mod tests {
     async fn nothing_needing_ux_returns_none() {
         let store = Arc::new(MemStore::default());
         assert!(uc(store, "{}").execute().await.expect("run").is_none());
+    }
+
+    #[test]
+    fn renderable_svg_accepts_well_formed() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300"><rect x="40" y="52" width="120" height="80" fill="#101017"/><text x="40" y="80">Login</text></svg>"##;
+        assert!(renderable_svg(svg));
+    }
+
+    #[test]
+    fn renderable_svg_rejects_html_entity() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg"><text x="40" y="52">A &middot; B</text></svg>"##;
+        assert!(!renderable_svg(svg));
+    }
+
+    #[test]
+    fn renderable_svg_rejects_unquoted_attribute() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg"><text x=40 y=52>Login</text></svg>"##;
+        assert!(!renderable_svg(svg));
+    }
+
+    #[test]
+    fn renderable_svg_rejects_empty_stub() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg"></svg>"##;
+        assert!(!renderable_svg(svg));
+    }
+
+    #[test]
+    fn renderable_svg_accepts_numeric_entity() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg"><text x="40" y="52">A &#183; B</text></svg>"##;
+        assert!(renderable_svg(svg));
     }
 }

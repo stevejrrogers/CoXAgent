@@ -216,7 +216,16 @@ loading, error, success, disabled), microcopy that tells users what to do next \
 the project design system — deviate only with a stated reason.\n\n\
 Respond with ONLY a JSON object, no prose, exactly:\n\
 {\"user_flow\": string, \"screens\": [string], \
-\"component_states\": [string], \"responsive_notes\": string}";
+\"component_states\": [string], \"responsive_notes\": string}\n\n\
+SVG mockup well-formedness (they are attached and viewed by humans, so a \
+malformed or blank file is a broken deliverable):\n\
+- Quote EVERY attribute value: `x=\"40\" y=\"52\"`, never `x=40`.\n\
+- Only XML entities are legal (`&amp; &lt; &gt; &quot; &apos;`); do NOT use \
+HTML entities like `&middot;` or `&nbsp;` — write the literal character or a \
+numeric ref (`&#183;`).\n\
+- The file must contain real, visible content — never an empty `<svg></svg>` \
+stub; include actual shapes/text.\n\
+- Validate the saved SVG (it must parse as well-formed XML) before finishing.";
 
 /// Developer — implements the one ticket handed to it in the working directory.
 pub const DEV: &str = "\
