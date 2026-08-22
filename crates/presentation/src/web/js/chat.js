@@ -1897,9 +1897,11 @@ async function showTicket(id){
    const grid=atts.map(a=>{
      const u=api("/attachment?key="+encodeURIComponent(a.key));
      const isImg=(a.content_type||"").startsWith("image/");
+     // In-app lightbox, never target=_blank: from the desktop shell a new tab
+     // opens an EXTERNAL browser with no session cookie — instant 401.
      return isImg
-       ?`<a href="${esc(u)}" target="_blank" class="att-card" title="${esc(a.name)} · ${esc(a.by)}"><img src="${esc(u)}" alt="${esc(a.name)}" loading="lazy"><span>${esc(a.name)}</span></a>`
-       :`<a href="${esc(u)}" target="_blank" class="att-card att-file" title="${esc(a.name)} · ${esc(a.by)}"><i class="ti ti-file"></i><span>${esc(a.name)}</span></a>`;
+       ?`<div class="att-card" onclick="event.stopPropagation();showAttachment('${esc(u)}','${esc(a.name)}')" title="${esc(a.name)} · ${esc(a.by)}"><img src="${esc(u)}" alt="${esc(a.name)}" loading="lazy"><span>${esc(a.name)}</span></div>`
+       :`<div class="att-card att-file" onclick="event.stopPropagation();showAttachment('${esc(u)}','${esc(a.name)}')" title="${esc(a.name)} · ${esc(a.by)}"><i class="ti ti-file"></i><span>${esc(a.name)}</span></div>`;
    }).join("");
    h+=`<div class="mrow" style="display:block;border:none"><span class="lbl">Design & attachments</span>
      <div class="att-grid" id="att-grid">${grid||'<div style="color:var(--dim);font-size:12px;margin-top:6px">— none yet (PD attaches mockups here)</div>'}</div>
@@ -1922,6 +1924,20 @@ async function showTicket(id){
   renderTicketComments(t.id);
   // Ticket descriptions can carry ```mermaid fences too (SA designs often do).
   if(typeof renderMermaidIn==="function")renderMermaidIn(body);}
+// In-app attachment viewer: full-screen overlay, same session, Esc/click to
+// close. Non-image types render through an <iframe> (PDF etc.).
+function showAttachment(url,name){
+  let ov=document.getElementById("att-light");
+  if(!ov){ov=document.createElement("div");ov.id="att-light";ov.className="attlight";
+    ov.onclick=()=>ov.classList.remove("open");
+    document.body.appendChild(ov);
+    document.addEventListener("keydown",e=>{if(e.key==="Escape")ov.classList.remove("open");});}
+  const isImg=/\.(svg|png|jpe?g|gif|webp)(\?|$)/i.test(name)||/image/.test(name);
+  ov.innerHTML=`<div class="attlight-name">${esc(name)}</div>`+(isImg
+    ?`<img src="${esc(url)}" alt="${esc(name)}">`
+    :`<iframe src="${esc(url)}" title="${esc(name)}"></iframe>`);
+  ov.classList.add("open");
+}
 // Upload one attachment: raw bytes body, MIME in Content-Type, name in query.
 async function uploadAttachment(id,input){
   const f=input.files&&input.files[0];if(!f)return;
