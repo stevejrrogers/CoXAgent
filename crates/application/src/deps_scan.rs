@@ -368,37 +368,49 @@ fn link_to_epic(ticket: &mut DomainTicket) {
     }
 }
 
+/// True when this package already has a remediation recorded for a *matching* scan kind.
+///
+/// Dependency-ticket ids changed scheme once (CXA-B089/B091): pre-upgrade remediations live under
+/// lossy ids like `DEP-scope-pkg`, post-upgrade ones under fixed-width hex like
+/// `DEP<40>scope<2f>pkg`, so an exact-id match alone cannot recognise an already-remediated dep
+/// across that boundary. Every remediation records its originating scan context — `kind ==
+/// "dependency-scan"`, label `"scan result"` (routine upgrade Chore) or `"cve finding"`
+/// (urgent-CVE Bug), detail starting with `<package>@` — so we can match on that instead.
+///
+/// The suppression must be *finding-kind aware*, otherwise any first-ever evidence permanently
+/// silences every later finding for the same package forever ([CXA-B099]): a stale legacy "scan
+/// result" Chore must never block filing a fresh urgent CVE Bug for that package months later.
+#[must_use]
+fn already_remediated_for(state: &ProjectState, dep: &str, is_urgent_cve: bool) -> bool {
+    let prefix = format!("{dep}@");
+    state.ticket_evidence.values().any(|list| {
+        list.iter().any(|e| {
+            if e.kind != "dependency-scan" || !e.detail.starts_with(&prefix) {
+                return false;
+            }
+            // A routine upgrade suppresses only another routine upgrade; an urgent CVE is only
+            // suppressed by a prior "cve finding", never by older non-CVE remediation ([CXA-B099]).
+            !is_urgent_cve || e.label == "cve finding"
+        })
+    })
+}
+
 /// File one finding as its proper ticket and attach the scan result as team context.
 ///
 /// An urgent CVE becomes a high-priority Bug regardless of version age; any other flagged package
 /// becomes a low-priority Chore carrying current/latest versions and every affected lockfile.
 /// Both are pre-linked to the master epic via `depends_on`.
-/// Does some already-persisted ticket already represent this exact dependency?
-///
-/// Dedupe must not only match on `TicketId` equality. Ticket ids changed scheme
-/// once ([CXA-B089]): before that fix every non-alphanumeric collapsed to '-'
-/// ('@scope/pkg' -> 'DEP-scope-pkg'); after it they become fixed-width hex tokens
-/// ('DEP-scope-pkg' no longer matches '@scope/pkg', which is now 'DEP<40>scope<2f>pkg').
-/// On the first scan after upgrading, an old-format id no longer equals its new one,
-/// so exact-id matching alone would file a fresh duplicate while leaving the legacy
-/// ticket behind ([CXA-B093]). Every remediation records its originating scan context
-/// ("scan result" / "cve finding") whose detail starts with "<package>@" — we match on
-/// that instead of parsing ids, so a prior remediation is recognised across scheme
-/// boundaries.
-fn already_remediated_for(state: &ProjectState, dep: &str) -> bool {
-    let prefix = format!("{dep}@");
-    state.ticket_evidence.values().any(|list| {
-        list.iter()
-            .any(|e| e.kind == "dependency-scan" && e.detail.starts_with(&prefix))
-    })
-}
-
+#[must_use]
 fn propose_one(state: &mut ProjectState, finding: &ScanFinding) -> Option<TicketId> {
     let Ok(id) = TicketId::new(ticket_id_for(&finding.package)) else {
         return None;
     };
     if state.tickets.iter().any(|t| t.id() == &id)
-        || already_remediated_for(state, &finding.package)
+        || already_remediated_for(
+            state,
+            &finding.package,
+            finding.urgent_cve_severity.is_some(),
+        )
     {
         return None;
     }
@@ -664,75 +676,93 @@ version = \"0.9.0\"
     }
 
     #[test]
-    fn upgrade_from_lossy_scheme_files_no_duplicate_for_already_remediated_scoped_dep() {
-        // Regression for CXA-B093. Before CXA-B089 collapsed non-alphanumerics into
-        // '-', '@scope/pkg' was remediated once under 'DEP-scope-pkg'. After switching
-        // to fixed-width hex tokens it now proposes 'DEP<40>scope<2f>pkg'. The first
-        // scan after upgrading must NOT file that as a second fresh duplicate while
-        // leaving the legacy ticket behind — the remediation is recognised by its scan
-        // evidence (which names the package), not by exact id.
-        //
-        // Reproduce persisted state exactly as pre-upgrade: a legacy ticket whose id is
-        // built from the OLD lossy rule, carrying its "scan result" evidence.
+    fn stale_legacy_scan_result_chore_does_not_suppress_new_urgent_cve() {
+        // CXA-B099 regression: a pre-upgrade remediation ('DEP-scope-pkg') carries its "scan
+        // result" evidence for '@scope/pkg'. Because that id scheme is gone (lossy -> hex), exact-id
+        // matching no longer recognises it — but neither must evidence-based dedup use it to
+        // silently drop a NEW urgent CVE surfacing months later. It must file as a high-priority
+        // Bug under the current hex id 'DEP<40>scope<2f>pkg'.
         let mut state = ProjectState::default();
-        ensure_master_epic(&mut state);
-        let old_id = TicketId::new("DEP-scope-pkg".to_string()).expect("legacy id valid");
-        let Ok(mut legacy) = DomainTicket::new(
-            old_id.clone(),
-            TicketType::Chore,
-            "upgrade @scope/pkg (major)".to_string(),
-            "Dependency @scope/pkg: current 7.8.9 -> latest 9.0.0 (major, hold).\npackage-lock.json"
-                .to_string(),
-            Priority::Medium,
-            Complexity::Small,
-            false,
-        ) else {
-            panic!("legacy ticket constructible");
-        };
-        link_to_epic(&mut legacy);
-        state.tickets.push(legacy);
         state.add_evidence(
-            old_id.as_str(),
+            "DEP-scope-pkg",
             "dependency-scan",
             "scan result",
             "@scope/pkg@7.8.9->9.0.0 tagged major",
         );
 
-        // The finding for '@scope/pkg' now derives its NEW-scheme id on re-scan.
-        let mut registry = BTreeMap::new();
-        registry.insert("@scope/pkg".to_string(), "9.0.0".to_string());
-        let findings = scan_locks(
-            &[("package-lock.json".to_string(), NPM_SAMPLE.to_string())],
-            &registry,
-            &BTreeMap::new(),
-        );
-        assert!(
-            findings.iter().any(|f| f.package == "@scope/pkg"),
-            "post-upgrade scan still flags @scope/pkg"
-        );
+        let finding = ScanFinding {
+            package: "@scope/pkg".to_string(),
+            current_version: "7.8.9".to_string(),
+            latest_version: Some("9.0.0".to_string()),
+            tier: None,
+            urgent_cve_severity: Some("high".to_string()),
+            affected_files: vec!["package-lock.json".to_string()],
+        };
 
-        let tickets_before = state.tickets.len();
-        let evidence_before = state.ticket_evidence.len();
-        let ids = apply_findings(&mut state, &findings);
-
-        // No duplicate remediation may be filed for the already-remediated dep...
-        assert!(
-            ids.iter().all(|id| id.as_str() != "DEP<40>scope<2f>pkg"),
-            "must not re-file @scope/pkg under its new id: {ids:?}"
-        );
-        assert_eq!(state.tickets.len(), tickets_before, "no new ticket created");
+        let ids = apply_findings(&mut state, std::slice::from_ref(&finding));
         assert_eq!(
-            state.ticket_evidence.len(),
-            evidence_before,
-            "no new evidence recorded"
+            ids.len(),
+            1,
+            "urgent CVE must not be dropped off stale scan-result evidence"
         );
 
-        // ...but unrelated newly-flagged deps in the same pass still get filed.
-        let other_locks = vec![("Cargo.lock".to_string(), CARGO_SAMPLE.to_string())];
-        let mut other_registry = BTreeMap::new();
-        other_registry.insert("alpha".to_string(), "2.0.0".to_string());
-        let more = scan_locks(&other_locks, &other_registry, &BTreeMap::new());
-        let more_ids = apply_findings(&mut state, &more);
-        assert_eq!(more_ids.len(), 1, "unrelated dep still remediated");
+        let t = state.ticket(&ids[0]).expect("filed bug");
+        assert_eq!(t.ticket_type(), TicketType::Bug);
+        assert_eq!(t.priority(), Priority::High);
+    }
+
+    #[test]
+    fn prior_cve_finding_suppresses_repeat_cve_and_tracks_kind() {
+        // Same-kind dedup must still hold for urgent CVEs: once a "cve finding" is recorded for a
+        // package, a re-scan of the same CVE does not file another Bug.
+        let mut state = ProjectState::default();
+        state.add_evidence(
+            "DEP-cve-scope-pkg",
+            "dependency-scan",
+            "cve finding",
+            "@scope/pkg@7.8.9 severity=high",
+        );
+
+        let finding = ScanFinding {
+            package: "@scope/pkg".to_string(),
+            current_version: "7.8.9".to_string(),
+            latest_version: Some("9.0.0".to_string()),
+            tier: None,
+            urgent_cve_severity: Some("high".to_string()),
+            affected_files: vec!["package-lock.json".to_string()],
+        };
+
+        assert!(
+            apply_findings(&mut state, std::slice::from_ref(&finding)).is_empty(),
+            "repeat CVE must not file a duplicate Bug"
+        );
+    }
+
+    #[test]
+    fn routine_upgrade_is_deduped_across_id_schemes() {
+        // CXA-B093 behaviour preserved: a legacy 'scan result' remediation for '@scope/pkg'
+        // suppresses a NEW routine upgrade finding for that same package, even though the ticket
+        // id scheme changed ('DEP-scope-pkg' -> hex) — so we don't file a duplicate Chore.
+        let mut state = ProjectState::default();
+        state.add_evidence(
+            "DEP-scope-pkg",
+            "dependency-scan",
+            "scan result",
+            "@scope/pkg@7.8.9->9.0.0 tagged major",
+        );
+
+        let finding = ScanFinding {
+            package: "@scope/pkg".to_string(),
+            current_version: "7.8.9".to_string(),
+            latest_version: Some("10.2.0".to_string()),
+            tier: Some(BumpTier::Major),
+            urgent_cve_severity: None,
+            affected_files: vec!["package-lock.json".to_string()],
+        };
+
+        assert!(
+            apply_findings(&mut state, std::slice::from_ref(&finding)).is_empty(),
+            "routine upgrade already remediated across id schemes must not duplicate"
+        );
     }
 }
