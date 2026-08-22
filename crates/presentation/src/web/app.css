@@ -1729,3 +1729,9 @@ textarea.np-in{resize:vertical;line-height:1.5}
   cursor:pointer;line-height:1}
 .attlight-nav:hover{background:rgba(255,255,255,.24)}
 .attlight-nav.prev{left:14px}.attlight-nav.next{right:14px}
+.att-card{position:relative}
+.att-del{position:absolute;top:4px;right:4px;width:20px;height:20px;border:none;border-radius:50%;
+  background:rgba(0,0,0,.55);color:#fff;font-size:14px;line-height:1;cursor:pointer;
+  display:none;align-items:center;justify-content:center;z-index:2}
+.att-card:hover .att-del{display:flex}
+.att-del:hover{background:var(--red,#d33)}

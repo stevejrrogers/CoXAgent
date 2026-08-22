@@ -1899,10 +1899,12 @@ async function showTicket(id){
    // shell a new tab opens an EXTERNAL browser with no session cookie — 401.
    ATT_GALLERY=atts.map(a=>({url:api("/attachment?key="+encodeURIComponent(a.key)),
      name:a.name,img:(a.content_type||"").startsWith("image/")}));
-   const grid=ATT_GALLERY.map((g,i)=>g.img
-       ?`<div class="att-card" onclick="event.stopPropagation();showAttachment(${i})" title="${esc(g.name)} · ${esc(atts[i].by)}"><img src="${esc(g.url)}" alt="${esc(g.name)}" loading="lazy"><span>${esc(g.name)}</span></div>`
-       :`<div class="att-card att-file" onclick="event.stopPropagation();showAttachment(${i})" title="${esc(g.name)} · ${esc(atts[i].by)}"><i class="ti ti-file"></i><span>${esc(g.name)}</span></div>`
-   ).join("");
+   const grid=ATT_GALLERY.map((g,i)=>{
+     const del=`<button class="att-del" title="Remove attachment" onclick="event.stopPropagation();deleteAttachment('${t.id}','${esc(atts[i].key)}')">&times;</button>`;
+     return g.img
+       ?`<div class="att-card" onclick="event.stopPropagation();showAttachment(${i})" title="${esc(g.name)} · ${esc(atts[i].by)}">${del}<img src="${esc(g.url)}" alt="${esc(g.name)}" loading="lazy"><span>${esc(g.name)}</span></div>`
+       :`<div class="att-card att-file" onclick="event.stopPropagation();showAttachment(${i})" title="${esc(g.name)} · ${esc(atts[i].by)}">${del}<i class="ti ti-file"></i><span>${esc(g.name)}</span></div>`;
+   }).join("");
    h+=`<div class="mrow" style="display:block;border:none"><span class="lbl">Design & attachments</span>
      <div class="att-grid" id="att-grid">${grid||'<div style="color:var(--dim);font-size:12px;margin-top:6px">— none yet (PD attaches mockups here)</div>'}</div>
      <input type="file" id="att-file" style="display:none" onchange="uploadAttachment('${t.id}',this)">
@@ -1948,6 +1950,15 @@ function showAttachment(i){
     +(many?`<button class="attlight-nav prev" onclick="event.stopPropagation();showAttachment(ATT_IDX-1)">‹</button>
             <button class="attlight-nav next" onclick="event.stopPropagation();showAttachment(ATT_IDX+1)">›</button>`:'');
   ov.classList.add("open");
+}
+// Remove one attachment record (confirm first), then refresh the modal.
+async function deleteAttachment(id,key){
+  if(!confirm("Remove this attachment?"))return;
+  const r=await fetch(api("/ticket/"+encodeURIComponent(id)+"/attachments?key="+encodeURIComponent(key)),
+    {method:"DELETE"});
+  if(!r.ok){toasty("Delete failed","err");return;}
+  toasty("Attachment removed");
+  showTicket(id);
 }
 // Upload one attachment: raw bytes body, MIME in Content-Type, name in query.
 async function uploadAttachment(id,input){
