@@ -38,6 +38,10 @@ pub struct Spend {
     /// so an idle agent card can still name which user it belongs to.
     #[serde(default)]
     pub operator_by_role: std::collections::BTreeMap<String, String>,
+    /// Characters of prompt SENT per role (system + task), summed — the
+    /// measurement that makes prompt trimming data-driven instead of guesswork.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub prompt_chars_by_role: std::collections::BTreeMap<String, u64>,
     /// Runs whose file writes were actually confined (Seatbelt/bwrap).
     #[serde(default)]
     pub confined_runs: u64,
@@ -175,6 +179,11 @@ pub struct PrReview {
     /// commits burns an engine call to repeat the same comment.
     #[serde(default)]
     pub head_sha: String,
+    /// Seconds from the PR's creation to this verdict — THE dispatch-model
+    /// health metric (spec trigger: median > 10 min for a week). Computed on
+    /// the hub from the mirrored open-PR record; `None` when unknowable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_secs: Option<u64>,
 }
 
 /// One ticket attachment (a PD design image, a screenshot): the record the UI

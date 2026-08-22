@@ -96,7 +96,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     sprint.number
                 )
             };
-            state.post_chat_in("SM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+            state.post_comment("SM", &msg, None);
             state.log_activity("SM", "flagged out-of-scope work", Some(id));
             changed = true;
         }
@@ -162,7 +162,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                          DEV, pull this next or say what blocks it.",
                         sprint.number
                     );
-                    state.post_chat_in("SM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+                    state.post_comment("SM", &msg, None);
                     state.log_activity("SM", "nudged a stalled ticket", Some(id.to_string()));
                 }
             }
@@ -202,7 +202,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                          next planning pulls a smaller, clearer slice.",
                         sprint.number
                     );
-                    state.post_chat_in("SM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+                    state.post_comment("SM", &msg, None);
                     state.log_activity("SM", "descoped an unstarted ticket", Some(id.to_string()));
                     changed = true;
                 }

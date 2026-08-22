@@ -141,19 +141,46 @@ function selectChannel(id){
 async function loadChatHistory(){
   const chan=CURCHAN;
   try{
-    const r=await fetch("/api/chat/messages?channel="+encodeURIComponent(chan));
+    // Newest 50 only — history beyond that arrives via loadOlderChat().
+    const r=await fetch("/api/chat/messages?channel="+encodeURIComponent(chan)+"&limit=50");
     if(!r.ok)throw new Error(r.status);
     const data=await r.json();
     if(chan!==CURCHAN)return; // channel switched mid-flight
     CHAT=data;CHAT_LOAD_ERR=false;
+    CHAT_MORE=data.length>=50; // a full window suggests older history exists
   }catch(e){
     if(chan!==CURCHAN)return;
     // Distinguish a failed load from a genuinely empty room (see renderChatList):
     // clear so we never bleed another channel's messages, and flag the error.
-    CHAT=[];CHAT_LOAD_ERR=true;
+    CHAT=[];CHAT_LOAD_ERR=true;CHAT_MORE=false;
   }
   CHAT.forEach(markSeen); // history is not "new" — don't notify for it
   renderChatList(true);
+}
+// Load-more: fetch the window OLDER than the oldest rendered message and
+// prepend, keeping the scroll anchored on what the reader was looking at.
+let CHAT_MORE=false,CHAT_LOADING_MORE=false;
+async function loadOlderChat(){
+  if(CHAT_LOADING_MORE||!CHAT.length)return;
+  CHAT_LOADING_MORE=true;
+  const chan=CURCHAN,oldest=CHAT[0]&&CHAT[0].id;
+  try{
+    const r=await fetch("/api/chat/messages?channel="+encodeURIComponent(chan)
+      +"&limit=50&before="+encodeURIComponent(oldest||""));
+    if(r.ok){
+      const older=await r.json();
+      if(chan===CURCHAN&&older.length){
+        const box=document.getElementById("chat-msgs");
+        const keepH=box?box.scrollHeight:0;
+        older.forEach(markSeen);
+        CHAT=older.concat(CHAT);
+        CHAT_MORE=older.length>=50;
+        renderChatList(false);
+        if(box)box.scrollTop=box.scrollHeight-keepH; // anchor the view
+      }else{CHAT_MORE=false;renderChatList(false);}
+    }
+  }catch(e){}
+  CHAT_LOADING_MORE=false;
 }
 // `parent` is set when the + on a channel row was used: the new room is opened
 // inside that one and starts with its members.
@@ -1563,6 +1590,9 @@ function renderChatList(force){
     : '<div class="chatempty"><i class="ti ti-message-circle-2"></i><div>No messages yet</div><span>Say hello to your teammates.</span></div>';
     return;}
   let lastDay="",html="";
+  if(typeof CHAT_MORE!=="undefined"&&CHAT_MORE){
+    html+='<div class="chatmore"><button class="tk-btn" onclick="loadOlderChat()"><i class="ti ti-history"></i> Tải tin cũ hơn</button></div>';
+  }
   let prev=null;
   msgs.forEach(m=>{
     // Deleted messages always render as a tombstone (was inconsistent before:
@@ -1819,7 +1849,18 @@ async function showTicket(id){
   document.getElementById("ov-ticket").classList.add("open");
   let t=null;try{t=await(await fetch(api("/ticket/"+encodeURIComponent(id)))).json();}catch(e){}
   if(!t||!t.id){t=(STATE.tickets||[]).find(x=>x.id===id);}
-  if(!t){body.innerHTML='<span class="x" onclick="close_(\'ov-ticket\')"><i class="ti ti-x"></i></span><div class="empty">ticket not found</div>';return;}
+  if(!t){
+    // Hub chat mentions tickets from EVERY project; the viewer may be sitting
+    // in another one. Find the ticket's home, switch there, and reopen.
+    try{
+      const ov=await(await fetch("/api/workspace/overview")).json();
+      for(const p of (ov.projects||[])){
+        if(p.id===PID)continue;
+        const rr=await fetch("/api/projects/"+encodeURIComponent(p.id)+"/ticket/"+encodeURIComponent(id));
+        if(rr.ok){switchProject(p.id);setTimeout(()=>showTicket(id),900);return;}
+      }
+    }catch(e){}
+    body.innerHTML='<span class="x" onclick="close_(\'ov-ticket\')"><i class="ti ti-x"></i></span><div class="empty">ticket not found in any project</div>';return;}
   const d=t.design||{},tech=d.technical,ux=d.ux,ac=t.acceptance_criteria||[];
   let h=`<span class="x" onclick="close_('ov-ticket')"><i class="ti ti-x"></i></span><h3>${esc(t.title)}</h3>
     <div class="msub">${esc(t.id)} · ${esc(t.type)}</div>
@@ -1852,7 +1893,7 @@ async function showTicket(id){
   if(ux)h+=`<div class="mrow" style="display:block;border:none"><span class="lbl">UI/UX spec</span><pre>${esc(ux.user_flow)}\nscreens: ${esc((ux.screens||[]).join(", "))}</pre></div>`;
   // Design attachments: PD mockups + user uploads. Bytes come from blob
   // storage via the attachment endpoint; records live on the state.
-  {const atts=((window.STATE&&STATE.ticket_attachments)||{})[t.id]||[];
+  {const atts=(t.attachments)||((window.STATE&&STATE.ticket_attachments)||{})[t.id]||[];
    const grid=atts.map(a=>{
      const u=api("/attachment?key="+encodeURIComponent(a.key));
      const isImg=(a.content_type||"").startsWith("image/");

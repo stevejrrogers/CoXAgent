@@ -1717,3 +1717,4 @@ textarea.np-in{resize:vertical;line-height:1.5}
 .cps-bar{height:8px;border-radius:4px;background:var(--accent2);opacity:.65;min-width:4px}
 .cps-val{font-size:11px;color:var(--muted)}
 .tso-skew{font-size:10px;color:var(--amber);background:color-mix(in srgb,var(--amber) 12%,transparent);border-radius:6px;padding:1px 6px;white-space:nowrap}
+.chatmore{display:flex;justify-content:center;padding:8px 0}
