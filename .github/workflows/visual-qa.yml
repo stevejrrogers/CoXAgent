@@ -1,8 +1,29 @@
 name: Visual QA
 
+# Merged pipeline serving two roles previously split across independent work:
+#
+#   - CXA-B063/B064 : branch protection requires a required status check literally named
+#     "Visual QA" on protected main; this workflow is its emitter. Do NOT rename or reshape
+#     this job's display name ("Visual QA", spaces intact): GitHub branch-protection matches a
+#     required status check by its CHECK RUN's display name, which comes from this job's
+#     `name:` field (or falls back to the YAML key). Protected main gates merges on exactly that string.
+#
+#   - CXA-F005/B062 : every dependent acceptance criterion builds on this regression guard —
+#     Playwright screenshots against committed golden baselines run on every PR touching main,
+#     regeneration OFF so changes surface as diffs instead of silently blessed baselines.
+#
+# Together they form one gate per relevant event -> one unambiguous green-or-red merge gate,
+# plus actionable follow-up when it goes red.
 on:
   pull_request:
-    types: [opened, synchronize]
+    types:
+      - opened
+      - synchronize
+    branches:
+      - main
+  push:
+    branches:
+      - main
 
 permissions:
   contents: read
@@ -11,30 +32,50 @@ permissions:
 
 jobs:
   visual-regression:
+
+    # GHA is disabled for this private repo — see "ci: disable GitHub Actions"
+    # on main. Keep 'if: false' so no hosted run is attempted (matches ci.yml /
+    # desktop.yml). Re-enable by removing this line when a paid plan or public repo.
+    #
+    # When enabled, runs macOS because e2e golden screenshots are committed as *-darwin.png;
+    # Linux looks for *-linux.png and fails every screenshot ("missing snapshot"),
+    # recreating precisely the un-passable required-check bug CXA-B063 fixed.
     if: false
 
-    name: Visual regression (screenshots)
-    runs-on: ubuntu-latest
+    # This display name IS the required-check that protected main gates on.
+    name: Visual QA
+
+    runs-on: macos-latest
+
     timeout-minutes: 30
 
     env:
       CARGO_TERM_COLOR: always
 
+
     steps:
+
+      # The e2e suite boots a REAL hub against frozen fixture state; without a build here there is nothing to serve.
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build coxagent (debug binary used by e2e webServer)
+      - name: Build coxagent binary used by e2e webServer
         run: cargo build --bin coxagent
 
+      # Headless Chromium for screenshot comparison; install commit-time deps first.
       - name: Install Playwright browsers + system deps (headless Chromium)
         working-directory: e2e
-        run: npx playwright install chromium --with-deps
+        run: |
+          npm ci
+          npx playwright install chromium --with-deps
 
-      - name: Run visual-regression suite against committed snapshots
+
+      # Regeneration OFF so committed goldens gate UI changes; failures surface as
+      # diffs instead of being silently blessed into new baselines.
+      - name: Run visual-regression suite against committed baselines
         working-directory: e2e
         shell: bash
         run: |
@@ -44,7 +85,8 @@ jobs:
           code=$?
           exit "$code"
 
-      - name: Upload test artifacts (report + screenshot diffs)
+      # Keep diff images + JSON report for every outcome so a failing PR is still inspectable.
+      - name: Upload screenshot evidence on every outcome
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -53,11 +95,31 @@ jobs:
             e2e/test-results/
             e2e/.playwright-report.json
 
-      # Failing PRs only. Read the JSON report to count failures and list failing
-      # specs, then comment with a link to the artifact containing diff images.
+
+      # Failing PRs only (green runs post nothing). File a Bug through GitHub CLI so a
+      # regression surfaces as an actionable ticket; publish its URL as a step output for
+      # the follow-up comment to consume (each `run` step is its own shell).
+      - name: Auto-file Bug tickets for regressions
+        id: file-bug
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}} Visual QA regression"
+          body=$(printf "View/OS regression detected by the Visual QA suite.\nPR link: %s\nArtifacts carry the diff images." \
+            "${{ github.event.pull_request.html_url }}")
+          bug_url=$(gh issue create --repo "${{ github.repository }}" --title "$title" --body "$body")
+          echo "bug_url=$bug_url" >> "$GITHUB_OUTPUT"
+
+
+      # Post a detailed failure summary back on the failing PR thread: parse the JSON report
+      # to count failures and list failing specs, reference the filed Bug ticket when one was
+      # created (from the file-bug step), and link the artifact holding the diff images.
       - name: Post failure summary to the PR thread
         if: failure()
         uses: actions/github-script@v7
+        env:
+          BUG_URL: ${{ steps.file-bug.outputs.bug_url }}
         with:
           script: |
             const fs = require('fs');
@@ -92,13 +154,15 @@ jobs:
                 body =
                   `## Visual QA failed\n\n${fails.length} test(s) exceeded the 2% screenshot tolerance.\n\n` +
                   `Failing spec(s):\n${fails.map((x) => '- ' + x).join('\n')}\n\n` +
-                  `Diff images and screenshots are in the run artifacts:\nVisual QA workflow run #${context.runNumber}.`;
+                  `Diff images and screenshots are in the artifacts you can download from GitHub Actions UI: Visual QA workflow run #${context.runNumber}.`;
               }
             } else {
               body =
                 `## Visual QA failed\n\nThe run reported failures but produced no JSON report.\n` +
                 `See run #${context.runNumber} artifacts.`;
             }
+
+            if (process.env.BUG_URL) body += `\n\nBug filed at ${process.env.BUG_URL}`;
 
             await github.rest.issues.createComment({
               owner: context.repo.owner,

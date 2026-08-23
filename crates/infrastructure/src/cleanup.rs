@@ -25,6 +25,21 @@ impl coxagent_application::ports::outbound::ProcessJanitorPort for OsProcessJani
     fn kill_orphaned_drivers(&self, work_dir: &Path) {
         kill_orphaned_drivers(work_dir);
     }
+
+    fn purge_target_cache(&self, work_dir: &Path) {
+        purge_target_cache(work_dir);
+    }
+}
+
+/// Best-effort removal of a build cache directory. Scoped to exactly
+/// `work_dir/target`, never touches anything else, and is never fatal —
+/// a cache we cannot remove just costs the next rebuild, not correctness.
+pub fn purge_target_cache(work_dir: &Path) {
+    let target = work_dir.join("target");
+    if !target.exists() {
+        return; // nothing cached — nothing to do
+    }
+    let _ = std::fs::remove_dir_all(&target);
 }
 
 static ORPHAN_PATTERNS: &[&str] = &["tl_driver", "cargo test", "pytest", "go test", "npm test"];
@@ -168,7 +183,7 @@ fn select_pids(pgrep_output: &str, scope: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::select_pids;
+    use super::{purge_target_cache, select_pids};
 
     #[test]
     fn only_kills_processes_inside_the_workspace() {
@@ -202,5 +217,34 @@ mod tests {
     fn ignores_malformed_lines() {
         assert!(select_pids("garbage\n\n", "/srv/p").is_empty());
         assert!(select_pids("abc cargo test /srv/p", "/srv/p").is_empty());
+    }
+
+    #[test]
+    fn purge_target_removes_only_the_build_cache() {
+        let tmp = std::env::temp_dir().join(format!("cxa-purge-test-{}", std::process::id()));
+        let target = tmp.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("artifacts.bin"), b"cache").unwrap();
+        std::fs::write(tmp.join("source.rs"), b"let code = 1;").unwrap();
+
+        purge_target_cache(&tmp);
+
+        assert!(!target.exists(), "target must be purged");
+        assert!(
+            tmp.join("source.rs").exists(),
+            "non-cache source files must survive"
+        );
+        // Second call on an already-clean dir is a no-op, never a panic.
+        purge_target_cache(&tmp);
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn purge_target_is_a_noop_when_nothing_cached() {
+        let tmp = std::env::temp_dir().join(format!("cxa-purge-null-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        purge_target_cache(&tmp); // no `target` subdir — must not error
+        assert!(tmp.exists());
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }

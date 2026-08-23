@@ -666,3 +666,35 @@ pub(super) async fn undo_approval_ep(
         Err(e) => internal_error(&e.to_string()),
     }
 }
+
+/// DELETE `/api/projects/:pid/ticket/:id/attachments?key=…` — remove one
+/// attachment record from the ticket and best-effort delete its blob.
+pub(super) async fn delete_attachment_ep(
+    State(app): State<AppState>,
+    Path((pid, id)): Path<(String, String)>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let key = params.get("key").cloned().unwrap_or_default();
+    if key.is_empty() || key.contains("..") {
+        return (axum::http::StatusCode::BAD_REQUEST, "bad key").into_response();
+    }
+    let removed = coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        if let Some(list) = s.ticket_attachments.get_mut(&id) {
+            list.retain(|a| a.key != key);
+            if list.is_empty() {
+                s.ticket_attachments.remove(&id);
+            }
+        }
+        Ok(())
+    })
+    .await;
+    if let Err(e) = removed {
+        return internal_error(&e.to_string());
+    }
+    // The record is the authority for what a ticket shows; the blob itself is
+    // left in storage (StoragePort has no delete) and is harmless stranded.
+    Json(serde_json::json!({ "ok": true })).into_response()
+}

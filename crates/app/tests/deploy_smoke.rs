@@ -84,6 +84,42 @@ fn compose(root: &Path, args: &[&str]) -> std::process::Output {
         .unwrap_or_else(|e| panic!("`docker compose {}` failed to spawn: {e}", args.join(" ")))
 }
 
+/// Whether an automated pass may tear down a docker compose project to free its
+/// host port.
+///
+/// Mirrors production deploy's shared policy (`reclaimable::reclaimable_compose_project`)
+/// rather than importing it: only agent-managed preview deployments (`cox-...`)
+/// are evictable. The live hub (`coxagent`) and shared backing infra (`cox-infra`)
+/// are NEVER touched — tearing those down to free :8101 would be a self-inflicted
+/// outage, and they bind port 4000 anyway (see AGENTS.md). Anything outside our own
+/// namespace is foreign and left alone; raw non-compose containers are stopped by id.
+fn reclaimable(project: &str) -> bool {
+    let lower = project.to_ascii_lowercase();
+    if lower == "cox-infra"
+        || lower == "coxagent"
+        || lower.starts_with("coxagent")
+        || lower.starts_with("cox-infra")
+    {
+        return false;
+    }
+    lower.starts_with("cox-")
+}
+
+/// The container ids of every running container publishing PORT.
+fn holders_on_the(port: u16) -> Vec<String> {
+    let out = Command::new("docker")
+        .args(["ps", "-q", "--filter", &format!("publish={port}")])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    out.lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
 /// Exclusive, ephemeral ownership of the stack for one run: brought up here,
 /// torn down when this value drops, even on panic, so a failing run never
 /// leaves a container holding the host port.
@@ -92,24 +128,83 @@ struct Stack {
 }
 
 impl Stack {
-    /// Claims the stack, tearing down anything already up under this compose
-    /// project first.
+    /// Claims host port HOST_PORT for THIS build's verification pass.
     ///
-    /// `Drop` only cleans up after *this* run. A stack left behind by anything
-    /// that skipped it — a `docker compose up -d --build` run by hand while
-    /// debugging, a `kill -9`'d test — keeps holding host port 8101, and the
-    /// `up` below then either fails to bind or silently reuses the stale
-    /// containers. The test would go on to probe an image built from someone
-    /// else's tree and report its health as this commit's. Teardown before
-    /// `up`, symmetric with `Drop`, makes each run start from nothing.
+    /// Tears down whatever currently holds the port before `up` — both anything
+    /// left under this directory's compose project by an earlier aborted run and
+    /// any FOREIGN agent-preview stack squatting :8101 (see [`clear_host_port`]) —
+    /// so the probe below can only ever reach an image freshly built from THIS
+    /// tree, never a stale unrelated container answering 200 there. Symmetric with
+    /// [`Drop`]; each claim starts from nothing.
     fn claim(root: PathBuf) -> Self {
         let stack = Self { root };
+        clear_host_port();
         stack.down();
         stack
     }
 
     fn down(&self) {
         let _ = compose(&self.root, &["down", "-v"]);
+    }
+}
+
+/// What an automated pass should do about one container squatting HOST_PORT, as
+/// a pure function of that container's compose-project ownership label so every
+/// branch is deterministically testable without invoking docker.
+#[derive(Debug, PartialEq)]
+enum Eviction {
+    /// The holder belongs to a reclaimable agent-preview compose project —
+    /// tear that whole project down to release the port cleanly.
+    ComposeProject(String),
+    /// The holder has no compose label (a raw `docker run`) — stop just it by id.
+    RawContainer(String),
+}
+
+fn classify_holder(owner: Option<&str>, id: String) -> Option<Eviction> {
+    match owner {
+        Some(project) if reclaimable(project) => Some(Eviction::ComposeProject(project.to_owned())),
+        // A protected/foreign compose project is never touched; there may be another
+        // squatter sharing :8101 (IPv4+IPv6), so this returns only this one's verdict.
+        Some(_non_reclaimable) => None,
+        None => Some(Eviction::RawContainer(id)),
+    }
+}
+
+fn inspect_project_of(id: &str) -> Option<String> {
+    Command::new("docker")
+        .args([
+            "inspect",
+            "--format",
+            "{{ index .Config.Labels \"com.docker.compose.project\" }}",
+            id,
+        ])
+        .output()
+        .ok()
+        .and_then(|o| {
+            let name = String::from_utf8_lossy(&o.stdout).trim().to_owned();
+            (!name.is_empty()).then_some(name)
+        })
+}
+
+fn execute_eviction(action: Eviction) {
+    match action {
+        Eviction::ComposeProject(project) => {
+            let _ = Command::new("docker")
+                .args(["compose", "-p", &project, "down", "--remove-orphans"])
+                .output();
+        }
+        Eviction::RawContainer(id) => {
+            let _ = Command::new("docker").args(["stop", &id]).output();
+        }
+    }
+}
+
+fn clear_host_port() {
+    let port = effective_host_port();
+    for id in holders_on_the(port) {
+        if let Some(action) = classify_holder(inspect_project_of(&id).as_deref(), id.clone()) {
+            execute_eviction(action);
+        }
     }
 }
 
@@ -203,4 +298,63 @@ fn a_bad_override_panics_rather_than_guessing_a_probe_target() {
         Ok(_) => panic!("a non-numeric APP_PORT must not silently probe a guessed port"),
     };
     assert!(msg.contains("APP_PORT"), "unhelpful panic message: {msg}");
+}
+
+/// The eviction decision is pure over an ownership label; verify every branch
+/// without invoking docker, and pin that protected infrastructure can never be
+/// classified as downed — a regression here would be a self-inflicted outage.
+#[cfg(test)]
+mod classify_tests {
+    use super::{classify_holder, Eviction};
+
+    #[test]
+    fn reclaimable_agent_preview_is_torn_down_as_a_project() {
+        assert_eq!(
+            classify_holder(Some("cox--other-worktree"), "abc".to_owned()),
+            Some(Eviction::ComposeProject("cox--other-worktree".to_owned()))
+        );
+    }
+
+    #[test]
+    fn foreign_non_preview_project_is_left_alone() {
+        assert_eq!(
+            classify_holder(Some("someone-elses-stack"), "abc".to_owned()),
+            None
+        );
+    }
+
+    #[test]
+    fn live_hub_and_infra_prefixes_are_never_touched() {
+        // The same casing-spoofing set production deploy's shared policy guards
+        // against (reclaimable.rs), mirrored here so drift can never reintroduce
+        // an automated teardown of the control plane.
+        for owner in [
+            "coxagent",
+            "coxagent-gateway",
+            "coxagent-db",
+            "cox-infra",
+            "cox-infra-db",
+            "COXAGENT",
+            "CoxAgent",
+            "CoxAgent-Gateway",
+            "COXAGENT-GATEWAY",
+            "COX-INFRA",
+            "COX-Infra-DB",
+            "Cox-Infra-Db",
+        ] {
+            assert_eq!(
+                classify_holder(Some(owner), "abc".to_owned()),
+                None,
+                "{owner} must never be evicted"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_container_with_no_label_is_stopped_by_id() {
+        assert_eq!(
+            classify_holder(None, "deadbeef".to_owned()),
+            Some(Eviction::RawContainer("deadbeef".to_owned()))
+        );
+    }
 }
