@@ -27,9 +27,22 @@ pub async fn merge_sweep<S: StateStorePort + ?Sized>(
     let Ok(prs) = forge.list_open_prs().await else {
         return out;
     };
+    // A human hold is absolute: the review path parked this PR for a person
+    // to decide (e.g. it touches .github/workflows), and no bulk sweep may
+    // steamroll that decision. #329 was merged past its hold before this check.
+    let holds = store
+        .load()
+        .await
+        .map(|s| s.human_holds)
+        .unwrap_or_default();
     let mut queue: Vec<_> = prs.into_iter().filter(|p| p.base == target).collect();
     queue.sort_by(|a, b| a.created.cmp(&b.created));
     for pr in queue.into_iter().take(12) {
+        if let Some(reason) = holds.get(&pr.number) {
+            out.skipped
+                .push((pr.number, format!("human hold: {reason}")));
+            continue;
+        }
         if !pr.mergeable {
             out.skipped.push((pr.number, "merge conflict".to_owned()));
             continue;
