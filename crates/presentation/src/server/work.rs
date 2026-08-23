@@ -75,6 +75,16 @@ pub(super) async fn ticket_detail_ep(
                     if state.cost_approved.contains(&id) {
                         obj.insert("cost_approved".into(), serde_json::json!(true));
                     }
+                    // Attachments ride the detail payload: the modal renders
+                    // from here, always fresh — the SSE snapshot path proved
+                    // unreliable as a source (records reached the store but
+                    // never the client's STATE).
+                    if let Some(atts) = state.ticket_attachments.get(&id) {
+                        obj.insert(
+                            "attachments".into(),
+                            serde_json::to_value(atts).unwrap_or_default(),
+                        );
+                    }
                 }
                 Json(v).into_response()
             }),

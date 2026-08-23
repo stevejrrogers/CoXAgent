@@ -100,6 +100,13 @@ pub(super) struct CommentReactReq {
 pub(super) struct ChatListQuery {
     /// Which channel's history to return; defaults to `#general`.
     pub(super) channel: Option<String>,
+    /// Return at most this many NEWEST messages (default 50, cap 500). The
+    /// full bounded history shipped on every open made the chat pane feel
+    /// slow; the tail is what a reader wants first.
+    pub(super) limit: Option<usize>,
+    /// Only messages strictly OLDER than this message id — the "load more"
+    /// cursor (pass the oldest id currently rendered).
+    pub(super) before: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
