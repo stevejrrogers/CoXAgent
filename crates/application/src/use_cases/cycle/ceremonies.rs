@@ -56,7 +56,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                      sprint so DEV can pull work."
                 );
                 state.log_activity("PO", "committed backlog to an empty sprint", None);
-                state.post_chat_in("PO", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+                state.post_comment("PO", &msg, None);
             }
             let _ = self.store.save(&state).await;
             return;
@@ -592,10 +592,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let mut items: Vec<String> = Vec::new();
         // Only post-ladder states reach the human report: a stuck PR the SA
         // already rescued once, a parked ticket the SA already re-designed.
+        // Cross-check both against the live mirrors — attempt counters left by
+        // PRs long closed, or by tickets that later shipped or were rejected,
+        // are zombies from before pruning existed, not actionable impediments.
         let stuck: Vec<String> = state
             .pr_fix_attempts
             .iter()
-            .filter(|(pr, n)| **n >= 3 && state.pr_rescues.contains_key(pr))
+            .filter(|(pr, n)| {
+                **n >= 3
+                    && state.pr_rescues.contains_key(pr)
+                    && state.open_prs.iter().any(|o| o.number == **pr)
+            })
             .map(|(pr, _)| format!("#{pr}"))
             .collect();
         if !stuck.is_empty() {
@@ -604,10 +611,22 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 stuck.join(", ")
             ));
         }
+        let active_ticket = |id: &str| {
+            state.tickets.iter().any(|t| {
+                t.id().as_str() == id
+                    && !matches!(
+                        t.status(),
+                        coxagent_domain::Status::Done
+                            | coxagent_domain::Status::Documented
+                            | coxagent_domain::Status::Rejected
+                            | coxagent_domain::Status::Verified
+                    )
+            })
+        };
         let parked: Vec<String> = state
             .ticket_fail_attempts
             .iter()
-            .filter(|(_, n)| **n >= 3)
+            .filter(|(id, n)| **n >= 3 && active_ticket(id))
             .map(|(id, _)| id.clone())
             .collect();
         if !parked.is_empty() {

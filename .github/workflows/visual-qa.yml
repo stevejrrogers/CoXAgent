@@ -6,10 +6,19 @@ name: Visual QA
 #     report -> post a failure summary onto the PR thread.
 #   * branch stream (CXA-F006): budget timeouts on every stage plus auto-file Bug
 #     tickets for any regression and comment back linking those filed tickets.
-
+#
+# CXA-B062 regression guard · this workflow is what every dependent acceptance
+# criterion builds on. Without it no Playwright screenshots run on PRs, no
+# Visual-QA Bug tickets are ever filed automatically, and no merge-gate check enforces.
+#
+# Runs headless Chromium against committed golden screenshots with regeneration OFF,
+# then for regressions files a Bug through GitHub CLI and comments back on the PR with
+# a link to the evidence artifact / filed ticket.
 on:
   pull_request:
-    types: [opened, synchronize]
+    types:
+      - opened
+      - synchronize
   push:
     branches: [main]
 
@@ -20,8 +29,7 @@ permissions:
 
 jobs:
   visual-regression:
-    if: false
-
+    # One check job per PR -> paints one unambiguous green-or-red merge gate.
     name: Visual regression (screenshots)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -36,14 +44,17 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build coxagent (debug binary used by e2e webServer)
+      - name: Build coxagent binary used by e2e webServer
         run: cargo build --bin coxagent
 
+      # Headless Chromium for screenshot comparison.
       - name: Install Playwright browsers + system deps (headless Chromium)
         working-directory: e2e
         run: npx playwright install chromium --with-deps
 
-      - name: Run visual-regression suite against committed snapshots
+      # Regeneration OFF so committed goldens gate UI changes; failures surface as
+      # diffs instead of being silently blessed into new baselines.
+      - name: Run visual-regression suite against committed baselines
         working-directory: e2e
         shell: bash
         run: |
@@ -53,7 +64,8 @@ jobs:
           code=$?
           exit "$code"
 
-      - name: Upload test artifacts (report + screenshot diffs)
+      # Keep diff images + JSON report for every outcome so a failing PR is still inspectable.
+      - name: Upload screenshot evidence on every outcome
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -62,59 +74,27 @@ jobs:
             e2e/test-results/
             e2e/.playwright-report.json
 
-      - name: Post failure summary to the PR thread
-        if: failure()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const out = 'e2e/.playwright-report.json';
-            function readFailures() {
-              try { return JSON.parse(fs.readFileSync(out, 'utf8')); }
-              catch (_) { return null; }
-            }
-            let body;
-            if (fs.existsSync(out)) {
-              const rep = readFailures();
-              if (!rep) {
-                body = '## Visual QA failed\n\nThe run produced a report that could not be parsed.\nSee run #${context.runNumber} artifacts.';
-              } else {
-                const fails = [];
-                for (const s of rep.suites || []) {
-                  for (const f of s.specs || []) {
-                    for (const t of f.tests || []) {
-                      for (const r of t.results || []) {
-                        if (r.status === 'failed') fails.push(f.title);
-                      }
-                    }
-                  }
-                }
-                body = '## Visual QA failed\n\n' + fails.length + ' test(s) exceeded the 2% screenshot tolerance.\n\nFailing spec(s):\n' + fails.map((x) => '- ' + x).join('\n') + '\n\nDiff images and screenshots are in the run artifacts:\nVisual QA workflow run #' + context.runNumber + '.';
-              }
-            } else {
-              body = '## Visual QA failed\n\nThe run reported failures but produced no JSON report.\nSee run #' + context.runNumber + ' artifacts.';
-            }
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body,
-            });
-
+      # Failing PRs only (green runs post nothing). File a Bug through GitHub CLI
+      # so a regression surfaces as an actionable ticket; publish its URL as a step
+      # output for the comment step to consume (each `run` step is its own shell).
       - name: Auto-file Bug tickets for regressions
+        id: file-bug
         if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           title="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}} Visual QA regression"
-          acceptance="Each diff must match its committed baseline under tolerance"
-          body=$(printf "View/OS regression.\nBaseline URL: %s\nDiff URL: %s\nPR link: %s\nAcceptance criteria: %s" \
-            "${SERVER_URL}/baseline" "${SERVER_URL}/diff" "${{ github.event.pull_request.html_url }}" "$acceptance")
-          ticket_id=$(gh issue create --repo "${{ github.repository }}" --title "$title" --body "$body")
-          echo "filed {ticket_id}: $ticket_id"
+          body=$(printf "View/OS regression detected by the Visual QA suite.\nPR link %s\nArtifacts carry the diff images." \
+            "${{ github.event.pull_request.html_url }}")
+          bug_url=$(gh issue create --repo "${{ github.repository }}" --title "$title" --body "$body")
+          echo "bug_url=$bug_url" >> "$GITHUB_OUTPUT"
 
+      # Comment on the PR thread, gated on failure, linking the filed ticket's URL
+      # from the ticketing step so humans see exactly what was filed.
       - name: Comment on PR linking filed tickets
         if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           gh pr comment "${{ github.event.pull_request.number }}" \
-            --body "Visual QA regression Bug filed: {ticket_id}"
+            --body "Visual QA regression Bug filed at ${{ steps.file-bug.outputs.bug_url }}"

@@ -724,15 +724,37 @@ impl ProjectState {
 
     /// Record (or replace) the SA agent's latest review verdict for a PR.
     pub fn upsert_review(&mut self, number: u64, decision: &str, summary: &str, head_sha: &str) {
+        // PR-open → verdict latency, from the mirrored open-PR record: the
+        // dispatch model's headline health metric. First verdict wins — a
+        // re-review of a moved head measures the fix loop, not dispatch.
+        let latency_secs = self
+            .open_prs
+            .iter()
+            .find(|p| p.number == number)
+            .and_then(|p| {
+                let fmt = &time::format_description::well_known::Rfc3339;
+                let created = time::OffsetDateTime::parse(&p.created, fmt).ok()?;
+                let secs = (time::OffsetDateTime::now_utc() - created).whole_seconds();
+                u64::try_from(secs).ok()
+            })
+            .or_else(|| {
+                self.reviews
+                    .iter()
+                    .find(|r| r.number == number)
+                    .and_then(|r| r.latency_secs)
+            });
         let review = PrReview {
             number,
             decision: decision.to_owned(),
             summary: summary.to_owned(),
             at: now_rfc3339(),
             head_sha: head_sha.to_owned(),
+            latency_secs,
         };
         if let Some(r) = self.reviews.iter_mut().find(|r| r.number == number) {
+            let first_latency = r.latency_secs.or(review.latency_secs);
             *r = review;
+            r.latency_secs = first_latency;
         } else {
             self.reviews.push(review);
         }

@@ -1,0 +1,24 @@
+lsof: status error on hgrep: No such file or directory
+lsof: status error on hgrep: No such file or directory
+lsof: status error on LISTEN: No such file or directory
+lsof: status error on -P: No such file or directory
+lsof: status error on LISTEN: No such file or directory
+lsof: status error on -P: No such file or directory
+lsof: status error on -n: No such file or directory
+lsof 4.91
+ latest revision: ftp://lsof.itap.purdue.edu/pub/tools/unix/lsof/
+ latest FAQ: ftp://lsof.itap.purdue.edu/pub/tools/unix/lsof/FAQ
+ latest man page: ftp://lsof.itap.purdue.edu/pub/tools/unix/lsof/lsof_man
+ usage: [-?abhlnNoOPRtUvVX] [+|-c c] [+|-d s] [+D D] [+|-f[cgG]]
+ [-F [f]] [-g [s]] [-i [i]] [+|-L [l]] [+|-M]lsof: status error on -n: No such file or directory
+lsof 4.91
+ latest revision: ftp://lsof.itap.purdue.edu/pub/tools/unix/lsof/
+ latest FAQ: ftp://lsof.itap.purdue.edu/pub/tools/unix/lsof/FAQ
+ latest man page: ftp://lsof.itap.purdue.edu/pub/tools/unix/lsof/lsof_man
+ usage: [-?abhlnNoOPRtUvVX] [+|-c c] [+|-d s] [+D D] [+|-f[cgG]]
+ [-F [f]] [-g [s]] [-i [i]] [+|-L [l]] [+|-M] [-o [o]] [-p s]
+ [+|-r [t]] [-s [p:s]] [-S [t]] [-T [t]] [-u s] [+|-w] [-x [fl]] [--] [names]
+Use the ``-h'' option to get more help information.
+ [-o [o]] [-p s]
+ [+|-r [t]] [-s [p:s]] [-S [t]] [-T [t]] [-u s] [+|-w] [-x [fl]] [--] [names]
+Use the ``-h'' option to get more help information.
