@@ -686,6 +686,20 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 ))
                 .await;
             }
+        } else if dirty && branch == base {
+            // Residue ON the base blocks every branch checkout too — the
+            // repeating "checkout failed: The following untracked working
+            // tree files would be overwritten" (COX-B016/B080, hourly). This
+            // runs at the TOP of a cycle, before any phase edits — dirt here
+            // is leftovers, never live work.
+            let msg = format!("hygiene: untracked/dirty residue on {base}");
+            let (ok, _) = git.raw(wd, &["stash", "push", "-u", "-m", &msg]).await;
+            if ok {
+                self.log_git(&format!(
+                    "hygiene: stashed residue blocking checkouts on {base} — `git stash list`"
+                ))
+                .await;
+            }
         }
         if !branch.is_empty() && branch != base && branch != "HEAD" {
             let (ok, _) = git.raw(wd, &["checkout", base]).await;

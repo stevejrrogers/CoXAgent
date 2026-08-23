@@ -817,6 +817,7 @@ pub async fn serve_full(
         .route(
             "/api/projects/:pid/ticket/:id/attachments",
             post(upload_attachment_ep)
+                .delete(delete_attachment_ep)
                 .layer(axum::extract::DefaultBodyLimit::max(25 * 1024 * 1024)),
         )
         .route("/api/projects/:pid/ticket/:id/ready", post(human_ready_ep))
