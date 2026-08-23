@@ -47,6 +47,9 @@ jobs:
 
     runs-on: macos-latest
 
+    # End-to-end pipeline budget (CXA-F006): build -> test -> compare -> ticket ->
+    # comment must complete in under 7 minutes; every stage above declares an explicit
+    # finite timeout-minutes cap so a slow run fails CI rather than relying on a human.
     timeout-minutes: 30
 
     env:
