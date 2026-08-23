@@ -20,6 +20,34 @@
       "parent_id": null,
       "depends_on": [],
       "acceptance_criteria": []
+    },
+    {
+      "priority": "high",
+      "complexity": "medium",
+      "status": "pending",
+      "has_ui": false,
+      "design": {
+        "technical": null,
+        "ux": null
+      },
+      "id": "TL-F002",
+      "type": "feature",
+      "title": "Walking skeleton: hello-world service with /health endpoint",
+      "description": "Seed walking skeleton per PLAN.md 3g: minimal end-to-end path proving the pipeline delivers value on this real project. examples/walking-skeleton.tn, integration tests in crates/tl-driver/tests/walking_skeleton.rs, docker-compose app serving /health on host port 8101, docs/guide/walking-skeleton.md."
+    },
+    {
+      "priority": "high",
+      "complexity": "medium",
+      "status": "pending",
+      "has_ui": false,
+      "design": {
+        "technical": null,
+        "ux": null
+      },
+      "id": "TL-B003",
+      "type": "bug",
+      "title": "[Baseline] Failing unit test: router_migrate_actor_preserves_state_and_flushes_buffered",
+      "description": "'tl cargo test -p tl-runtime' fails at crates/tl-runtime/src/router.rs:325 -- 'assertion failed: !router_a.drain_outbound(NodeId(2)).is_empty()'. Pre-existing; 'not introduced by walking skeleton. Reproduces consistently in isolation."
     }
   ],
   "history": [],

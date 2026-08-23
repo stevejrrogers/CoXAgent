@@ -95,6 +95,30 @@ pub(super) fn lite_state_value(state: &coxagent_application::ProjectState) -> se
                 .and_then(serde_json::Value::as_str)
                 .is_some_and(|c| PUBLIC.contains(&c))
         });
+        // The snapshot broadcasts EVERY second: ship only each channel's tail
+        // (newest 50) — history beyond that comes from the paginated REST
+        // list. Bounded-500 chat serialized 4 channels per tick was a real
+        // drag on the chat pane.
+        let mut seen: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        let keep: Vec<bool> = chat
+            .iter()
+            .rev()
+            .map(|m| {
+                let c = m
+                    .get("channel")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_owned();
+                let n = seen.entry(c).or_default();
+                *n += 1;
+                *n <= 50
+            })
+            .collect();
+        let mut keep_fwd = keep;
+        keep_fwd.reverse();
+        let mut it = keep_fwd.into_iter();
+        chat.retain(|_| it.next().unwrap_or(false));
     }
     v
 }

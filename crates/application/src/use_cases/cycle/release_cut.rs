@@ -147,6 +147,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 &["worktree", "remove", "--force", &wt.to_string_lossy()],
             )
             .await;
+        // Retry safety: a cut that COMMITTED but failed to push (network/auth
+        // down that minute) leaves the local branch behind, and `worktree add
+        // -b` then fails silently forever after — v2.27.0 sat orphaned for a
+        // day. The branch is re-derived from origin on every cut, so deleting
+        // a leftover loses nothing.
+        let _ = git.raw(wd, &["branch", "-D", branch]).await;
         let (ok, _) = git
             .raw(
                 wd,

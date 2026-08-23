@@ -167,8 +167,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 }
             }
         }
-
         let mut reconciled = false;
+
+
         if let Err(e) = result {
             // Self-heal 2 of 2 — reconcile residual tree debris: rejected-proposal
             // debris or leftover agent residue blocks even switching to this ticket's
@@ -594,7 +595,6 @@ fn unshipped_candidates(state: &crate::state::ProjectState) -> Vec<(TicketId, &'
     let mut matched: Vec<(TicketId, &'static str)> = state
         .tickets
         .iter()
-        .filter(|t| t.assignee().is_none())
         .filter(|t| !state.swept_tickets.contains(t.id().as_str()))
         .filter_map(|t| match (t.ticket_type(), t.status()) {
             (TicketType::Feature | TicketType::Chore, Status::Done) => {
@@ -708,14 +708,19 @@ mod tests {
     }
 
     #[test]
-    fn done_feature_assigned_to_human_is_excluded() {
+    fn done_feature_assigned_to_operator_is_still_shipped() {
         let mut t = done(ticket("C-1", TicketType::Feature));
-        t.assign_to_human("alice");
+        t.assign_to_human("root");
         let state = ProjectState {
             tickets: vec![t],
             ..ProjectState::default()
         };
-        assert!(unshipped_candidates(&state).is_empty());
+        // The assignee is an ownership label ("who owns it"), not a scheduler
+        // block — the operator's team still ships finished work it was handed.
+        assert_eq!(
+            unshipped_candidates(&state),
+            vec![(TicketId::new("C-1").expect("id"), "feat")]
+        );
     }
 
     #[test]
