@@ -87,14 +87,15 @@ jobs:
           body=$(printf "View/OS regression detected by the Visual QA suite.\nPR link %s\nArtifacts carry the diff images." \
             "${{ github.event.pull_request.html_url }}")
           bug_url=$(gh issue create --repo "${{ github.repository }}" --title "$title" --body "$body")
-          echo "bug_url=$bug_url" >> "$GITHUB_OUTPUT"
+          echo "url=$bug_url" >> "$GITHUB_OUTPUT"
+          echo "issue_number=${bug_url##*/}" >> "$GITHUB_OUTPUT"
 
-      # Comment on the PR thread, gated on failure, linking the filed ticket's URL
-      # from the ticketing step so humans see exactly what was filed.
+      # Comment on the PR thread, gated on failure, linking each auto-filed Bug
+      # ticket by its ID so humans see exactly what was filed.
       - name: Comment on PR linking filed tickets
         if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh pr comment "${{ github.event.pull_request.number }}" \
-            --body "Visual QA regression Bug filed at ${{ steps.file-bug.outputs.bug_url }}"
+            --body "Visual QA regression Bug filed at ${{ steps.file-bug.outputs.url }} (#${{ steps.file-bug.outputs.issue_number }})"
