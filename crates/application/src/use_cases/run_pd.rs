@@ -345,7 +345,6 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
     }
 
     /// Pure renderability gate for a downloaded SVG mockup.
-
     async fn build_request(
         &self,
         id: &TicketId,
@@ -416,7 +415,7 @@ fn renderable_svg(body: &str) -> bool {
     // for any '<' between the opening tag's '>' and the closing </svg>; its
     // ABSENCE means the SVG renders as an empty box, which is useless.
     let rest = &body[..body.rfind("</svg>").unwrap_or(body.len())];
-    let open_end = rest.find('>').map(|i| i + 1).unwrap_or(rest.len());
+    let open_end = rest.find('>').map_or(rest.len(), |i| i + 1);
     let between = &rest[open_end..];
     if !between.contains('<') {
         return false;
