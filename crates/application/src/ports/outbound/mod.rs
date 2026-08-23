@@ -12,6 +12,7 @@ pub mod notify;
 pub mod pr_report;
 pub mod probe;
 pub mod screenshot;
+pub mod sibling_index;
 pub mod state_store;
 pub mod storage;
 pub mod workspace;
@@ -31,6 +32,9 @@ pub use notify::{ChatNotifier, FanoutNotifier, NotifierPort, NotifyEvent, NullNo
 pub use pr_report::{NullPrReporter, PrOpen, PrReporterPort, StorePrReporter};
 pub use probe::{ApiProbePort, ApiProof};
 pub use screenshot::ScreenshotPort;
+pub use sibling_index::{
+    siblings_block, sorted_unique_siblings, KnowledgeHandles, SiblingIndexPort, SiblingProject,
+};
 pub use state_store::{mutate_state, GitCheck, StateStorePort, WorkerCaps, WorkerEntry};
 pub use storage::StoragePort;
 pub use workspace::{FileMeta, WorkspaceFilesPort};
