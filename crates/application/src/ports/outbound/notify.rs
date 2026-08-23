@@ -54,6 +54,11 @@ fn kind_icon(kind: &str) -> &'static str {
     match kind {
         k if k.contains("deploy_failed") || k.contains("fail") => "❌",
         k if k.contains("deploy") => "🚀",
+        // Predictive FinOps early-warning (CXA-F013): projected budget
+        // exhaustion N days out — visually distinct from today's amber
+        // budget_warning so an operator can tell "approaching now" from
+        // "projected ahead", while sharing its warning family tone.
+        k if k.contains("budget_forecast") => "🔮",
         k if k.contains("budget_warning") => "⚠️",
         k if k.contains("budget") => "💰",
         k if k.contains("quota") => "⛔",
@@ -98,6 +103,16 @@ mod tests {
         assert_eq!(kind_icon("budget_warning"), "⚠️");
         assert_eq!(kind_icon("budget_reached"), "💰");
         assert_ne!(kind_icon("budget_warning"), kind_icon("budget_reached"));
+    }
+
+    #[test]
+    fn budget_forecast_is_distinct_from_today_budget_warning_and_hard_stop() {
+        // CXA-F013 AC4: the predictive forecast is its own event kind, so an
+        // operator can tell a *projected* exhaustion (N days out) from today's
+        // approaching/hard-stop warnings — and each has a distinct icon.
+        assert_eq!(kind_icon("budget_forecast"), "🔮");
+        assert_ne!(kind_icon("budget_forecast"), kind_icon("budget_warning"));
+        assert_ne!(kind_icon("budget_forecast"), kind_icon("budget_reached"));
     }
 
     #[test]

@@ -166,6 +166,14 @@ mod tests {
     }
 
     #[test]
+    fn skips_non_pub_module_lines_when_declaring() {
+        // A private test module (`mod internal;`) must not count as a facade
+        // declaration — only `pub mod` lines are part of the public surface.
+        let src = "//! header\n\npub use other::Thing;\n#[cfg(test)]\nmod internal;\n";
+        assert_eq!(parse_declarations(src), Vec::<String>::new());
+    }
+
+    #[test]
     fn collects_path_qualifiers_from_reexports_including_multiline_groups() {
         let src =
             "pub use alpha::{AUseCase, BType};\npub use beta::{\n  C,\n  D,\n};\npub use gamma::G;\n";
