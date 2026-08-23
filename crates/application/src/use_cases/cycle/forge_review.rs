@@ -241,6 +241,30 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             if self.already_reviewed_at(pr.number, &head_sha).await {
                 continue;
             }
+            // Per-PR review lease: with a dedicated review runner per MACHINE
+            // (event-dispatch P1) two machines can reach the same fresh head
+            // at once — the head-sha guard only stops repeats after a verdict
+            // is recorded. The stage-claim's TTL covers the reviewer dying
+            // mid-review (the lease expires and the PR is picked up again).
+            {
+                let key = format!("PR-{}", pr.number);
+                let worker = if self.worker.is_empty() {
+                    "local".to_owned()
+                } else {
+                    self.worker.clone()
+                };
+                let Ok(key) = coxagent_domain::TicketId::new(&key) else {
+                    continue;
+                };
+                let claimed = self
+                    .store
+                    .claim_stage(&key, "review", &worker, &crate::state::now_rfc3339())
+                    .await
+                    .unwrap_or(true);
+                if !claimed {
+                    continue; // another runner is reviewing this PR right now
+                }
+            }
             // With require_ci off (CI unavailable, e.g. Actions billing dead),
             // CI status is ignored entirely — local test/lint gates plus the
             // SA's diff judgement carry the review instead.
