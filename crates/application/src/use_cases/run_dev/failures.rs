@@ -73,6 +73,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
     /// As [`Self::record_failure`], but the caller names the layer and gate it
     /// rejected the work at, so the next agent reads data instead of guessing
     /// from a sentence.
+    #[allow(clippy::too_many_lines)] // one failure ladder, read top to bottom
     pub(super) async fn record_failure_at(
         &self,
         id: &TicketId,
@@ -147,7 +148,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 // to reject) instead of routing it onward forever. Mirrors the
                 // phantom-bug close in run_dev — a ticket that cannot be done
                 // honestly should LEAVE the queue, not linger parked.
-                if is_unresolvable_failure(&short, &why) {
+                if is_unresolvable_failure(&short, why) {
                     let id_c = id.clone();
                     s.post_comment(
                         "SYSTEM",
