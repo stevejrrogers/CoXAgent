@@ -416,8 +416,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                         "TDD: ticket {id} ({title}) is about to be implemented. Write \
                          FAILING tests that encode EXACTLY these acceptance criteria — \
                          nothing else, no implementation, no fixing existing tests:\n- {}\n\
-                         Put them where this project keeps tests, compiling but failing \
-                         for the right reason. Commit nothing.",
+                         Put them where this project keeps tests, as PURE function tests \
+                         over the state/domain types that exist in the codebase — never a \
+                         fake HTTP server, host harness or network port. Every fixture must \
+                         be buildable from data the codebase actually has; if an acceptance \
+                         criterion asserts data that does not exist in the codebase, that is \
+                         a design gap — do NOT fabricate it, report it. The tests must \
+                         COMPILE (no word-salad signatures, no invented identifiers) and \
+                         fail only for the missing behaviour. Commit nothing.",
                         criteria.join("\n- ")
                     ),
                     work_dir: self.work_dir.clone(),

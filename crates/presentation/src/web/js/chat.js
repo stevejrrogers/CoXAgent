@@ -141,19 +141,46 @@ function selectChannel(id){
 async function loadChatHistory(){
   const chan=CURCHAN;
   try{
-    const r=await fetch("/api/chat/messages?channel="+encodeURIComponent(chan));
+    // Newest 50 only — history beyond that arrives via loadOlderChat().
+    const r=await fetch("/api/chat/messages?channel="+encodeURIComponent(chan)+"&limit=50");
     if(!r.ok)throw new Error(r.status);
     const data=await r.json();
     if(chan!==CURCHAN)return; // channel switched mid-flight
     CHAT=data;CHAT_LOAD_ERR=false;
+    CHAT_MORE=data.length>=50; // a full window suggests older history exists
   }catch(e){
     if(chan!==CURCHAN)return;
     // Distinguish a failed load from a genuinely empty room (see renderChatList):
     // clear so we never bleed another channel's messages, and flag the error.
-    CHAT=[];CHAT_LOAD_ERR=true;
+    CHAT=[];CHAT_LOAD_ERR=true;CHAT_MORE=false;
   }
   CHAT.forEach(markSeen); // history is not "new" — don't notify for it
   renderChatList(true);
+}
+// Load-more: fetch the window OLDER than the oldest rendered message and
+// prepend, keeping the scroll anchored on what the reader was looking at.
+let CHAT_MORE=false,CHAT_LOADING_MORE=false;
+async function loadOlderChat(){
+  if(CHAT_LOADING_MORE||!CHAT.length)return;
+  CHAT_LOADING_MORE=true;
+  const chan=CURCHAN,oldest=CHAT[0]&&CHAT[0].id;
+  try{
+    const r=await fetch("/api/chat/messages?channel="+encodeURIComponent(chan)
+      +"&limit=50&before="+encodeURIComponent(oldest||""));
+    if(r.ok){
+      const older=await r.json();
+      if(chan===CURCHAN&&older.length){
+        const box=document.getElementById("chat-msgs");
+        const keepH=box?box.scrollHeight:0;
+        older.forEach(markSeen);
+        CHAT=older.concat(CHAT);
+        CHAT_MORE=older.length>=50;
+        renderChatList(false);
+        if(box)box.scrollTop=box.scrollHeight-keepH; // anchor the view
+      }else{CHAT_MORE=false;renderChatList(false);}
+    }
+  }catch(e){}
+  CHAT_LOADING_MORE=false;
 }
 // `parent` is set when the + on a channel row was used: the new room is opened
 // inside that one and starts with its members.
@@ -1563,6 +1590,9 @@ function renderChatList(force){
     : '<div class="chatempty"><i class="ti ti-message-circle-2"></i><div>No messages yet</div><span>Say hello to your teammates.</span></div>';
     return;}
   let lastDay="",html="";
+  if(typeof CHAT_MORE!=="undefined"&&CHAT_MORE){
+    html+='<div class="chatmore"><button class="tk-btn" onclick="loadOlderChat()"><i class="ti ti-history"></i> Tải tin cũ hơn</button></div>';
+  }
   let prev=null;
   msgs.forEach(m=>{
     // Deleted messages always render as a tombstone (was inconsistent before:
@@ -1819,7 +1849,18 @@ async function showTicket(id){
   document.getElementById("ov-ticket").classList.add("open");
   let t=null;try{t=await(await fetch(api("/ticket/"+encodeURIComponent(id)))).json();}catch(e){}
   if(!t||!t.id){t=(STATE.tickets||[]).find(x=>x.id===id);}
-  if(!t){body.innerHTML='<span class="x" onclick="close_(\'ov-ticket\')"><i class="ti ti-x"></i></span><div class="empty">ticket not found</div>';return;}
+  if(!t){
+    // Hub chat mentions tickets from EVERY project; the viewer may be sitting
+    // in another one. Find the ticket's home, switch there, and reopen.
+    try{
+      const ov=await(await fetch("/api/workspace/overview")).json();
+      for(const p of (ov.projects||[])){
+        if(p.id===PID)continue;
+        const rr=await fetch("/api/projects/"+encodeURIComponent(p.id)+"/ticket/"+encodeURIComponent(id));
+        if(rr.ok){switchProject(p.id);setTimeout(()=>showTicket(id),900);return;}
+      }
+    }catch(e){}
+    body.innerHTML='<span class="x" onclick="close_(\'ov-ticket\')"><i class="ti ti-x"></i></span><div class="empty">ticket not found in any project</div>';return;}
   const d=t.design||{},tech=d.technical,ux=d.ux,ac=t.acceptance_criteria||[];
   let h=`<span class="x" onclick="close_('ov-ticket')"><i class="ti ti-x"></i></span><h3>${esc(t.title)}</h3>
     <div class="msub">${esc(t.id)} · ${esc(t.type)}</div>
@@ -1852,13 +1893,17 @@ async function showTicket(id){
   if(ux)h+=`<div class="mrow" style="display:block;border:none"><span class="lbl">UI/UX spec</span><pre>${esc(ux.user_flow)}\nscreens: ${esc((ux.screens||[]).join(", "))}</pre></div>`;
   // Design attachments: PD mockups + user uploads. Bytes come from blob
   // storage via the attachment endpoint; records live on the state.
-  {const atts=((window.STATE&&STATE.ticket_attachments)||{})[t.id]||[];
-   const grid=atts.map(a=>{
-     const u=api("/attachment?key="+encodeURIComponent(a.key));
-     const isImg=(a.content_type||"").startsWith("image/");
-     return isImg
-       ?`<a href="${esc(u)}" target="_blank" class="att-card" title="${esc(a.name)} · ${esc(a.by)}"><img src="${esc(u)}" alt="${esc(a.name)}" loading="lazy"><span>${esc(a.name)}</span></a>`
-       :`<a href="${esc(u)}" target="_blank" class="att-card att-file" title="${esc(a.name)} · ${esc(a.by)}"><i class="ti ti-file"></i><span>${esc(a.name)}</span></a>`;
+  {const atts=(t.attachments)||((window.STATE&&STATE.ticket_attachments)||{})[t.id]||[];
+   // Gallery list for the lightbox: prev/next walks every attachment of the
+   // ticket in grid order. In-app only, never target=_blank: from the desktop
+   // shell a new tab opens an EXTERNAL browser with no session cookie — 401.
+   ATT_GALLERY=atts.map(a=>({url:api("/attachment?key="+encodeURIComponent(a.key)),
+     name:a.name,img:(a.content_type||"").startsWith("image/")}));
+   const grid=ATT_GALLERY.map((g,i)=>{
+     const del=`<button class="att-del" title="Remove attachment" onclick="event.stopPropagation();deleteAttachment('${t.id}','${esc(atts[i].key)}')">&times;</button>`;
+     return g.img
+       ?`<div class="att-card" onclick="event.stopPropagation();showAttachment(${i})" title="${esc(g.name)} · ${esc(atts[i].by)}">${del}<img src="${esc(g.url)}" alt="${esc(g.name)}" loading="lazy"><span>${esc(g.name)}</span></div>`
+       :`<div class="att-card att-file" onclick="event.stopPropagation();showAttachment(${i})" title="${esc(g.name)} · ${esc(atts[i].by)}">${del}<i class="ti ti-file"></i><span>${esc(g.name)}</span></div>`;
    }).join("");
    h+=`<div class="mrow" style="display:block;border:none"><span class="lbl">Design & attachments</span>
      <div class="att-grid" id="att-grid">${grid||'<div style="color:var(--dim);font-size:12px;margin-top:6px">— none yet (PD attaches mockups here)</div>'}</div>
@@ -1881,6 +1926,40 @@ async function showTicket(id){
   renderTicketComments(t.id);
   // Ticket descriptions can carry ```mermaid fences too (SA designs often do).
   if(typeof renderMermaidIn==="function")renderMermaidIn(body);}
+// In-app attachment viewer: full-screen overlay, same session. Gallery-aware:
+// ‹ › buttons and ←/→ keys walk ATT_GALLERY; Esc or backdrop click closes.
+// Non-image types render through an <iframe> (PDF etc.).
+let ATT_GALLERY=[],ATT_IDX=0;
+function showAttachment(i){
+  if(!ATT_GALLERY.length)return;
+  ATT_IDX=((i%ATT_GALLERY.length)+ATT_GALLERY.length)%ATT_GALLERY.length;
+  const g=ATT_GALLERY[ATT_IDX];
+  let ov=document.getElementById("att-light");
+  if(!ov){ov=document.createElement("div");ov.id="att-light";ov.className="attlight";
+    ov.onclick=e=>{if(e.target===ov)ov.classList.remove("open");};
+    document.body.appendChild(ov);
+    document.addEventListener("keydown",e=>{
+      if(!ov.classList.contains("open"))return;
+      if(e.key==="Escape")ov.classList.remove("open");
+      else if(e.key==="ArrowLeft")showAttachment(ATT_IDX-1);
+      else if(e.key==="ArrowRight")showAttachment(ATT_IDX+1);});}
+  const many=ATT_GALLERY.length>1;
+  ov.innerHTML=`<div class="attlight-name">${esc(g.name)}${many?` · ${ATT_IDX+1}/${ATT_GALLERY.length}`:''}</div>`
+    +(g.img?`<img src="${esc(g.url)}" alt="${esc(g.name)}">`
+           :`<iframe src="${esc(g.url)}" title="${esc(g.name)}"></iframe>`)
+    +(many?`<button class="attlight-nav prev" onclick="event.stopPropagation();showAttachment(ATT_IDX-1)">‹</button>
+            <button class="attlight-nav next" onclick="event.stopPropagation();showAttachment(ATT_IDX+1)">›</button>`:'');
+  ov.classList.add("open");
+}
+// Remove one attachment record (confirm first), then refresh the modal.
+async function deleteAttachment(id,key){
+  if(!confirm("Remove this attachment?"))return;
+  const r=await fetch(api("/ticket/"+encodeURIComponent(id)+"/attachments?key="+encodeURIComponent(key)),
+    {method:"DELETE"});
+  if(!r.ok){toasty("Delete failed","err");return;}
+  toasty("Attachment removed");
+  showTicket(id);
+}
 // Upload one attachment: raw bytes body, MIME in Content-Type, name in query.
 async function uploadAttachment(id,input){
   const f=input.files&&input.files[0];if(!f)return;

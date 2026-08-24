@@ -241,6 +241,30 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             if self.already_reviewed_at(pr.number, &head_sha).await {
                 continue;
             }
+            // Per-PR review lease: with a dedicated review runner per MACHINE
+            // (event-dispatch P1) two machines can reach the same fresh head
+            // at once — the head-sha guard only stops repeats after a verdict
+            // is recorded. The stage-claim's TTL covers the reviewer dying
+            // mid-review (the lease expires and the PR is picked up again).
+            {
+                let key = format!("PR-{}", pr.number);
+                let worker = if self.worker.is_empty() {
+                    "local".to_owned()
+                } else {
+                    self.worker.clone()
+                };
+                let Ok(key) = coxagent_domain::TicketId::new(&key) else {
+                    continue;
+                };
+                let claimed = self
+                    .store
+                    .claim_stage(&key, "review", &worker, &crate::state::now_rfc3339())
+                    .await
+                    .unwrap_or(true);
+                if !claimed {
+                    continue; // another runner is reviewing this PR right now
+                }
+            }
             // With require_ci off (CI unavailable, e.g. Actions billing dead),
             // CI status is ignored entirely — local test/lint gates plus the
             // SA's diff judgement carry the review instead.
@@ -341,12 +365,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                             );
                             let _ = forge.comment_pr(loser, &note).await;
                             if forge.close_pr(loser).await.is_ok() {
-                                let _ =
-                                    crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                                let _ = crate::ports::outbound::mutate_state(
+                                    self.store.as_ref(),
+                                    |s| {
                                         s.seen_closed_prs.insert(loser);
                                         Ok(())
-                                    })
-                                    .await;
+                                    },
+                                )
+                                .await;
                             }
                             if loser == pr.number {
                                 self.log_git(&format!(
@@ -445,8 +471,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                         // machine does not auto-land another layer on a fix
                         // it just landed.
                         let fix_on_fix = self.fix_on_fix_hold(&pr.title).await;
-                        if let Some(why) = needs_human_eyes(&diff, self.config.git.max_changed_lines)
-                            .or(fix_on_fix)
+                        if let Some(why) =
+                            needs_human_eyes(&diff, self.config.git.max_changed_lines)
+                                .or(fix_on_fix)
                         {
                             let msg = format!(
                                 "Approved, but not auto-merging: {why}. Ask a human to land this."
