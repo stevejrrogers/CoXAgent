@@ -71,10 +71,15 @@ fi
 NEW_BIN="$BUILD_WT/target/release/coxagent"
 "$NEW_BIN" --version >>"$LOG" 2>&1 || { log "new binary does not run"; exit 1; }
 
-# Swap with a backup; the previous binary is the rollback.
-cp -X "$TARGET" "$TARGET.prev" 2>>"$LOG"
-cp -X "$NEW_BIN" "$TARGET" || { log "copy failed"; exit 1; }
-codesign --force --sign - "$TARGET" >>"$LOG" 2>&1
+# Swap ATOMICALLY via rename, never by overwriting in place: on macOS,
+# writing over an executing binary makes the kernel kill the old process with
+# "Taskgated Invalid Signature" (three crash reports, 2026-08-19/20). A rename
+# gives the new file a fresh inode while the running hub keeps executing its
+# old one until WE kill it in an orderly way below.
+cp -X "$NEW_BIN" "$TARGET.new" || { log "copy failed"; exit 1; }
+codesign --force --sign - "$TARGET.new" >>"$LOG" 2>&1
+mv -f "$TARGET" "$TARGET.prev" 2>>"$LOG"
+mv -f "$TARGET.new" "$TARGET" || { log "rename failed"; mv -f "$TARGET.prev" "$TARGET"; exit 1; }
 
 # Restart: kill the listener; the app shell respawns the binary.
 PID=$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | awk 'NR==2{print $2}')
