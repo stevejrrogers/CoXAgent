@@ -158,6 +158,7 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/ticket/:id/assign", &["post"]),
     route("/api/projects/:pid/ticket/:id/attachments", &["post"]),
     route("/api/projects/:pid/ticket/:id/edit", &["post"]),
+    route("/api/projects/:pid/ticket/:id/pre-mortem", &["post"]),
     route("/api/projects/:pid/ticket/:id/priority", &["post"]),
     route("/api/projects/:pid/ticket/:id/ready", &["post"]),
     route("/api/projects/:pid/ticket/:id/reject", &["post"]),

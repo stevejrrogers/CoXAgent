@@ -1880,6 +1880,7 @@ async function showTicket(id){
     <div class="mrow"><span class="lbl">Blocked by</span>${depChips(t.depends_on)}</div>
     <div class="mrow"><span class="lbl">Blocks</span>${depChips((STATE.tickets||[]).filter(x=>(x.depends_on||[]).includes(t.id)).map(x=>x.id))}</div>
     <div class="mrow" style="display:block"><span class="lbl">Description</span><div class="doc-body md" style="margin-top:7px;color:var(--muted);line-height:1.6;font-size:13px">${t.description?mdRender(t.description):'—'}</div></div>
+    ${renderPreMortem(t)}
     <div class="mrow" style="display:block"><span class="lbl">Acceptance criteria</span>${ac.length?`<div class="aclist">${ac.map(c=>`<div class="acitem"><i class="ti ti-square-check"></i> ${esc(c)}</div>`).join("")}</div>`:'<div style="margin-top:6px;color:var(--dim);font-size:12px">— none defined yet</div>'}</div>`
     +(function(){const tcs=t.test_cases||[];if(!tcs.length)return '';
       return `<div class="mrow" style="display:block;border:none"><span class="lbl">Test cases</span><div class="tclist">${tcs.map(tc=>{
@@ -1914,6 +1915,7 @@ async function showTicket(id){
   h+=`<div class="tk-actions">
     <button class="tk-btn" onclick="editTicket('${t.id}')"><i class="ti ti-edit"></i> Edit</button>
     ${canWork?`<button class="tk-btn go" onclick="workNext('${t.id}')"><i class="ti ti-player-play-filled"></i> Work on this next</button>`:''}
+    ${(t.status==="pending"||t.status==="ready")?`<button class="tk-btn" onclick="runPreMortem('${t.id}')"><i class="ti ti-shield-exclamation"></i> Risk assess before sprint</button>`:''}
     ${(t.status==="pending"&&tech)?`<button class="tk-btn go" onclick="humanGate('${t.id}','ready')"><i class="ti ti-checks"></i> Approve → Ready</button>`:''}
     ${t.status==="fixed"?`<button class="tk-btn" onclick="inboxSendBack('${t.id}')"><i class="ti ti-arrow-back-up"></i> Send back</button>`:''}
     ${t.status==="fixed"?`<button class="tk-btn go" onclick="humanGate('${t.id}','verify')"><i class="ti ti-shield-check"></i> Mark Verified</button>`:''}
@@ -1926,6 +1928,36 @@ async function showTicket(id){
   renderTicketComments(t.id);
   // Ticket descriptions can carry ```mermaid fences too (SA designs often do).
   if(typeof renderMermaidIn==="function")renderMermaidIn(body);}
+// Pre-mortem risk findings: rendered prominently ABOVE acceptance criteria
+// with a color-coded severity badge (AC3). Empty until "Risk assess before
+// sprint" runs; an unavailable note tells the user to retry or skip (AC5).
+function renderPreMortem(t){
+  const pm=t.pre_mortem||[];
+  // No rendered layout until there ARE findings: an always-on placeholder would
+  // shift every unassessed ticket dialog's pixels and churn unrelated baselines.
+  if(!pm.length)return '';
+  const badge={high:["var(--red)","ti-alert-triangle","High"],medium:["var(--amber)","ti-alert-circle","Medium"],low:["var(--green)","ti-shield-check","Low"]};
+  let h=`<div class="mrow pm-block"><span class="lbl"><i class="ti ti-shield-exclamation"></i> Pre-mortem risk</span><div class="pmlist">${pm.map(r=>{
+    // Unknown/missing severity falls back to MEDIUM tint, never LOW/green:
+    // under-stating anticipated failure modes is worse than over-stating them.
+    const b=badge[r.severity]||badge['medium'];
+    return `<div class="pmitem"><span class="pm-badge" style="color:${b[0]};border-color:${b[0]}"><i class="ti ${b[1]}"></i> ${b[2]}</span><span class="pm-desc">${esc(r.description)}</span></div>`;
+  }).join("")}</div></div>`;
+  return h;
+}
+// AC2 trigger + AC1 call. One-shot POST; re-renders on success so findings
+// show immediately; surfaces the unavailable note rather than blocking.
+async function runPreMortem(id){
+  const btn=event&&event.currentTarget;if(btn){btn.disabled=true;btn.textContent='Assessing…';}
+  try{
+    const r=await fetch(`/api/projects/${encodeURIComponent(PID)}/ticket/${encodeURIComponent(id)}/pre-mortem`,{method:"POST"});
+    const j=await r.json();
+    if(j.unavailable){alert("(pre-mortem unavailable — review technical design)");return;}
+    if(r.ok&&j.ok){showTicket(id);return;}
+    alert("Pre-mortem failed: "+((j&&j.note)||r.status));
+  }catch(e){alert("Pre-mortem failed: "+e.message);}
+  finally{if(btn){btn.disabled=false;btn.textContent='Risk assess before sprint';}}
+}
 // In-app attachment viewer: full-screen overlay, same session. Gallery-aware:
 // ‹ › buttons and ←/→ keys walk ATT_GALLERY; Esc or backdrop click closes.
 // Non-image types render through an <iframe> (PDF etc.).

@@ -92,6 +92,9 @@ pub fn field_permitted(actor: Role, field: &str) -> bool {
         "design.technical" | "depends_on" => actor == Role::Sa,
         // PD owns UX; SA may cover it when PD is disabled.
         "design.ux" => matches!(actor, Role::Pd | Role::Sa),
+        // Pre-mortem findings are written by the automated analysis run after
+        // an agent or heuristic pass — never by a human or a DEV directly.
+        "pre_mortem" => actor == Role::System,
         _ => false,
     }
 }

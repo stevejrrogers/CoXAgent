@@ -12,6 +12,7 @@ pub mod json_repair;
 pub mod manual_rollback;
 pub mod merge_policy;
 pub mod merge_sweep;
+pub mod pre_mortem;
 pub mod recover;
 pub mod refine_ticket;
 pub mod run_ba;
@@ -43,6 +44,7 @@ pub use merge_policy::{
     MAX_TICKET_RESCUES,
 };
 pub use merge_sweep::{merge_sweep, SweepOutcome};
+pub use pre_mortem::{PreMortemOutcome, PreMortemResult, RunPreMortemUseCase};
 pub use recover::RecoverUseCase;
 pub use refine_ticket::{RefineTicketUseCase, RefinedTicket, TeamNote};
 pub use run_ba::RunBaUseCase;
@@ -64,6 +66,8 @@ pub use runner::{run_forever, RunnerHandle, RunnerSnapshot};
 
 #[cfg(test)]
 mod mod_guard_tests;
+#[cfg(test)]
+mod pre_mortem_tdd_tests;
 #[cfg(test)]
 mod run_releases_tdd_tests;
 #[cfg(test)]

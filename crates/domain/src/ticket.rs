@@ -11,7 +11,16 @@ use serde::{Deserialize, Serialize};
 
 // Value objects live in `kinds`; re-exported here so existing paths like
 // `crate::ticket::{Status, TicketType}` keep resolving without a cycle.
-pub use crate::kinds::{Complexity, Priority, Role, Status, TicketType};
+pub use crate::kinds::{Complexity, Priority, RiskSeverity, Role, Status, TicketType};
+
+/// One pre-mortem finding: an anticipated failure mode for a ticket plus its
+/// severity. Produced before work starts (a "risk assess before sprint" step)
+/// either deterministically for `Small` tickets or by a one-shot agent run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RiskEntry {
+    pub description: String,
+    pub severity: RiskSeverity,
+}
 
 /// Technical design authored by SA. Presence gates `Pending -> Ready`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,6 +116,11 @@ pub struct Ticket {
     /// Up to 5 acceptance criteria — the checklist that defines "done".
     #[serde(default)]
     acceptance_criteria: Vec<String>,
+    /// Pre-mortem risk findings (anticipated failure modes) produced before the
+    /// ticket enters InProgress. Empty until a "risk assess before sprint"
+    /// action runs. Persisted with `serde(default)` so old tickets load clean.
+    #[serde(default)]
+    pre_mortem: Vec<RiskEntry>,
     /// The ticket's test cases — one per acceptance criterion (kept in sync by
     /// the agents), each carrying its own pass/fail verdict and per-case
     /// evidence. Persisted with `serde(default)` so old tickets load clean.
@@ -166,6 +180,7 @@ impl Ticket {
             parent_id: None,
             depends_on: Vec::new(),
             acceptance_criteria: Vec::new(),
+            pre_mortem: Vec::new(),
             test_cases: Vec::new(),
             claimed_by: None,
             claimed_at: None,
@@ -183,6 +198,13 @@ impl Ticket {
     #[must_use]
     pub fn acceptance_criteria(&self) -> &[String] {
         &self.acceptance_criteria
+    }
+
+    /// Pre-mortem risk findings produced before work started. Empty when no
+    /// "risk assess before sprint" action has run.
+    #[must_use]
+    pub fn pre_mortem(&self) -> &[RiskEntry] {
+        &self.pre_mortem
     }
 
     /// Replace the acceptance criteria, trimming blanks and capping at 5.
@@ -496,6 +518,28 @@ impl Ticket {
         Ok(())
     }
 
+    /// Attach or replace the pre-mortem risk findings produced before work
+    /// starts. Written by the automated analysis run (the `System` role) after a
+    /// one-shot agent analysis or a deterministic heuristic pass; re-running
+    /// overwrites — never accumulates stale findings.
+    ///
+    /// # Errors
+    /// [`DomainError::FieldNotPermitted`] if `actor` lacks pre-mortem authority.
+    pub fn set_pre_mortem(
+        &mut self,
+        actor: Role,
+        findings: Vec<RiskEntry>,
+    ) -> Result<(), DomainError> {
+        if !field_permitted(actor, "pre_mortem") {
+            return Err(DomainError::FieldNotPermitted {
+                role: actor,
+                field: "pre_mortem",
+            });
+        }
+        self.pre_mortem = findings;
+        Ok(())
+    }
+
     /// Declare a dependency on another ticket (SA during design/split).
     ///
     /// # Errors
@@ -754,6 +798,60 @@ mod tests {
             .expect("claim");
         assert!(t.release_claim(Role::DevFeature).is_err());
         assert_eq!(t.status(), Status::InProgress);
+    }
+
+    #[test]
+    fn only_system_writes_pre_mortem_findings() {
+        let mut t = feature(false);
+        let findings = vec![RiskEntry {
+            description: "dependency may not be ready".to_owned(),
+            severity: RiskSeverity::High,
+        }];
+        // No single human/DEV may author findings directly — the analysis run
+        // (System) owns the field.
+        assert!(matches!(
+            t.set_pre_mortem(Role::Po, findings.clone()),
+            Err(DomainError::FieldNotPermitted { .. })
+        ));
+        assert!(matches!(
+            t.set_pre_mortem(Role::Sa, findings.clone()),
+            Err(DomainError::FieldNotPermitted { .. })
+        ));
+        assert_eq!(t.pre_mortem().len(), 0);
+        // System writes it; re-running overwrites rather than appending.
+        t.set_pre_mortem(Role::System, findings.clone())
+            .expect("system writes");
+        assert_eq!(t.pre_mortem().len(), 1);
+        assert_eq!(t.pre_mortem()[0].severity, RiskSeverity::High);
+    }
+
+    #[test]
+    fn pre_mortem_re_run_overwrites_and_tracks_low_severity() {
+        let mut t = feature(false);
+        t.set_pre_mortem(
+            Role::System,
+            vec![RiskEntry {
+                description: "old".to_owned(),
+                severity: RiskSeverity::Medium,
+            }],
+        )
+        .expect("write");
+        // A later re-run replaces the previous snapshot entirely.
+        t.set_pre_mortem(
+            Role::System,
+            vec![
+                RiskEntry {
+                    description: "fresh one".to_owned(),
+                    severity: RiskSeverity::Low,
+                },
+                RiskEntry {
+                    description: "fresh two".to_owned(),
+                    severity: RiskSeverity::High,
+                },
+            ],
+        )
+        .expect("overwrite");
+        assert_eq!(t.pre_mortem().len(), 2);
     }
 
     #[test]

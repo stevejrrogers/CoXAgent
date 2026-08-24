@@ -344,6 +344,38 @@ pub(super) async fn edit_ticket(
     }
 }
 
+/// POST /api/projects/:pid/ticket/:id/pre-mortem — run one-shot risk analysis.
+pub(super) async fn pre_mortem_ep(
+    State(app): State<AppState>,
+    Path((pid, id)): Path<(String, String)>,
+) -> axum::response::Response {
+    use coxagent_application::use_cases::{PreMortemResult, RunPreMortemUseCase};
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Ok(tid) = coxagent_domain::TicketId::new(id.clone()) else {
+        return (axum::http::StatusCode::BAD_REQUEST, "bad id").into_response();
+    };
+    let uc = RunPreMortemUseCase::new(
+        Arc::clone(&p.store),
+        Arc::clone(&p.engine),
+        p.work_dir.clone(),
+    );
+    match uc.execute(tid).await {
+        Ok(PreMortemResult::Completed(out)) => Json(serde_json::json!({
+            "ok": true,
+            "deterministic": out.deterministic,
+            "findings": out.findings,
+        }))
+        .into_response(),
+        Ok(PreMortemResult::Unavailable(reason)) => {
+            Json(serde_json::json!({ "ok": false, "unavailable": true, "note": reason }))
+                .into_response()
+        }
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
 pub(super) async fn reject_ticket(
     State(app): State<AppState>,
     Path((pid, id)): Path<(String, String)>,

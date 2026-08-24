@@ -38,6 +38,17 @@ pub enum Complexity {
     Large,
 }
 
+/// Severity of one pre-mortem risk finding — the cost of a failure mode if it
+/// fires. Coarse by design so a dashboard badge and a PO decision need no
+/// interpretation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RiskSeverity {
+    Low,
+    Medium,
+    High,
+}
+
 /// Lifecycle status. Feature/chore and bug share `InProgress` and `Rejected`;
 /// the transition table keeps the two lifecycles distinct per [`TicketType`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

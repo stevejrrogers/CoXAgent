@@ -840,6 +840,10 @@ pub async fn serve_full(
         .route("/api/projects/:pid/ticket/:id/unpark", post(unpark_ticket))
         .route("/api/projects/:pid/ticket/:id/edit", post(edit_ticket))
         .route(
+            "/api/projects/:pid/ticket/:id/pre-mortem",
+            post(pre_mortem_ep),
+        )
+        .route(
             "/api/projects/:pid/comments",
             get(list_comments).post(post_comment),
         )
