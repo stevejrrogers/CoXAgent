@@ -2425,3 +2425,33 @@ async fn rollbacks_post_mortems_target_the_incidents_channel_and_notify_distinct
          because CXA-F012 is unimplemented. Channels seen so far depend on it."
     );
 }
+
+/// A human hold is absolute for the bulk sweep too: PR #329 (touching
+/// .github/workflows) was parked for a person, and merge_sweep steamrolled it.
+/// The sweep must skip any PR in `human_holds`, whatever its CI/mergeable state.
+#[tokio::test]
+async fn merge_sweep_never_merges_a_human_held_pr() {
+    let forge = SpyForge {
+        ci: "passing".to_owned(),
+        mergeable: true,
+        ..SpyForge::default()
+    };
+    let store = MemStore {
+        state: Mutex::new({
+            let mut s = ProjectState::default();
+            s.human_holds
+                .insert(7, "touches .github/workflows".to_owned());
+            s
+        }),
+    };
+    let out = crate::use_cases::merge_sweep::merge_sweep(&forge, &store, "main", false, true).await;
+    assert!(
+        forge.merged.lock().expect("lock").is_empty(),
+        "sweep must not merge a human-held PR"
+    );
+    assert!(
+        out.skipped.iter().any(|(n, r)| *n == 7 && r.contains("human hold")),
+        "the held PR is reported as skipped with its hold reason: {:?}",
+        out.skipped
+    );
+}

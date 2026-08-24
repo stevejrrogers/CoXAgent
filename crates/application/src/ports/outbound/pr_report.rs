@@ -71,6 +71,59 @@ pub trait PrReporterPort: Send + Sync {
     async fn fetch_reviews(&self) -> Vec<PrReview>;
 }
 
+/// A reporter for runners living IN the hub process: writes straight to the
+/// shared store instead of looping through HTTP. Before this existed, a hub
+/// with no `git.server_url` fell back to the Null reporter and silently
+/// dropped every review record, human hold and latency measurement its own
+/// in-process runners produced.
+pub struct StorePrReporter {
+    store: std::sync::Arc<dyn super::StateStorePort>,
+}
+
+impl StorePrReporter {
+    #[must_use]
+    pub fn new(store: std::sync::Arc<dyn super::StateStorePort>) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait]
+impl PrReporterPort for StorePrReporter {
+    async fn report_pr(&self, pr: PrOpen) {
+        let _ = super::mutate_state(self.store.as_ref(), move |s| {
+            s.upsert_open_pr(pr.clone());
+            Ok(())
+        })
+        .await;
+    }
+
+    async fn report_review(&self, number: u64, decision: &str, summary: &str, head_sha: &str) {
+        let (d, su, h) = (decision.to_owned(), summary.to_owned(), head_sha.to_owned());
+        let _ = super::mutate_state(self.store.as_ref(), move |s| {
+            s.upsert_review(number, &d, &su, &h);
+            Ok(())
+        })
+        .await;
+    }
+
+    async fn report_hold(&self, number: u64, reason: &str) {
+        let reason = reason.to_owned();
+        let _ = super::mutate_state(self.store.as_ref(), move |s| {
+            s.human_holds.insert(number, reason.clone());
+            Ok(())
+        })
+        .await;
+    }
+
+    async fn fetch_reviews(&self) -> Vec<PrReview> {
+        self.store
+            .load()
+            .await
+            .map(|s| s.reviews)
+            .unwrap_or_default()
+    }
+}
+
 /// A reporter that drops everything — used when no hub is configured or in
 /// tests that do not care. Keeps the runner working with git disabled.
 pub struct NullPrReporter;

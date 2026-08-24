@@ -110,3 +110,9 @@ new process, should be data, not a code change.**
 
 Any of: median PR-open→review-verdict latency > 10 minutes over a week (metric already
 recorded); needed concurrency > 3; a fifth "decouple X from the cycle" patch.
+
+<!-- review-latency live probe 080540 -->
+
+<!-- warm probe 102326 -->
+
+<!-- clean probe 151204 -->
