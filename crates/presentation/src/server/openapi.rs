@@ -72,6 +72,8 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/engines", &["get"]),
     route("/api/engines/opencode/models", &["get"]),
     route("/api/health", &["get"]),
+    route("/api/hub-knowledge/index", &["get"]),
+    route("/api/hub-knowledge/curate", &["post"]),
     route("/api/manage/overview", &["get"]),
     route("/api/manage/spaces/:sid", &["get"]),
     route("/api/mcp", &["post"]),

@@ -47,6 +47,7 @@ mod engines;
 mod forge;
 mod guards;
 mod hub_docs;
+mod hub_knowledge;
 mod inbox;
 mod manage;
 mod meetings;
@@ -76,6 +77,7 @@ use engines::*;
 use forge::*;
 use guards::*;
 use hub_docs::*;
+use hub_knowledge::*;
 use inbox::*;
 use manage::*;
 use meetings::*;
@@ -260,6 +262,9 @@ struct AppState {
     /// Server-side documentation store (MongoDB) when configured; `None` falls
     /// back to per-project `state.json`.
     doc_store: Option<Arc<dyn coxagent_application::ports::outbound::DocStorePort>>,
+    /// Shared KV store for hub-wide curation state (CXA-F017); falls back to
+    /// an in-process cache when no Postgres-backed store is configured.
+    hub_knowledge_kv: Option<Arc<dyn coxagent_application::ports::outbound::KvDocPort>>,
     /// A hub-level engine for cross-project drafting (e.g. project goals), with a
     /// working directory to run it in.
     analyzer: Option<(
@@ -761,6 +766,8 @@ pub async fn serve_full(
         )
         .route("/api/manage/overview", get(manage_overview_ep))
         .route("/api/manage/spaces/:sid", get(manage_space_detail_ep))
+        .route("/api/hub-knowledge/index", get(hub_knowledge_index_ep))
+        .route("/api/hub-knowledge/curate", post(hub_knowledge_curate_ep))
         .route("/api/me/agents", get(my_agents_ep))
         .route("/join/:token", get(join_page_ep))
         .route("/api/workspace/join", post(join_ep))

@@ -18,6 +18,7 @@ pub(super) async fn build_state(
     let kv2 = extras.syschat_store.clone();
     let kv3 = extras.syschat_store.clone();
     let kv3_pf = extras.syschat_store.clone();
+    let hub_knowledge_kv = extras.syschat_store.clone();
     let syschat = SysChat::load(&hub_dir, extras.syschat_store).await;
     let workspace = Ws::load(&hub_dir, kv).await;
     let spaces = Sp::load(&hub_dir, kv2).await;
@@ -50,6 +51,7 @@ pub(super) async fn build_state(
             })
         }),
         doc_store: extras.doc_store,
+        hub_knowledge_kv,
     }
 }
 

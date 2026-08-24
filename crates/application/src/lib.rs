@@ -11,6 +11,7 @@ pub mod conformance;
 pub mod deps_scan;
 pub mod error;
 pub mod faults;
+pub mod hub_knowledge;
 pub mod metrics;
 pub mod metrics_health;
 pub mod parsing;
