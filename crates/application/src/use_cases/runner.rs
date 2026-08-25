@@ -275,6 +275,9 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
     // no-progress cycles whose errors look infrastructural pause the runner
     // and tell the humans, exactly like the budget cap does.
     let mut infra_streak = 0u32;
+    // Last task-shaped error set already announced in #agents — repeat
+    // failures post once, a CHANGED failure posts again.
+    let mut last_logic_errors = String::new();
     loop {
         // Gate: wait until running or a step is requested; exit if stopped.
         let stepping = loop {
@@ -428,6 +431,32 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
                 Ok(())
             })
             .await;
+        }
+        // Task-shaped (non-infra) errors used to be a bare count in the cycle
+        // summary — "(1 errors)" every cycle for hours with the actual reason
+        // invisible anywhere (the .app swallows stdout). Surface the DETAIL in
+        // #agents, but only on change: the same failure repeating each cycle
+        // is one message, not a drumbeat.
+        {
+            let logic: Vec<String> = report
+                .errors
+                .iter()
+                .filter(|e| !crate::faults::is_infra_fault(e))
+                .cloned()
+                .collect();
+            let joined = logic.join(" · ");
+            if !joined.is_empty() && joined != last_logic_errors {
+                last_logic_errors = joined.clone();
+                let mut msg = format!("⚠️ cycle errors: {joined}");
+                msg.truncate(600);
+                let _ = crate::ports::outbound::mutate_state(breaker_store.as_ref(), move |s| {
+                    s.post_chat_in("SYSTEM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+                    Ok(())
+                })
+                .await;
+            } else if joined.is_empty() {
+                last_logic_errors.clear();
+            }
         }
         // Streak bookkeeping. Reset only on REAL signal that the engine lives:
         // work shipped, or runs that failed for non-infra reasons (the engine
