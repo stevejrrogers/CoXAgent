@@ -47,6 +47,10 @@ impl<S: StateStorePort + ?Sized> AddTicketUseCase<S> {
         // filed five near-identical "bug triage" tickets in a week, each a
         // different string, same ticket. Same predicate as the BA's
         // (normalised match, near-paraphrase, ceremony-class).
+        // Active tickets block a duplicate outright. REJECTED titles block it
+        // too: a rejection is a human "no" to the whole theme, and terminal
+        // status must not reopen the door — the BA refiled the same bug-triage
+        // meta ticket a 7th time the moment its 6 predecessors were rejected.
         let active: Vec<String> = state
             .tickets
             .iter()
@@ -61,10 +65,24 @@ impl<S: StateStorePort + ?Sized> AddTicketUseCase<S> {
             })
             .map(|t| t.title().to_owned())
             .collect();
+        let rejected: Vec<String> = state
+            .tickets
+            .iter()
+            .filter(|t| t.status() == coxagent_domain::Status::Rejected)
+            .map(|t| t.title().to_owned())
+            .collect();
         if crate::parsing::duplicates_existing(&input.title, &active) {
             return Err(crate::error::PortError::Backend(format!(
                 "{DUPLICATE_REFUSED}: \"{}\" matches an open ticket (same theme \
                  already tracked)",
+                input.title
+            ))
+            .into());
+        }
+        if crate::parsing::duplicates_existing(&input.title, &rejected) {
+            return Err(crate::error::PortError::Backend(format!(
+                "{DUPLICATE_REFUSED}: \"{}\" matches a REJECTED ticket — a human \
+                 already said no to this theme; do not refile it",
                 input.title
             ))
             .into());
@@ -206,6 +224,37 @@ mod tests {
             ))
             .await
             .is_err());
+        assert_eq!(store.load().await.expect("load").tickets.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn refuses_refiling_a_rejected_theme() {
+        let store = Arc::new(MemStore::default());
+        let uc = AddTicketUseCase::new(Arc::clone(&store));
+        let id = uc
+            .execute(input_titled(TicketType::Feature, "Bug triage and burn-down cadence"))
+            .await
+            .expect("first");
+        // A human rejects the theme…
+        {
+            let mut s = store.load().await.expect("load");
+            s.ticket_mut(&id)
+                .expect("ticket")
+                .transition_to(coxagent_domain::Role::Po, coxagent_domain::Status::Rejected)
+                .expect("reject");
+            store.save(&s).await.expect("save");
+        }
+        // …so refiling the same theme is refused even though nothing active
+        // matches — a rejection must not reopen the door (the BA refiled the
+        // triage meta ticket a 7th time the moment its predecessors died).
+        let err = uc
+            .execute(input_titled(
+                TicketType::Feature,
+                "Backlog triage: assess bug risk and burn down"
+            ))
+            .await
+            .expect_err("refused");
+        assert!(err.to_string().contains("REJECTED"), "{err}");
         assert_eq!(store.load().await.expect("load").tickets.len(), 1);
     }
 
