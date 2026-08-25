@@ -11,7 +11,7 @@ mod shutdown;
 use coxagent_application::config::{
     Config, DeployConfig, GitConfig, PolicyConfig, ReleasesConfig, WorkflowConfig,
 };
-use coxagent_application::ports::outbound::StateStorePort;
+use coxagent_application::ports::outbound::{SandboxStatus, StateStorePort};
 use coxagent_application::use_cases::{RecoverUseCase, RunBaUseCase, RunCycleUseCase};
 use coxagent_application::Spend;
 use coxagent_infrastructure::engine::{
@@ -903,8 +903,13 @@ fn build_engine(
     logs_dir: PathBuf,
     mcp: Option<&coxagent_infrastructure::engine::McpAccess>,
 ) -> Result<BuiltEngine, Box<dyn std::error::Error>> {
-    if config.workflow.sandbox && !cfg!(target_os = "macos") {
-        tracing::warn!("workflow.sandbox is on but this platform has no sandbox backend yet — agents run unsandboxed");
+    if config.workflow.sandbox
+        && matches!(
+            coxagent_infrastructure::proc::sandbox_status(true),
+            SandboxStatus::Unavailable(_) | SandboxStatus::Denied(_)
+        )
+    {
+        tracing::warn!("workflow.sandbox is on but no sandbox backend is available — agents run unsandboxed");
     }
     let fallbacks = effective_fallbacks(config);
     let default = build_failover(

@@ -236,8 +236,9 @@ pub struct WorkflowConfig {
     #[serde(default = "default_true")]
     pub tdd: bool,
     /// Sandbox agent CLIs: confine their file WRITES to the project workspace
-    /// and tool caches (macOS Seatbelt today; other platforms run unsandboxed
-    /// with a warning). Off by default — turn on for untrusted codebases.
+    /// and tool caches (macOS via Seatbelt, Linux via Bubblewrap when `bwrap`
+    /// is on `PATH`; platforms without a backend run unsandboxed with a
+    /// warning). Off by default — turn on for untrusted codebases.
     #[serde(default)]
     pub sandbox: bool,
     /// Hybrid-team knobs: which lifecycle moves wait for a person, and where
