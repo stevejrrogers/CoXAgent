@@ -959,7 +959,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 Err(e) => report.errors.push(format!("DEV-BUG: {e}")),
             }
         }
-        let bugs_first = self.store.load().await.is_ok_and(|s| s.tuning.bugs_first);
+        // The bugs-first brake gives bugs the dev SLOT — it must never starve
+        // the slot outright. With every bug parked/held the bug pass claims
+        // nothing, and an unconditional brake deadlocked BOTH lanes for 50+
+        // cycles (features locked "for bugs", no bug workable). The brake only
+        // holds when this cycle actually spent its slot on a bug.
+        let bugs_first = self.store.load().await.is_ok_and(|s| s.tuning.bugs_first)
+            && report.bug_fixed.is_some();
         if bugs_first {
             report
                 .errors
