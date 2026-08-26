@@ -675,6 +675,27 @@ pub struct GitConfig {
     /// with an internally-minted token, so no forge secret lives in config.
     #[serde(default)]
     pub server_url: String,
+    /// How many consecutive times the SA reviewer may silently fail to render
+    /// a verdict on a PR (engine crash / unparseable JSON) before the runner
+    /// surfaces it to a human instead of letting the PR starve undistributed.
+    /// Default 4. 0 = never surface the skip (old behaviour).
+    #[serde(default = "default_review_max_skips")]
+    pub review_max_skips: u32,
+    /// How long (hours) a mergeable CLEAN PR may sit open with NO review
+    /// verdict before the runner stops waiting for the SA and verifies +
+    /// merges it itself (an anti-starvation deadline, only when `auto_merge`
+    /// is on). It still passes `verify_merged_result` and the size/human-eyes
+    /// gates before landing. 0 = disabled (never auto-land a never-reviewed PR).
+    #[serde(default = "default_review_deadline_hours")]
+    pub review_deadline_hours: u32,
+}
+
+fn default_review_max_skips() -> u32 {
+    4
+}
+
+fn default_review_deadline_hours() -> u32 {
+    12
 }
 
 fn default_true() -> bool {
@@ -710,6 +731,8 @@ impl Default for GitConfig {
             max_open_prs: default_max_open_prs(),
             max_changed_lines: default_max_changed_lines(),
             server_url: String::new(),
+            review_max_skips: default_review_max_skips(),
+            review_deadline_hours: default_review_deadline_hours(),
         }
     }
 }
