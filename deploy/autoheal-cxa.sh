@@ -28,10 +28,6 @@ check() {
   fi
   return 0
 }
-    return 1
-  fi
-  return 0
-}
 
 log "autoheal watchdog started (pid $$)"
 
@@ -51,6 +47,8 @@ while true; do
       else
         log "ERROR: compose up failed — will retry"
       fi
+    else
+      log "ERROR: could not load env — will retry"
     fi
     # give the stack time to come back after a restart
     sleep 30
