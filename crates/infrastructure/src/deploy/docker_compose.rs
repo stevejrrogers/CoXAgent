@@ -9,6 +9,10 @@ use std::path::Path;
 use std::time::Duration;
 use tokio::process::Command;
 
+// Deploy may tear down only what [`reclaimable_compose_project`] allows — see
+// that shared policy for why port-eviction must never touch the live hub.
+use super::reclaimable::reclaimable_compose_project;
+
 const COMPOSE_FILES: &[&str] = &[
     "docker-compose.yml",
     "docker-compose.yaml",
@@ -589,11 +593,6 @@ async fn compose_project_on_port(port: &str) -> Option<String> {
     let name = String::from_utf8_lossy(&out.stdout).trim().to_owned();
     (!name.is_empty()).then_some(name)
 }
-
-// Port-eviction uses the single shared reclaimability policy from this crate,
-// so it can never drift from what the docker janitor considers safe to tear
-// down: both refuse to touch the live hub or shared infra.
-use super::reclaimable::reclaimable_compose_project;
 
 /// Clamp every container of this compose project to a CPU/memory budget via
 /// `docker update`, regardless of what the agent-authored compose file says —
@@ -1294,6 +1293,8 @@ mod tests {
     /// The deploy port-eviction decision routes through the single shared
     /// reclaimability policy (`crate::deploy::reclaimable`), whose own unit
     /// tests own the full blast-radius matrix — live hub, shared infra,
+    /// case-insensitivity and foreign projects.
+
     /// Regression guard for CXA-B010 + CXA-B017: every site that runs compose
     /// against this repo's secret-bearing docker-compose.yml must seed
     /// PG_PASSWORD and COXAGENT_ADMIN_PASSWORD with valid, non-blank values. If

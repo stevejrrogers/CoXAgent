@@ -217,6 +217,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 for (role, cost) in std::mem::take(&mut m.metered_cost_by_role) {
                     *state.spend.metered_cost_by_role.entry(role).or_default() += cost;
                 }
+                for (role, chars) in std::mem::take(&mut m.prompt_chars_by_role) {
+                    *state.spend.prompt_chars_by_role.entry(role).or_default() += chars;
+                }
                 // Live engine per role (last-wins), plus the operator that ran it
                 // — so each agent card can name its real engine and its user.
                 for (role, eng) in std::mem::take(&mut m.engine_by_role) {

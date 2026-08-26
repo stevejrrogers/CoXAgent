@@ -817,6 +817,7 @@ pub async fn serve_full(
         .route(
             "/api/projects/:pid/ticket/:id/attachments",
             post(upload_attachment_ep)
+                .delete(delete_attachment_ep)
                 .layer(axum::extract::DefaultBodyLimit::max(25 * 1024 * 1024)),
         )
         .route("/api/projects/:pid/ticket/:id/ready", post(human_ready_ep))
@@ -1114,6 +1115,8 @@ fn internal_error(msg: &str) -> axum::response::Response {
 
 #[cfg(test)]
 mod avatar_media_security_tests;
+#[cfg(test)]
+mod cors_rate_limit_tests;
 #[cfg(test)]
 mod pr_preview_tests;
 #[cfg(test)]

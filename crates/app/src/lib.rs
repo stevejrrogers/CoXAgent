@@ -11,7 +11,7 @@ mod shutdown;
 use coxagent_application::config::{
     Config, DeployConfig, GitConfig, PolicyConfig, ReleasesConfig, WorkflowConfig,
 };
-use coxagent_application::ports::outbound::StateStorePort;
+use coxagent_application::ports::outbound::{SandboxStatus, StateStorePort};
 use coxagent_application::use_cases::{RecoverUseCase, RunBaUseCase, RunCycleUseCase};
 use coxagent_application::Spend;
 use coxagent_infrastructure::engine::{
@@ -102,6 +102,7 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
             Ok(render_report(&state))
         }
         Command::Discover => Ok(render_discovery()),
+        Command::Probe { hub, project } => run_probe(&hub, &project).await,
         Command::Onboard {
             name,
             alias,
@@ -902,8 +903,13 @@ fn build_engine(
     logs_dir: PathBuf,
     mcp: Option<&coxagent_infrastructure::engine::McpAccess>,
 ) -> Result<BuiltEngine, Box<dyn std::error::Error>> {
-    if config.workflow.sandbox && !cfg!(target_os = "macos") {
-        tracing::warn!("workflow.sandbox is on but this platform has no sandbox backend yet — agents run unsandboxed");
+    if config.workflow.sandbox
+        && matches!(
+            coxagent_infrastructure::proc::sandbox_status(true),
+            SandboxStatus::Unavailable(_) | SandboxStatus::Denied(_)
+        )
+    {
+        tracing::warn!("workflow.sandbox is on but no sandbox backend is available — agents run unsandboxed");
     }
     let fallbacks = effective_fallbacks(config);
     let default = build_failover(
@@ -1465,6 +1471,50 @@ fn record_compression(before: usize, after: usize) {
         // and wrecked the stats. O_APPEND + a single small write is atomic.
         let _ = f.write_all(format!("{before} {after}\n").as_bytes());
     }
+}
+
+/// One-shot engine discovery + report for a machine that has agent CLIs on
+/// PATH (the dashboard host itself may not). Detects local engines and sends
+/// them through the hub's /store heartbeat so `/api/engines` populates without
+/// waiting for a full runner cycle.
+async fn run_probe(hub: &str, project: &str) -> Result<String, Box<dyn std::error::Error>> {
+    use crate::builders::{detected_engines, operator_token_path};
+    let caps = coxagent_application::ports::outbound::WorkerCaps {
+        engines: detected_engines().into_iter().map(|(n, _)| n).collect(),
+        ..Default::default()
+    };
+    if caps.engines.is_empty() {
+        return Ok("No agent engines detected on PATH.\n".to_owned());
+    }
+    let token = match std::env::var("COXAGENT_REMOTE_TOKEN") {
+        Ok(v) if !v.trim().is_empty() => Some(v.trim().to_owned()),
+        _ => match operator_token_path() {
+            Some(path) => std::fs::read_to_string(path)
+                .ok()
+                .map(|text| text.trim().to_owned())
+                .filter(|t| !t.is_empty()),
+            None => None,
+        },
+    };
+    let cfg = RestConfig {
+        base_url: hub.trim_end_matches('/').to_owned(),
+        project_id: project.to_owned(),
+        token,
+    };
+    let store = RestStateStore::new(cfg)?;
+    let worker = ["HOSTNAME", "HOST"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok())
+        .unwrap_or_else(|| "probe".to_owned());
+    let now = coxagent_application::state::now_rfc3339();
+    store
+        .heartbeat_worker(&worker, "probe", "", &caps, &now)
+        .await?;
+    Ok(format!(
+        "Detected {} engine(s) and reported them to {hub}: {}",
+        caps.engines.len(),
+        caps.engines.join(", ")
+    ))
 }
 
 fn render_discovery() -> String {
