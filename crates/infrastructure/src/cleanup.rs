@@ -25,9 +25,33 @@ impl coxagent_application::ports::outbound::ProcessJanitorPort for OsProcessJani
     fn kill_orphaned_drivers(&self, work_dir: &Path) {
         kill_orphaned_drivers(work_dir);
     }
+
+    fn purge_target_cache(&self, work_dir: &Path) {
+        purge_target_cache(work_dir);
+    }
+}
+
+/// Best-effort removal of a build cache directory. Scoped to exactly
+/// `work_dir/target`, never touches anything else, and is never fatal —
+/// a cache we cannot remove just costs the next rebuild, not correctness.
+pub fn purge_target_cache(work_dir: &Path) {
+    let target = work_dir.join("target");
+    if !target.exists() {
+        return; // nothing cached — nothing to do
+    }
+    let _ = std::fs::remove_dir_all(&target);
 }
 
 static ORPHAN_PATTERNS: &[&str] = &["tl_driver", "cargo test", "pytest", "go test", "npm test"];
+
+/// Agent engine CLIs whose command line names the workspace (`--dir`/
+/// `--add-dir`). A running hub restart does NOT take its in-flight engine
+/// children with it — they reparent to PID 1 and keep editing the codebase
+/// while the new hub claims the same tickets, so two agents trample one
+/// working tree. Reparenting IS the proof of orphanhood, so these are killed
+/// on `ppid == 1` alone (no age gate): a sibling operator's live engine still
+/// has its living parent and is never touched.
+static ENGINE_PATTERNS: &[&str] = &["opencode", "copilot"];
 
 pub fn kill_orphaned_drivers(work_dir: &Path) {
     let Some(scope) = work_dir.to_str().filter(|s| !s.trim().is_empty()) else {
@@ -37,6 +61,43 @@ pub fn kill_orphaned_drivers(work_dir: &Path) {
     for pattern in ORPHAN_PATTERNS {
         let _ = kill_by_pattern(pattern, scope, &my_pid);
     }
+    for pattern in ENGINE_PATTERNS {
+        let _ = kill_reparented_engines(pattern, scope, &my_pid);
+    }
+}
+
+/// Kill engine processes matching `pattern` whose command line mentions the
+/// workspace AND whose parent is PID 1 — i.e. their spawning runner is gone.
+fn kill_reparented_engines(pattern: &str, scope: &str, my_pid: &str) -> Result<(), std::io::Error> {
+    let output = Command::new("pgrep").arg("-fl").arg(pattern).output()?;
+    if !output.status.success() {
+        return Ok(());
+    }
+    for pid in select_pids(&String::from_utf8_lossy(&output.stdout), scope) {
+        if pid == my_pid {
+            continue;
+        }
+        let Ok(pid_num) = pid.parse::<i32>() else {
+            continue;
+        };
+        if pid_num < 100 || !is_reparented(pid_num) {
+            continue;
+        }
+        let _ = Command::new("kill").arg(&pid).output();
+    }
+    Ok(())
+}
+
+/// Whether `pid`'s parent is PID 1 (launchd/init) — the spawner died. Unknown
+/// = NOT reparented (never kill on uncertainty).
+fn is_reparented(pid: i32) -> bool {
+    let Ok(out) = Command::new("ps")
+        .args(["-o", "ppid=", "-p", &pid.to_string()])
+        .output()
+    else {
+        return false;
+    };
+    String::from_utf8_lossy(&out.stdout).trim() == "1"
 }
 
 /// Kill processes matching `pattern` whose full command line ALSO mentions
@@ -122,7 +183,7 @@ fn select_pids(pgrep_output: &str, scope: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::select_pids;
+    use super::{purge_target_cache, select_pids};
 
     #[test]
     fn only_kills_processes_inside_the_workspace() {
@@ -156,5 +217,34 @@ mod tests {
     fn ignores_malformed_lines() {
         assert!(select_pids("garbage\n\n", "/srv/p").is_empty());
         assert!(select_pids("abc cargo test /srv/p", "/srv/p").is_empty());
+    }
+
+    #[test]
+    fn purge_target_removes_only_the_build_cache() {
+        let tmp = std::env::temp_dir().join(format!("cxa-purge-test-{}", std::process::id()));
+        let target = tmp.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("artifacts.bin"), b"cache").unwrap();
+        std::fs::write(tmp.join("source.rs"), b"let code = 1;").unwrap();
+
+        purge_target_cache(&tmp);
+
+        assert!(!target.exists(), "target must be purged");
+        assert!(
+            tmp.join("source.rs").exists(),
+            "non-cache source files must survive"
+        );
+        // Second call on an already-clean dir is a no-op, never a panic.
+        purge_target_cache(&tmp);
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn purge_target_is_a_noop_when_nothing_cached() {
+        let tmp = std::env::temp_dir().join(format!("cxa-purge-null-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        purge_target_cache(&tmp); // no `target` subdir — must not error
+        assert!(tmp.exists());
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }

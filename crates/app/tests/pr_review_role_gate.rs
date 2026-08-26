@@ -5,7 +5,7 @@
 //! `/api/projects/:pid/prs/:num/:action` (merge, request-changes, close,
 //! preview, preview-stop, force-merge). `can_review()` used to be
 //! `can_write() || Reviewer`, i.e. "any role except Viewer" — mathematically
-//! identical to the ordinary write gate, so a member-tier user (BA/FE/BE/…)
+//! identical to the ordinary write gate, so a member-tier user (BA/PO/QA/SM)
 //! could force-merge a PR (bypassing CI per the `require_ci` feature) or spin
 //! up a preview deploy. `can_review()` now grants review rights to the
 //! developer roles and the SA too (COX-roles gate map), so the non-review
@@ -194,14 +194,15 @@ const ACTIONS: [&str; 6] = [
 async fn pr_actions_are_reviewer_only_not_open_to_every_writer() {
     let _dir = boot().await;
 
-    // Non-review member tier: `can_write()` is true for all of them, which is
-    // why every one of these used to succeed. Per the team's gate map
-    // (COX-roles), PR review belongs to developers and the SA, not BA/PO/SM/QA.
+    // The non-dev member tier can write but must not sign off a PR: BA, PO, QA
+    // and SM review nothing (per the gate map), and Viewer is read-only
+    // entirely. `can_write()` was once true for all of them except Viewer —
+    // which is exactly why every one of these used to get through.
     for role in [
         AuthRole::Ba,
         AuthRole::Po,
-        AuthRole::Sm,
         AuthRole::Qa,
+        AuthRole::Sm,
         AuthRole::Viewer,
     ] {
         for action in ACTIONS {
@@ -251,3 +252,4 @@ async fn pr_actions_are_reviewer_only_not_open_to_every_writer() {
         }
     }
 }
+

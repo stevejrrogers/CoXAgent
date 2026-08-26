@@ -48,4 +48,22 @@ impl<E: AgentEnginePort> AgentEnginePort for RoutingEngine<E> {
         let engine = self.per_role.get(&request.role).unwrap_or(&self.default);
         engine.run(request).await
     }
+
+    /// Route the resume to the SAME per-role engine that ran (and so minted the
+    /// session id). Without this the trait default fired and every resume — the
+    /// two-phase plan/execute pass, the repair pass — silently fell back to a
+    /// cold run, defeating the whole point of keeping the session.
+    async fn resume_run(
+        &self,
+        role: Role,
+        session_id: &str,
+        follow_up: &str,
+        work_dir: &std::path::Path,
+        timeout: std::time::Duration,
+    ) -> Result<AgentOutcome, PortError> {
+        let engine = self.per_role.get(&role).unwrap_or(&self.default);
+        engine
+            .resume_run(role, session_id, follow_up, work_dir, timeout)
+            .await
+    }
 }

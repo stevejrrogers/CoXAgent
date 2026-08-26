@@ -97,6 +97,26 @@ pub struct EngineMapping {
     pub escalation: Vec<String>,
 }
 
+impl Default for EngineMapping {
+    /// Claude/sonnet with auto-failover on — the mapping a project gets when it
+    /// says nothing about engines. Named here rather than only inside
+    /// [`Config::default`] so `engine` can be `#[serde(default)]`: an omitted
+    /// section is a config that predates the field, not an unrepresentable
+    /// value, and must not fail the whole document's load (COX-B043).
+    fn default() -> Self {
+        Self {
+            default: EngineChoice {
+                engine: EngineKind::Claude,
+                model: "sonnet".to_owned(),
+            },
+            per_role: HashMap::new(),
+            fallbacks: Vec::new(),
+            auto_fallback: true,
+            escalation: Vec::new(),
+        }
+    }
+}
+
 impl EngineMapping {
     /// Resolve the effective choice for a role (override, else default).
     #[must_use]
@@ -112,6 +132,18 @@ pub enum Mode {
     #[default]
     Kanban,
     Scrum,
+}
+
+/// What a scrum sprint window is measured in — wall-clock days (default) or
+/// loop cycles. Cycles shrink and stretch with the workload (90 s idle, 30+ min
+/// mid-build), so day-based sprints are what most teams mean by "a sprint";
+/// cycle-based stays available for cadence experiments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SprintUnit {
+    #[default]
+    Days,
+    Cycles,
 }
 
 /// The language the team's Scrum ceremonies and feed posts speak. Code, tickets
@@ -166,9 +198,17 @@ pub struct WorkflowConfig {
     /// Delivery mode (kanban = continuous, scrum = sprint windows).
     #[serde(default)]
     pub mode: Mode,
-    /// Cycles per sprint in scrum mode.
+    /// Cycles per sprint in scrum mode (used when `sprint_unit` is `cycles`).
     #[serde(default = "default_sprint_len")]
     pub sprint_length_cycles: u64,
+    /// What a sprint window is measured in. `days` (the default) rolls on wall
+    /// clock — a sprint is a real day/week regardless of how fast cycles spin;
+    /// `cycles` restores the pure cycle counter for teams that want it.
+    #[serde(default)]
+    pub sprint_unit: SprintUnit,
+    /// Days per sprint when `sprint_unit` is `days`.
+    #[serde(default = "default_sprint_days")]
+    pub sprint_length_days: u64,
     /// Ops/SRE monitor (default on): after a deploy, the leader pings the app on
     /// its published port each cycle and files a high-priority bug + alerts the
     /// chat if it went down — so the team also runs what it ships.
@@ -196,8 +236,9 @@ pub struct WorkflowConfig {
     #[serde(default = "default_true")]
     pub tdd: bool,
     /// Sandbox agent CLIs: confine their file WRITES to the project workspace
-    /// and tool caches (macOS Seatbelt today; other platforms run unsandboxed
-    /// with a warning). Off by default — turn on for untrusted codebases.
+    /// and tool caches (macOS via Seatbelt, Linux via Bubblewrap when `bwrap`
+    /// is on `PATH`; platforms without a backend run unsandboxed with a
+    /// warning). Off by default — turn on for untrusted codebases.
     #[serde(default)]
     pub sandbox: bool,
     /// Hybrid-team knobs: which lifecycle moves wait for a person, and where
@@ -213,6 +254,84 @@ pub struct WorkflowConfig {
     /// linked back so no work is lost). 0 = default (2).
     #[serde(default)]
     pub pr_stale_days: u64,
+    /// Per-phase cadence knobs (docs budget, debt sweep, architecture audit).
+    #[serde(default)]
+    pub cadence: CadenceConfig,
+    /// Quiet window `"HH:MM-HH:MM"` in UTC during which NO new engine calls
+    /// start — overnight quota walls and sleeping laptops make those hours the
+    /// most failure-prone and least supervised. (UTC because the hub has no
+    /// reliable local-timezone source; VN 02:00–07:00 = `"19:00-00:00"`.)
+    /// Urgent work is the exception: an open high-priority bug still runs.
+    /// Empty = no window.
+    #[serde(default)]
+    pub quiet_hours_utc: String,
+}
+
+/// How often the periodic phases run. Zeros mean "use the built-in default" so
+/// an absent config block changes nothing.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CadenceConfig {
+    /// Wiki refresh budget per UTC day (0 = default 5).
+    pub docs_refreshes_per_day: u32,
+    /// File a tech-debt sweep chore every N cycles (0 = default 10).
+    pub debt_sweep_every_cycles: u64,
+    /// SA architecture + docs audit every N sprints (0 = default 8).
+    pub arch_review_every_sprints: u32,
+}
+
+impl CadenceConfig {
+    #[must_use]
+    pub fn docs_refreshes_per_day(&self) -> u32 {
+        if self.docs_refreshes_per_day == 0 {
+            5
+        } else {
+            self.docs_refreshes_per_day
+        }
+    }
+    #[must_use]
+    pub fn debt_sweep_every_cycles(&self) -> u64 {
+        if self.debt_sweep_every_cycles == 0 {
+            10
+        } else {
+            self.debt_sweep_every_cycles
+        }
+    }
+    #[must_use]
+    pub fn arch_review_every_sprints(&self) -> u32 {
+        if self.arch_review_every_sprints == 0 {
+            8
+        } else {
+            self.arch_review_every_sprints
+        }
+    }
+}
+
+/// Whether local wall-clock `now` (minutes since midnight) falls inside the
+/// `"HH:MM-HH:MM"` window; supports windows that wrap midnight ("22:00-06:00").
+/// Malformed windows are treated as no window — quiet hours must never be able
+/// to halt a team by typo.
+#[must_use]
+pub fn in_quiet_window(window: &str, now_minutes: u32) -> bool {
+    let Some((a, b)) = window.trim().split_once('-') else {
+        return false;
+    };
+    let parse = |s: &str| -> Option<u32> {
+        let (h, m) = s.trim().split_once(':')?;
+        let (h, m): (u32, u32) = (h.parse().ok()?, m.parse().ok()?);
+        (h < 24 && m < 60).then_some(h * 60 + m)
+    };
+    let (Some(start), Some(end)) = (parse(a), parse(b)) else {
+        return false;
+    };
+    if start == end {
+        return false; // zero-length window means "off", not "always"
+    }
+    if start < end {
+        (start..end).contains(&now_minutes)
+    } else {
+        now_minutes >= start || now_minutes < end
+    }
 }
 
 /// Human-in-the-loop configuration (see docs/HYBRID_TEAM.md).
@@ -304,8 +423,16 @@ fn default_max_open_prs() -> u32 {
     4
 }
 
+fn default_max_changed_lines() -> usize {
+    3000
+}
+
 fn default_sprint_len() -> u64 {
     10
+}
+
+fn default_sprint_days() -> u64 {
+    1
 }
 
 fn default_concurrency() -> u32 {
@@ -337,6 +464,8 @@ impl Default for WorkflowConfig {
             budget_usd: None,
             mode: Mode::Kanban,
             sprint_length_cycles: default_sprint_len(),
+            sprint_unit: SprintUnit::default(),
+            sprint_length_days: default_sprint_days(),
             webhook_url: None,
             token_saver: true,
             language: Language::En,
@@ -346,6 +475,8 @@ impl Default for WorkflowConfig {
             human: HumanConfig::default(),
             backlog_cap: 0,
             pr_stale_days: 0,
+            cadence: CadenceConfig::default(),
+            quiet_hours_utc: String::new(),
         }
     }
 }
@@ -408,6 +539,14 @@ pub struct DeployConfig {
     /// the live hub serves.
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Self-upgrade (dogfood CD): the hub periodically runs
+    /// `deploy/self-upgrade.sh`, which builds origin/<default_branch> in a
+    /// detached worktree, swaps its OWN binary (backup kept), restarts, and
+    /// rolls back if the new hub fails its health check. The script is a
+    /// detached process so a dying hub cannot orphan its own rescue. Opt-in
+    /// (default off) — only meaningful when the hub manages its own repo.
+    #[serde(default)]
+    pub self_upgrade: bool,
     /// Auto-redeploy the last known-good version when `deploy()` or a
     /// post-deploy `run_tests()` fails, so the shared environment self-heals
     /// instead of staying broken until a DEV agent picks up the bug ticket.
@@ -449,6 +588,7 @@ impl Default for DeployConfig {
         Self {
             host_port: None,
             enabled: true,
+            self_upgrade: false,
             auto_rollback: false,
             max_rollback_age_secs: default_max_rollback_age_secs(),
             migration_detection_paths: default_migration_detection_paths(),
@@ -524,6 +664,11 @@ pub struct GitConfig {
     /// the brake that prevents cascade merge conflicts. 0 = unlimited.
     #[serde(default = "default_max_open_prs")]
     pub max_open_prs: u32,
+    /// Largest diff (changed lines) the SA will auto-merge without a human.
+    /// A change larger than this is approved but held for a human to land.
+    /// 0 = no size bound (never hold for size alone). Default 3000.
+    #[serde(default = "default_max_changed_lines")]
+    pub max_changed_lines: usize,
     /// Absolute URL of the hub the runner reports PR/review activity to, e.g.
     /// `http://localhost:4000`. Empty = the runner uses the loopback URL on
     /// `deploy.host_port` (the same hub it serves). The runner authenticates
@@ -563,6 +708,7 @@ impl Default for GitConfig {
             auto_merge: false,
             require_ci: true,
             max_open_prs: default_max_open_prs(),
+            max_changed_lines: default_max_changed_lines(),
             server_url: String::new(),
         }
     }
@@ -579,11 +725,67 @@ pub struct ReleasesConfig {
     /// no matter how many milestones have been reached.
     #[serde(default)]
     pub enabled: bool,
+    /// Cadence of the automated release cut (days between cuts; 0 = off).
+    /// Every cut scans conventional commits since the last `v*` tag, decides
+    /// the bump (feat → minor, else patch; major is a human call), and opens
+    /// a release PR that a person lands from the Inbox. The merge tags it.
+    #[serde(default)]
+    pub cut_every_days: u64,
+}
+
+/// Version of the persisted `coxagent.json` schema this build understands.
+///
+/// A document carrying a `schema_version` HIGHER than this is written by a
+/// future build: load refuses it rather than accepting a shape it cannot
+/// represent or defaulting it away (the same fail-closed posture state.json
+/// already has via `SCHEMA_VERSION` / `parse_checked`). Documents that omit
+/// `schema_version` predate the anchor and load as prior-version state.
+pub const CONFIG_SCHEMA_VERSION: u32 = 1;
+
+/// Gap-detection coverage policy. `enabled` switches the coverage gate on/off;
+/// `threshold` is the minimum gap-free depth (in cycles) a codebase must hold
+/// before the pass stops flagging it — the knob the dashboard edits.
+///
+/// COX-B043: defaults are set by an EXPLICIT container `Default`
+/// (`enabled = true, threshold = 3`), never Rust's derived zero-value, so an
+/// unset knob is *documented-and-true*, not silently `{false, 0}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CoverageConfig {
+    #[serde(default = "default_coverage_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_coverage_threshold")]
+    pub threshold: u32,
+}
+
+fn default_coverage_enabled() -> bool {
+    true
+}
+
+fn default_coverage_threshold() -> u32 {
+    3
+}
+
+impl Default for CoverageConfig {
+    fn default() -> Self {
+        CoverageConfig {
+            enabled: default_coverage_enabled(),
+            threshold: default_coverage_threshold(),
+        }
+    }
 }
 
 /// Top-level configuration persisted as `coxagent.json`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// EVERY section is `#[serde(default)]`, so a document written by an older
+/// version — or by hand, mentioning only the sections it cares about — still
+/// loads with defaults for what it omits. Only a value the schema cannot
+/// represent fails the load (COX-B043): an absent section is not a corrupt
+/// config, and must not be the reason a project's governance policy is
+/// discarded along with it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Config {
+    /// Which engine and model each role runs on.
+    #[serde(default)]
     pub engine: EngineMapping,
     /// Version-control / forge integration settings.
     #[serde(default)]
@@ -602,34 +804,46 @@ pub struct Config {
     /// Release pipeline settings (automated tag + Release chore per milestone).
     #[serde(default)]
     pub releases: ReleasesConfig,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            engine: EngineMapping {
-                default: EngineChoice {
-                    engine: EngineKind::Claude,
-                    model: "sonnet".to_owned(),
-                },
-                per_role: HashMap::new(),
-                fallbacks: Vec::new(),
-                auto_fallback: true,
-                escalation: Vec::new(),
-            },
-            git: GitConfig::default(),
-            workflow: WorkflowConfig::default(),
-            architecture: Vec::new(),
-            policy: PolicyConfig::default(),
-            deploy: DeployConfig::default(),
-            releases: ReleasesConfig::default(),
-        }
-    }
+    /// Gap-detection coverage policy (enabled state + threshold).
+    #[serde(default)]
+    pub coverage: CoverageConfig,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quiet_window_handles_wrap_zero_and_garbage() {
+        // Plain window.
+        assert!(in_quiet_window("02:00-07:00", 3 * 60));
+        assert!(!in_quiet_window("02:00-07:00", 8 * 60));
+        // Wraps midnight (VN overnight in UTC).
+        assert!(in_quiet_window("19:00-00:00", 20 * 60));
+        assert!(in_quiet_window("22:00-06:00", 60));
+        assert!(!in_quiet_window("22:00-06:00", 12 * 60));
+        // Zero-length = off; garbage = off (a typo must never halt the team).
+        assert!(!in_quiet_window("07:00-07:00", 7 * 60));
+        assert!(!in_quiet_window("bogus", 0));
+        assert!(!in_quiet_window("25:00-26:00", 0));
+        assert!(!in_quiet_window("", 0));
+    }
+
+    #[test]
+    fn cadence_zeros_mean_defaults() {
+        let c = CadenceConfig::default();
+        assert_eq!(c.docs_refreshes_per_day(), 5);
+        assert_eq!(c.debt_sweep_every_cycles(), 10);
+        assert_eq!(c.arch_review_every_sprints(), 8);
+        let c = CadenceConfig {
+            docs_refreshes_per_day: 2,
+            debt_sweep_every_cycles: 50,
+            arch_review_every_sprints: 3,
+        };
+        assert_eq!(c.docs_refreshes_per_day(), 2);
+        assert_eq!(c.debt_sweep_every_cycles(), 50);
+        assert_eq!(c.arch_review_every_sprints(), 3);
+    }
 
     #[test]
     fn resolve_prefers_per_role_override() {
@@ -651,5 +865,33 @@ mod tests {
         let json = serde_json::to_string(&cfg).expect("serialize");
         let back: Config = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(cfg, back);
+    }
+
+    /// The engine mapping a project gets when it configures none: an
+    /// unconfigured project must still have a usable engine, and auto-failover
+    /// on, exactly as the hand-written `Config::default` used to spell out.
+    #[test]
+    fn the_default_engine_mapping_is_claude_sonnet_with_failover_on() {
+        let m = EngineMapping::default();
+
+        assert_eq!(m.default.engine, EngineKind::Claude);
+        assert_eq!(m.default.model, "sonnet");
+        assert!(m.auto_fallback);
+        assert!(m.per_role.is_empty());
+        assert!(m.fallbacks.is_empty());
+        assert!(m.escalation.is_empty());
+    }
+
+    /// COX-B043: an omitted section is a config that predates the field, not a
+    /// corrupt one. `engine` was the last section without `#[serde(default)]`,
+    /// so a hand-written document that never mentions engines used to fail the
+    /// whole parse — taking the policy it DID declare down with it.
+    #[test]
+    fn a_document_that_omits_the_engine_section_keeps_the_policy_it_declares() {
+        let cfg: Config = serde_json::from_str(r#"{"policy":{"forbidden_paths":["infra/"]}}"#)
+            .expect("an omitted section is not a corrupt config");
+
+        assert_eq!(cfg.policy.forbidden_paths, ["infra/"]);
+        assert_eq!(cfg.engine.default.model, "sonnet");
     }
 }

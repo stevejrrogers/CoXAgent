@@ -10,47 +10,13 @@ use coxagent_application::ports::outbound::{
     AgentEnginePort, AgentOutcome, AgentRequest, SandboxStatus, Usage,
 };
 use coxagent_application::PortError;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 
-/// The live-log file for a run: `<workspace>/logs/live/<role>.log`, derived from
-/// the codebase work-dir (`<workspace>/codebase`). Streamed to during the run so
-/// the UI can tail it live. When a per-run [`AgentRequest::label`] is present it
-/// lands between role and operator so runs are chaseable per ticket:
-/// `<role>__<label>__<operator>.log`.
-fn live_path(work_dir: &Path, role: &str, label: Option<&str>) -> Option<PathBuf> {
-    let dir = work_dir.parent()?.join("logs").join("live");
-    std::fs::create_dir_all(&dir).ok()?;
-    // Key the file by operator when this process runs as a named headless worker
-    // (COXAGENT_OPERATOR), so two operators working the same role don't clobber
-    // each other's live log and each can be tailed separately in the dashboard.
-    let label_part = label
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map_or_else(String::new, |l| format!("__{l}"));
-    let suffix = std::env::var("COXAGENT_OPERATOR")
-        .ok()
-        .map(|o| {
-            o.chars()
-                .filter(char::is_ascii_alphanumeric)
-                .collect::<String>()
-        })
-        .filter(|s| !s.is_empty())
-        .map_or_else(String::new, |s| format!("__{s}"));
-    Some(dir.join(format!("{role}{label_part}{suffix}.log")))
-}
-
-fn append_live(path: &Path, line: &str) {
-    use std::io::Write as _;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        let _ = writeln!(f, "{}", line.trim_end());
-    }
-}
+// Shared with every streaming engine so all live logs land where the
+// dashboard reads them (including the per-slot-worktree hop) — see engine::live.
+use crate::engine::live::{append_live, live_path};
 
 /// Adapter over the `claude` binary for one model selection.
 pub struct ClaudeEngine {
@@ -260,6 +226,7 @@ impl AgentEnginePort for ClaudeEngine {
 
     async fn resume_run(
         &self,
+        _role: coxagent_domain::Role,
         session_id: &str,
         follow_up: &str,
         work_dir: &std::path::Path,
@@ -307,7 +274,11 @@ impl ClaudeEngine {
         }
         cmd.stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        let mut child = crate::proc::spawn_confined(&mut cmd, sandbox)
+        // The status comes BACK from the spawn: a host whose Seatbelt refused
+        // the profile on every attempt downgrades it to `Denied`, so the
+        // outcome reports a run that never happened instead of a confined one
+        // (COX-B016).
+        let (mut child, sandbox) = crate::proc::spawn_confined(&mut cmd, sandbox)
             .await
             .map_err(|e| PortError::Backend(format!("spawn claude: {e}")))?;
         let out = child
@@ -380,6 +351,7 @@ impl ClaudeEngine {
             trace,
             session_id: extract_session(&raw),
             sandbox,
+            engine: "claude".to_owned(),
         })
     }
 }
@@ -662,15 +634,19 @@ mod tests {
     #[test]
     fn tool_result_summary_reads_as_an_outcome_not_a_byte_count() {
         assert_eq!(
-            summarize_tool_result("   Compiling…\ntest result: ok. 220 passed; 0 failed; 0 ignored"),
+            summarize_tool_result(
+                "   Compiling…\ntest result: ok. 220 passed; 0 failed; 0 ignored"
+            ),
             "✓ 220 passed"
         );
         assert_eq!(
             summarize_tool_result("test result: FAILED. 2 passed; 1 failed; 0 ignored"),
             "✗ 1 failed"
         );
-        assert!(summarize_tool_result("error[E0433]: cannot find `x`\nerror: aborting")
-            .starts_with("✗ 2 error"));
+        assert!(
+            summarize_tool_result("error[E0433]: cannot find `x`\nerror: aborting")
+                .starts_with("✗ 2 error")
+        );
         // A source dump full of `.map_err`/`Error` must NOT read as failures.
         assert_eq!(
             summarize_tool_result("fn f() -> Result<(), Error> { x.map_err(|e| e)?; Ok(()) }"),
@@ -678,9 +654,15 @@ mod tests {
         );
         // A git fatal is shown as itself.
         assert!(summarize_tool_result("fatal: path 'x.rs' does not exist").starts_with("✗ fatal:"));
-        assert_eq!(summarize_tool_result("warning: unused variable `y`"), "⚠ 1 warning");
+        assert_eq!(
+            summarize_tool_result("warning: unused variable `y`"),
+            "⚠ 1 warning"
+        );
         assert_eq!(summarize_tool_result("a\nb\nc"), "3 lines");
-        assert_eq!(summarize_tool_result("crates/app/src/lib.rs:42"), "crates/app/src/lib.rs:42");
+        assert_eq!(
+            summarize_tool_result("crates/app/src/lib.rs:42"),
+            "crates/app/src/lib.rs:42"
+        );
         assert_eq!(summarize_tool_result("   "), "done (no output)");
     }
 
@@ -785,7 +767,11 @@ mod tests {
                 system_prompt: "sys".to_owned(),
                 task_prompt: "task".to_owned(),
                 work_dir: dir.clone(),
-                timeout: std::time::Duration::from_secs(10),
+                // Generous on purpose (CXA-B041): this spawns a real child via
+                // the production path, and a one-line echo can still outlast a
+                // tight wall-clock budget when CI is heavily loaded. The test
+                // asserts argv/env plumbing only — latency is irrelevant.
+                timeout: std::time::Duration::from_secs(120),
                 escalation_level: 0,
                 label: None,
             })

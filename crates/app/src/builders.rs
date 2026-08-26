@@ -1,7 +1,8 @@
 // Part of the composition root split by concern — see lib.rs.
 #![allow(clippy::wildcard_imports)]
 //! Wiring: everything that turns config into live adapters — stores, auth,
-//! engines, storage, MCP access, and the config self-healing.
+//! engines, storage, MCP access. Config loading/self-heal lives in
+//! `config_load.rs`.
 
 use super::*;
 
@@ -83,8 +84,6 @@ pub(crate) async fn make_store(
     }
 }
 
-/// Load `coxagent.json` from the workspace root (parent of the state dir), or
-/// fall back to defaults. Config lives beside the state, written by `onboard`.
 /// Load the shared coordination backend (Postgres state DSN + Redis URL) from
 /// `<base>/coordination.json` into the environment, unless already set. Lets the
 /// Finder-launched app join the distributed backend without env plumbing.
@@ -267,10 +266,11 @@ pub(crate) async fn build_project(
     // One read settles both the `Config` and the deploy health-gate's host-port
     // probe, so a `deploy.host_port` this project cannot publish fails the gate
     // (COX-B035) or is healed (COX-B042) instead of drifting between the two.
+    // A config that does not parse at all fails the project's load (COX-B043).
     let LoadedConfig {
         config,
         host_port_probe,
-    } = load_config_with_probe(state_dir);
+    } = load_config_with_probe(state_dir)?;
     // `auth` must be the SAME store the hub actually serves /api/mcp with —
     // NOT re-derived from state_dir here. Each project can live under a
     // different workspace root than the hub-wide auth.json (see run_hub's
@@ -324,9 +324,9 @@ pub(crate) async fn build_project(
                 "gitlab" => Some(Arc::new(coxagent_infrastructure::GlForge::new(
                     repo, base, wd,
                 ))),
-                "github" => Some(Arc::new(coxagent_infrastructure::GhForge::with_account(
+                "github" => Some(coxagent_infrastructure::github_forge(
                     repo, base, wd, account,
-                ))),
+                )),
                 _ => None,
             }
         } else {
@@ -339,8 +339,53 @@ pub(crate) async fn build_project(
     let handle =
         Arc::new(RunnerHandle::new().with_capabilities(local_caps(&config, &work_dir).await));
 
+    // Hot-reload hook: each runner asks this at its cycle boundary; when
+    // coxagent.json changed since last asked, it rebuilds the engine stack from
+    // the fresh config so Settings edits apply WITHOUT a hub restart. Each
+    // runner gets its own hook (own hash cell) so all of them converge.
+    let mk_reloader = {
+        let state_dir = state_dir.to_path_buf();
+        let mcp = mcp.clone();
+        move || {
+            let (state_dir, mcp) = (state_dir.clone(), mcp.clone());
+            let hash = std::sync::Mutex::new(config_content_hash(&state_dir));
+            Arc::new(move || {
+                let new = config_content_hash(&state_dir);
+                {
+                    let mut h = hash.lock().ok()?;
+                    if *h == new {
+                        return None;
+                    }
+                    *h = new;
+                }
+                let reloaded = match load_config_with_probe(&state_dir) {
+                    Ok(l) => l.config,
+                    Err(e) => {
+                        tracing::warn!("config changed but is invalid — keeping previous: {e}");
+                        return None;
+                    }
+                };
+                match build_engine(&reloaded, logs_dir(&state_dir), mcp.as_ref()) {
+                    Ok((engine, meter)) => Some((reloaded, engine, meter)),
+                    Err(e) => {
+                        tracing::warn!(
+                            "config changed but engine rebuild failed; keeping previous: {e}"
+                        );
+                        None
+                    }
+                }
+            }) as Arc<dyn Fn() -> _ + Send + Sync>
+        }
+    };
+
     // Leader runner: singleton phases (BA, PO, standup, etc.)
     {
+        // The leader's feedback-fix / SA-rescue git ops get their OWN worktree,
+        // mirroring what every concurrency slot already gets for DEV. The main
+        // checkout is dirty mid-cycle, so git ops there abort and the merge
+        // queue spins forever; the feedback tree shares repo refs, so branch
+        // checkout/commit/push land normally.
+        let feedback_worktree = worktree_at(work_dir.clone(), &format!("{id}-feedback"));
         let leader = RunCycleUseCase::new(
             Arc::clone(&store),
             engine.clone(),
@@ -371,7 +416,9 @@ pub(crate) async fn build_project(
         .with_files(Some(Arc::new(
             coxagent_infrastructure::FsWorkspaceFiles::new(),
         )))
-        .with_janitor(Some(Arc::new(coxagent_infrastructure::OsProcessJanitor)));
+        .with_janitor(Some(Arc::new(coxagent_infrastructure::OsProcessJanitor)))
+        .with_reloader(mk_reloader())
+        .with_feedback_workdir(feedback_worktree);
         let leader = if let Some(ref f) = forge {
             leader.with_forge(Arc::clone(f))
         } else {
@@ -381,10 +428,76 @@ pub(crate) async fn build_project(
         let leader = if let Some(r) = build_pr_reporter(&config, auth, id, id).await {
             leader.with_reporter(r)
         } else {
-            leader
+            // Same-process hub: reviews/holds/latency write straight to the
+            // shared store — the Null fallback silently dropped them all.
+            leader.with_reporter(Arc::new(
+                coxagent_application::ports::outbound::StorePrReporter::new(
+                    Arc::clone(&store) as Arc<dyn coxagent_application::ports::outbound::StateStorePort>,
+                ),
+            ))
         };
         let wh = Arc::clone(&handle);
         tokio::spawn(async move { run_forever(wh, leader, sleep).await });
+
+        // Event-dispatch P1 (docs/proposals/event-dispatch.md): a DEDICATED
+        // review runner on its own fast loop, so a one-hour DEV phase never
+        // delays a ripe PR by a whole cycle. It reuses the full gate stack;
+        // duplicate work across machines is stopped by the per-PR review
+        // lease + head-sha guard. It respects Pause and stops with the hub.
+        if config.git.enabled && forge.is_some() {
+            let reviewer = RunCycleUseCase::new(
+                Arc::clone(&store),
+                engine.clone(),
+                config.clone(),
+                worktree_at(work_dir.clone(), &format!("{id}-review")),
+                context.clone(),
+            )
+            .with_leader_election(false)
+            .with_meter(meter.clone())
+            .with_live_budget(Arc::clone(&live_budget))
+            .with_deploy(Arc::new(DockerComposeDeploy::new()))
+            .with_host_port_probe(host_port_probe)
+            .with_git(Arc::new(coxagent_infrastructure::SystemGit::new()))
+            .with_files(Some(Arc::new(
+                coxagent_infrastructure::FsWorkspaceFiles::new(),
+            )));
+            let mut reviewer = reviewer;
+            reviewer.set_worker(format!("review@{}", worker_host()));
+            let reviewer = if let Some(ref f) = forge {
+                reviewer.with_forge(Arc::clone(f))
+            } else {
+                reviewer
+            };
+            let reviewer =
+                reviewer.with_notifier(build_notifier(Arc::clone(&store), webhook.clone()));
+            let reviewer = if let Some(r) = build_pr_reporter(&config, auth, id, id).await {
+                reviewer.with_reporter(r)
+            } else {
+                // Same-process hub: reviews/holds/latency write straight to
+                // the shared store — the Null fallback silently dropped them.
+                reviewer.with_reporter(Arc::new(
+                    coxagent_application::ports::outbound::StorePrReporter::new(
+                        Arc::clone(&store)
+                            as Arc<dyn coxagent_application::ports::outbound::StateStorePort>,
+                    ),
+                ))
+            };
+            let rh = Arc::clone(&handle);
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(90)).await;
+                    let snap = rh.snapshot();
+                    if snap.mode == "stopped" {
+                        break;
+                    }
+                    if snap.mode != "running" {
+                        continue; // paused — the review loop pauses with the team
+                    }
+                    reviewer.run_review_pass().await;
+                }
+            });
+            tracing::info!("[{id}] dedicated review runner armed (90s loop)");
+        }
     }
 
     tracing::info!(
@@ -392,14 +505,24 @@ pub(crate) async fn build_project(
         concurrency.saturating_sub(1),
         concurrency
     );
-    for _ in 1..concurrency {
+    for slot in 1..concurrency {
+        // Each extra worker runs in its OWN git worktree. Sharing the leader's
+        // checkout meant no DEV could ever pass a green-suite DoD — each saw
+        // the other's half-written changes (the overnight zero-throughput
+        // deadlock). Falls back to the shared tree when this isn't a repo.
+        let slot_dir = worktree_at(work_dir.clone(), &format!("{id}-slot-{slot}"));
         let worker = RunCycleUseCase::new(
             Arc::clone(&store),
             engine.clone(),
             config.clone(),
-            work_dir.clone(),
+            slot_dir,
             context.clone(),
         )
+        // Co-located slots never compete for the machine's leader lease —
+        // rotation across slots produced the scorecard-numbering and
+        // version-ping-pong bugs. Machine-level election (slot 0) remains,
+        // so multi-machine teams still fail ceremonies over.
+        .with_leader_election(false)
         .with_meter(meter.clone())
         .with_live_budget(Arc::clone(&live_budget))
         .with_deploy(Arc::new(DockerComposeDeploy::new()))
@@ -423,7 +546,8 @@ pub(crate) async fn build_project(
         .with_files(Some(Arc::new(
             coxagent_infrastructure::FsWorkspaceFiles::new(),
         )))
-        .with_janitor(Some(Arc::new(coxagent_infrastructure::OsProcessJanitor)));
+        .with_janitor(Some(Arc::new(coxagent_infrastructure::OsProcessJanitor)))
+        .with_reloader(mk_reloader());
         let worker = if let Some(ref f) = forge {
             worker.with_forge(Arc::clone(f))
         } else {
@@ -433,7 +557,13 @@ pub(crate) async fn build_project(
         let worker = if let Some(r) = build_pr_reporter(&config, auth, id, id).await {
             worker.with_reporter(r)
         } else {
-            worker
+            // Same-process hub: reviews/holds/latency write straight to the
+            // shared store — the Null fallback silently dropped them all.
+            worker.with_reporter(Arc::new(
+                coxagent_application::ports::outbound::StorePrReporter::new(
+                    Arc::clone(&store) as Arc<dyn coxagent_application::ports::outbound::StateStorePort>,
+                ),
+            ))
         };
         let wh = Arc::clone(&handle);
         tokio::spawn(async move { run_forever(wh, worker, Duration::from_secs(5)).await });
@@ -450,6 +580,58 @@ pub(crate) async fn build_project(
                 handle.resume();
                 tracing::info!("auto-resumed operator {operator} (left running)");
             }
+        }
+    }
+
+    // Self-upgrade (dogfood CD, opt-in): every 15 min a DETACHED script checks
+    // origin/<base> for a commit newer than the deployed hub, builds it in a
+    // temp worktree, swaps this very binary (backup kept), restarts, and rolls
+    // back if the new hub fails its health check. Detached because a process
+    // cannot be trusted to finish replacing itself.
+    if config.deploy.self_upgrade {
+        let script = work_dir.join("deploy").join("self-upgrade.sh");
+        let repo = work_dir.clone();
+        let base = config.git.default_branch.clone();
+        if let Ok(target) = std::env::current_exe() {
+            let port = std::env::var("COXAGENT_PORT")
+                .ok()
+                .and_then(|p| p.parse::<u16>().ok())
+                .unwrap_or(4000);
+            let _ = &script; // superseded: the script comes from origin, not the clone
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(900)).await;
+                    // Heartbeat: proof the watcher is alive, distinguishable
+                    // from "script ran and had nothing to do" (which is
+                    // silent by design). The hub's own logs are swallowed by
+                    // the app shell, so this file is the only observable.
+                    let hb = repo.join(".coxagent-self-upgrade");
+                    let _ = std::fs::create_dir_all(&hb);
+                    let _ = std::fs::write(
+                        hb.join("watcher-heartbeat"),
+                        format!("{:?}\n", std::time::SystemTime::now()),
+                    );
+                    // Run the LATEST script straight from origin/<base> via
+                    // `git show` — reading it from the clone was a
+                    // chicken-and-egg: a clone that predates the script never
+                    // upgrades, and therefore never gets the script.
+                    let cmd = "git -C \"$1\" fetch -q origin \"$4\" && \
+                         git -C \"$1\" show \"origin/$4:deploy/self-upgrade.sh\" 2>/dev/null \
+                         | bash -s -- \"$1\" \"$2\" \"$3\" \"$4\"";
+                    let _ = std::process::Command::new("bash")
+                        .arg("-c")
+                        .arg(cmd)
+                        .arg("self-upgrade") // $0
+                        .arg(&repo)
+                        .arg(&target)
+                        .arg(port.to_string())
+                        .arg(&base)
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn();
+                }
+            });
+            tracing::info!("[{id}] self-upgrade watcher armed (every 15 min)");
         }
     }
 
@@ -479,6 +661,15 @@ pub(crate) async fn build_project(
             coxagent_infrastructure::FsWorkspaceFiles::new(),
         )),
         deploy: Some(Arc::new(DockerComposeDeploy::new())),
+        storage: Some(build_storage().await.unwrap_or_else(|| {
+            Arc::new(coxagent_infrastructure::storage::LocalStorage::new(
+                std::env::var_os("HOME")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_default()
+                    .join("CoXAgent")
+                    .join("blobs"),
+            ))
+        })),
     })
 }
 
@@ -570,6 +761,7 @@ pub(crate) async fn local_caps(
     coxagent_application::ports::outbound::WorkerCaps {
         engines: detected_engines().into_iter().map(|(n, _)| n).collect(),
         models: detected_models(),
+        version: env!("CARGO_PKG_VERSION").to_owned(),
         tooling: Some(detected_tooling()),
         git: if config.git.enabled && !config.git.repo.is_empty() {
             Some(
@@ -777,7 +969,7 @@ pub(crate) async fn build_pr_reporter(
 ) -> Option<Arc<dyn coxagent_application::ports::outbound::PrReporterPort>> {
     let server_url = config.git.server_url.trim();
     if server_url.is_empty() {
-        return None;
+        return None; // in-process runners get a StorePrReporter from the caller
     }
     let token = match auth {
         Some(auth) => ensure_internal_pr_token(auth, identity).await?,

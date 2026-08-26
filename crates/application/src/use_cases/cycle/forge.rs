@@ -7,6 +7,7 @@
 use super::RunCycleUseCase;
 use crate::ports::outbound::{AgentEnginePort, AgentRequest, GitAuthor, StateStorePort};
 use coxagent_domain::TicketId;
+use std::path::PathBuf;
 
 impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// Ship a just-completed ticket through the git flow, when enabled:
@@ -108,9 +109,86 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .unwrap_or_else(|| id.to_string());
 
         let branch = format!("{}{id}", self.config.git.branch_prefix);
-        if let Err(e) = git.checkout_branch(&self.work_dir, &branch).await {
-            self.log_git(&format!("branch {branch} failed: {e}")).await;
-            return;
+        // Self-heal 1 of 2 — release a leftover squatter worktree:
+        // an earlier agent run may have left a worktree behind that is still squatting
+        // this branch (abandoned opencode temp checkouts are never `worktree remove`d).
+        // Git then refuses every checkout of the branch and the ticket is mis-assigned
+        // forever; release it once and retry before doing anything heavier.
+        let mut result = git.checkout_branch(&self.work_dir, &branch).await;
+        if let Err(err) = &result {
+            if let Some(collision) = worktree_path_in_use(&err.to_string()) {
+                self.log_git(&format!(
+                    "branch {branch} held by leftover worktree {} — releasing and retrying",
+                    collision.display()
+                ))
+                .await;
+                let _ = git.worktree_remove(&self.work_dir, &collision).await;
+                // Genuinely retry now that any colliding worktree is gone.
+                result = git.checkout_branch(&self.work_dir, &branch).await;
+            }
+        }
+        // Second escalation: `worktree_remove` cannot release a *main* working
+        // tree — git refuses with "is a main working tree". That is exactly the
+        // branch-squatting case a leftover checkout in the repo's primary
+        // worktree causes (e.g. the shared codebase left sitting on a feature
+        // branch). If the squatter is clean, relocate it onto the base branch to
+        // free the branch; if it has uncommitted work, do NOT destroy it — log
+        // and bail so the drain loop surfaces the ticket later instead of
+        // retrying a doomed checkout every cycle.
+        if let Err(err) = &result {
+            if let Some(collision) = worktree_path_in_use(&err.to_string()) {
+                let base = self.flow_base().to_owned();
+                let clean = git
+                    .working_tree(&collision)
+                    .await
+                    .is_ok_and(|wt| wt.changed_paths.is_empty());
+                if clean {
+                    let (ok, _) = git.raw(&collision, &["checkout", &base]).await;
+                    if ok {
+                        self.log_git(&format!(
+                            "released {branch}: relocated clean worktree {} onto {base}",
+                            collision.display()
+                        ))
+                        .await;
+                        result = git.checkout_branch(&self.work_dir, &branch).await;
+                    } else {
+                        self.log_git(&format!(
+                            "branch {branch} squatter {} is clean but relocation onto {base} failed",
+                            collision.display()
+                        ))
+                        .await;
+                    }
+                } else {
+                    self.log_git(&format!(
+                        "branch {branch} still held by non-removable worktree {} with uncommitted work — skipping this cycle",
+                        collision.display()
+                    ))
+                    .await;
+                }
+            }
+        }
+        let mut reconciled = false;
+
+
+        if let Err(e) = result {
+            // Self-heal 2 of 2 — reconcile residual tree debris: rejected-proposal
+            // debris or leftover agent residue blocks even switching to this ticket's
+            // branch once any stale worktree has been released above. Rather than blame
+            // a Fixed/Done ticket forever (the repeated "branch failed" spam), hand the
+            // tree to a DEV agent to reconcile it intelligently: keep THIS ticket's
+            // legitimate work, drop debris from past attacks a human already rejected,
+            // commit the survivor to `branch`, and leave it switchable. One bounded
+            // attempt; if it still cannot ship, report and move on (no infinite loop).
+            if !self.reconcile_tree_for_ship(id, &branch, &e).await {
+                self.log_git(&format!("branch {branch} failed: {e}")).await;
+                return;
+            }
+            // The reconcile agent already committed the ticket's work on
+            // `branch` and left the tree switchable, so `commit_all` below will
+            // find nothing NEW to stage — yet the branch is exactly the ship we
+            // must push. Remember that so we still push + record it as swept
+            // instead of bailing on the empty-commit and re-sweeping forever.
+            reconciled = true;
         }
         let email = if self.config.git.commit_email.trim().is_empty() {
             "coxagent-bot@users.noreply.github.com".to_owned()
@@ -124,7 +202,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let msg = format!("{kind}({id}): {title}");
         match git.commit_all(&self.work_dir, &msg, &author).await {
             Ok(Some(sha)) => self.log_git(&format!("committed {sha} on {branch}")).await,
-            Ok(None) => return, // nothing changed — no branch to push
+            // Nothing new to stage. Normally that means no branch to push — but
+            // if we just reconciled the tree, the reconcile agent already
+            // committed the ticket's work on `branch`. Fall through so we push
+            // that and record the ticket as swept; otherwise it is re-matched
+            // and re-reconciled every cycle forever.
+            Ok(None) if !reconciled => return,
+            Ok(None) => {}
             Err(e) => {
                 self.log_git(&format!("commit failed for {id}: {e}")).await;
                 return;
@@ -174,6 +258,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
         self.log_git(&format!("pushed {branch}")).await;
 
+        // The work has shipped to origin on its own branch — record it so the
+        // end-of-cycle sweep never re-selects this ticket (it would otherwise
+        // re-clone/re-push the same residue every cycle and, on a dirty tree,
+        // log a fresh `checkout` failure each time).
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+            s.swept_tickets.insert(id.to_string());
+            Ok(())
+        })
+        .await;
+
         if self.config.git.auto_pr {
             if let Some(forge) = &self.forge {
                 let base = self.flow_base();
@@ -216,6 +310,106 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             }
         }
     }
+
+    /// When a ticket's branch cannot be checked out because the working tree
+    /// is dirty (uncommitted edits, untracked debris — typically residue from
+    /// past attempts a human already rejected, see the ticket journal), ask a
+    /// DEV agent to reconcile the tree intelligently and commit this ticket's
+    /// legitimate work onto its branch. Returns whether `branch` can now be
+    /// checked out. Bounded: exactly one reconciliation attempt per call, so a
+    /// genuinely-blocked tree surfaces as a single logged failure, never a loop.
+    async fn reconcile_tree_for_ship(
+        &self,
+        id: &TicketId,
+        branch: &str,
+        err: &crate::PortError,
+    ) -> bool {
+        let Some(git) = &self.git else { return false };
+        // Only worth the agent call when the tree genuinely has residue.
+        if let Ok(tree) = git.working_tree(&self.work_dir).await {
+            if tree.changed_paths.is_empty() {
+                return false;
+            }
+        }
+        // Journal hints tell the agent what a human already rejected, so it
+        // does not resurrect a superseded design as "new" work.
+        let journal = self
+            .store
+            .load()
+            .await
+            .ok()
+            .map(|s| {
+                s.ticket_journal
+                    .get(id.as_str())
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        let notes = if journal.is_empty() {
+            "(none)".to_owned()
+        } else {
+            let items: Vec<String> = journal
+                .iter()
+                .enumerate()
+                .map(|(i, j)| format!("  {}. {j}", i + 1))
+                .collect();
+            format!("\n{}", items.join("\n"))
+        };
+        let title = self
+            .store
+            .load()
+            .await
+            .ok()
+            .and_then(|s| {
+                s.tickets
+                    .iter()
+                    .find(|t| t.id() == id)
+                    .map(|t| t.title().to_owned())
+            })
+            .unwrap_or_else(|| id.to_string());
+        self.report("DEV", &format!("reconciling dirty worktree to ship {id}"));
+        let task = format!(
+            "Checkout of branch `{branch}` just FAILED in this working directory:\n{err}\n\
+             because there are uncommitted changes and/or untracked files that git refuses \
+             to overwrite. This is residue cluttering a tree whose ticket `{id}` — \"{title}\" — \
+             is finished and needs to ship ON `{branch}`.\n\n\
+             Reconcile the tree INTELLIGENTLY and exactly once:\n\
+             1. Inspect every modified and untracked path (`git status`, and read the actual \
+             files before judging).\n\
+             2. KEEP and commit any change that is legitimate NEW work belonging to ticket \
+             `{id}` — commit it on `{branch}` (create it with `git checkout -b {branch}` AFTER \
+             the tree is clean, or as applicable).\n\
+             3. DISCARD/remove residue that is stale debris from past attempts this ticket \
+             already superseded — especially anything the ticket journal flags as rejected \
+             (journal below). Never keep two copies of the same fix.\n\
+             4. Untracked scratch/wiki files that are NOT this ticket's work must be removed \
+             or moved aside so the branch switch is not blocked.\n\
+             5. Leave the tree switched to `{branch}` with everything for this ticket committed \
+             and NO working-tree changes blocking a branch switch, then confirm the build still \
+             compiles if you touched code (`cargo check --workspace`).\n\
+             Do NOT push, do NOT open a PR, do NOT touch other branches — just reconcile and \
+             commit THIS ticket's work on `{branch}`.\n\n\
+             Prior-attempt journal for {id} (what a human already rejected — do not redo):\n{notes}"
+        );
+        let request = crate::ports::outbound::AgentRequest {
+            role: coxagent_domain::Role::DevFeature,
+            system_prompt: crate::prompts::system_prompt(crate::prompts::DEV),
+            task_prompt: task,
+            work_dir: self.work_dir.clone(),
+            timeout: std::time::Duration::from_secs(900),
+            escalation_level: 0,
+            label: None,
+        };
+        match self.engine.run(request).await {
+            Ok(outcome) if outcome.succeeded() => {
+                // Trust nothing: the branch must be reachable now, or we report
+                // failure (the caller logs it and moves on — no loop).
+                git.checkout_branch(&self.work_dir, branch).await.is_ok()
+            }
+            _ => false,
+        }
+    }
+
     /// End-of-cycle safety net ("agents don't sleep"). The normal ship path
     /// commits a completed ticket inline right after DEV returns — but if that
     /// window is interrupted (a process crash between the Done/Fixed transition
@@ -279,7 +473,27 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             return false;
         };
         let target = self.flow_base();
-        let open = prs.iter().filter(|p| p.base == target).count();
+        // Only PRs the AGENTS can still act on count against the queue. A PR
+        // that exhausted the fix→rescue ladder has been handed to a human
+        // (pr_stuck in the inbox) — counting it here left the clean-base gate
+        // waiting on a PR no agent may touch, which locked ALL dev work behind
+        // one human decision indefinitely.
+        let handed_off: std::collections::BTreeSet<u64> = self
+            .store
+            .load()
+            .await
+            .map(|s| {
+                s.pr_fix_attempts
+                    .iter()
+                    .filter(|(_, n)| **n > 2)
+                    .map(|(k, _)| *k)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let open = prs
+            .iter()
+            .filter(|p| p.base == target && !handed_off.contains(&p.number))
+            .count();
         if open == 0 {
             return false;
         }
@@ -345,6 +559,21 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     }
 }
 
+/// Extract the path of a worktree that git says is squatting a branch, from its
+/// "already used by worktree at '<path>'" diagnostic. Pure string parsing — no
+/// IO — so it is unit-testable without any port double. Used to release a
+/// leftover worktree and retry a branch checkout.
+fn worktree_path_in_use(err: &str) -> Option<PathBuf> {
+    let marker = "is already used by worktree at '";
+    let start = err.find(marker)? + marker.len();
+    let path = err[start..].split('\'').next()?;
+    if path.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(path))
+    }
+}
+
 /// The tickets whose finished-but-uncommitted residue an end-of-cycle sweep may
 /// ship: those whose Definition-of-Done formally passed (`Done` feature/chore,
 /// `Fixed` bug). Ordered oldest-first so stranded work ships in commit order.
@@ -356,10 +585,17 @@ fn unshipped_candidates(state: &crate::state::ProjectState) -> Vec<(TicketId, &'
     // their finished-but-uncommitted residue is unambiguous ("clearly-finished"
     // feature/bug work). Everything else is deliberately out of scope — a bare
     // Ready/Open ticket or an unclaimed scratch edit carries no proof of a pass.
+    //
+    // A ticket whose residue the sweep ALREADY shipped (pushed a branch) is
+    // excluded: the sweep is the only consumer, and re-selecting it every cycle
+    // would re-clone/re-push the work forever (the duplicate-PR / repeated
+    // `checkout`-failure spam). The shipped marker is set on the successful
+    // push, so shipping stays exactly-once even though the ticket remains in a
+    // terminal status waiting on its PR to merge.
     let mut matched: Vec<(TicketId, &'static str)> = state
         .tickets
         .iter()
-        .filter(|t| t.assignee().is_none())
+        .filter(|t| !state.swept_tickets.contains(t.id().as_str()))
         .filter_map(|t| match (t.ticket_type(), t.status()) {
             (TicketType::Feature | TicketType::Chore, Status::Done) => {
                 Some((t.id().clone(), "feat"))
@@ -374,7 +610,7 @@ fn unshipped_candidates(state: &crate::state::ProjectState) -> Vec<(TicketId, &'
 
 #[cfg(test)]
 mod tests {
-    use super::unshipped_candidates;
+    use super::{unshipped_candidates, worktree_path_in_use};
     use crate::state::ProjectState;
     use coxagent_domain::{
         Complexity, Priority, Role, Status, TechnicalDesign, Ticket, TicketId, TicketType,
@@ -440,14 +676,51 @@ mod tests {
     }
 
     #[test]
-    fn done_feature_assigned_to_human_is_excluded() {
+    fn already_swept_ticket_is_not_re_armed() {
+        // A `Fixed`/`Done` ticket the sweep already shipped (pushed a branch)
+        // must not be re-selected every cycle — that was the repeated
+        // branch-failure / duplicate-PR loop.
+        let state = ProjectState {
+            tickets: vec![
+                done(ticket("C-1", TicketType::Feature)),
+                fixed(ticket("C-2", TicketType::Bug)),
+            ],
+            swept_tickets: ["C-1".to_owned(), "C-2".to_owned()].into_iter().collect(),
+            ..ProjectState::default()
+        };
+        assert!(unshipped_candidates(&state).is_empty());
+    }
+
+    #[test]
+    fn swept_only_excludes_the_recorded_ticket() {
+        let state = ProjectState {
+            tickets: vec![
+                done(ticket("A-1", TicketType::Feature)),
+                fixed(ticket("B-2", TicketType::Bug)),
+            ],
+            swept_tickets: ["A-1".to_owned()].into_iter().collect(),
+            ..ProjectState::default()
+        };
+        assert_eq!(
+            unshipped_candidates(&state),
+            vec![(TicketId::new("B-2").expect("id"), "fix")]
+        );
+    }
+
+    #[test]
+    fn done_feature_assigned_to_operator_is_still_shipped() {
         let mut t = done(ticket("C-1", TicketType::Feature));
-        t.assign_to_human("alice");
+        t.assign_to_human("root");
         let state = ProjectState {
             tickets: vec![t],
             ..ProjectState::default()
         };
-        assert!(unshipped_candidates(&state).is_empty());
+        // The assignee is an ownership label ("who owns it"), not a scheduler
+        // block — the operator's team still ships finished work it was handed.
+        assert_eq!(
+            unshipped_candidates(&state),
+            vec![(TicketId::new("C-1").expect("id"), "feat")]
+        );
     }
 
     #[test]
@@ -466,5 +739,25 @@ mod tests {
                 (TicketId::new("B-001").expect("id"), "feat"),
             ]
         );
+    }
+
+    #[test]
+    fn worktree_path_in_use_extracts_the_colliding_path_from_git_error() {
+        let err = "fatal: 'feat/CXA-B043' is already used by worktree at \
+                   '/private/var/folders/8c/p43zxq5n49q853zck6hywldm0000gn/T/opencode/wt-b043'";
+        assert_eq!(
+            worktree_path_in_use(err).map(|p| p.to_string_lossy().into_owned()),
+            Some(
+                "/private/var/folders/8c/p43zxq5n49q853zck6hywldm0000gn/T/opencode/wt-b043"
+                    .to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn worktree_path_in_use_is_none_when_not_a_worktree_collision() {
+        assert!(worktree_path_in_use("fatal: cannot lock ref").is_none());
+        assert!(worktree_path_in_use("branch already exists").is_none());
+        assert!(worktree_path_in_use("already used by worktree at ''").is_none());
     }
 }

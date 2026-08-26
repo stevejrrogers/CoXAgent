@@ -112,9 +112,61 @@ pub fn doc_category_of(folder: &str) -> &'static str {
     }
 }
 
+/// Canonicalize a Wiki folder path to the case the doc exporter must write to
+/// disk: lowercase, kebab-slug per `/`-separated segment (e.g. `"Product"` ->
+/// `"product"`, `"Technical/Architecture"` -> `"technical/architecture"`).
+///
+/// Folder names in state (`STANDARD_DOC_FOLDERS`, `standard_doc_folder`) are
+/// title-cased for display. Without normalizing at export time, the same
+/// logical folder can land on disk under two different cases across exports
+/// (`wiki/Product/…` then `wiki/product/…`). On a case-insensitive filesystem
+/// (macOS default) those are one physical file with two git index entries —
+/// `git add -A` then refuses with "will not add file alias" for every
+/// subsequent commit touching the repo. Call this wherever a folder path is
+/// turned into a directory on disk (COX-B083).
+#[must_use]
+pub fn wiki_folder_path(folder: &str) -> String {
+    folder
+        .split('/')
+        .map(slugify_segment)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn slugify_segment(segment: &str) -> String {
+    let mut out = String::with_capacity(segment.len());
+    let mut prev_dash = false;
+    for ch in segment.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash && !out.is_empty() {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    out
+}
+
 /// One living documentation page. `category` is `"product"` or `"technical"`;
 /// `body` is Markdown. Pages are written by the DOCS agent and editable by
 /// humans, and are structured so both people and agents can read them.
+/// Idle-cycle refresh bookkeeping for one Wiki page. `at` is the RFC3339 time of
+/// the last refresh attempt (a cooldown, so a page is not rewritten every
+/// cycle); `fails` counts consecutive rewrites the structure gate rejected — at
+/// the cap the page is parked (it needs a human/redesign, not more calls).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocRefreshMark {
+    #[serde(default)]
+    pub at: String,
+    #[serde(default)]
+    pub fails: u32,
+}
+
 /// One living documentation page. `category` is `"product"` or `"technical"`;
 /// `body` is Markdown. Pages are written by the DOCS agent and editable by
 /// humans, and are structured so both people and agents can read them.
@@ -134,4 +186,57 @@ pub struct DocPage {
     pub updated_at: String,
     #[serde(default)]
     pub updated_by: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wiki_folder_path;
+    use coxagent_domain::TicketType;
+
+    #[test]
+    fn lowercases_a_single_segment() {
+        assert_eq!(wiki_folder_path("Product"), "product");
+        assert_eq!(wiki_folder_path("Engineering"), "engineering");
+    }
+
+    #[test]
+    fn lowercases_each_nested_segment_independently() {
+        assert_eq!(
+            wiki_folder_path("Technical/Architecture"),
+            "technical/architecture"
+        );
+    }
+
+    #[test]
+    fn slugifies_spaces_and_punctuation() {
+        assert_eq!(wiki_folder_path("CXA Features!!"), "cxa-features");
+        assert_eq!(wiki_folder_path("  Product  "), "product");
+    }
+
+    #[test]
+    fn is_idempotent() {
+        for input in ["Product", "Technical/Architecture", "already-lower"] {
+            let once = wiki_folder_path(input);
+            assert_eq!(wiki_folder_path(&once), once);
+        }
+    }
+
+    #[test]
+    fn drops_empty_segments_from_leading_trailing_and_doubled_slashes() {
+        assert_eq!(wiki_folder_path("/Product/"), "product");
+        assert_eq!(wiki_folder_path("Product//Sub"), "product/sub");
+        assert_eq!(wiki_folder_path(""), "");
+    }
+
+    #[test]
+    fn standard_doc_folder_output_normalizes_to_the_canonical_lowercase_slug() {
+        assert_eq!(
+            wiki_folder_path(super::standard_doc_folder(TicketType::Feature)),
+            "product"
+        );
+        assert_eq!(
+            wiki_folder_path(super::standard_doc_folder(TicketType::Bug)),
+            "engineering"
+        );
+    }
 }

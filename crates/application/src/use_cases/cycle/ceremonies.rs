@@ -4,7 +4,7 @@
 //! Split out of the cycle so the rhythm of the team lives in one place and a
 //! ticket about a ceremony stops colliding with a ticket about a deploy.
 
-use super::{prune_memory_index, CycleReport, RunCycleUseCase, ARCH_REVIEW_EVERY_SPRINTS};
+use super::{prune_memory_index, CycleReport, RunCycleUseCase};
 use crate::ports::outbound::{AgentEnginePort, AgentRequest, StateStorePort};
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -21,6 +21,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         };
         let _ = cycle; // the per-process cycle resets on restart — use the
                        // persistent counter below so sprints keep advancing.
+        let policy = crate::sprint::SprintPolicy::from_config(&self.config.workflow);
         let len = self.config.workflow.sprint_length_cycles;
         // Migrate: seed the persistent counter from the current sprint's stored
         // (old per-process) cycle the first time, so an in-flight sprint doesn't
@@ -40,8 +41,23 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // Capture the closing sprint before `advance` replaces it, so we can run
         // a real review + retro on it.
         let closing = state.sprint.clone();
-        let Some(n) = crate::sprint::advance(&mut state, sc, len) else {
-            // No roll this cycle — still persist the bumped counter.
+        let _ = len;
+        let Some(n) = crate::sprint::advance(&mut state, sc, policy) else {
+            // No roll this cycle. An open sprint with an EMPTY committed set is
+            // silent DEV starvation under the sprint-scope gate (tickets going
+            // Ready mid-sprint are out of scope until rollover) — the PO
+            // commits the open backlog now and announces, instead of the team
+            // idling for days with a full queue.
+            let refilled = crate::sprint::refill_empty_scope(&mut state);
+            if refilled > 0 {
+                let msg = format!(
+                    "📋 Sprint scope held no ready feature work while {refilled} \
+                     ticket(s) sat ready — PO committed them to the current \
+                     sprint so DEV can pull work."
+                );
+                state.log_activity("PO", "committed backlog to an empty sprint", None);
+                state.post_comment("PO", &msg, None);
+            }
             let _ = self.store.save(&state).await;
             return;
         };
@@ -71,7 +87,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // Every few sprints the SA steps back and reviews the whole architecture,
         // filing refactor tickets and asking the PO to prioritise a hardening
         // sprint before tech debt compounds.
-        if n % ARCH_REVIEW_EVERY_SPRINTS == 0 {
+        if n % self.config.workflow.cadence.arch_review_every_sprints() == 0 {
             self.architecture_audit(n).await;
             self.docs_audit(n).await;
         }
@@ -576,10 +592,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let mut items: Vec<String> = Vec::new();
         // Only post-ladder states reach the human report: a stuck PR the SA
         // already rescued once, a parked ticket the SA already re-designed.
+        // Cross-check both against the live mirrors — attempt counters left by
+        // PRs long closed, or by tickets that later shipped or were rejected,
+        // are zombies from before pruning existed, not actionable impediments.
         let stuck: Vec<String> = state
             .pr_fix_attempts
             .iter()
-            .filter(|(pr, n)| **n >= 3 && state.pr_rescues.contains_key(pr))
+            .filter(|(pr, n)| {
+                **n >= 3
+                    && state.pr_rescues.contains_key(pr)
+                    && state.open_prs.iter().any(|o| o.number == **pr)
+            })
             .map(|(pr, _)| format!("#{pr}"))
             .collect();
         if !stuck.is_empty() {
@@ -588,10 +611,22 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 stuck.join(", ")
             ));
         }
+        let active_ticket = |id: &str| {
+            state.tickets.iter().any(|t| {
+                t.id().as_str() == id
+                    && !matches!(
+                        t.status(),
+                        coxagent_domain::Status::Done
+                            | coxagent_domain::Status::Documented
+                            | coxagent_domain::Status::Rejected
+                            | coxagent_domain::Status::Verified
+                    )
+            })
+        };
         let parked: Vec<String> = state
             .ticket_fail_attempts
             .iter()
-            .filter(|(_, n)| **n >= 3)
+            .filter(|(id, n)| **n >= 3 && active_ticket(id))
             .map(|(id, _)| id.clone())
             .collect();
         if !parked.is_empty() {
@@ -716,24 +751,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let Ok(state) = self.store.load().await else {
             return;
         };
-        let Some(topic) = Self::scrum_topic(&state, report, cycle, self.config.workflow.language)
+        let Some((category, topic)) =
+            Self::scrum_topic(&state, report, cycle, self.config.workflow.language)
         else {
             return;
         };
-        // Skip if we discussed the exact same topic last cycle — prevents
-        // duplicate noise when the trigger condition persists across cycles.
-        {
-            // The guard only holds a topic string, so a poisoned lock (another
-            // thread panicked mid-update) costs nothing to recover from — take
-            // the inner value rather than panic a whole cycle over dedupe state.
-            let mut last = self
-                .last_discussion_topic
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if *last == topic {
-                return;
-            }
-            (*last).clone_from(&topic);
+        // At most ONE discussion of a given category per day (persisted + shared
+        // across operators), so a condition that persists — "47 open bugs" every
+        // cycle — is raised once, not re-posted every 30 seconds. A genuinely
+        // different topic (a deploy failure) can still fire the same day.
+        if !self.claim_daily(&format!("discussion:{category}")).await {
+            return;
         }
         self.report("SM", "scrum discussion");
         let uc = crate::use_cases::RunDiscussionUseCase::new(

@@ -11,7 +11,7 @@ mod shutdown;
 use coxagent_application::config::{
     Config, DeployConfig, GitConfig, PolicyConfig, ReleasesConfig, WorkflowConfig,
 };
-use coxagent_application::ports::outbound::StateStorePort;
+use coxagent_application::ports::outbound::{SandboxStatus, StateStorePort};
 use coxagent_application::use_cases::{RecoverUseCase, RunBaUseCase, RunCycleUseCase};
 use coxagent_application::Spend;
 use coxagent_infrastructure::engine::{
@@ -31,6 +31,7 @@ use std::time::Duration;
 
 mod builders;
 mod config_load;
+mod host_port;
 mod shims;
 
 pub use builders::load_coordination;
@@ -38,6 +39,8 @@ pub use builders::load_coordination;
 use builders::*;
 #[allow(clippy::wildcard_imports)] // one module, many files — see config_load.rs
 use config_load::*;
+#[allow(clippy::wildcard_imports)] // one module, many files — see host_port.rs
+use host_port::*;
 pub use shims::shim_script;
 #[allow(clippy::wildcard_imports)] // one module, many files — see shims.rs
 use shims::*;
@@ -99,6 +102,7 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
             Ok(render_report(&state))
         }
         Command::Discover => Ok(render_discovery()),
+        Command::Probe { hub, project } => run_probe(&hub, &project).await,
         Command::Onboard {
             name,
             alias,
@@ -114,7 +118,7 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
         }
         Command::RunBa { work_dir, context } => {
             let store = store().await?;
-            let config = load_config(&args.state_dir);
+            let config = load_config(&args.state_dir)?;
             let (engine, _meter) = build_engine(&config, logs_dir(&args.state_dir), None)?;
             let uc = RunBaUseCase::new(Arc::clone(&store), engine, config, work_dir, context);
             let created = uc.execute().await?;
@@ -137,7 +141,7 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
         }
         Command::Check { work_dir } => {
             let store = store().await?;
-            let config = load_config(&args.state_dir);
+            let config = load_config(&args.state_dir)?;
             let uc = coxagent_application::use_cases::RunConformanceUseCase::new(
                 Arc::clone(&store),
                 work_dir,
@@ -567,6 +571,7 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
     let auth = build_auth(registry.parent().unwrap_or_else(|| Path::new("."))).await?;
 
     let mut projects = Vec::new();
+    let mut broken = Vec::new();
     for e in entries {
         let state_dir = e.path.join("state");
         let work_dir = e.path.join("codebase");
@@ -575,7 +580,18 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
                 tracing::info!("hub: registered project '{}'", p.id);
                 projects.push(p);
             }
-            Err(err) => tracing::warn!("hub: skipping '{}': {err}", e.id),
+            // Loud, and carried into the dashboard: a project that fails to
+            // load has no handle to serve, so without this record it would
+            // simply be absent from /api/projects and the person looking for
+            // it would have only the hub log to go on (COX-B043).
+            Err(err) => {
+                tracing::error!("hub: skipping '{}': {err}", e.id);
+                broken.push(coxagent_presentation::BrokenProject {
+                    id: e.id.clone(),
+                    config_path: e.path.join("coxagent.json"),
+                    error: err.to_string(),
+                });
+            }
         }
     }
 
@@ -628,6 +644,7 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
             deploy: DeployConfig::default(),
             policy: PolicyConfig::default(),
             releases: ReleasesConfig::default(),
+            coverage: coxagent_application::config::CoverageConfig::default(),
         },
         logs_dir(&base),
         None,
@@ -651,6 +668,7 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
         storage: build_storage().await,
         doc_store: build_doc_store().await,
         syschat_store: build_syschat_store(&base).await,
+        broken,
     };
     coxagent_presentation::serve_full(projects, port, audit, extras).await?;
     Ok(())
@@ -772,69 +790,6 @@ async fn onboard_project(
         .map_err(|e| e.to_string())
 }
 
-/// First host port for auto-allocation.
-const PORT_BASE: u16 = 8100;
-
-/// Write a free `deploy.host_port` into the new project's `coxagent.json`,
-/// picking the lowest port from [`PORT_BASE`] not already used by a registered
-/// project. Best-effort — a failure just leaves the port unset.
-fn assign_host_port(
-    base: &Path,
-    registry_path: &Path,
-    proj_dir: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use coxagent_application::Config;
-    // Collect ports already taken by registered projects.
-    let mut used: std::collections::HashSet<u16> = std::collections::HashSet::new();
-    if let Ok(text) = std::fs::read_to_string(registry_path) {
-        if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&text) {
-            for e in arr {
-                if let Some(p) = e.get("path").and_then(|p| p.as_str()) {
-                    let cfg = Path::new(p).join("coxagent.json");
-                    if let Ok(c) = std::fs::read_to_string(&cfg) {
-                        if let Ok(c) = serde_json::from_str::<Config>(&c) {
-                            if let Some(port) = c.deploy.host_port {
-                                used.insert(port);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    let _ = base; // reserved for future host-wide allocation policy
-                  // Also exclude ports published by Docker containers so a new project never
-                  // picks a port already serving another app.
-    if let Ok(out) = std::process::Command::new("docker")
-        .args(["ps", "--format", "{{.Ports}}"])
-        .output()
-    {
-        let text = String::from_utf8_lossy(&out.stdout);
-        for pair in text.split_whitespace() {
-            if let Some((host, _)) = pair.split_once("->") {
-                if let Some((_, hp)) = host.rsplit_once(':') {
-                    if let Ok(p) = hp.parse::<u16>() {
-                        used.insert(p);
-                    }
-                }
-            }
-        }
-    }
-    let port = (PORT_BASE..PORT_BASE + 500)
-        .find(|p| !used.contains(p))
-        .unwrap_or(PORT_BASE);
-
-    let cfg_path = proj_dir.join("coxagent.json");
-    let mut cfg: Config = std::fs::read_to_string(&cfg_path)
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default();
-    cfg.deploy.host_port = Some(port);
-    std::fs::write(&cfg_path, serde_json::to_string_pretty(&cfg)?)?;
-    tracing::info!("assigned host port {port} to new project");
-    Ok(())
-}
-
 /// Pick an id not already taken by a workspace directory under `base`.
 fn unique_id(base: &Path, seed: &str) -> String {
     let seed = if seed.is_empty() { "project" } else { seed };
@@ -948,8 +903,13 @@ fn build_engine(
     logs_dir: PathBuf,
     mcp: Option<&coxagent_infrastructure::engine::McpAccess>,
 ) -> Result<BuiltEngine, Box<dyn std::error::Error>> {
-    if config.workflow.sandbox && !cfg!(target_os = "macos") {
-        tracing::warn!("workflow.sandbox is on but this platform has no sandbox backend yet — agents run unsandboxed");
+    if config.workflow.sandbox
+        && matches!(
+            coxagent_infrastructure::proc::sandbox_status(true),
+            SandboxStatus::Unavailable(_) | SandboxStatus::Denied(_)
+        )
+    {
+        tracing::warn!("workflow.sandbox is on but no sandbox backend is available — agents run unsandboxed");
     }
     let fallbacks = effective_fallbacks(config);
     let default = build_failover(
@@ -1020,10 +980,14 @@ async fn run_loop(
     // One read settles both the `Config` and the deploy health-gate's host-port
     // probe, so a `deploy.host_port` this project cannot publish fails the gate
     // (COX-B035) or is healed (COX-B042) instead of drifting between the two.
+    // A config that does not parse at all stops the run here (COX-B043).
     let LoadedConfig {
         config,
         host_port_probe,
-    } = load_config_with_probe(state_dir);
+    } = load_config_with_probe(state_dir)?;
+
+    // Track config changes so engine can be reloaded at cycle boundaries without restart
+    let mut config_hash = config_content_hash(state_dir);
     // Same project-id derivation as Command::Run/operator_main: the workspace
     // dir name (e.g. `cxc`), not a fixed "default" — so this operator's MCP
     // calls target the same project the hub knows it by.
@@ -1053,7 +1017,7 @@ async fn run_loop(
     )
     .await;
     let (engine, meter) = build_engine(&config, logs_dir(state_dir), mcp.as_ref())?;
-    let sleep = std::time::Duration::from_secs(config.workflow.sleep_seconds);
+    let mut sleep = std::time::Duration::from_secs(config.workflow.sleep_seconds);
 
     // Recovery: release any claims orphaned by a previous crash before looping.
     let recovered = RecoverUseCase::new(Arc::clone(&store)).execute().await?;
@@ -1089,9 +1053,9 @@ async fn run_loop(
                 "gitlab" => Some(Arc::new(coxagent_infrastructure::GlForge::new(
                     repo, base, wd,
                 ))),
-                "github" => Some(Arc::new(coxagent_infrastructure::GhForge::with_account(
+                "github" => Some(coxagent_infrastructure::github_forge(
                     repo, base, wd, account,
-                ))),
+                )),
                 _ => None,
             }
         } else {
@@ -1224,19 +1188,9 @@ async fn run_loop(
     // `cox-server run` keeps its run-immediately default.
     let wait_for_start = std::env::var("COXAGENT_WAIT_FOR_START").is_ok_and(|v| v == "1");
 
-    // Fast job poll: a human's force-merge queued by the hub starts within
-    // ~15s on this runner instead of waiting for the next full cycle.
-    let uc = Arc::new(uc);
-    {
-        let uc = Arc::clone(&uc);
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-                uc.drain_jobs().await;
-            }
-        });
-    }
-
+    // A human's force-merge queued by the hub is drained at the top of each
+    // cycle (below), so the use case can stay owned + mut here — which is what
+    // lets the loop hot-reload its engine when the config changes.
     let mut cycle = 0u64;
     while !shutdown.is_triggered() {
         // Honour this operator's per-user Start/Stop from the web: idle (without
@@ -1252,6 +1206,44 @@ async fn run_loop(
             continue;
         }
         cycle += 1;
+
+        // Force-merge jobs the hub queued: pick them up at the top of the cycle.
+        // Boxed for the same reason run_cycle is: this future carries whole
+        // engine-run paths. Polling it inline on the worker stack (after the
+        // drain task was folded into the loop) overflowed the stack right
+        // after "cycle loop started" — the heap is where it belongs.
+        Box::pin(uc.drain_jobs()).await;
+
+        // Hot-reload on a config change (a Settings edit) — rebuild the engine
+        // and apply the new config NOW, no process restart. The old meter was
+        // drained into state at the previous cycle's end, so the swap loses no
+        // spend. If the rebuild fails, keep running on the previous engine.
+        let new_hash = config_content_hash(state_dir);
+        if new_hash != config_hash {
+            config_hash = new_hash;
+            let reloaded = match load_config_with_probe(state_dir) {
+                Ok(l) => l.config,
+                Err(e) => {
+                    tracing::warn!("config changed but is invalid — keeping previous: {e}");
+                    continue;
+                }
+            };
+            match build_engine(&reloaded, logs_dir(state_dir), mcp.as_ref()) {
+                Ok((engine, meter)) => {
+                    sleep = std::time::Duration::from_secs(reloaded.workflow.sleep_seconds);
+                    uc.reload(reloaded, engine, meter);
+                    tracing::info!(
+                        "config changed — engine reloaded and applied without a restart"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "config changed but engine rebuild failed; keeping previous: {e}"
+                    );
+                }
+            }
+        }
+
         // Boxed: a cycle future is ~17KB of agent-phase locals, and this loop
         // frame lives for the whole daemon's life.
         let report = Box::pin(uc.run_cycle(cycle)).await;
@@ -1383,6 +1375,16 @@ fn isolate_worktree(work_dir: PathBuf, worker: &str) -> PathBuf {
     {
         return work_dir;
     }
+    worktree_at(work_dir, worker)
+}
+
+/// Materialize (or reuse) a git worktree for `slug` beside the repo and return
+/// its path — or the original `work_dir` when this isn't a repo or the add
+/// fails. This is what makes CONCURRENT runners real: two DEV agents sharing
+/// one checkout could never both pass a green-suite DoD (each saw the other's
+/// half-written changes — the overnight zero-throughput deadlock), so each
+/// concurrency slot gets its own tree.
+pub(crate) fn worktree_at(work_dir: PathBuf, slug: &str) -> PathBuf {
     let is_repo = std::process::Command::new("git")
         .arg("-C")
         .arg(&work_dir)
@@ -1392,10 +1394,27 @@ fn isolate_worktree(work_dir: PathBuf, worker: &str) -> PathBuf {
     if !is_repo {
         return work_dir;
     }
-    let slug: String = worker
+    let sanitized: String = slug
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
+    // Key the worktree to THIS repo, not just the caller's slug. Sanitizing
+    // collapses distinct ids onto one name ("my.app" and "my-app"), and the
+    // headless slug (operator@host) carries no project at all — either way two
+    // projects sharing a parent dir would silently reuse each other's worktree
+    // (an agent then edits the WRONG repo). A short hash of the canonical repo
+    // path makes the name unique per repo; both callers flow through here.
+    let repo_key = {
+        use std::hash::{Hash as _, Hasher as _};
+        let canon = std::fs::canonicalize(&work_dir).unwrap_or_else(|_| work_dir.clone());
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        canon.hash(&mut h);
+        format!(
+            "{:08x}",
+            u32::try_from(h.finish() & u64::from(u32::MAX)).unwrap_or(0)
+        )
+    };
+    let slug = format!("{sanitized}-{repo_key}");
     // Sibling of the repo, so it is never inside the tree the agent commits.
     let wt = work_dir
         .parent()
@@ -1452,6 +1471,50 @@ fn record_compression(before: usize, after: usize) {
         // and wrecked the stats. O_APPEND + a single small write is atomic.
         let _ = f.write_all(format!("{before} {after}\n").as_bytes());
     }
+}
+
+/// One-shot engine discovery + report for a machine that has agent CLIs on
+/// PATH (the dashboard host itself may not). Detects local engines and sends
+/// them through the hub's /store heartbeat so `/api/engines` populates without
+/// waiting for a full runner cycle.
+async fn run_probe(hub: &str, project: &str) -> Result<String, Box<dyn std::error::Error>> {
+    use crate::builders::{detected_engines, operator_token_path};
+    let caps = coxagent_application::ports::outbound::WorkerCaps {
+        engines: detected_engines().into_iter().map(|(n, _)| n).collect(),
+        ..Default::default()
+    };
+    if caps.engines.is_empty() {
+        return Ok("No agent engines detected on PATH.\n".to_owned());
+    }
+    let token = match std::env::var("COXAGENT_REMOTE_TOKEN") {
+        Ok(v) if !v.trim().is_empty() => Some(v.trim().to_owned()),
+        _ => match operator_token_path() {
+            Some(path) => std::fs::read_to_string(path)
+                .ok()
+                .map(|text| text.trim().to_owned())
+                .filter(|t| !t.is_empty()),
+            None => None,
+        },
+    };
+    let cfg = RestConfig {
+        base_url: hub.trim_end_matches('/').to_owned(),
+        project_id: project.to_owned(),
+        token,
+    };
+    let store = RestStateStore::new(cfg)?;
+    let worker = ["HOSTNAME", "HOST"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok())
+        .unwrap_or_else(|| "probe".to_owned());
+    let now = coxagent_application::state::now_rfc3339();
+    store
+        .heartbeat_worker(&worker, "probe", "", &caps, &now)
+        .await?;
+    Ok(format!(
+        "Detected {} engine(s) and reported them to {hub}: {}",
+        caps.engines.len(),
+        caps.engines.join(", ")
+    ))
 }
 
 fn render_discovery() -> String {
@@ -1607,6 +1670,20 @@ mod mcp_auth_tests {
 }
 
 /// The one thing no fake-binary test can prove: that the REAL `claude` CLI,
+/// Compute a hash of the config file content to detect changes at cycle boundary
+fn config_content_hash(state_dir: &Path) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let root = state_dir.parent().unwrap_or(state_dir);
+    let path = root.join("coxagent.json");
+
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut hasher = DefaultHasher::new();
+    content.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// given a real `--mcp-config` file, actually calls the tool instead of
 /// ignoring it. `#[ignore]`d — costs a real API call and needs `claude`
 /// logged in — run explicitly with `cargo test -- --ignored

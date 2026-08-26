@@ -198,6 +198,7 @@
         <div id="ov-goal"></div>
         <div class="kpis" id="kpis"></div>
         <div id="ov-health"></div>
+        <div id="ov-cycle-perf"></div>
         <div id="ov-deploy"></div>
         <div class="row2" id="ov-charts"></div>
         <div id="ov-design"></div>
@@ -215,6 +216,8 @@
         <div class="agents" id="agents"></div>
         <div class="sec" style="margin-top:22px">Performance &amp; quality <span style="font-size:11px;color:var(--dim);font-weight:400">· deterministic evals from state — no tokens spent</span></div>
         <div class="kpis" id="team-evals"><div class="empty">loading…</div></div>
+        <div class="sec" style="margin-top:22px">Cycle scorecard <span style="font-size:11px;color:var(--dim);font-weight:400">· each cycle graded A–D: shipped · useful runs · cost · incidents</span></div>
+        <div class="acard" id="cycle-scores"><div class="empty">no cycles scored yet</div></div>
         <div class="sec admin-only" style="margin-top:22px">People on this project <span style="font-size:11px;color:var(--dim);font-weight:400">· humans who oversee & collaborate</span></div>
         <div class="acard admin-only" id="team-people"><div class="empty">loading…</div></div>
       </div>
@@ -250,7 +253,7 @@
         <div id="agent-picker" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px"></div>
         <div class="sec" style="margin-top:10px">Recent actions</div>
         <div id="agent-acts" class="panel" style="max-height:16vh;overflow:auto"></div>
-        <div class="sec" style="margin-top:12px;display:flex;align-items:center;gap:8px">Work log <span id="agent-live-badge" style="font-size:10px;font-weight:700;padding:1px 7px;border-radius:5px;background:color-mix(in srgb,var(--green) 22%,transparent);color:var(--green);display:none">● LIVE</span> <span style="font-size:11px;color:var(--dim);font-weight:400">· what the agent is doing, step by step</span></div>
+        <div class="sec" style="margin-top:12px;display:flex;align-items:center;gap:8px">Work log <span id="agent-live-badge" style="font-size:10px;font-weight:700;padding:1px 7px;border-radius:5px;background:color-mix(in srgb,var(--green) 22%,transparent);color:var(--green);display:none">● LIVE</span> <span id="agent-err-badge" style="font-size:10px;font-weight:700;padding:1px 7px;border-radius:5px;background:color-mix(in srgb,var(--red) 22%,transparent);color:var(--red);display:none"></span> <span style="font-size:11px;color:var(--dim);font-weight:400">· what the agent is doing, step by step</span></div>
         <div id="agent-transcript" class="worklog"><div class="wl-empty"><i class="ti ti-loader-2"></i> loading…</div></div>
       </div></div>
       <div class="ov" id="ov-transcript" onclick="if(event.target===this)close_('ov-transcript')"><div class="modal" style="max-width:760px">
@@ -770,6 +773,7 @@
     <button class="pri" onclick="createProject()" style="width:100%;justify-content:center;padding:11px"><i class="ti ti-plus"></i> <span id="np-submit-label">Create project</span></button>
   </div></div>
 
+<script src="/assets/js/mermaid.min.js"></script>
 <script src="/assets/js/core.js"></script>
 <script src="/assets/js/manage.js"></script>
 <script src="/assets/js/home.js"></script>

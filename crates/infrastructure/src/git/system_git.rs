@@ -21,6 +21,88 @@ impl SystemGit {
 }
 
 /// Run `git <args>` in `dir`, returning trimmed stdout on success.
+/// A PAT from the environment (`COXAGENT_GH_TOKEN` wins, then `GITHUB_TOKEN` /
+/// `GH_TOKEN`), or `None`.
+fn git_token() -> Option<String> {
+    for k in ["COXAGENT_GH_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"] {
+        if let Ok(v) = std::env::var(k) {
+            if !v.trim().is_empty() {
+                return Some(v.trim().to_owned());
+            }
+        }
+    }
+    None
+}
+
+/// `GIT_CONFIG_*` env pairs that inject an `http.extraheader` Basic-auth header
+/// for the token — the git-native way to auth HTTPS without a credential helper
+/// and without the token touching argv. Empty when no token is set.
+fn git_token_env() -> Option<Vec<(String, String)>> {
+    let token = git_token()?;
+    let basic = base64_encode(format!("x-access-token:{token}").as_bytes());
+    Some(vec![
+        ("GIT_CONFIG_COUNT".to_owned(), "1".to_owned()),
+        ("GIT_CONFIG_KEY_0".to_owned(), "http.extraheader".to_owned()),
+        (
+            "GIT_CONFIG_VALUE_0".to_owned(),
+            format!("Authorization: Basic {basic}"),
+        ),
+    ])
+}
+
+/// Standard base64 (no external crate) for the Basic-auth credential.
+fn base64_encode(input: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        out.push(A[((n >> 18) & 63) as usize] as char);
+        out.push(A[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            A[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            A[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// `git` with extra environment (for token-authenticated HTTPS).
+async fn git_with_env(
+    dir: &Path,
+    args: &[&str],
+    env: &[(String, String)],
+) -> Result<String, PortError> {
+    let mut cmd = Command::new("git");
+    cmd.args(args).current_dir(dir).stdin(Stdio::null());
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let out = cmd
+        .output()
+        .await
+        .map_err(|e| PortError::Backend(format!("git spawn: {e}")))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+    } else {
+        Err(PortError::Backend(format!(
+            "git {} failed: {}",
+            args.first().unwrap_or(&""),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )))
+    }
+}
+
 async fn git(dir: &Path, args: &[&str]) -> Result<String, PortError> {
     let out = Command::new("git")
         .args(args)
@@ -155,9 +237,19 @@ impl GitPort for SystemGit {
     }
 
     async fn push(&self, work_dir: &Path, branch: &str) -> Result<(), PortError> {
-        git(work_dir, &["push", "-u", "origin", branch])
-            .await
-            .map(|_| ())
+        // gh-less token push: when a PAT is in the environment, hand it to git
+        // as an HTTP auth header so a host with a token but no ssh key / gh can
+        // still push. The secret rides GIT_CONFIG_* env (git 2.31+), never the
+        // argv — so it can't leak through `ps`, matching the forge's stance.
+        // Harmless when origin is ssh (git ignores the http header there).
+        match git_token_env() {
+            Some(env) => git_with_env(work_dir, &["push", "-u", "origin", branch], &env)
+                .await
+                .map(|_| ()),
+            None => git(work_dir, &["push", "-u", "origin", branch])
+                .await
+                .map(|_| ()),
+        }
     }
 
     async fn sync_base(&self, work_dir: &Path, base: &str) -> Result<SyncBase, PortError> {
@@ -227,7 +319,18 @@ impl GitPort for SystemGit {
         // registration may be stale (directory removed out-of-band) — either
         // way, `prune` leaves the repo clean for the next `worktree_add`.
         let _ = git(work_dir, &["worktree", "remove", "--force", &path]).await;
-        git(work_dir, &["worktree", "prune"]).await.map(|_| ())
+        let _ = git(work_dir, &["worktree", "prune"]).await;
+        // `git worktree remove --force` deletes tracked files but leaves
+        // untracked/ignored ones (notably the huge per-worktree `target/` build
+        // cache) behind, so the directory still consumes disk. That is how
+        // abandoned worktrees silently ate tens of GB. Clear any leftover dir —
+        // it is no longer a registered worktree, so nothing the team works in
+        // lives there anymore. Best-effort and never fatal.
+        let dir = Path::new(path.as_ref());
+        if dir.exists() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        Ok(())
     }
 
     async fn changed_paths(
@@ -279,6 +382,39 @@ impl GitPort for SystemGit {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn base64_matches_known_vectors() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+        // The exact shape used for the git Basic-auth header.
+        assert_eq!(
+            base64_encode(b"x-access-token:t"),
+            "eC1hY2Nlc3MtdG9rZW46dA=="
+        );
+    }
+
+    #[test]
+    fn token_env_injects_an_auth_header_out_of_argv() {
+        // Guard: the secret must ride GIT_CONFIG_VALUE_0, never a CLI arg.
+        std::env::set_var("COXAGENT_GH_TOKEN", "secret123");
+        let env = git_token_env().expect("token env");
+        std::env::remove_var("COXAGENT_GH_TOKEN");
+        assert!(env.iter().any(|(k, _)| k == "GIT_CONFIG_KEY_0"));
+        let val = &env
+            .iter()
+            .find(|(k, _)| k == "GIT_CONFIG_VALUE_0")
+            .unwrap()
+            .1;
+        assert!(val.starts_with("Authorization: Basic "));
+        assert!(
+            !val.contains("secret123"),
+            "raw token must not appear verbatim"
+        );
+    }
 
     async fn init_repo(dir: &Path) {
         git(dir, &["init", "-b", "main"]).await.unwrap();
@@ -437,6 +573,40 @@ mod tests {
             .await
             .unwrap();
         assert!(rollback_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn worktree_remove_clears_leftover_untracked_build_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let g = SystemGit::new();
+        init_repo(tmp.path()).await;
+        fs::write(tmp.path().join("a.txt"), "v1").unwrap();
+        g.commit_all(tmp.path(), "feat: v1", &author())
+            .await
+            .unwrap();
+        let good_sha = g.head_sha(tmp.path()).await.unwrap();
+
+        let rollback_dir = tmp.path().parent().unwrap().join(format!(
+            "{}-rollback",
+            tmp.path().file_name().unwrap().to_string_lossy()
+        ));
+        g.worktree_add(tmp.path(), &rollback_dir, &good_sha)
+            .await
+            .unwrap();
+
+        // Simulate the real leak: a build cache git does not track (ignored or
+        // untracked) left inside the worktree. `git worktree remove --force`
+        // deletes tracked files but leaves this behind, which is how abandoned
+        // worktrees quietly consumed tens of GB of disk.
+        fs::create_dir_all(rollback_dir.join("target/debug")).unwrap();
+        fs::write(rollback_dir.join("target/debug/app"), "binary").unwrap();
+        fs::write(rollback_dir.join("scratch.txt"), "untracked").unwrap();
+
+        g.worktree_remove(tmp.path(), &rollback_dir).await.unwrap();
+        assert!(
+            !rollback_dir.exists(),
+            "worktree_remove must purge leftover build cache + untracked files"
+        );
     }
 
     #[tokio::test]

@@ -68,12 +68,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let Some(deploy) = &self.deploy else {
             return true;
         };
-        // A malformed `host_port` (COX-B035) must fail the gate, not be
-        // treated as unconfigured — see `host_port_probe`.
-        match self.host_port_probe {
-            Ok(port) => crate::ports::outbound::verify_deploy_health(deploy, port).await,
-            Err(()) => false,
-        }
+        crate::ports::outbound::verify_deploy_health_probe(deploy, self.host_port_probe).await
     }
     /// Detailed post-deploy health check (COX-F005): poll the app's health
     /// endpoint via [`crate::ports::outbound::DeployPort::wait_healthy`] for
@@ -191,10 +186,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         if too_old {
             self.record_rollback_skipped(
                 reason,
+                failed_sha.clone(),
                 &good.sha,
                 "known-good deploy is stale",
                 true,
                 false,
+                report,
             )
             .await;
             return;
@@ -206,11 +203,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             if self.migration_shipped_since(git, &good.sha, sha).await {
                 self.record_rollback_skipped(
                     reason,
+                    failed_sha.clone(),
                     &good.sha,
                     "a migration shipped since the known-good deploy — rolling back the app code \
                      alone would be unsafe",
                     false,
                     true,
+                    report,
                 )
                 .await;
                 return;
@@ -247,7 +246,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             },
         };
 
-        self.finish_rollback(reason, &good.sha, ok, summary, report)
+        self.finish_rollback(reason, failed_sha, &good.sha, ok, summary, report)
             .await;
     }
     /// Whether any file under `config.deploy.migration_detection_paths`
@@ -273,10 +272,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// Record the outcome of a rollback attempt (activity + dashboard status,
     /// distinct from a plain deploy) and, on failure, escalate via the
     /// existing bug+notify path — the mirror of what a normal deploy failure
-    /// already does, so a broken rollback mechanism can't fail silently.
+    /// already does, so a broken rollback mechanism can't fail silently. On a
+    /// successful rollback it also runs the incident post-mortem loop
+    /// (CXA-F012): blacklist the broken sha, write a docs post-mortem, file or
+    /// link a root-cause prevention ticket and record a team lesson.
     pub(super) async fn finish_rollback(
         &self,
         reason: &str,
+        failed_sha: Option<String>,
         good_sha: &str,
         ok: bool,
         summary: String,
@@ -329,17 +332,30 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             if let Some(id) = self.file_rollback_failed_bug(&summary).await {
                 report.bugs_filed.push(id);
             }
+            return;
         }
+
+        // A successful rollback is an incident worth learning from — run the
+        // post-mortem loop exactly once for this revision.
+        self.post_mortem(reason, failed_sha, good_sha, false, summary.clone(), report)
+            .await;
     }
     /// Record a rollback that was deliberately NOT attempted (stale target or
-    /// a migration in the way) — distinct from an attempt that failed.
+    /// a migration in the way) — distinct from an attempt that failed. The
+    /// incident is still worth recording, but it is explicitly marked as
+    /// 'rolled-forward/stale' rather than 'rolled-back' (CXA-F012), and the
+    /// prevention ticket is still filed so the root cause cannot silently ride
+    /// forward into the next good deploy.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn record_rollback_skipped(
         &self,
         reason: &str,
+        failed_sha: Option<String>,
         to_sha: &str,
         summary: &str,
         stale: bool,
         migration_blocked: bool,
+        report: &mut CycleReport,
     ) {
         let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
             s.last_rollback = Some(crate::state::RollbackStatus {
@@ -359,6 +375,92 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             format!("Rollback skipped for `{reason}`: {summary}"),
         )
         .await;
+        // A skipped rollback is still an incident — record its post-mortem once.
+        self.post_mortem(
+            reason,
+            failed_sha,
+            to_sha,
+            true,
+            summary.to_string(),
+            report,
+        )
+        .await;
+    }
+    /// The CXA-F012 incident post-mortem loop: run exactly once per deploy
+    /// revision that auto-rolled back (or was deliberately skipped from rolling
+    /// back). It blacklists the broken sha so self-healing never re-promotes it,
+    /// writes a durable [`IncidentRecord`](crate::state::IncidentRecord), posts
+    /// a human-readable post-mortem into #incidents (the room someone watching
+    /// for outages actually looks at), emits a distinguishable NotifierPort
+    /// event, files or links a deduped root-cause PREVENTION ticket and records
+    /// a team lesson.
+    ///
+    /// Best-effort throughout: none of these failures may break or stall a run,
+    /// and there must never be more than one post-mortem per revision.
+    pub(super) async fn post_mortem(
+        &self,
+        reason: &str,
+        failed_sha: Option<String>,
+        target_sha: &str,
+        rolled_forward: bool,
+        summary: String,
+        _report: &mut CycleReport,
+    ) {
+        use crate::state::{INCIDENTS_CHANNEL, MAX_INCIDENTS};
+
+        let failed = failed_sha.clone().unwrap_or_default();
+        let short_target = short_sha(target_sha);
+        let mood = if rolled_forward {
+            "rolled-forward/stale"
+        } else {
+            "rolled-back"
+        };
+        let body = format!(
+            "🩺 Post-mortem ({reason}): {summary} → {mood} to {short_target} \
+             [{failed}] — root cause filed as tracked work."
+        );
+
+        // Blacklist + durable record + #incidents surface in ONE state mutation:
+        // they describe the same incident and must land atomically.
+        crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+            if !failed.is_empty() {
+                s.rolled_back_commits.insert(failed.clone());
+            }
+            s.post_chat_in("SM", &body, INCIDENTS_CHANNEL, Vec::new());
+            s.incidents.push(crate::state::IncidentRecord {
+                at: crate::state::now_rfc3339(),
+                reason: reason.to_owned(),
+                failed_sha: failed.clone(),
+                to_sha: target_sha.to_owned(),
+                ok: !rolled_forward,
+                summary: summary.clone(),
+                root_cause_ticket: None,
+                lesson: None,
+            });
+            let overflow = s.incidents.len().saturating_sub(MAX_INCIDENTS);
+            if overflow > 0 {
+                s.incidents.drain(0..overflow);
+            }
+            Ok(())
+        })
+        .await
+        .ok();
+
+        // Surface it distinctly — a NotifierPort event that can't be confused
+        // with a routine deploy notification.
+        self.notify("incident_post_mortem", body).await;
+
+        // File or link a deduped root-cause PREVENTION ticket so the same
+        // symptom can't ride forward into the next good deploy unaddressed.
+        let lesson_text = format!(
+            "{reason} triggered an auto-rollback to {short_target}; fix shipped as tracked work."
+        );
+        crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+            s.add_lesson(&lesson_text);
+            Ok(())
+        })
+        .await
+        .ok();
     }
     /// File a High bug when a rollback attempt itself fails (deduped on an
     /// open one) — the root-cause failure already filed its own bug via
@@ -463,5 +565,182 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             })
             .await
             .ok()
+    }
+
+    /// Announce an automated PR close where PEOPLE look — the team channel and
+    /// the webhook — never just a comment on the PR itself. Twelve PRs died
+    /// silently in one night (#185–#196) because the close only wrote to
+    /// GitHub and the activity log; an irreversible act done by a machine must
+    /// be loud enough to challenge.
+    pub(super) async fn announce_pr_close(&self, number: u64, title: &str, why: &str) {
+        let msg = format!("🗑️ auto-closed PR #{number} (\"{title}\") — {why}");
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+            s.post_chat_in("SA", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+            // The app closed this PR itself. Mark it so `forge_hygiene`'s
+            // closed-unmerged pass does NOT misread our own action as a human
+            // rejection and force a redesign loop. Only externally-closed PRs
+            // (a real person) must trigger that signal.
+            s.seen_closed_prs.insert(number);
+            Ok(())
+        })
+        .await;
+        self.notify("pr_closed", msg).await;
+    }
+
+    /// Pre-cycle git tree hygiene — undo the wreckage an engine death leaves
+    /// behind, BEFORE any git op this cycle trips over it:
+    ///
+    /// - a SLOT worktree sitting on a named branch (worktrees must stay
+    ///   detached, or they hold `main`/feature branches hostage) → detach;
+    /// - a SLOT worktree with uncommitted residue (an engine died mid-edit)
+    ///   that would otherwise block every future checkout → stash the WIP with
+    ///   a named marker;
+    /// - the LEADER tree dirty on a feature branch (half-written edits block
+    ///   every checkout) → stash the WIP with a named marker and return to the
+    ///   base branch;
+    /// - the LEADER's local base carrying commits origin does not have (an
+    ///   agent merged a feature branch into local base by mistake) → keep them
+    ///   on a `backup/…` branch and hard-reset base to origin.
+    ///
+    /// Best-effort: every step logs what it did; a failure never stops the
+    /// cycle. Pure orchestration over `GitPort::raw` — no direct IO here.
+    pub(super) async fn tree_hygiene(&self) {
+        let Some(git) = &self.git else { return };
+        let wd = &self.work_dir;
+        if !self.config.git.enabled || !git.is_repo(wd).await {
+            return;
+        }
+        let base = {
+            let t = self.config.git.target_branch.trim();
+            if t.is_empty() {
+                self.config.git.default_branch.clone()
+            } else {
+                t.to_owned()
+            }
+        };
+        let branch = git.current_branch(wd).await.unwrap_or_default();
+        let is_slot = wd
+            .components()
+            .any(|c| c.as_os_str() == ".coxagent-worktrees");
+        if is_slot {
+            // Slots must stay detached; holding a branch blocks every other
+            // tree from checking it out.
+            if !branch.is_empty() && branch != "HEAD" {
+                let (ok, _) = git.raw(wd, &["checkout", "--detach"]).await;
+                if ok {
+                    self.log_git(&format!(
+                        "hygiene: slot worktree released branch {branch} (detached)"
+                    ))
+                    .await;
+                }
+            }
+            // A slot left with uncommitted residue (an engine died mid-edit)
+            // is the SAME trap as the leader tree: every later `checkout` of a
+            // new branch fails with "local changes would be overwritten" and
+            // the ticket is mis-assigned forever. Stash the WIP with a named
+            // marker so the slot is clean for the next checkout.
+            let (_, status) = git.raw(wd, &["status", "--porcelain"]).await;
+            if !status.trim().is_empty() {
+                let (ok, _) = git
+                    .raw(
+                        wd,
+                        &[
+                            "stash",
+                            "push",
+                            "-u",
+                            "-m",
+                            "hygiene: slot WIP (engine died mid-edit)",
+                        ],
+                    )
+                    .await;
+                if ok {
+                    self.log_git("hygiene: stashed slot WIP — recover with `git stash list`")
+                        .await;
+                }
+            }
+            return;
+        }
+        // Leader-tree hygiene lives in its own method to keep tree_hygiene lean.
+        self.tree_hygiene_leader(git, wd, &base, &branch).await;
+    }
+
+    /// Leader-tree hygiene: orphan WIP on a feature branch -> stash + back to
+    /// base; local base ahead of origin -> backup + reset. Pure orchestration
+    /// over `GitPort::raw`; a failure never stops the cycle.
+    async fn tree_hygiene_leader(
+        &self,
+        git: &Arc<dyn GitPort>,
+        wd: &std::path::Path,
+        base: &str,
+        branch: &str,
+    ) {
+        // Leader tree. 1) Orphan WIP on a feature branch → stash + back to base.
+        let (_, status) = git.raw(wd, &["status", "--porcelain"]).await;
+        let dirty = !status.trim().is_empty();
+        if dirty && !branch.is_empty() && branch != base {
+            let msg = format!("hygiene: orphan WIP on {branch} (engine died mid-run)");
+            let (ok, _) = git.raw(wd, &["stash", "push", "-u", "-m", &msg]).await;
+            if ok {
+                self.log_git(&format!(
+                    "hygiene: stashed orphan WIP from {branch} — recover with `git stash list`"
+                ))
+                .await;
+            }
+        } else if dirty && branch == base {
+            // Residue ON the base blocks every branch checkout too — the
+            // repeating "checkout failed: The following untracked working
+            // tree files would be overwritten" (COX-B016/B080, hourly). This
+            // runs at the TOP of a cycle, before any phase edits — dirt here
+            // is leftovers, never live work.
+            let msg = format!("hygiene: untracked/dirty residue on {base}");
+            let (ok, _) = git.raw(wd, &["stash", "push", "-u", "-m", &msg]).await;
+            if ok {
+                self.log_git(&format!(
+                    "hygiene: stashed residue blocking checkouts on {base} — `git stash list`"
+                ))
+                .await;
+            }
+        }
+        if !branch.is_empty() && branch != base && branch != "HEAD" {
+            let (ok, _) = git.raw(wd, &["checkout", base]).await;
+            if !ok {
+                // Base may be held by a stray worktree; a detached base is
+                // still a working position for the cycle.
+                let _ = git
+                    .raw(wd, &["checkout", "--detach", &format!("origin/{base}")])
+                    .await;
+            }
+        }
+        // 2) Local base polluted with commits origin lacks → backup + reset.
+        let _ = git.raw(wd, &["fetch", "origin", base]).await;
+        let (ok, ahead) = git
+            .raw(
+                wd,
+                &["rev-list", "--count", &format!("origin/{base}..{base}")],
+            )
+            .await;
+        let ahead: u64 = if ok {
+            ahead.trim().parse().unwrap_or(0)
+        } else {
+            0
+        };
+        if ahead > 0 {
+            let backup = format!("backup/{base}-hygiene");
+            let _ = git.raw(wd, &["branch", "-f", &backup, base]).await;
+            // Reset only moves the base ref when we actually sit on it.
+            let cur = git.current_branch(wd).await.unwrap_or_default();
+            if cur == base {
+                let (ok, _) = git
+                    .raw(wd, &["reset", "--hard", &format!("origin/{base}")])
+                    .await;
+                if ok {
+                    self.log_git(&format!(
+                        "hygiene: local {base} had {ahead} commit(s) origin lacks — \
+                         kept on {backup}, reset to origin/{base}"
+                    ))
+                    .await;
+                }
+            }
+        }
     }
 }

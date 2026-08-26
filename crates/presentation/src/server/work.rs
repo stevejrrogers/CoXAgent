@@ -75,6 +75,16 @@ pub(super) async fn ticket_detail_ep(
                     if state.cost_approved.contains(&id) {
                         obj.insert("cost_approved".into(), serde_json::json!(true));
                     }
+                    // Attachments ride the detail payload: the modal renders
+                    // from here, always fresh — the SSE snapshot path proved
+                    // unreliable as a source (records reached the store but
+                    // never the client's STATE).
+                    if let Some(atts) = state.ticket_attachments.get(&id) {
+                        obj.insert(
+                            "attachments".into(),
+                            serde_json::to_value(atts).unwrap_or_default(),
+                        );
+                    }
                 }
                 Json(v).into_response()
             }),
@@ -396,6 +406,10 @@ pub(super) async fn reject_ticket(
     ) {
         return (axum::http::StatusCode::CONFLICT, e.to_string()).into_response();
     }
+    // A rejected ticket is not awaiting work — drop any cost hold so it stops
+    // showing as a spend to approve.
+    state.cost_holds.remove(&id);
+    state.cost_approved.remove(&id);
     state.log_activity("USER", "rejected ticket", Some(id));
     match p.store.save(&state).await {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
@@ -590,8 +604,36 @@ pub(super) async fn control_ep(
         _ => resolve_username(&app, &headers).await,
     };
     let operator = format!("{account}@{}", machine_host());
+    // Ownership gate: a run belongs to whoever started it. Only that user — or
+    // an admin/root — may pause, stop, or step it. Anyone else pressing Start
+    // while someone's run is live only records THEIR desired-run intent (their
+    // own operator picks it up); it never hijacks or relabels the live run.
+    let (owner, live) = {
+        let s = p.runner.snapshot();
+        (s.operator, s.mode == "running")
+    };
+    let owns = match app.auth.clone() {
+        None => true, // open mode: single-user local
+        Some(auth) => {
+            let caller = resolve_principal(&auth, &headers).await;
+            caller.as_ref().is_some_and(|u| {
+                matches!(
+                    u.role,
+                    coxagent_application::auth::AuthRole::Super
+                        | coxagent_application::auth::AuthRole::Admin
+                ) || owner
+                    .as_deref()
+                    .map_or(true, |o| o.eq_ignore_ascii_case(&u.username))
+            })
+        }
+    };
     match action.as_str() {
         "resume" => {
+            if live && !owns {
+                // Someone else's run is live: just start MY operator.
+                let _ = p.store.set_desired(&operator, true).await;
+                return Json(p.runner.snapshot()).into_response();
+            }
             p.runner.set_operator(&account, &machine_host());
             p.runner.resume();
             // Persist this operator's intent so reopening the app auto-resumes
@@ -600,6 +642,16 @@ pub(super) async fn control_ep(
         }
         // Pause/stop are local to this operator and persist the stopped intent,
         // so a reopen stays idle instead of auto-resuming.
+        "pause" | "step" | "stop" if !owns => {
+            let who = owner.unwrap_or_default();
+            return (
+                axum::http::StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": format!("this run belongs to {who} — only they or an admin can {action} it")
+                })),
+            )
+                .into_response();
+        }
         "pause" => {
             p.runner.pause();
             let _ = p.store.set_desired(&operator, false).await;
@@ -639,9 +691,14 @@ pub(super) async fn operator_control_ep(
     if let Some(auth) = app.auth.clone() {
         let caller = resolve_principal(&auth, &headers).await;
         let account = operator.split('@').next().unwrap_or("");
-        let allowed = caller
-            .as_ref()
-            .is_some_and(|u| u.role.can_manage() || u.username.eq_ignore_ascii_case(account));
+        // Admin/root manage everyone; leads and below only their own operator.
+        let allowed = caller.as_ref().is_some_and(|u| {
+            matches!(
+                u.role,
+                coxagent_application::auth::AuthRole::Super
+                    | coxagent_application::auth::AuthRole::Admin
+            ) || u.username.eq_ignore_ascii_case(account)
+        });
         if !allowed {
             return (
                 axum::http::StatusCode::FORBIDDEN,

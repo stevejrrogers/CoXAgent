@@ -9,6 +9,7 @@ pub mod conformance_check;
 pub mod cycle;
 pub mod generate_docs;
 pub mod json_repair;
+pub mod manual_rollback;
 pub mod merge_policy;
 pub mod merge_sweep;
 pub mod recover;
@@ -36,6 +37,7 @@ pub use conformance_check::RunConformanceUseCase;
 pub use cycle::{CycleReport, RunCycleUseCase};
 pub use generate_docs::GenerateDocsUseCase;
 pub use json_repair::repair_json;
+pub use manual_rollback::{known_good_target, ManualRollbackInput, RollbackOutcome};
 pub use merge_policy::{
     competing_pr, escalation_route, needs_human_eyes, route_from_failures, EscalationRoute,
     MAX_TICKET_RESCUES,
@@ -60,6 +62,8 @@ pub use run_standup::RunStandupUseCase;
 pub use run_test::RunTestUseCase;
 pub use runner::{run_forever, RunnerHandle, RunnerSnapshot};
 
+#[cfg(test)]
+mod mod_guard_tests;
 #[cfg(test)]
 mod run_releases_tdd_tests;
 #[cfg(test)]

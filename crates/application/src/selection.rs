@@ -98,19 +98,30 @@ fn deps_satisfied(state: &ProjectState, ticket: &Ticket) -> bool {
     })
 }
 
-/// All tickets matching `pred`, best-first: priority desc, then id ascending.
+/// All tickets matching `pred`, priority-ordered: tickets committed to the
+/// current sprint first (the team's aligned work), then the rest best-first.
+/// Within each scope bucket: priority desc, then id ascending.
 fn candidates<F: Fn(&Ticket) -> bool>(state: &ProjectState, pred: F) -> Vec<TicketId> {
-    // Human-assigned tickets are a person's, end to end — never an agent
-    // candidate. The person hands one back by clearing the assignment.
+    // An assignee records WHO owns a ticket, it does not LOCK it out of the
+    // team's work. In this app the running agents are the operator's team, so
+    // a ticket assigned to the operator is prioritised work for them, not a
+    // walled-off lane — a human-assigned ticket can still be actioned by the
+    // team (the assignee flag is an ownership label, not a scheduler block).
     let mut matched: Vec<&Ticket> = state
         .tickets
         .iter()
-        .filter(|t| t.assignee().is_none() && pred(t))
+        .filter(|t| pred(t))
         .collect();
     matched.sort_by(|a, b| {
-        priority_rank(b.priority())
-            .cmp(&priority_rank(a.priority()))
-            .then_with(|| a.id().as_str().cmp(b.id().as_str()))
+        let a_in = in_dev_scope(state, a.id());
+        let b_in = in_dev_scope(state, b.id());
+        b_in
+            .cmp(&a_in) // in-scope first
+            .then_with(|| {
+                priority_rank(b.priority())
+                    .cmp(&priority_rank(a.priority()))
+                    .then_with(|| a.id().as_str().cmp(b.id().as_str()))
+            })
     });
     matched.into_iter().map(|t| t.id().clone()).collect()
 }
@@ -121,6 +132,36 @@ fn priority_rank(p: Priority) -> u8 {
         Priority::Medium => 1,
         Priority::High => 2,
     }
+}
+
+/// Is `id` inside the DEV work scope for the current sprint?
+///
+/// Real-world rule: DEV only pulls tickets the team committed to this sprint
+/// (PO/SM aligned via the sprint-board action). Two things stay in scope
+/// regardless:
+///  - bugs still `Open` — dedicated bug work outranks the board, and
+///  - Kanban mode (no sprint open) — there is no sprint to be out of scope
+///    for, so any ready ticket is fair game.
+///
+/// In Scrum mode a feature/chore the PO/SM has not committed is out of scope:
+/// DEV must ask to have it added before picking it up.
+#[must_use]
+pub fn in_dev_scope(state: &ProjectState, id: &TicketId) -> bool {
+    // Emergency bugs are always workable, sprint or not.
+    if matches!(
+        state.ticket(id),
+        Some(t) if matches!((t.ticket_type(), t.status()), (TicketType::Bug, Status::Open))
+    ) {
+        return true;
+    }
+    // Kanban mode (no sprint open): no scope ceremony — DEV may pull any
+    // ready ticket.
+    let Some(sprint) = state.sprint.as_ref() else {
+        return true;
+    };
+    // Scrum mode: features/chores only get worked when the team committed
+    // them to this sprint (PO/SM aligned via the sprint-board action).
+    sprint.committed.contains(id)
 }
 
 #[cfg(test)]
@@ -181,5 +222,148 @@ mod tests {
     #[test]
     fn no_ready_feature_returns_none() {
         assert!(next_ready_feature(&ProjectState::default()).is_none());
+    }
+
+    // Ticket::new creates bugs already in `Open`.
+    fn open_bug(id: &str) -> Ticket {
+        Ticket::new(
+            TicketId::new(id).expect("id"),
+            TicketType::Bug,
+            "b",
+            "",
+            Priority::High,
+            Complexity::Small,
+            false,
+        )
+        .expect("ticket")
+    }
+
+    fn sprint(committed: &[&str]) -> crate::state::Sprint {
+        crate::state::Sprint {
+            number: 1,
+            goal: String::new(),
+            started_cycle: 0,
+            length_cycles: 10,
+            committed: committed
+                .iter()
+                .copied()
+                .filter_map(|c| TicketId::new(c).ok())
+                .collect(),
+            started_at: String::new(),
+        }
+    }
+
+    /// A `pending` feature with no technical design yet (the SA queue).
+    fn pending_feature_needing_design(id: &str, prio: Priority) -> Ticket {
+        Ticket::new(
+            TicketId::new(id).expect("id"),
+            TicketType::Feature,
+            "f",
+            "",
+            prio,
+            Complexity::Small,
+            false,
+        )
+        .expect("ticket")
+    }
+
+    #[test]
+    fn design_prefers_committed_feature_over_out_of_scope() {
+        // Same priority; the committed one must be picked first even though the
+        // out-of-scope one comes lexicographically earlier.
+        let state = ProjectState {
+            tickets: vec![
+                pending_feature_needing_design("CXA-F010", Priority::High),
+                pending_feature_needing_design("CXA-F003", Priority::High),
+            ],
+            sprint: Some(sprint(&["CXA-F010"])),
+            ..ProjectState::default()
+        };
+        assert_eq!(
+            next_feature_needing_design(&state).expect("some").as_str(),
+            "CXA-F010"
+        );
+    }
+
+    #[test]
+    fn design_falls_back_to_out_of_scope_when_no_committed_work() {
+        // No committed feature needs design but an out-of-scope one does — it
+        // is still designed so the pipeline isn't starved (the sprint cost-free
+        // fallback; DEV only ignores it because it isn't scoped).
+        let state = ProjectState {
+            tickets: vec![pending_feature_needing_design("CXA-F020", Priority::High)],
+            sprint: Some(sprint(&["CXA-F011"])),
+            ..ProjectState::default()
+        };
+        assert_eq!(
+            next_feature_needing_design(&state).expect("some").as_str(),
+            "CXA-F020"
+        );
+    }
+
+    #[test]
+    fn in_scope_committed_feature_is_workable() {
+        let state = ProjectState {
+            tickets: vec![ready_feature("CXA-F001", Priority::High)],
+            sprint: Some(sprint(&["CXA-F001"])),
+            ..ProjectState::default()
+        };
+        assert!(in_dev_scope(
+            &state,
+            &TicketId::new("CXA-F001").expect("id")
+        ));
+    }
+
+    #[test]
+    fn out_of_scope_ready_feature_is_blocked() {
+        let state = ProjectState {
+            tickets: vec![ready_feature("CXA-F023", Priority::High)],
+            // Sprint committed something else; F023 was never PO/SM-aligned.
+            sprint: Some(sprint(&["CXA-F004"])),
+            ..ProjectState::default()
+        };
+        assert!(!in_dev_scope(
+            &state,
+            &TicketId::new("CXA-F023").expect("id")
+        ));
+    }
+
+    #[test]
+    fn open_bug_is_always_in_scope() {
+        let state = ProjectState {
+            tickets: vec![open_bug("CXA-B002")],
+            ..ProjectState::default()
+        };
+        // No sprint at all — still workable because it is an emergency bug.
+        assert!(in_dev_scope(
+            &state,
+            &TicketId::new("CXA-B002").expect("id")
+        ));
+    }
+
+    #[test]
+    fn no_sprint_means_kanban_features_are_in_scope() {
+        let state = ProjectState {
+            tickets: vec![ready_feature("CXA-F001", Priority::High)],
+            ..ProjectState::default()
+        };
+        // Kanban mode (no sprint): no ceremony, any ready feature is workable.
+        assert!(in_dev_scope(
+            &state,
+            &TicketId::new("CXA-F001").expect("id")
+        ));
+    }
+
+    #[test]
+    fn committed_feature_is_in_scope_under_sprint() {
+        let state = ProjectState {
+            tickets: vec![ready_feature("CXA-F001", Priority::High)],
+            sprint: Some(sprint(&["CXA-F001"])),
+            ..ProjectState::default()
+        };
+        assert!(in_dev_scope(
+            &state,
+            &TicketId::new("CXA-F001").expect("id")
+        ));
     }
 }

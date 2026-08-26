@@ -201,10 +201,26 @@ async function generateDocs(){
   clearInterval(tick);btn.innerHTML=old;btn.disabled=false;renderDocMain();
 }
 // Minimal Markdown → HTML for doc pages (headings, lists, code, links).
+// Render every not-yet-processed ```mermaid fence inside `root` as a live
+// diagram. Safe to call repeatedly — Mermaid stamps processed nodes. Dark
+// theme to match the app; failures leave the source text visible.
+function renderMermaidIn(root){
+  if(!window.mermaid)return;
+  if(!window._mmInit){window._mmInit=1;mermaid.initialize({startOnLoad:false,theme:"dark",securityLevel:"strict",themeVariables:{fontFamily:"ui-sans-serif,system-ui",background:"transparent"}});}
+  const nodes=(root||document).querySelectorAll("pre.mermaid:not([data-processed])");
+  if(nodes.length)mermaid.run({nodes}).catch(()=>{});
+}
 function mdRender(md){
   if(!md)return"";
   const blocks=[];
-  let s=md.replace(/```([\s\S]*?)```/g,(_,c)=>{blocks.push('<pre class="codeblock">'+esc(c.replace(/^\n/,"").replace(/\n$/,""))+'</pre>');return "\nZZCODEBLK"+(blocks.length-1)+"ZZ\n";});
+  let s=md.replace(/```(\w*)\n?([\s\S]*?)```/g,(_,lang,c)=>{
+    const body=c.replace(/^\n/,"").replace(/\n$/,"");
+    // Mermaid fences become live diagrams (rendered by renderMermaidIn after
+    // the HTML lands); everything else stays a plain code block.
+    blocks.push(lang==="mermaid"
+      ?'<pre class="mermaid">'+esc(body)+'</pre>'
+      :'<pre class="codeblock">'+esc(body)+'</pre>');
+    return "\nZZCODEBLK"+(blocks.length-1)+"ZZ\n";});
   const inline=t=>esc(t)
     .replace(/`([^`]+)`/g,'<code class="inlinecode">$1</code>')
     .replace(/\*\*([^*]+)\*\*/g,"<b>$1</b>").replace(/(^|[^*])\*([^*\n]+)\*/g,"$1<i>$2</i>")
@@ -239,6 +255,9 @@ function mdRender(md){
 function startPoll(){if(poll)return;poll=setInterval(async()=>{try{const s=await(await fetch(api("/state"))).json();const rn=await(await fetch(api("/runner"))).json();render(s);renderRunner(rn);setConn(false);}catch(e){}},3000);}
 function connect(){if(ES)ES.close();if(poll){clearInterval(poll);poll=null;}
   ES=new EventSource(api("/events"));ES.onmessage=e=>{try{handle(JSON.parse(e.data));if(poll){clearInterval(poll);poll=null;}}catch(_){}};ES.onerror=()=>{setConn(false);startPoll();};}
-function loadBudget(){fetch(api("/config")).then(r=>r.json()).then(c=>{window._budget=(c.workflow&&c.workflow.budget_usd)||null;if(CUR==="insights")renderActive();}).catch(()=>{});}
+function loadBudget(){fetch(api("/config")).then(r=>r.json()).then(c=>{window._budget=(c.workflow&&c.workflow.budget_usd)||null;
+  // Cache the whole config: the agent cards read engine.per_role for the
+  // engine badge before any run of a role has finished (see core.js).
+  window._cfg=c;if(CUR==="insights"||CUR==="team")renderActive();}).catch(()=>{});}
 let PROJECTS=[];
 function projInitial(p){return (p.alias||p.name||"P").trim().charAt(0).toUpperCase()||"P";}

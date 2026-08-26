@@ -1,10 +1,15 @@
 # Self-host CoXAgent: the hub + dashboard, backed by Postgres for multi-tenant
 # state, audit, and audit retention. Bring up with:
-#   COXAGENT_ADMIN_PASSWORD=yourpw docker compose up -d --build
+#   PG_PASSWORD=<strong> COXAGENT_ADMIN_PASSWORD=<strong> docker compose up -d --build
 # then open http://localhost:8101 and log in as root.
 #
-# Host port is fixed at 8101 (this project's assigned deploy.host_port) so it
-# never collides with a live hub bound to 4000 on the same docker host.
+# Both variables are REQUIRED — compose fails fast with a clear message if
+# either is unset. Never start without setting them.
+#
+# The app's host port defaults to 8101 (this project's assigned deploy.host_port)
+# so it never collides with a live hub bound to 4000 on the same docker host.
+# Override with APP_PORT when another stack already holds the default — every
+# published port is env-driven, never a hardcoded shared value (CXA-B069).
 #
 # Note: real LLM agents need a CLI (claude/opencode) on PATH inside the
 # container; the base image ships scripted/mock (offline). Install a CLI in a
@@ -13,7 +18,7 @@ services:
   db:
     image: postgres:16-alpine
     environment:
-      POSTGRES_PASSWORD: ${PG_PASSWORD:-coxagent_dev}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?PG_PASSWORD is required — set it before running docker compose up}
       POSTGRES_DB: coxagent
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -22,6 +27,7 @@ services:
       interval: 3s
       timeout: 3s
       retries: 15
+    restart: unless-stopped
 
   coxagent:
     build: .
@@ -29,14 +35,15 @@ services:
       db:
         condition: service_healthy
     environment:
-      COXAGENT_DB_DSN: postgres://postgres:${PG_PASSWORD:-coxagent_dev}@db:5432/coxagent
+      COXAGENT_DB_DSN: postgres://postgres:${PG_PASSWORD:?PG_PASSWORD is required — set it before running docker compose up}@db:5432/coxagent
       COXAGENT_ADMIN_USER: root
-      COXAGENT_ADMIN_PASSWORD: ${COXAGENT_ADMIN_PASSWORD:-changeme}
+      COXAGENT_ADMIN_PASSWORD: ${COXAGENT_ADMIN_PASSWORD:?COXAGENT_ADMIN_PASSWORD is required — set it before running docker compose up}
       COXAGENT_AUDIT_RETENTION_DAYS: "90"
     ports:
-      - "8101:4000"
+      - "${APP_PORT:-8101}:4000"
     volumes:
       - workspace:/workspace
+    restart: unless-stopped
 
 volumes:
   pgdata:

@@ -194,6 +194,9 @@ pub(super) async fn auth_mw(
     // webhook token is the credential, so no session is required).
     if path == "/"
         || path == "/api/health"
+        // OpenAPI spec - public, like health: MCP clients and SDK generators
+        // must discover endpoints without holding a hub session.
+        || path == "/api/openapi.json"
         || path == "/api/auth/login"
         // Embedded static assets (vendored JS/CSS) — same trust level as "/".
         || path.starts_with("/assets/")
@@ -434,6 +437,45 @@ pub(super) async fn disable_2fa_ep(
     Json(serde_json::json!({ "ok": true })).into_response()
 }
 
+/// Canonical machine-local location of the persisted remote-store bearer token.
+///
+/// Mirrors `coxagent_app::builders::operator_token_path` exactly so the login
+/// writer (here) and the runner-side reader can never disagree about where the
+/// secret lives. Env override `COXAGENT_TOKEN_FILE` wins; else
+/// `<home>/CoXAgent/operator.token`. Inlined because coxagent-presentation must
+/// not import from coxagent-app (dependency cycle app -> presentation).
+fn operator_token_path() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("COXAGENT_TOKEN_FILE") {
+        let p = p.trim();
+        if !p.is_empty() {
+            return Some(PathBuf::from(p));
+        }
+    }
+    std::env::home_dir().map(|h| h.join("CoXAgent").join("operator.token"))
+}
+
+/// Persist a harvested personal API token to [`operator_token_path`], owner-only
+/// (0600), so separately-spawned operator processes can read it for `/store`
+/// auth. Silently no-ops when no path resolves or the write fails -- a missing
+/// token file only degrades remote-store provisioning, never login itself.
+fn persist_local_operator_token(secret: &str) {
+    let Some(path) = operator_token_path() else {
+        return;
+    };
+
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).ok();
+    }
+
+    std::fs::write(&path, secret.as_bytes()).ok();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+}
+
 pub(super) async fn login_ep(
     State(app): State<AppState>,
     headers: axum::http::HeaderMap,
@@ -459,7 +501,8 @@ pub(super) async fn login_ep(
             // authenticated under P5a). Idempotent per user — first login mints,
             // later logins reuse without re-issuing the secret.
             if let Some(secret) = auth.auto_issue_personal_token(&req.username).await {
-                std::env::set_var("COXAGENT_REMOTE_TOKEN", secret);
+                std::env::set_var("COXAGENT_REMOTE_TOKEN", secret.clone());
+                persist_local_operator_token(&secret);
             }
             token
         }
@@ -517,4 +560,68 @@ pub(super) async fn logout_ep(
         Json(serde_json::json!({ "ok": true })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod operator_token_writer_tests {
+    use super::persist_local_operator_token;
+    use std::path::PathBuf;
+
+    /// These tests read/write process-global env vars; serialize them so they
+    /// cannot clobber one another's values when Rust runs them on many threads.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn persist_local_operator_token_writes_secret_at_env_path() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let base: PathBuf = dir.path().to_path_buf();
+        let target = base.join("operator.token");
+        // Point the canonical location at a throwaway path so we never touch a
+        // real ~/CoXAgent token while testing.
+        std::env::set_var("COXAGENT_TOKEN_FILE", &target);
+
+        persist_local_operator_token("super-secret");
+
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "super-secret",
+            "the secret should be persisted verbatim at the canonical location"
+        );
+
+        // Owner-only (0600) on unix — never a world-readable secret file.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = std::fs::metadata(&target).unwrap();
+            assert_eq!(
+                meta.permissions().mode() & 0o777,
+                0o600,
+                "the token file must be owner-only (0600)"
+            );
+            assert!(meta.is_file(), "a regular file should be written");
+        }
+
+        std::env::remove_var("COXAGENT_TOKEN_FILE");
+    }
+
+    #[test]
+    fn persist_local_operator_token_creates_parent_dir_and_overwrites() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        // Nest under a directory that does not exist yet.
+        let target: PathBuf = dir.path().join("nested/deeply").join("operator.token");
+        std::env::set_var("COXAGENT_TOKEN_FILE", &target);
+
+        persist_local_operator_token("first");
+        persist_local_operator_token("second");
+
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "second",
+            "re-persisting should overwrite the previous secret in place"
+        );
+
+        std::env::remove_var("COXAGENT_TOKEN_FILE");
+    }
 }

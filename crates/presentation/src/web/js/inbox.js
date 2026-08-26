@@ -14,12 +14,14 @@ function inboxBadge(n){
 
 const INBOX_KIND={
   approve_ready:{label:"Approve to Ready",ic:"ti-checks",col:"var(--accent2)"},
+  cost_approve:{label:"Approve the spend",ic:"ti-coin",col:"var(--amber)"},
   verify:{label:"Verify fix",ic:"ti-shield-check",col:"var(--green)"},
   assigned:{label:"Assigned to you",ic:"ti-user",col:"var(--purple)"},
   question:{label:"Question for you",ic:"ti-help-circle",col:"var(--amber)"},
   review_pr:{label:"PR held for human",ic:"ti-git-pull-request",col:"var(--teal)"},
   auto_approved:{label:"Auto-approved",ic:"ti-robot",col:"var(--dim)"},
   pr_stuck:{label:"PR stuck — needs you",ic:"ti-alert-triangle",col:"var(--red)"},
+  human_eyes:{label:"Needs human eyes",ic:"ti-eye-exclamation",col:"var(--amber)"},
 };
 
 function inboxCard(kind,meta,title,actions,ticket){
@@ -83,6 +85,14 @@ async function renderInbox(){
           ?ibtn("Reject",`inboxAct('${esc(it.ticket)}','reject')`)+
            ibtn("Approve",`inboxAct('${esc(it.ticket)}','ready')`,1)
           :noRight(it.role)),it.ticket);
+    }else if(it.kind==="cost_approve"){
+      const est=(typeof it.estimate_usd==="number")?" · ~$"+it.estimate_usd.toFixed(2):"";
+      html+=inboxCard("cost_approve",esc(it.ticket)+(it.priority?" · "+esc(it.priority):"")+est,esc(it.title),
+        ibtn("Review",`showTicket('${esc(it.ticket)}')`)+
+        (act
+          ?ibtn("Reject",`inboxAct('${esc(it.ticket)}','reject')`)+
+           ibtn("Approve spend",`inboxAct('${esc(it.ticket)}','approve-cost')`,1)
+          :noRight(it.role)),it.ticket);
     }else if(it.kind==="verify"){
       html+=inboxCard("verify",esc(it.ticket),esc(it.title),
         ibtn("Evidence",`showTicket('${esc(it.ticket)}')`)+
@@ -106,6 +116,15 @@ async function renderInbox(){
     }else if(it.kind==="review_pr"){
       html+=inboxCard("review_pr","#"+it.number,esc(it.title),
         (act?ibtn("Open review",`nav('review')`,1):noRight(it.role)));
+    }else if(it.kind==="human_eyes"){
+      // The machine approved this PR but refuses to land it alone — the meta
+      // line carries the gate's exact reason so the person decides informed.
+      html+=inboxCard("human_eyes","#"+it.number+" · "+esc(it.reason||""),esc(it.title||("PR #"+it.number)),
+        (it.url?ibtn("Open PR",`window.open('${esc(it.url)}','_blank')`):"")+
+        (act
+          ?ibtn("Dismiss",`inboxHumanPr(${it.number},'dismiss')`)+
+           ibtn("Land it",`inboxHumanPr(${it.number},'approve')`,1)
+          :noRight(it.role)));
     }else if(it.kind==="pr_stuck"){
       // The team tried, the SA rescued it, and it is still not moving. Say what
       // was tried and give the two moves a person actually has.
@@ -153,6 +172,18 @@ async function inboxUndo(id){
     if(!r.ok)toasty(await r.text(),"err");else toasty(id+" pulled back — that shape asks again","ok");
   }catch(e){}
   renderInbox();}
+
+// Decide a PR the machine held for human eyes: land it (this click IS the
+// human the gate waited for) or dismiss the hold and handle it on the forge.
+async function inboxHumanPr(number,action){
+  try{
+    const r=await fetch(api("/pr/"+number+"/human"),
+      {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action})});
+    if(!r.ok){toasty(await r.text()||"Failed","err");return;}
+    toasty(action==="approve"?("PR #"+number+" landed"):("Hold on #"+number+" dismissed"),"ok");
+  }catch(e){toasty("Network error","err");}
+  renderInbox();
+}
 
 async function inboxUnassign(id){
   try{await fetch(api("/ticket/"+encodeURIComponent(id)+"/assign"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:""})});}catch(e){}
