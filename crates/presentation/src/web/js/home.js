@@ -267,19 +267,91 @@ function spBurndown(total,doneN,elapsed,len){
 }
 function renderBacklogPanel(s){
   const el=document.getElementById("backlog-body");
-  // Backlog = not yet in flight and not shipped: pending/ready/open, newest-priority first.
   const rank={high:0,medium:1,low:2};
   const items=(s.tickets||[]).filter(t=>["pending","ready","open"].includes(t.status))
     .sort((a,b)=>(rank[a.priority]??3)-(rank[b.priority]??3));
   const committed=new Set((s.sprint&&s.sprint.committed)||[]);
   const pc={high:"var(--red)",medium:"var(--amber)",low:"var(--muted)"};
+  const byId=id=>(s.tickets||[]).find(x=>x.id===id);
+  // 1) The running sprint, always on top.
+  const sp=s.sprint;
+  let activeHtml="";
+  if(sp){
+    const cm=(sp.committed||[]).map(byId).filter(Boolean);
+    const done=cm.filter(t=>["done","documented","verified"].includes(t.status)).length;
+    activeHtml=`<div class="panel spq-card spq-active" ondragover="spqOver(event,this)" ondragleave="spqLeave(this)" ondrop="spqDrop(event,null)">
+      <div class="spq-head"><span class="pbadge on">● running</span><b>Sprint #${sp.number}</b>
+        <span class="spq-goal">${esc(sp.goal)}</span>
+        <span class="spq-n">${done}/${cm.length} done</span>
+        <a onclick="setWorkTab('sprint')" style="cursor:pointer;color:var(--accent2);font-size:11.5px;margin-left:auto">open board →</a></div>
+      <div class="spq-tk">${(sp.committed||[]).map(id=>{const t=byId(id);const col=t?(pc[t.priority]||"var(--muted)"):"var(--muted)";
+        return `<span class="spq-chip" style="border-color:${col}55" onclick="showTicket('${esc(id)}')">${esc(id)}</span>`;}).join("")||'<span class="empty" style="padding:4px">empty — drag tickets here</span>'}</div>
+    </div>`;
+  }
+  // 2) Queued sprints, in run order.
+  const queue=s.sprint_queue||[];
+  const qHtml=queue.map((q,i)=>`<div class="panel spq-card" ondragover="spqOver(event,this)" ondragleave="spqLeave(this)" ondrop="spqDrop(event,${q.id})">
+    <div class="spq-head"><span class="spq-ord">#${i+1} up next</span><span class="spq-goal">${esc(q.goal)}</span>
+      <span class="spq-n">${(q.tickets||[]).length} ticket${(q.tickets||[]).length===1?"":"s"}</span>
+      ${q.by?`<span class="spq-by" title="planned by">${esc(q.by)}</span>`:""}
+      <button class="sp-scope" style="margin-left:auto" onclick="spqDelete(${q.id})" title="Drop this planned sprint">✕ plan</button></div>
+    <div class="spq-tk">${(q.tickets||[]).map(id=>{const t=byId(id);const col=t?(pc[t.priority]||"var(--muted)"):"var(--muted)";
+      return `<span class="spq-chip" style="border-color:${col}55" onclick="showTicket('${esc(id)}')">${esc(id)}<i class="ti ti-x" onclick="event.stopPropagation();spqScope(${q.id},null,'${esc(id)}')" title="remove"></i></span>`;}).join("")||'<span class="empty" style="padding:4px">no tickets yet — drag from the backlog below</span>'}</div>
+  </div>`).join("");
+  // 3) The prioritised backlog list, draggable into any sprint above.
   const rows=items.map(t=>{const col=pc[t.priority]||"var(--muted)";const inSp=committed.has(t.id);
-    return `<div class="act" onclick="showTicket('${t.id}')" style="cursor:pointer"><div class="ad" style="background:${col}22;color:${col}"><i class="ti ti-${t.type==='bug'?'bug':'bulb'}" style="font-size:13px"></i></div>
+    return `<div class="act" draggable="true" ondragstart="spqDrag(event,'${esc(t.id)}')" onclick="showTicket('${t.id}')" style="cursor:pointer"><div class="ad" style="background:${col}22;color:${col}"><i class="ti ti-${t.type==='bug'?'bug':'bulb'}" style="font-size:13px"></i></div>
       <div class="atx"><span class="tk">${esc(t.id)}</span> ${esc(t.title)} <span class="fchip" style="padding:1px 8px;font-size:10px;border:none;background:${col}22;color:${col}">${esc(t.priority||'—')}</span>${inSp?' <span class="fchip" style="padding:1px 8px;font-size:10px;border:none;background:var(--accentbg);color:var(--accent2)">in sprint</span>':''}</div>
       <button class="sp-scope" onclick="event.stopPropagation();sprintScope('${t.id}',${inSp?"false":"true"})" title="${inSp?'Drop from the running sprint':'Pull into the running sprint'}">${inSp?'− sprint':'+ sprint'}</button>
       <span class="tm">${esc(t.status)}</span></div>`;}).join("");
-  el.innerHTML=`<div class="filters"><span style="font-size:12px;color:var(--muted)">Prioritised backlog — the PO pulls from the top into each sprint.</span><div style="flex:1"></div><span class="fchip">${items.length} waiting</span></div>
+  el.innerHTML=`${activeHtml}${qHtml}
+    <div style="display:flex;align-items:center;gap:10px;margin:14px 0 8px">
+      <span class="sec" style="margin:0">Backlog</span>
+      <span style="font-size:11.5px;color:var(--dim)">drag a ticket onto a sprint above, or use + sprint for the running one</span>
+      <div style="flex:1"></div>
+      <span class="fchip">${items.length} waiting</span>
+      <button class="tk-btn go" onclick="spqCreate()"><i class="ti ti-plus"></i> New sprint</button>
+    </div>
     <div class="panel">${rows||'<div class="empty">backlog is clear — every ticket is in flight or shipped</div>'}</div>`;
+}
+// --- Sprint-queue interactions (drag a backlog row onto a sprint card) ---
+function spqDrag(ev,id){ev.dataTransfer.setData("text/ticket",id);ev.dataTransfer.effectAllowed="copy";}
+function spqOver(ev,el){ev.preventDefault();ev.dataTransfer.dropEffect="copy";el.classList.add("spq-hot");}
+function spqLeave(el){el.classList.remove("spq-hot");}
+async function spqDrop(ev,qid){
+  ev.preventDefault();ev.currentTarget.classList.remove("spq-hot");
+  const id=ev.dataTransfer.getData("text/ticket");if(!id)return;
+  if(qid==null){await sprintScope(id,true);return;} // the running sprint
+  await spqScope(qid,id,null);
+}
+async function spqScope(qid,add,remove){
+  try{
+    const body={add:add?[add]:[],remove:remove?[remove]:[]};
+    const r=await fetch(api("/sprint-queue/"+qid+"/scope"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    if(!r.ok){toasty((await r.text())||"Plan update failed","err");return;}
+    toasty(add?`${add} added to the plan`:`${remove} removed from the plan`);
+    await refreshDisc();
+  }catch(e){toasty("Network error","err");}
+}
+async function spqCreate(){
+  const goal=await coxModal({title:"New sprint",message:"Goal for this planned sprint — it runs after the ones above it, and its tickets become the sprint scope.",input:{placeholder:"e.g. harden auth & session handling"},confirmText:"Queue sprint"});
+  if(!goal||!String(goal).trim())return;
+  try{
+    const r=await fetch(api("/sprint-queue"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({goal:String(goal).trim(),tickets:[]})});
+    if(!r.ok){toasty((await r.text())||"Could not queue the sprint","err");return;}
+    toasty("Sprint queued — drag tickets into it");
+    await refreshDisc();
+  }catch(e){toasty("Network error","err");}
+}
+async function spqDelete(qid){
+  const ok=await coxModal({title:"Drop planned sprint",message:"Remove this planned sprint from the queue? Its tickets stay in the backlog.",danger:true,confirmText:"Drop plan"});
+  if(!ok)return;
+  try{
+    const r=await fetch(api("/sprint-queue/"+qid),{method:"DELETE"});
+    if(!r.ok){toasty((await r.text())||"Delete failed","err");return;}
+    toasty("Planned sprint dropped");
+    await refreshDisc();
+  }catch(e){toasty("Network error","err");}
 }
 // Pull a backlog ticket into the sprint that is already running, or drop it.
 // The automatic commit only happens at roll-over; this is how a person changes

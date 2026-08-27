@@ -813,6 +813,89 @@ pub(super) async fn sprint_scope_ep(
     }
 }
 
+/// Queue a sprint to run after the current one. The queue is consumed
+/// front-first at roll-over: the plan's goal and ticket set become the next
+/// sprint's. Planning is additive — an empty queue changes nothing.
+pub(super) async fn queue_sprint_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<super::QueueSprintReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let goal = req.goal.trim().to_owned();
+    if goal.is_empty() {
+        return (StatusCode::BAD_REQUEST, "goal must not be empty").into_response();
+    }
+    let by = resolve_username(&app, &headers).await;
+    let ids: Vec<coxagent_domain::TicketId> = req
+        .tickets
+        .iter()
+        .filter_map(|t| coxagent_domain::TicketId::new(t.trim()).ok())
+        .collect();
+    let mut qid = 0u64;
+    match coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        qid = coxagent_application::sprint::queue_sprint(s, &goal, ids.clone(), &by);
+        Ok(())
+    })
+    .await
+    {
+        Ok(()) => Json(serde_json::json!({ "ok": true, "id": qid })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Add/remove tickets on one queued sprint.
+pub(super) async fn queue_scope_ep(
+    State(app): State<AppState>,
+    Path((pid, qid)): Path<(String, u64)>,
+    Json(req): Json<super::QueueScopeReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let parse = |v: &[String]| -> Vec<coxagent_domain::TicketId> {
+        v.iter()
+            .filter_map(|t| coxagent_domain::TicketId::new(t.trim()).ok())
+            .collect()
+    };
+    let (add, remove) = (parse(&req.add), parse(&req.remove));
+    let mut hit = false;
+    match coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        hit = coxagent_application::sprint::scope_queued_sprint(s, qid, &add, &remove);
+        Ok(())
+    })
+    .await
+    {
+        Ok(()) if !hit => (StatusCode::NOT_FOUND, "no such queued sprint").into_response(),
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Drop a queued sprint outright.
+pub(super) async fn queue_delete_ep(
+    State(app): State<AppState>,
+    Path((pid, qid)): Path<(String, u64)>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let mut hit = false;
+    match coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        hit = coxagent_application::sprint::delete_queued_sprint(s, qid);
+        Ok(())
+    })
+    .await
+    {
+        Ok(()) if !hit => (StatusCode::NOT_FOUND, "no such queued sprint").into_response(),
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
 /// Close the running sprint NOW and open the next one, instead of waiting for
 /// the window to elapse. The closed sprint is archived exactly as a timed
 /// roll-over archives it, so the velocity history stays one shape.

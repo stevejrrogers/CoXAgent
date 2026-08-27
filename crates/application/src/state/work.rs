@@ -155,6 +155,27 @@ pub struct Sprint {
     pub started_at: String,
 }
 
+/// A sprint prepared ahead of time (by the PO or a person) and queued to run
+/// after the current one. Rollover consumes the queue front-first: its goal
+/// and ticket set become the next sprint's, so planning can run several
+/// sprints ahead of execution. An empty queue leaves rollover exactly as it
+/// always was (goal chip, then capacity-based auto-commit).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannedSprint {
+    /// Stable id unique within the queue (monotonic; survives reorders).
+    pub id: u64,
+    pub goal: String,
+    /// Tickets picked for this sprint. Validated again at rollover — shipped
+    /// or deleted tickets are silently skipped.
+    #[serde(default)]
+    pub tickets: Vec<TicketId>,
+    #[serde(default)]
+    pub created_at: String,
+    /// Who queued it ("po" for the agent, else a username).
+    #[serde(default)]
+    pub by: String,
+}
+
 /// A closed sprint's outcome — the velocity history.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SprintRecord {
