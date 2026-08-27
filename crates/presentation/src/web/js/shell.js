@@ -502,6 +502,7 @@ async function doLogin(){
     // them (see rememberDestination): navigate there once auth succeeds.
     const next=sessionStorage.getItem(NEXT_KEY);
     sessionStorage.removeItem(NEXT_KEY);
+    SESS_CACHE=null;SESS_AT=0;
     await boot();
     // A guest who asked for ?next=<hash> lands back on that view once signed
     // in; an invalid/nonexistent fragment safely falls through to overview.
@@ -1160,9 +1161,17 @@ function deviceIcon(label){const l=(label||"").toLowerCase();
   if(l.includes("chrome"))return "brand-chrome";if(l.includes("firefox"))return "brand-firefox";
   if(l.includes("safari"))return "brand-safari";if(l.includes("edge"))return "brand-edge";
   return "device-desktop";}
+// /api/auth/* is rate-limited (20 req/min per IP); renderSessions fires on every
+// state snapshot, so an uncached fetch here turns agent churn into a 429 storm.
+let SESS_CACHE=null,SESS_AT=0;
+const SESS_TTL_MS=60*1000;
 async function renderSessions(){
   const el=document.getElementById("team-sessions");if(!el)return;
-  let ss=[];try{ss=await(await fetch("/api/auth/sessions")).json();}catch(e){}
+  let ss=SESS_CACHE;
+  if(!ss||Date.now()-SESS_AT>SESS_TTL_MS){
+    ss=[];try{ss=await(await fetch("/api/auth/sessions")).json();}catch(e){}
+    SESS_CACHE=ss;SESS_AT=Date.now();
+  }
   if(!Array.isArray(ss)||!ss.length){el.innerHTML="";return;}
   // Only show current device — not history.
   var cur=ss.find(function(s){return s.current;});
