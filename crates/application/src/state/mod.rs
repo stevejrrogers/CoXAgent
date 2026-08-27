@@ -193,6 +193,13 @@ pub struct ProjectState {
     /// burning tokens forever; entries are dropped when the PR closes.
     #[serde(default)]
     pub pr_fix_attempts: std::collections::BTreeMap<u64, u32>,
+    /// How many times in a ROW the SA reviewer failed to render a verdict on
+    /// each open PR (engine crash / unparseable JSON), so a PR the reviewer
+    /// silently chokes on is surfaced to a human instead of starving forever.
+    /// Cleared whenever the PR gets a real review or the record is reset on
+    /// merge/close.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub pr_review_skips: std::collections::BTreeMap<u64, u32>,
     /// Engine conversation id of the last fix run per PR — the next fix round
     /// RESUMES that conversation (the agent still has the branch, the feedback
     /// and its own changes in context) instead of starting cold. Dropped with
@@ -431,6 +438,7 @@ impl Default for ProjectState {
             sprint_goal: String::new(),
             last_digest_day: String::new(),
             pr_fix_attempts: std::collections::BTreeMap::new(),
+            pr_review_skips: std::collections::BTreeMap::new(),
             pr_sessions: std::collections::BTreeMap::new(),
             ticket_sessions: std::collections::BTreeMap::new(),
             cost_holds: std::collections::BTreeMap::new(),

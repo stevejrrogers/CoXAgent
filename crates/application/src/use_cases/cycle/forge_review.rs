@@ -456,8 +456,73 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     }
                 }
             }
+            // Anti-starvation deadline: a CLEAN, mergeable PR that has sat open
+            // with NO review verdict past `review_deadline_hours` is verified
+            // and landed by the runner rather than waiting on a reviewer that
+            // may never reach it. Same verify-then-merge path an approval
+            // takes, so nothing red lands.
+            if auto_merge
+                && pr.mergeable
+                && self.config.git.review_deadline_hours > 0
+                && !self.has_review_for(pr.number).await
+            {
+                let deadline_secs = u64::from(self.config.git.review_deadline_hours) * 3600;
+                if let Some(age_secs) = crate::use_cases::cycle::seconds_since(&pr.created) {
+                    if age_secs >= deadline_secs {
+                        let deadline_hold =
+                            needs_human_eyes(&diff, self.config.git.max_changed_lines)
+                                .or(self.fix_on_fix_hold(&pr.title).await);
+                        if let Some(why) = deadline_hold {
+                            self.log_git(&format!(
+                                "PR #{} past review deadline but held for a human: {why}",
+                                pr.number
+                            ))
+                            .await;
+                        } else if let Err(why) = self.verify_merged_result(&pr.head, target).await {
+                            self.log_git(&format!(
+                                "PR #{} past review deadline, merged result failed \
+                             verification: {why}",
+                                pr.number
+                            ))
+                            .await;
+                        } else {
+                            match forge.merge_pr(pr.number).await {
+                                Ok(()) => {
+                                    self.log_git(&format!(
+                                        "PR #{} auto-landed after {}h with no review (deadline)",
+                                        pr.number,
+                                        age_secs / 3600
+                                    ))
+                                    .await;
+                                    self.reporter()
+                                        .report_hold(
+                                            pr.number,
+                                            "landed via review-deadline (never reviewed)",
+                                        )
+                                        .await;
+                                }
+                                Err(e) => {
+                                    self.log_git(&format!("merge PR #{} failed: {e}", pr.number))
+                                        .await;
+                                }
+                            }
+                        }
+                        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                            s.pr_review_skips.remove(&pr.number);
+                            Ok(())
+                        })
+                        .await;
+                        continue;
+                    }
+                }
+            }
             match self.sa_review(&pr.title, &pr.head, &diff).await {
                 Some((true, summary)) => {
+                    let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                        s.pr_review_skips.remove(&pr.number);
+                        Ok(())
+                    })
+                    .await;
                     self.record_review(pr.number, "approve", &summary, &head_sha)
                         .await;
                     if auto_merge {
@@ -537,13 +602,60 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     }
                 }
                 Some((false, comment)) => {
+                    let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                        s.pr_review_skips.remove(&pr.number);
+                        Ok(())
+                    })
+                    .await;
                     let _ = forge.request_changes(pr.number, &comment).await;
                     self.record_review(pr.number, "request_changes", &comment, &head_sha)
                         .await;
                     self.log_git(&format!("SA requested changes on PR #{}", pr.number))
                         .await;
                 }
-                None => {}
+                None => {
+                    // SA failed to render a verdict (engine crash / bad JSON).
+                    // Track consecutive failures so a PR the reviewer silently
+                    // chokes on is surfaced to a human instead of starving
+                    // forever; a successful verdict above resets this count.
+                    let threshold = self.config.git.review_max_skips;
+                    if threshold > 0 {
+                        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                            let n = s.pr_review_skips.entry(pr.number).or_insert(0);
+                            *n += 1;
+                            Ok(())
+                        })
+                        .await;
+                        let skips = self.store.load().await.map_or(0, |s| {
+                            s.pr_review_skips.get(&pr.number).copied().unwrap_or(0)
+                        });
+                        if skips >= threshold {
+                            self.reporter()
+                                .report_hold(pr.number, "SA keeps failing to review this PR")
+                                .await;
+                            self.notify(
+                                "human_eyes",
+                                format!(
+                                    "PR #{} — the SA reviewer keeps failing to render a \
+                                     verdict; it may be stalled.",
+                                    pr.number
+                                ),
+                            )
+                            .await;
+                            self.log_git(&format!(
+                                "PR #{} surfaced: SA failed to review {threshold}+ times in a row",
+                                pr.number
+                            ))
+                            .await;
+                        } else {
+                            self.log_git(&format!(
+                                "review of PR #{} yielded no verdict (skip)",
+                                pr.number
+                            ))
+                            .await;
+                        }
+                    }
+                }
             }
         }
     }
@@ -576,6 +688,18 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         self.reporter().fetch_reviews().await.iter().any(|r| {
             r.number == number && r.decision == "request_changes" && r.head_sha == head_sha
         })
+    }
+
+    /// Whether the SA has rendered ANY verdict (approve or request-changes)
+    /// on this PR. A CLEAN PR with no verdict at all is a starvation candidate —
+    /// the anti-starvation deadline and the "SA keeps failing" surface key off
+    /// this so a never-touched PR can't wait forever undistributed.
+    pub(super) async fn has_review_for(&self, number: u64) -> bool {
+        self.reporter()
+            .fetch_reviews()
+            .await
+            .iter()
+            .any(|r| r.number == number)
     }
 
     /// The fix-on-fix brake: `Some(reason)` when this PR's ticket already had
