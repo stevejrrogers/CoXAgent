@@ -212,17 +212,17 @@ function renderDocsList(){
   box.innerHTML=node(root,0)||'<div class="empty" style="padding:14px 8px;font-size:12px">Empty. Create a folder (＋) or page.</div>';
 }
 async function newFolder(parent){
-  const name=await coxModal({title:"New folder",message:parent?("Tạo folder trong \""+parent+"\"."):"Tạo folder ở root.",input:{placeholder:"Folder name"},confirmText:"Create"});if(!name||!name.trim())return;
+  const name=await coxModal({title:"New folder",message:parent?("Create a folder in \""+parent+"\"."):"Create a folder at root.",input:{placeholder:"Folder name"},confirmText:"Create"});if(!name||!name.trim())return;
   const path=(parent?parent+"/":"")+name.trim().replace(/\//g,"-");
   try{await fetch(api("/doc-folders"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path})});}catch(e){}
   if(parent)docExp().add(parent);docExp().add(path);saveExp();await loadDocs();
 }
-async function deleteFolder(path){if(!await coxModal({title:"Delete folder",message:'Xoá folder "'+path+'" và toàn bộ nội dung bên trong? Không hoàn tác được.',danger:true,confirmText:"Delete"}))return;
+async function deleteFolder(path){if(!await coxModal({title:"Delete folder",message:'Delete folder "'+path+'" and everything inside it? This cannot be undone.',danger:true,confirmText:"Delete"}))return;
   try{await fetch(api("/doc-folders/delete"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path})});}catch(e){}
   await loadDocs();
 }
 async function moveDoc(id){const cur=DOCS.find(d=>d.id===id);if(!cur)return;
-  const folder=await coxModal({title:"Move page",message:"Folder đích (để trống = root).",input:{placeholder:"e.g. Technical/Architecture",value:cur.folder||""},confirmText:"Move"});if(folder===null)return;
+  const folder=await coxModal({title:"Move page",message:"Destination folder (blank = root).",input:{placeholder:"e.g. Technical/Architecture",value:cur.folder||""},confirmText:"Move"});if(folder===null)return;
   try{await fetch(api("/docs/"+id+"/move"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:folder.trim()})});}catch(e){}
   if(folder.trim())docExp().add(folder.trim());saveExp();await loadDocs();}
 function openDoc(id){if(typeof docsWsClose==="function")docsWsClose();DOC_CUR=id;DOC_EDIT=false;renderDocsList();renderDocMain();}
@@ -271,9 +271,9 @@ function renderDocMain(){
   renderMermaidIn(el);
 }
 async function newDoc(folder){
-  const title=await coxModal({title:"New page",message:"Tiêu đề trang mới.",input:{placeholder:"Page title"},confirmText:"Next"});if(!title||!title.trim())return;
+  const title=await coxModal({title:"New page",message:"Title for the new page.",input:{placeholder:"Page title"},confirmText:"Next"});if(!title||!title.trim())return;
   // Folder given (from a tree node) → use it; else ask.
-  if(folder===undefined||folder===null){folder=(await coxModal({title:"New page",message:"Folder chứa trang (để trống = root).",input:{placeholder:"e.g. Product, Technical/Architecture"},confirmText:"Create"}));if(folder===null)return;folder=folder.trim();}
+  if(folder===undefined||folder===null){folder=(await coxModal({title:"New page",message:"Folder for the page (blank = root).",input:{placeholder:"e.g. Product, Technical/Architecture"},confirmText:"Create"}));if(folder===null)return;folder=folder.trim();}
   if(folder)docExp().add(folder),saveExp();
   await putDoc("", folder, title.trim(), "# "+title.trim()+"\n\nWrite here…");DOC_EDIT=true;renderDocMain();
 }

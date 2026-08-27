@@ -478,7 +478,7 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
     const spend=s.spend||{};
     document.getElementById("ov-alerts").innerHTML=alertsHtml(s,m,spend);
     drainBanner("ov-drain");
-    document.getElementById("kpis").innerHTML=[kpi("Shipped",m.shipped),kpi("In flight",m.inflight),kpi("Open bugs",m.openBugs),kpi("Documented",m.docd),kpi("Releases",m.releases),kpi("Cost",money(spend.total_cost_usd))].join("");
+    document.getElementById("kpis").innerHTML=[kpi("Shipped",m.shipped),kpi("In flight",m.inflight),kpi("Documented",m.docd),kpi("Releases",m.releases),kpi("Cost",money(spend.total_cost_usd))].join("");
     renderHealth(s);
     const dp=s.deploy;
     document.getElementById("ov-deploy").innerHTML=dp?`<div class="panel" style="margin-top:16px;display:flex;align-items:center;gap:13px">
