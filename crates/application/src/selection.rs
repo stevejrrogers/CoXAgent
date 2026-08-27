@@ -107,16 +107,11 @@ fn candidates<F: Fn(&Ticket) -> bool>(state: &ProjectState, pred: F) -> Vec<Tick
     // a ticket assigned to the operator is prioritised work for them, not a
     // walled-off lane — a human-assigned ticket can still be actioned by the
     // team (the assignee flag is an ownership label, not a scheduler block).
-    let mut matched: Vec<&Ticket> = state
-        .tickets
-        .iter()
-        .filter(|t| pred(t))
-        .collect();
+    let mut matched: Vec<&Ticket> = state.tickets.iter().filter(|t| pred(t)).collect();
     matched.sort_by(|a, b| {
         let a_in = in_dev_scope(state, a.id());
         let b_in = in_dev_scope(state, b.id());
-        b_in
-            .cmp(&a_in) // in-scope first
+        b_in.cmp(&a_in) // in-scope first
             .then_with(|| {
                 priority_rank(b.priority())
                     .cmp(&priority_rank(a.priority()))

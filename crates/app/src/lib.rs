@@ -909,7 +909,9 @@ fn build_engine(
             SandboxStatus::Unavailable(_) | SandboxStatus::Denied(_)
         )
     {
-        tracing::warn!("workflow.sandbox is on but no sandbox backend is available — agents run unsandboxed");
+        tracing::warn!(
+            "workflow.sandbox is on but no sandbox backend is available — agents run unsandboxed"
+        );
     }
     let fallbacks = effective_fallbacks(config);
     let default = build_failover(

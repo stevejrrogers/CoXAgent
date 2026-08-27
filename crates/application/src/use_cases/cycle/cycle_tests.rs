@@ -606,7 +606,7 @@ async fn sa_review_failures_are_counted_and_surfaced_to_a_human() {
     // First failure -> counter 1, below threshold, not surfaced yet.
     uc.review_open_prs().await;
     assert!(
-        store.load().await.unwrap().human_holds.get(&7).is_none(),
+        !store.load().await.unwrap().human_holds.contains_key(&7),
         "a single failure must not trip the human surface"
     );
 

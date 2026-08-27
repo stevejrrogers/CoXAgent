@@ -42,7 +42,10 @@ fn discover_lockfiles(root: &Path) -> Vec<PathBuf> {
                 if !path.file_name().is_some_and(|n| n == ".git") && !is_hidden(&path) {
                     stack.push(path);
                 }
-            } else if path.file_name().and_then(|n| n.to_str()).map_or(false, scan::is_lockfile)
+            } else if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(scan::is_lockfile)
             {
                 out.push(path);
             }
@@ -58,14 +61,11 @@ fn is_hidden(path: &Path) -> bool {
 
 const CARGO_SAMPLE: &str = "\n[[package]]\nname = \"alpha\"\nversion = \"1.2.3\"\n";
 const POETRY_SAMPLE: &str = "\n[[package]]\nname = \"gamma\"\nversion = \"3.1.4\"\n";
-const NPM_SAMPLE: &str =
-    r#"{"packages": {"node_modules/lodash": {"version": "4.17.21"}, "node_modules/@scope/pkg": {"version": "7.8.9"}, "": {"name":"app","version":"1.0.0"}}}"#;
+const NPM_SAMPLE: &str = r#"{"packages": {"node_modules/lodash": {"version": "4.17.21"}, "node_modules/@scope/pkg": {"version": "7.8.9"}, "": {"name":"app","version":"1.0.0"}}}"#;
 
 /// Render one TOML lock block for a pinned dependency.
 fn toml_block(pkg: &str, maj: u64, min: u64, pat: u64) -> String {
-    format!(
-        "[[package]]\nname = \"{pkg}\"\nversion = \"{maj}.{min}.{pat}\""
-    )
+    format!("[[package]]\nname = \"{pkg}\"\nversion = \"{maj}.{min}.{pat}\"")
 }
 
 // ---- AC#1: parses lock files from root and all subdirectories ----
@@ -78,7 +78,9 @@ fn discovers_lockfiles_in_root_and_subdirectories() {
         "root Cargo.lock not discovered: {found:?}"
     );
     assert!(
-        found.iter().any(|p| p == &repo_root().join("package-lock.json")),
+        found
+            .iter()
+            .any(|p| p == &repo_root().join("package-lock.json")),
         "root package-lock.json not discovered: {found:?}"
     );
     assert!(
@@ -104,7 +106,10 @@ fn extracts_current_versions_from_real_package_locks() {
         let deps = scan::parse_lockfile(rel, &body);
         assert!(!deps.is_empty(), "{rel} parsed to no dependencies");
         for v in deps.values() {
-            assert!(v.major > 0 || v.minor > 0 || v.patch > 0, "{rel}: empty version");
+            assert!(
+                v.major > 0 || v.minor > 0 || v.patch > 0,
+                "{rel}: empty version"
+            );
         }
     }
 }
@@ -141,7 +146,7 @@ fn scan_tier(pinned_body: &str, latest_version: &str) -> Option<&'static str> {
     findings
         .iter()
         .find(|f| f.package == "alpha")
-        .and_then(|f| f.tier.map(|t| t.label()))
+        .and_then(|f| f.tier.map(scan::BumpTier::label))
 }
 
 #[test]

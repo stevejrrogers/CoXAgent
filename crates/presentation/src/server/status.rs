@@ -99,8 +99,7 @@ pub(super) fn lite_state_value(state: &coxagent_application::ProjectState) -> se
         // (newest 50) — history beyond that comes from the paginated REST
         // list. Bounded-500 chat serialized 4 channels per tick was a real
         // drag on the chat pane.
-        let mut seen: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
+        let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         let keep: Vec<bool> = chat
             .iter()
             .rev()

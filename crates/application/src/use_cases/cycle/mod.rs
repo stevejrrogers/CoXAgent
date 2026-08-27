@@ -478,7 +478,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             return;
         };
         let base = self.flow_base();
-        let _ = git.raw(&self.work_dir, &["fetch", "-q", "origin", base]).await;
+        let _ = git
+            .raw(&self.work_dir, &["fetch", "-q", "origin", base])
+            .await;
         let (ok, text) = git
             .raw(
                 &self.work_dir,

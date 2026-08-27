@@ -48,7 +48,12 @@ pub(crate) struct RouteSpec {
 }
 
 const fn route(path: &'static str, methods: &'static [&'static str]) -> RouteSpec {
-    RouteSpec { path, methods, tag: None, summary: None }
+    RouteSpec {
+        path,
+        methods,
+        tag: None,
+        summary: None,
+    }
 }
 
 /// Every service route registered by `serve_full()`. Keep this complete:
@@ -258,11 +263,10 @@ fn build_document() -> serde_json::Value {
 
 /// Build one OpenAPI Operation object from a [`RouteSpec`] + HTTP verb.
 fn operation(spec: &RouteSpec, method: &str) -> serde_json::Value {
-    let tag = spec.tag.map(str::to_string).unwrap_or_else(|| autotag(spec.path));
+    let tag = spec.tag.map_or_else(|| autotag(spec.path), str::to_string);
     let summary = spec
         .summary
-        .map(str::to_string)
-        .unwrap_or_else(|| autosummary(spec.path));
+        .map_or_else(|| autosummary(spec.path), str::to_string);
     let security = security_for(spec.path);
     serde_json::json!({
         // Unique per verb - a multi-method route yields one id per method, so ids
@@ -292,7 +296,10 @@ fn operation(spec: &RouteSpec, method: &str) -> serde_json::Value {
 /// * **Authenticated** - everything else needs any valid session plus membership
 ///   of any project named in the path.
 fn security_for(path: &str) -> SecurityLevel {
-    if matches!(path, "/api/health" | "/api/openapi.json" | "/api/auth/login") {
+    if matches!(
+        path,
+        "/api/health" | "/api/openapi.json" | "/api/auth/login"
+    ) {
         return SecurityLevel::Public;
     }
     if path.starts_with("/api/auth/users") || path.starts_with("/api/auth/tokens") {
@@ -303,7 +310,12 @@ fn security_for(path: &str) -> SecurityLevel {
 
 #[cfg(test)]
 fn tagged(path: &'static str) -> RouteSpec {
-    RouteSpec { path, methods: &["get"], tag: None, summary: None }
+    RouteSpec {
+        path,
+        methods: &["get"],
+        tag: None,
+        summary: None,
+    }
 }
 
 /// Feature-area tag derived from the first static segment after `/api/`. Stable
@@ -312,17 +324,19 @@ fn tagged(path: &'static str) -> RouteSpec {
 fn autotag(path: &str) -> String {
     let rest = path.strip_prefix("/api/").unwrap_or("");
     rest.split('/')
-       .next()
-       .map(|seg| seg.replace(['-', '_'], ""))
-       .filter(|s| !s.is_empty())
-       .map(|s| {
-           let mut chars = s.chars();
-           match chars.next() {
-               Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-               None => String::new(),
-           }
-       })
-       .unwrap_or_else(|| String::from("Misc"))
+        .next()
+        .map(|seg| seg.replace(['-', '_'], ""))
+        .filter(|s| !s.is_empty())
+        .map_or_else(
+            || String::from("Misc"),
+            |s| {
+                let mut chars = s.chars();
+                match chars.next() {
+                    Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                    None => String::new(),
+                }
+            },
+        )
 }
 
 /// One-line human summary derived from the last static segment of the path,
@@ -444,16 +458,13 @@ mod tests {
             for op in item.as_object().expect("path item").values() {
                 let tag = &op["tags"];
                 assert!(
-                    tag.as_array()
-                        .is_some_and(|tags| !tags.is_empty()),
+                    tag.as_array().is_some_and(|tags| !tags.is_empty()),
                     "operation lacks a tag: {:?}",
                     op["operationId"]
                 );
                 let summary = &op["summary"];
                 assert!(
-                    summary
-                        .as_str()
-                        .is_some_and(|s| !s.is_empty()),
+                    summary.as_str().is_some_and(|s| !s.is_empty()),
                     "operation lacks a summary: {:?}",
                     op["operationId"]
                 );

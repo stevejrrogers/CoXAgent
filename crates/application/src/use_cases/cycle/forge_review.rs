@@ -197,6 +197,41 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                         }
                         continue;
                     }
+                    // "Letting review land it" assumed the reviewer WOULD. When
+                    // the SA engine fails repeatedly (quota, outage), no verdict
+                    // is ever recorded, the PR is re-reviewed every cycle
+                    // forever, and — with the clean-base gate armed — one
+                    // unlandable PR paused BOTH dev lanes for days (#363).
+                    // A settled ticket already went through the dev flow's own
+                    // gates; the review here is a second opinion, not the only
+                    // door. So land it directly, provided the mechanical
+                    // safeties hold: mergeable, no committed conflict markers,
+                    // no scratch in the diff.
+                    if pr.mergeable {
+                        let safe = match forge.pr_diff(pr.number).await {
+                            Ok(d) => {
+                                !diff_has_conflict_markers(&d)
+                                    && crate::use_cases::merge_policy::commits_scratch(&d).is_none()
+                            }
+                            Err(_) => false,
+                        };
+                        if safe && forge.merge_pr(pr.number).await.is_ok() {
+                            let note = format!(
+                                "Merged: {tid} is already settled — the dev flow's own gates \
+                                 accepted this work — and the diff was not yet on main. \
+                                 Landing it directly instead of waiting on a review round \
+                                 that keeps failing to happen."
+                            );
+                            let _ = forge.comment_pr(pr.number, &note).await;
+                            self.log_git(&format!(
+                                "review: merged PR #{} — {tid} settled, diff not on main, \
+                                 mergeable and marker/scratch-free",
+                                pr.number
+                            ))
+                            .await;
+                            continue;
+                        }
+                    }
                     self.log_git(&format!(
                         "review: PR #{} kept OPEN — {tid} is settled but the diff is \
                          NOT on main; letting review land it",

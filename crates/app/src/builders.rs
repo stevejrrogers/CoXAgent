@@ -431,9 +431,8 @@ pub(crate) async fn build_project(
             // Same-process hub: reviews/holds/latency write straight to the
             // shared store — the Null fallback silently dropped them all.
             leader.with_reporter(Arc::new(
-                coxagent_application::ports::outbound::StorePrReporter::new(
-                    Arc::clone(&store) as Arc<dyn coxagent_application::ports::outbound::StateStorePort>,
-                ),
+                coxagent_application::ports::outbound::StorePrReporter::new(Arc::clone(&store)
+                    as Arc<dyn coxagent_application::ports::outbound::StateStorePort>),
             ))
         };
         let wh = Arc::clone(&handle);
@@ -476,10 +475,8 @@ pub(crate) async fn build_project(
                 // Same-process hub: reviews/holds/latency write straight to
                 // the shared store — the Null fallback silently dropped them.
                 reviewer.with_reporter(Arc::new(
-                    coxagent_application::ports::outbound::StorePrReporter::new(
-                        Arc::clone(&store)
-                            as Arc<dyn coxagent_application::ports::outbound::StateStorePort>,
-                    ),
+                    coxagent_application::ports::outbound::StorePrReporter::new(Arc::clone(&store)
+                        as Arc<dyn coxagent_application::ports::outbound::StateStorePort>),
                 ))
             };
             let rh = Arc::clone(&handle);
@@ -560,9 +557,8 @@ pub(crate) async fn build_project(
             // Same-process hub: reviews/holds/latency write straight to the
             // shared store — the Null fallback silently dropped them all.
             worker.with_reporter(Arc::new(
-                coxagent_application::ports::outbound::StorePrReporter::new(
-                    Arc::clone(&store) as Arc<dyn coxagent_application::ports::outbound::StateStorePort>,
-                ),
+                coxagent_application::ports::outbound::StorePrReporter::new(Arc::clone(&store)
+                    as Arc<dyn coxagent_application::ports::outbound::StateStorePort>),
             ))
         };
         let wh = Arc::clone(&handle);

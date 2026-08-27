@@ -212,9 +212,12 @@ mod tests {
     async fn refuses_near_duplicate_titles_from_any_caller() {
         let store = Arc::new(MemStore::default());
         let uc = AddTicketUseCase::new(Arc::clone(&store));
-        uc.execute(input_titled(TicketType::Feature, "Bug triage and burn-down cadence"))
-            .await
-            .expect("first");
+        uc.execute(input_titled(
+            TicketType::Feature,
+            "Bug triage and burn-down cadence",
+        ))
+        .await
+        .expect("first");
         // A rephrasing of the same ceremony theme — the class that produced
         // five near-identical tickets in one week — is refused.
         assert!(uc
@@ -232,7 +235,10 @@ mod tests {
         let store = Arc::new(MemStore::default());
         let uc = AddTicketUseCase::new(Arc::clone(&store));
         let id = uc
-            .execute(input_titled(TicketType::Feature, "Bug triage and burn-down cadence"))
+            .execute(input_titled(
+                TicketType::Feature,
+                "Bug triage and burn-down cadence",
+            ))
             .await
             .expect("first");
         // A human rejects the theme…
@@ -250,7 +256,7 @@ mod tests {
         let err = uc
             .execute(input_titled(
                 TicketType::Feature,
-                "Backlog triage: assess bug risk and burn down"
+                "Backlog triage: assess bug risk and burn down",
             ))
             .await
             .expect_err("refused");

@@ -182,9 +182,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 for f in listed.iter().filter(|f| !f.trim().is_empty()).take(12) {
                     match fs.stat(&self.work_dir.join(f)).await {
                         Some(m) => {
-                            {
                             let _ = write!(s, "\ndesign file {f}: exists, {} bytes", m.size);
-                        }
                         }
                         None => {
                             let _ = write!(s, "\ndesign file {f}: MISSING");
