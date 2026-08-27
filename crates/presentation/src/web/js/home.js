@@ -88,7 +88,7 @@ async function checkAppUpdate(){
   const btn=document.getElementById("getapp-btn"),ic=document.getElementById("getapp-ic");
   if(btn){
     btn.classList.toggle("has-update",newer);
-    btn.title=newer?("CoXAgent "+d.latest_version+" đã có — bấm để cập nhật"):"Get the app";
+    btn.title=newer?("CoXAgent "+d.latest_version+" is out — click to update"):"Get the app";
     const dot=btn.querySelector(".upd-dot");if(dot)dot.hidden=!newer;
     if(ic)ic.className=newer?"ti ti-rocket":"ti ti-download";
     const ver=document.getElementById("getapp-ver");
@@ -114,7 +114,7 @@ function hubUpgradeReload(version){
 function coxSelfUpdate(url){
   try{
     window.webkit.messageHandlers.coxupdate.postMessage(url);
-    toasty("Đang tải bản cập nhật — app sẽ tự khởi động lại khi xong","ok");
+    toasty("Downloading update — the app will restart itself when done","ok");
     const ic=document.getElementById("getapp-ic");
     if(ic)ic.className="ti ti-loader-2 att-spin";
     close_("ov-getapp");
@@ -129,9 +129,9 @@ async function openGetApp(){
   const dl=d.downloads||{};
   const upToDate=d.latest_version&&d.hub_version&&!verGt(d.latest_version,d.hub_version);
   document.getElementById("ga-ver").textContent=
-    !d.latest_version?"chưa cấu hình release — Settings → Workspace"
-    :upToDate?("bạn đang chạy v"+d.hub_version+" — mới nhất ✓")
-    :("bạn đang chạy v"+d.hub_version+" → mới nhất v"+d.latest_version);
+    !d.latest_version?"no release configured — Settings → Workspace"
+    :upToDate?("you're running v"+d.hub_version+" — latest ✓")
+    :("you're running v"+d.hub_version+" → latest v"+d.latest_version);
   const plats=[["macos","macOS","brand-apple",".dmg"],["windows","Windows","brand-windows",".exe"],["linux","Linux","brand-ubuntu",".tar.gz"],["ios","iOS","device-mobile","App Store / TestFlight"]];
   const mine=/Mac/i.test(navigator.platform)?"macos":/Win/i.test(navigator.platform)?"windows":/Linux/i.test(navigator.platform)?"linux":"";
   // Inside the macOS shell we can self-update in place — one click, app
@@ -139,10 +139,10 @@ async function openGetApp(){
   const canSelf=!!(window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.coxupdate);
   document.getElementById("ga-list").innerHTML=plats.map(([k,label,icon,hint])=>{
     const url=dl[k];const on=k===mine;
-    if(!url)return `<div class="gc-btn" style="display:flex;align-items:center;gap:10px;padding:12px 14px;opacity:.45;cursor:default"><i class="ti ti-${icon}" style="font-size:19px"></i><b style="flex:1">${label}</b><span style="font-size:11px">chưa có bản build</span></div>`;
+    if(!url)return `<div class="gc-btn" style="display:flex;align-items:center;gap:10px;padding:12px 14px;opacity:.45;cursor:default"><i class="ti ti-${icon}" style="font-size:19px"></i><b style="flex:1">${label}</b><span style="font-size:11px">no build yet</span></div>`;
     if(k==="macos"&&canSelf)
-      return `<button onclick="coxSelfUpdate(location.origin+'/api/app/download/macos.dmg')" class="gc-btn" style="display:flex;align-items:center;gap:10px;padding:12px 14px;border-color:var(--accent);cursor:pointer;width:100%;text-align:left"><i class="ti ti-${icon}" style="font-size:19px"></i><b style="flex:1">${label}</b><span style="font-size:11px;color:var(--accent2)">cập nhật & tự khởi động lại</span><i class="ti ti-refresh"></i></button>`;
-    return `<a href="${esc(url)}" target="_blank" rel="noopener" class="gc-btn" style="display:flex;align-items:center;gap:10px;padding:12px 14px;text-decoration:none;${on?"border-color:var(--accent)":""}"><i class="ti ti-${icon}" style="font-size:19px"></i><b style="flex:1">${label}</b><span style="font-size:11px;color:var(--dim)">${hint}${on?" · máy này":""}</span><i class="ti ti-download"></i></a>`;
+      return `<button onclick="coxSelfUpdate(location.origin+'/api/app/download/macos.dmg')" class="gc-btn" style="display:flex;align-items:center;gap:10px;padding:12px 14px;border-color:var(--accent);cursor:pointer;width:100%;text-align:left"><i class="ti ti-${icon}" style="font-size:19px"></i><b style="flex:1">${label}</b><span style="font-size:11px;color:var(--accent2)">update & restart automatically</span><i class="ti ti-refresh"></i></button>`;
+    return `<a href="${esc(url)}" target="_blank" rel="noopener" class="gc-btn" style="display:flex;align-items:center;gap:10px;padding:12px 14px;text-decoration:none;${on?"border-color:var(--accent)":""}"><i class="ti ti-${icon}" style="font-size:19px"></i><b style="flex:1">${label}</b><span style="font-size:11px;color:var(--dim)">${hint}${on?" · this machine":""}</span><i class="ti ti-download"></i></a>`;
   }).join("");
   const nw=document.getElementById("ga-notes");
   if(nw){const has=!!(d.notes&&d.notes.trim())&&!upToDate;nw.hidden=!has;
@@ -513,7 +513,7 @@ async function reviewRun(btn,path,who){
   btn.innerHTML=old;btn.disabled=false;
 }
 async function startDiscussion(){
-  const topic=await coxModal({title:"Agent discussion",message:"Chủ đề để team thảo luận — PO + SA cho ý kiến, SM chốt.",input:{placeholder:"e.g. có nên chuyển store sang Postgres ngay sprint này không?",multiline:true},confirmText:"Start discussion"});
+  const topic=await coxModal({title:"Agent discussion",message:"Topic for the team to discuss — PO + SA weigh in, SM decides.",input:{placeholder:"e.g. should we move the store to Postgres this sprint?",multiline:true},confirmText:"Start discussion"});
   if(!topic||!topic.trim())return;
   const lbl=document.getElementById("disc-run-label");lbl.textContent="Agents discussing…";
   document.getElementById("disc-filter").value="";

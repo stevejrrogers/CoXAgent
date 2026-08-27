@@ -205,7 +205,7 @@ async function createChannel(parent){
   }catch(e){toasty("could not create channel","err");}
 }
 async function inviteToChannel(){
-  const who=await coxModal({title:"Invite to channel",message:"Username cần mời. Tip: thêm \" +invite\" để họ cũng được quyền mời người khác.",input:{placeholder:"username  (+invite)"},confirmText:"Invite"});
+  const who=await coxModal({title:"Invite to channel",message:"Username to invite. Tip: add \" +invite\" so they can invite others too.",input:{placeholder:"username  (+invite)"},confirmText:"Invite"});
   if(!who||!who.trim())return;
   let user=who.trim(),delegate=false;
   if(/\+invite\s*$/i.test(user)){delegate=true;user=user.replace(/\+invite\s*$/i,"").trim();}
@@ -290,7 +290,7 @@ function renderChannelSettings(){
   }
 }
 async function deleteChannel(id){
-  const ok=await coxModal({title:"Delete #"+id,message:"Xoá channel này và mọi sub-channel của nó? Không hoàn tác được.",confirmText:"Delete"});
+  const ok=await coxModal({title:"Delete #"+id,message:"Delete this channel and all its sub-channels? This cannot be undone.",confirmText:"Delete"});
   if(!ok)return;
   try{
     const r=await fetch("/api/chat/channels/"+encodeURIComponent(id),{method:"DELETE"});
@@ -871,7 +871,7 @@ function renderMeetUpNext(){
                     :d.toLocaleDateString([],{weekday:"short"})+" "+d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
     const live=meetLive(m);
     const n=(m.participants||[]).length;
-    return `<div class="meet-up" onclick="openMeeting('${esc(m.id)}')" title="${esc(m.title)} · ${n} người">
+    return `<div class="meet-up" onclick="openMeeting('${esc(m.id)}')" title="${esc(m.title)} · ${n} people">
       ${live?'<span class="mu-live"></span>':`<span class="mu-time">${esc(when)}</span>`}
       <span class="mu-title">${esc(m.title)}</span>
       ${live?`<span class="mu-join" onclick="event.stopPropagation();joinMeeting('${esc(m.id)}')">Join</span>`:`<span class="mu-time">${n}👤</span>`}</div>`;
@@ -1591,7 +1591,7 @@ function renderChatList(force){
     return;}
   let lastDay="",html="";
   if(typeof CHAT_MORE!=="undefined"&&CHAT_MORE){
-    html+='<div class="chatmore"><button class="tk-btn" onclick="loadOlderChat()"><i class="ti ti-history"></i> Tải tin cũ hơn</button></div>';
+    html+='<div class="chatmore"><button class="tk-btn" onclick="loadOlderChat()"><i class="ti ti-history"></i> Load older messages</button></div>';
   }
   let prev=null;
   msgs.forEach(m=>{
@@ -1683,7 +1683,7 @@ async function removeAvatar(){
     else toasty(await r.text()||"Could not remove","err");
   }catch(e){toasty("Network error","err");}}
 async function uploadAvatar(input){const f=input.files[0];input.value="";if(!f)return;
-  if(f.size>2*1024*1024){toasty("Ảnh tối đa 2MB","err");return;}
+  if(f.size>2*1024*1024){toasty("Image max 2MB","err");return;}
   const fd=new FormData();fd.append("file",f);
   try{const r=await fetch("/api/profile/avatar",{method:"POST",body:fd});
     if(r.ok){await loadProfiles();try{renderMe();}catch(e){}openProfile("profile");toasty("Avatar updated","ok");renderChatList(true);}
@@ -1786,10 +1786,10 @@ function renderHealth(s){
   el.innerHTML=`<div class="sec" style="margin-top:20px"><i class="ti ti-heart-rate-monitor" style="color:var(--accent2)"></i> Team health</div>
     <div class="hgrid">
       ${card("Sprint velocity",velo,veloSub,"var(--green)")}
-      ${card("WIP (in progress)",wip,wip>6?'high — cân nhắc giảm':'ok',wip>6?'var(--amber)':'var(--text)')}
-      ${card("Open bugs",openBugs,"chưa fix",openBugs>4?'var(--red)':'var(--text)')}
+      ${card("WIP (in progress)",wip,wip>6?'high — consider reducing':'ok',wip>6?'var(--amber)':'var(--text)')}
+      ${card("Open bugs",openBugs,"unfixed",openBugs>4?'var(--red)':'var(--text)')}
       ${card("PR reject rate",reviewTotal?rejectRate+'%':'—',`${appr}✓ / ${chg}✗`,rejectRate>50?'var(--amber)':'var(--text)')}
-      ${card("Refactor debt",refactors,"ticket refactor mở",refactors>0?'var(--amber)':'var(--text)')}
+      ${card("Refactor debt",refactors,"open refactor tickets",refactors>0?'var(--amber)':'var(--text)')}
       ${card("Team memory",mem,"decisions + lessons","var(--accent2)")}
     </div>`;
 }
@@ -2156,8 +2156,8 @@ async function loadSettings(){
           <select id="eng-autofb"><option value="true" ${(cfg.engine&&cfg.engine.auto_fallback!==false)?'selected':''}>on</option><option value="false" ${(cfg.engine&&cfg.engine.auto_fallback===false)?'selected':''}>off</option></select>
           <span class="hint">on (default): auto-use every installed CLI + a cheaper tier as fallback — no manual list needed</span></div>
         <div class="fr" style="align-items:flex-start"><span class="lbl">Extra fallbacks</span>
-          <textarea id="eng-fallbacks" rows="2" style="flex:1;min-width:0;background:var(--card);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:8px 11px;font-size:12.5px;font-family:ui-monospace,Menlo,monospace" placeholder="one per line: &lt;engine&gt; &lt;model&gt;\ne.g.  opencode gpt-4o\n      gemini gemini-2.0-flash">${(cfg.engine&&cfg.engine.fallbacks||[]).map(f=>`${f.engine} ${f.model}`).join("\n")}</textarea>
-          <span class="hint">tried in order when the primary hits a quota/rate-limit wall or stalls (timeout). Same CLI, cheaper model works too, e.g. <code>claude haiku</code></span></div>
+          <textarea id="eng-fallbacks" rows="2" style="flex:2 1 280px;min-width:220px;background:var(--card);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:8px 11px;font-size:12.5px;font-family:ui-monospace,Menlo,monospace" placeholder="one per line: &lt;engine&gt; &lt;model&gt;\ne.g.  opencode gpt-4o\n      gemini gemini-2.0-flash">${(cfg.engine&&cfg.engine.fallbacks||[]).map(f=>`${f.engine} ${f.model}`).join("\n")}</textarea>
+          <span class="hint" style="flex:1 1 160px;min-width:0">tried in order when the primary hits a quota/rate-limit wall or stalls (timeout). Same CLI, cheaper model works too, e.g. <code>claude haiku</code></span></div>
         <button type="button" class="set-expand ${anyOverride?'open':''}" onclick="toggleRoleOverrides(this)"><i class="ti ti-chevron-right"></i> Per-agent model overrides <span style="color:var(--dim);font-weight:400">· optional — give any agent a different model</span></button>
         <div class="role-overrides" ${anyOverride?'':'hidden'}>${roleRows}</div>
       </div>

@@ -14,7 +14,7 @@ function rtChecklist(){rtInsert('<ul class="tasklist"><li data-checked="false">T
 function rtHr(){rtInsert('<hr><p><br></p>');}
 function rtTable(){let h='<table><tbody>';for(let r=0;r<3;r++){h+='<tr>';for(let c=0;c<3;c++){h+=(r===0?'<th>Head '+(c+1)+'</th>':'<td>&nbsp;</td>');}h+='</tr>';}h+='</tbody></table><p><br></p>';rtInsert(h);}
 async function rtLink(){const s0=window.getSelection();const saved=(s0&&s0.rangeCount)?s0.getRangeAt(0).cloneRange():null;
-  const url=await coxModal({title:"Insert link",message:"URL để chèn vào trang.",input:{placeholder:"https://…",value:"https://"},confirmText:"Insert"});if(!url)return;
+  const url=await coxModal({title:"Insert link",message:"URL to insert into the page.",input:{placeholder:"https://…",value:"https://"},confirmText:"Insert"});if(!url)return;
   if(saved){const s=window.getSelection();s.removeAllRanges();s.addRange(saved);}
   const s=window.getSelection();const t=(s&&s.toString())||url;if(s&&s.toString())document.execCommand("createLink",false,url);else rtInsert('<a href="'+esc(url)+'" target="_blank" rel="noopener">'+esc(t)+'</a>&nbsp;');rtDirty();}
 function docEditInit(d){
@@ -168,7 +168,7 @@ async function putDoc(id, folder, title, body){
 }
 async function askAiEdit(){
   const d=currentDoc();if(!d)return;
-  const instruction=await coxModal({title:"AI revise",message:"AI nên sửa trang này thế nào?",input:{placeholder:"e.g. add a section on error handling; make it shorter and clearer",multiline:true},confirmText:"Revise"});
+  const instruction=await coxModal({title:"AI revise",message:"How should AI revise this page?",input:{placeholder:"e.g. add a section on error handling; make it shorter and clearer",multiline:true},confirmText:"Revise"});
   if(!instruction||!instruction.trim())return;
   const el=document.getElementById("docs-main");
   el.innerHTML='<div class="docs-empty"><i class="ti ti-loader-2 att-spin"></i><div>DOCS agent is revising…</div></div>';
@@ -181,7 +181,7 @@ async function askAiEdit(){
 }
 async function deleteDoc(){
   const d=currentDoc();if(!d)return;
-  if(!await coxModal({title:"Delete page",message:'Xoá trang "'+(d.title||d.id)+'"? Không hoàn tác được.',danger:true,confirmText:"Delete"}))return;
+  if(!await coxModal({title:"Delete page",message:'Delete page "'+(d.title||d.id)+'"? This cannot be undone.',danger:true,confirmText:"Delete"}))return;
   try{await fetch(api("/docs/"+encodeURIComponent(d.id)),{method:"DELETE"});}catch(e){}
   DOC_CUR=null;DOC_EDIT=false;await loadDocs();
 }
