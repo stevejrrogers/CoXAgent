@@ -48,7 +48,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // Ready mid-sprint are out of scope until rollover) — the PO
             // commits the open backlog now and announces, instead of the team
             // idling for days with a full queue.
-            let refilled = crate::sprint::refill_empty_scope(&mut state);
+            // Park exhausted tickets FIRST so the refill below never re-commits
+            // work that already burned its retries against an outside blocker.
+            for id in crate::sprint::auto_hold_exhausted(&mut state) {
+                let msg = format!(
+                    "⏸ {id} was auto-held after repeated failures — resume it                      from the ticket dialog once the blocker is cleared."
+                );
+                state.post_comment("SM", &msg, None);
+            }
+            let refilled =
+                crate::sprint::refill_empty_scope(&mut state) + crate::sprint::top_up_scope(&mut state);
             if refilled > 0 {
                 let msg = format!(
                     "📋 Sprint scope held no ready feature work while {refilled} \
