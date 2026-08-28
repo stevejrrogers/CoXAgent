@@ -3,7 +3,7 @@
 //!
 //! Pure data; loading from `coxagent.json` is an adapter concern.
 
-use coxagent_domain::Role;
+use coxagent_domain::{Priority, Role};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -271,6 +271,14 @@ pub struct WorkflowConfig {
     /// Empty = no window.
     #[serde(default)]
     pub quiet_hours_utc: String,
+    /// Bug-burn floor (CXA-F028): when set, a scrum sprint commits only open
+    /// bugs AT OR ABOVE this priority and the DEV bug queue ignores the rest —
+    /// the "one-week high-severity burn" knob that parks cosmetic bugs for the
+    /// burn's duration without losing them. Reuses the existing three-level
+    /// [`Priority`] as the severity axis. Absent/`None` = burn every open bug
+    /// (the historical behaviour), so existing configs deserialize unchanged.
+    #[serde(default)]
+    pub bug_burn_floor: Option<Priority>,
 }
 
 /// How often the periodic phases run. Zeros mean "use the built-in default" so
@@ -488,6 +496,7 @@ impl Default for WorkflowConfig {
             pr_stale_days: 0,
             cadence: CadenceConfig::default(),
             quiet_hours_utc: String::new(),
+            bug_burn_floor: None,
         }
     }
 }
@@ -927,5 +936,31 @@ mod tests {
 
         assert_eq!(cfg.policy.forbidden_paths, ["infra/"]);
         assert_eq!(cfg.engine.default.model, "sonnet");
+    }
+
+    /// CXA-F028: the bug-burn floor is optional and backward compatible — a
+    /// config document that never mentions it burns every open bug exactly as
+    /// before; naming it picks the minimum severity.
+    #[test]
+    fn bug_burn_floor_is_absent_by_default_and_parses_the_priority_names() {
+        let cfg: Config = serde_json::from_str("{}").expect("legacy config");
+        assert_eq!(
+            cfg.workflow.bug_burn_floor, None,
+            "absent = burn everything"
+        );
+
+        let cfg: Config = serde_json::from_str(
+            r#"{"workflow":{"ba_every_n_cycles":4,"feature_dev_enabled":true,
+                "sleep_seconds":30,"bug_burn_floor":"high"}}"#,
+        )
+        .expect("floor config");
+        assert_eq!(cfg.workflow.bug_burn_floor, Some(Priority::High));
+
+        let cfg: Config = serde_json::from_str(
+            r#"{"workflow":{"ba_every_n_cycles":4,"feature_dev_enabled":true,
+                "sleep_seconds":30,"bug_burn_floor":"low"}}"#,
+        )
+        .expect("floor config");
+        assert_eq!(cfg.workflow.bug_burn_floor, Some(Priority::Low));
     }
 }

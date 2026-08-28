@@ -40,6 +40,9 @@ pub(crate) async fn make_store(
                 token: std::env::var("COXAGENT_REMOTE_TOKEN")
                     .ok()
                     .filter(|t| !t.is_empty()),
+                // CXA-F029 bug #2: per-deployment request deadline; defaults to
+                // the previously hard-coded 120 s.
+                timeout: RestConfig::timeout_from_env(),
             };
             let store = RestStateStore::new(cfg)?;
             tracing::info!("[{id}] state store: REMOTE gateway");

@@ -5,14 +5,34 @@
 use crate::state::ProjectState;
 use coxagent_domain::{Priority, Status, Ticket, TicketId, TicketType};
 
+/// True when an active bug-burn floor excludes priority `p` (CXA-F028): the
+/// burn targets bugs AT OR ABOVE the floor, so anything strictly below is
+/// parked for the burn's duration. `None` = no burn floor — every open bug
+/// burns, exactly as before the floor existed.
+#[must_use]
+pub(crate) fn below_bug_burn_floor(floor: Option<Priority>, p: Priority) -> bool {
+    floor.is_some_and(|f| p < f)
+}
+
+/// The sprint's active bug-burn floor, or `None` outside a burn (no sprint /
+/// a sprint opened before the floor existed).
+fn active_bug_burn_floor(state: &ProjectState) -> Option<Priority> {
+    state.sprint.as_ref().and_then(|s| s.bug_burn_floor)
+}
+
 /// Open bugs, best-first (priority desc, id asc). The `*_candidates` variants
 /// return the whole ordered queue so a runner that loses a claim race can fall
 /// through to the next ticket instead of idling — the basis for two runners
-/// picking *different* tickets and working in parallel.
+/// picking *different* tickets and working in parallel. Under an active
+/// bug-burn floor, bugs below the floor are excluded: the burn burns the
+/// right severities (CXA-F028).
 #[must_use]
 pub fn open_bug_candidates(state: &ProjectState) -> Vec<TicketId> {
+    let floor = active_bug_burn_floor(state);
     candidates(state, |t| {
-        t.ticket_type() == TicketType::Bug && t.status() == Status::Open
+        t.ticket_type() == TicketType::Bug
+            && t.status() == Status::Open
+            && !below_bug_burn_floor(floor, t.priority())
     })
 }
 
@@ -179,22 +199,27 @@ fn priority_rank(p: Priority) -> u8 {
 /// Is `id` inside the DEV work scope for the current sprint?
 ///
 /// Real-world rule: DEV only pulls tickets the team committed to this sprint
-/// (PO/SM aligned via the sprint-board action). Two things stay in scope
-/// regardless:
-///  - bugs still `Open` — dedicated bug work outranks the board, and
+/// (PO/SM aligned via the sprint-board action). Three things shape that:
+///  - bugs still `Open` are emergency work that outranks the board — UNLESS an
+///    active bug-burn floor scopes the burn above their severity (CXA-F028):
+///    a below-floor Open bug is parked for the burn's duration, while a bug
+///    at/above the floor stays workable even mid-burn (a genuine critical is
+///    never blocked),
 ///  - Kanban mode (no sprint open) — there is no sprint to be out of scope
-///    for, so any ready ticket is fair game.
-///
-/// In Scrum mode a feature/chore the PO/SM has not committed is out of scope:
-/// DEV must ask to have it added before picking it up.
+///    for, so any ready ticket is fair game, and
+///  - Scrum mode: a feature/chore the PO/SM has not committed is out of scope;
+///    DEV must ask to have it added before picking it up.
 #[must_use]
 pub fn in_dev_scope(state: &ProjectState, id: &TicketId) -> bool {
-    // Emergency bugs are always workable, sprint or not.
-    if matches!(
-        state.ticket(id),
-        Some(t) if matches!((t.ticket_type(), t.status()), (TicketType::Bug, Status::Open))
-    ) {
-        return true;
+    // Emergency bugs are always workable, sprint or not — above the burn floor.
+    if let Some(t) = state.ticket(id) {
+        if matches!(
+            (t.ticket_type(), t.status()),
+            (TicketType::Bug, Status::Open)
+        ) {
+            let floor = active_bug_burn_floor(state);
+            return !below_bug_burn_floor(floor, t.priority());
+        }
     }
     // Kanban mode (no sprint open): no scope ceremony — DEV may pull any
     // ready ticket.
@@ -307,12 +332,16 @@ mod tests {
 
     // Ticket::new creates bugs already in `Open`.
     fn open_bug(id: &str) -> Ticket {
+        open_bug_prio(id, Priority::High)
+    }
+
+    fn open_bug_prio(id: &str, prio: Priority) -> Ticket {
         Ticket::new(
             TicketId::new(id).expect("id"),
             TicketType::Bug,
             "b",
             "",
-            Priority::High,
+            prio,
             Complexity::Small,
             false,
         )
@@ -320,6 +349,10 @@ mod tests {
     }
 
     fn sprint(committed: &[&str]) -> crate::state::Sprint {
+        sprint_with_floor(committed, None)
+    }
+
+    fn sprint_with_floor(committed: &[&str], floor: Option<Priority>) -> crate::state::Sprint {
         crate::state::Sprint {
             number: 1,
             goal: String::new(),
@@ -331,6 +364,7 @@ mod tests {
                 .filter_map(|c| TicketId::new(c).ok())
                 .collect(),
             started_at: String::new(),
+            bug_burn_floor: floor,
         }
     }
 
@@ -420,6 +454,91 @@ mod tests {
             &state,
             &TicketId::new("CXA-B002").expect("id")
         ));
+    }
+
+    // ---- CXA-F028: an active bug-burn floor scopes the DEV bug queue. ----
+
+    #[test]
+    fn burn_floor_excludes_below_floor_bugs_and_keeps_best_first_order() {
+        let state = ProjectState {
+            tickets: vec![
+                open_bug_prio("CXA-B-LOW", Priority::Low),
+                open_bug_prio("CXA-B-MED", Priority::Medium),
+                open_bug_prio("CXA-B-HIGH", Priority::High),
+            ],
+            sprint: Some(sprint_with_floor(&[], Some(Priority::Medium))),
+            ..ProjectState::default()
+        };
+        // Only at/above-floor bugs burn, best-first (priority desc).
+        assert_eq!(
+            open_bug_candidates(&state),
+            vec![
+                TicketId::new("CXA-B-HIGH").expect("id"),
+                TicketId::new("CXA-B-MED").expect("id"),
+            ]
+        );
+        // The same sprint without a floor keeps every open bug queued.
+        let state = ProjectState {
+            tickets: state.tickets,
+            sprint: Some(sprint(&[])),
+            ..ProjectState::default()
+        };
+        assert_eq!(open_bug_candidates(&state).len(), 3);
+    }
+
+    #[test]
+    fn mid_burn_criticals_stay_in_scope() {
+        let state = ProjectState {
+            tickets: vec![
+                open_bug_prio("CXA-B-CRIT", Priority::High),
+                open_bug_prio("CXA-B-MED", Priority::Medium),
+            ],
+            // An active High-floor burn: the emergency clause still covers
+            // bugs at/above the floor — a genuine critical is never blocked.
+            sprint: Some(sprint_with_floor(&[], Some(Priority::High))),
+            ..ProjectState::default()
+        };
+        assert!(in_dev_scope(
+            &state,
+            &TicketId::new("CXA-B-CRIT").expect("id")
+        ));
+        assert!(!in_dev_scope(
+            &state,
+            &TicketId::new("CXA-B-MED").expect("id")
+        ));
+    }
+
+    #[test]
+    fn below_floor_open_bugs_are_out_of_scope_mid_burn_even_if_committed() {
+        let state = ProjectState {
+            tickets: vec![open_bug_prio("CXA-B-LOW", Priority::Low)],
+            // The bug somehow sits on the sprint (e.g. committed before the
+            // burn began): the floor still parks it — DEV must not work it.
+            sprint: Some(sprint_with_floor(&["CXA-B-LOW"], Some(Priority::High))),
+            ..ProjectState::default()
+        };
+        assert!(!in_dev_scope(
+            &state,
+            &TicketId::new("CXA-B-LOW").expect("id")
+        ));
+    }
+
+    #[test]
+    fn no_burn_window_means_open_bugs_stay_in_scope() {
+        let low = open_bug_prio("CXA-B-LOW", Priority::Low);
+        // No sprint at all (Kanban): nothing scopes the burn.
+        let state = ProjectState {
+            tickets: vec![low.clone()],
+            ..ProjectState::default()
+        };
+        assert!(in_dev_scope(&state, low.id()));
+        // A sprint WITHOUT a floor (old snapshot / floor unset): unchanged.
+        let state = ProjectState {
+            tickets: vec![low.clone()],
+            sprint: Some(sprint(&[])),
+            ..ProjectState::default()
+        };
+        assert!(in_dev_scope(&state, low.id()));
     }
 
     #[test]

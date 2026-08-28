@@ -1181,3 +1181,9 @@ mod cors_rate_limit_tests;
 mod pr_preview_tests;
 #[cfg(test)]
 mod pr_review_gate_tests;
+#[cfg(test)]
+mod store_rpc_guard_tests;
+#[cfg(test)]
+mod store_rpc_stale_write_tests;
+#[cfg(test)]
+mod store_rpc_test_support;

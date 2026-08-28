@@ -1527,6 +1527,7 @@ async fn run_probe(hub: &str, project: &str) -> Result<String, Box<dyn std::erro
         base_url: hub.trim_end_matches('/').to_owned(),
         project_id: project.to_owned(),
         token,
+        timeout: RestConfig::timeout_from_env(),
     };
     let store = RestStateStore::new(cfg)?;
     let worker = ["HOSTNAME", "HOST"]

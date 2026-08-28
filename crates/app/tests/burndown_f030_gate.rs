@@ -248,7 +248,7 @@ fn sprint_start_state() -> ProjectState {
     }
     s.tickets.push(next);
     // Sprint start: the cycle opens the sprint that must carry the burn-down.
-    let opened = sprint::advance(&mut s, 1, SprintPolicy::Cycles(10));
+    let opened = sprint::advance(&mut s, 1, SprintPolicy::cycles(10));
     assert_eq!(opened, Some(1), "sprint start opens the first sprint");
     s
 }
