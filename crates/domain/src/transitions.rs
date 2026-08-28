@@ -9,7 +9,7 @@ use crate::kinds::{Role, Status, TicketType};
 /// Is `from -> to` a legal edge for this ticket type?
 #[must_use]
 pub fn transition_allowed(ticket_type: TicketType, from: Status, to: Status) -> bool {
-    use Status::{Documented, Done, Fixed, InProgress, Open, Pending, Ready, Rejected, Verified};
+    use Status::{Documented, Done, Fixed, InProgress, OnHold, Open, Pending, Ready, Rejected, Verified};
     match ticket_type {
         TicketType::Feature | TicketType::Chore => matches!(
             (from, to),
@@ -24,6 +24,10 @@ pub fn transition_allowed(ticket_type: TicketType, from: Status, to: Status) -> 
                 | (Ready, InProgress | Pending | Rejected)
                 | (InProgress, Done)
                 | (Done, Documented)
+                // On hold: parked before work starts; resumes to Pending so it
+                // re-passes the ready gate, or is rejected outright.
+                | (Pending | Ready, OnHold)
+                | (OnHold, Pending | Rejected)
         ),
         TicketType::Bug => matches!(
             (from, to),
@@ -39,6 +43,9 @@ pub fn transition_allowed(ticket_type: TicketType, from: Status, to: Status) -> 
             (Open, InProgress | Rejected)
                 | (InProgress, Fixed | Rejected)
                 | (Fixed, Verified | Open) // Fixed -> Open = reopen after failed regression
+                // On hold: parked while blocked on the outside world.
+                | (Open, OnHold)
+                | (OnHold, Open | Rejected)
         ),
     }
 }
@@ -49,7 +56,7 @@ pub fn transition_allowed(ticket_type: TicketType, from: Status, to: Status) -> 
 /// and is always allowed for legal edges. `User` acts as a super-PO.
 #[must_use]
 pub fn can_transition(actor: Role, from: Status, to: Status) -> bool {
-    use Status::{Documented, Done, Fixed, InProgress, Open, Pending, Ready, Rejected, Verified};
+    use Status::{Documented, Done, Fixed, InProgress, OnHold, Open, Pending, Ready, Rejected, Verified};
 
     if actor == Role::System {
         return true;
@@ -62,7 +69,10 @@ pub fn can_transition(actor: Role, from: Status, to: Status) -> bool {
         (Pending, Ready) => matches!(actor, Role::Sa | Role::Pd | Role::User),
         // PO (or a user acting as super-PO) rejects. From `Ready` too: work has
         // not started there, and a duplicate is worth catching late.
-        (Pending | Open | Ready, Rejected) => matches!(actor, Role::Po | Role::User),
+        (Pending | Open | Ready | OnHold, Rejected) => matches!(actor, Role::Po | Role::User),
+        // Holding and resuming are people's process calls: PO, SM, or a user.
+        (Pending | Ready | Open, OnHold) => matches!(actor, Role::Po | Role::Sm | Role::User),
+        (OnHold, Pending | Open) => matches!(actor, Role::Po | Role::Sm | Role::User),
         // Taking an approval back — the undo window, and only before work starts.
         (Ready, Pending) => matches!(actor, Role::Po | Role::User),
         // Claiming work is a dev action.
@@ -99,6 +109,25 @@ pub fn field_permitted(actor: Role, field: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn on_hold_parks_and_resumes_without_terminating() {
+        let f = TicketType::Feature;
+        assert!(transition_allowed(f, Status::Pending, Status::OnHold));
+        assert!(transition_allowed(f, Status::Ready, Status::OnHold));
+        assert!(transition_allowed(f, Status::OnHold, Status::Pending));
+        assert!(transition_allowed(f, Status::OnHold, Status::Rejected));
+        assert!(!transition_allowed(f, Status::OnHold, Status::InProgress));
+        let b = TicketType::Bug;
+        assert!(transition_allowed(b, Status::Open, Status::OnHold));
+        assert!(transition_allowed(b, Status::OnHold, Status::Open));
+        assert!(!transition_allowed(b, Status::OnHold, Status::Fixed));
+        // People park work; devs do not.
+        assert!(can_transition(Role::Po, Status::Open, Status::OnHold));
+        assert!(can_transition(Role::Sm, Status::Ready, Status::OnHold));
+        assert!(can_transition(Role::User, Status::OnHold, Status::Open));
+        assert!(!can_transition(Role::DevBug, Status::Open, Status::OnHold));
+    }
 
     #[test]
     fn feature_happy_path_edges_are_legal() {

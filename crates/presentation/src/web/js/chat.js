@@ -1842,6 +1842,15 @@ function depChips(ids){
     const col=done?"var(--green)":(dt?"var(--amber)":"var(--dim)");
     return `<span onclick="showTicket('${id}')" title="${dt?esc(dt.title)+' · '+esc(dt.status):'unknown'}" style="cursor:pointer;display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:3px 8px;border-radius:7px;background:${col}22;color:${col};margin-right:5px">
       <i class="ti ti-${done?'check':'circle'}" style="font-size:11px"></i>${esc(id)}</span>`;}).join("");}
+async function holdTicket(id,hold){
+  try{
+    const r=await fetch(api("/ticket/"+encodeURIComponent(id)+"/status/"+(hold?"hold":"resume")),{method:"POST"});
+    if(!r.ok){toasty((await r.text())||"Status change failed","err");return;}
+    toasty(hold?`${id} on hold — sprints skip it until resumed`:`${id} resumed`);
+    close_('ov-ticket');await refreshDisc();
+  }catch(e){toasty("Network error","err");}
+}
+
 async function showTicket(id){
   // Full detail (incl. design specs stripped from list payloads) loads on demand.
   const body=document.getElementById("ticket-body");
@@ -1864,7 +1873,7 @@ async function showTicket(id){
   const d=t.design||{},tech=d.technical,ux=d.ux,ac=t.acceptance_criteria||[];
   let h=`<span class="x" onclick="close_('ov-ticket')"><i class="ti ti-x"></i></span><h3>${esc(t.title)}</h3>
     <div class="msub">${esc(t.id)} · ${esc(t.type)}</div>
-    <div class="mrow"><span class="lbl">Status</span><b>${esc(t.status)}</b></div>
+    <div class="mrow"><span class="lbl">Status</span><b>${t.status==="on_hold"?'<span style="color:var(--amber)">on hold</span>':esc(t.status)}</b>${(typeof canManage==="function"&&canManage())?(["pending","ready","open"].includes(t.status)?` <button class="tk-btn" style="margin-left:10px" onclick="holdTicket('${t.id}',true)" title="Park it — sprints and agents skip it until resumed"><i class="ti ti-player-pause"></i> Hold</button>`:(t.status==="on_hold"?` <button class="tk-btn go" style="margin-left:10px" onclick="holdTicket('${t.id}',false)"><i class="ti ti-player-play"></i> Resume</button>`:"")):""}</div>
     <div class="mrow"><span class="lbl">Priority</span>
       <div style="display:flex;gap:6px;align-items:center">
         ${["high","medium","low"].map(p=>`<span onclick="setPriority('${t.id}','${p}')" style="cursor:pointer;font-size:11px;padding:3px 10px;border-radius:7px;font-weight:600;${t.priority===p?`background:var(--accentbg);color:var(--accent2)`:'background:var(--card2);color:var(--muted)'}">${p}</span>`).join("")}

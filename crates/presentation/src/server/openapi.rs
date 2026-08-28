@@ -182,6 +182,7 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/sprint/:action", &["post"]),
     route("/api/projects/:pid/sprint/close", &["post"]),
     route("/api/projects/:pid/sprint/goal", &["post"]),
+    route("/api/projects/:pid/ticket/:id/status/:action", &["post"]),
     route("/api/projects/:pid/sprint-queue", &["post"]),
     route("/api/projects/:pid/sprint-queue/:qid/scope", &["post"]),
     route("/api/projects/:pid/sprint-queue/:qid", &["delete"]),

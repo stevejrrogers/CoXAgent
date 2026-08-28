@@ -1,0 +1,10 @@
+/private/tmp/claude-501/-Users-luton-Projects-CoXAgent/b5b9960d-ac63-4c46-ab0f-65ffad9586a2/scratchpad/cox-sq/crates/app/target/debug/deps/chacha20-f5814c78d90d8213.d: /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.1/src/lib.rs /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.1/src/variants.rs /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.1/src/backends.rs /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.1/src/rng.rs /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.1/src/../README.md /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.1/src/backends/neon.rs
+
+/private/tmp/claude-501/-Users-luton-Projects-CoXAgent/b5b9960d-ac63-4c46-ab0f-65ffad9586a2/scratchpad/cox-sq/crates/app/target/debug/deps/libchacha20-f5814c78d90d8213.rmeta: /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.1/src/lib.rs /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.1/src/variants.rs /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.1/src/backends.rs /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.1/src/rng.rs /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.1/src/../README.md /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.1/src/backends/neon.rs
+
+/Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.1/src/lib.rs:
+/Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.1/src/variants.rs:
+/Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.1/src/backends.rs:
+/Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.1/src/rng.rs:
+/Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.1/src/../README.md:
+/Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/chacha20-0.10.1/src/backends/neon.rs:

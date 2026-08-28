@@ -1,0 +1,12 @@
+/private/tmp/claude-501/-Users-luton-Projects-CoXAgent/b5b9960d-ac63-4c46-ab0f-65ffad9586a2/scratchpad/cox-sq/crates/app/target/debug/deps/serde-0f3a5523cf248b83.d: /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /private/tmp/claude-501/-Users-luton-Projects-CoXAgent/b5b9960d-ac63-4c46-ab0f-65ffad9586a2/scratchpad/cox-sq/crates/app/target/debug/build/serde-ef49ee5ed3a2a0f9/out/private.rs
+
+/private/tmp/claude-501/-Users-luton-Projects-CoXAgent/b5b9960d-ac63-4c46-ab0f-65ffad9586a2/scratchpad/cox-sq/crates/app/target/debug/deps/libserde-0f3a5523cf248b83.rmeta: /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /private/tmp/claude-501/-Users-luton-Projects-CoXAgent/b5b9960d-ac63-4c46-ab0f-65ffad9586a2/scratchpad/cox-sq/crates/app/target/debug/build/serde-ef49ee5ed3a2a0f9/out/private.rs
+
+/Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs:
+/Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs:
+/Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs:
+/Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs:
+/Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs:
+/private/tmp/claude-501/-Users-luton-Projects-CoXAgent/b5b9960d-ac63-4c46-ab0f-65ffad9586a2/scratchpad/cox-sq/crates/app/target/debug/build/serde-ef49ee5ed3a2a0f9/out/private.rs:
+
+# env-dep:OUT_DIR=/private/tmp/claude-501/-Users-luton-Projects-CoXAgent/b5b9960d-ac63-4c46-ab0f-65ffad9586a2/scratchpad/cox-sq/crates/app/target/debug/build/serde-ef49ee5ed3a2a0f9/out
