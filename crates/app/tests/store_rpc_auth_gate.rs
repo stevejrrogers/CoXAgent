@@ -170,35 +170,59 @@ async fn store_op(port: u16, role: Option<AuthRole>, op: &str) -> (u16, String) 
     (status, resp.text().await.unwrap_or_default())
 }
 
-/// Every operation this single endpoint can dispatch onto the state store.
-const OPS: [&str; 4] = ["load", "save", "claim_ticket", "acquire_leader"];
+/// Every operation this single endpoint can dispatch onto the state store —
+/// the full twelve-op surface `RestStateStore` drives over this route
+/// (crates/infrastructure/src/state/rest_store.rs). CXA-F029 bug #1 pin: the
+/// gate covers each op, not just a sample.
+const OPS: [&str; 12] = [
+    "load",
+    "version",
+    "save",
+    "claim_ticket",
+    "acquire_leader",
+    "claim_stage",
+    "release_stage",
+    "heartbeat",
+    "workers",
+    "set_desired",
+    "get_desired",
+    "acquire_operator",
+];
 
 /// One hub, one port: these assertions share a process-wide TCP bind, so they
 /// live in a single `#[tokio::test]` rather than racing each other.
 #[tokio::test]
-async fn store_requires_a_principal_and_member_writes_clear_it() {
+async fn store_requires_a_manage_principal_for_every_op() {
     let _dir = boot().await;
 
     for op in OPS {
+        // Anonymous — no session, no bearer: the middleware refuses before the
+        // handler runs, so the store adapter is never reached.
         let (status, body) = store_op(PORT, None, op).await;
         assert_eq!(status, 401, "unauthenticated /store?op={op} — got: {body}");
-    }
 
-    for role in [
-        AuthRole::Ba,
-        AuthRole::Fe,
-        AuthRole::Be,
-        AuthRole::Aie,
-        AuthRole::Ds,
-        AuthRole::Da,
-        AuthRole::De,
-    ] {
-        let (status, body) = store_op(PORT, Some(role), "load").await;
+        // Member-tier worker with a valid session (and membership in :pid):
+        // store ops write WHOLE state snapshots, so `write_gate_ok` demands
+        // manage rights for this path — an ordinary writer must be refused
+        // even though it is fully authenticated.
+        let (status, body) = store_op(PORT, Some(AuthRole::Be), op).await;
+        assert_eq!(
+            status, 403,
+            "member-tier /store?op={op} must be stopped by the manage bar — got: {body}"
+        );
+
+        // Manage tier clears every gate; the handler then answers 404 because
+        // [`PID`] is deliberately not registered with this hub. A 401/403 here
+        // would mean the RBAC bar is miswired for this op.
+        let (status, body) = store_op(PORT, Some(AuthRole::Admin), op).await;
+        assert_ne!(status, 401, "admin must clear auth on /store?op={op} — got: {body}");
         assert_ne!(
-            status,
-            401,
-            "{} must clear /store auth — got: {body}",
-            role.as_str()
+            status, 403,
+            "admin must clear the manage bar on /store?op={op} — got: {body}"
+        );
+        assert_eq!(
+            status, 404,
+            "admin should reach the handler (project lookup 404s) on /store?op={op} — got: {body}"
         );
     }
 }

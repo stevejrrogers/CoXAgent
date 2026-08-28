@@ -282,6 +282,11 @@ struct SpyForge {
     /// When `Some`, list two SAME-ticket PRs and serve per-PR diffs — the
     /// competing-PR scenario. Tuples are `(number, title, diff)`.
     competing: Option<Vec<(u64, String, String)>>,
+    /// Creation timestamp to serve on the (single) open PR. `None` keeps the
+    /// existing empty-string behaviour (unknown age), so existing tests are
+    /// untouched. Set it to an old RFC3339 stamp to exercise the
+    /// anti-starvation deadline path.
+    created: Option<String>,
 }
 #[async_trait::async_trait]
 impl ForgePort for SpyForge {
@@ -314,7 +319,7 @@ impl ForgePort for SpyForge {
             author: "coxagent-bot".to_owned(),
             ci: self.ci.clone(),
             mergeable: self.mergeable,
-            created: String::new(),
+            created: self.created.clone().unwrap_or_default(),
         }])
     }
     async fn pr_diff(&self, n: u64) -> Result<String, PortError> {
@@ -353,6 +358,29 @@ impl AgentEnginePort for ReviewEngine {
             stdout: format!("{{\"decision\":\"{}\",\"summary\":\"s\"}}", self.decision),
             stderr: String::new(),
             exit_code: Some(0),
+            usage: None,
+            trace: String::new(),
+            session_id: None,
+            sandbox: SandboxStatus::default(),
+            engine: String::new(),
+        })
+    }
+}
+
+/// Engine whose SA run fails (non-zero exit) — makes `sa_review` yield
+/// `None`, simulating an engine that crashes / emits unparseable JSON on a
+/// PR, which is the silent-starvation case the skip-counter surfaces.
+struct FailEngine;
+#[async_trait::async_trait]
+impl AgentEnginePort for FailEngine {
+    fn id(&self) -> &'static str {
+        "failing-review"
+    }
+    async fn run(&self, _: AgentRequest) -> Result<AgentOutcome, PortError> {
+        Ok(AgentOutcome {
+            stdout: "no verdict".to_owned(),
+            stderr: String::new(),
+            exit_code: Some(1),
             usage: None,
             trace: String::new(),
             session_id: None,
@@ -505,6 +533,95 @@ async fn sa_requests_changes_on_reject_and_never_merges_failing_ci() {
         .await;
     assert!(forge.merged.lock().expect("lock").is_empty());
     assert_eq!(*forge.changes.lock().expect("lock"), vec![7]);
+}
+
+#[tokio::test]
+async fn review_deadline_auto_merges_a_clean_pr_with_no_verdict() {
+    // Anti-starvation deadline (Fix B): a mergeable PR open past
+    // `review_deadline_hours` with NO review verdict is verified and landed
+    // by the runner, even though the reviewer engine can never reach an
+    // approve (it always fails). Nothing red lands: the same
+    // verify-then-merge path an approval takes.
+    let created = (time::OffsetDateTime::now_utc() - time::Duration::hours(48))
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+    let forge = Arc::new(SpyForge {
+        ci: "passing".to_owned(),
+        mergeable: true,
+        created: Some(created),
+        ..Default::default()
+    });
+    let mut cfg = Config::default();
+    cfg.git.enabled = true;
+    cfg.git.auto_merge = true;
+    cfg.git.review_deadline_hours = 12;
+    RunCycleUseCase::new(
+        Arc::new(MemStore::default()),
+        Arc::new(FailEngine),
+        cfg,
+        PathBuf::from("/tmp"),
+        "goal".to_owned(),
+    )
+    .with_forge(Arc::clone(&forge) as Arc<dyn ForgePort>)
+    .review_open_prs()
+    .await;
+    assert_eq!(
+        *forge.merged.lock().expect("lock"),
+        vec![7],
+        "an unreviewed PR past the deadline is landed, not starved"
+    );
+    assert!(
+        forge.changes.lock().expect("lock").is_empty(),
+        "the deadline merge doesn't fabricate a request-changes verdict"
+    );
+}
+
+#[tokio::test]
+async fn sa_review_failures_are_counted_and_surfaced_to_a_human() {
+    // Surface (Fix A): an engine that keeps failing on a PR (`sa_review` ->
+    // `None`) accumulates `pr_review_skips` instead of the runner silently
+    // cycling past it. At `review_max_skips` the PR is held for a human.
+    let forge = Arc::new(SpyForge {
+        ci: "passing".to_owned(),
+        mergeable: true,
+        ..Default::default()
+    });
+    let mut cfg = Config::default();
+    cfg.git.enabled = true;
+    cfg.git.review_max_skips = 2; // fail twice, then surface
+    cfg.git.review_deadline_hours = 0; // keep the deadline disabled
+    let store = Arc::new(MemStore::default());
+    let uc = RunCycleUseCase::new(
+        Arc::clone(&store),
+        Arc::new(FailEngine),
+        cfg,
+        PathBuf::from("/tmp"),
+        "goal".to_owned(),
+    )
+    .with_forge(Arc::clone(&forge) as Arc<dyn ForgePort>)
+    .with_reporter(Arc::new(crate::ports::outbound::StorePrReporter::new(
+        Arc::clone(&store) as Arc<dyn crate::ports::outbound::StateStorePort>,
+    )));
+
+    // First failure -> counter 1, below threshold, not surfaced yet.
+    uc.review_open_prs().await;
+    assert!(
+        !store.load().await.unwrap().human_holds.contains_key(&7),
+        "a single failure must not trip the human surface"
+    );
+
+    // Second failure -> counter 2 >= threshold -> held for a human.
+    uc.review_open_prs().await;
+    let holds = &store.load().await.unwrap().human_holds;
+    assert_eq!(
+        holds.get(&7).map(String::as_str),
+        Some("SA keeps failing to review this PR"),
+        "the PR is surfaced to a human after the skip threshold"
+    );
+    assert!(
+        forge.merged.lock().expect("lock").is_empty(),
+        "a PR the SA keeps failing on is never auto-merged"
+    );
 }
 
 #[tokio::test]
@@ -2423,5 +2540,37 @@ async fn rollbacks_post_mortems_target_the_incidents_channel_and_notify_distinct
         !incidents_chat(&state).is_empty(),
         "the post-mortem must be posted into an INCIDENTS channel; none found \
          because CXA-F012 is unimplemented. Channels seen so far depend on it."
+    );
+}
+
+/// A human hold is absolute for the bulk sweep too: PR #329 (touching
+/// .github/workflows) was parked for a person, and merge_sweep steamrolled it.
+/// The sweep must skip any PR in `human_holds`, whatever its CI/mergeable state.
+#[tokio::test]
+async fn merge_sweep_never_merges_a_human_held_pr() {
+    let forge = SpyForge {
+        ci: "passing".to_owned(),
+        mergeable: true,
+        ..SpyForge::default()
+    };
+    let store = MemStore {
+        state: Mutex::new({
+            let mut s = ProjectState::default();
+            s.human_holds
+                .insert(7, "touches .github/workflows".to_owned());
+            s
+        }),
+    };
+    let out = crate::use_cases::merge_sweep::merge_sweep(&forge, &store, "main", false, true).await;
+    assert!(
+        forge.merged.lock().expect("lock").is_empty(),
+        "sweep must not merge a human-held PR"
+    );
+    assert!(
+        out.skipped
+            .iter()
+            .any(|(n, r)| *n == 7 && r.contains("human hold")),
+        "the held PR is reported as skipped with its hold reason: {:?}",
+        out.skipped
     );
 }

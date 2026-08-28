@@ -55,7 +55,17 @@ the hub instead of the runner, and an empty code map. Before adding any 'detect'
 - Run what you changed and read the output. A ticket is not evidence; a green unit test \
 is not evidence that the running system behaves. Curl the endpoint, read the log, inspect \
 the row, look at the rendered page — the defects that matter most are the ones no \
-acceptance criterion thought to ask about.";
+acceptance criterion thought to ask about.
+- Every gate names its EXIT before it ships. A gate that can hold work must state what \
+unblocks it and who performs that action — and that actor must exist and be able to act. \
+'Letting review land it' while the reviewer kept failing left one mergeable PR parked \
+forever, and the clean-base gate it fed paused ALL dev work for days while designers piled \
+up 194 ready tickets nobody was allowed to build. If a gate's exit depends on another \
+process succeeding, the gate must also handle that process NOT succeeding.
+- Free prose is never a mode switch. Sprint goals, ticket titles and chat quote each \
+other, so keyword-sniffing them flips modes by accident — a chore literally NAMED \
+'Refactor: …' armed a whole-team clean-base hold. Modes are explicit state with a set \
+and a clear lifecycle (like `refactor_mode`), never a substring match.";
 
 pub const ENGINEERING_STANDARDS: &str = "\
 ENGINEERING STANDARDS (non-negotiable house rules):\n\
@@ -216,7 +226,16 @@ loading, error, success, disabled), microcopy that tells users what to do next \
 the project design system — deviate only with a stated reason.\n\n\
 Respond with ONLY a JSON object, no prose, exactly:\n\
 {\"user_flow\": string, \"screens\": [string], \
-\"component_states\": [string], \"responsive_notes\": string}";
+\"component_states\": [string], \"responsive_notes\": string}\n\n\
+SVG mockup well-formedness (they are attached and viewed by humans, so a \
+malformed or blank file is a broken deliverable):\n\
+- Quote EVERY attribute value: `x=\"40\" y=\"52\"`, never `x=40`.\n\
+- Only XML entities are legal (`&amp; &lt; &gt; &quot; &apos;`); do NOT use \
+HTML entities like `&middot;` or `&nbsp;` — write the literal character or a \
+numeric ref (`&#183;`).\n\
+- The file must contain real, visible content — never an empty `<svg></svg>` \
+stub; include actual shapes/text.\n\
+- Validate the saved SVG (it must parse as well-formed XML) before finishing.";
 
 /// Developer — implements the one ticket handed to it in the working directory.
 pub const DEV: &str = "\

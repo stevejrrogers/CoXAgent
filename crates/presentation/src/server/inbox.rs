@@ -103,6 +103,16 @@ pub(super) async fn inbox_ep(
             }));
             continue;
         }
+        // On hold: parked on an outside blocker — the resume decision is a
+        // person's, so it lives in the inbox instead of only a board filter.
+        if t.status() == coxagent_domain::Status::OnHold {
+            items.push(serde_json::json!({
+                "kind": "on_hold", "ticket": id, "title": t.title(),
+                "reason": state.hold_reasons.get(&id).cloned().unwrap_or_default(),
+                "role": "PO", "can_act": my_role.can_approve_ready(),
+            }));
+            continue;
+        }
         // Exception tickets routed to me.
         if t.assignee() == Some(me.as_str()) {
             items.push(serde_json::json!({
@@ -523,6 +533,13 @@ async fn human_transition(
     };
     if let Err(e) = t.transition_to(coxagent_domain::Role::User, to) {
         return (axum::http::StatusCode::CONFLICT, e.to_string()).into_response();
+    }
+    // Reaching Verified MEANS the human QA verdict was rendered; the burn-down
+    // (CXA-F032 AC#2) only counts bugs carrying their own REGRESSION TEST PASS
+    // record, so this path writes the same provenance the agent TEST path has
+    // written since F022.
+    if to == coxagent_domain::Status::Verified {
+        coxagent_application::use_cases::run_test::record_human_verify_evidence(&mut state, id);
     }
     let label = format!("{to:?}").to_lowercase();
     // Teach the adaptive gate: every human decision is a sample

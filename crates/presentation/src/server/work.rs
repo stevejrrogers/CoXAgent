@@ -753,6 +753,34 @@ pub(super) async fn set_sprint_goal_ep(
     }
 }
 
+/// Human burn mode (CXA-F030): pause feature work and burn down open bugs
+/// until the count reaches the exit gate. `target: null` sets no numeric
+/// gate — the mode then holds until switched off with `enabled: false`.
+pub(super) async fn burn_mode_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    Json(req): Json<BurnModeReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    match coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        s.tuning.burn_mode = req.enabled;
+        s.tuning.burn_until_bugs_le = req.target;
+        Ok(())
+    })
+    .await
+    {
+        Ok(()) => Json(serde_json::json!({
+            "ok": true,
+            "burn_mode": req.enabled,
+            "target": req.target.unwrap_or(0),
+        }))
+        .into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
 /// Pull tickets into the sprint that is already running, or drop them from it.
 ///
 /// The automatic commit is capacity-based and happens once, at roll-over. A
@@ -809,6 +837,230 @@ pub(super) async fn sprint_scope_ep(
             .into_response(),
         Ok(()) => Json(serde_json::json!({ "ok": true, "changed": changed, "unknown": unknown }))
             .into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Park a ticket (`on_hold`) or resume it. Holding is a person's process call
+/// for work blocked on the outside world (a billing account, a vendor): the
+/// ticket stays on the board but sprint auto-commit, refill and agent pickup
+/// all skip it — unlike Rejected, it comes back with one click.
+pub(super) async fn hold_ticket_ep(
+    State(app): State<AppState>,
+    Path((pid, id, action)): Path<(String, String, String)>,
+    headers: axum::http::HeaderMap,
+    body: Option<Json<super::HoldReq>>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Ok(tid) = coxagent_domain::TicketId::new(id.clone()) else {
+        return (StatusCode::BAD_REQUEST, "bad id").into_response();
+    };
+    let holding = match action.as_str() {
+        "hold" => true,
+        "resume" => false,
+        _ => return (StatusCode::BAD_REQUEST, "action must be hold or resume").into_response(),
+    };
+    // Same qualification as reject: this is a person's gate decision.
+    let Some(me) = super::inbox::gate_principal(
+        &app,
+        &headers,
+        coxagent_application::AuthRole::can_approve_ready,
+    )
+    .await
+    else {
+        return (
+            StatusCode::FORBIDDEN,
+            "your role may not take this decision",
+        )
+            .into_response();
+    };
+    let mut err: Option<String> = None;
+    match coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        let Some(t) = s.tickets.iter_mut().find(|t| t.id() == &tid) else {
+            err = Some("no such ticket".to_owned());
+            return Ok(());
+        };
+        let to = if holding {
+            coxagent_domain::Status::OnHold
+        } else {
+            match t.ticket_type() {
+                coxagent_domain::TicketType::Bug => coxagent_domain::Status::Open,
+                _ => coxagent_domain::Status::Pending,
+            }
+        };
+        if let Err(e) = t.transition_to(coxagent_domain::Role::User, to) {
+            err = Some(e.to_string());
+            return Ok(());
+        }
+        if holding {
+            let reason = body
+                .as_ref()
+                .map(|Json(r)| r.reason.trim().to_owned())
+                .filter(|r| !r.is_empty())
+                .unwrap_or_else(|| "held by a person".to_owned());
+            s.hold_reasons.insert(tid.to_string(), reason);
+        } else {
+            // Resume forgives the failure history (and the hold reason) —
+            // otherwise the auto-hold sweep would park it right back.
+            coxagent_application::sprint::clear_fail_attempts(s, &tid);
+        }
+        s.log_activity(
+            &me,
+            if holding {
+                "put on hold"
+            } else {
+                "resumed from hold"
+            },
+            Some(tid.to_string()),
+        );
+        Ok(())
+    })
+    .await
+    {
+        Ok(()) => match err {
+            Some(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+            None => Json(serde_json::json!({ "ok": true })).into_response(),
+        },
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Queue a sprint to run after the current one. The queue is consumed
+/// front-first at roll-over: the plan's goal and ticket set become the next
+/// sprint's. Planning is additive — an empty queue changes nothing.
+pub(super) async fn queue_sprint_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<super::QueueSprintReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let goal = req.goal.trim().to_owned();
+    if goal.is_empty() {
+        return (StatusCode::BAD_REQUEST, "goal must not be empty").into_response();
+    }
+    let by = resolve_username(&app, &headers).await;
+    let ids: Vec<coxagent_domain::TicketId> = req
+        .tickets
+        .iter()
+        .filter_map(|t| coxagent_domain::TicketId::new(t.trim()).ok())
+        .collect();
+    let mut qid = 0u64;
+    match coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        qid = coxagent_application::sprint::queue_sprint(s, &goal, ids.clone(), &by);
+        Ok(())
+    })
+    .await
+    {
+        Ok(()) => Json(serde_json::json!({ "ok": true, "id": qid })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Add/remove tickets on one queued sprint.
+pub(super) async fn queue_scope_ep(
+    State(app): State<AppState>,
+    Path((pid, qid)): Path<(String, u64)>,
+    Json(req): Json<super::QueueScopeReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let parse = |v: &[String]| -> Vec<coxagent_domain::TicketId> {
+        v.iter()
+            .filter_map(|t| coxagent_domain::TicketId::new(t.trim()).ok())
+            .collect()
+    };
+    let (add, remove) = (parse(&req.add), parse(&req.remove));
+    let mut hit = false;
+    match coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        hit = coxagent_application::sprint::scope_queued_sprint(s, qid, &add, &remove);
+        Ok(())
+    })
+    .await
+    {
+        Ok(()) if !hit => (StatusCode::NOT_FOUND, "no such queued sprint").into_response(),
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Rename a queued sprint's goal.
+pub(super) async fn queue_rename_ep(
+    State(app): State<AppState>,
+    Path((pid, qid)): Path<(String, u64)>,
+    Json(req): Json<super::SprintGoalReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    if req.goal.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "goal must not be empty").into_response();
+    }
+    let mut hit = false;
+    match coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        hit = coxagent_application::sprint::rename_queued_sprint(s, qid, &req.goal);
+        Ok(())
+    })
+    .await
+    {
+        Ok(()) if !hit => (StatusCode::NOT_FOUND, "no such queued sprint").into_response(),
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Move a queued sprint up or down in run order.
+pub(super) async fn queue_move_ep(
+    State(app): State<AppState>,
+    Path((pid, qid, dir)): Path<(String, u64, String)>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let delta: i64 = match dir.as_str() {
+        "up" => -1,
+        "down" => 1,
+        _ => return (StatusCode::BAD_REQUEST, "dir must be up or down").into_response(),
+    };
+    let mut hit = false;
+    match coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        hit = coxagent_application::sprint::move_queued_sprint(s, qid, delta);
+        Ok(())
+    })
+    .await
+    {
+        Ok(()) if !hit => (
+            StatusCode::BAD_REQUEST,
+            "no such queued sprint, or already at that end",
+        )
+            .into_response(),
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Drop a queued sprint outright.
+pub(super) async fn queue_delete_ep(
+    State(app): State<AppState>,
+    Path((pid, qid)): Path<(String, u64)>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let mut hit = false;
+    match coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        hit = coxagent_application::sprint::delete_queued_sprint(s, qid);
+        Ok(())
+    })
+    .await
+    {
+        Ok(()) if !hit => (StatusCode::NOT_FOUND, "no such queued sprint").into_response(),
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => internal_error(&e.to_string()),
     }
 }

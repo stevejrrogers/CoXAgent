@@ -22,6 +22,7 @@ const INBOX_KIND={
   auto_approved:{label:"Auto-approved",ic:"ti-robot",col:"var(--dim)"},
   pr_stuck:{label:"PR stuck — needs you",ic:"ti-alert-triangle",col:"var(--red)"},
   human_eyes:{label:"Needs human eyes",ic:"ti-eye-exclamation",col:"var(--amber)"},
+  on_hold:{label:"On hold — resume when unblocked",ic:"ti-player-pause",col:"var(--amber)"},
 };
 
 function inboxCard(kind,meta,title,actions,ticket){
@@ -67,13 +68,13 @@ async function renderInbox(){
   const bar=`<div class="ibx-filters">${chip("","All",all.length)}${chip("mine","Assigned to me",mineN)}</div>`;
   const items=flt==="mine"?all.filter(i=>i.can_act):all;
   if(!all.length){
-    el.innerHTML='<div class="card" style="padding:28px;text-align:center" class="muted">🎉 Nothing waits on the team.</div>';
+    el.innerHTML='<div class="empty" style="padding:48px 20px;text-align:center">🎉 Nothing waits on you — the team is fully unblocked.</div>';
     return;
   }
   items.sort((a,b)=>(b.escalated?1:0)-(a.escalated?1:0));
   let html=bar;
   if(!items.length){
-    html+='<div class="card" style="padding:24px;text-align:center" class="muted">Nothing needs you right now — switch to <b>All</b> to see the team\'s queue.</div>';
+    html+='<div class="empty" style="padding:24px;text-align:center">Nothing needs you right now — switch to <b>All</b> to see the team\'s queue.</div>';
     el.innerHTML=html;return;
   }
   for(const it of items){
@@ -100,6 +101,10 @@ async function renderInbox(){
           ?ibtn("Send back",`inboxSendBack('${esc(it.ticket)}')`)+
            ibtn("Verified",`inboxAct('${esc(it.ticket)}','verify')`,1)
           :noRight(it.role)),it.ticket);
+    }else if(it.kind==="on_hold"){
+      html+=inboxCard("on_hold",esc(it.ticket)+(it.reason?" · "+esc(it.reason):""),esc(it.title),
+        ibtn("Open",`showTicket('${esc(it.ticket)}')`)+
+        (act?ibtn("Resume",`holdTicket('${esc(it.ticket)}',false)`,1):noRight(it.role)),it.ticket);
     }else if(it.kind==="assigned"){
       html+=inboxCard("assigned",esc(it.ticket)+" · "+esc(it.status||""),esc(it.title),
         ibtn("Return to agents",`inboxUnassign('${esc(it.ticket)}')`),it.ticket);
@@ -139,7 +144,7 @@ async function renderInbox(){
 
 async function inboxAct(id,action){
   if(action==="reject"){
-    const reason=await coxModal({title:"Reject "+id,message:"Lý do? (agents học từ đây — cùng lý do 2 lần là nó tự sửa trước khi hỏi lại)",input:{placeholder:"vd: thiếu acceptance criteria"},confirmText:"Reject"});
+    const reason=await coxModal({title:"Reject "+id,message:"Why? (agents learn from this — the same reason twice and they fix it before asking again)",input:{placeholder:"e.g. missing acceptance criteria"},confirmText:"Reject"});
     if(reason===null||reason===undefined)return;
     try{await fetch(api("/ticket/"+encodeURIComponent(id)+"/reject"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({reason:String(reason||"")})});}catch(e){}
     renderInbox();return;
@@ -155,8 +160,8 @@ async function inboxAct(id,action){
 // goes on the ticket, which is what steers the next attempt.
 async function inboxSendBack(id){
   const reason=await coxModal({title:"Send back "+id,
-    message:"Vì sao chưa nghiệm thu được? (lý do đi kèm ticket — agent đọc và làm lại theo đó)",
-    input:{placeholder:"vd: không có evidence cho acceptance criteria #2"},confirmText:"Send back"});
+    message:"Why can't this be accepted yet? (the reason goes on the ticket — the agent reads it and redoes the work accordingly)",
+    input:{placeholder:"e.g. no evidence for acceptance criteria #2"},confirmText:"Send back"});
   if(reason===null||reason===undefined)return;
   try{
     const r=await fetch(api("/ticket/"+encodeURIComponent(id)+"/send-back"),

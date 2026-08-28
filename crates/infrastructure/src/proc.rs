@@ -262,10 +262,10 @@ fn confined_command(program: impl AsRef<OsStr>, work_dir: &Path) -> Command {
             cmd.arg(a);
         }
         cmd.arg("nice").arg("-n").arg("10").arg(program.as_ref());
-        // Own process group, same as the macOS branch above: bwrap leads it,
-        // so a timed-out caller's kill_group(pid) (a process-group signal)
-        // actually reaps the whole tree instead of silently failing because
-        // pid was never a group leader (COX-B046).
+        // Own process group, same as the macOS branch above: bwrap must lead
+        // it so kill_group's `kill -9 -<pid>` (a process-GROUP signal) can
+        // actually reap the whole tree on timeout, not just fail silently
+        // because pid never led a group (COX-B046).
         cmd.process_group(0);
         cmd
     }
@@ -657,5 +657,37 @@ mod tests {
             .is_ok_and(|s| s.success());
         assert!(!alive, "grandchild {bg} must be dead");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// COX-B046 regression: `kill_group`'s `kill -9 -<pid>` targets a process
+    /// GROUP — it only works if `pid` actually leads one. The macOS arm of
+    /// `confined_command` already calls `process_group(0)`; the Linux (bwrap)
+    /// arm didn't, so a sandboxed agent that hung past its timeout on Linux
+    /// was never reaped and its spawned dev server/build kept running as an
+    /// orphan. Source-inspection, not an execution test, because the Linux
+    /// arm is `#[cfg(target_os = "linux")]` and cannot compile on this host.
+    #[test]
+    fn confined_command_sets_process_group_on_every_platform_arm() {
+        const SRC: &str = include_str!("proc.rs");
+        let start = SRC
+            .find("fn confined_command")
+            .expect("confined_command exists");
+        let body = &SRC[start..];
+        let end = body.find("\n}\n").expect("function body ends");
+        let body = &body[..end];
+        let linux_start = body
+            .find("target_os = \"linux\"")
+            .expect("confined_command has a linux arm");
+        let (macos_arm, linux_arm) = body.split_at(linux_start);
+        assert!(
+            macos_arm.contains("process_group(0)"),
+            "macOS arm must lead its own process group"
+        );
+        assert!(
+            linux_arm.contains("process_group(0)"),
+            "Linux arm must lead its own process group too — otherwise \
+             kill_group's process-group signal silently fails to reap a \
+             timed-out sandboxed agent and its children"
+        );
     }
 }
