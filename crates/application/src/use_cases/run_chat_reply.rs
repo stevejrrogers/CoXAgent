@@ -1077,72 +1077,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             "(The app auto-deploys via docker compose after DEV each cycle; you can also deploy \
              on request with ACTION: deploy.)\n",
         );
-        // Open backlog so the agent knows what's there and can avoid duplicates.
-        let pending: Vec<_> = s
-            .tickets
-            .iter()
-            .filter(|t| matches!(t.status(), Status::Pending | Status::Ready | Status::Open))
-            .take(10)
-            .collect();
-        if !pending.is_empty() {
-            out.push_str("Open tickets (don't file duplicates):\n");
-            for t in pending {
-                let _ = writeln!(
-                    out,
-                    "- {} [{:?}] {} ({:?})",
-                    t.id(),
-                    t.ticket_type(),
-                    t.title(),
-                    t.priority()
-                );
-            }
-        }
-        if !s.decisions.is_empty() {
-            out.push_str("Team decisions/conventions (honour these):\n");
-            for d in s.decisions.iter().rev().take(6).rev() {
-                let _ = writeln!(out, "- {d}");
-            }
-        }
-        // Planned sprints + parked work — the human plans here; the agent must
-        // see the plan to talk about it.
-        if !s.sprint_queue.is_empty() {
-            out.push_str("Planned sprints (run in this order after the current one):\n");
-            for (i, q) in s.sprint_queue.iter().enumerate() {
-                let _ = writeln!(
-                    out,
-                    "- #{} {} ({} ticket(s))",
-                    i + 1,
-                    q.goal,
-                    q.tickets.len()
-                );
-            }
-        }
-        let held: Vec<String> = s
-            .tickets
-            .iter()
-            .filter(|t| t.status() == Status::OnHold)
-            .map(|t| {
-                let why = s
-                    .hold_reasons
-                    .get(&t.id().to_string())
-                    .cloned()
-                    .unwrap_or_default();
-                format!("{} ({why})", t.id())
-            })
-            .collect();
-        if !held.is_empty() {
-            let _ = writeln!(out, "On hold (waiting on the outside world): {}", held.join(", "));
-        }
-        // Engine health — so "why is BA slow" gets a real answer.
-        let sick: Vec<String> = s
-            .role_health
-            .iter()
-            .filter(|(_, h)| h.errors > 0)
-            .map(|(r, h)| format!("{r}: {} error(s), {} timeout(s)", h.errors, h.timeouts))
-            .collect();
-        if !sick.is_empty() {
-            let _ = writeln!(out, "Engine health: {}", sick.join(" · "));
-        }
+        push_backlog_and_health(&s, &mut out);
         out.push_str("Recent team channel (oldest first — this is the conversation you are in):\n");
         let recent: Vec<_> = s
             .comments
@@ -1175,7 +1110,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
                 self.lang.reply_directive()
             )
         };
-        let (po_task, sa_task, sm_task) = (
+        let (po_task, sa_task, scrum_task) = (
             view("PO (product owner)", "value & priority"),
             view("SA (architect)", "technical feasibility & design"),
             view("SM (scrum master)", "process, risk & sequencing"),
@@ -1183,7 +1118,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         let (po, sa, sm) = tokio::join!(
             self.run("PO", &po_task),
             self.run("SA", &sa_task),
-            self.run("SM", &sm_task),
+            self.run("SM", &scrum_task),
         );
         let mut takes = String::new();
         for (who, t) in [("PO", &po), ("SA", &sa), ("SM", &sm)] {
@@ -1335,17 +1270,110 @@ const NEEDS_YES: &[&str] = &[
     "import",
 ];
 
+/// Appends the work-surface part of the agent briefing — open backlog, team
+/// decisions, planned sprints, on-hold tickets, engine health — to `out`.
+/// Split out of [`RunChatReplyUseCase::context`] so each half stays reviewable;
+/// the agent must see the plan and the blockers to talk about them.
+fn push_backlog_and_health(s: &crate::state::ProjectState, out: &mut String) {
+    use coxagent_domain::Status;
+    // Open backlog so the agent knows what's there and can avoid duplicates.
+    let pending: Vec<_> = s
+        .tickets
+        .iter()
+        .filter(|t| matches!(t.status(), Status::Pending | Status::Ready | Status::Open))
+        .take(10)
+        .collect();
+    if !pending.is_empty() {
+        out.push_str("Open tickets (don't file duplicates):\n");
+        for t in pending {
+            let _ = writeln!(
+                out,
+                "- {} [{:?}] {} ({:?})",
+                t.id(),
+                t.ticket_type(),
+                t.title(),
+                t.priority()
+            );
+        }
+    }
+    if !s.decisions.is_empty() {
+        out.push_str("Team decisions/conventions (honour these):\n");
+        for d in s.decisions.iter().rev().take(6).rev() {
+            let _ = writeln!(out, "- {d}");
+        }
+    }
+    // Planned sprints + parked work — the human plans here; the agent must
+    // see the plan to talk about it.
+    if !s.sprint_queue.is_empty() {
+        out.push_str("Planned sprints (run in this order after the current one):\n");
+        for (i, q) in s.sprint_queue.iter().enumerate() {
+            let _ = writeln!(
+                out,
+                "- #{} {} ({} ticket(s))",
+                i + 1,
+                q.goal,
+                q.tickets.len()
+            );
+        }
+    }
+    let held: Vec<String> = s
+        .tickets
+        .iter()
+        .filter(|t| t.status() == Status::OnHold)
+        .map(|t| {
+            let why = s
+                .hold_reasons
+                .get(&t.id().to_string())
+                .cloned()
+                .unwrap_or_default();
+            format!("{} ({why})", t.id())
+        })
+        .collect();
+    if !held.is_empty() {
+        let _ = writeln!(
+            out,
+            "On hold (waiting on the outside world): {}",
+            held.join(", ")
+        );
+    }
+    // Engine health — so "why is BA slow" gets a real answer.
+    let sick: Vec<String> = s
+        .role_health
+        .iter()
+        .filter(|(_, h)| h.errors > 0)
+        .map(|(r, h)| format!("{r}: {} error(s), {} timeout(s)", h.errors, h.timeouts))
+        .collect();
+    if !sick.is_empty() {
+        let _ = writeln!(out, "Engine health: {}", sick.join(" · "));
+    }
+}
+
 /// Pick which agent should answer a human message from its wording.
 /// Should the whole panel answer instead of one persona? Broad, strategic,
 /// or comparative questions — where three perspectives beat one voice.
 fn wants_panel(msg: &str) -> bool {
-    let m = msg.to_lowercase();
     const CUES: &[&str] = &[
-        "nên ", "hướng", "roadmap", "chiến lược", "strategy", "should we",
-        "approach", "so sánh", "compare", "ý kiến", "opinions", "đánh giá",
-        "thiết kế thế nào", "architecture", "plan for", "kế hoạch",
-        "cả team", "@team", "team nghĩ",
+        "nên ",
+        "hướng",
+        "roadmap",
+        "chiến lược",
+        "strategy",
+        "should we",
+        "approach",
+        "so sánh",
+        "compare",
+        "ý kiến",
+        "opinions",
+        "đánh giá",
+        "thiết kế thế nào",
+        "architecture",
+        "plan for",
+        "kế hoạch",
+        "cả team",
+        "@team",
+        "team nghĩ",
     ];
+    let m = msg.to_lowercase();
     CUES.iter().any(|c| m.contains(c))
 }
 

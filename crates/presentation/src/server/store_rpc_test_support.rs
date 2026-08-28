@@ -66,9 +66,7 @@ impl AuthPort for StubAuth {
         match token {
             INSIDE_SESSION => Some(principal("alice", AuthRole::Admin, &[PID])),
             OUTSIDE_SESSION => Some(principal("mallory", AuthRole::Be, &[OTHER_PID])),
-            LEAD_ELSEWHERE_SESSION => {
-                Some(principal("morgan", AuthRole::Manager, &[OTHER_PID]))
-            }
+            LEAD_ELSEWHERE_SESSION => Some(principal("morgan", AuthRole::Manager, &[OTHER_PID])),
             _ => None,
         }
     }
@@ -232,7 +230,9 @@ impl StateStorePort for CountingStore {
         Ok(())
     }
 
-    async fn workers(&self) -> Result<Vec<coxagent_application::ports::outbound::WorkerEntry>, PortError> {
+    async fn workers(
+        &self,
+    ) -> Result<Vec<coxagent_application::ports::outbound::WorkerEntry>, PortError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(Vec::new())
     }
@@ -270,7 +270,10 @@ impl coxagent_application::ports::outbound::AgentEnginePort for UnusedEngine {
 
 /// One registered project (id [`PID`]) backed by `store`, in a hub whose auth
 /// is `auth`. Lives in a tempdir like every other hub fixture.
-pub(super) async fn app_with(auth: Option<Arc<dyn AuthPort>>, store: Arc<dyn StateStorePort>) -> AppState {
+pub(super) async fn app_with(
+    auth: Option<Arc<dyn AuthPort>>,
+    store: Arc<dyn StateStorePort>,
+) -> AppState {
     let dir = tempfile::tempdir().expect("tempdir");
     let work = tempfile::tempdir().expect("workdir");
     let handle = ProjectHandle {
@@ -306,10 +309,7 @@ pub(super) async fn app_with(auth: Option<Arc<dyn AuthPort>>, store: Arc<dyn Sta
 pub(super) fn deployed_router(state: AppState) -> Router {
     Router::new()
         .route("/api/projects/:pid/store", post(store_rpc::store_rpc_ep))
-        .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            auth_mw,
-        ))
+        .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth_mw))
         .with_state(state)
 }
 
