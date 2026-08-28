@@ -86,6 +86,12 @@ pub struct TestCase {
     pub status: TestCaseStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence: Option<CaseEvidence>,
+    /// What demonstrates this criterion: relative test-file paths, or an API
+    /// request/response line for non-UI tickets (CXA-F024). Written by the
+    /// application layer's traceability matcher; the coverage matrix surfaces
+    /// it. `serde(default)` so pre-matrix tickets load clean.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<String>,
 }
 
 /// The ticket aggregate root. Fields are private; all access is via methods so
@@ -215,6 +221,7 @@ impl Ticket {
                     description: ac.clone(),
                     status: TestCaseStatus::Pending,
                     evidence: None,
+                    sources: Vec::new(),
                 }),
             }
         }
@@ -294,6 +301,30 @@ impl Ticket {
             at,
         });
         true
+    }
+
+    /// Record WHAT demonstrates a test case — relative test-file paths, or an
+    /// API request/response line when the evidence is not file-based
+    /// (CXA-F024). Provenance only: it never changes the verdict. Returns
+    /// `false` when no case matched.
+    pub fn set_test_case_sources(&mut self, description: &str, sources: Vec<String>) -> bool {
+        let Some(tc) = self
+            .test_cases
+            .iter_mut()
+            .find(|t| t.description == description)
+        else {
+            return false;
+        };
+        tc.sources = sources;
+        true
+    }
+
+    /// The test-to-AC traceability matrix (CXA-F024): one row per acceptance
+    /// criterion with its coverage status and the evidence addressing it.
+    /// Computed fresh on every read — always consistent with current state.
+    #[must_use]
+    pub fn coverage_matrix(&self) -> Vec<crate::coverage::CoverageEntry> {
+        crate::coverage::matrix_for(self)
     }
 
     // --- Accessors ---
@@ -523,6 +554,8 @@ impl Ticket {
     /// - [`DomainError::InvalidTransition`] — not a legal edge for this type.
     /// - [`DomainError::TransitionNotPermitted`] — role not allowed.
     /// - [`DomainError::NotReady`] — precondition for the target status unmet.
+    /// - [`DomainError::CoverageIncomplete`] — `Verified` with an acceptance
+    ///   criterion no passing test case demonstrates (CXA-F024).
     pub fn transition_to(&mut self, actor: Role, to: Status) -> Result<(), DomainError> {
         let from = self.status;
         if !transition_allowed(self.kind, from, to) {
@@ -542,11 +575,29 @@ impl Ticket {
         if to == Status::Ready {
             self.check_ready()?;
         }
+        if to == Status::Verified {
+            self.check_covered()?;
+        }
         self.status = to;
         // Leaving InProgress (completion or reject) frees the claim.
         if to != Status::InProgress {
             self.claimed_by = None;
             self.claimed_at = None;
+        }
+        Ok(())
+    }
+
+    /// Definition of Verified: every acceptance criterion is demonstrated by a
+    /// PASSING test case (CXA-F024). Deliberately emptied criteria (the BA
+    /// clarification path) leave nothing to cover and verify freely. The check
+    /// is a pure read — a blocked transition leaves the ticket untouched.
+    fn check_covered(&self) -> Result<(), DomainError> {
+        let missing = crate::coverage::uncovered(&self.acceptance_criteria, &self.test_cases);
+        if let Some(first) = missing.first() {
+            return Err(DomainError::CoverageIncomplete {
+                uncovered: missing.len(),
+                first: first.clone(),
+            });
         }
         Ok(())
     }
