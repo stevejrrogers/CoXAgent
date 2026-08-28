@@ -24,7 +24,7 @@ use coxagent_application::state::ProjectState;
 use coxagent_infrastructure::JsonStateStore;
 use std::sync::Arc;
 use store_rpc_test_support::{
-    all_ops, app_with, body_text, CountingStore, deployed_router, handler_router, post_store,
+    all_ops, app_with, body_text, deployed_router, handler_router, post_store, CountingStore,
     StubAuth, LEAD_ELSEWHERE_SESSION, OUTSIDE_SESSION,
 };
 
@@ -129,7 +129,11 @@ async fn ac2_store_rejects_an_outside_session_instead_of_forwarding_it() {
     let router = handler_router(app);
 
     let personas = [
-        (OUTSIDE_SESSION, StatusCode::FORBIDDEN, "management role required"),
+        (
+            OUTSIDE_SESSION,
+            StatusCode::FORBIDDEN,
+            "management role required",
+        ),
         (
             LEAD_ELSEWHERE_SESSION,
             StatusCode::FORBIDDEN,
@@ -191,9 +195,8 @@ async fn ac2_deployed_route_scopes_a_global_session_to_project_membership() {
 #[tokio::test]
 async fn ac3_open_mode_executes_every_op_without_a_principal() {
     let state_dir = tempfile::tempdir().expect("state dir");
-    let store: Arc<dyn StateStorePort> = Arc::new(
-        JsonStateStore::new(state_dir.path().join("state")).expect("json store"),
-    );
+    let store: Arc<dyn StateStorePort> =
+        Arc::new(JsonStateStore::new(state_dir.path().join("state")).expect("json store"));
     let app = app_with(None, store).await;
     let router = deployed_router(app);
 
