@@ -12,6 +12,7 @@ pub mod deps_scan;
 pub mod error;
 pub mod faults;
 pub mod metrics;
+pub mod metrics_burndown;
 pub mod metrics_health;
 pub mod parsing;
 pub mod policy;

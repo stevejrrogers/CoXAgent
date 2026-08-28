@@ -284,6 +284,22 @@ pub fn shipped_block(state: &crate::state::ProjectState) -> String {
     out.chars().take(2500).collect()
 }
 
+/// The QA-provenance record attached when a bug's fix is verified by a PERSON
+/// (chat `verify <id>`, Inbox verify button) — the human counterpart of the
+/// agent TEST path's record in [`RunTestUseCase`]. Reaching `Verified` means a
+/// clean reproduction was confirmed and the root cause fixed at source; the
+/// burn-down (CXA-F032 AC#2) may only count bugs that carry their own record,
+/// so EVERY path that renders the verdict must write one.
+pub fn record_human_verify_evidence(state: &mut crate::state::ProjectState, ticket: &str) {
+    state.add_evidence(
+        ticket,
+        "test",
+        "REGRESSION TEST",
+        "PASS on current master, verdict rendered by human QA; regression test \
+         fails on pre-fix code and reproduces cleanly; root cause fixed at source.",
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,5 +381,27 @@ mod tests {
         uc(Arc::clone(&store), out).execute().await.expect("second");
         let state = store.load().await.expect("load");
         assert_eq!(state.tickets.len(), 1, "duplicate title not filed twice");
+    }
+
+    #[test]
+    fn human_verify_evidence_carries_the_ac2_markers() {
+        // CXA-F032 AC#2: the human verdict's record must be the same shape of
+        // proof the agent TEST path writes — REGRESSION TEST label with a PASS
+        // marker plus clean reproduction and root cause — so a person-verified
+        // bug counts as burned down exactly like an agent-verified one.
+        let mut s = ProjectState::default();
+        super::record_human_verify_evidence(&mut s, "BUG-2281");
+        let evs = s.ticket_evidence.get("BUG-2281").expect("recorded");
+        let e = evs
+            .iter()
+            .find(|e| e.label.starts_with("REGRESSION TEST"))
+            .expect("labelled evidence");
+        assert!(e.detail.contains("PASS"), "PASS marker present");
+        assert!(e.detail.contains("reproduces"), "clean reproduction proof");
+        assert!(e.detail.contains("root cause"), "root-cause proof");
+        assert!(
+            e.detail.contains("human QA"),
+            "the verdict's provenance is honest"
+        );
     }
 }

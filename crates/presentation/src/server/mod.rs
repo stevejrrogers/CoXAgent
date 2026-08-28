@@ -732,6 +732,10 @@ pub async fn serve_full(
             get(metrics_summary_ep),
         )
         .route("/api/projects/:pid/metrics/trends", get(metrics_trends_ep))
+        .route(
+            "/api/projects/:pid/metrics/burndown",
+            get(metrics_burndown_ep),
+        )
         .route("/api/projects/:pid/agent-evals", get(agent_evals_ep))
         .route("/api/projects/:pid/runner", get(runner_ep))
         .route("/api/projects/:pid/workers", get(workers_ep))

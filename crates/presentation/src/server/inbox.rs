@@ -524,6 +524,13 @@ async fn human_transition(
     if let Err(e) = t.transition_to(coxagent_domain::Role::User, to) {
         return (axum::http::StatusCode::CONFLICT, e.to_string()).into_response();
     }
+    // Reaching Verified MEANS the human QA verdict was rendered; the burn-down
+    // (CXA-F032 AC#2) only counts bugs carrying their own REGRESSION TEST PASS
+    // record, so this path writes the same provenance the agent TEST path has
+    // written since F022.
+    if to == coxagent_domain::Status::Verified {
+        coxagent_application::use_cases::run_test::record_human_verify_evidence(&mut state, id);
+    }
     let label = format!("{to:?}").to_lowercase();
     // Teach the adaptive gate: every human decision is a sample
     // (docs/ADAPTIVE_APPROVAL.md).

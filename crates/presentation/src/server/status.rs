@@ -197,6 +197,31 @@ pub(super) async fn metrics_trends_ep(
     }
 }
 
+/// Bug burn-down history (CXA-F032): per-day open/fixed/verified counts over
+/// the dashboard window plus the net open-bug change across the last two
+/// known days (`delta_24h`, positive = backlog burned down). Same auth surface
+/// as the other `/metrics` reads: project membership via `auth_mw`.
+pub(super) async fn metrics_burndown_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    match p.store.load().await {
+        Ok(state) => {
+            let day = now_rfc3339().get(..10).unwrap_or("").to_owned();
+            Json(coxagent_application::metrics::compute_burndown(
+                &state,
+                &day,
+                coxagent_application::metrics::BURNDOWN_WINDOW_DAYS,
+            ))
+            .into_response()
+        }
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
 /// The shared worker registry: every team (`account@host`) currently online for
 /// this project, across all machines. Powers the dashboard's cross-machine view.
 pub(super) async fn workers_ep(
