@@ -299,6 +299,17 @@ pub struct Tuning {
     /// until the queue drains.
     #[serde(default)]
     pub skip_ba: bool,
+    /// Human burn mode (CXA-F030): a person pauses feature work and the team
+    /// burns down open bugs until the exit gate releases it. Unlike
+    /// `bugs_first` — recomputed from the evals each day — this is a human
+    /// decision the loop must honour and never overwrite.
+    #[serde(default)]
+    pub burn_mode: bool,
+    /// The burn mode's explicit exit gate: once the open-bug count is at or
+    /// below this, the mode clears itself and features resume. Absent means
+    /// no numeric gate — the mode then holds until switched off by hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub burn_until_bugs_le: Option<u32>,
     /// The day (`YYYY-MM-DD`) tuning was last evaluated.
     #[serde(default)]
     pub last_eval_day: String,
@@ -307,7 +318,11 @@ pub struct Tuning {
 impl Tuning {
     #[must_use]
     pub fn is_default(&self) -> bool {
-        !self.bugs_first && !self.skip_ba && self.last_eval_day.is_empty()
+        !self.bugs_first
+            && !self.skip_ba
+            && !self.burn_mode
+            && self.burn_until_bugs_le.is_none()
+            && self.last_eval_day.is_empty()
     }
 }
 
@@ -386,5 +401,85 @@ mod daily_job_tests {
             .remove("engine_incidents");
         let back: ProjectState = serde_json::from_value(doc).expect("legacy state loads");
         assert!(back.daily_jobs.is_empty() && back.engine_incidents.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod burn_mode_tests {
+    use super::{ProjectState, Tuning};
+    use crate::ports::outbound::{mutate_state, StateStorePort};
+    use crate::PortError;
+    use async_trait::async_trait;
+    use std::sync::{Arc, Mutex};
+
+    /// In-memory store — the round-trip needs no filesystem.
+    #[derive(Default)]
+    struct MemStore {
+        state: Mutex<ProjectState>,
+    }
+
+    #[async_trait]
+    impl StateStorePort for MemStore {
+        async fn load(&self) -> Result<ProjectState, PortError> {
+            Ok(self.state.lock().map_err(poison)?.clone())
+        }
+        async fn save(&self, state: &ProjectState) -> Result<(), PortError> {
+            state.validate().map_err(PortError::Corrupt)?;
+            *self.state.lock().map_err(poison)? = state.clone();
+            Ok(())
+        }
+    }
+
+    fn poison<T>(_: std::sync::PoisonError<T>) -> PortError {
+        PortError::Backend("lock poisoned".to_owned())
+    }
+
+    #[test]
+    fn is_default_covers_the_burn_mode_fields() {
+        assert!(Tuning::default().is_default());
+        let engaged = Tuning {
+            burn_mode: true,
+            ..Tuning::default()
+        };
+        assert!(!engaged.is_default());
+        let gated = Tuning {
+            burn_until_bugs_le: Some(0),
+            ..Tuning::default()
+        };
+        assert!(
+            !gated.is_default(),
+            "a stored exit gate must survive: `tuning` is skipped from the persisted \
+             document only while is_default() holds"
+        );
+    }
+
+    #[test]
+    fn state_written_before_burn_mode_existed_still_loads() {
+        // Projects on disk predate the burn-mode fields; a missing key must
+        // not fail the load and strand a whole project.
+        let mut doc = serde_json::to_value(ProjectState::default()).expect("serialize");
+        doc.as_object_mut().expect("object").remove("tuning");
+        let back: ProjectState = serde_json::from_value(doc).expect("load legacy state");
+        assert!(!back.tuning.burn_mode);
+        assert!(back.tuning.burn_until_bugs_le.is_none());
+    }
+
+    #[tokio::test]
+    async fn burn_mode_set_through_the_store_round_trips() {
+        let store = Arc::new(MemStore::default());
+        mutate_state(store.as_ref(), |s| {
+            s.tuning.burn_mode = true;
+            s.tuning.burn_until_bugs_le = Some(2);
+            Ok(())
+        })
+        .await
+        .expect("set through the store");
+        let s = store.load().await.expect("load");
+        assert!(s.tuning.burn_mode);
+        assert_eq!(s.tuning.burn_until_bugs_le, Some(2));
+        // And it must be PERSISTED, not skipped as default tuning.
+        let doc = serde_json::to_value(&s).expect("serialize");
+        assert_eq!(doc["tuning"]["burn_mode"], serde_json::json!(true));
+        assert_eq!(doc["tuning"]["burn_until_bugs_le"], serde_json::json!(2));
     }
 }

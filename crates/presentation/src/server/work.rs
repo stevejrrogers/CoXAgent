@@ -753,6 +753,34 @@ pub(super) async fn set_sprint_goal_ep(
     }
 }
 
+/// Human burn mode (CXA-F030): pause feature work and burn down open bugs
+/// until the count reaches the exit gate. `target: null` sets no numeric
+/// gate — the mode then holds until switched off with `enabled: false`.
+pub(super) async fn burn_mode_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    Json(req): Json<BurnModeReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    match coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        s.tuning.burn_mode = req.enabled;
+        s.tuning.burn_until_bugs_le = req.target;
+        Ok(())
+    })
+    .await
+    {
+        Ok(()) => Json(serde_json::json!({
+            "ok": true,
+            "burn_mode": req.enabled,
+            "target": req.target.unwrap_or(0),
+        }))
+        .into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
 /// Pull tickets into the sprint that is already running, or drop them from it.
 ///
 /// The automatic commit is capacity-based and happens once, at roll-over. A
@@ -872,7 +900,11 @@ pub(super) async fn hold_ticket_ep(
         }
         s.log_activity(
             &me,
-            if holding { "put on hold" } else { "resumed from hold" },
+            if holding {
+                "put on hold"
+            } else {
+                "resumed from hold"
+            },
             Some(tid.to_string()),
         );
         Ok(())
