@@ -40,12 +40,20 @@ pub fn transition_allowed(ticket_type: TicketType, from: Status, to: Status) -> 
             // failed, the ticket bounced back into the queue, and a
             // not-reproducible bug burned a fresh full investigation every
             // sprint (the CXA-B002/B003/B004 loop).
-            (Open, InProgress | Rejected)
+            // Open -> Rejected = filed in error / duplicate caught before work.
+            // InProgress -> Rejected = the automated not-reproducible close: a
+            // bug pass that ends with no reproduction on a green tree (or is a
+            // duplicate already fixed under another ticket) must be able to
+            // CLOSE instead of re-queue. Historically that mid-work close did
+            // not exist, so the phantom-bug guard's System Rejected transition
+            // failed, the ticket bounced back into the queue, and a
+            // not-reproducible bug burned a fresh full investigation every
+            // sprint (the CXA-B002/B003/B004 loop).
+            // Open -> OnHold = parked while blocked on the outside world.
+            (Open, InProgress | Rejected | OnHold)
                 | (InProgress, Fixed | Rejected)
                 | (Fixed, Verified | Open) // Fixed -> Open = reopen after failed regression
-                // On hold: parked while blocked on the outside world.
-                | (Open, OnHold)
-                | (OnHold, Open | Rejected)
+                | (OnHold, Open | Rejected),
         ),
     }
 }

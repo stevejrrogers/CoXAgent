@@ -153,6 +153,12 @@ pub struct Sprint {
     /// seven-minute "sprints" in two days — ceremony noise with no meaning.
     #[serde(default)]
     pub started_at: String,
+    /// Bug-burn floor mirrored from `WorkflowConfig` when this sprint opened
+    /// (CXA-F028). Selection reads it from HERE so the DEV scope stays a pure
+    /// function of persisted state — config never leaks into selection call
+    /// sites. `None` (old snapshots) = burn every open bug, exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bug_burn_floor: Option<coxagent_domain::Priority>,
 }
 
 /// A sprint prepared ahead of time (by the PO or a person) and queued to run
@@ -349,6 +355,71 @@ mod attempt_failure_tests {
             .remove("ticket_failures");
         let back: ProjectState = serde_json::from_value(doc).expect("load legacy state");
         assert!(back.ticket_failures.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod sprint_floor_tests {
+    use super::{ProjectState, Sprint};
+    use coxagent_domain::Priority;
+
+    fn sprint_with_floor(floor: Option<Priority>) -> Sprint {
+        Sprint {
+            number: 1,
+            goal: "burn".to_owned(),
+            started_cycle: 1,
+            length_cycles: 10,
+            committed: Vec::new(),
+            started_at: String::new(),
+            bug_burn_floor: floor,
+        }
+    }
+
+    #[test]
+    fn the_floor_round_trips_through_the_sprint_record() {
+        for floor in [None, Some(Priority::Low), Some(Priority::High)] {
+            let s = ProjectState {
+                sprint: Some(sprint_with_floor(floor)),
+                ..ProjectState::default()
+            };
+            let doc = serde_json::to_value(&s).expect("serialize");
+            let back: ProjectState = serde_json::from_value(doc).expect("deserialize");
+            assert_eq!(back.sprint.expect("sprint").bug_burn_floor, floor);
+        }
+    }
+
+    #[test]
+    fn a_sprint_snapshot_from_before_the_floor_still_loads() {
+        // Projects persisted before CXA-F028 have no `bug_burn_floor` key on
+        // their sprint; the load must give None (burn everything), not fail.
+        let mut doc = serde_json::to_value(ProjectState {
+            sprint: Some(sprint_with_floor(Some(Priority::High))),
+            ..ProjectState::default()
+        })
+        .expect("serialize");
+        doc.as_object_mut()
+            .expect("object")
+            .get_mut("sprint")
+            .expect("sprint key")
+            .as_object_mut()
+            .expect("sprint object")
+            .remove("bug_burn_floor");
+        let back: ProjectState = serde_json::from_value(doc).expect("legacy sprint loads");
+        assert_eq!(back.sprint.expect("sprint").bug_burn_floor, None);
+    }
+
+    #[test]
+    fn an_absent_floor_is_not_serialized_into_new_snapshots() {
+        // Old stores stay byte-shaped like before when the floor is unused.
+        let doc = serde_json::to_value(ProjectState {
+            sprint: Some(sprint_with_floor(None)),
+            ..ProjectState::default()
+        })
+        .expect("serialize");
+        assert!(
+            doc.pointer("/sprint/bug_burn_floor").is_none(),
+            "None must not add a key old readers never saw"
+        );
     }
 }
 

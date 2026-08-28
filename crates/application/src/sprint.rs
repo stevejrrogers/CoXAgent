@@ -2,8 +2,9 @@
 //! at the start of each cycle; it opens the first sprint and rolls over to a
 //! new one when the window elapses, committing the open feature backlog.
 
+use crate::selection::below_bug_burn_floor;
 use crate::state::{ProjectState, Sprint};
-use coxagent_domain::{Status, TicketId, TicketType};
+use coxagent_domain::{Priority, Status, TicketId, TicketType};
 
 /// Open the first sprint or roll over an elapsed one. Returns the number of a
 /// newly opened sprint, or `None` when the current sprint is still running.
@@ -13,20 +14,52 @@ use coxagent_domain::{Status, TicketId, TicketType};
 /// cycles produced 500 seven-minute "sprints" in two days). `Cycles` keeps the
 /// pure cycle counter for cadence experiments.
 #[derive(Debug, Clone, Copy)]
-pub enum SprintPolicy {
+pub enum SprintWindow {
     Days(u64),
     Cycles(u64),
+}
+
+/// Everything a sprint boundary needs, resolved from the workflow config: how
+/// the window elapses, plus the bug-burn floor mirrored onto the next Sprint
+/// at rollover (CXA-F028). One vehicle on purpose — a caller that builds the
+/// policy from config cannot forget to carry the floor with it.
+#[derive(Debug, Clone, Copy)]
+pub struct SprintPolicy {
+    pub window: SprintWindow,
+    pub bug_burn_floor: Option<Priority>,
 }
 
 impl SprintPolicy {
     /// Resolve from the workflow config.
     #[must_use]
     pub fn from_config(wf: &crate::config::WorkflowConfig) -> Self {
-        match wf.sprint_unit {
-            crate::config::SprintUnit::Days => SprintPolicy::Days(wf.sprint_length_days.max(1)),
+        let window = match wf.sprint_unit {
+            crate::config::SprintUnit::Days => SprintWindow::Days(wf.sprint_length_days.max(1)),
             crate::config::SprintUnit::Cycles => {
-                SprintPolicy::Cycles(wf.sprint_length_cycles.max(1))
+                SprintWindow::Cycles(wf.sprint_length_cycles.max(1))
             }
+        };
+        Self {
+            window,
+            bug_burn_floor: wf.bug_burn_floor,
+        }
+    }
+
+    /// Cycle-counted window, no burn floor.
+    #[must_use]
+    pub fn cycles(len: u64) -> Self {
+        Self {
+            window: SprintWindow::Cycles(len),
+            bug_burn_floor: None,
+        }
+    }
+
+    /// Day-counted window, no burn floor.
+    #[must_use]
+    pub fn days(days: u64) -> Self {
+        Self {
+            window: SprintWindow::Days(days),
+            bug_burn_floor: None,
         }
     }
 }
@@ -34,29 +67,29 @@ impl SprintPolicy {
 pub fn advance(state: &mut ProjectState, cycle: u64, policy: SprintPolicy) -> Option<u32> {
     let need_open = match &state.sprint {
         None => true,
-        Some(s) => match policy {
+        Some(s) => match policy.window {
             // Cycle windows ALSO require a minimum wall-clock age (the promise
             // Sprint.started_at documents): cycles shrank from ~30 min to ~2
             // min as the loop got faster, and a pure cycle counter rolled a
             // "sprint" every 10 minutes — the team spent the whole day in
             // planning/review/retro ceremonies and DEV never shipped anything
             // (sprint 586's velocity-0% retro, tickets carried over forever).
-            SprintPolicy::Cycles(len) => {
+            SprintWindow::Cycles(len) => {
                 cycle.saturating_sub(s.started_cycle) >= len
                     && sprint_age_minutes(&s.started_at) >= MIN_SPRINT_MINUTES
             }
-            SprintPolicy::Days(days) => sprint_age_days(&s.started_at) >= days,
+            SprintWindow::Days(days) => sprint_age_days(&s.started_at) >= days,
         },
     };
     if !need_open {
         return None;
     }
-    let length = match policy {
-        SprintPolicy::Cycles(len) => len,
+    let length = match policy.window {
+        SprintWindow::Cycles(len) => len,
         // Recorded for display; day-based sprints don't use it to roll.
-        SprintPolicy::Days(_) => state.sprint.as_ref().map_or(0, |s| s.length_cycles),
+        SprintWindow::Days(_) => state.sprint.as_ref().map_or(0, |s| s.length_cycles),
     };
-    Some(roll_over(state, cycle, length))
+    Some(roll_over(state, cycle, length, policy.bug_burn_floor))
 }
 
 /// The floor under a cycle-window sprint: however fast the cycles spin, a
@@ -91,7 +124,14 @@ fn sprint_age_days(started_at: &str) -> u64 {
 /// Archive whatever sprint is running and open the next one. The single place
 /// a sprint boundary is written — the timed rollover and an early close must
 /// leave identical history, or the velocity chart compares different shapes.
-fn roll_over(state: &mut ProjectState, cycle: u64, length: u64) -> u32 {
+/// `bug_burn_floor` is the config's floor mirrored onto the new sprint
+/// (CXA-F028), so selection reads a pure fact of state from here on.
+fn roll_over(
+    state: &mut ProjectState,
+    cycle: u64,
+    length: u64,
+    bug_burn_floor: Option<Priority>,
+) -> u32 {
     // Archive the closing sprint's outcome for the velocity history.
     if let Some(closing) = &state.sprint {
         let done = done_count(state);
@@ -135,12 +175,12 @@ fn roll_over(state: &mut ProjectState, cycle: u64, length: u64) -> u32 {
                 .cloned()
                 .collect();
             if live.is_empty() {
-                (open_backlog(state), Some(p.goal))
+                (open_backlog(state, bug_burn_floor), Some(p.goal))
             } else {
                 (live, Some(p.goal))
             }
         }
-        None => (open_backlog(state), None),
+        None => (open_backlog(state, bug_burn_floor), None),
     };
     // Goal precedence: the plan's goal, then the PO's goal chip, then one
     // derived from the committed titles.
@@ -156,6 +196,7 @@ fn roll_over(state: &mut ProjectState, cycle: u64, length: u64) -> u32 {
         length_cycles: length,
         committed,
         started_at: crate::state::now_rfc3339(),
+        bug_burn_floor,
     });
     number
 }
@@ -192,13 +233,16 @@ pub fn commit_ticket(state: &mut ProjectState, id: &TicketId) -> bool {
 ///
 /// Returns how many tickets were committed (0 = nothing needed).
 pub fn refill_empty_scope(state: &mut ProjectState) -> usize {
-    // Case 1: a genuinely empty committed set — pull the whole backlog in.
+    // Case 1: a genuinely empty committed set — pull the backlog in, still
+    // respecting the running sprint's burn floor (an active burn does not
+    // re-admit parked cosmetics through the refill door).
     if state
         .sprint
         .as_ref()
         .is_some_and(|s| s.committed.is_empty())
     {
-        let backlog = open_backlog(state);
+        let floor = state.sprint.as_ref().and_then(|s| s.bug_burn_floor);
+        let backlog = open_backlog(state, floor);
         let n = backlog.len();
         if let Some(sprint) = &mut state.sprint {
             sprint.committed = backlog;
@@ -252,8 +296,11 @@ pub fn uncommit_ticket(state: &mut ProjectState, id: &TicketId) -> bool {
 ///
 /// Returns the new sprint number, or `None` when no sprint was running.
 pub fn close_now(state: &mut ProjectState, cycle: u64) -> Option<u32> {
-    let length = state.sprint.as_ref()?.length_cycles.max(1);
-    Some(roll_over(state, cycle, length))
+    // Keep the closing sprint's burn floor: an early close re-opens the next
+    // sprint under the same burn (only the config changes the floor).
+    let s = state.sprint.as_ref()?;
+    let (length, bug_burn_floor) = (s.length_cycles.max(1), s.bug_burn_floor);
+    Some(roll_over(state, cycle, length, bug_burn_floor))
 }
 
 /// A readable goal from the first few committed ticket titles.
@@ -274,7 +321,9 @@ fn goal_from(state: &ProjectState, committed: &[TicketId]) -> String {
 /// to track only features/chores, so a team heads-down on a bug burndown
 /// looked idle ("sprint không work gì hết") while two DEVs were mid-fix.
 /// Open bugs commit first (they outrank new work), then features/chores.
-fn open_backlog(state: &ProjectState) -> Vec<TicketId> {
+/// `bug_burn_floor` (CXA-F028) scopes the commitment to bugs at or above that
+/// priority: the high-severity burn parks cosmetics instead of committing them.
+fn open_backlog(state: &ProjectState, bug_burn_floor: Option<Priority>) -> Vec<TicketId> {
     let cap = sprint_capacity(state);
     // A bug-heavy backlog must not lock FEATURE work out of every sprint:
     // reserve one slot for a READY feature/chore so DEV-FEATURE always has
@@ -294,13 +343,14 @@ fn open_backlog(state: &ProjectState) -> Vec<TicketId> {
         picked.push(ready);
     }
     // Open bugs get the next seats, but only within remaining capacity — the
-    // reserved feature slot above is never displaced by bug pressure.
+    // reserved feature slot above is never displaced by bug pressure. Bugs
+    // below the burn floor are skipped: parked, not committed.
     let mut bug_budget = cap.saturating_sub(picked.len());
-    for t in state
-        .tickets
-        .iter()
-        .filter(|t| t.ticket_type() == TicketType::Bug && t.status() == Status::Open)
-    {
+    for t in state.tickets.iter().filter(|t| {
+        t.ticket_type() == TicketType::Bug
+            && t.status() == Status::Open
+            && !below_bug_burn_floor(bug_burn_floor, t.priority())
+    }) {
         if bug_budget == 0 {
             break;
         }
@@ -490,6 +540,9 @@ pub fn top_up_scope(state: &mut ProjectState) -> usize {
     let Some(sprint) = &state.sprint else {
         return 0;
     };
+    // An active burn floor parks below-severity open bugs — the top-up must
+    // not re-commit them through the back door (CXA-F028).
+    let bug_burn_floor = sprint.bug_burn_floor;
     let committed: std::collections::BTreeSet<TicketId> =
         sprint.committed.iter().cloned().collect();
     let actionable = state
@@ -509,7 +562,11 @@ pub fn top_up_scope(state: &mut ProjectState) -> usize {
         .iter()
         .filter(|t| {
             !committed.contains(t.id())
-                && matches!(t.status(), Status::Ready | Status::Open)
+                && match t.status() {
+                    Status::Ready => true,
+                    Status::Open => !below_bug_burn_floor(bug_burn_floor, t.priority()),
+                    _ => false,
+                }
         })
         .map(|t| t.id().clone())
         .take(want)
@@ -552,6 +609,19 @@ mod tests {
         .expect("t")
     }
 
+    fn bug_prio(id: &str, prio: Priority) -> Ticket {
+        Ticket::new(
+            TicketId::new(id).expect("id"),
+            TicketType::Bug,
+            "b",
+            "",
+            prio,
+            Complexity::Small,
+            false,
+        )
+        .expect("t")
+    }
+
     fn ready_feature(id: &str) -> Ticket {
         let mut t = feature(id);
         t.set_technical_design(Role::Sa, TechnicalDesign::default())
@@ -574,7 +644,7 @@ mod tests {
         );
         queue_sprint(&mut state, "polish UI", vec![], "po");
         assert!(id1 > 0);
-        advance(&mut state, 1, SprintPolicy::Cycles(10));
+        advance(&mut state, 1, SprintPolicy::cycles(10));
         let sp = state.sprint.as_ref().expect("sprint");
         assert_eq!(sp.goal, "harden auth");
         assert_eq!(sp.committed, vec![TicketId::new("F002").expect("id")]);
@@ -590,8 +660,8 @@ mod tests {
             ..ProjectState::default()
         };
         let mut b = a.clone();
-        advance(&mut a, 1, SprintPolicy::Cycles(10));
-        advance(&mut b, 1, SprintPolicy::Cycles(10));
+        advance(&mut a, 1, SprintPolicy::cycles(10));
+        advance(&mut b, 1, SprintPolicy::cycles(10));
         let (sa, sb) = (a.sprint.expect("a"), b.sprint.expect("b"));
         // started_at is a wall-clock stamp; everything meaningful must match.
         assert_eq!((sa.number, &sa.goal, &sa.committed), (sb.number, &sb.goal, &sb.committed));
@@ -611,7 +681,7 @@ mod tests {
             created_at: String::new(),
             by: "po".to_owned(),
         });
-        advance(&mut state, 1, SprintPolicy::Cycles(10));
+        advance(&mut state, 1, SprintPolicy::cycles(10));
         let sp = state.sprint.as_ref().expect("sprint");
         assert_eq!(sp.goal, "ghost plan");
         // Fallback committed the real backlog instead of an empty scope.
@@ -630,7 +700,12 @@ mod tests {
         let ghost = TicketId::new("F999").expect("id");
         assert!(scope_queued_sprint(&mut state, id, &[f1.clone(), f1.clone(), ghost], &[]));
         assert_eq!(state.sprint_queue[0].tickets, vec![f1.clone()]);
-        assert!(scope_queued_sprint(&mut state, id, &[f2.clone()], &[f1]));
+        assert!(scope_queued_sprint(
+            &mut state,
+            id,
+            std::slice::from_ref(&f2),
+            &[f1]
+        ));
         assert_eq!(state.sprint_queue[0].tickets, vec![f2]);
         assert!(!scope_queued_sprint(&mut state, 999, &[], &[]));
         assert!(delete_queued_sprint(&mut state, id));
@@ -645,7 +720,7 @@ mod tests {
         };
         state.ticket_fail_attempts.insert("B001".into(), 3);
         state.ticket_fail_attempts.insert("F001".into(), 2);
-        advance(&mut state, 1, SprintPolicy::Cycles(10));
+        advance(&mut state, 1, SprintPolicy::cycles(10));
         assert!(state
             .sprint
             .as_ref()
@@ -687,6 +762,7 @@ mod tests {
             length_cycles: 10,
             committed: vec![TicketId::new("F001").expect("id")],
             started_at: crate::state::now_rfc3339(),
+            bug_burn_floor: None,
         });
         // Hold one candidate — it must never be pulled in.
         state
@@ -711,7 +787,7 @@ mod tests {
             tickets: vec![feature("F001"), feature("F002")],
             ..ProjectState::default()
         };
-        let n = advance(&mut state, 1, SprintPolicy::Cycles(10));
+        let n = advance(&mut state, 1, SprintPolicy::cycles(10));
         assert_eq!(n, Some(1));
         let s = state.sprint.as_ref().expect("sprint");
         assert_eq!(s.number, 1);
@@ -722,7 +798,7 @@ mod tests {
     fn an_empty_sprint_scope_refills_from_backlog_instead_of_starving_dev() {
         // Sprint opened onto an empty backlog…
         let mut state = ProjectState::default();
-        advance(&mut state, 1, SprintPolicy::Cycles(10));
+        advance(&mut state, 1, SprintPolicy::cycles(10));
         assert!(state.sprint.as_ref().expect("sprint").committed.is_empty());
         // …then tickets became Ready mid-sprint. Under the sprint-scope DEV
         // gate they'd be invisible until rollover — refill commits them now.
@@ -744,7 +820,7 @@ mod tests {
             tickets: vec![bug("B001"), ready_feature("F001")],
             ..ProjectState::default()
         };
-        advance(&mut state, 1, SprintPolicy::Cycles(10));
+        advance(&mut state, 1, SprintPolicy::cycles(10));
         // The rollover now reserves F001 (open_backlog change), so simulate an
         // OLD bug-only sprint that predates the fix.
         let f1 = TicketId::new("F001").expect("id");
@@ -777,7 +853,7 @@ mod tests {
             tickets: vec![ready_feature("F001"), bug("B001"), bug("B002"), bug("B003")],
             ..ProjectState::default()
         };
-        let committed = open_backlog(&state);
+        let committed = open_backlog(&state, None);
         assert!(
             committed.contains(&TicketId::new("F001").expect("id")),
             "a ready feature must keep a scout seat even under bug pressure"
@@ -792,10 +868,151 @@ mod tests {
             tickets: vec![bug("B001"), bug("B002"), bug("B003"), bug("B004")],
             ..ProjectState::default()
         };
-        let committed = open_backlog(&state);
+        let committed = open_backlog(&state, None);
         assert!(
             committed.iter().all(|id| id.to_string().starts_with('B')),
             "without a ready feature, the sprint is bugs-only"
+        );
+    }
+
+    // ---- CXA-F028: the bug-burn floor scopes commitment and DEV work. ----
+
+    #[test]
+    fn a_burn_floor_scopes_commitment_to_at_or_above_floor_bugs() {
+        let state = ProjectState {
+            tickets: vec![
+                ready_feature("F001"),
+                bug_prio("B-HIGH", Priority::High),
+                bug_prio("B-MED", Priority::Medium),
+                bug_prio("B-LOW", Priority::Low),
+            ],
+            ..ProjectState::default()
+        };
+        let committed = open_backlog(&state, Some(Priority::High));
+        assert!(
+            committed.contains(&TicketId::new("B-HIGH").expect("id")),
+            "high-severity bugs are the burn's target"
+        );
+        assert!(
+            !committed.contains(&TicketId::new("B-MED").expect("id")),
+            "medium bugs are parked below a High floor"
+        );
+        assert!(
+            !committed.contains(&TicketId::new("B-LOW").expect("id")),
+            "low bugs are parked below a High floor"
+        );
+        // The reserved feature slot survives the floor.
+        assert!(committed.contains(&TicketId::new("F001").expect("id")));
+    }
+
+    #[test]
+    fn no_floor_commits_every_open_bug_exactly_as_before() {
+        let state = ProjectState {
+            tickets: vec![
+                bug_prio("B-HIGH", Priority::High),
+                bug_prio("B-MED", Priority::Medium),
+                bug_prio("B-LOW", Priority::Low),
+            ],
+            ..ProjectState::default()
+        };
+        assert_eq!(
+            open_backlog(&state, None).len(),
+            3,
+            "floor=None burns every open bug (the historical behaviour)"
+        );
+    }
+
+    #[test]
+    fn rollover_mirrors_the_config_floor_onto_the_new_sprint() {
+        let mut state = ProjectState {
+            tickets: vec![feature("F001")],
+            ..ProjectState::default()
+        };
+        let policy = SprintPolicy {
+            bug_burn_floor: Some(Priority::High),
+            ..SprintPolicy::cycles(10)
+        };
+        advance(&mut state, 1, policy);
+        let s = state.sprint.as_ref().expect("sprint");
+        assert_eq!(s.bug_burn_floor, Some(Priority::High));
+        // Age the sprint so its window can elapse, then roll under a
+        // floor-less policy: the new sprint is floor-less again.
+        state.sprint.as_mut().expect("sprint").started_at = "2020-01-01T00:00:00Z".to_owned();
+        advance(&mut state, 11, SprintPolicy::cycles(10));
+        let s = state.sprint.as_ref().expect("sprint");
+        assert_eq!(s.number, 2);
+        assert_eq!(s.bug_burn_floor, None);
+    }
+
+    #[test]
+    fn top_up_never_recommits_below_floor_open_bugs_mid_burn() {
+        let mut state = ProjectState {
+            tickets: vec![ready_feature("F001"), bug_prio("B-LOW", Priority::Low)],
+            ..ProjectState::default()
+        };
+        state.sprint = Some(Sprint {
+            number: 1,
+            goal: "burn".into(),
+            started_cycle: 1,
+            length_cycles: 10,
+            committed: vec![TicketId::new("F001").expect("id")],
+            started_at: crate::state::now_rfc3339(),
+            bug_burn_floor: Some(Priority::High),
+        });
+        // Below the MIN_ACTIONABLE_SCOPE floor the top-up would normally pull
+        // the open bug in — under the burn floor it must stay parked.
+        assert_eq!(top_up_scope(&mut state), 0);
+        assert!(!state
+            .sprint
+            .as_ref()
+            .expect("sprint")
+            .committed
+            .contains(&TicketId::new("B-LOW").expect("id")));
+    }
+
+    #[test]
+    fn refill_respects_the_burn_floor_when_recommitting_an_empty_scope() {
+        let mut state = ProjectState {
+            tickets: vec![
+                bug_prio("B-HIGH", Priority::High),
+                bug_prio("B-LOW", Priority::Low),
+            ],
+            ..ProjectState::default()
+        };
+        state.sprint = Some(Sprint {
+            number: 1,
+            goal: "burn".into(),
+            started_cycle: 1,
+            length_cycles: 10,
+            committed: Vec::new(),
+            started_at: crate::state::now_rfc3339(),
+            bug_burn_floor: Some(Priority::High),
+        });
+        // The refill heals an empty scope, but an active burn floor means the
+        // healed scope is the burn's scope: high bug in, low bug stays parked.
+        assert_eq!(refill_empty_scope(&mut state), 1);
+        let committed = &state.sprint.as_ref().expect("sprint").committed;
+        assert!(committed.contains(&TicketId::new("B-HIGH").expect("id")));
+        assert!(!committed.contains(&TicketId::new("B-LOW").expect("id")));
+    }
+
+    #[test]
+    fn closing_early_keeps_the_burn_running_in_the_next_sprint() {
+        let mut state = ProjectState {
+            tickets: vec![bug("B001")],
+            ..ProjectState::default()
+        };
+        let policy = SprintPolicy {
+            bug_burn_floor: Some(Priority::High),
+            ..SprintPolicy::cycles(10)
+        };
+        advance(&mut state, 1, policy);
+        // An early close is a boundary write, not a burn cancel: sprint 2
+        // inherits the floor (only the config changes it).
+        assert_eq!(close_now(&mut state, 3), Some(2));
+        assert_eq!(
+            state.sprint.as_ref().expect("sprint").bug_burn_floor,
+            Some(Priority::High)
         );
     }
 
@@ -805,7 +1022,7 @@ mod tests {
             tickets: vec![feature("F001")],
             ..ProjectState::default()
         };
-        advance(&mut state, 1, SprintPolicy::Cycles(10));
+        advance(&mut state, 1, SprintPolicy::cycles(10));
         state.tickets.push(feature("F002"));
         let id = TicketId::new("F002").expect("id");
         assert!(commit_ticket(&mut state, &id));
@@ -833,9 +1050,9 @@ mod tests {
             tickets: vec![feature("F001")],
             ..ProjectState::default()
         };
-        advance(&mut state, 1, SprintPolicy::Cycles(10));
+        advance(&mut state, 1, SprintPolicy::cycles(10));
         // Cycle 3 of a 10-cycle window: nothing would roll over on its own.
-        assert_eq!(advance(&mut state, 3, SprintPolicy::Cycles(10)), None);
+        assert_eq!(advance(&mut state, 3, SprintPolicy::cycles(10)), None);
         assert_eq!(close_now(&mut state, 3), Some(2));
         assert_eq!(state.sprints.len(), 1, "the closed sprint is in history");
         assert_eq!(state.sprints[0].number, 1);
@@ -855,8 +1072,8 @@ mod tests {
             tickets: vec![feature("F001")],
             ..ProjectState::default()
         };
-        advance(&mut state, 1, SprintPolicy::Cycles(10));
-        assert_eq!(advance(&mut state, 5, SprintPolicy::Cycles(10)), None);
+        advance(&mut state, 1, SprintPolicy::cycles(10));
+        assert_eq!(advance(&mut state, 5, SprintPolicy::cycles(10)), None);
         assert_eq!(state.sprint.as_ref().expect("s").number, 1);
     }
 
@@ -866,16 +1083,16 @@ mod tests {
             tickets: vec![feature("F001")],
             ..ProjectState::default()
         };
-        advance(&mut state, 1, SprintPolicy::Cycles(10));
+        advance(&mut state, 1, SprintPolicy::cycles(10));
         // Counter elapsed but the sprint is seconds old: must NOT roll. Pure
         // cycle-rolling at ~2-min cycles produced 10-minute "sprints" that
         // were all ceremony and no delivery (sprint 586, velocity 0%).
-        assert_eq!(advance(&mut state, 11, SprintPolicy::Cycles(10)), None);
+        assert_eq!(advance(&mut state, 11, SprintPolicy::cycles(10)), None);
         // Same counter, but the sprint is genuinely old — now it rolls.
         if let Some(s) = &mut state.sprint {
             s.started_at = "2020-01-01T00:00:00Z".to_owned();
         }
-        assert_eq!(advance(&mut state, 11, SprintPolicy::Cycles(10)), Some(2));
+        assert_eq!(advance(&mut state, 11, SprintPolicy::cycles(10)), Some(2));
     }
 
     #[test]
@@ -884,17 +1101,17 @@ mod tests {
             tickets: vec![feature("F001")],
             ..ProjectState::default()
         };
-        advance(&mut state, 1, SprintPolicy::Days(1));
+        advance(&mut state, 1, SprintPolicy::days(1));
         // A thousand cycles later but seconds old: must NOT roll — this is the
         // 500-seven-minute-sprints bug the day unit exists to kill.
-        assert_eq!(advance(&mut state, 1000, SprintPolicy::Days(1)), None);
+        assert_eq!(advance(&mut state, 1000, SprintPolicy::days(1)), None);
         assert_eq!(state.sprint.as_ref().expect("s").number, 1);
         // Age it past a day: rolls.
         let old = (time::OffsetDateTime::now_utc() - time::Duration::hours(25))
             .format(&time::format_description::well_known::Rfc3339)
             .expect("fmt");
         state.sprint.as_mut().expect("s").started_at = old;
-        assert_eq!(advance(&mut state, 1000, SprintPolicy::Days(1)), Some(2));
+        assert_eq!(advance(&mut state, 1000, SprintPolicy::days(1)), Some(2));
     }
 }
 
