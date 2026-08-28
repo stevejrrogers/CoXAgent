@@ -50,8 +50,13 @@ while true; do
     else
       log "ERROR: could not load env — will retry"
     fi
-    # give the stack time to come back after a restart
+    # give the stack time to come back after a restart, then verify liveness again.
     sleep 30
+    if check; then
+      log "OK: DB/Redis healthy again after restart"
+    else
+      log "WARN: DB/Redis still down after restart"
+    fi
   fi
   sleep 60
 done
