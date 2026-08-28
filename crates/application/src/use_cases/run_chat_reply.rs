@@ -170,6 +170,13 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         }
         let persona = route_persona(&msg.to_lowercase());
         let context = self.context().await;
+        // A broad or strategic question deserves the TEAM, not one voice:
+        // PO/SA/SM think in parallel, then one synthesis answers with the
+        // distinct viewpoints and a single recommendation — the thing a lone
+        // assistant cannot give you.
+        if wants_panel(msg) {
+            return self.panel_reply(msg, &context).await;
+        }
         let task = format!(
             "{context}\nA human teammate just wrote in the team channel:\n\"{msg}\"\n\nYou are \
              {persona}, replying like a sharp senior teammate — the way a good coding agent in a \
@@ -1096,15 +1103,56 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
                 let _ = writeln!(out, "- {d}");
             }
         }
-        out.push_str("Recent team channel:\n");
-        for c in s
+        // Planned sprints + parked work — the human plans here; the agent must
+        // see the plan to talk about it.
+        if !s.sprint_queue.is_empty() {
+            out.push_str("Planned sprints (run in this order after the current one):\n");
+            for (i, q) in s.sprint_queue.iter().enumerate() {
+                let _ = writeln!(
+                    out,
+                    "- #{} {} ({} ticket(s))",
+                    i + 1,
+                    q.goal,
+                    q.tickets.len()
+                );
+            }
+        }
+        let held: Vec<String> = s
+            .tickets
+            .iter()
+            .filter(|t| t.status() == Status::OnHold)
+            .map(|t| {
+                let why = s
+                    .hold_reasons
+                    .get(&t.id().to_string())
+                    .cloned()
+                    .unwrap_or_default();
+                format!("{} ({why})", t.id())
+            })
+            .collect();
+        if !held.is_empty() {
+            let _ = writeln!(out, "On hold (waiting on the outside world): {}", held.join(", "));
+        }
+        // Engine health — so "why is BA slow" gets a real answer.
+        let sick: Vec<String> = s
+            .role_health
+            .iter()
+            .filter(|(_, h)| h.errors > 0)
+            .map(|(r, h)| format!("{r}: {} error(s), {} timeout(s)", h.errors, h.timeouts))
+            .collect();
+        if !sick.is_empty() {
+            let _ = writeln!(out, "Engine health: {}", sick.join(" · "));
+        }
+        out.push_str("Recent team channel (oldest first — this is the conversation you are in):\n");
+        let recent: Vec<_> = s
             .comments
             .iter()
             .filter(|c| c.ticket.is_none())
             .rev()
-            .take(8)
-        {
-            let body: String = c.body.chars().take(160).collect();
+            .take(16)
+            .collect();
+        for c in recent.into_iter().rev() {
+            let body: String = c.body.chars().take(400).collect();
             let _ = writeln!(out, "- {}: {body}", c.author);
         }
         out
@@ -1117,6 +1165,54 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             .ok()
             .and_then(|s| s.sprint.map(|sp| sp.number))
             .unwrap_or(0)
+    }
+
+    /// Team panel: three role perspectives in parallel, one synthesis.
+    async fn panel_reply(&self, msg: &str, context: &str) -> Result<(), AppError> {
+        let view = |role: &str, lens: &str| {
+            format!(
+                "{context}\nA human teammate wrote in the team channel:\n\"{msg}\"\n\nYou are {role}.                  Give YOUR take through the {lens} lens, grounded in the project state above:                  your recommendation, the strongest reason for it, and the one risk the others                  will miss. At most 110 words, no preamble.{}",
+                self.lang.reply_directive()
+            )
+        };
+        let (po_task, sa_task, sm_task) = (
+            view("PO (product owner)", "value & priority"),
+            view("SA (architect)", "technical feasibility & design"),
+            view("SM (scrum master)", "process, risk & sequencing"),
+        );
+        let (po, sa, sm) = tokio::join!(
+            self.run("PO", &po_task),
+            self.run("SA", &sa_task),
+            self.run("SM", &sm_task),
+        );
+        let mut takes = String::new();
+        for (who, t) in [("PO", &po), ("SA", &sa), ("SM", &sm)] {
+            if let Some(t) = t {
+                let _ = writeln!(takes, "{who} said:\n{t}\n");
+            }
+        }
+        if takes.trim().is_empty() {
+            // Every perspective failed — fall back to the single-voice path so
+            // the human still gets an answer.
+            let solo = view("SM", "pragmatic");
+            let Some(raw) = self.run("SM", &solo).await else {
+                return Ok(());
+            };
+            self.post("SM", raw.trim()).await;
+            return Ok(());
+        }
+        let synth = format!(
+            "{context}\nA human teammate wrote in the team channel:\n\"{msg}\"\n\nThree teammates              answered from different angles:\n{takes}\nYou are the SM. Write ONE team reply for the              human: open with the team's recommendation in one sentence, then the strongest points              from each teammate WITH attribution (\"PO thinks… SA warns… \"), keep real              disagreements visible instead of averaging them away, and close with the next concrete              step. Under 220 words.\n\nYou may also append EXACTLY ONE final line with an action,              same rules as always:\nACTION: feature: <title> :: <desc> :: <low|medium|high>\n             ACTION: bug: <title> :: <desc> :: <low|medium|high>\nACTION: discuss: <topic>\n             ACTION: none{}",
+            self.lang.reply_directive()
+        );
+        let Some(raw) = self.run("TEAM", &synth).await else {
+            return Ok(());
+        };
+        let (reply, action) = split_action(&raw);
+        if !reply.trim().is_empty() {
+            self.post("TEAM", reply.trim()).await;
+        }
+        self.dispatch(&action).await
     }
 
     async fn run(&self, persona: &str, task: &str) -> Option<String> {
@@ -1240,6 +1336,19 @@ const NEEDS_YES: &[&str] = &[
 ];
 
 /// Pick which agent should answer a human message from its wording.
+/// Should the whole panel answer instead of one persona? Broad, strategic,
+/// or comparative questions — where three perspectives beat one voice.
+fn wants_panel(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    const CUES: &[&str] = &[
+        "nên ", "hướng", "roadmap", "chiến lược", "strategy", "should we",
+        "approach", "so sánh", "compare", "ý kiến", "opinions", "đánh giá",
+        "thiết kế thế nào", "architecture", "plan for", "kế hoạch",
+        "cả team", "@team", "team nghĩ",
+    ];
+    CUES.iter().any(|c| m.contains(c))
+}
+
 fn route_persona(lower: &str) -> &'static str {
     let has = |kw: &[&str]| kw.iter().any(|k| lower.contains(k));
     if has(&[
@@ -1306,6 +1415,20 @@ fn split_action(raw: &str) -> (String, String) {
         }
     }
     (raw.to_owned(), String::new())
+}
+
+#[cfg(test)]
+mod panel_tests {
+    use super::wants_panel;
+
+    #[test]
+    fn strategic_questions_get_the_panel_and_reports_do_not() {
+        assert!(wants_panel("mình nên ưu tiên hướng nào cho quý sau?"));
+        assert!(wants_panel("should we adopt a monorepo approach?"));
+        assert!(wants_panel("cả team nghĩ sao về kế hoạch này"));
+        assert!(!wants_panel("nút login bị lỗi 500"));
+        assert!(!wants_panel("deploy lại đi"));
+    }
 }
 
 #[cfg(test)]

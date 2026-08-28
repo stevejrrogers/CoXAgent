@@ -30,6 +30,9 @@ pub fn transition_allowed(ticket_type: TicketType, from: Status, to: Status) -> 
                 // re-passes the ready gate, or is rejected outright.
                 | (Pending | Ready, OnHold)
                 | (OnHold, Pending | Rejected)
+                // Ship-truth demotion: a ticket marked shipped whose diff never
+                // landed on main goes back to Pending to be re-done honestly.
+                | (Done | Documented, Pending)
         ),
         TicketType::Bug => matches!(
             (from, to),
@@ -48,6 +51,8 @@ pub fn transition_allowed(ticket_type: TicketType, from: Status, to: Status) -> 
                 // On hold: parked while blocked on the outside world; resume
                 // (or reject) once the outside blocker is gone.
                 | (OnHold, Open | Rejected)
+                // Ship-truth demotion: a claimed-fixed bug absent from main reopens.
+                | (Verified, Open)
         ),
     }
 }
@@ -77,6 +82,9 @@ pub fn can_transition(actor: Role, from: Status, to: Status) -> bool {
         // Holding and resuming are people's process calls: PO, SM, or a user.
         (Pending | Ready | Open, OnHold) => matches!(actor, Role::Po | Role::Sm | Role::User),
         (OnHold, Pending | Open) => matches!(actor, Role::Po | Role::Sm | Role::User),
+        // Ship-truth demotion is a machine/process correction (System always
+        // passes); a person doing it by hand is a PO/super-PO call.
+        (Done | Documented, Pending) | (Verified, Open) => matches!(actor, Role::Po | Role::User),
         // Taking an approval back — the undo window, and only before work starts.
         (Ready, Pending) => matches!(actor, Role::Po | Role::User),
         // Claiming work is a dev action.
@@ -113,6 +121,19 @@ pub fn field_permitted(actor: Role, field: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ship_truth_demotion_edges_reopen_ghost_ships() {
+        let f = TicketType::Feature;
+        assert!(transition_allowed(f, Status::Done, Status::Pending));
+        assert!(transition_allowed(f, Status::Documented, Status::Pending));
+        assert!(transition_allowed(TicketType::Bug, Status::Verified, Status::Open));
+        // Not a free-for-all: only PO/User (and System) may demote.
+        assert!(can_transition(Role::System, Status::Documented, Status::Pending));
+        assert!(can_transition(Role::Po, Status::Done, Status::Pending));
+        assert!(!can_transition(Role::DevFeature, Status::Done, Status::Pending));
+        assert!(!can_transition(Role::Docs, Status::Documented, Status::Pending));
+    }
 
     #[test]
     fn on_hold_parks_and_resumes_without_terminating() {
