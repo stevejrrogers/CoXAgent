@@ -865,6 +865,11 @@ pub(super) async fn hold_ticket_ep(
             err = Some(e.to_string());
             return Ok(());
         }
+        if !holding {
+            // Resume forgives the failure history — otherwise the auto-hold
+            // sweep would park it right back on the next cycle.
+            coxagent_application::sprint::clear_fail_attempts(s, &tid);
+        }
         s.log_activity(
             &me,
             if holding { "put on hold" } else { "resumed from hold" },

@@ -419,6 +419,108 @@ pub fn delete_queued_sprint(state: &mut ProjectState, id: u64) -> bool {
     state.sprint_queue.len() != before
 }
 
+
+/// The fail-attempt count at which a ticket stops being retried and is parked.
+pub const HOLD_AFTER_ATTEMPTS: u32 = 3;
+
+/// Auto-park exhausted tickets: anything that failed `HOLD_AFTER_ATTEMPTS`
+/// times and still sits in play (Pending/Ready/Open) moves to `OnHold` and
+/// leaves the running sprint's scope. Before this, "parked" was only a KPI:
+/// the ticket kept re-entering every sprint (the CXA-B072/B073 billing bugs
+/// recommitted themselves for days and starved DEV). A person resumes it from
+/// the ticket dialog when the outside blocker is gone — resume clears the
+/// attempt count, so the retry starts fresh.
+pub fn auto_hold_exhausted(state: &mut ProjectState) -> Vec<TicketId> {
+    let exhausted: Vec<TicketId> = state
+        .tickets
+        .iter()
+        .filter(|t| {
+            matches!(t.status(), Status::Pending | Status::Ready | Status::Open)
+                && state
+                    .ticket_fail_attempts
+                    .get(&t.id().to_string())
+                    .is_some_and(|n| *n >= HOLD_AFTER_ATTEMPTS)
+        })
+        .map(|t| t.id().clone())
+        .collect();
+    let mut held = Vec::new();
+    for id in exhausted {
+        let ok = state
+            .tickets
+            .iter_mut()
+            .find(|t| t.id() == &id)
+            .is_some_and(|t| {
+                t.transition_to(coxagent_domain::Role::System, Status::OnHold)
+                    .is_ok()
+            });
+        if ok {
+            if let Some(sp) = &mut state.sprint {
+                sp.committed.retain(|c| c != &id);
+            }
+            state.log_activity(
+                "SYSTEM",
+                "auto-held after repeated failures — resume it from the ticket when unblocked",
+                Some(id.to_string()),
+            );
+            held.push(id);
+        }
+    }
+    held
+}
+
+/// Forget a ticket's failure history — the other half of resume-from-hold:
+/// without this, an auto-held ticket would be re-held on the next sweep.
+pub fn clear_fail_attempts(state: &mut ProjectState, id: &TicketId) {
+    state.ticket_fail_attempts.remove(&id.to_string());
+}
+
+
+/// The floor under a running sprint's actionable scope: when fewer than this
+/// many committed tickets are still workable (Ready feature/chore or Open
+/// bug), the top-up commits more from the backlog. Velocity-based capacity
+/// sizes the sprint at rollover; this keeps DEV fed BETWEEN rollovers, so
+/// finishing the scope early means more work, not an idle afternoon.
+pub const MIN_ACTIONABLE_SCOPE: usize = 4;
+
+/// Keep the running sprint's scope topped up to [`MIN_ACTIONABLE_SCOPE`].
+/// Pulls Ready features/chores first (priority order is the backlog's own),
+/// then Open bugs; anything OnHold/Rejected never qualifies. Returns how many
+/// tickets were committed.
+pub fn top_up_scope(state: &mut ProjectState) -> usize {
+    let Some(sprint) = &state.sprint else {
+        return 0;
+    };
+    let committed: std::collections::BTreeSet<TicketId> =
+        sprint.committed.iter().cloned().collect();
+    let actionable = state
+        .tickets
+        .iter()
+        .filter(|t| {
+            committed.contains(t.id())
+                && matches!(t.status(), Status::Ready | Status::Open)
+        })
+        .count();
+    if actionable >= MIN_ACTIONABLE_SCOPE {
+        return 0;
+    }
+    let want = MIN_ACTIONABLE_SCOPE - actionable;
+    let picks: Vec<TicketId> = state
+        .tickets
+        .iter()
+        .filter(|t| {
+            !committed.contains(t.id())
+                && matches!(t.status(), Status::Ready | Status::Open)
+        })
+        .map(|t| t.id().clone())
+        .take(want)
+        .collect();
+    let n = picks.len();
+    if let Some(sprint) = &mut state.sprint {
+        sprint.committed.extend(picks);
+    }
+    n
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -533,6 +635,74 @@ mod tests {
         assert!(!scope_queued_sprint(&mut state, 999, &[], &[]));
         assert!(delete_queued_sprint(&mut state, id));
         assert!(state.sprint_queue.is_empty());
+    }
+
+    #[test]
+    fn exhausted_tickets_auto_hold_and_leave_sprint_scope() {
+        let mut state = ProjectState {
+            tickets: vec![feature("F001"), bug("B001")],
+            ..ProjectState::default()
+        };
+        state.ticket_fail_attempts.insert("B001".into(), 3);
+        state.ticket_fail_attempts.insert("F001".into(), 2);
+        advance(&mut state, 1, SprintPolicy::Cycles(10));
+        assert!(state
+            .sprint
+            .as_ref()
+            .expect("sprint")
+            .committed
+            .contains(&TicketId::new("B001").expect("id")));
+        let held = auto_hold_exhausted(&mut state);
+        assert_eq!(held, vec![TicketId::new("B001").expect("id")]);
+        let b = state.ticket(&TicketId::new("B001").expect("id")).expect("t");
+        assert_eq!(b.status(), Status::OnHold);
+        // Out of the running sprint; the 2-attempt ticket is untouched.
+        assert!(!state
+            .sprint
+            .as_ref()
+            .expect("sprint")
+            .committed
+            .contains(&TicketId::new("B001").expect("id")));
+        // Resume + cleared attempts = eligible again, not instantly re-held.
+        clear_fail_attempts(&mut state, &TicketId::new("B001").expect("id"));
+        assert!(auto_hold_exhausted(&mut state).is_empty());
+    }
+
+    #[test]
+    fn top_up_keeps_the_scope_floor_and_skips_held_tickets() {
+        let mut state = ProjectState {
+            tickets: vec![
+                ready_feature("F001"),
+                ready_feature("F002"),
+                ready_feature("F003"),
+                ready_feature("F004"),
+                ready_feature("F005"),
+            ],
+            ..ProjectState::default()
+        };
+        state.sprint = Some(Sprint {
+            number: 1,
+            goal: "g".into(),
+            started_cycle: 1,
+            length_cycles: 10,
+            committed: vec![TicketId::new("F001").expect("id")],
+            started_at: crate::state::now_rfc3339(),
+        });
+        // Hold one candidate — it must never be pulled in.
+        state
+            .tickets
+            .iter_mut()
+            .find(|t| t.id().to_string() == "F005")
+            .expect("t")
+            .transition_to(coxagent_domain::Role::User, Status::OnHold)
+            .expect("hold");
+        let n = top_up_scope(&mut state);
+        assert_eq!(n, 3);
+        let committed = &state.sprint.as_ref().expect("sprint").committed;
+        assert_eq!(committed.len(), 4);
+        assert!(!committed.contains(&TicketId::new("F005").expect("id")));
+        // Already at the floor: a second call is a no-op.
+        assert_eq!(top_up_scope(&mut state), 0);
     }
 
     #[test]
