@@ -1,8 +1,0 @@
-/private/tmp/claude-501/-Users-luton-Projects-CoXAgent/b5b9960d-ac63-4c46-ab0f-65ffad9586a2/scratchpad/cox-sq/crates/app/target/debug/deps/mongodb_internal_macros-ec782a3ea14a3f8f.d: /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mongodb-internal-macros-3.8.0/src/lib.rs /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mongodb-internal-macros-3.8.0/src/action_impl.rs /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mongodb-internal-macros-3.8.0/src/option.rs /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mongodb-internal-macros-3.8.0/src/rustdoc.rs
-
-/private/tmp/claude-501/-Users-luton-Projects-CoXAgent/b5b9960d-ac63-4c46-ab0f-65ffad9586a2/scratchpad/cox-sq/crates/app/target/debug/deps/libmongodb_internal_macros-ec782a3ea14a3f8f.dylib: /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mongodb-internal-macros-3.8.0/src/lib.rs /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mongodb-internal-macros-3.8.0/src/action_impl.rs /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mongodb-internal-macros-3.8.0/src/option.rs /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mongodb-internal-macros-3.8.0/src/rustdoc.rs
-
-/Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mongodb-internal-macros-3.8.0/src/lib.rs:
-/Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mongodb-internal-macros-3.8.0/src/action_impl.rs:
-/Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mongodb-internal-macros-3.8.0/src/option.rs:
-/Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mongodb-internal-macros-3.8.0/src/rustdoc.rs:
