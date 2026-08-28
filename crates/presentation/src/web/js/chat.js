@@ -2073,6 +2073,10 @@ async function loadSettings(){
   try{const r=await fetch(api("/config"));const b=await r.json();if(r.ok)cfg=b;else cfgErr=b;}
   catch(e){cfgErr={error:"the hub could not be reached"};}
   window._cfg=cfg;
+  // The opencode catalog drifts (providers add/remove models); re-ask on every
+  // Settings open instead of once per page session, so the dropdowns and the
+  // stale-model warning below reflect what the CLI offers right now.
+  try{await loadOpencodeModels();}catch(e){}
   if(cfgErr){
     document.getElementById("settings-body").innerHTML=`
       <div class="panel" style="border-color:var(--red)">
@@ -2151,6 +2155,12 @@ async function loadSettings(){
     <div class="settab" data-p="engines">
       ${detBanner}
       <div style="margin:-2px 0 12px"><button onclick="checkAgentSetup(true)" class="btn-ghost"><i class="ti ti-robot"></i> Agent setup guide</button></div>
+      ${(()=>{const d=(cfg.engine&&cfg.engine.default)||{};
+        if(d.engine!=="opencode"||!OC_MODELS.length)return"";
+        const stale=[];
+        const chk=(label,ch)=>{if(ch&&ch.engine==="opencode"&&ch.model&&!OC_MODELS.includes(ch.model))stale.push(`${label}: <code>${esc(ch.model)}</code>`);};
+        chk("default",d);Object.entries((cfg.engine&&cfg.engine.per_role)||{}).forEach(([r,ch])=>chk(r,ch));
+        return stale.length?`<div class="panel" style="border-color:var(--amber);margin-bottom:12px;font-size:12.5px"><i class="ti ti-alert-triangle" style="color:var(--amber)"></i> The provider no longer offers ${stale.join(", ")} — runs on it fail until you pick a model from the current list.</div>`:"";})()}
       <div class="panel frm">${defRow}
         <div class="fr"><span class="lbl">Auto failover</span>
           <select id="eng-autofb"><option value="true" ${(cfg.engine&&cfg.engine.auto_fallback!==false)?'selected':''}>on</option><option value="false" ${(cfg.engine&&cfg.engine.auto_fallback===false)?'selected':''}>off</option></select>
