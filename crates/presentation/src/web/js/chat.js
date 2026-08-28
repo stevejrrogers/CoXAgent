@@ -1878,6 +1878,11 @@ async function showTicket(id){
   const d=t.design||{},tech=d.technical,ux=d.ux,ac=t.acceptance_criteria||[];
   let h=`<span class="x" onclick="close_('ov-ticket')"><i class="ti ti-x"></i></span><h3>${esc(t.title)}</h3>
     <div class="msub">${esc(t.id)} · ${esc(t.type)}</div>
+    <div class="tk-tabs" role="tablist">
+      <button class="tk-tab on" data-tk-tab="details" onclick="tkTab('details')"><i class="ti ti-list-details"></i> Details</button>
+      <button class="tk-tab" data-tk-tab="coverage" onclick="tkTab('coverage')"><i class="ti ti-shield-check"></i> Test Coverage</button>
+    </div>
+    <div class="tk-pane" id="tk-pane-details">
     <div class="mrow"><span class="lbl">Status</span><b>${t.status==="on_hold"?'<span style="color:var(--amber)">on hold</span>':esc(t.status)}</b>${t.status==="on_hold"&&(STATE.hold_reasons||{})[t.id]?`<span style="font-size:11.5px;color:var(--dim);margin-left:8px">· ${esc(STATE.hold_reasons[t.id])}</span>`:""}${(typeof canManage==="function"&&canManage())?(["pending","ready","open"].includes(t.status)?` <button class="tk-btn" style="margin-left:10px" onclick="holdTicket('${t.id}',true)" title="Park it — sprints and agents skip it until resumed"><i class="ti ti-player-pause"></i> Hold</button>`:(t.status==="on_hold"?` <button class="tk-btn go" style="margin-left:10px" onclick="holdTicket('${t.id}',false)"><i class="ti ti-player-play"></i> Resume</button>`:"")):""}</div>
     <div class="mrow"><span class="lbl">Priority</span>
       <div style="display:flex;gap:6px;align-items:center">
@@ -1923,6 +1928,7 @@ async function showTicket(id){
      <div class="att-grid" id="att-grid">${grid||'<div style="color:var(--dim);font-size:12px;margin-top:6px">— none yet (PD attaches mockups here)</div>'}</div>
      <input type="file" id="att-file" style="display:none" onchange="uploadAttachment('${t.id}',this)">
      <button class="tk-btn" style="margin-top:8px" onclick="document.getElementById('att-file').click()"><i class="ti ti-paperclip"></i> Attach file</button></div>`;}
+  h+=`</div>`+covPane(t);
   const canWork=["pending","ready","open"].includes(t.status);
   if(t.cost_hold!=null&&!t.cost_approved)h+=`<div class="mrow" style="display:block;border:1px solid var(--amber);border-radius:9px;padding:10px 12px;background:color-mix(in srgb,var(--amber) 9%,transparent)"><span style="color:var(--amber);font-weight:700"><i class="ti ti-currency-dollar"></i> Held for cost approval</span><div style="font-size:12.5px;color:var(--muted);margin-top:4px">Estimated ~$${(+t.cost_hold).toFixed(2)}/run exceeds the approval gate. Agents will skip this ticket until you approve it.</div><button class="pri" style="margin-top:8px" onclick="approveCost('${t.id}')"><i class="ti ti-check"></i> Approve run</button></div>`;
   h+=`<div class="tk-actions">
@@ -1940,6 +1946,31 @@ async function showTicket(id){
   renderTicketComments(t.id);
   // Ticket descriptions can carry ```mermaid fences too (SA designs often do).
   if(typeof renderMermaidIn==="function")renderMermaidIn(body);}
+// Ticket-detail tabs (CXA-F024): Details vs Test Coverage. Pure visibility
+// toggle — both panes render once, switching never refetches.
+function tkTab(name){
+  document.querySelectorAll("#ov-ticket .tk-tab").forEach(b=>b.classList.toggle("on",b.dataset.tkTab===name));
+  for(const p of["details","coverage"]){const el=document.getElementById("tk-pane-"+p);if(el)el.hidden=p!==name;}
+}
+// The Test Coverage pane (CXA-F024): one row per acceptance criterion with its
+// coverage status and the evidence addressing it — test files, or an API
+// request/response for non-UI tickets. Status text is always shown next to its
+// color, so no state rides on color alone.
+function covPane(t){
+  // Absent field (stale snapshot payload, detail fetch failed) renders an
+  // empty pane — same degradation as the Test cases section. Only a PRESENT
+  // empty matrix may claim "no criteria to cover".
+  if(!Array.isArray(t.coverage_matrix))return `<div class="tk-pane" id="tk-pane-coverage" hidden></div>`;
+  const cm=t.coverage_matrix;
+  if(!cm.length)return `<div class="tk-pane" id="tk-pane-coverage" hidden><div class="cov-empty"><i class="ti ti-shield-check"></i><div class="cov-empty-t">No acceptance criteria to cover</div><div class="cov-empty-s">Nothing is gated for verification on this ticket.</div></div></div>`;
+  const meta={covered:["var(--green)","ti-circle-check","COVERED"],partially_covered:["var(--amber)","ti-alert-triangle","PARTIALLY COVERED"],not_tested:["var(--red)","ti-circle-dashed","NOT TESTED"]};
+  const rows=cm.map(e=>{
+    const m=meta[e.status]||meta.not_tested;
+    const srcs=(e.sources||[]).filter(Boolean).map(s=>`<span class="cov-src" title="${esc(s)}">${esc(s)}</span>`).join("");
+    return `<div class="cov-row"><div class="cov-badge" style="color:${m[0]}"><i class="ti ${m[1]}"></i>${m[2]}</div><div class="cov-body"><div class="cov-ac">${esc(e.criterion)}</div>${srcs?`<div class="cov-srcs">${srcs}</div>`:""}</div></div>`;
+  }).join("");
+  return `<div class="tk-pane" id="tk-pane-coverage" hidden><div class="covlist">${rows}</div></div>`;
+}
 // In-app attachment viewer: full-screen overlay, same session. Gallery-aware:
 // ‹ › buttons and ←/→ keys walk ATT_GALLERY; Esc or backdrop click closes.
 // Non-image types render through an <iframe> (PDF etc.).

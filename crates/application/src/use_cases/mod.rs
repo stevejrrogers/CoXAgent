@@ -6,6 +6,7 @@ pub mod approval_memory;
 pub mod approval_risk;
 pub mod ceremony;
 pub mod conformance_check;
+pub mod coverage;
 pub mod cycle;
 pub mod generate_docs;
 pub mod json_repair;
@@ -34,6 +35,7 @@ pub mod runner;
 pub use add_ticket::{AddTicketInput, AddTicketUseCase};
 pub use analyze_attachment::{AnalyzeAttachmentUseCase, ReadableAttachment};
 pub use conformance_check::RunConformanceUseCase;
+pub use coverage::{match_score, matches_criterion, record_verdicts};
 pub use cycle::{CycleReport, RunCycleUseCase};
 pub use generate_docs::GenerateDocsUseCase;
 pub use json_repair::repair_json;
@@ -68,3 +70,5 @@ mod mod_guard_tests;
 mod run_releases_tdd_tests;
 #[cfg(test)]
 mod run_releases_tests;
+#[cfg(test)]
+mod run_test_tdd_tests;
