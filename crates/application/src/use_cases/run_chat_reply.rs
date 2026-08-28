@@ -7,7 +7,8 @@
 use crate::config::Language;
 use crate::error::AppError;
 use crate::ports::outbound::{AgentEnginePort, AgentRequest, DeployPort, StateStorePort};
-use coxagent_domain::Role;
+use crate::state::ProjectState;
+use coxagent_domain::{Role, Status};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -1025,7 +1026,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
 
     /// A compact, grounded status the reply agent reasons over.
     async fn context(&self) -> String {
-        use coxagent_domain::{Status, TicketType};
+        use coxagent_domain::TicketType;
         let _ = self.token_saver;
         let Ok(s) = self.store.load().await else {
             return String::new();
@@ -1274,7 +1275,7 @@ const NEEDS_YES: &[&str] = &[
 /// decisions, planned sprints, on-hold tickets, engine health — to `out`.
 /// Split out of [`RunChatReplyUseCase::context`] so each half stays reviewable;
 /// the agent must see the plan and the blockers to talk about them.
-fn push_backlog_and_health(s: &crate::state::ProjectState, out: &mut String) {
+fn push_backlog_and_health(s: &ProjectState, out: &mut String) {
     use coxagent_domain::Status;
     // Open backlog so the agent knows what's there and can avoid duplicates.
     let pending: Vec<_> = s
@@ -1348,33 +1349,36 @@ fn push_backlog_and_health(s: &crate::state::ProjectState, out: &mut String) {
     }
 }
 
+/// Wording that means several perspectives beat one voice: broad, strategic,
+/// or comparative questions, where three views beat one.
+const PANEL_CUES: &[&str] = &[
+    "nên ",
+    "hướng",
+    "roadmap",
+    "chiến lược",
+    "strategy",
+    "should we",
+    "approach",
+    "so sánh",
+    "compare",
+    "ý kiến",
+    "opinions",
+    "đánh giá",
+    "thiết kế thế nào",
+    "architecture",
+    "plan for",
+    "kế hoạch",
+    "cả team",
+    "@team",
+    "team nghĩ",
+];
+
 /// Pick which agent should answer a human message from its wording.
 /// Should the whole panel answer instead of one persona? Broad, strategic,
 /// or comparative questions — where three perspectives beat one voice.
 fn wants_panel(msg: &str) -> bool {
-    const CUES: &[&str] = &[
-        "nên ",
-        "hướng",
-        "roadmap",
-        "chiến lược",
-        "strategy",
-        "should we",
-        "approach",
-        "so sánh",
-        "compare",
-        "ý kiến",
-        "opinions",
-        "đánh giá",
-        "thiết kế thế nào",
-        "architecture",
-        "plan for",
-        "kế hoạch",
-        "cả team",
-        "@team",
-        "team nghĩ",
-    ];
     let m = msg.to_lowercase();
-    CUES.iter().any(|c| m.contains(c))
+    PANEL_CUES.iter().any(|c| m.contains(c))
 }
 
 fn route_persona(lower: &str) -> &'static str {

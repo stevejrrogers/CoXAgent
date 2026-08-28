@@ -152,33 +152,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
             filed.push(id);
         }
 
-        // Apply the TEST agent's per-acceptance-criterion verdicts onto the
-        // shipped tickets' test cases — each criterion becomes a test case
-        // marked passed/failed with its evidence note. Matches by exact AC text.
+        // Traceability (CXA-F024): apply the TEST agent's per-acceptance-
+        // criterion verdicts onto the shipped tickets' test cases — exact
+        // criterion text first, then keyword + fuzzy (Levenshtein ≤ 0.3)
+        // overlap when the agent paraphrased — and attach each verdict's
+        // evidence sources (test files / API request-response) so the ticket's
+        // Test Coverage tab can show what demonstrates every criterion.
         if !verdicts.is_empty() {
             let mut state = self.store.load().await?;
-            let mut changed = false;
             let at = crate::state::now_rfc3339();
-            for v in &verdicts {
-                if v.ac.trim().is_empty() {
-                    continue;
-                }
-                let Some(t) = state
-                    .tickets
-                    .iter_mut()
-                    .find(|t| t.acceptance_criteria().iter().any(|c| c == &v.ac))
-                else {
-                    continue;
-                };
-                t.ensure_test_cases_from_acceptance();
-                let note = if v.note.trim().is_empty() {
-                    None
-                } else {
-                    Some(v.note.trim().to_owned())
-                };
-                changed |= t.set_test_case_result(&v.ac, v.passed, note, None, at.clone());
-            }
-            if changed {
+            if crate::use_cases::coverage::record_verdicts(&mut state, &verdicts, &at) {
                 let _ = self.store.save(&state).await;
             }
         }

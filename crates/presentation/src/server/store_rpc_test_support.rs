@@ -322,10 +322,11 @@ pub(super) fn handler_router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// POST one store op with the given JSON `Args` body and optional
-/// `Authorization: <bearer>` / session cookie values.
-pub(super) async fn post_store(
+/// POST one store op against project `pid` with the given JSON `Args` body
+/// and optional `Authorization: <bearer>` / session cookie values.
+pub(super) async fn post_store_at(
     router: Router,
+    pid: &str,
     op: &str,
     args: serde_json::Value,
     authorization: Option<&str>,
@@ -333,7 +334,7 @@ pub(super) async fn post_store(
 ) -> axum::response::Response {
     let mut builder = Request::builder()
         .method("POST")
-        .uri(format!("/api/projects/{PID}/store?op={op}"))
+        .uri(format!("/api/projects/{pid}/store?op={op}"))
         .header(header::CONTENT_TYPE, "application/json");
     if let Some(value) = authorization {
         builder = builder.header(header::AUTHORIZATION, value);
@@ -349,6 +350,18 @@ pub(super) async fn post_store(
         )
         .await
         .expect("in-memory request")
+}
+
+/// POST one store op against the shared [`PID`] project — the shape every
+/// guard test but the unknown-project criterion needs.
+pub(super) async fn post_store(
+    router: Router,
+    op: &str,
+    args: serde_json::Value,
+    authorization: Option<&str>,
+    session: Option<&str>,
+) -> axum::response::Response {
+    post_store_at(router, PID, op, args, authorization, session).await
 }
 
 /// Drain a response body into text for assertions.

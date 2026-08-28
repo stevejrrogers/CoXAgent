@@ -1169,8 +1169,12 @@ async function renderSessions(){
   const el=document.getElementById("team-sessions");if(!el)return;
   let ss=SESS_CACHE;
   if(!ss||Date.now()-SESS_AT>SESS_TTL_MS){
+    // Claim the TTL window BEFORE awaiting: a render burst (SSE reconnect
+    // flood) used to fan out one fetch per render while the first was still
+    // in flight — 56 requests in 2 seconds straight into the auth limiter.
+    SESS_AT=Date.now();
     ss=[];try{ss=await(await fetch("/api/auth/sessions")).json();}catch(e){}
-    SESS_CACHE=ss;SESS_AT=Date.now();
+    SESS_CACHE=ss;
   }
   if(!Array.isArray(ss)||!ss.length){el.innerHTML="";return;}
   // Only show current device — not history.
