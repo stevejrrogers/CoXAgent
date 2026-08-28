@@ -171,6 +171,7 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/members/:username", &["delete"]),
     route("/api/projects/:pid/merge-sweep", &["post"]),
     route("/api/projects/:pid/metrics", &["get"]),
+    route("/api/projects/:pid/metrics/burndown", &["get"]),
     route("/api/projects/:pid/metrics/summary", &["get"]),
     route("/api/projects/:pid/metrics/trends", &["get"]),
     route("/api/projects/:pid/operators/:operator/:action", &["post"]),

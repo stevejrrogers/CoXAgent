@@ -371,7 +371,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 matches!(t.status(), Status::Pending | Status::Ready | Status::Open)
             })
             .count();
-        let next = crate::metrics::decide_tuning(&evals, backlog, &state.tuning);
+        // Net open-bug change across the last two RECORDED days (negative =
+        // backlog grew) — the burn-down escalation input for the quality
+        // brake. The full dashboard window (not just yesterday) is scanned so
+        // one missed day — leader down, fresh deploy — degrades to a wider
+        // gap instead of silently reporting no delta.
+        let bug_delta =
+            crate::metrics::compute_burndown(&state, &today, crate::metrics::BURNDOWN_WINDOW_DAYS)
+                .delta_24h;
+        let next = crate::metrics::decide_tuning(&evals, backlog, bug_delta, &state.tuning);
         let was = state.tuning.clone();
         drop(state);
         // Read the hub lessons OUTSIDE the state closure: the closure is sync.
@@ -725,6 +733,25 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             tracing::info!("posted daily digest for {today}");
         }
     }
+    /// Record the day's open/fixed/verified bug counts, once per UTC day — the
+    /// persisted burn-down history (CXA-F032). Same dedup discipline as the
+    /// digest: pre-check outside the mutate to skip needless writes, re-check
+    /// inside so a second operator or a restart can never double-record.
+    pub(super) async fn record_daily_bug_snapshot(&self) {
+        let today = crate::state::now_rfc3339()[..10].to_owned();
+        let Ok(state) = self.store.load().await else {
+            return;
+        };
+        if state.bug_snapshots.contains_key(&today) {
+            return;
+        }
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+            crate::metrics::record_burndown_snapshot(s, &today);
+            Ok(())
+        })
+        .await;
+    }
+
     /// Run the daily standup: the SM opens, each active agent posts a grounded
     /// update (done/next/blockers), and the SM highlights blockers + focus.
     pub(super) async fn scrum_standup(&self) {

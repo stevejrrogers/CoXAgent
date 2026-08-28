@@ -395,7 +395,30 @@ pub struct ProjectState {
     /// is verified. Consult-only against state — no git ref changes.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub rolled_back_commits: std::collections::BTreeSet<String>,
+    /// One bug-status count per UTC day (`YYYY-MM-DD` → counts), recorded by
+    /// the leader cycle so the burn-down history survives restarts instead of
+    /// leaving only today's snapshot in `metrics::compute` (CXA-F032). Bounded
+    /// by [`MAX_BUG_SNAPSHOT_DAYS`]; every added field is serde-defaulted so
+    /// the schema stays at version 1.
+    #[serde(default)]
+    pub bug_snapshots: std::collections::BTreeMap<String, BugSnapshot>,
 }
+
+/// One day's open/fixed/verified bug counts — the persisted burn-down point
+/// (CXA-F032).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct BugSnapshot {
+    #[serde(default)]
+    pub open: u32,
+    #[serde(default)]
+    pub fixed: u32,
+    #[serde(default)]
+    pub verified: u32,
+}
+
+/// Cap on persisted daily bug snapshots — a full leap year of days; older
+/// entries are dropped as new ones arrive so state cannot grow without bound.
+pub const MAX_BUG_SNAPSHOT_DAYS: usize = 366;
 
 /// Cap on how many incident records are kept (newest first). One per deploy
 /// revision means a storm of failures still stays bounded and readable.
@@ -479,6 +502,7 @@ impl Default for ProjectState {
             last_rollback: None,
             incidents: Vec::new(),
             rolled_back_commits: std::collections::BTreeSet::new(),
+            bug_snapshots: std::collections::BTreeMap::new(),
         }
     }
 }

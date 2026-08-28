@@ -396,6 +396,13 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
                 .ok_or_else(|| crate::PortError::Corrupt(format!("no ticket {tid}")))?;
             t.transition_to(coxagent_domain::Role::User, to)
                 .map_err(|e| crate::PortError::Corrupt(e.to_string()))?;
+            // Reaching Verified MEANS the QA verdict was rendered; the burn-down
+            // (CXA-F032 AC#2) only counts bugs carrying their own REGRESSION
+            // TEST PASS record, so the human verdict writes the same provenance
+            // the agent TEST path has written since F022.
+            if to == coxagent_domain::Status::Verified {
+                super::run_test::record_human_verify_evidence(s, &tid.to_string());
+            }
             s.log_activity(
                 "USER",
                 &format!("chat-approved to {label}"),

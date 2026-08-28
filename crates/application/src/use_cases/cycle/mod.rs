@@ -775,6 +775,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // One digest per UTC day into the team chat: shipped/spend/sprint at
             // a glance, so the user doesn't need the dashboard open to keep up.
             self.post_daily_digest().await;
+            // One bug-count snapshot per UTC day: the persisted burn-down
+            // history the metrics dashboard and the self-tuning escalation
+            // read (CXA-F032). Recorded BEFORE self-tune so today's delta is
+            // already on file when the tuner evaluates it.
+            self.record_daily_bug_snapshot().await;
 
             // Self-correcting memory: audit the engine's per-machine notes
             // against the current process law once a day.
