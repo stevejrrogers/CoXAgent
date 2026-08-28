@@ -447,9 +447,12 @@ function card(t){const a={high:"var(--red)",medium:"var(--amber)",low:"var(--dim
   const ui=t.has_ui?'<span class="b ui">UI</span>':'',bug=t.type==="bug"?'<span class="b bug">bug</span>':'';
   // A human-assigned ticket is out of the agent pool — say WHO owns it.
   const who=t.assignee?`<span class="b" style="background:var(--accentbg);color:var(--accent2)"><i class="ti ti-user" style="font-size:10px"></i> @${esc(t.assignee)}</span>`:'';
+  const doneSet=["done","documented","verified","rejected"];
+  const blockers=(t.depends_on||[]).filter(d=>{const dt=(STATE.tickets||[]).find(x=>x.id===d);return dt&&!doneSet.includes(dt.status);});
+  const blocked=blockers.length?`<span class="b" style="background:color-mix(in srgb,var(--red) 16%,transparent);color:var(--red)" title="blocked by ${esc(blockers.join(', '))}"><i class="ti ti-lock" style="font-size:10px"></i> blocked</span>`:'';
   const hold=t.status==="on_hold"?`<span class="b" style="background:color-mix(in srgb,var(--amber) 18%,transparent);color:var(--amber)" title="${esc((STATE.hold_reasons||{})[t.id]||'on hold')}"><i class="ti ti-player-pause" style="font-size:10px"></i> on hold</span>`:'';
   return `<div class="card-t" onclick="showTicket('${t.id}')" ${t.status==="on_hold"?'style="opacity:.65"':''}><div class="cid">${esc(t.id)}</div>
-    <div class="ct">${esc(t.title)}</div><div class="badges"><span class="b ${t.priority}">${t.priority}</span>${hold}${ui}${bug}${who}</div></div>`;}
+    <div class="ct">${esc(t.title)}</div><div class="badges"><span class="b ${t.priority}">${t.priority}</span>${hold}${blocked}${ui}${bug}${who}</div></div>`;}
 function column([k,l,c],ts){const items=ts.filter(t=>t.status===k);
   return `<div class="col"><h3><span class="dot" style="background:var(${c})"></span>${l}<span class="n">${items.length}</span></h3>${items.length?items.map(card).join(""):'<div class="empty">—</div>'}</div>`;}
 // Unified column: collects both features and bugs whose status maps to this stage.
@@ -557,12 +560,14 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
       // Which engine CLI this role is really on — copilot/opencode/claude/… —
       // stamped from the run that actually happened, so failover shows through.
       const engBadge=eng?`<span class="ag-eng" title="engine actually running this agent">${esc(eng)}</span>`:'';
+      const hl=(s.role_health||{})[r];
+      const healthHtml=hl&&hl.errors>0?`<div class="ag-health" title="${esc(hl.last_error||'')}"><i class="ti ti-alert-triangle"></i> ${hl.errors} error${hl.errors===1?'':'s'}${hl.timeouts?` · ${hl.timeouts} timeout${hl.timeouts===1?'':'s'}`:''}${hl.timeouts>=3?' · <b>provider under load — consider a lower concurrency</b>':''}</div>`:'';
       return `<div class="agent ${live?'run':''}" onclick="openAgent('${r}')" style="cursor:pointer">
         <div class="ag-head"><div class="av" style="background:${col}22;color:${col}">${initials(r)}<span class="sr"></span></div>
           <div class="ag-id"><div class="rl">${r}${engBadge}</div><div class="ds">${d}</div></div>
           <i class="ti ti-terminal-2 ag-term"></i></div>
         <div class="agstats"><span title="actions"><i class="ti ti-bolt"></i> ${st.n}</span><span title="tickets touched"><i class="ti ti-ticket"></i> ${st.tk.size}</span>${cost>0?`<span title="cost"><i class="ti ti-coin"></i> ${money(cost)}</span>`:''}</div>
-        <div class="ag-status">${statusHtml}</div></div>`;}).join("");
+        <div class="ag-status">${statusHtml}</div>${healthHtml}</div>`;}).join("");
     renderDupWarn(s);
     renderCycleScores(s);
     renderTeamsOnline();

@@ -176,6 +176,20 @@ pub struct PlannedSprint {
     pub by: String,
 }
 
+/// Cumulative engine-health counters for one agent role — errors and
+/// timeout-class failures with the most recent message, so the Agents view
+/// can say "BA is failing 40% of runs on this model" instead of a person
+/// grepping hub.log for it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleHealth {
+    pub errors: u64,
+    pub timeouts: u64,
+    #[serde(default)]
+    pub last_error: String,
+    #[serde(default)]
+    pub last_error_at: String,
+}
+
 /// A closed sprint's outcome — the velocity history.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SprintRecord {
