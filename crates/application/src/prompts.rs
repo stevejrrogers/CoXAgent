@@ -327,7 +327,7 @@ array: [].\n\
 `verdicts` is a JSON array with ONE entry per acceptance criterion of EVERY ticket in \
 JUST SHIPPED — you must explicitly verify each one against the live app. Each entry \
 exactly:\n\
-{\"ac\": string, \"passed\": boolean, \"note\": string, \"route\": string}\n\
+{\"ac\": string, \"passed\": boolean, \"note\": string, \"route\": string, \"tests\": [string]}\n\
 - `ac`: the EXACT acceptance-criterion text from the JUST SHIPPED block (match it \
 word-for-word; do not paraphrase — the system marks that ticket's test case by this text).\n\
 - `passed`: true only when you actually verified the behavior end-to-end on the deployed \
@@ -335,7 +335,10 @@ build; false when it fails or you could not verify it.\n\
 - `note`: one line of concrete evidence — the command/request you ran and the actual \
 response, or what blocked verification.\n\
 - `route`: the URL path on the running app that demonstrates this criterion (e.g. \
-\"/settings\"), or \"\" when none applies — it becomes the per-test-case screenshot.";
+\"/settings\"), or \"\" when none applies — it becomes the per-test-case screenshot.\n\
+- `tests`: relative paths of the test files that demonstrate this criterion \
+(e.g. \"crates/domain/tests/gate.rs\"), or [] when the evidence is an API \
+request/response instead of a file-based test.";
 
 /// Tech Writer — documents ONE verified feature in full for the team Wiki.
 pub const DOCS: &str = "\
