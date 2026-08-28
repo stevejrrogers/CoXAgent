@@ -22,6 +22,7 @@ const INBOX_KIND={
   auto_approved:{label:"Auto-approved",ic:"ti-robot",col:"var(--dim)"},
   pr_stuck:{label:"PR stuck — needs you",ic:"ti-alert-triangle",col:"var(--red)"},
   human_eyes:{label:"Needs human eyes",ic:"ti-eye-exclamation",col:"var(--amber)"},
+  on_hold:{label:"On hold — resume when unblocked",ic:"ti-player-pause",col:"var(--amber)"},
 };
 
 function inboxCard(kind,meta,title,actions,ticket){
@@ -100,6 +101,10 @@ async function renderInbox(){
           ?ibtn("Send back",`inboxSendBack('${esc(it.ticket)}')`)+
            ibtn("Verified",`inboxAct('${esc(it.ticket)}','verify')`,1)
           :noRight(it.role)),it.ticket);
+    }else if(it.kind==="on_hold"){
+      html+=inboxCard("on_hold",esc(it.ticket)+(it.reason?" · "+esc(it.reason):""),esc(it.title),
+        ibtn("Open",`showTicket('${esc(it.ticket)}')`)+
+        (act?ibtn("Resume",`holdTicket('${esc(it.ticket)}',false)`,1):noRight(it.role)),it.ticket);
     }else if(it.kind==="assigned"){
       html+=inboxCard("assigned",esc(it.ticket)+" · "+esc(it.status||""),esc(it.title),
         ibtn("Return to agents",`inboxUnassign('${esc(it.ticket)}')`),it.ticket);

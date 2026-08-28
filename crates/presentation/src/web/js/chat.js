@@ -1843,8 +1843,13 @@ function depChips(ids){
     return `<span onclick="showTicket('${id}')" title="${dt?esc(dt.title)+' · '+esc(dt.status):'unknown'}" style="cursor:pointer;display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:3px 8px;border-radius:7px;background:${col}22;color:${col};margin-right:5px">
       <i class="ti ti-${done?'check':'circle'}" style="font-size:11px"></i>${esc(id)}</span>`;}).join("");}
 async function holdTicket(id,hold){
+  let reason="";
+  if(hold){
+    reason=await coxModal({title:"Hold "+id,message:"Why is it parked? Shown on the ticket so future-you knows what unblocks it.",input:{placeholder:"e.g. waiting on GitHub billing"},confirmText:"Hold"});
+    if(reason===undefined||reason===null||reason===false)return;
+  }
   try{
-    const r=await fetch(api("/ticket/"+encodeURIComponent(id)+"/status/"+(hold?"hold":"resume")),{method:"POST"});
+    const r=await fetch(api("/ticket/"+encodeURIComponent(id)+"/status/"+(hold?"hold":"resume")),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({reason:String(reason||"")})});
     if(!r.ok){toasty((await r.text())||"Status change failed","err");return;}
     toasty(hold?`${id} on hold — sprints skip it until resumed`:`${id} resumed`);
     close_('ov-ticket');await refreshDisc();
@@ -1873,7 +1878,7 @@ async function showTicket(id){
   const d=t.design||{},tech=d.technical,ux=d.ux,ac=t.acceptance_criteria||[];
   let h=`<span class="x" onclick="close_('ov-ticket')"><i class="ti ti-x"></i></span><h3>${esc(t.title)}</h3>
     <div class="msub">${esc(t.id)} · ${esc(t.type)}</div>
-    <div class="mrow"><span class="lbl">Status</span><b>${t.status==="on_hold"?'<span style="color:var(--amber)">on hold</span>':esc(t.status)}</b>${(typeof canManage==="function"&&canManage())?(["pending","ready","open"].includes(t.status)?` <button class="tk-btn" style="margin-left:10px" onclick="holdTicket('${t.id}',true)" title="Park it — sprints and agents skip it until resumed"><i class="ti ti-player-pause"></i> Hold</button>`:(t.status==="on_hold"?` <button class="tk-btn go" style="margin-left:10px" onclick="holdTicket('${t.id}',false)"><i class="ti ti-player-play"></i> Resume</button>`:"")):""}</div>
+    <div class="mrow"><span class="lbl">Status</span><b>${t.status==="on_hold"?'<span style="color:var(--amber)">on hold</span>':esc(t.status)}</b>${t.status==="on_hold"&&(STATE.hold_reasons||{})[t.id]?`<span style="font-size:11.5px;color:var(--dim);margin-left:8px">· ${esc(STATE.hold_reasons[t.id])}</span>`:""}${(typeof canManage==="function"&&canManage())?(["pending","ready","open"].includes(t.status)?` <button class="tk-btn" style="margin-left:10px" onclick="holdTicket('${t.id}',true)" title="Park it — sprints and agents skip it until resumed"><i class="ti ti-player-pause"></i> Hold</button>`:(t.status==="on_hold"?` <button class="tk-btn go" style="margin-left:10px" onclick="holdTicket('${t.id}',false)"><i class="ti ti-player-play"></i> Resume</button>`:"")):""}</div>
     <div class="mrow"><span class="lbl">Priority</span>
       <div style="display:flex;gap:6px;align-items:center">
         ${["high","medium","low"].map(p=>`<span onclick="setPriority('${t.id}','${p}')" style="cursor:pointer;font-size:11px;padding:3px 10px;border-radius:7px;font-weight:600;${t.priority===p?`background:var(--accentbg);color:var(--accent2)`:'background:var(--card2);color:var(--muted)'}">${p}</span>`).join("")}
@@ -2193,6 +2198,7 @@ async function loadSettings(){
           <input id="wf-sp" type="number" min="1" value="${wf.sprint_length_cycles??10}" style="width:90px;${wf.sprint_unit==='cycles'?'':'display:none'}"/>
           <span class="hint">days = wall-clock sprints (recommended — cycles speed up and slow down); cycles = roll on the loop counter</span></div>
         <div class="fr"><span class="lbl">BA every N cycles</span><input id="wf-ba" type="number" min="0" value="${wf.ba_every_n_cycles??4}" style="width:90px"/><span class="hint">0 disables BA</span></div>
+        <div class="fr"><span class="lbl">DEV scope floor</span><input id="wf-floor" type="number" min="0" value="${wf.dev_scope_floor??4}" style="width:90px"/><span class="hint">keep at least this many actionable tickets committed — the mid-sprint top-up pulls more from the backlog; 0 disables</span></div>
         <div class="fr"><span class="lbl">Feature dev</span><select id="wf-fd"><option value="true" ${wf.feature_dev_enabled!==false?'selected':''}>enabled</option><option value="false" ${wf.feature_dev_enabled===false?'selected':''}>disabled</option></select></div>
         <div class="fr"><span class="lbl">Ops monitor</span><select id="wf-ops"><option value="true" ${wf.ops_monitor!==false?'selected':''}>on</option><option value="false" ${wf.ops_monitor===false?'selected':''}>off</option></select><span class="hint">pings the deployed app; files a bug + alerts on an outage</span></div>
         <div class="fr"><span class="lbl">Token saver</span><select id="wf-ts"><option value="true" ${wf.token_saver!==false?'selected':''}>on — compress diffs/logs &amp; terse agent output</option><option value="false" ${wf.token_saver===false?'selected':''}>off — full verbosity</option></select><span class="hint">cuts engine spend on big reviews with no loss of the actual change</span></div>

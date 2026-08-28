@@ -849,6 +849,7 @@ pub(super) async fn hold_ticket_ep(
     State(app): State<AppState>,
     Path((pid, id, action)): Path<(String, String, String)>,
     headers: axum::http::HeaderMap,
+    body: Option<Json<super::HoldReq>>,
 ) -> axum::response::Response {
     let Some(p) = app.project(&pid).await else {
         return not_found();
@@ -893,9 +894,16 @@ pub(super) async fn hold_ticket_ep(
             err = Some(e.to_string());
             return Ok(());
         }
-        if !holding {
-            // Resume forgives the failure history — otherwise the auto-hold
-            // sweep would park it right back on the next cycle.
+        if holding {
+            let reason = body
+                .as_ref()
+                .map(|Json(r)| r.reason.trim().to_owned())
+                .filter(|r| !r.is_empty())
+                .unwrap_or_else(|| "held by a person".to_owned());
+            s.hold_reasons.insert(tid.to_string(), reason);
+        } else {
+            // Resume forgives the failure history (and the hold reason) —
+            // otherwise the auto-hold sweep would park it right back.
             coxagent_application::sprint::clear_fail_attempts(s, &tid);
         }
         s.log_activity(
@@ -976,6 +984,61 @@ pub(super) async fn queue_scope_ep(
     .await
     {
         Ok(()) if !hit => (StatusCode::NOT_FOUND, "no such queued sprint").into_response(),
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Rename a queued sprint's goal.
+pub(super) async fn queue_rename_ep(
+    State(app): State<AppState>,
+    Path((pid, qid)): Path<(String, u64)>,
+    Json(req): Json<super::SprintGoalReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    if req.goal.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "goal must not be empty").into_response();
+    }
+    let mut hit = false;
+    match coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        hit = coxagent_application::sprint::rename_queued_sprint(s, qid, &req.goal);
+        Ok(())
+    })
+    .await
+    {
+        Ok(()) if !hit => (StatusCode::NOT_FOUND, "no such queued sprint").into_response(),
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Move a queued sprint up or down in run order.
+pub(super) async fn queue_move_ep(
+    State(app): State<AppState>,
+    Path((pid, qid, dir)): Path<(String, u64, String)>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let delta: i64 = match dir.as_str() {
+        "up" => -1,
+        "down" => 1,
+        _ => return (StatusCode::BAD_REQUEST, "dir must be up or down").into_response(),
+    };
+    let mut hit = false;
+    match coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        hit = coxagent_application::sprint::move_queued_sprint(s, qid, delta);
+        Ok(())
+    })
+    .await
+    {
+        Ok(()) if !hit => (
+            StatusCode::BAD_REQUEST,
+            "no such queued sprint, or already at that end",
+        )
+            .into_response(),
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => internal_error(&e.to_string()),
     }

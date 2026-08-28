@@ -72,6 +72,7 @@ async function saveSettings(){
   cfg.workflow.sprint_unit=val("wf-su")==="cycles"?"cycles":"days";
   {const sd=parseInt(val("wf-sp-days")||"1",10);cfg.workflow.sprint_length_days=Number.isFinite(sd)&&sd>0?sd:1;}
   cfg.workflow.ba_every_n_cycles=parseInt(val("wf-ba")||"4",10);
+  cfg.workflow.dev_scope_floor=parseInt(val("wf-floor")||"4",10);
   cfg.workflow.feature_dev_enabled=val("wf-fd")==="true";
   cfg.workflow.ops_monitor=val("wf-ops")!=="false";
   cfg.workflow.token_saver=val("wf-ts")==="true";
