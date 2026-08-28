@@ -100,6 +100,10 @@ pub struct ProjectState {
     /// hold (human or the auto-hold sweep), cleared on resume.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub hold_reasons: std::collections::BTreeMap<String, String>,
+    /// Per-role engine health (role label → counters), fed by the cycle's
+    /// error report. Rendered on the Agents view.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub role_health: std::collections::BTreeMap<String, RoleHealth>,
     #[serde(default)]
     pub deploy: Option<DeployStatus>,
     /// Discussion threads: per-ticket and team-channel comments.
@@ -449,6 +453,7 @@ impl Default for ProjectState {
             sprints: Vec::new(),
             sprint_queue: Vec::new(),
             hold_reasons: std::collections::BTreeMap::new(),
+            role_health: std::collections::BTreeMap::new(),
             deploy: None,
             comments: Vec::new(),
             reviews: Vec::new(),

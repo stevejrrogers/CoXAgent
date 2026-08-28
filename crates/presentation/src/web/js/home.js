@@ -303,8 +303,11 @@ function renderBacklogPanel(s){
       return `<span class="spq-chip" style="border-color:${col}55" onclick="showTicket('${esc(id)}')">${esc(id)}<i class="ti ti-x" onclick="event.stopPropagation();spqScope(${q.id},null,'${esc(id)}')" title="remove"></i></span>`;}).join("")||'<span class="empty" style="padding:4px">no tickets yet — drag from the backlog below</span>'}</div>
   </div>`).join("");
   // 3) The prioritised backlog list, draggable into any sprint above.
+  window._blkSel=window._blkSel||new Set();
+  const sel=window._blkSel;
+  for(const id of [...sel])if(!items.some(t=>t.id===id))sel.delete(id);
   const rows=items.map(t=>{const col=pc[t.priority]||"var(--muted)";const inSp=committed.has(t.id);
-    return `<div class="act" draggable="true" ondragstart="spqDrag(event,'${esc(t.id)}')" onclick="showTicket('${t.id}')" style="cursor:pointer"><div class="ad" style="background:${col}22;color:${col}"><i class="ti ti-${t.type==='bug'?'bug':'bulb'}" style="font-size:13px"></i></div>
+    return `<div class="act" draggable="true" ondragstart="spqDrag(event,'${esc(t.id)}')" onclick="showTicket('${t.id}')" style="cursor:pointer"><input type="checkbox" class="blk-chk" ${sel.has(t.id)?'checked':''} onclick="event.stopPropagation();blkToggle('${esc(t.id)}',this.checked)"/><div class="ad" style="background:${col}22;color:${col}"><i class="ti ti-${t.type==='bug'?'bug':'bulb'}" style="font-size:13px"></i></div>
       <div class="atx"><span class="tk">${esc(t.id)}</span> ${esc(t.title)} <span class="fchip" style="padding:1px 8px;font-size:10px;border:none;background:${col}22;color:${col}">${esc(t.priority||'—')}</span>${inSp?' <span class="fchip" style="padding:1px 8px;font-size:10px;border:none;background:var(--accentbg);color:var(--accent2)">in sprint</span>':''}</div>
       ${t.status==="on_hold"?'':`<button class="sp-scope" onclick="event.stopPropagation();sprintScope('${t.id}',${inSp?"false":"true"})" title="${inSp?'Drop from the running sprint':'Pull into the running sprint'}">${inSp?'− sprint':'+ sprint'}</button>`}
       <span class="tm"${t.status==="on_hold"?' style="color:var(--amber)"':''}>${t.status==="on_hold"?'on hold':esc(t.status)}</span></div>`;}).join("");
@@ -316,7 +319,37 @@ function renderBacklogPanel(s){
       <span class="fchip">${items.length} waiting</span>
       <button class="tk-btn go" onclick="spqCreate()"><i class="ti ti-plus"></i> New sprint</button>
     </div>
+    ${sel.size?`<div class="blk-bar"><b>${sel.size} selected</b>
+      <button class="tk-btn" onclick="blkAct('hold')"><i class="ti ti-player-pause"></i> Hold…</button>
+      <button class="tk-btn" onclick="blkAct('sprint')">+ running sprint</button>
+      ${queue.length?`<button class="tk-btn" onclick="blkAct('plan')">+ next plan</button>`:''}
+      <span style="color:var(--dim)">priority:</span>
+      ${["high","medium","low"].map(pr=>`<button class="tk-btn" onclick="blkAct('prio','${pr}')">${pr}</button>`).join("")}
+      <div style="flex:1"></div><button class="tk-btn" onclick="window._blkSel.clear();renderActive()">clear</button></div>`:''}
     <div class="panel">${rows||'<div class="empty">backlog is clear — every ticket is in flight or shipped</div>'}</div>`;
+}
+function blkToggle(id,on){const s=window._blkSel;if(on)s.add(id);else s.delete(id);renderActive();}
+// One decision applied to every selected ticket, sequentially (the endpoints
+// are cheap and per-ticket; a burst of 10 is fine).
+async function blkAct(kind,arg){
+  const ids=[...(window._blkSel||[])];if(!ids.length)return;
+  if(kind==="hold"){
+    const reason=await coxModal({title:`Hold ${ids.length} tickets`,message:"One reason, applied to all.",input:{placeholder:"e.g. waiting on vendor"},confirmText:"Hold all"});
+    if(reason===undefined||reason===null||reason===false)return;
+    for(const id of ids){await fetch(api("/ticket/"+encodeURIComponent(id)+"/status/hold"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({reason:String(reason||"")})});}
+    toasty(`${ids.length} tickets on hold`);
+  }else if(kind==="sprint"){
+    await fetch(api("/sprint/commit"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tickets:ids})});
+    toasty(`${ids.length} pulled into the sprint`);
+  }else if(kind==="plan"){
+    const q=(STATE.sprint_queue||[])[0];if(!q)return;
+    await fetch(api("/sprint-queue/"+q.id+"/scope"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({add:ids,remove:[]})});
+    toasty(`${ids.length} added to "${q.goal}"`);
+  }else if(kind==="prio"){
+    for(const id of ids){await setPriority(id,arg);}
+    toasty(`priority ${arg} set on ${ids.length}`);
+  }
+  window._blkSel.clear();await refreshDisc();
 }
 // --- Sprint-queue interactions (drag a backlog row onto a sprint card) ---
 function spqDrag(ev,id){ev.dataTransfer.setData("text/ticket",id);ev.dataTransfer.effectAllowed="copy";}

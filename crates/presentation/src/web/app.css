@@ -1749,3 +1749,10 @@ textarea.np-in{resize:vertical;line-height:1.5}
 .spq-chip{font-size:11px;font-family:ui-monospace,Menlo,monospace;border:1px solid var(--border2);border-radius:6px;padding:2px 7px;cursor:pointer;display:inline-flex;align-items:center;gap:5px}
 .spq-chip:hover{border-color:var(--accent2)}
 .spq-chip .ti-x{font-size:10px;color:var(--dim)} .spq-chip .ti-x:hover{color:var(--red)}
+
+/* Agent card engine-health line (Agents view). */
+.ag-health{margin-top:6px;font-size:11px;color:var(--amber);display:flex;gap:5px;align-items:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ag-health b{font-weight:600}
+/* Backlog bulk-selection bar. */
+.blk-bar{display:flex;gap:8px;align-items:center;padding:8px 12px;border:1px solid var(--accent2);border-radius:10px;background:var(--accentbg);margin-bottom:10px;font-size:12px;flex-wrap:wrap}
+.blk-chk{accent-color:var(--accent2);width:14px;height:14px;flex:none;cursor:pointer}
