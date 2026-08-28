@@ -105,12 +105,41 @@ fn roll_over(state: &mut ProjectState, cycle: u64, length: u64) -> u32 {
         state.sprints.push(record);
     }
     let number = state.sprint.as_ref().map_or(0, |s| s.number) + 1;
-    let committed = open_backlog(state);
-    // The PO's set goal wins; otherwise derive one from the committed titles.
-    let goal = if state.sprint_goal.trim().is_empty() {
-        goal_from(state, &committed)
+    // A planned sprint at the queue front wins outright: its ticket set and
+    // goal ARE the next sprint (that is what planning ahead means). Tickets
+    // that shipped or vanished since planning are skipped; a plan whose every
+    // ticket is gone falls back to the capacity-based auto-commit.
+    let planned = if state.sprint_queue.is_empty() {
+        None
     } else {
-        state.sprint_goal.trim().to_owned()
+        Some(state.sprint_queue.remove(0))
+    };
+    let (committed, planned_goal) = match planned {
+        Some(p) => {
+            let live: Vec<TicketId> = p
+                .tickets
+                .iter()
+                .filter(|id| {
+                    state
+                        .ticket(id)
+                        .is_some_and(|t| !matches!(t.status(), Status::Documented | Status::Verified))
+                })
+                .cloned()
+                .collect();
+            if live.is_empty() {
+                (open_backlog(state), Some(p.goal))
+            } else {
+                (live, Some(p.goal))
+            }
+        }
+        None => (open_backlog(state), None),
+    };
+    // Goal precedence: the plan's goal, then the PO's goal chip, then one
+    // derived from the committed titles.
+    let goal = match planned_goal.filter(|g| !g.trim().is_empty()) {
+        Some(g) => g.trim().to_owned(),
+        None if !state.sprint_goal.trim().is_empty() => state.sprint_goal.trim().to_owned(),
+        None => goal_from(state, &committed),
     };
     state.sprint = Some(Sprint {
         number,
@@ -324,6 +353,64 @@ pub fn done_count(state: &ProjectState) -> usize {
         .count()
 }
 
+
+/// Queue a sprint to run after the current one. Returns the new plan's id.
+pub fn queue_sprint(state: &mut ProjectState, goal: &str, tickets: Vec<TicketId>, by: &str) -> u64 {
+    let id = state
+        .sprint_queue
+        .iter()
+        .map(|p| p.id)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    // Only tickets that exist can be planned; duplicates collapse.
+    let mut seen = std::collections::BTreeSet::new();
+    let tickets: Vec<TicketId> = tickets
+        .into_iter()
+        .filter(|t| state.ticket(t).is_some() && seen.insert(t.clone()))
+        .collect();
+    state.sprint_queue.push(crate::state::PlannedSprint {
+        id,
+        goal: goal.trim().to_owned(),
+        tickets,
+        created_at: crate::state::now_rfc3339(),
+        by: by.to_owned(),
+    });
+    id
+}
+
+/// Add or remove tickets on a queued sprint. Unknown plan id → `false`.
+pub fn scope_queued_sprint(
+    state: &mut ProjectState,
+    id: u64,
+    add: &[TicketId],
+    remove: &[TicketId],
+) -> bool {
+    // Existence is checked against tickets before the mutable borrow.
+    let valid: Vec<TicketId> = add
+        .iter()
+        .filter(|t| state.ticket(t).is_some())
+        .cloned()
+        .collect();
+    let Some(plan) = state.sprint_queue.iter_mut().find(|p| p.id == id) else {
+        return false;
+    };
+    plan.tickets.retain(|t| !remove.contains(t));
+    for t in valid {
+        if !plan.tickets.contains(&t) {
+            plan.tickets.push(t);
+        }
+    }
+    true
+}
+
+/// Drop a queued sprint outright. Unknown plan id → `false`.
+pub fn delete_queued_sprint(state: &mut ProjectState, id: u64) -> bool {
+    let before = state.sprint_queue.len();
+    state.sprint_queue.retain(|p| p.id != id);
+    state.sprint_queue.len() != before
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,6 +448,83 @@ mod tests {
             .expect("design");
         t.transition_to(Role::Sa, Status::Ready).expect("ready");
         t
+    }
+
+    #[test]
+    fn rollover_consumes_the_planned_queue_front_first() {
+        let mut state = ProjectState {
+            tickets: vec![feature("F001"), feature("F002"), feature("F003")],
+            ..ProjectState::default()
+        };
+        let id1 = queue_sprint(
+            &mut state,
+            "harden auth",
+            vec![TicketId::new("F002").expect("id")],
+            "po",
+        );
+        queue_sprint(&mut state, "polish UI", vec![], "po");
+        assert!(id1 > 0);
+        advance(&mut state, 1, SprintPolicy::Cycles(10));
+        let sp = state.sprint.as_ref().expect("sprint");
+        assert_eq!(sp.goal, "harden auth");
+        assert_eq!(sp.committed, vec![TicketId::new("F002").expect("id")]);
+        // The consumed plan is gone; the next one waits its turn.
+        assert_eq!(state.sprint_queue.len(), 1);
+        assert_eq!(state.sprint_queue[0].goal, "polish UI");
+    }
+
+    #[test]
+    fn an_empty_queue_leaves_rollover_exactly_as_before() {
+        let mut a = ProjectState {
+            tickets: vec![feature("F001"), feature("F002")],
+            ..ProjectState::default()
+        };
+        let mut b = a.clone();
+        advance(&mut a, 1, SprintPolicy::Cycles(10));
+        advance(&mut b, 1, SprintPolicy::Cycles(10));
+        let (sa, sb) = (a.sprint.expect("a"), b.sprint.expect("b"));
+        // started_at is a wall-clock stamp; everything meaningful must match.
+        assert_eq!((sa.number, &sa.goal, &sa.committed), (sb.number, &sb.goal, &sb.committed));
+    }
+
+    #[test]
+    fn a_plan_whose_tickets_all_shipped_falls_back_to_auto_commit() {
+        let mut state = ProjectState {
+            tickets: vec![feature("F001")],
+            ..ProjectState::default()
+        };
+        // Plan names a ticket that no longer exists by rollover time.
+        state.sprint_queue.push(crate::state::PlannedSprint {
+            id: 1,
+            goal: "ghost plan".to_owned(),
+            tickets: vec![TicketId::new("F999").expect("id")],
+            created_at: String::new(),
+            by: "po".to_owned(),
+        });
+        advance(&mut state, 1, SprintPolicy::Cycles(10));
+        let sp = state.sprint.as_ref().expect("sprint");
+        assert_eq!(sp.goal, "ghost plan");
+        // Fallback committed the real backlog instead of an empty scope.
+        assert_eq!(sp.committed, vec![TicketId::new("F001").expect("id")]);
+    }
+
+    #[test]
+    fn queued_sprint_scope_adds_dedupes_and_removes() {
+        let mut state = ProjectState {
+            tickets: vec![feature("F001"), feature("F002")],
+            ..ProjectState::default()
+        };
+        let id = queue_sprint(&mut state, "g", vec![], "user");
+        let f1 = TicketId::new("F001").expect("id");
+        let f2 = TicketId::new("F002").expect("id");
+        let ghost = TicketId::new("F999").expect("id");
+        assert!(scope_queued_sprint(&mut state, id, &[f1.clone(), f1.clone(), ghost], &[]));
+        assert_eq!(state.sprint_queue[0].tickets, vec![f1.clone()]);
+        assert!(scope_queued_sprint(&mut state, id, &[f2.clone()], &[f1]));
+        assert_eq!(state.sprint_queue[0].tickets, vec![f2]);
+        assert!(!scope_queued_sprint(&mut state, 999, &[], &[]));
+        assert!(delete_queued_sprint(&mut state, id));
+        assert!(state.sprint_queue.is_empty());
     }
 
     #[test]

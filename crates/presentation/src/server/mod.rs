@@ -741,6 +741,9 @@ pub async fn serve_full(
         .route("/api/projects/:pid/control/:action", post(control_ep))
         .route("/api/projects/:pid/sprint/goal", post(set_sprint_goal_ep))
         .route("/api/projects/:pid/sprint/close", post(sprint_close_ep))
+        .route("/api/projects/:pid/sprint-queue", post(queue_sprint_ep))
+        .route("/api/projects/:pid/sprint-queue/:qid/scope", post(queue_scope_ep))
+        .route("/api/projects/:pid/sprint-queue/:qid", axum::routing::delete(queue_delete_ep))
         .route("/api/projects/:pid/sprint/:action", post(sprint_scope_ep))
         .route("/api/projects/:pid/digest", post(digest_ep))
         .route("/api/projects/:pid/merge-sweep", post(merge_sweep_ep))
@@ -1083,6 +1086,23 @@ struct SprintGoalReq {
 #[derive(serde::Deserialize)]
 struct SprintScopeReq {
     tickets: Vec<String>,
+}
+
+/// A sprint queued to run after the current one (goal + optional ticket picks).
+#[derive(serde::Deserialize)]
+struct QueueSprintReq {
+    goal: String,
+    #[serde(default)]
+    tickets: Vec<String>,
+}
+
+/// Ticket adds/removes on one queued sprint.
+#[derive(serde::Deserialize)]
+struct QueueScopeReq {
+    #[serde(default)]
+    add: Vec<String>,
+    #[serde(default)]
+    remove: Vec<String>,
 }
 
 #[derive(serde::Deserialize)]

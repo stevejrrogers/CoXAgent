@@ -92,6 +92,10 @@ pub struct ProjectState {
     pub sprint: Option<Sprint>,
     #[serde(default)]
     pub sprints: Vec<SprintRecord>,
+    /// Upcoming sprints prepared ahead of time, consumed front-first at
+    /// rollover. See [`PlannedSprint`].
+    #[serde(default)]
+    pub sprint_queue: Vec<PlannedSprint>,
     #[serde(default)]
     pub deploy: Option<DeployStatus>,
     /// Discussion threads: per-ticket and team-channel comments.
@@ -416,6 +420,7 @@ impl Default for ProjectState {
             spend: Spend::default(),
             sprint: None,
             sprints: Vec::new(),
+            sprint_queue: Vec::new(),
             deploy: None,
             comments: Vec::new(),
             reviews: Vec::new(),
