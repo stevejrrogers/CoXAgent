@@ -63,6 +63,13 @@ pub(super) async fn ticket_detail_ep(
                 // Cost-gate surface: the hold estimate (if any) and whether a
                 // human already approved this ticket to run.
                 if let Some(obj) = v.as_object_mut() {
+                    // Test-to-AC traceability (CXA-F024): the Test Coverage tab
+                    // renders straight from the aggregate's computed matrix —
+                    // the status logic stays in the domain, not in the view.
+                    obj.insert(
+                        "coverage_matrix".into(),
+                        serde_json::to_value(t.coverage_matrix()).unwrap_or_default(),
+                    );
                     if let Some(est) = state.cost_holds.get(&id) {
                         obj.insert("cost_hold".into(), serde_json::json!(est));
                     }
