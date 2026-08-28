@@ -447,7 +447,7 @@ function card(t){const a={high:"var(--red)",medium:"var(--amber)",low:"var(--dim
   const ui=t.has_ui?'<span class="b ui">UI</span>':'',bug=t.type==="bug"?'<span class="b bug">bug</span>':'';
   // A human-assigned ticket is out of the agent pool — say WHO owns it.
   const who=t.assignee?`<span class="b" style="background:var(--accentbg);color:var(--accent2)"><i class="ti ti-user" style="font-size:10px"></i> @${esc(t.assignee)}</span>`:'';
-  const hold=t.status==="on_hold"?`<span class="b" style="background:color-mix(in srgb,var(--amber) 18%,transparent);color:var(--amber)"><i class="ti ti-player-pause" style="font-size:10px"></i> on hold</span>`:'';
+  const hold=t.status==="on_hold"?`<span class="b" style="background:color-mix(in srgb,var(--amber) 18%,transparent);color:var(--amber)" title="${esc((STATE.hold_reasons||{})[t.id]||'on hold')}"><i class="ti ti-player-pause" style="font-size:10px"></i> on hold</span>`:'';
   return `<div class="card-t" onclick="showTicket('${t.id}')" ${t.status==="on_hold"?'style="opacity:.65"':''}><div class="cid">${esc(t.id)}</div>
     <div class="ct">${esc(t.title)}</div><div class="badges"><span class="b ${t.priority}">${t.priority}</span>${hold}${ui}${bug}${who}</div></div>`;}
 function column([k,l,c],ts){const items=ts.filter(t=>t.status===k);
@@ -542,7 +542,16 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
         statusHtml=`<div class="ag-now"><i class="ti ti-loader-2 att-spin"></i> working now${runners.length>1?`<span class="ag-nteams">${runners.length} teams</span>`:''}</div>
           <div class="ag-runs">${rows}</div>`;
       }else{
-        statusHtml=`<div class="ag-last"><i class="ti ti-point"></i> ${cur?'last touched':'idle'}${lastOp?` · <span class="ag-by" title="${esc(lastOp)}"><i class="ti ti-user-cog"></i> ${esc(workerLabel(lastOp,[lastOp]))}</span>`:''}</div>
+        // Say WHY it idles, not just that it does — the difference between
+        // "nothing scoped for DEV" and "engine down" is the whole diagnosis.
+        let idleWhy='';
+        if(!cur){
+          const scoped=((s.sprint&&s.sprint.committed)||[]).map(id=>((s.tickets||[]).find(x=>x.id===id)||{}));
+          if(r.startsWith('DEV')&&!scoped.some(t=>["ready","open"].includes(t.status)))idleWhy=' — no scoped work';
+          else if(s.ops_down)idleWhy=' — ops down';
+          else idleWhy=' — waiting for its phase';
+        }
+        statusHtml=`<div class="ag-last"><i class="ti ti-point"></i> ${cur?'last touched':'idle'+idleWhy}${lastOp?` · <span class="ag-by" title="${esc(lastOp)}"><i class="ti ti-user-cog"></i> ${esc(workerLabel(lastOp,[lastOp]))}</span>`:''}</div>
           ${cur?taskChip('',cur,'idle'):''}`;
       }
       // Which engine CLI this role is really on — copilot/opencode/claude/… —

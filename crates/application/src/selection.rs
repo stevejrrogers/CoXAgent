@@ -42,6 +42,47 @@ pub fn next_open_bug(state: &ProjectState) -> Option<TicketId> {
     open_bug_candidates(state).into_iter().next()
 }
 
+/// The next feature work: the first still-actionable (Pending/Ready)
+/// feature/chore in backlog order — what a burn-down sprint is clearing the
+/// road for. Bugs behind it in the backlog neither block nor gate it.
+#[must_use]
+pub fn next_feature_work(state: &ProjectState) -> Option<TicketId> {
+    state
+        .tickets
+        .iter()
+        .find(|t| {
+            matches!(t.ticket_type(), TicketType::Feature | TicketType::Chore)
+                && matches!(t.status(), Status::Pending | Status::Ready)
+        })
+        .map(|t| t.id().clone())
+}
+
+/// The burn-down scope (CXA-F030): every OPEN bug that blocks the next
+/// feature work (the feature's `depends_on` names it) or precedes it in the
+/// backlog. These bugs stand between the team and its next feature, so a
+/// sprint opened over them commits the scope IN FULL — never capacity-capped
+/// (see `sprint::open_backlog`).
+#[must_use]
+pub fn burn_down_scope(state: &ProjectState) -> Vec<TicketId> {
+    let Some(feature) = next_feature_work(state) else {
+        return Vec::new();
+    };
+    let feature_pos = state.tickets.iter().position(|t| t.id() == &feature);
+    let feature_deps = state.ticket(&feature).map(Ticket::depends_on);
+    state
+        .tickets
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.ticket_type() == TicketType::Bug && t.status() == Status::Open)
+        .filter(|(pos, t)| {
+            let blocks = feature_deps.is_some_and(|deps| deps.contains(t.id()));
+            let precedes = feature_pos.is_some_and(|fp| *pos < fp);
+            blocks || precedes
+        })
+        .map(|(_, t)| t.id().clone())
+        .collect()
+}
+
 /// `pending` feature/chore tickets still missing a technical design (SA queue).
 #[must_use]
 pub fn design_candidates(state: &ProjectState) -> Vec<TicketId> {
@@ -110,11 +151,17 @@ pub fn next_ready_feature(state: &ProjectState) -> Option<TicketId> {
 
 /// A feature/chore is workable only when every dependency has reached `Done`
 /// (or beyond). Prevents handing out a ticket blocked by unfinished work.
+/// `Verified` counts too (CXA-F030): a fixed-and-verified bug is the
+/// burn-down's terminal state — the clean baseline it leaves releases the
+/// work it gated.
 fn deps_satisfied(state: &ProjectState, ticket: &Ticket) -> bool {
     ticket.depends_on().iter().all(|dep| {
-        state
-            .ticket(dep)
-            .is_some_and(|d| matches!(d.status(), Status::Done | Status::Documented))
+        state.ticket(dep).is_some_and(|d| {
+            matches!(
+                d.status(),
+                Status::Done | Status::Documented | Status::Verified
+            )
+        })
     })
 }
 
@@ -182,6 +229,45 @@ pub fn in_dev_scope(state: &ProjectState, id: &TicketId) -> bool {
     // Scrum mode: features/chores only get worked when the team committed
     // them to this sprint (PO/SM aligned via the sprint-board action).
     sprint.committed.contains(id)
+}
+
+/// Whether the HUMAN burn mode (CXA-F030) currently holds DEV-FEATURE: the
+/// mode is engaged and either no numeric exit gate was set — it then holds
+/// until a person switches it off — or the open-bug count is still above the
+/// target. The COUNT decides; priority order is irrelevant to the gate.
+#[must_use]
+pub fn burn_mode_holds(state: &ProjectState) -> bool {
+    state.tuning.burn_mode
+        && match state.tuning.burn_until_bugs_le {
+            Some(target) => {
+                let target = usize::try_from(target).unwrap_or(usize::MAX);
+                open_bug_candidates(state).len() > target
+            }
+            None => true,
+        }
+}
+
+/// Apply the burn mode's explicit exit gate to live state: an engaged mode
+/// whose open-bug count has reached its target clears itself, so the
+/// burn-down sprint ends without waiting for a person. Returns whether the
+/// state changed — the caller persists it through the store.
+pub fn clear_burn_mode_if_gate_met(state: &mut ProjectState) -> bool {
+    if state.tuning.burn_mode && !burn_mode_holds(state) {
+        state.tuning.burn_mode = false;
+        true
+    } else {
+        false
+    }
+}
+
+/// DEV-FEATURE's pause for one cycle: the reactive `bugs_first` brake and the
+/// human burn mode hold independently — either one pauses features. Both
+/// share the deadlock valve: a cycle whose bug slot produced nothing
+/// (`bug_slot_worked == false`) never holds features, however loud the
+/// brakes — the 50-cycle both-lanes-starved lesson from the reactive brake.
+#[must_use]
+pub fn dev_feature_paused(state: &ProjectState, bug_slot_worked: bool) -> bool {
+    (state.tuning.bugs_first || burn_mode_holds(state)) && bug_slot_worked
 }
 
 #[cfg(test)]
@@ -479,5 +565,129 @@ mod tests {
             &state,
             &TicketId::new("CXA-F001").expect("id")
         ));
+    }
+
+    // --- CXA-F030: the human burn mode and the burn-down scope ---
+
+    fn tuning(burn_mode: bool, target: Option<u32>, bugs_first: bool) -> crate::state::Tuning {
+        crate::state::Tuning {
+            burn_mode,
+            burn_until_bugs_le: target,
+            bugs_first,
+            ..crate::state::Tuning::default()
+        }
+    }
+
+    fn state_with(t: crate::state::Tuning, bugs: &[&str]) -> ProjectState {
+        ProjectState {
+            tuning: t,
+            tickets: bugs.iter().map(|id| open_bug(id)).collect(),
+            ..ProjectState::default()
+        }
+    }
+
+    #[test]
+    fn burn_mode_exits_once_the_open_bug_count_reaches_its_target() {
+        // The gate is the COUNT: even HIGH-priority open bugs at or below the
+        // target release feature work.
+        let mut s = state_with(tuning(true, Some(2), false), &["B001", "B002"]);
+        assert!(!burn_mode_holds(&s), "count == target: the gate is met");
+        assert!(clear_burn_mode_if_gate_met(&mut s), "a met gate clears");
+        assert!(!s.tuning.burn_mode, "exit means the mode is off");
+        assert!(!clear_burn_mode_if_gate_met(&mut s), "idempotent");
+    }
+
+    #[test]
+    fn burn_mode_holds_features_while_open_bugs_exceed_the_target() {
+        let mut s = state_with(tuning(true, Some(1), false), &["B001", "B002", "B003"]);
+        assert!(burn_mode_holds(&s));
+        assert!(
+            !clear_burn_mode_if_gate_met(&mut s),
+            "an unmet gate never clears the mode"
+        );
+        assert!(s.tuning.burn_mode);
+    }
+
+    #[test]
+    fn burn_mode_without_a_numeric_gate_holds_until_a_person_disables_it() {
+        let mut s = state_with(tuning(true, None, false), &[]);
+        assert!(burn_mode_holds(&s));
+        assert!(!clear_burn_mode_if_gate_met(&mut s));
+    }
+
+    #[test]
+    fn reactive_bugs_first_pauses_independently_of_the_explicit_mode() {
+        // The reactive brake alone holds features…
+        let s = state_with(tuning(false, None, true), &[]);
+        assert!(dev_feature_paused(&s, true));
+        // …and the explicit mode is inert while switched off.
+        assert!(!burn_mode_holds(&s));
+        // A burn-mode exit never touches the reactive brake: clearing only
+        // rewrites `burn_mode`.
+        let mut both = state_with(tuning(true, Some(0), true), &[]);
+        assert!(clear_burn_mode_if_gate_met(&mut both));
+        assert!(both.tuning.bugs_first, "reactive brake survives the exit");
+    }
+
+    #[test]
+    fn the_two_brakes_hold_features_with_or_semantics() {
+        let burn_only = state_with(tuning(true, Some(1), false), &["B001", "B002"]);
+        assert!(dev_feature_paused(&burn_only, true));
+        let reactive_only = state_with(tuning(false, None, true), &[]);
+        assert!(dev_feature_paused(&reactive_only, true));
+        let neither = state_with(tuning(false, None, false), &[]);
+        assert!(!dev_feature_paused(&neither, true));
+        // The shared deadlock valve: a cycle whose bug slot produced nothing
+        // never holds features, whatever the brakes say.
+        let both = state_with(tuning(true, Some(0), true), &["B001"]);
+        assert!(!dev_feature_paused(&both, false));
+        assert!(dev_feature_paused(&both, true));
+    }
+
+    #[test]
+    fn burn_down_scope_covers_blockers_and_bugs_preceding_the_next_feature() {
+        let mut blocked = ready_feature("F002", Priority::High);
+        blocked
+            .add_dependency(Role::Sa, TicketId::new("B001").expect("id"))
+            .expect("dep");
+        let state = ProjectState {
+            // B001 blocks F002 (its dep); B002 precedes it in the backlog;
+            // B003 sits after the feature and blocks nothing — out of scope.
+            tickets: vec![
+                open_bug("B001"),
+                open_bug("B002"),
+                blocked,
+                open_bug("B003"),
+            ],
+            ..ProjectState::default()
+        };
+        let scope = burn_down_scope(&state);
+        assert!(scope.contains(&TicketId::new("B001").expect("id")));
+        assert!(scope.contains(&TicketId::new("B002").expect("id")));
+        assert!(!scope.contains(&TicketId::new("B003").expect("id")));
+        // …and with no actionable feature work there is no scope at all.
+        let empty = ProjectState {
+            tickets: vec![open_bug("B001")],
+            ..ProjectState::default()
+        };
+        assert!(burn_down_scope(&empty).is_empty());
+    }
+
+    #[test]
+    fn a_blocking_bug_behind_the_feature_is_still_in_scope() {
+        let mut feature = ready_feature("F001", Priority::High);
+        feature
+            .add_dependency(Role::Sa, TicketId::new("B009").expect("id"))
+            .expect("dep");
+        let state = ProjectState {
+            // B009 does not precede F001, but the feature depends on it.
+            tickets: vec![feature, open_bug("B009")],
+            ..ProjectState::default()
+        };
+        let scope = burn_down_scope(&state);
+        assert!(
+            scope.contains(&TicketId::new("B009").expect("id")),
+            "a dependency blocks the next feature work wherever it sits"
+        );
     }
 }

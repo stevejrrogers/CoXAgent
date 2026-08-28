@@ -294,7 +294,11 @@ function renderBacklogPanel(s){
     <div class="spq-head"><span class="spq-ord">#${i+1} up next</span><span class="spq-goal">${esc(q.goal)}</span>
       <span class="spq-n">${(q.tickets||[]).length} ticket${(q.tickets||[]).length===1?"":"s"}</span>
       ${q.by?`<span class="spq-by" title="planned by">${esc(q.by)}</span>`:""}
-      <button class="sp-scope" style="margin-left:auto" onclick="spqDelete(${q.id})" title="Drop this planned sprint">✕ plan</button></div>
+      <span style="margin-left:auto;display:flex;gap:4px">
+        <button class="sp-scope" onclick="spqMove(${q.id},'up')" title="Run earlier" ${i===0?'disabled style="opacity:.35"':''}>↑</button>
+        <button class="sp-scope" onclick="spqMove(${q.id},'down')" title="Run later" ${i===queue.length-1?'disabled style="opacity:.35"':''}>↓</button>
+        <button class="sp-scope" onclick="spqRename(${q.id},'${esc(q.goal).replace(/'/g,"\\'")}')" title="Rename the goal"><i class="ti ti-pencil"></i></button>
+        <button class="sp-scope" onclick="spqDelete(${q.id})" title="Drop this planned sprint">✕ plan</button></span></div>
     <div class="spq-tk">${(q.tickets||[]).map(id=>{const t=byId(id);const col=t?(pc[t.priority]||"var(--muted)"):"var(--muted)";
       return `<span class="spq-chip" style="border-color:${col}55" onclick="showTicket('${esc(id)}')">${esc(id)}<i class="ti ti-x" onclick="event.stopPropagation();spqScope(${q.id},null,'${esc(id)}')" title="remove"></i></span>`;}).join("")||'<span class="empty" style="padding:4px">no tickets yet — drag from the backlog below</span>'}</div>
   </div>`).join("");
@@ -340,6 +344,23 @@ async function spqCreate(){
     const r=await fetch(api("/sprint-queue"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({goal:String(goal).trim(),tickets:[]})});
     if(!r.ok){toasty((await r.text())||"Could not queue the sprint","err");return;}
     toasty("Sprint queued — drag tickets into it");
+    await refreshDisc();
+  }catch(e){toasty("Network error","err");}
+}
+async function spqMove(qid,dir){
+  try{
+    const r=await fetch(api("/sprint-queue/"+qid+"/move/"+dir),{method:"POST"});
+    if(!r.ok){toasty((await r.text())||"Move failed","err");return;}
+    await refreshDisc();
+  }catch(e){toasty("Network error","err");}
+}
+async function spqRename(qid,cur){
+  const goal=await coxModal({title:"Rename planned sprint",message:"New goal for this plan.",input:{placeholder:"goal",value:cur},confirmText:"Rename"});
+  if(!goal||!String(goal).trim())return;
+  try{
+    const r=await fetch(api("/sprint-queue/"+qid+"/rename"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({goal:String(goal).trim()})});
+    if(!r.ok){toasty((await r.text())||"Rename failed","err");return;}
+    toasty("Plan renamed");
     await refreshDisc();
   }catch(e){toasty("Network error","err");}
 }

@@ -743,11 +743,26 @@ pub async fn serve_full(
         .route("/api/projects/:pid/audit", get(audit_ep))
         .route("/api/projects/:pid/config", get(get_config).put(put_config))
         .route("/api/projects/:pid/control/:action", post(control_ep))
+        .route("/api/projects/:pid/burn-mode", post(burn_mode_ep))
         .route("/api/projects/:pid/sprint/goal", post(set_sprint_goal_ep))
         .route("/api/projects/:pid/sprint/close", post(sprint_close_ep))
         .route("/api/projects/:pid/sprint-queue", post(queue_sprint_ep))
-        .route("/api/projects/:pid/sprint-queue/:qid/scope", post(queue_scope_ep))
-        .route("/api/projects/:pid/sprint-queue/:qid", axum::routing::delete(queue_delete_ep))
+        .route(
+            "/api/projects/:pid/sprint-queue/:qid/scope",
+            post(queue_scope_ep),
+        )
+        .route(
+            "/api/projects/:pid/sprint-queue/:qid/rename",
+            post(queue_rename_ep),
+        )
+        .route(
+            "/api/projects/:pid/sprint-queue/:qid/move/:dir",
+            post(queue_move_ep),
+        )
+        .route(
+            "/api/projects/:pid/sprint-queue/:qid",
+            axum::routing::delete(queue_delete_ep),
+        )
         .route("/api/projects/:pid/sprint/:action", post(sprint_scope_ep))
         .route("/api/projects/:pid/digest", post(digest_ep))
         .route("/api/projects/:pid/merge-sweep", post(merge_sweep_ep))
@@ -814,7 +829,10 @@ pub async fn serve_full(
         .route("/api/projects/:pid/ticket/:id", get(ticket_detail_ep))
         .route("/api/projects/:pid/ticket/:id/priority", post(set_priority))
         .route("/api/projects/:pid/ticket/:id/reject", post(reject_ticket))
-        .route("/api/projects/:pid/ticket/:id/status/:action", post(hold_ticket_ep))
+        .route(
+            "/api/projects/:pid/ticket/:id/status/:action",
+            post(hold_ticket_ep),
+        )
         .route(
             "/api/projects/:pid/ticket/:id/approve-cost",
             post(approve_cost),
@@ -1087,10 +1105,27 @@ struct SprintGoalReq {
     goal: String,
 }
 
+/// Turn the human burn mode (CXA-F030) on/off and set its numeric exit gate.
+#[derive(serde::Deserialize)]
+struct BurnModeReq {
+    enabled: bool,
+    /// Clear the mode by itself once the open-bug count reaches this;
+    /// `null` keeps it on until switched off by hand.
+    #[serde(default)]
+    target: Option<u32>,
+}
+
 /// Which tickets to pull into (or drop from) the running sprint.
 #[derive(serde::Deserialize)]
 struct SprintScopeReq {
     tickets: Vec<String>,
+}
+
+/// Why a ticket is being put on hold.
+#[derive(serde::Deserialize)]
+struct HoldReq {
+    #[serde(default)]
+    reason: String,
 }
 
 /// A sprint queued to run after the current one (goal + optional ticket picks).

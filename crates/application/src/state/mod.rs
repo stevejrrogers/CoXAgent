@@ -96,6 +96,10 @@ pub struct ProjectState {
     /// rollover. See [`PlannedSprint`].
     #[serde(default)]
     pub sprint_queue: Vec<PlannedSprint>,
+    /// Why each on-hold ticket is parked (ticket id → reason). Written on
+    /// hold (human or the auto-hold sweep), cleared on resume.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub hold_reasons: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub deploy: Option<DeployStatus>,
     /// Discussion threads: per-ticket and team-channel comments.
@@ -444,6 +448,7 @@ impl Default for ProjectState {
             sprint: None,
             sprints: Vec::new(),
             sprint_queue: Vec::new(),
+            hold_reasons: std::collections::BTreeMap::new(),
             deploy: None,
             comments: Vec::new(),
             reviews: Vec::new(),

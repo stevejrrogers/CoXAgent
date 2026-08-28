@@ -103,6 +103,16 @@ pub(super) async fn inbox_ep(
             }));
             continue;
         }
+        // On hold: parked on an outside blocker — the resume decision is a
+        // person's, so it lives in the inbox instead of only a board filter.
+        if t.status() == coxagent_domain::Status::OnHold {
+            items.push(serde_json::json!({
+                "kind": "on_hold", "ticket": id, "title": t.title(),
+                "reason": state.hold_reasons.get(&id).cloned().unwrap_or_default(),
+                "role": "PO", "can_act": my_role.can_approve_ready(),
+            }));
+            continue;
+        }
         // Exception tickets routed to me.
         if t.assignee() == Some(me.as_str()) {
             items.push(serde_json::json!({

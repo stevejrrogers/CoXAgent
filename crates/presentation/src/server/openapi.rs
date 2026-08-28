@@ -130,6 +130,7 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/attachment", &["get"]),
     route("/api/projects/:pid/audit", &["get"]),
     route("/api/projects/:pid/ba-analyze", &["post"]),
+    route("/api/projects/:pid/burn-mode", &["post"]),
     route("/api/projects/:pid/channels", &["get", "post"]),
     route("/api/projects/:pid/channels/:cid/invite", &["post"]),
     route(
@@ -186,6 +187,8 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/ticket/:id/status/:action", &["post"]),
     route("/api/projects/:pid/sprint-queue", &["post"]),
     route("/api/projects/:pid/sprint-queue/:qid/scope", &["post"]),
+    route("/api/projects/:pid/sprint-queue/:qid/rename", &["post"]),
+    route("/api/projects/:pid/sprint-queue/:qid/move/:dir", &["post"]),
     route("/api/projects/:pid/sprint-queue/:qid", &["delete"]),
     route("/api/projects/:pid/standup", &["post"]),
     route("/api/projects/:pid/state", &["get"]),

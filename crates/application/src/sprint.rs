@@ -160,17 +160,15 @@ fn roll_over(
                 .tickets
                 .iter()
                 .filter(|id| {
-                    state
-                        .ticket(id)
-                        .is_some_and(|t| {
-                            !matches!(
-                                t.status(),
-                                Status::Documented
-                                    | Status::Verified
-                                    | Status::Rejected
-                                    | Status::OnHold
-                            )
-                        })
+                    state.ticket(id).is_some_and(|t| {
+                        !matches!(
+                            t.status(),
+                            Status::Documented
+                                | Status::Verified
+                                | Status::Rejected
+                                | Status::OnHold
+                        )
+                    })
                 })
                 .cloned()
                 .collect();
@@ -342,6 +340,12 @@ fn open_backlog(state: &ProjectState, bug_burn_floor: Option<Priority>) -> Vec<T
     {
         picked.push(ready);
     }
+    // Burn-down scope (CXA-F030): every open bug that blocks or precedes the
+    // next feature work IS the sprint's job — committed in full, never
+    // capacity-capped. Capping it is how a burn-down sprint ships with its
+    // own blockers still uncommitted. Disjoint from the seat above (scope is
+    // bugs, the seat is a feature/chore), so nothing dedupes here.
+    picked.extend(crate::selection::burn_down_scope(state));
     // Open bugs get the next seats, but only within remaining capacity — the
     // reserved feature slot above is never displaced by bug pressure. Bugs
     // below the burn floor are skipped: parked, not committed.
@@ -354,10 +358,15 @@ fn open_backlog(state: &ProjectState, bug_burn_floor: Option<Priority>) -> Vec<T
         if bug_budget == 0 {
             break;
         }
+        if picked.contains(t.id()) {
+            continue;
+        }
         picked.push(t.id().clone());
         bug_budget -= 1;
     }
     // Remaining capacity: the rest of the actionable features/chores.
+    let seats = cap.saturating_sub(picked.len());
+    let already_picked: std::collections::BTreeSet<TicketId> = picked.iter().cloned().collect();
     picked.extend(
         state
             .tickets
@@ -368,8 +377,9 @@ fn open_backlog(state: &ProjectState, bug_burn_floor: Option<Priority>) -> Vec<T
                         t.status(),
                         Status::Done | Status::Documented | Status::Rejected
                     )
+                    && !already_picked.contains(t.id())
             })
-            .take(cap.saturating_sub(picked.len()))
+            .take(seats)
             .map(|t| t.id().clone()),
     );
     picked
@@ -411,16 +421,9 @@ pub fn done_count(state: &ProjectState) -> usize {
         .count()
 }
 
-
 /// Queue a sprint to run after the current one. Returns the new plan's id.
 pub fn queue_sprint(state: &mut ProjectState, goal: &str, tickets: Vec<TicketId>, by: &str) -> u64 {
-    let id = state
-        .sprint_queue
-        .iter()
-        .map(|p| p.id)
-        .max()
-        .unwrap_or(0)
-        + 1;
+    let id = state.sprint_queue.iter().map(|p| p.id).max().unwrap_or(0) + 1;
     // Only tickets that exist can be planned; duplicates collapse.
     let mut seen = std::collections::BTreeSet::new();
     let tickets: Vec<TicketId> = tickets
@@ -469,7 +472,6 @@ pub fn delete_queued_sprint(state: &mut ProjectState, id: u64) -> bool {
     state.sprint_queue.len() != before
 }
 
-
 /// The fail-attempt count at which a ticket stops being retried and is parked.
 pub const HOLD_AFTER_ATTEMPTS: u32 = 3;
 
@@ -507,6 +509,10 @@ pub fn auto_hold_exhausted(state: &mut ProjectState) -> Vec<TicketId> {
             if let Some(sp) = &mut state.sprint {
                 sp.committed.retain(|c| c != &id);
             }
+            state.hold_reasons.insert(
+                id.to_string(),
+                format!("auto-held after {HOLD_AFTER_ATTEMPTS} failed attempts"),
+            );
             state.log_activity(
                 "SYSTEM",
                 "auto-held after repeated failures — resume it from the ticket when unblocked",
@@ -522,21 +528,50 @@ pub fn auto_hold_exhausted(state: &mut ProjectState) -> Vec<TicketId> {
 /// without this, an auto-held ticket would be re-held on the next sweep.
 pub fn clear_fail_attempts(state: &mut ProjectState, id: &TicketId) {
     state.ticket_fail_attempts.remove(&id.to_string());
+    state.hold_reasons.remove(&id.to_string());
 }
 
+/// Rename a queued sprint's goal. Unknown id → `false`.
+pub fn rename_queued_sprint(state: &mut ProjectState, id: u64, goal: &str) -> bool {
+    let Some(p) = state.sprint_queue.iter_mut().find(|p| p.id == id) else {
+        return false;
+    };
+    p.goal = goal.trim().to_owned();
+    true
+}
+
+/// Move a queued sprint one slot up (`-1`) or down (`+1`) in run order.
+/// Unknown id or a move off either end → `false` (nothing changes).
+pub fn move_queued_sprint(state: &mut ProjectState, id: u64, delta: i64) -> bool {
+    let Some(i) = state.sprint_queue.iter().position(|p| p.id == id) else {
+        return false;
+    };
+    let j = i64::try_from(i).unwrap_or(i64::MAX) + delta;
+    if j < 0 || usize::try_from(j).unwrap_or(usize::MAX) >= state.sprint_queue.len() {
+        return false;
+    }
+    state.sprint_queue.swap(i, usize::try_from(j).unwrap_or(i));
+    true
+}
 
 /// The floor under a running sprint's actionable scope: when fewer than this
 /// many committed tickets are still workable (Ready feature/chore or Open
 /// bug), the top-up commits more from the backlog. Velocity-based capacity
 /// sizes the sprint at rollover; this keeps DEV fed BETWEEN rollovers, so
 /// finishing the scope early means more work, not an idle afternoon.
-pub const MIN_ACTIONABLE_SCOPE: usize = 4;
+pub const MIN_ACTIONABLE_SCOPE: usize = 4; // default for config dev_scope_floor
 
 /// Keep the running sprint's scope topped up to [`MIN_ACTIONABLE_SCOPE`].
 /// Pulls Ready features/chores first (priority order is the backlog's own),
 /// then Open bugs; anything OnHold/Rejected never qualifies. Returns how many
 /// tickets were committed.
-pub fn top_up_scope(state: &mut ProjectState) -> usize {
+pub fn top_up_scope(state: &mut ProjectState, floor: usize) -> usize {
+    if let Some(sprint) = &mut state.sprint {
+        // Concurrent refill/top-up races have produced doubles; keep the
+        // committed list a set whatever the interleaving was.
+        let mut seen = std::collections::BTreeSet::new();
+        sprint.committed.retain(|id| seen.insert(id.clone()));
+    }
     let Some(sprint) = &state.sprint else {
         return 0;
     };
@@ -549,14 +584,13 @@ pub fn top_up_scope(state: &mut ProjectState) -> usize {
         .tickets
         .iter()
         .filter(|t| {
-            committed.contains(t.id())
-                && matches!(t.status(), Status::Ready | Status::Open)
+            committed.contains(t.id()) && matches!(t.status(), Status::Ready | Status::Open)
         })
         .count();
-    if actionable >= MIN_ACTIONABLE_SCOPE {
+    if actionable >= floor {
         return 0;
     }
-    let want = MIN_ACTIONABLE_SCOPE - actionable;
+    let want = floor - actionable;
     let picks: Vec<TicketId> = state
         .tickets
         .iter()
@@ -664,7 +698,10 @@ mod tests {
         advance(&mut b, 1, SprintPolicy::cycles(10));
         let (sa, sb) = (a.sprint.expect("a"), b.sprint.expect("b"));
         // started_at is a wall-clock stamp; everything meaningful must match.
-        assert_eq!((sa.number, &sa.goal, &sa.committed), (sb.number, &sb.goal, &sb.committed));
+        assert_eq!(
+            (sa.number, &sa.goal, &sa.committed),
+            (sb.number, &sb.goal, &sb.committed)
+        );
     }
 
     #[test]
@@ -698,7 +735,12 @@ mod tests {
         let f1 = TicketId::new("F001").expect("id");
         let f2 = TicketId::new("F002").expect("id");
         let ghost = TicketId::new("F999").expect("id");
-        assert!(scope_queued_sprint(&mut state, id, &[f1.clone(), f1.clone(), ghost], &[]));
+        assert!(scope_queued_sprint(
+            &mut state,
+            id,
+            &[f1.clone(), f1.clone(), ghost],
+            &[]
+        ));
         assert_eq!(state.sprint_queue[0].tickets, vec![f1.clone()]);
         assert!(scope_queued_sprint(
             &mut state,
@@ -729,7 +771,9 @@ mod tests {
             .contains(&TicketId::new("B001").expect("id")));
         let held = auto_hold_exhausted(&mut state);
         assert_eq!(held, vec![TicketId::new("B001").expect("id")]);
-        let b = state.ticket(&TicketId::new("B001").expect("id")).expect("t");
+        let b = state
+            .ticket(&TicketId::new("B001").expect("id"))
+            .expect("t");
         assert_eq!(b.status(), Status::OnHold);
         // Out of the running sprint; the 2-attempt ticket is untouched.
         assert!(!state
@@ -772,13 +816,13 @@ mod tests {
             .expect("t")
             .transition_to(coxagent_domain::Role::User, Status::OnHold)
             .expect("hold");
-        let n = top_up_scope(&mut state);
+        let n = top_up_scope(&mut state, 4);
         assert_eq!(n, 3);
         let committed = &state.sprint.as_ref().expect("sprint").committed;
         assert_eq!(committed.len(), 4);
         assert!(!committed.contains(&TicketId::new("F005").expect("id")));
         // Already at the floor: a second call is a no-op.
-        assert_eq!(top_up_scope(&mut state), 0);
+        assert_eq!(top_up_scope(&mut state, 4), 0);
     }
 
     #[test]
@@ -961,7 +1005,7 @@ mod tests {
         });
         // Below the MIN_ACTIONABLE_SCOPE floor the top-up would normally pull
         // the open bug in — under the burn floor it must stay parked.
-        assert_eq!(top_up_scope(&mut state), 0);
+        assert_eq!(top_up_scope(&mut state, MIN_ACTIONABLE_SCOPE), 0);
         assert!(!state
             .sprint
             .as_ref()

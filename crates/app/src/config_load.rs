@@ -374,7 +374,8 @@ mod tests {
     fn an_out_of_range_host_port_fails_the_load_and_the_file_survives() {
         let (_dir, state) = workspace("70000");
 
-        let msg = load_config_with_probe(&state).expect_err("70000 is outside u16");
+        let msg =
+            load_config_with_probe(&state).expect_err("a port outside u16 must fail the load");
 
         assert!(msg.contains("coxagent.json"), "{msg}");
         assert!(msg.contains("deploy.host_port"), "{msg}");
@@ -396,8 +397,7 @@ mod tests {
         let LoadedConfig {
             config,
             host_port_probe,
-        } = load_config_with_probe(&state)
-            .expect("an explicit null host_port must not be a config error");
+        } = load_config_with_probe(&state).expect("an explicit null host_port must not be a config error");
 
         let healed = config.deploy.host_port.expect("a port must be assigned");
         assert_eq!(

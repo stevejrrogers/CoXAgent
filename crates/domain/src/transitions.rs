@@ -9,7 +9,9 @@ use crate::kinds::{Role, Status, TicketType};
 /// Is `from -> to` a legal edge for this ticket type?
 #[must_use]
 pub fn transition_allowed(ticket_type: TicketType, from: Status, to: Status) -> bool {
-    use Status::{Documented, Done, Fixed, InProgress, OnHold, Open, Pending, Ready, Rejected, Verified};
+    use Status::{
+        Documented, Done, Fixed, InProgress, OnHold, Open, Pending, Ready, Rejected, Verified,
+    };
     match ticket_type {
         TicketType::Feature | TicketType::Chore => matches!(
             (from, to),
@@ -40,20 +42,12 @@ pub fn transition_allowed(ticket_type: TicketType, from: Status, to: Status) -> 
             // failed, the ticket bounced back into the queue, and a
             // not-reproducible bug burned a fresh full investigation every
             // sprint (the CXA-B002/B003/B004 loop).
-            // Open -> Rejected = filed in error / duplicate caught before work.
-            // InProgress -> Rejected = the automated not-reproducible close: a
-            // bug pass that ends with no reproduction on a green tree (or is a
-            // duplicate already fixed under another ticket) must be able to
-            // CLOSE instead of re-queue. Historically that mid-work close did
-            // not exist, so the phantom-bug guard's System Rejected transition
-            // failed, the ticket bounced back into the queue, and a
-            // not-reproducible bug burned a fresh full investigation every
-            // sprint (the CXA-B002/B003/B004 loop).
-            // Open -> OnHold = parked while blocked on the outside world.
             (Open, InProgress | Rejected | OnHold)
                 | (InProgress, Fixed | Rejected)
                 | (Fixed, Verified | Open) // Fixed -> Open = reopen after failed regression
-                | (OnHold, Open | Rejected),
+                // On hold: parked while blocked on the outside world; resume
+                // (or reject) once the outside blocker is gone.
+                | (OnHold, Open | Rejected)
         ),
     }
 }
@@ -64,7 +58,9 @@ pub fn transition_allowed(ticket_type: TicketType, from: Status, to: Status) -> 
 /// and is always allowed for legal edges. `User` acts as a super-PO.
 #[must_use]
 pub fn can_transition(actor: Role, from: Status, to: Status) -> bool {
-    use Status::{Documented, Done, Fixed, InProgress, OnHold, Open, Pending, Ready, Rejected, Verified};
+    use Status::{
+        Documented, Done, Fixed, InProgress, OnHold, Open, Pending, Ready, Rejected, Verified,
+    };
 
     if actor == Role::System {
         return true;
