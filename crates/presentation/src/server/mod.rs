@@ -810,6 +810,7 @@ pub async fn serve_full(
         .route("/api/projects/:pid/ticket/:id", get(ticket_detail_ep))
         .route("/api/projects/:pid/ticket/:id/priority", post(set_priority))
         .route("/api/projects/:pid/ticket/:id/reject", post(reject_ticket))
+        .route("/api/projects/:pid/ticket/:id/status/:action", post(hold_ticket_ep))
         .route(
             "/api/projects/:pid/ticket/:id/approve-cost",
             post(approve_cost),

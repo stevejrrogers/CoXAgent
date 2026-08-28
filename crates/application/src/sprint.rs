@@ -122,7 +122,15 @@ fn roll_over(state: &mut ProjectState, cycle: u64, length: u64) -> u32 {
                 .filter(|id| {
                     state
                         .ticket(id)
-                        .is_some_and(|t| !matches!(t.status(), Status::Documented | Status::Verified))
+                        .is_some_and(|t| {
+                            !matches!(
+                                t.status(),
+                                Status::Documented
+                                    | Status::Verified
+                                    | Status::Rejected
+                                    | Status::OnHold
+                            )
+                        })
                 })
                 .cloned()
                 .collect();

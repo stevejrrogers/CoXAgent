@@ -1,0 +1,8 @@
+/private/tmp/claude-501/-Users-luton-Projects-CoXAgent/b5b9960d-ac63-4c46-ab0f-65ffad9586a2/scratchpad/cox-sq/crates/app/target/debug/deps/deadpool_postgres-34282289a79caa58.d: /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/deadpool-postgres-0.14.1/src/lib.rs /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/deadpool-postgres-0.14.1/src/config.rs /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/deadpool-postgres-0.14.1/src/generic_client.rs /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/deadpool-postgres-0.14.1/src/../README.md
+
+/private/tmp/claude-501/-Users-luton-Projects-CoXAgent/b5b9960d-ac63-4c46-ab0f-65ffad9586a2/scratchpad/cox-sq/crates/app/target/debug/deps/libdeadpool_postgres-34282289a79caa58.rmeta: /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/deadpool-postgres-0.14.1/src/lib.rs /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/deadpool-postgres-0.14.1/src/config.rs /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/deadpool-postgres-0.14.1/src/generic_client.rs /Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/deadpool-postgres-0.14.1/src/../README.md
+
+/Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/deadpool-postgres-0.14.1/src/lib.rs:
+/Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/deadpool-postgres-0.14.1/src/config.rs:
+/Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/deadpool-postgres-0.14.1/src/generic_client.rs:
+/Users/luton/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/deadpool-postgres-0.14.1/src/../README.md:

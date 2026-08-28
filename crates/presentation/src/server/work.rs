@@ -813,6 +813,75 @@ pub(super) async fn sprint_scope_ep(
     }
 }
 
+/// Park a ticket (`on_hold`) or resume it. Holding is a person's process call
+/// for work blocked on the outside world (a billing account, a vendor): the
+/// ticket stays on the board but sprint auto-commit, refill and agent pickup
+/// all skip it — unlike Rejected, it comes back with one click.
+pub(super) async fn hold_ticket_ep(
+    State(app): State<AppState>,
+    Path((pid, id, action)): Path<(String, String, String)>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Ok(tid) = coxagent_domain::TicketId::new(id.clone()) else {
+        return (StatusCode::BAD_REQUEST, "bad id").into_response();
+    };
+    let holding = match action.as_str() {
+        "hold" => true,
+        "resume" => false,
+        _ => return (StatusCode::BAD_REQUEST, "action must be hold or resume").into_response(),
+    };
+    // Same qualification as reject: this is a person's gate decision.
+    let Some(me) = super::inbox::gate_principal(
+        &app,
+        &headers,
+        coxagent_application::AuthRole::can_approve_ready,
+    )
+    .await
+    else {
+        return (
+            StatusCode::FORBIDDEN,
+            "your role may not take this decision",
+        )
+            .into_response();
+    };
+    let mut err: Option<String> = None;
+    match coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        let Some(t) = s.tickets.iter_mut().find(|t| t.id() == &tid) else {
+            err = Some("no such ticket".to_owned());
+            return Ok(());
+        };
+        let to = if holding {
+            coxagent_domain::Status::OnHold
+        } else {
+            match t.ticket_type() {
+                coxagent_domain::TicketType::Bug => coxagent_domain::Status::Open,
+                _ => coxagent_domain::Status::Pending,
+            }
+        };
+        if let Err(e) = t.transition_to(coxagent_domain::Role::User, to) {
+            err = Some(e.to_string());
+            return Ok(());
+        }
+        s.log_activity(
+            &me,
+            if holding { "put on hold" } else { "resumed from hold" },
+            Some(tid.to_string()),
+        );
+        Ok(())
+    })
+    .await
+    {
+        Ok(()) => match err {
+            Some(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+            None => Json(serde_json::json!({ "ok": true })).into_response(),
+        },
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
 /// Queue a sprint to run after the current one. The queue is consumed
 /// front-first at roll-over: the plan's goal and ticket set become the next
 /// sprint's. Planning is additive — an empty queue changes nothing.

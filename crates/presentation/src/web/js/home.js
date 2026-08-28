@@ -268,8 +268,8 @@ function spBurndown(total,doneN,elapsed,len){
 function renderBacklogPanel(s){
   const el=document.getElementById("backlog-body");
   const rank={high:0,medium:1,low:2};
-  const items=(s.tickets||[]).filter(t=>["pending","ready","open"].includes(t.status))
-    .sort((a,b)=>(rank[a.priority]??3)-(rank[b.priority]??3));
+  const items=(s.tickets||[]).filter(t=>["pending","ready","open","on_hold"].includes(t.status))
+    .sort((a,b)=>(a.status==="on_hold")-(b.status==="on_hold")||(rank[a.priority]??3)-(rank[b.priority]??3));
   const committed=new Set((s.sprint&&s.sprint.committed)||[]);
   const pc={high:"var(--red)",medium:"var(--amber)",low:"var(--muted)"};
   const byId=id=>(s.tickets||[]).find(x=>x.id===id);
@@ -302,8 +302,8 @@ function renderBacklogPanel(s){
   const rows=items.map(t=>{const col=pc[t.priority]||"var(--muted)";const inSp=committed.has(t.id);
     return `<div class="act" draggable="true" ondragstart="spqDrag(event,'${esc(t.id)}')" onclick="showTicket('${t.id}')" style="cursor:pointer"><div class="ad" style="background:${col}22;color:${col}"><i class="ti ti-${t.type==='bug'?'bug':'bulb'}" style="font-size:13px"></i></div>
       <div class="atx"><span class="tk">${esc(t.id)}</span> ${esc(t.title)} <span class="fchip" style="padding:1px 8px;font-size:10px;border:none;background:${col}22;color:${col}">${esc(t.priority||'—')}</span>${inSp?' <span class="fchip" style="padding:1px 8px;font-size:10px;border:none;background:var(--accentbg);color:var(--accent2)">in sprint</span>':''}</div>
-      <button class="sp-scope" onclick="event.stopPropagation();sprintScope('${t.id}',${inSp?"false":"true"})" title="${inSp?'Drop from the running sprint':'Pull into the running sprint'}">${inSp?'− sprint':'+ sprint'}</button>
-      <span class="tm">${esc(t.status)}</span></div>`;}).join("");
+      ${t.status==="on_hold"?'':`<button class="sp-scope" onclick="event.stopPropagation();sprintScope('${t.id}',${inSp?"false":"true"})" title="${inSp?'Drop from the running sprint':'Pull into the running sprint'}">${inSp?'− sprint':'+ sprint'}</button>`}
+      <span class="tm"${t.status==="on_hold"?' style="color:var(--amber)"':''}>${t.status==="on_hold"?'on hold':esc(t.status)}</span></div>`;}).join("");
   el.innerHTML=`${activeHtml}${qHtml}
     <div style="display:flex;align-items:center;gap:10px;margin:14px 0 8px">
       <span class="sec" style="margin:0">Backlog</span>

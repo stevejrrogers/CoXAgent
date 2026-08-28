@@ -285,6 +285,7 @@ fn status_key(s: Status) -> &'static str {
         Status::Open => "open",
         Status::Fixed => "fixed",
         Status::Verified => "verified",
+        Status::OnHold => "on_hold",
     }
 }
 
