@@ -536,7 +536,7 @@ pub fn rename_queued_sprint(state: &mut ProjectState, id: u64, goal: &str) -> bo
     let Some(p) = state.sprint_queue.iter_mut().find(|p| p.id == id) else {
         return false;
     };
-    p.goal = goal.trim().to_owned();
+    goal.trim().clone_into(&mut p.goal);
     true
 }
 

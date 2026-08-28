@@ -117,7 +117,11 @@ async fn version_reports_the_revision_the_stale_write_guard_expects() {
     let resp = save_at(router.clone(), 0, &state).await;
     let status = resp.status();
     let body = body_text(resp).await;
-    assert_eq!(status, StatusCode::OK, "saving against revision 0 — got: {body}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "saving against revision 0 — got: {body}"
+    );
 
     let resp = post_store(router, "version", serde_json::json!({}), None, None).await;
     let revision = serde_json::from_str::<serde_json::Value>(&body_text(resp).await)
@@ -158,7 +162,11 @@ async fn stale_save_conflicts_and_the_newer_state_survives_a_fresh_retry() {
     let resp = save_at(router.clone(), 1, &theirs).await;
     let status = resp.status();
     let body = body_text(resp).await;
-    assert_eq!(status, StatusCode::OK, "concurrent writer @rev 1 — got: {body}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "concurrent writer @rev 1 — got: {body}"
+    );
 
     // Writer A still holds rev 1, but the store is at 2: a stale write must
     // conflict instead of silently clobbering B's update.
@@ -204,7 +212,11 @@ async fn stale_save_conflicts_and_the_newer_state_survives_a_fresh_retry() {
         "retry against the fresh revision must commit — got: {body}"
     );
     assert_eq!(
-        store.load().await.expect("reload after retry").current_version,
+        store
+            .load()
+            .await
+            .expect("reload after retry")
+            .current_version,
         coxagent_domain::SemVer::new(2, 2, 0),
         "the retried write must land"
     );

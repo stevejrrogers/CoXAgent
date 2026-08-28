@@ -66,9 +66,7 @@ impl AuthPort for StubAuth {
         match token {
             INSIDE_SESSION => Some(principal("alice", AuthRole::Admin, &[PID])),
             OUTSIDE_SESSION => Some(principal("mallory", AuthRole::Be, &[OTHER_PID])),
-            LEAD_ELSEWHERE_SESSION => {
-                Some(principal("morgan", AuthRole::Manager, &[OTHER_PID]))
-            }
+            LEAD_ELSEWHERE_SESSION => Some(principal("morgan", AuthRole::Manager, &[OTHER_PID])),
             _ => None,
         }
     }
@@ -232,7 +230,9 @@ impl StateStorePort for CountingStore {
         Ok(())
     }
 
-    async fn workers(&self) -> Result<Vec<coxagent_application::ports::outbound::WorkerEntry>, PortError> {
+    async fn workers(
+        &self,
+    ) -> Result<Vec<coxagent_application::ports::outbound::WorkerEntry>, PortError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(Vec::new())
     }
@@ -270,7 +270,10 @@ impl coxagent_application::ports::outbound::AgentEnginePort for UnusedEngine {
 
 /// One registered project (id [`PID`]) backed by `store`, in a hub whose auth
 /// is `auth`. Lives in a tempdir like every other hub fixture.
-pub(super) async fn app_with(auth: Option<Arc<dyn AuthPort>>, store: Arc<dyn StateStorePort>) -> AppState {
+pub(super) async fn app_with(
+    auth: Option<Arc<dyn AuthPort>>,
+    store: Arc<dyn StateStorePort>,
+) -> AppState {
     let dir = tempfile::tempdir().expect("tempdir");
     let work = tempfile::tempdir().expect("workdir");
     let handle = ProjectHandle {
@@ -306,10 +309,7 @@ pub(super) async fn app_with(auth: Option<Arc<dyn AuthPort>>, store: Arc<dyn Sta
 pub(super) fn deployed_router(state: AppState) -> Router {
     Router::new()
         .route("/api/projects/:pid/store", post(store_rpc::store_rpc_ep))
-        .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            auth_mw,
-        ))
+        .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth_mw))
         .with_state(state)
 }
 
@@ -322,10 +322,11 @@ pub(super) fn handler_router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// POST one store op with the given JSON `Args` body and optional
-/// `Authorization: <bearer>` / session cookie values.
-pub(super) async fn post_store(
+/// POST one store op against project `pid` with the given JSON `Args` body
+/// and optional `Authorization: <bearer>` / session cookie values.
+pub(super) async fn post_store_at(
     router: Router,
+    pid: &str,
     op: &str,
     args: serde_json::Value,
     authorization: Option<&str>,
@@ -333,7 +334,7 @@ pub(super) async fn post_store(
 ) -> axum::response::Response {
     let mut builder = Request::builder()
         .method("POST")
-        .uri(format!("/api/projects/{PID}/store?op={op}"))
+        .uri(format!("/api/projects/{pid}/store?op={op}"))
         .header(header::CONTENT_TYPE, "application/json");
     if let Some(value) = authorization {
         builder = builder.header(header::AUTHORIZATION, value);
@@ -349,6 +350,18 @@ pub(super) async fn post_store(
         )
         .await
         .expect("in-memory request")
+}
+
+/// POST one store op against the shared [`PID`] project — the shape every
+/// guard test but the unknown-project criterion needs.
+pub(super) async fn post_store(
+    router: Router,
+    op: &str,
+    args: serde_json::Value,
+    authorization: Option<&str>,
+    session: Option<&str>,
+) -> axum::response::Response {
+    post_store_at(router, PID, op, args, authorization, session).await
 }
 
 /// Drain a response body into text for assertions.
