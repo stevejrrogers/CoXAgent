@@ -952,6 +952,31 @@ fn build_engine(
             ""
         }
     );
+    // Provider catalogs drift: a saved `opencode` model can vanish upstream
+    // (bizbrain dropped DeepSeek-V4-Pro and every run failed with an opaque
+    // "Unexpected server error"). Compare what the config names against what
+    // `opencode models` offers RIGHT NOW and say so at boot, while an operator
+    // is still looking at the log — instead of the silent per-run failures.
+    {
+        use coxagent_application::config::EngineKind;
+        let offered = coxagent_infrastructure::engine::discover_opencode_models();
+        if !offered.is_empty() {
+            let check = |label: &str, choice: &coxagent_application::config::EngineChoice| {
+                if matches!(choice.engine, EngineKind::Opencode)
+                    && !offered.iter().any(|m| m == &choice.model)
+                {
+                    tracing::warn!(
+                        "{label} names opencode model '{}' which `opencode models` no longer offers — the provider may have removed it; its runs will fail until the config is updated",
+                        choice.model
+                    );
+                }
+            };
+            check("default engine", &config.engine.default);
+            for (role, choice) in &config.engine.per_role {
+                check(&format!("per-role engine for {role:?}"), choice);
+            }
+        }
+    }
     let router = RoutingEngine::new(default, per_role);
     let logged = TranscriptEngine::new(router, logs_dir);
     let meter: Meter = Arc::new(Mutex::new(Spend::default()));
