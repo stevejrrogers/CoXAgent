@@ -56,8 +56,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 );
                 state.post_comment("SM", &msg, None);
             }
-            let refilled =
-                crate::sprint::refill_empty_scope(&mut state) + crate::sprint::top_up_scope(&mut state);
+            let refilled = crate::sprint::refill_empty_scope(&mut state)
+                + crate::sprint::top_up_scope(&mut state);
             if refilled > 0 {
                 let msg = format!(
                     "📋 Sprint scope held no ready feature work while {refilled} \

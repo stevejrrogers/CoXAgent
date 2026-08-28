@@ -130,6 +130,7 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/attachment", &["get"]),
     route("/api/projects/:pid/audit", &["get"]),
     route("/api/projects/:pid/ba-analyze", &["post"]),
+    route("/api/projects/:pid/burn-mode", &["post"]),
     route("/api/projects/:pid/channels", &["get", "post"]),
     route("/api/projects/:pid/channels/:cid/invite", &["post"]),
     route(
