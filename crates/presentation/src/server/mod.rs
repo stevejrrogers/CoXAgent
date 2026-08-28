@@ -752,6 +752,14 @@ pub async fn serve_full(
             post(queue_scope_ep),
         )
         .route(
+            "/api/projects/:pid/sprint-queue/:qid/rename",
+            post(queue_rename_ep),
+        )
+        .route(
+            "/api/projects/:pid/sprint-queue/:qid/move/:dir",
+            post(queue_move_ep),
+        )
+        .route(
             "/api/projects/:pid/sprint-queue/:qid",
             axum::routing::delete(queue_delete_ep),
         )
@@ -1111,6 +1119,13 @@ struct BurnModeReq {
 #[derive(serde::Deserialize)]
 struct SprintScopeReq {
     tickets: Vec<String>,
+}
+
+/// Why a ticket is being put on hold.
+#[derive(serde::Deserialize)]
+struct HoldReq {
+    #[serde(default)]
+    reason: String,
 }
 
 /// A sprint queued to run after the current one (goal + optional ticket picks).

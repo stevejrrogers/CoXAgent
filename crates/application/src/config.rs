@@ -209,6 +209,12 @@ pub struct WorkflowConfig {
     /// Days per sprint when `sprint_unit` is `days`.
     #[serde(default = "default_sprint_days")]
     pub sprint_length_days: u64,
+    /// The floor under a running sprint's actionable scope: when fewer than
+    /// this many committed tickets are still workable, the mid-sprint top-up
+    /// commits more from the backlog. Raise it to keep more DEV work in
+    /// flight; 0 disables the top-up.
+    #[serde(default = "default_scope_floor")]
+    pub dev_scope_floor: usize,
     /// Ops/SRE monitor (default on): after a deploy, the leader pings the app on
     /// its published port each cycle and files a high-priority bug + alerts the
     /// chat if it went down — so the team also runs what it ships.
@@ -435,6 +441,10 @@ fn default_sprint_days() -> u64 {
     1
 }
 
+fn default_scope_floor() -> usize {
+    4
+}
+
 fn default_concurrency() -> u32 {
     1
 }
@@ -457,6 +467,7 @@ impl Default for WorkflowConfig {
     fn default() -> Self {
         Self {
             ba_every_n_cycles: 4,
+            dev_scope_floor: default_scope_floor(),
             feature_dev_enabled: true,
             ops_monitor: true,
             sleep_seconds: 30,
