@@ -487,7 +487,9 @@ async fn ac2_human_verify_path_records_regression_evidence() {
         false,
         Language::En,
     );
-    uc.execute(&format!("verify {bug_id}"))
+    // Box::pin: the use-case future crossed the large-future lint threshold
+    // when the governance ledger joined ProjectState (CXA-F230).
+    Box::pin(uc.execute(&format!("verify {bug_id}")))
         .await
         .expect("human verify command handled");
 

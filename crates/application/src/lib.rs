@@ -3,6 +3,7 @@
 //! ports, presentation drives the inbound ones.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod artifacts;
 pub mod auth;
 pub mod backlog_scoping;
 pub mod codegraph;
@@ -14,6 +15,7 @@ pub mod error;
 pub mod faults;
 pub mod metrics;
 pub mod metrics_burndown;
+pub mod metrics_governance;
 pub mod metrics_health;
 pub mod metrics_registry;
 pub mod parsing;
@@ -21,6 +23,7 @@ pub mod policy;
 pub mod ports;
 pub mod prompts;
 pub mod prompts_resolve;
+pub mod release_candidates;
 pub mod selection;
 pub mod sprint;
 pub mod state;
@@ -30,10 +33,15 @@ pub mod ts;
 pub mod use_cases;
 pub mod verify_cache;
 
+#[cfg(test)]
+mod release_candidates_tdd_tests;
+
+pub use artifacts::{ArtifactRegistry, ARTIFACT_SCHEMA_VERSION};
 pub use auth::{AuthPort, AuthRole, AuthUser, LoginResult, TokenInfo};
 pub use config::{
-    BudgetCaps, Config, CoverageConfig, DeployConfig, EngineChoice, EngineKind, EngineMapping,
-    LiveBudget, Mode, PolicyConfig, WorkflowConfig, CONFIG_SCHEMA_VERSION,
+    ArtifactsConfig, BudgetCaps, Config, CoverageConfig, DepsConfig, DeployConfig, EngineChoice,
+    EngineKind,
+    EngineMapping, LiveBudget, Mode, PolicyConfig, WorkflowConfig, CONFIG_SCHEMA_VERSION,
 };
 pub use config_parse::{parse_config, ConfigParseError};
 pub use error::{AppError, PortError};

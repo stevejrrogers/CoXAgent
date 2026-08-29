@@ -23,7 +23,11 @@
 //   AC5 bump migration    -> prior_version_state_migrates_and_preserves_user_coverage
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use coxagent_application::artifacts::{
+    ArtifactRegistry, ARTIFACT_SCHEMA_VERSION, WEB_DESKTOP_VERSION, WORKSPACE_CRATE_VERSION,
+};
 use coxagent_application::config::{Config, CONFIG_SCHEMA_VERSION};
+use coxagent_domain::SemVer;
 use serde_json::{json, Value};
 
 const DOCUMENTED_DEFAULT_ENABLED: bool = true;
@@ -145,5 +149,45 @@ fn prior_version_state_migrates_and_preserves_user_coverage() {
     assert_eq!(
         migrated.coverage.threshold, 11,
         "user-set threshold must survive migration; default-fabrication would yield {DOCUMENTED_DEFAULT_THRESHOLD}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CXA-F224 — the artifact-version registry and its schema anchor
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_declared_artifact_manifest_carries_the_declared_versions() {
+    // The manifest is built from pure constants (no filesystem), so the gate
+    // pins each member's semver to the declared workspace/web version strings
+    // — the same values the root Cargo.toml and package.json declare. A skew
+    // between the manifest and the declarations cannot merge.
+    for (artifact, declared) in [
+        (ArtifactRegistry::rust_workspace(), WORKSPACE_CRATE_VERSION),
+        (ArtifactRegistry::web_desktop(), WEB_DESKTOP_VERSION),
+    ] {
+        assert_eq!(
+            artifact.semver_version,
+            SemVer::parse(declared).expect("declared version is valid semver"),
+            "{} must carry the declared version {declared}",
+            artifact.name
+        );
+    }
+}
+
+#[test]
+fn a_newer_artifact_manifest_is_refused_at_load_not_defaulted() {
+    // A manifest reporting schema_version > ARTIFACT_SCHEMA_VERSION fails
+    // closed exactly like CONFIG_SCHEMA_VERSION + 1 does for the document:
+    // refused at load, naming the field, never silently re-defaulted.
+    let future_version = ARTIFACT_SCHEMA_VERSION + 1;
+    let future_doc =
+        format!(r#"{{"artifacts":{{"schema_version":{future_version},"versions":[]}}}}"#);
+
+    let outcome = coxagent_application::config_parse::parse_config(&future_doc);
+    let err = outcome.expect_err("a newer artifact manifest must refuse to load, not default away");
+    assert_eq!(
+        err.field, "artifacts.schema_version",
+        "the error names the artifact schema field, got: {err}"
     );
 }
