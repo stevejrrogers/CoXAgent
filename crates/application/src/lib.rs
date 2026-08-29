@@ -12,7 +12,9 @@ pub mod deps_scan;
 pub mod error;
 pub mod faults;
 pub mod metrics;
+pub mod metrics_burndown;
 pub mod metrics_health;
+pub mod metrics_registry;
 pub mod parsing;
 pub mod policy;
 pub mod ports;
@@ -39,6 +41,10 @@ pub use state::{
     PrReview, ProjectState, Reaction, Spend, Sprint, GENERAL_CHANNEL, SCHEMA_VERSION,
 };
 pub use system_chat::{ChatContext, ProjectRef, SystemChat, UserRef, Webhook};
+pub use metrics_registry::{
+    encode_prometheus, label_bucket, MetricsRegistry, HTTP_REQUEST_DURATION, HTTP_REQUESTS,
+    PROCESS_UPTIME, PROMETHEUS_CONTENT_TYPE,
+};
 
 /// Test-only filesystem adapter: the real disk behind the files port, for
 /// tests that build fixtures in a temp dir. `#[cfg(test)]` code may use

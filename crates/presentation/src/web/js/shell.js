@@ -97,7 +97,7 @@ function renderProjMore(){
   const m=document.getElementById("proj-more-menu");if(!m||m.hidden)return;
   const q=(window._pmq||"").toLowerCase();
   const list=PROJECTS.filter(p=>!q||(p.alias||"").toLowerCase().includes(q)||p.name.toLowerCase().includes(q));
-  m.innerHTML=`<div class="pm-search"><i class="ti ti-search"></i><input placeholder="Tìm project…" value="${esc(window._pmq||"")}" oninput="window._pmq=this.value;renderProjMore()" onclick="event.stopPropagation()"></div>
+  m.innerHTML=`<div class="pm-search"><i class="ti ti-search"></i><input placeholder="Find project…" value="${esc(window._pmq||"")}" oninput="window._pmq=this.value;renderProjMore()" onclick="event.stopPropagation()"></div>
     <div class="pm-list">${list.map(p=>`<button class="pm-item${p.id===PID?' on':''}" onclick="closeProjMore();switchProject('${esc(p.id)}')">
       <span class="sdot" style="background:${projColor(p.id)}"></span><span>${esc(p.alias||p.name)}</span></button>`).join("")||'<span class="segproj-empty">no match</span>'}</div>`;
   const i=m.querySelector("input");if(i){const v=i.value;i.focus();i.setSelectionRange(v.length,v.length);}
@@ -212,7 +212,7 @@ function tkRich(){return document.getElementById("nt-desc");}
 function tkFmt(cmd){document.execCommand(cmd,false,null);tkRich().focus();}
 function tkCode(){const s=window.getSelection();const t=s&&s.toString();document.execCommand("insertHTML",false,t?'<code>'+esc(t)+'</code>&nbsp;':'<code>code</code>&nbsp;');tkRich().focus();}
 async function tkLink(){const s0=window.getSelection();const saved=(s0&&s0.rangeCount)?s0.getRangeAt(0).cloneRange():null;
-  const url=await coxModal({title:"Insert link",message:"URL để chèn vào ticket.",input:{placeholder:"https://…",value:"https://"},confirmText:"Insert"});if(!url)return;
+  const url=await coxModal({title:"Insert link",message:"URL to insert into the ticket.",input:{placeholder:"https://…",value:"https://"},confirmText:"Insert"});if(!url)return;
   if(saved){const s=window.getSelection();s.removeAllRanges();s.addRange(saved);}
   const s=window.getSelection();if(s&&s.toString())document.execCommand("createLink",false,url);else document.execCommand("insertHTML",false,'<a href="'+esc(url)+'" target="_blank" rel="noopener">'+esc(url)+'</a>&nbsp;');tkRich().focus();}
 function ntDescGet(){return htmlToMd(tkRich()).trim();}
@@ -286,7 +286,7 @@ function setProjMode(m){PROJ_MODE=m;
   // Goal (+ AI drafting) applies to both modes — an imported codebase needs a
   // brief just as much; it merges into the auto-detected comprehension context.
   document.getElementById("np-goal").placeholder=m==="import"
-    ?"Hướng đi tiếp cho codebase này — e.g. 'ổn định hoá, thêm thanh toán, mobile app'. Click Draft để BA/PO viết brief."
+    ?"Where this codebase should go next — e.g. 'stabilize, add payments, mobile app'. Click Draft to have BA/PO write the brief."
     :"Rough idea — e.g. 'a secure team chat, more private than WhatsApp'. Click Draft to have BA/PO turn it into a project brief you review.";
   document.getElementById("np-submit-label").textContent=m==="import"?"Import project":"Create project";}
 function openNewProject(){["np-name","np-alias","np-path","np-goal"].forEach(i=>document.getElementById(i).value="");document.getElementById("np-err").textContent="";setProjMode("new");document.getElementById("ov-newproj").classList.add("open");setTimeout(()=>document.getElementById("np-name").focus(),50);return loadNpSpaces();}
@@ -343,7 +343,7 @@ async function createProject(){
 async function deleteProject(id){
   id=id||PID;if(!id)return;
   const p=PROJECTS.find(x=>x.id===id);const nm=p?p.name:id;
-  if(!await coxModal({title:"Remove project",message:'Gỡ project "'+nm+'" khỏi CoXAgent? File workspace vẫn còn trên disk; chỉ gỡ đăng ký.',danger:true,confirmText:"Remove"}))return;
+  if(!await coxModal({title:"Remove project",message:'Remove project "'+nm+'" from CoXAgent? Workspace files stay on disk; only the registration is removed.',danger:true,confirmText:"Remove"}))return;
   try{
     const r=await fetch("/api/projects/"+encodeURIComponent(id),{method:"DELETE"});
     if(!r.ok){toasty("Delete failed: "+(await r.text()||r.status),"err");return;}
@@ -502,6 +502,7 @@ async function doLogin(){
     // them (see rememberDestination): navigate there once auth succeeds.
     const next=sessionStorage.getItem(NEXT_KEY);
     sessionStorage.removeItem(NEXT_KEY);
+    SESS_CACHE=null;SESS_AT=0;
     await boot();
     // A guest who asked for ?next=<hash> lands back on that view once signed
     // in; an invalid/nonexistent fragment safely falls through to overview.
@@ -674,20 +675,20 @@ async function drainBanner(elId){
     try{const prs=await(await fetch(api("/prs"))).json();DRAIN_CACHE={t:Date.now(),n:Array.isArray(prs)?prs.length:0};}catch(e){el.innerHTML=toolbar;return;}
   }
   el.innerHTML=(DRAIN_CACHE.n>0?`<div class="drainbar"><i class="ti ti-barrier-block"></i>
-    <div><b>CLEAN-BASE DRAIN</b> — refactor đang chờ merge sạch <b>${DRAIN_CACHE.n} PR</b>.
-    Mọi agent của mọi user tạm NGỪNG mở việc mới — chỉ fix conflict &amp; merge (cũ nhất trước).
-    <a onclick="nav('review')">Mở Review để merge PR xanh →</a> ${sweepBtn}</div></div>`:"")+toolbar;
+    <div><b>CLEAN-BASE DRAIN</b> — refactor waiting on a clean merge of <b>${DRAIN_CACHE.n} PR</b>.
+    All agents for all users PAUSE new work — only fix conflicts &amp; merge (oldest first).
+    <a onclick="nav('review')">Open Review to merge green PRs →</a> ${sweepBtn}</div></div>`:"")+toolbar;
 }
 // Ask the SA to merge every green open PR right now (oldest first). Token-free;
 // results are announced in #agents and summarised in a toast.
 async function mergeSweep(){
-  toasty("SA đang quét queue & merge PR xanh…","ok");
+  toasty("SA is sweeping the queue & merging green PRs…","ok");
   try{
     const r=await fetch(api("/merge-sweep"),{method:"POST"});
     if(!r.ok){toasty("Sweep failed: "+(await r.text()||r.status),"err");return;}
     const d=await r.json();
     const m=(d.merged||[]).length,s=(d.skipped||[]).length;
-    toasty(m?`Đã merge ${m} PR ✓${s?` · còn ${s} chưa đủ điều kiện`:""}`:`Chưa merge được PR nào${s?` — ${s} cái đang conflict/CI`:""}`,m?"ok":"warn");
+    toasty(m?`Merged ${m} PR ✓${s?` · ${s} not eligible yet`:""}`:`No PRs merged${s?` — ${s} stuck on conflict/CI`:""}`,m?"ok":"warn");
     DRAIN_CACHE.t=0;
     if(CUR==="review")renderReview(); if(CUR==="overview")drainBanner("ov-drain");
   }catch(e){toasty("Network error","err");}
@@ -739,7 +740,7 @@ async function renderReview(){
         <button class="gc-btn" title="Stop the preview and restore the main build" onclick="prAction(${p.number},'preview-stop')"><i class="ti ti-eye-off"></i></button>
         <button class="gc-btn" onclick="prAction(${p.number},'request-changes')"><i class="ti ti-arrow-back-up"></i> Changes</button>
         <button class="gc-btn pri" ${p.mergeable?'':'disabled'} onclick="prAction(${p.number},'merge')"><i class="ti ti-git-merge"></i> Merge</button>
-        <button class="gc-btn forcemg" title="SA gỡ conflict NGAY (nếu có) rồi merge PR này — theo dõi tiến trình trong #agents" onclick="prAction(${p.number},'force-merge')"><i class="ti ti-bolt"></i> Force</button>`:''}
+        <button class="gc-btn forcemg" title="SA resolves conflicts NOW (if any) then merges this PR — follow progress in #agents" onclick="prAction(${p.number},'force-merge')"><i class="ti ti-bolt"></i> Force</button>`:''}
       </div>
     </div>`).join("")+`</div>`;
 }
@@ -771,16 +772,16 @@ function renderDiff(t){
 async function prAction(num,action){
   let comment="";
   if(action==="request-changes"){
-    comment=await coxModal({title:"Request changes on PR #"+num,message:"Mô tả rõ cần sửa gì — DEV agent sẽ đọc và tự xử lý ở cycle tới.",input:{placeholder:"e.g. thêm test cho case token hết hạn; đừng đổi API public",multiline:true},confirmText:"Request changes"});
+    comment=await coxModal({title:"Request changes on PR #"+num,message:"Describe exactly what needs fixing — the DEV agent reads it and handles it next cycle.",input:{placeholder:"e.g. add a test for the expired-token case; don't change the public API",multiline:true},confirmText:"Request changes"});
     if(comment===null||comment==="")return;}
-  if(action==="merge"&&!(await coxModal({title:"Merge PR #"+num+"?",message:"Squash-merge vào main và xoá branch — chính thức ship code này.",confirmText:"Merge"})))return;
-  if(action==="force-merge"&&!(await coxModal({title:"⚡ Force-merge PR #"+num+"?",message:"SA sẽ gỡ conflict ngay (nếu có) rồi merge thẳng vào main — kể cả khi chưa có CI check. Theo dõi tiến trình trong #agents.",danger:true,confirmText:"Force merge"})))return;
+  if(action==="merge"&&!(await coxModal({title:"Merge PR #"+num+"?",message:"Squash-merge into main and delete the branch — officially ship this code.",confirmText:"Merge"})))return;
+  if(action==="force-merge"&&!(await coxModal({title:"⚡ Force-merge PR #"+num+"?",message:"SA resolves conflicts now (if any) then merges straight into main — even without CI checks. Follow progress in #agents.",danger:true,confirmText:"Force merge"})))return;
   if(action==="preview")toasty("Building preview of PR #"+num+"… (docker build, may take a minute)","ok");
   try{const r=await fetch(api("/prs/"+num+"/"+action),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({comment})});
     if(r.ok){
       if(action==="preview"){const d=await r.json().catch(()=>({}));
         toasty("Preview live"+(d.url?" — "+d.url:""),"ok");if(d.url)window.open(d.url,"_blank");}
-      else if(action==="force-merge"){toasty("⚡ SA đang force-merge #"+num+" — xem tiến trình trong #agents","ok");}
+      else if(action==="force-merge"){toasty("⚡ SA is force-merging #"+num+" — follow progress in #agents","ok");}
       else toasty(action==="merge"?"Merged ✓":action==="request-changes"?"Changes requested — a DEV agent will address it next cycle":action==="preview-stop"?"Preview stopped — main restored":"Done","ok");
       renderReview();}
     else{toasty("Failed: "+(await r.text()||r.status),"err");}
@@ -814,8 +815,8 @@ function termTabsRender(){
   if(lbl)lbl.textContent=a?`${a.pid} · ${a.term.cols}×${a.term.rows}`:"";
 }
 async function termNew(){
-  if(!PID){toasty("Chọn project trước","warn");return;}
-  try{await termLib();}catch(e){toasty("Không tải được xterm.js (cần mạng)","err");return;}
+  if(!PID){toasty("Pick a project first","warn");return;}
+  try{await termLib();}catch(e){toasty("Couldn't load xterm.js (network needed)","err");return;}
   const id=++TERM_SEQ;
   const host=document.getElementById("term-host");
   const pane=document.createElement("div");pane.className="term-pane";pane.id="term-pane-"+id;
@@ -832,7 +833,7 @@ async function termNew(){
   ws.onopen=()=>{t.live=true;fit.fit();ws.send(JSON.stringify({resize:{cols:term.cols,rows:term.rows}}));termTabsRender();term.focus();};
   ws.onmessage=e=>{term.write(typeof e.data==="string"?e.data:new Uint8Array(e.data));};
   ws.onclose=e=>{t.live=false;
-    term.write("\r\n\x1b[2m["+(e.code===1008?"read-only role":"session closed")+" — bấm + để mở terminal mới]\x1b[0m\r\n");
+    term.write("\r\n\x1b[2m["+(e.code===1008?"read-only role":"session closed")+" — press + to open a new terminal]\x1b[0m\r\n");
     termTabsRender();};
   ws.onerror=()=>{t.live=false;termTabsRender();};
   term.onData(d=>{if(ws.readyState===1)ws.send(JSON.stringify({input:d}));});
@@ -1140,7 +1141,7 @@ async function resetUserPassword(){if(!EU_USER)return;
     else{msg.style.color="var(--red)";msg.textContent=await r.text()||"Failed.";}
   }catch(e){msg.style.color="var(--red)";msg.textContent="Network error.";}
 }
-async function deleteUser(username){if(!await coxModal({title:"Remove account",message:"Xoá tài khoản \""+username+"\"? Không hoàn tác được.",danger:true,confirmText:"Remove"}))return;try{const r=await fetch("/api/auth/users/"+username,{method:"DELETE"});if(!r.ok)document.getElementById("usr-err").textContent=await r.text();renderUsers();}catch(e){}}
+async function deleteUser(username){if(!await coxModal({title:"Remove account",message:"Delete account \""+username+"\"? This cannot be undone.",danger:true,confirmText:"Remove"}))return;try{const r=await fetch("/api/auth/users/"+username,{method:"DELETE"});if(!r.ok)document.getElementById("usr-err").textContent=await r.text();renderUsers();}catch(e){}}
 async function assignUser(pid,username){try{await fetch("/api/projects/"+pid+"/members",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:decodeURIComponent(username)})});renderUsers();}catch(e){}}
 async function unassignUser(pid,username){try{await fetch("/api/projects/"+pid+"/members/"+username,{method:"DELETE"});renderUsers();}catch(e){}}
 function fmtBytes(n){return n<1024?n+" B":n<1048576?(n/1024).toFixed(1)+" KB":(n/1048576).toFixed(1)+" MB";}
@@ -1160,9 +1161,21 @@ function deviceIcon(label){const l=(label||"").toLowerCase();
   if(l.includes("chrome"))return "brand-chrome";if(l.includes("firefox"))return "brand-firefox";
   if(l.includes("safari"))return "brand-safari";if(l.includes("edge"))return "brand-edge";
   return "device-desktop";}
+// /api/auth/* is rate-limited (20 req/min per IP); renderSessions fires on every
+// state snapshot, so an uncached fetch here turns agent churn into a 429 storm.
+let SESS_CACHE=null,SESS_AT=0;
+const SESS_TTL_MS=60*1000;
 async function renderSessions(){
   const el=document.getElementById("team-sessions");if(!el)return;
-  let ss=[];try{ss=await(await fetch("/api/auth/sessions")).json();}catch(e){}
+  let ss=SESS_CACHE;
+  if(!ss||Date.now()-SESS_AT>SESS_TTL_MS){
+    // Claim the TTL window BEFORE awaiting: a render burst (SSE reconnect
+    // flood) used to fan out one fetch per render while the first was still
+    // in flight — 56 requests in 2 seconds straight into the auth limiter.
+    SESS_AT=Date.now();
+    ss=[];try{ss=await(await fetch("/api/auth/sessions")).json();}catch(e){}
+    SESS_CACHE=ss;
+  }
   if(!Array.isArray(ss)||!ss.length){el.innerHTML="";return;}
   // Only show current device — not history.
   var cur=ss.find(function(s){return s.current;});
@@ -1261,7 +1274,7 @@ async function renderTeamsOnline(){
     }).join("")+`</div></div>`;
 }
 async function stopOperator(op){
-  if(!await coxModal({title:"Stop operator",message:"Dừng operator "+op+"? Nó sẽ idle (không đốt token) cho tới khi được start lại.",confirmText:"Stop"}))return;
+  if(!await coxModal({title:"Stop operator",message:"Stop operator "+op+"? It will idle (no token burn) until started again.",confirmText:"Stop"}))return;
   try{await fetch(api("/operators/"+encodeURIComponent(op)+"/stop"),{method:"POST"});}catch(e){}
   setTimeout(renderTeamsOnline,600);
 }

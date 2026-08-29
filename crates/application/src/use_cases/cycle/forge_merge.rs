@@ -468,6 +468,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
                         s.pr_fix_attempts.remove(&pr.number);
                         s.pr_sessions.remove(&pr.number);
+                        s.pr_review_skips.remove(&pr.number);
                         Ok(())
                     })
                     .await;

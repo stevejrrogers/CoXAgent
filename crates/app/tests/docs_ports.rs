@@ -54,9 +54,13 @@ fn read(rel: &str) -> String {
 fn resolve_host_port(field: &str) -> Result<u16, String> {
     let raw = field.strip_prefix("${").and_then(|s| s.strip_suffix('}'));
     match raw {
-        None => field.parse::<u16>().map_err(|e| format!("bad host port ({e})")),
+        None => field
+            .parse::<u16>()
+            .map_err(|e| format!("bad host port ({e})")),
         Some(body) => match body.split(":-").nth(1) {
-            Some(default) => default.parse::<u16>().map_err(|e| format!("bad host port ({e})")),
+            Some(default) => default
+                .parse::<u16>()
+                .map_err(|e| format!("bad host port ({e})")),
             None => Err(format!(
                 "interpolation `${{{body}}}` has no numeric default this guard can verify"
             )),
@@ -116,8 +120,9 @@ fn published_host_ports(compose_src: &str) -> Result<Vec<u16>, String> {
         }
         let host_field = fields[fields.len() - 2];
         out.push(
-            resolve_host_port(host_field)
-                .map_err(|why| format!("port mapping `{mapping}` in services.coxagent.ports {why}"))?,
+            resolve_host_port(host_field).map_err(|why| {
+                format!("port mapping `{mapping}` in services.coxagent.ports {why}")
+            })?,
         );
         Ok(out)
     })

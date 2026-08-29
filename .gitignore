@@ -1,4 +1,5 @@
 /target
+crates/**/target/
 **/*.rs.bk
 Cargo.lock.orig
 
@@ -71,8 +72,7 @@ __pycache__/
 *.pyc
 
 # Self-upgrade runtime state: written by deploy/self-upgrade.sh each run.
-.coxagent-self-upgrade/*.log
-.coxagent-self-upgrade/deployed-sha.tmp
+.coxagent-self-upgrade/
 
 # Nested scratch repo / "merge test" clones a worker creates; must never be
 # swept into a PR as a gitlink (mode 160000) — that broke CI + the visual-qa

@@ -100,7 +100,9 @@ impl<S: StateStorePort> RunConformanceUseCase<S> {
                 Ok(id) => filed.push(id),
                 // Two drifts can share a theme in one sweep; the gate refusing
                 // the second is correct — skip it, never abort the sweep.
-                Err(e) if e.to_string().contains(crate::use_cases::add_ticket::DUPLICATE_REFUSED) => {}
+                Err(e)
+                    if e.to_string()
+                        .contains(crate::use_cases::add_ticket::DUPLICATE_REFUSED) => {}
                 Err(e) => return Err(e),
             }
         }

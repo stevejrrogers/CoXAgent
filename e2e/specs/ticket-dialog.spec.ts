@@ -35,5 +35,30 @@ test('the read dialog shows a seeded ticket with its acceptance criteria', async
   await expect(dlg.locator('#tk-assign-sel')).toBeVisible();
 
   await expect(page).toHaveScreenshot('ticket-read.png');
+
+  // CXA-F024: the Test Coverage tab maps each acceptance criterion to its
+  // coverage status. The seeded ticket has criteria but no verdicts yet, so
+  // every row must read NOT TESTED — the gap made visible. (Folded into this
+  // load on purpose: the auth rate limiter is a shared 20-req/60s bucket and
+  // every extra page load in the suite spends it.)
+  await dlg.locator('.tk-tab[data-tk-tab="coverage"]').click();
+  const pane = dlg.locator('#tk-pane-coverage');
+  await expect(pane).toBeVisible();
+  await expect(dlg.locator('#tk-pane-details')).toBeHidden();
+  await expect(pane.locator('.cov-row')).toHaveCount(2);
+  await expect(pane).toContainText('Switching tabs switches the search scope');
+  await expect(pane).toContainText('Cmd+K focuses the box');
+  await expect(pane.locator('.cov-badge', { hasText: 'NOT TESTED' })).toHaveCount(2);
+
+  // Edge case: criteria deliberately left empty after clarification — no rows
+  // to cover, and the matrix says so instead of rendering nothing. Reuses the
+  // same page session (no new page load).
+  await page.evaluate(() => window.showTicket('B001'));
+  // The modal re-renders in place; anchor on B001's own title so the click
+  // below cannot land on the still-mounted F001 modal.
+  await expect(dlg).toContainText('Delivery timeline connector line breaks');
+  await page.locator('.tk-tab[data-tk-tab="coverage"]').click();
+  await expect(page.locator('#tk-pane-coverage')).toContainText('No acceptance criteria to cover');
+
   await assertNoConsoleErrors(errors);
 });

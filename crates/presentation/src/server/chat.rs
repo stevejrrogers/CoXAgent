@@ -383,8 +383,12 @@ pub(super) async fn syschat_messages_ep(
         let Ok(state) = p.store.load().await else {
             return internal_error("load failed");
         };
-        return Json(paginate_tail(&state.chat_in(&room), q.limit, q.before.as_deref()))
-            .into_response();
+        return Json(paginate_tail(
+            &state.chat_in(&room),
+            q.limit,
+            q.before.as_deref(),
+        ))
+        .into_response();
     }
     let sc = app.syschat.inner.lock().await;
     if !sc.can_view(&channel, &user, &ctx) {

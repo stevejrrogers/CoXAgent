@@ -32,7 +32,9 @@ use tokio::sync::RwLock;
 use tokio_stream::wrappers::IntervalStream;
 use tokio_stream::{Stream, StreamExt};
 
-use crate::middleware::{cors_layer, rate_limit_mw, RateLimiter, AUTH_RATE_MAX, AUTH_RATE_WINDOW};
+use crate::middleware::{
+    cors_layer, rate_limit_mw, telemetry_mw, RateLimiter, AUTH_RATE_MAX, AUTH_RATE_WINDOW,
+};
 
 mod assets;
 mod auth;
@@ -50,6 +52,7 @@ mod hub_docs;
 mod inbox;
 mod manage;
 mod meetings;
+mod metrics_admin;
 mod openapi;
 mod people;
 mod pr_listing;
@@ -72,6 +75,7 @@ use chat::*;
 use comments::*;
 use docs::*;
 use downloads::*;
+use metrics_admin::spawn_metrics_admin;
 use engines::*;
 use forge::*;
 use guards::*;
@@ -732,6 +736,10 @@ pub async fn serve_full(
             get(metrics_summary_ep),
         )
         .route("/api/projects/:pid/metrics/trends", get(metrics_trends_ep))
+        .route(
+            "/api/projects/:pid/metrics/burndown",
+            get(metrics_burndown_ep),
+        )
         .route("/api/projects/:pid/agent-evals", get(agent_evals_ep))
         .route("/api/projects/:pid/runner", get(runner_ep))
         .route("/api/projects/:pid/workers", get(workers_ep))
@@ -739,8 +747,26 @@ pub async fn serve_full(
         .route("/api/projects/:pid/audit", get(audit_ep))
         .route("/api/projects/:pid/config", get(get_config).put(put_config))
         .route("/api/projects/:pid/control/:action", post(control_ep))
+        .route("/api/projects/:pid/burn-mode", post(burn_mode_ep))
         .route("/api/projects/:pid/sprint/goal", post(set_sprint_goal_ep))
         .route("/api/projects/:pid/sprint/close", post(sprint_close_ep))
+        .route("/api/projects/:pid/sprint-queue", post(queue_sprint_ep))
+        .route(
+            "/api/projects/:pid/sprint-queue/:qid/scope",
+            post(queue_scope_ep),
+        )
+        .route(
+            "/api/projects/:pid/sprint-queue/:qid/rename",
+            post(queue_rename_ep),
+        )
+        .route(
+            "/api/projects/:pid/sprint-queue/:qid/move/:dir",
+            post(queue_move_ep),
+        )
+        .route(
+            "/api/projects/:pid/sprint-queue/:qid",
+            axum::routing::delete(queue_delete_ep),
+        )
         .route("/api/projects/:pid/sprint/:action", post(sprint_scope_ep))
         .route("/api/projects/:pid/digest", post(digest_ep))
         .route("/api/projects/:pid/merge-sweep", post(merge_sweep_ep))
@@ -807,6 +833,10 @@ pub async fn serve_full(
         .route("/api/projects/:pid/ticket/:id", get(ticket_detail_ep))
         .route("/api/projects/:pid/ticket/:id/priority", post(set_priority))
         .route("/api/projects/:pid/ticket/:id/reject", post(reject_ticket))
+        .route(
+            "/api/projects/:pid/ticket/:id/status/:action",
+            post(hold_ticket_ep),
+        )
         .route(
             "/api/projects/:pid/ticket/:id/approve-cost",
             post(approve_cost),
@@ -920,6 +950,24 @@ pub async fn serve_full(
             trust_proxy,
         )
     }));
+
+    // --- HTTP telemetry layer (outermost, CXA-C039) ---
+    // Sits outside CORS/rate-limit/auth so the recorded status is the one the
+    // client actually sees (429s included), exactly once per request. The
+    // registry is shared with the metrics admin listener below; its creation
+    // also starts the uptime clock.
+    let registry = Arc::new(coxagent_application::MetricsRegistry::new());
+    let telemetry_registry = Arc::clone(&registry);
+    let app = app.layer(axum::middleware::from_fn(move |req, next| {
+        telemetry_mw(req, next, Arc::clone(&telemetry_registry))
+    }));
+
+    // --- Metrics admin listener (CXA-C039) ---
+    // Served by gateway/realtime roles (and the all-in-one); knowledge pods
+    // run batch loops only — same surface rule as the Redis bus bridge.
+    if !matches!(hub_role(), HubRole::Knowledge) {
+        spawn_metrics_admin(registry);
+    }
 
     // Bind loopback by default (safe for local use); a container sets
     // COXAGENT_HOST=0.0.0.0 so published ports are reachable from the host.
@@ -1079,10 +1127,44 @@ struct SprintGoalReq {
     goal: String,
 }
 
+/// Turn the human burn mode (CXA-F030) on/off and set its numeric exit gate.
+#[derive(serde::Deserialize)]
+struct BurnModeReq {
+    enabled: bool,
+    /// Clear the mode by itself once the open-bug count reaches this;
+    /// `null` keeps it on until switched off by hand.
+    #[serde(default)]
+    target: Option<u32>,
+}
+
 /// Which tickets to pull into (or drop from) the running sprint.
 #[derive(serde::Deserialize)]
 struct SprintScopeReq {
     tickets: Vec<String>,
+}
+
+/// Why a ticket is being put on hold.
+#[derive(serde::Deserialize)]
+struct HoldReq {
+    #[serde(default)]
+    reason: String,
+}
+
+/// A sprint queued to run after the current one (goal + optional ticket picks).
+#[derive(serde::Deserialize)]
+struct QueueSprintReq {
+    goal: String,
+    #[serde(default)]
+    tickets: Vec<String>,
+}
+
+/// Ticket adds/removes on one queued sprint.
+#[derive(serde::Deserialize)]
+struct QueueScopeReq {
+    #[serde(default)]
+    add: Vec<String>,
+    #[serde(default)]
+    remove: Vec<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1121,3 +1203,11 @@ mod cors_rate_limit_tests;
 mod pr_preview_tests;
 #[cfg(test)]
 mod pr_review_gate_tests;
+#[cfg(test)]
+mod store_rpc_auth_enforcement_tests;
+#[cfg(test)]
+mod store_rpc_guard_tests;
+#[cfg(test)]
+mod store_rpc_stale_write_tests;
+#[cfg(test)]
+mod store_rpc_test_support;
