@@ -43,7 +43,6 @@ struct Spool {
 }
 
 /// A durable, file-backed outbox spool for one project.
-#[derive(Clone)]
 pub struct FileOutboxStore {
     path: PathBuf,
     cap: usize,
@@ -66,17 +65,20 @@ impl FileOutboxStore {
         })
     }
 
-    /// Override the newest-entry cap (tests exercise the drop-oldest rule).
+    /// Override the newest-entry cap. Production uses the default; tests
+    /// exercise the drop-oldest rule on a tiny spool.
     #[must_use]
-    pub fn with_cap(mut self, cap: usize) -> Self {
+    #[cfg(test)]
+    pub(crate) fn with_cap(mut self, cap: usize) -> Self {
         self.cap = cap;
         self
     }
 
-    /// Override the claim lease TTL (tests exercise crash-recovery without
-    /// waiting out the production 60s).
+    /// Override the claim lease TTL. Production uses the default; tests
+    /// exercise crash-recovery without waiting out the production 60s.
     #[must_use]
-    pub fn with_lease_ttl_secs(mut self, ttl: i64) -> Self {
+    #[cfg(test)]
+    pub(crate) fn with_lease_ttl_secs(mut self, ttl: i64) -> Self {
         self.lease_ttl_secs = ttl;
         self
     }
@@ -86,13 +88,23 @@ impl FileOutboxStore {
     }
 }
 
-/// Read the spool file, or the empty default when absent or unreadable — a
-/// corrupt spool must never wedge alert delivery; the next enqueue rebuilds it.
+/// Read the spool file, or the empty default when absent. A file that exists
+/// but does not parse is logged and treated as empty — the next enqueue
+/// rebuilds it, and delivery must never wedge on a corrupt spool.
 fn load_spool(path: &Path) -> Spool {
-    std::fs::read(path)
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default()
+    match std::fs::read(path) {
+        Err(_) => Spool::default(), // absent: a fresh spool
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(spool) => spool,
+            Err(e) => {
+                tracing::warn!(
+                    "outbox spool {} unread ({e}) — starting empty",
+                    path.display()
+                );
+                Spool::default()
+            }
+        },
+    }
 }
 
 /// Persist the spool atomically (temp file + fsync + rename). The caller holds
@@ -115,25 +127,42 @@ fn with_spool<T>(path: &Path, f: impl FnOnce(&mut Spool) -> T) -> Result<T, Port
     Ok(out)
 }
 
+/// The port is best-effort by contract — a spool op that fails must never
+/// fail the caller — but a swallowed failure still gets a trace on the log,
+/// or a systematically broken disk would silently strand every alert.
+fn logged<T: Default>(path: &Path, op: &str, result: Result<T, PortError>) -> T {
+    match result {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("outbox {op} failed ({}): {e}", path.display());
+            T::default()
+        }
+    }
+}
+
 #[async_trait]
 impl OutboxStorePort for FileOutboxStore {
     async fn enqueue(&self, entry: OutboxEntry) {
         let (path, cap, _) = self.params();
         let result = tokio::task::spawn_blocking(move || {
-            with_spool(&path, |spool| {
-                spool.next_id += 1;
-                let mut entry = entry;
-                entry.id = spool.next_id;
-                entry.message = clamp_message(&entry.message);
-                entry.status = OutboxStatus::Pending;
-                spool.entries.push(entry);
-                // Bounded under sustained outage: drop the OLDEST events
-                // (lowest id = oldest, whatever their status) beyond the cap.
-                if spool.entries.len() > cap {
-                    let excess = spool.entries.len() - cap;
-                    spool.entries.drain(..excess);
-                }
-            })
+            logged(
+                &path,
+                "enqueue",
+                with_spool(&path, |spool| {
+                    spool.next_id += 1;
+                    let mut entry = entry;
+                    entry.id = spool.next_id;
+                    entry.message = clamp_message(&entry.message);
+                    entry.status = OutboxStatus::Pending;
+                    spool.entries.push(entry);
+                    // Bounded under sustained outage: drop the OLDEST events
+                    // (lowest id = oldest, whatever their status) beyond the cap.
+                    if spool.entries.len() > cap {
+                        let excess = spool.entries.len() - cap;
+                        spool.entries.drain(..excess);
+                    }
+                }),
+            );
         })
         .await;
         if let Err(e) = result {
@@ -144,23 +173,26 @@ impl OutboxStorePort for FileOutboxStore {
     async fn claim_due(&self, batch: u32) -> Vec<OutboxEntry> {
         let (path, _, lease_ttl) = self.params();
         tokio::task::spawn_blocking(move || {
-            with_spool(&path, |spool| {
-                let now = unix_now_secs();
-                let mut claimed = Vec::new();
-                for e in spool
-                    .entries
-                    .iter_mut()
-                    .filter(|e| e.status == OutboxStatus::Pending && e.next_attempt_at <= now)
-                {
-                    if claimed.len() >= batch as usize {
-                        break;
+            logged(
+                &path,
+                "claim_due",
+                with_spool(&path, |spool| {
+                    let now = unix_now_secs();
+                    let mut claimed = Vec::new();
+                    for e in spool
+                        .entries
+                        .iter_mut()
+                        .filter(|e| e.status == OutboxStatus::Pending && e.next_attempt_at <= now)
+                    {
+                        if claimed.len() >= batch as usize {
+                            break;
+                        }
+                        e.next_attempt_at = now + lease_ttl; // the in-flight lease
+                        claimed.push(e.clone());
                     }
-                    e.next_attempt_at = now + lease_ttl; // the in-flight lease
-                    claimed.push(e.clone());
-                }
-                claimed
-            })
-            .unwrap_or_default()
+                    claimed
+                }),
+            )
         })
         .await
         .unwrap_or_default()
@@ -169,11 +201,15 @@ impl OutboxStorePort for FileOutboxStore {
     async fn mark_delivered(&self, id: u64) {
         let (path, _, _) = self.params();
         let _ = tokio::task::spawn_blocking(move || {
-            with_spool(&path, |spool| {
-                for e in spool.entries.iter_mut().filter(|e| e.id == id) {
-                    e.status = OutboxStatus::Delivered;
-                }
-            })
+            logged(
+                &path,
+                "mark_delivered",
+                with_spool(&path, |spool| {
+                    for e in spool.entries.iter_mut().filter(|e| e.id == id) {
+                        e.status = OutboxStatus::Delivered;
+                    }
+                }),
+            );
         })
         .await;
     }
@@ -181,12 +217,18 @@ impl OutboxStorePort for FileOutboxStore {
     async fn mark_retry(&self, id: u64, next_attempt_at: i64) {
         let (path, _, _) = self.params();
         let _ = tokio::task::spawn_blocking(move || {
-            with_spool(&path, |spool| {
-                for e in spool.entries.iter_mut().filter(|e| e.id == id) {
-                    e.attempts = e.attempts.saturating_add(1).min(OUTBOX_MAX_ATTEMPTS); // guard in code, per schema
-                    e.next_attempt_at = next_attempt_at;
-                }
-            })
+            logged(
+                &path,
+                "mark_retry",
+                with_spool(&path, |spool| {
+                    for e in spool.entries.iter_mut().filter(|e| e.id == id) {
+                        // Attempts are capped in code: a retry can never push an
+                        // entry past the max the delivery policy promises.
+                        e.attempts = e.attempts.saturating_add(1).min(OUTBOX_MAX_ATTEMPTS);
+                        e.next_attempt_at = next_attempt_at;
+                    }
+                }),
+            );
         })
         .await;
     }
@@ -194,11 +236,15 @@ impl OutboxStorePort for FileOutboxStore {
     async fn mark_dead(&self, id: u64) {
         let (path, _, _) = self.params();
         let _ = tokio::task::spawn_blocking(move || {
-            with_spool(&path, |spool| {
-                for e in spool.entries.iter_mut().filter(|e| e.id == id) {
-                    e.status = OutboxStatus::Dead;
-                }
-            })
+            logged(
+                &path,
+                "mark_dead",
+                with_spool(&path, |spool| {
+                    for e in spool.entries.iter_mut().filter(|e| e.id == id) {
+                        e.status = OutboxStatus::Dead;
+                    }
+                }),
+            );
         })
         .await;
     }
@@ -206,13 +252,16 @@ impl OutboxStorePort for FileOutboxStore {
     async fn recent(&self, limit: u32) -> Vec<OutboxEntry> {
         let (path, _, _) = self.params();
         tokio::task::spawn_blocking(move || {
-            with_spool(&path, |spool| {
-                let mut entries = spool.entries.clone();
-                entries.sort_by_key(|e| std::cmp::Reverse(e.id));
-                entries.truncate(limit as usize);
-                entries
-            })
-            .unwrap_or_default()
+            logged(
+                &path,
+                "recent",
+                with_spool(&path, |spool| {
+                    let mut entries = spool.entries.clone();
+                    entries.sort_by_key(|e| std::cmp::Reverse(e.id));
+                    entries.truncate(limit as usize);
+                    entries
+                }),
+            )
         })
         .await
         .unwrap_or_default()
@@ -221,30 +270,34 @@ impl OutboxStorePort for FileOutboxStore {
     async fn replay(&self, id: u64) -> bool {
         let (path, _, _) = self.params();
         tokio::task::spawn_blocking(move || {
-            with_spool(&path, |spool| {
-                let now = unix_now_secs();
-                let replayed = spool
-                    .entries
-                    .iter_mut()
-                    .find(|e| e.id == id && e.status == OutboxStatus::Dead);
-                match replayed {
-                    Some(e) => {
-                        e.status = OutboxStatus::Pending;
-                        e.attempts = 0;
-                        e.next_attempt_at = now;
-                        true
+            logged(
+                &path,
+                "replay",
+                with_spool(&path, |spool| {
+                    let now = unix_now_secs();
+                    let replayed = spool
+                        .entries
+                        .iter_mut()
+                        .find(|e| e.id == id && e.status == OutboxStatus::Dead);
+                    match replayed {
+                        Some(e) => {
+                            e.status = OutboxStatus::Pending;
+                            e.attempts = 0;
+                            e.next_attempt_at = now;
+                            true
+                        }
+                        None => false,
                     }
-                    None => false,
-                }
-            })
-            .unwrap_or(false)
+                }),
+            )
         })
         .await
         .unwrap_or(false)
     }
 }
 
-/// Arc helper so wiring can hand one store to runner, flusher and server.
+/// Arc helper so the composition root can hand one store to the notifier, the
+/// background flusher and the dashboard's history view.
 #[must_use]
 pub fn spool_in_dir(dir: impl AsRef<Path>) -> Arc<dyn OutboxStorePort> {
     match FileOutboxStore::new(dir) {

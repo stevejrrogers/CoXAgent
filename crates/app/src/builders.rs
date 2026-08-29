@@ -304,9 +304,9 @@ pub(crate) async fn build_project(
     }
     let webhook = config.workflow.webhook_url.clone();
     // Durable outbound alert delivery (CXA-F235): one spool per project, shared
-    // by every runner's notifier and the dashboard's delivery-history view.
-    let outbox: std::sync::Arc<dyn coxagent_application::ports::outbound::OutboxStorePort> =
-        Arc::new(coxagent_infrastructure::FileOutboxStore::new(state_dir)?);
+    // by every runner's notifier, the background flusher and the dashboard's
+    // delivery-history view.
+    let outbox = coxagent_infrastructure::spool_in_dir(state_dir);
     if let Some(url) = webhook.as_deref().filter(|u| !u.is_empty()) {
         // One background flusher per project — never per runner — so three
         // polling loops don't race the same spool's leases.

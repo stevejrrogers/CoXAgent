@@ -1239,6 +1239,8 @@ fn internal_error(msg: &str) -> axum::response::Response {
 }
 
 #[cfg(test)]
+mod alerts_tests;
+#[cfg(test)]
 mod avatar_media_security_tests;
 #[cfg(test)]
 mod cors_rate_limit_tests;

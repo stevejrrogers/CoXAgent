@@ -29,7 +29,6 @@ const FLUSH_POLL_SECS: u64 = 5;
 const CLAIM_BATCH: u32 = 16;
 
 /// Spools events to the durable outbox for an independent flusher to deliver.
-#[derive(Clone)]
 pub struct WebhookNotifier {
     outbox: Arc<dyn OutboxStorePort>,
 }
@@ -90,10 +89,10 @@ pub(crate) async fn flush_once(
     for entry in &due {
         match post_event(client, url, entry).await {
             Ok(()) => outbox.mark_delivered(entry.id).await,
-            Err(()) => match advance_after_failure(unix_now_secs(), entry) {
+            Err(reason) => match advance_after_failure(unix_now_secs(), entry) {
                 failed if failed.status == OutboxStatus::Dead => {
                     tracing::warn!(
-                        "alert {} ({}) dead after {} attempt(s) — replayable in the dashboard",
+                        "alert {} ({}) dead after {} attempt(s): {reason} — replayable in the dashboard",
                         entry.id,
                         entry.kind,
                         failed.attempts
@@ -101,6 +100,13 @@ pub(crate) async fn flush_once(
                     outbox.mark_dead(entry.id).await;
                 }
                 failed => {
+                    tracing::debug!(
+                        "alert {} ({}) attempt {} failed ({reason}) — retrying after {}s of backoff",
+                        entry.id,
+                        entry.kind,
+                        failed.attempts,
+                        failed.next_attempt_at - unix_now_secs()
+                    );
                     outbox.mark_retry(entry.id, failed.next_attempt_at).await;
                 }
             },
@@ -114,8 +120,13 @@ pub(crate) async fn flush_once(
 /// POST one spooled event. The body is the same `NotifyEvent` JSON the old
 /// fire-and-forget notifier sent; the entry id rides as `Idempotency-Key` so
 /// an at-least-once receiver can dedupe retries without any call-site change.
-/// Any non-2xx — or a transport error/timeout — is a failed attempt.
-async fn post_event(client: &reqwest::Client, url: &str, entry: &OutboxEntry) -> Result<(), ()> {
+/// Any non-2xx — or a transport error/timeout — is a failed attempt; the
+/// reason is carried back so the flusher can log it.
+async fn post_event(
+    client: &reqwest::Client,
+    url: &str,
+    entry: &OutboxEntry,
+) -> Result<(), String> {
     let event = NotifyEvent {
         kind: entry.kind.clone(),
         project: entry.project.clone(),
@@ -127,11 +138,12 @@ async fn post_event(client: &reqwest::Client, url: &str, entry: &OutboxEntry) ->
         .json(&event)
         .send()
         .await
-        .map_err(|_| ())?;
-    if response.status().is_success() {
+        .map_err(|e| format!("transport: {e}"))?;
+    let status = response.status();
+    if status.is_success() {
         Ok(())
     } else {
-        Err(())
+        Err(format!("HTTP {status}"))
     }
 }
 
