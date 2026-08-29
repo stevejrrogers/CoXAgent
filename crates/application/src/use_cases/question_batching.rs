@@ -17,11 +17,16 @@ use coxagent_domain::Status;
 use crate::config::{in_quiet_window, FocusWindow, HumanConfig};
 use crate::state::{AgentQuestion, ProjectState};
 
-/// The addressee of a question, with any `@` prefix and casing stripped —
-/// the bare username a focus window is keyed by (`@Luffy` and `luffy` are
-/// the same person, matching how the inbox resolves the caller).
-fn owner_of(to: &str) -> &str {
-    to.trim().strip_prefix('@').unwrap_or(to.trim())
+/// The addressee of a question, with any `@` prefix stripped and lowercased —
+/// the canonical username a focus window is keyed by (`@Luffy`, `@LUFFY` and
+/// `luffy` are the same person, matching how the inbox resolves the caller).
+/// Lowercase is the group key everywhere, so mixed-case addressing of one
+/// person still produces ONE batch, not two.
+fn owner_of(to: &str) -> String {
+    to.trim()
+        .strip_prefix('@')
+        .unwrap_or_else(|| to.trim())
+        .to_ascii_lowercase()
 }
 
 /// The focus settings for a question's addressee, if one is configured for
@@ -34,7 +39,7 @@ fn focus_of<'a>(human: &'a HumanConfig, to: &str) -> Option<&'a FocusWindow> {
     human
         .focus_windows
         .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case(owner))
+        .find(|(name, _)| name.eq_ignore_ascii_case(&owner))
         .map(|(_, window)| window)
 }
 
@@ -59,9 +64,13 @@ pub fn now_minutes_utc() -> u32 {
 /// (CXA-F176): `true` = hold it for their focus-window digest, `false` =
 /// deliver immediately, exactly as questions have always delivered.
 ///
-/// Pure over (per-user config, current minute, question age, SLA). A
-/// question already past its SLA never waits — batching must not become a
-/// second way for a blocked ticket to starve.
+/// Only questions explicitly addressed with `@username` are batchable — a
+/// bare-username `to` is agent-queue territory (see `answer_open_questions`)
+/// and every batching surface (selection, flush, SLA escalation) only
+/// handles `@` ones; deferring anything else would hold it where nothing
+/// ever looks. Pure over (per-user config, current minute, question age,
+/// SLA). A question already past its SLA never waits — batching must not
+/// become a second way for a blocked ticket to starve.
 #[must_use]
 pub fn should_defer(
     human: &HumanConfig,
@@ -70,6 +79,9 @@ pub fn should_defer(
     age_minutes: u64,
     sla_minutes: u64,
 ) -> bool {
+    if !to.trim().starts_with('@') {
+        return false;
+    }
     let Some(fw) = batching_on(human, to) else {
         return false;
     };
@@ -80,9 +92,9 @@ pub fn should_defer(
 }
 
 /// The questions currently HELD for batching, grouped per owner — one
-/// consolidated batch per username, questions in ask order. This is the
-/// queue a focus window is sitting on at any moment; the digest flush
-/// delivers exactly one such group per person.
+/// consolidated batch per username (case-insensitive), questions in ask
+/// order. This is the queue a focus window is sitting on at any moment; the
+/// digest flush delivers exactly one such group per person.
 #[must_use]
 pub fn select_deferred(state: &ProjectState) -> Vec<(String, Vec<AgentQuestion>)> {
     let mut order: Vec<String> = Vec::new();
@@ -91,7 +103,7 @@ pub fn select_deferred(state: &ProjectState) -> Vec<(String, Vec<AgentQuestion>)
         if !(q.is_open() && q.deferred && q.to.starts_with('@')) {
             continue;
         }
-        let owner = owner_of(&q.to).to_owned();
+        let owner = owner_of(&q.to);
         if owner.is_empty() {
             continue;
         }
@@ -147,35 +159,22 @@ pub fn flush_batches(
     human: &HumanConfig,
     now_minutes: u32,
 ) -> Vec<(String, Vec<AgentQuestion>)> {
-    let mut order: Vec<String> = Vec::new();
-    let mut groups: BTreeMap<String, Vec<AgentQuestion>> = BTreeMap::new();
-    for q in &state.questions {
-        if !(q.is_open() && q.deferred && q.to.starts_with('@')) {
-            continue;
-        }
-        let owner = owner_of(&q.to).to_owned();
-        if owner.is_empty() {
-            continue;
-        }
-        let still_in_window = batching_on(human, &q.to)
-            .is_some_and(|fw| in_quiet_window(&fw.window_utc, now_minutes));
-        if still_in_window {
-            continue;
-        }
-        if !still_relevant(q, state) {
-            continue;
-        }
-        if !order.contains(&owner) {
-            order.push(owner.clone());
-        }
-        groups.entry(owner).or_default().push(q.clone());
-    }
-    order
+    select_deferred(state)
         .into_iter()
-        .map(|owner| {
-            let batch = groups.remove(&owner).unwrap_or_default();
-            (owner, batch)
+        .map(|(owner, batch)| {
+            let live: Vec<AgentQuestion> = batch
+                .into_iter()
+                // Due: this question's window is no longer active.
+                .filter(|q| {
+                    !batching_on(human, &q.to)
+                        .is_some_and(|fw| in_quiet_window(&fw.window_utc, now_minutes))
+                })
+                // Surface only what still needs the person (AC edge).
+                .filter(|q| still_relevant(q, state))
+                .collect();
+            (owner, live)
         })
+        .filter(|(_, live)| !live.is_empty())
         .collect()
 }
 
@@ -246,7 +245,7 @@ mod tests {
             .push(question("CXC-F001", "@luffy", "soft-delete or move?", true));
         state
             .questions
-            .push(question("CXC-F002", "@luffy", "which storage?", true));
+            .push(question("CXC-F002", "@LUFFY", "which storage?", true));
         state
             .questions
             .push(question("CXC-B001", "@nami", "what does 'done' mean?", true));
@@ -260,6 +259,7 @@ mod tests {
 
         let batches = select_deferred(&state);
         assert_eq!(batches.len(), 2, "one batch per user, not per question");
+        // Mixed-case addressing of the same person is still ONE group.
         assert_eq!(batches[0].0, "luffy");
         assert_eq!(batches[0].1.len(), 2, "answered dropped, both live kept");
         assert_eq!(batches[1].0, "nami");
@@ -282,8 +282,10 @@ mod tests {
         assert!(!should_defer(&off, "@luffy", inside, 0, 60));
         // No feature at all (default config) -> deliver now, always.
         assert!(!should_defer(&HumanConfig::default(), "@luffy", inside, 0, 60));
-        // Bare-username addressing batches the same as @-addressing.
-        assert!(should_defer(&human, "luffy", inside, 0, 60));
+        // Bare-username addressing is agent-queue territory, never batched:
+        // every batching surface (selection, flush, escalation) handles only
+        // @-person questions, so deferring these would lose them.
+        assert!(!should_defer(&human, "luffy", inside, 0, 60));
     }
 
     // (3) Urgency is never batched away: past its SLA a question goes

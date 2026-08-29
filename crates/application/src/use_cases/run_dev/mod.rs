@@ -1606,6 +1606,100 @@ mod tests {
         assert!(parse_ask("ASK SA: how does the store behave?").is_some());
     }
 
+    /// An engine whose only act is to ask a person — the run must park the
+    /// ticket on the question, not on a failure.
+    struct AskEngine;
+    #[async_trait::async_trait]
+    impl AgentEnginePort for AskEngine {
+        fn id(&self) -> &'static str {
+            "ask"
+        }
+        async fn run(&self, _r: AgentRequest) -> Result<AgentOutcome, PortError> {
+            Ok(AgentOutcome {
+                stdout: "ASK @luffy: the customer decided archive semantics verbally — soft \
+                         delete or purge?"
+                    .to_owned(),
+                stderr: String::new(),
+                exit_code: Some(0),
+                usage: None,
+                trace: String::new(),
+                session_id: None,
+                sandbox: SandboxStatus::default(),
+                engine: String::new(),
+            })
+        }
+    }
+
+    /// A focus window that is active RIGHT NOW, whatever time the test runs
+    /// (wraps midnight cleanly for the last two minutes of the day).
+    fn window_covering_now() -> String {
+        let now = crate::use_cases::question_batching::now_minutes_utc();
+        let end = (now + 2) % (24 * 60);
+        format!(
+            "{:02}:{:02}-{:02}:{:02}",
+            now / 60,
+            now % 60,
+            end / 60,
+            end % 60
+        )
+    }
+
+    fn store_with_ready_feature() -> Arc<MemStore> {
+        Arc::new(MemStore {
+            state: Mutex::new(ProjectState {
+                tickets: vec![ready_feature("FEAT-001")],
+                ..ProjectState::default()
+            }),
+        })
+    }
+
+    // (AC1) With a focus window configured for the addressee, a new
+    // person-addressed question is queued (deferred) instead of landing as
+    // its own interrupt.
+    #[tokio::test]
+    async fn a_person_question_inside_their_focus_window_is_held_for_the_digest() {
+        let mut config = Config::default();
+        config.workflow.human.focus_windows.insert(
+            "luffy".to_owned(),
+            crate::config::FocusWindow {
+                window_utc: window_covering_now(),
+                defer_to_digest: true,
+            },
+        );
+        let store = store_with_ready_feature();
+        let uc = RunDevUseCase::new(
+            Arc::clone(&store),
+            Arc::new(AskEngine),
+            config,
+            PathBuf::from("/tmp"),
+            DevMode::Feature,
+        );
+        // The ask parks the run: nothing was "done", the question waits.
+        assert!(uc.execute().await.expect("run").is_none());
+        let state = store.load().await.expect("load");
+        let q = &state.questions[0];
+        assert_eq!(q.to, "@LUFFY");
+        assert!(q.deferred, "held for the owner's focus-window digest");
+        assert!(!q.escalated, "the window, not the SLA, is what holds it");
+    }
+
+    // (AC boundary) Without a window the same question delivers immediately —
+    // today's behaviour, unchanged.
+    #[tokio::test]
+    async fn without_a_focus_window_a_person_question_delivers_immediately() {
+        let store = store_with_ready_feature();
+        let uc = RunDevUseCase::new(
+            Arc::clone(&store),
+            Arc::new(AskEngine),
+            Config::default(),
+            PathBuf::from("/tmp"),
+            DevMode::Feature,
+        );
+        assert!(uc.execute().await.expect("run").is_none());
+        let state = store.load().await.expect("load");
+        assert!(!state.questions[0].deferred);
+    }
+
     /// Shells to the real `git` binary — `tree_fingerprint` parses actual
     /// `git status --porcelain` output, which the pure `verify_cache` unit
     /// tests never exercise.
