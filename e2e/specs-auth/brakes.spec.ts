@@ -93,6 +93,21 @@ test.describe('brake cockpit', () => {
     // Clearing again is honestly 404 — there is no hold left to clear.
     const again = await page.request.delete('/api/projects/default/brakes/bugs_first/hold');
     expect(again.status()).toBe(404);
+
+    // The other direction of "hold/release": a FREEZE (pinnedValue null)
+    // suspends recomputation without reversing the brake's current value.
+    const freeze = await page.request.post('/api/projects/default/brakes/skip_ba/hold', {
+      data: { pinnedValue: null, reason: 'e2e: freeze intake brake', expiresAt: futureStamp(3_600_000) },
+    });
+    expect(freeze.status()).toBe(200);
+    const frozen = await (await page.request.get('/api/projects/default/brakes')).json();
+    const intake = frozen.cards.find((c) => c.id === 'intake');
+    expect(intake.mode).toBe('held-freeze');
+    expect(frozen.activeHolds[0].pinnedValue).toBeNull();
+    const unfrozen = await page.request.delete('/api/projects/default/brakes/skip_ba/hold');
+    expect(unfrozen.status()).toBe(200);
+    const restoredIntake = await (await page.request.get('/api/projects/default/brakes')).json();
+    expect(restoredIntake.cards.find((c) => c.id === 'intake').mode).toBe('auto');
   });
 
   test('a hold is always bounded: bad input is refused, not stored', async ({ page }) => {

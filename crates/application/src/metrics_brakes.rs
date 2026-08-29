@@ -32,6 +32,10 @@ pub const BACKLOG_BRAKE_OFF: usize = 12;
 /// `Tuning` field side by side — the ONE table every cockpit surface reads.
 const BRAKES: &[(&str, &str)] = &[("quality", "bugs_first"), ("intake", "skip_ba")];
 
+/// Audit entries served per cockpit read — one screenful of the trail; the
+/// full bounded history stays in `state.tuning_history`.
+const COCKPIT_HISTORY_SHOWN: usize = 50;
+
 /// `true` when `brake` names one of the tunable brake fields.
 #[must_use]
 pub fn is_brake_field(brake: &str) -> bool {
@@ -39,7 +43,7 @@ pub fn is_brake_field(brake: &str) -> bool {
 }
 
 /// The brake's value on a tuning struct, by field name.
-fn value_of(tuning: &Tuning, field: &str) -> bool {
+fn brake_value(tuning: &Tuning, field: &str) -> bool {
     match field {
         "bugs_first" => tuning.bugs_first,
         "skip_ba" => tuning.skip_ba,
@@ -48,7 +52,7 @@ fn value_of(tuning: &Tuning, field: &str) -> bool {
 }
 
 /// Write a brake's value on a tuning struct, by field name.
-fn set_value(tuning: &mut Tuning, field: &str, value: bool) {
+fn set_brake_value(tuning: &mut Tuning, field: &str, value: bool) {
     match field {
         "bugs_first" => tuning.bugs_first = value,
         "skip_ba" => tuning.skip_ba = value,
@@ -118,8 +122,8 @@ pub fn apply_brake_holds(
     let mut effective = raw.clone();
     for (_, field) in BRAKES {
         if let Some(hold) = holds.get(*field) {
-            let pinned = hold.pinned_value.unwrap_or_else(|| value_of(current, field));
-            set_value(&mut effective, field, pinned);
+            let pinned = hold.pinned_value.unwrap_or_else(|| brake_value(current, field));
+            set_brake_value(&mut effective, field, pinned);
         }
     }
     effective
@@ -166,8 +170,8 @@ pub fn reconcile_brake_holds(state: &mut ProjectState, now: &str) -> bool {
             "SM",
             "expiry",
             brake,
-            value_of(&state.tuning, brake),
-            value_of(&effective, brake),
+            brake_value(&state.tuning, brake),
+            brake_value(&effective, brake),
             "hold expired — autonomous tuning resumed",
             Some(hold.expires_at.clone()),
         );
@@ -207,8 +211,8 @@ pub fn clear_brake_hold(state: &mut ProjectState, brake: &str, actor: &str) -> b
         actor,
         "clear",
         brake,
-        value_of(&state.tuning, brake),
-        value_of(&effective, brake),
+        brake_value(&state.tuning, brake),
+        brake_value(&effective, brake),
         "hold cleared — autonomous tuning resumed",
         Some(hold.expires_at),
     );
@@ -225,13 +229,13 @@ pub fn set_brake_hold(state: &mut ProjectState, brake: &str, hold: BrakeHold) ->
     if !is_brake_field(brake) {
         return false;
     }
-    let from = value_of(&state.tuning, brake);
+    let from = brake_value(&state.tuning, brake);
     let to = hold.pinned_value.unwrap_or(from);
     state
         .tuning_overrides
         .insert(brake.to_owned(), hold.clone());
     if let Some(v) = hold.pinned_value {
-        set_value(&mut state.tuning, brake, v);
+        set_brake_value(&mut state.tuning, brake, v);
     }
     let entry = audited_entry(
         &hold.actor,
@@ -331,13 +335,13 @@ pub fn brake_cockpit(state: &ProjectState, now: &str) -> BrakeCockpit {
             BrakeCard {
                 id: (*id).to_owned(),
                 field_name: (*field).to_owned(),
-                effective_value: value_of(&state.tuning, field),
+                effective_value: brake_value(&state.tuning, field),
                 mode: match hold {
                     Some(h) if h.pinned_value.is_some() => "overridden".to_owned(),
                     Some(_) => "held-freeze".to_owned(),
                     None => "auto".to_owned(),
                 },
-                auto_would_be: value_of(&raw, field),
+                auto_would_be: brake_value(&raw, field),
             }
         })
         .collect();
@@ -368,7 +372,13 @@ pub fn brake_cockpit(state: &ProjectState, now: &str) -> BrakeCockpit {
             backlog_on: BACKLOG_BRAKE_ON,
             backlog_off: BACKLOG_BRAKE_OFF,
         },
-        history: state.tuning_history.iter().rev().take(50).cloned().collect(),
+        history: state
+            .tuning_history
+            .iter()
+            .rev()
+            .take(COCKPIT_HISTORY_SHOWN)
+            .cloned()
+            .collect(),
     }
 }
 

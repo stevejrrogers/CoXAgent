@@ -356,7 +356,8 @@ fn c_audit_appends_every_change_with_source_and_fieldwise_from_to() {
         until: None,
     });
     // Operator hold on the other brake, with its window.
-    set_brake_hold(&mut s, "skip_ba", hold(Some(true), "freeze intake", &future_stamp()));
+    let window = future_stamp();
+    set_brake_hold(&mut s, "skip_ba", hold(Some(true), "freeze intake", &window));
     let flip = &s.tuning_history[0];
     assert_eq!(flip.source, "self_tune");
     assert_eq!(flip.brake, "bugs_first");
@@ -366,11 +367,21 @@ fn c_audit_appends_every_change_with_source_and_fieldwise_from_to() {
     assert_eq!(set.source, "hold");
     assert_eq!(set.brake, "skip_ba");
     assert_eq!(set.reason, "freeze intake", "the operator's own reason");
-    assert_eq!(set.until.as_deref(), Some(set_reason_window(set)), "window recorded");
+    assert_eq!(set.until.as_deref(), Some(window.as_str()), "window recorded");
 }
 
-fn set_reason_window(entry: &TuningAuditEntry) -> &str {
-    entry.until.as_deref().expect("hold window")
+#[test]
+fn c_freeze_hold_that_changes_nothing_is_still_audited() {
+    // A freeze (None pin) on a brake whose value already matches what the
+    // operator wants changes no state value — but the INTERVENTION itself is
+    // a governance event and lands in the trail with its window.
+    let mut s = shipped_team_state();
+    assert!(!s.tuning.skip_ba, "fixture: intake brake already off");
+    assert!(set_brake_hold(&mut s, "skip_ba", hold(None, "hold it off", &future_stamp())));
+    let entry = s.tuning_history.last().expect("hold entry");
+    assert_eq!(entry.source, "hold");
+    assert_eq!(entry.from, entry.to, "value untouched, event still recorded");
+    assert_eq!(entry.reason, "hold it off");
 }
 
 #[test]
@@ -423,6 +434,54 @@ async fn d_announcement_strings_match_existing_sm_wording_for_pure_auto_flips() 
             "🎛️ Self-tuning: quality brake ON — retry churn 2.00/ship; features pause, bugs first",
         ],
         "bit-exact existing SM wording (churn 6/3 = 2.00)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (d2) AC2's core: an ACTIVE hold survives the daily pass and pins the brake
+// AGAINST what the autonomous verdict wants — this is the whole point of the
+// cockpit, so it is tested at the cycle level, not only on the pure fn.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn d2_active_hold_survives_the_daily_pass_and_pins_against_the_loop() {
+    let mut pre = shipped_team_state();
+    let auto = autonomous_decision(&pre);
+    assert!(auto.bugs_first, "fixture: hot churn wants the brake ON");
+    // The operator disagrees and pins it OFF with a still-future bound.
+    pre.tuning_overrides.insert(
+        "bugs_first".to_owned(),
+        hold(Some(false), "release gate is mid-flight", &future_stamp()),
+    );
+    pre.tuning.bugs_first = false;
+    let (store, dir) = world(pre);
+    run_one_cycle(&store, &dir).await;
+
+    let after = store.load().await.unwrap();
+    assert!(
+        !after.tuning.bugs_first,
+        "the pin rode above the hysteresis: the brake did NOT flip"
+    );
+    assert!(
+        after
+            .tuning_overrides
+            .get("bugs_first")
+            .is_some_and(|h| h.pinned_value == Some(false)),
+        "the hold persists across the daily re-tune"
+    );
+    assert!(
+        !after
+            .tuning_history
+            .iter()
+            .any(|e| e.source == "self_tune" && e.brake == "bugs_first"),
+        "no autonomous flip entry: the effective value never moved"
+    );
+    assert!(
+        !after
+            .comments
+            .iter()
+            .any(|c| c.body.contains("quality brake ON")),
+        "the SM does not announce a flip the operator is overriding"
     );
 }
 
