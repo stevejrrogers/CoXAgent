@@ -7,6 +7,11 @@ use coxagent_domain::{Priority, Role};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+// The `artifacts` section type lives in [`crate::artifacts`] with the schema
+// anchor and build manifest it belongs to; it is re-exported here so every
+// Config section type is reachable as `config::<Section>Config`.
+pub use crate::artifacts::ArtifactsConfig;
+
 /// Known agent engine CLIs. `as_binary` gives the executable name to look for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -801,7 +806,7 @@ impl Default for GitConfig {
 /// chore. `enabled` is off by default: creating a git tag mutates the managed
 /// codebase's history, so an existing project's release history is never
 /// touched until an operator opts in — the same convention as `GitConfig`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReleasesConfig {
     /// Master switch. When false, the cycle never tags or files releases,
     /// no matter how many milestones have been reached.
@@ -813,6 +818,32 @@ pub struct ReleasesConfig {
     /// a release PR that a person lands from the Inbox. The merge tags it.
     #[serde(default)]
     pub cut_every_days: u64,
+    /// CXA-F231: a cut only carries commit subjects whose ticket refs are in
+    /// the verified-complete set (bugs at `Verified`, features/chores at
+    /// `Done`/`Documented`); unverified or unreferenced subjects are excluded
+    /// with an explicit reason on the SM manifest line. Off restores the
+    /// legacy all-subjects cut during migration.
+    #[serde(default = "default_cut_only_verified")]
+    pub cut_only_verified: bool,
+}
+
+fn default_cut_only_verified() -> bool {
+    true
+}
+
+impl Default for ReleasesConfig {
+    /// `enabled`/`cut_every_days` default OFF (tagging mutates git history, so
+    /// an existing project never releases until an operator opts in);
+    /// `cut_only_verified` defaults ON — an RC silently carrying unverified
+    /// work is the failure mode CXA-F231 removes. Defaults are EXPLICIT
+    /// (COX-B043), never derived zero-values.
+    fn default() -> Self {
+        ReleasesConfig {
+            enabled: false,
+            cut_every_days: 0,
+            cut_only_verified: default_cut_only_verified(),
+        }
+    }
 }
 
 /// Version of the persisted `coxagent.json` schema this build understands.
@@ -912,6 +943,11 @@ pub struct Config {
     /// Gap-detection coverage policy (enabled state + threshold).
     #[serde(default)]
     pub coverage: CoverageConfig,
+    /// Per-project artifact-version registry (which build artifacts exist and
+    /// the semver each carries), anchored by
+    /// [`crate::artifacts::ARTIFACT_SCHEMA_VERSION`].
+    #[serde(default)]
+    pub artifacts: ArtifactsConfig,
     /// Dependency-health scan policy (CXA-F009). When enabled, the periodic
     /// self-tuning scan reads lock files, flags outdated/vulnerable packages,
     /// and files remediation tickets against a master 'Dependency Audit' epic.
@@ -963,6 +999,24 @@ mod tests {
         let rewritten = serde_json::to_string(&human).expect("serialize");
         let back: HumanConfig = serde_json::from_str(&rewritten).expect("deserialize");
         assert_eq!(back, human);
+    }
+
+    #[test]
+    fn cut_only_verified_defaults_true_for_documents_without_the_knob() {
+        // CXA-F231: a pre-F231 document (no `cut_only_verified`) loads with
+        // the verification gate ON — an RC silently carrying unverified work
+        // is the failure mode being removed, not the default behaviour.
+        let old = r#"{"enabled":true,"cut_every_days":7}"#;
+        let releases: ReleasesConfig = serde_json::from_str(old).expect("pre-F231 doc loads");
+        assert!(releases.enabled);
+        assert_eq!(releases.cut_every_days, 7);
+        assert!(releases.cut_only_verified);
+
+        // The explicit container default stays documented-true (COX-B043):
+        // releases themselves stay opt-in, the verification gate does not.
+        assert!(!ReleasesConfig::default().enabled);
+        assert_eq!(ReleasesConfig::default().cut_every_days, 0);
+        assert!(ReleasesConfig::default().cut_only_verified);
     }
 
     #[test]
