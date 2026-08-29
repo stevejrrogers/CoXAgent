@@ -136,7 +136,10 @@ pub async fn rate_limit_mw(
         let read_only = req.method() == axum::http::Method::GET
             && matches!(path, "/api/auth/sessions" | "/api/auth/me");
         let (key, max) = if read_only {
-            (format!("{}:ro", client_key(&req, trust_proxy)), max.saturating_mul(12))
+            (
+                format!("{}:ro", client_key(&req, trust_proxy)),
+                max.saturating_mul(12),
+            )
         } else {
             (client_key(&req, trust_proxy), max)
         };

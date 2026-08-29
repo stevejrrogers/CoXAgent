@@ -634,6 +634,9 @@ async fn human_transition(
     // written since F022.
     if to == coxagent_domain::Status::Verified {
         coxagent_application::use_cases::run_test::record_human_verify_evidence(&mut state, id);
+        // Goal-line outcome ledger (CXA-F228): a human verdict is a delivered
+        // outcome like the agent path's.
+        state.record_verified_outcome(id);
     }
     let label = format!("{to:?}").to_lowercase();
     // Teach the adaptive gate: every human decision is a sample
