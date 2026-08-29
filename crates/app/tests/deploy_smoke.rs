@@ -79,7 +79,13 @@ impl HolderDecision {
         match self {
             HolderDecision::EvictComposeProject(project) => {
                 let _ = Command::new("docker")
-                    .args(["compose", "-p", project.as_str(), "down", "--remove-orphans"])
+                    .args([
+                        "compose",
+                        "-p",
+                        project.as_str(),
+                        "down",
+                        "--remove-orphans",
+                    ])
                     .output();
             }
             HolderDecision::EvictRawContainer(id) => {
@@ -496,6 +502,23 @@ mod decide_tests {
     fn foreign_raw_container_blocking_port_is_reported_as_a_skip() {
         let holders = vec![holder("nginx", None)];
         assert_eq!(plan_holders(&holders), PortPlan::Skip("nginx".to_owned()));
+    }
+
+    /// CXA-B083 AC (from the CXA-B084 branch): an anonymous/foreign raw holder
+    /// squatting :8101 blocks the run even alongside reclaimable squatters —
+    /// no eviction may run while an un-touchable raw holder keeps the port.
+    #[test]
+    fn anonymous_raw_holder_wins_over_co_squatters_no_eviction_runs() {
+        let mixed = vec![
+            holder("nginx", None),
+            holder("cox--stale-preview-hub-1", Some("cox--stale-preview")),
+            holder("cox--stale-raw", None),
+        ];
+        assert_eq!(
+            plan_holders(&mixed),
+            PortPlan::Skip("nginx".to_owned()),
+            "no eviction may run while an un-touchable raw holder keeps the port"
+        );
     }
 
     /// A single protected hub/infra holder blocks the whole run, even when other
