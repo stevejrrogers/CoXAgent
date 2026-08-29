@@ -4,6 +4,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod auth;
+pub mod backlog_scoping;
 pub mod codegraph;
 pub mod config;
 pub mod config_parse;

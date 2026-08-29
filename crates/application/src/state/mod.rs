@@ -10,6 +10,7 @@ mod chat;
 mod docs;
 mod goals;
 mod governance;
+mod integrity;
 mod ops;
 mod work;
 
@@ -17,6 +18,7 @@ pub use chat::*;
 pub use docs::*;
 pub use goals::*;
 pub use governance::*;
+pub use integrity::*;
 pub use ops::*;
 pub use work::*;
 

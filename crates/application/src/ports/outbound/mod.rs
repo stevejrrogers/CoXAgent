@@ -31,6 +31,8 @@ pub use notify::{ChatNotifier, FanoutNotifier, NotifierPort, NotifyEvent, NullNo
 pub use pr_report::{NullPrReporter, PrOpen, PrReporterPort, StorePrReporter};
 pub use probe::{ApiProbePort, ApiProof};
 pub use screenshot::ScreenshotPort;
-pub use state_store::{mutate_state, GitCheck, StateStorePort, WorkerCaps, WorkerEntry};
+pub use state_store::{
+    mutate_state, GitCheck, QuarantineEntry, StateStorePort, WorkerCaps, WorkerEntry,
+};
 pub use storage::StoragePort;
 pub use workspace::{FileMeta, WorkspaceFilesPort};
