@@ -2,6 +2,7 @@
 
 pub mod any_store;
 pub mod json_store;
+mod quarantine;
 pub mod redis_coord;
 mod rest_store;
 pub mod sql_store;

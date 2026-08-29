@@ -8,11 +8,13 @@ use serde::{Deserialize, Serialize};
 
 mod chat;
 mod docs;
+mod integrity;
 mod ops;
 mod work;
 
 pub use chat::*;
 pub use docs::*;
+pub use integrity::*;
 pub use ops::*;
 pub use work::*;
 
