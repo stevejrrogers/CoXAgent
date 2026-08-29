@@ -119,6 +119,14 @@ pub struct CycleScore {
     /// USD metered per role this cycle — where the money went.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub phase_cost: std::collections::BTreeMap<String, f64>,
+    /// Human gate decisions recorded during this cycle, by ticket class
+    /// (CXA-F230) — the agent-side scorecard's mirror of the operator's own
+    /// attention. serde-defaulted so old scorecards load clean.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub attention_by_area: std::collections::BTreeMap<String, u64>,
+    /// Same delta by intervention kind (`ready_approve`, `verify_pass`, …).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub attention_by_kind: std::collections::BTreeMap<String, u64>,
 }
 
 impl CycleScore {
