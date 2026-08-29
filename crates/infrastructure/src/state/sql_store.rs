@@ -7,12 +7,17 @@
 //! concurrency (a monotonic `revision`) rejects lost updates from two writers.
 
 use async_trait::async_trait;
-use coxagent_application::ports::outbound::{StateStorePort, WorkerCaps, WorkerEntry};
+use coxagent_application::ports::outbound::{
+    QuarantineEntry, StateStorePort, WorkerCaps, WorkerEntry,
+};
 use coxagent_application::state::{ProjectState, SCHEMA_VERSION};
 use coxagent_application::PortError;
 use coxagent_domain::{Role, TicketId};
 use deadpool_postgres::{Config, Pool, Runtime};
+use std::sync::Arc;
 use tokio_postgres::NoTls;
+
+use super::quarantine::{gate_save, QuarantineLedger};
 
 /// Schema for the shared project + coordination tables. Idempotent; run on
 /// connect. `project_coord` is the cross-machine coordination row set: one
@@ -73,6 +78,10 @@ pub struct SqlStateStore {
     /// Postgres save so a lost Postgres volume can be re-seeded from disk
     /// (the seed logic in `app::make_store` picks it up automatically).
     local_mirror: Option<super::JsonStateStore>,
+    /// Audit trail of write-backs the structural-integrity gate refused
+    /// (CXA-F229). Memory-only: Postgres gains no table for it, so a hub
+    /// restart drops the trail and every refusal is also logged.
+    quarantine: Arc<QuarantineLedger>,
 }
 
 impl SqlStateStore {
@@ -93,6 +102,7 @@ impl SqlStateStore {
             project_id: project_id.into(),
             redis: None,
             local_mirror: None,
+            quarantine: Arc::new(QuarantineLedger::memory_only()),
         };
         store.migrate().await?;
         Ok(store)
@@ -434,6 +444,10 @@ impl StateStorePort for SqlStateStore {
         }
         Ok(true)
     }
+
+    async fn quarantined(&self) -> Vec<QuarantineEntry> {
+        self.quarantine.recent()
+    }
 }
 
 impl SqlStateStore {
@@ -479,9 +493,16 @@ impl SqlStateStore {
         state: ProjectState,
         expected_revision: Option<i64>,
     ) -> Result<(), PortError> {
-        state
-            .validate()
-            .map_err(|e| PortError::Corrupt(format!("refusing to save invalid state: {e}")))?;
+        // The pre-existing schema-level validation is untouched; the
+        // structural-integrity audit (CXA-F229) is the additional gate. The
+        // ledger is memory-only here, so every refusal is also logged.
+        if let Err(e) = gate_save(&state, &self.quarantine) {
+            tracing::error!(
+                "[{}] write-back refused by structural integrity audit: {e}",
+                self.project_id
+            );
+            return Err(e);
+        }
         let value =
             serde_json::to_value(&state).map_err(|e| PortError::Backend(format!("encode: {e}")))?;
 

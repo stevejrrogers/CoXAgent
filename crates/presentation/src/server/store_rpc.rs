@@ -15,6 +15,13 @@ pub(super) struct OpQ {
     op: String,
 }
 
+/// Query for the read-only audit surface (`GET …/store?op=audit`): the op is
+/// part of the documented contract; omitting it defaults to the audit.
+#[derive(serde::Deserialize)]
+pub(super) struct AuditQ {
+    op: Option<String>,
+}
+
 /// Optional arguments carried for each operation.
 #[derive(Default, serde::Deserialize)]
 pub(super) struct Args {
@@ -263,6 +270,109 @@ async fn op_acquire_operator(p: &ProjectHandle, args: &Args) -> Response {
     }
 }
 
+/// P5a defense-in-depth: when hub auth is configured every /store call needs
+/// a manage-tier principal who is a member of :pid (Super/Admin exempt) — the
+/// exact policy `auth_mw` enforces for this path (write gate -> `can_manage`,
+/// plus per-project membership). The middleware already rejects traffic while
+/// /store sits under it; enforcing the same decision HERE keeps the adapter
+/// closed even if /store ever moves out from under that middleware — an
+/// authenticated-but-outsider session must be refused by the endpoint itself
+/// instead of being forwarded to the store adapter. Shared by the POST
+/// runner surface and the GET audit surface so both stay in lockstep.
+async fn authorize_store_call(
+    app: &super::AppState,
+    pid: &str,
+    headers: &axum::http::HeaderMap,
+) -> Result<(), axum::response::Response> {
+    let Some(auth) = &app.auth else {
+        return Ok(());
+    };
+    let Some(user) = super::resolve_principal(auth, headers).await else {
+        return Err((axum::http::StatusCode::UNAUTHORIZED, "sign in first").into_response());
+    };
+    if !user.role.can_manage() {
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({
+                "error": "management role required"
+            })),
+        )
+            .into_response());
+    }
+    let is_super_or_admin = user.role == coxagent_application::auth::AuthRole::Super
+        || user.role == coxagent_application::auth::AuthRole::Admin;
+    if !is_super_or_admin && !user.projects.iter().any(|p| p == pid) {
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({
+                "error": "not a member of this project"
+            })),
+        )
+            .into_response());
+    }
+    Ok(())
+}
+
+/// The read-only structural-integrity audit for one project's persisted
+/// state (CXA-F229): findings plus the quarantine ledger of write-backs the
+/// gate already refused. The findings are computed purely from the loaded
+/// snapshot; the handler adds no business logic beyond marshalling.
+async fn op_audit(p: &ProjectHandle) -> Response {
+    match p.store.load().await {
+        Ok(state) => {
+            let findings = state.audit_structural_integrity();
+            let healthy = findings.is_empty();
+            let quarantined = p.store.quarantined().await;
+            ok(serde_json::json!({
+                "findings": findings,
+                "healthy": healthy,
+                "quarantined": quarantined,
+            }))
+        }
+        Err(e) => err(e),
+    }
+}
+
+/// Opt-in self-heal (CXA-F229): audit first, then drop exactly the dangling
+/// ticket-keyed map entries the audit reported — never anything else; every
+/// other finding class needs a human decision and refuses the heal. The
+/// mutation goes through `mutate_state`, so it inherits the port's
+/// revision/concurrency guards and the write-time validation + audit gate.
+async fn op_heal(p: &ProjectHandle) -> Response {
+    let healed = std::sync::atomic::AtomicUsize::new(0);
+    let outcome =
+        coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |state| match state
+            .heal_dangling_references()
+        {
+            Ok(n) => {
+                healed.store(n, std::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            }
+            Err(violation) => Err(coxagent_application::PortError::Corrupt(
+                violation.to_string(),
+            )),
+        })
+        .await;
+    match outcome {
+        Ok(()) => {
+            // Report against the state that actually persisted: a concurrent
+            // writer could have changed things after the heal landed.
+            match p.store.load().await {
+                Ok(state) => {
+                    let findings = state.audit_structural_integrity();
+                    ok(serde_json::json!({
+                        "healed": healed.load(std::sync::atomic::Ordering::Relaxed),
+                        "healthy": findings.is_empty(),
+                        "findings": findings,
+                    }))
+                }
+                Err(e) => err(e),
+            }
+        }
+        Err(e) => err(e),
+    }
+}
+
 /// Entry point routing every runner operation onto this project's store.
 pub(super) async fn store_rpc_ep(
     axum::extract::State(app): axum::extract::State<super::AppState>,
@@ -274,38 +384,8 @@ pub(super) async fn store_rpc_ep(
     let Some(p) = app.project(&pid).await else {
         return super::not_found();
     };
-    // P5a defense-in-depth: when hub auth is configured every op needs a
-    // manage-tier principal who is a member of :pid (Super/Admin exempt) — the
-    // exact policy `auth_mw` enforces for this path (write gate ->
-    // `can_manage`, plus per-project membership). The middleware already
-    // rejects traffic while /store sits under it; enforcing the same decision
-    // HERE keeps the adapter closed even if /store ever moves out from under
-    // that middleware — an authenticated-but-outsider session must be refused
-    // by the endpoint itself instead of being forwarded to the store adapter.
-    if let Some(auth) = &app.auth {
-        let Some(user) = super::resolve_principal(auth, &headers).await else {
-            return (axum::http::StatusCode::UNAUTHORIZED, "sign in first").into_response();
-        };
-        if !user.role.can_manage() {
-            return (
-                axum::http::StatusCode::FORBIDDEN,
-                axum::Json(serde_json::json!({
-                    "error": "management role required"
-                })),
-            )
-                .into_response();
-        }
-        let is_super_or_admin = user.role == coxagent_application::auth::AuthRole::Super
-            || user.role == coxagent_application::auth::AuthRole::Admin;
-        if !is_super_or_admin && !user.projects.iter().any(|p| p == &pid) {
-            return (
-                axum::http::StatusCode::FORBIDDEN,
-                axum::Json(serde_json::json!({
-                    "error": "not a member of this project"
-                })),
-            )
-                .into_response();
-        }
+    if let Err(refused) = authorize_store_call(&app, &pid, &headers).await {
+        return refused;
     }
     match q.op.as_str() {
         "load" => op_load(&p).await,
@@ -320,7 +400,33 @@ pub(super) async fn store_rpc_ep(
         "set_desired" => op_set_desired(&p, &args).await,
         "get_desired" => op_get_desired(&p, &args).await,
         "acquire_operator" => op_acquire_operator(&p, &args).await,
+        "audit" => op_audit(&p).await,
+        "heal" => op_heal(&p).await,
         other => err(coxagent_application::PortError::Backend(format!(
+            "unknown store op: {other}"
+        ))),
+    }
+}
+
+/// Read-only integrity audit: `GET /api/projects/:pid/store?op=audit`
+/// (CXA-F229). Same `auth_mw` layering as the POST surface plus the same
+/// in-handler defense-in-depth gate, so the audit of a project's state is
+/// exactly as protected as writing it.
+pub(super) async fn store_audit_ep(
+    axum::extract::State(app): axum::extract::State<super::AppState>,
+    Path(pid): Path<String>,
+    Query(q): Query<AuditQ>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let Some(p) = app.project(&pid).await else {
+        return super::not_found();
+    };
+    if let Err(refused) = authorize_store_call(&app, &pid, &headers).await {
+        return refused;
+    }
+    match q.op.as_deref() {
+        None | Some("audit") => op_audit(&p).await,
+        Some(other) => err(coxagent_application::PortError::Backend(format!(
             "unknown store op: {other}"
         ))),
     }
