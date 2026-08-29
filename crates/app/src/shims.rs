@@ -73,7 +73,7 @@ pub fn shim_script(cmd: &str, shim_dir: &str, exe: &str) -> String {
 /// pid is unique among live processes, so concurrent hubs never collide, and a
 /// recycled pid merely claims a dead instance's leftovers as its own.
 #[must_use]
-pub fn shim_dir_for_process(temp_dir: &Path, pid: u32) -> PathBuf {
+pub(crate) fn shim_dir_for_process(temp_dir: &Path, pid: u32) -> PathBuf {
     temp_dir.join(format!("coxagent-shims-{pid}"))
 }
 
@@ -83,6 +83,7 @@ pub(crate) fn setup_command_shims() -> Option<PathBuf> {
     std::fs::create_dir_all(&dir).ok()?;
     let dir_disp = dir.display().to_string();
     let exe_disp = exe.display().to_string();
+    let mut all_written = true;
     for cmd in SHIM_CMDS {
         let script = shim_script(cmd, &dir_disp, &exe_disp);
         let p = dir.join(cmd);
@@ -92,9 +93,16 @@ pub(crate) fn setup_command_shims() -> Option<PathBuf> {
                 use std::os::unix::fs::PermissionsExt as _;
                 let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755));
             }
+        } else {
+            all_written = false;
         }
     }
-    Some(dir)
+    // Advertise the directory only if every wrapper in it is ours: a recycled
+    // pid can land this instance on a FOREIGN stale dir (shared temp dir,
+    // another user's hub), and putting scripts we could not write on agent
+    // PATH resurrects exactly the stale-shim failure CXA-B109 fixes. Skipping
+    // the advertisement degrades to unshimmed tools — safe, never fatal.
+    all_written.then_some(dir)
 }
 
 /// Generate the shims and advertise them to agent subprocesses via

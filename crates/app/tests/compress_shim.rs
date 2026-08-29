@@ -421,16 +421,17 @@ const REPRO_LINES: usize = 3_000;
 /// The empty tree, so `git diff <empty> HEAD` yields the whole file as a patch.
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
-/// The directory holding the real `git`, skipping any shim directory that
-/// happens to be on the ambient `PATH` (an agent shell has one). CXA-B109 made
-/// the directory name pid-suffixed (`coxagent-shims-<pid>`), so match the
-/// prefix every instance shares instead of one exact name.
+/// Is this PATH entry one of the hub's shim directories? CXA-B109 made the
+/// directory name pid-suffixed (`coxagent-shims-<pid>`), so match the prefix
+/// every instance shares instead of one exact name.
 fn is_shim_dir(d: &Path) -> bool {
     d.file_name()
         .and_then(|n| n.to_str())
         .is_some_and(|n| n.starts_with("coxagent-shims"))
 }
 
+/// The directory holding the real `git`, skipping any shim directory that
+/// happens to be on the ambient `PATH` (an agent shell has one).
 fn real_git_dir() -> PathBuf {
     let path = std::env::var_os("PATH").expect("PATH is unset");
     std::env::split_paths(&path)
@@ -616,7 +617,10 @@ fn the_same_content_is_compressed_for_porcelain_and_other_tools() {
 #[test]
 fn a_vanished_compress_binary_degrades_to_the_real_binary() {
     let vanished = "/coxagent-cxa-b109/purged-worktree/target/debug/coxagent";
-    assert!(!Path::new(vanished).exists(), "the baked binary must be gone");
+    assert!(
+        !Path::new(vanished).exists(),
+        "the baked binary must be gone"
+    );
 
     // A plain-pipeline command (no exactness probe — the path the ticket is
     // about): every byte must come from the real binary, streams separate,
@@ -647,4 +651,15 @@ fn a_vanished_compress_binary_degrades_to_the_real_binary() {
         Some(FAKE_EXIT),
         "vanished-exe git show: exit code"
     );
+
+    // The other half of the guard: with a HEALTHY baked binary it must NOT
+    // fire — a plain-pipeline command still gets the token saving.
+    let healthy = Shimmed::with_cmd_and_exe("node", env!("CARGO_BIN_EXE_coxagent"));
+    let out = healthy.run(&["--version"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("output compressed") && text.contains(&format!("(×{FAKE_LINES})")),
+        "the guard fired on a healthy compress binary: {text:.200}"
+    );
+    assert_eq!(out.status.code(), Some(FAKE_EXIT));
 }
