@@ -227,6 +227,10 @@ pub(super) async fn auth_mw(
     // (Realtime endpoints carry their own guard; this blocks the REST surface.)
     let realtime_path = path.ends_with("/ws")
         || path.ends_with("/events")
+        // The fleet river (CXA-F233) is an SSE stream like the per-project
+        // one — a realtime surface, so the physical service split keeps
+        // routing it to realtime pods instead of whichever pod answers REST.
+        || path.ends_with("/river")
         || path.ends_with("/terminal")
         || path.contains("/docs-ws");
     let role_ok = match hub_role() {
