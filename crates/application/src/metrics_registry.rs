@@ -145,11 +145,11 @@ impl MetricsRegistry {
                     hist.buckets[i].fetch_add(1, Ordering::Relaxed);
                 }
             }
-            hist.sum_bits.fetch_update(
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-                |bits| Some((f64::from_bits(bits) + seconds).to_bits()),
-            ).ok();
+            hist.sum_bits
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |bits| {
+                    Some((f64::from_bits(bits) + seconds).to_bits())
+                })
+                .ok();
             hist.count.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -177,14 +177,8 @@ impl MetricsRegistry {
     /// capacity assertions on the bounded-cardinality logic.
     #[must_use]
     pub fn series_count(&self) -> usize {
-        let counters = self
-            .counters
-            .lock()
-            .map_or(0, |m| m.len());
-        let histograms = self
-            .histograms
-            .lock()
-            .map_or(0, |m| m.len());
+        let counters = self.counters.lock().map_or(0, |m| m.len());
+        let histograms = self.histograms.lock().map_or(0, |m| m.len());
         counters + histograms
     }
 
@@ -231,6 +225,11 @@ fn get_or_admit<T: Default>(
 /// to the same key); every other path keeps at most its first two segments.
 /// This is what keeps a scanner probing `/api/projects/x/y/z/…` from minting
 /// unbounded series: N input paths produce O(1) family keys.
+///
+/// `/s/…` collapses WITHOUT its second segment (CXA-F069): there the segment
+/// is the share-link token itself — a credential — and a metric label is a
+/// log surface. Matched routes already record the `/s/:token` pattern; only
+/// this bucket path could ever see a raw token.
 #[must_use]
 pub fn label_bucket(raw: &str) -> String {
     let segments: Vec<&str> = raw.split('/').filter(|s| !s.is_empty()).collect();
@@ -238,6 +237,9 @@ pub fn label_bucket(raw: &str) -> String {
         [] => "/".to_owned(),
         ["api", "projects", _pid] => "/api/projects/:pid".to_owned(),
         ["api", "projects", _pid, ..] => "/api/projects/:pid/*".to_owned(),
+        ["s"] => "/s/:token".to_owned(),
+        ["s", _token] => "/s/:token".to_owned(),
+        ["s", ..] => "/s/:token/*".to_owned(),
         [one] => format!("/{one}"),
         [first, second, ..] => format!("/{first}/{second}"),
     }
@@ -408,8 +410,14 @@ mod tests {
     #[test]
     fn inc_counter_renders_total_suffix_with_labels() {
         let registry = MetricsRegistry::new();
-        registry.inc_counter(HTTP_REQUESTS, &[("route", "/api/health"), ("method", "GET")]);
-        registry.inc_counter(HTTP_REQUESTS, &[("route", "/api/health"), ("method", "GET")]);
+        registry.inc_counter(
+            HTTP_REQUESTS,
+            &[("route", "/api/health"), ("method", "GET")],
+        );
+        registry.inc_counter(
+            HTTP_REQUESTS,
+            &[("route", "/api/health"), ("method", "GET")],
+        );
 
         let text = encode_prometheus(&registry);
         let samples = parse_lines(&text);
@@ -507,7 +515,9 @@ mod tests {
             .filter(|(n, _, _)| n == "cxa_http_request_total")
             .collect();
         assert_eq!(samples.len(), 2);
-        let total: u64 = samples.iter().map(|(_, _, v)| v.parse::<u64>().expect("count"))
+        let total: u64 = samples
+            .iter()
+            .map(|(_, _, v)| v.parse::<u64>().expect("count"))
             .sum();
         assert_eq!(total, 8_000, "atomic increments preserve every count");
     }
@@ -537,10 +547,30 @@ mod tests {
             registry.inc_counter(HTTP_REQUESTS, &[("route", &route)]);
         }
         assert_eq!(label_bucket("/api/projects/anything"), "/api/projects/:pid");
-        assert_eq!(label_bucket("/api/projects/anything/chat"), "/api/projects/:pid/*");
+        assert_eq!(
+            label_bucket("/api/projects/anything/chat"),
+            "/api/projects/:pid/*"
+        );
         assert_eq!(label_bucket("/healthz"), "/healthz");
         assert_eq!(label_bucket("/"), "/");
         assert_eq!(registry.series_count(), 1, "10k inputs, one family series");
+    }
+
+    #[test]
+    fn label_bucket_never_records_a_share_token() {
+        // CXA-F069 AC5: the share token is a credential, and a metric label
+        // is a log surface — the bucket must collapse it away, even for the
+        // unmatched shapes (trailing segments) that miss the route pattern.
+        let token = "0123456789abcdef0123456789abcdef";
+        assert_eq!(label_bucket(&format!("/s/{token}")), "/s/:token");
+        assert_eq!(
+            label_bucket(&format!("/s/{token}/extra/segments")),
+            "/s/:token/*"
+        );
+        assert!(
+            !label_bucket(&format!("/s/{token}/x")).contains(token),
+            "the raw token must not survive bucketing"
+        );
     }
 
     #[test]

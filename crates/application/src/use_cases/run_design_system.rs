@@ -165,6 +165,7 @@ mod tests {
                 complexity: Complexity::Small,
                 has_ui,
                 acceptance_criteria: Vec::new(),
+                goal: None,
             })
             .await
             .expect("seed");

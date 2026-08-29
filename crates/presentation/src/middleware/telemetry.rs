@@ -19,9 +19,7 @@
 use axum::extract::{MatchedPath, Request};
 use axum::middleware::Next;
 use axum::response::Response;
-use coxagent_application::{
-    label_bucket, MetricsRegistry, HTTP_REQUEST_DURATION, HTTP_REQUESTS,
-};
+use coxagent_application::{label_bucket, MetricsRegistry, HTTP_REQUESTS, HTTP_REQUEST_DURATION};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -30,11 +28,7 @@ use std::time::Instant;
 /// Labels: `route` (matched pattern or bucketed path), `method`,
 /// `status` (class: `2xx`…`5xx`, else `other`). Exactly one counter increment
 /// and one duration observation per request.
-pub async fn telemetry_mw(
-    req: Request,
-    next: Next,
-    registry: Arc<MetricsRegistry>,
-) -> Response {
+pub async fn telemetry_mw(req: Request, next: Next, registry: Arc<MetricsRegistry>) -> Response {
     let started = Instant::now();
     let route = route_label(&req);
     let method = req.method().as_str().to_owned();
@@ -55,12 +49,10 @@ pub async fn telemetry_mw(
 /// The route label for a request: the matched route pattern when the router
 /// matched one, else the path bucketed into a bounded family.
 fn route_label(req: &Request) -> String {
-    req.extensions()
-        .get::<MatchedPath>()
-        .map_or_else(
-            || label_bucket(req.uri().path()),
-            |matched| matched.as_str().to_owned(),
-        )
+    req.extensions().get::<MatchedPath>().map_or_else(
+        || label_bucket(req.uri().path()),
+        |matched| matched.as_str().to_owned(),
+    )
 }
 
 /// Coarse status class for the `status` label: `2xx`…`5xx`; anything outside
@@ -88,7 +80,10 @@ mod tests {
     /// exactly as `serve_full` layers it.
     fn app(status: StatusCode, registry: Arc<MetricsRegistry>) -> Router {
         Router::new()
-            .route("/api/projects/:pid/metrics", get(move || async move { status }))
+            .route(
+                "/api/projects/:pid/metrics",
+                get(move || async move { status }),
+            )
             .layer(middleware::from_fn(move |req, next| {
                 telemetry_mw(req, next, Arc::clone(&registry))
             }))
@@ -159,7 +154,13 @@ mod tests {
         let count_sum: u64 = text
             .lines()
             .filter(|l| l.starts_with("cxa_http_request_duration_seconds_count"))
-            .map(|l| l.rsplit_once(' ').expect("count has value").1.parse::<u64>().expect("count parses"))
+            .map(|l| {
+                l.rsplit_once(' ')
+                    .expect("count has value")
+                    .1
+                    .parse::<u64>()
+                    .expect("count parses")
+            })
             .sum();
         assert_eq!(count_sum, 2, "exactly one sample per request: {text}");
     }
@@ -168,7 +169,11 @@ mod tests {
     async fn unmatched_paths_bucket_into_bounded_family_labels() {
         let registry = Arc::new(MetricsRegistry::new());
         let app = app(StatusCode::NOT_FOUND, Arc::clone(&registry));
-        for probe in ["/api/projects/one/nope", "/api/projects/two/nope", "/favicon.ico"] {
+        for probe in [
+            "/api/projects/one/nope",
+            "/api/projects/two/nope",
+            "/favicon.ico",
+        ] {
             app.clone()
                 .oneshot(
                     HttpRequest::builder()

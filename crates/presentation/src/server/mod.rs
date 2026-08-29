@@ -47,6 +47,7 @@ mod docs;
 mod downloads;
 mod engines;
 mod forge;
+mod goals;
 mod guards;
 mod hub_docs;
 mod inbox;
@@ -60,6 +61,8 @@ mod projects;
 mod realtime;
 mod requests;
 mod security;
+mod share_link;
+mod share_page;
 mod status;
 mod store_rpc;
 mod transcripts;
@@ -75,7 +78,6 @@ use chat::*;
 use comments::*;
 use docs::*;
 use downloads::*;
-use metrics_admin::spawn_metrics_admin;
 use engines::*;
 use forge::*;
 use guards::*;
@@ -83,6 +85,7 @@ use hub_docs::*;
 use inbox::*;
 use manage::*;
 use meetings::*;
+use metrics_admin::spawn_metrics_admin;
 use openapi::*;
 use people::*;
 use pr_listing::*;
@@ -90,6 +93,8 @@ use projects::*;
 use realtime::*;
 use requests::*;
 use security::*;
+use share_link::*;
+use share_page::*;
 use status::*;
 use transcripts::*;
 use work::*;
@@ -728,7 +733,10 @@ pub async fn serve_full(
             "/api/projects/:pid",
             axum::routing::delete(delete_project_ep).patch(rename_project_ep),
         )
-        .route("/api/projects/:pid/store", post(store_rpc::store_rpc_ep))
+        .route(
+            "/api/projects/:pid/store",
+            post(store_rpc::store_rpc_ep).get(store_rpc::store_audit_ep),
+        )
         .route("/api/projects/:pid/state", get(state_ep))
         .route("/api/projects/:pid/metrics", get(metrics_ep))
         .route(
@@ -790,6 +798,18 @@ pub async fn serve_full(
         .route("/api/me/agents", get(my_agents_ep))
         .route("/join/:token", get(join_page_ep))
         .route("/api/workspace/join", post(join_ep))
+        // Public share-link status page (CXA-F069): the token IS the
+        // credential, so no session is required (allowlisted in auth_mw).
+        .route("/s/:token", get(share_page_ep))
+        // Share-link management (admin): mint, list, revoke.
+        .route(
+            "/api/projects/:pid/share-links",
+            get(share_link_list_ep).post(share_link_create_ep),
+        )
+        .route(
+            "/api/projects/:pid/share-links/:token",
+            axum::routing::delete(share_link_revoke_ep),
+        )
         .route(
             "/api/projects/:pid/operators/:operator/:action",
             post(operator_control_ep),
@@ -842,7 +862,18 @@ pub async fn serve_full(
             post(approve_cost),
         )
         .route("/api/projects/:pid/inbox", get(inbox_ep))
+        .route("/api/projects/:pid/goals", post(goals::add_goal_ep))
+        .route("/api/projects/:pid/goals/outcomes", get(goals::outcomes_ep))
+        .route(
+            "/api/projects/:pid/goals/:gid/rename",
+            post(goals::rename_goal_ep),
+        )
+        .route(
+            "/api/projects/:pid/ticket/:id/goal",
+            post(goals::ticket_set_goal_ep),
+        )
         .route("/api/projects/:pid/pr/:number/human", post(human_pr_ep))
+        .route("/api/projects/:pid/reverts/:sha", post(revert_decision_ep))
         .route("/api/projects/:pid/attachment", get(attachment_ep))
         .route(
             "/api/projects/:pid/ticket/:id/attachments",
@@ -1203,6 +1234,10 @@ mod cors_rate_limit_tests;
 mod pr_preview_tests;
 #[cfg(test)]
 mod pr_review_gate_tests;
+#[cfg(test)]
+mod share_link_tests;
+#[cfg(test)]
+mod store_rpc_audit_tests;
 #[cfg(test)]
 mod store_rpc_auth_enforcement_tests;
 #[cfg(test)]

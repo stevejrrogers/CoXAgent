@@ -166,6 +166,9 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/git/auth", &["get"]),
     route("/api/projects/:pid/git/connect", &["post"]),
     route("/api/projects/:pid/git/test", &["post"]),
+    route("/api/projects/:pid/goals", &["post"]),
+    route("/api/projects/:pid/goals/:gid/rename", &["post"]),
+    route("/api/projects/:pid/goals/outcomes", &["get"]),
     route("/api/projects/:pid/inbox", &["get"]),
     route("/api/projects/:pid/media/:file", &["get"]),
     route("/api/projects/:pid/members", &["get", "post"]),
@@ -180,7 +183,10 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/prs", &["get"]),
     route("/api/projects/:pid/prs/:num/:action", &["post"]),
     route("/api/projects/:pid/prs/:num/diff", &["get"]),
+    route("/api/projects/:pid/reverts/:sha", &["post"]),
     route("/api/projects/:pid/runner", &["get"]),
+    route("/api/projects/:pid/share-links", &["get", "post"]),
+    route("/api/projects/:pid/share-links/:token", &["delete"]),
     route("/api/projects/:pid/sprint/:action", &["post"]),
     route("/api/projects/:pid/sprint/close", &["post"]),
     route("/api/projects/:pid/sprint/goal", &["post"]),
@@ -192,7 +198,7 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/sprint-queue/:qid", &["delete"]),
     route("/api/projects/:pid/standup", &["post"]),
     route("/api/projects/:pid/state", &["get"]),
-    route("/api/projects/:pid/store", &["post"]),
+    route("/api/projects/:pid/store", &["get", "post"]),
     route("/api/projects/:pid/terminal", &["get"]),
     route("/api/projects/:pid/ticket-refine", &["post"]),
     route("/api/projects/:pid/ticket/:id", &["get"]),
@@ -200,6 +206,7 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/ticket/:id/assign", &["post"]),
     route("/api/projects/:pid/ticket/:id/attachments", &["post"]),
     route("/api/projects/:pid/ticket/:id/edit", &["post"]),
+    route("/api/projects/:pid/ticket/:id/goal", &["post"]),
     route("/api/projects/:pid/ticket/:id/priority", &["post"]),
     route("/api/projects/:pid/ticket/:id/ready", &["post"]),
     route("/api/projects/:pid/ticket/:id/reject", &["post"]),
@@ -215,6 +222,7 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/workspace", &["get"]),
     route("/api/spaces", &["get", "post"]),
     route("/api/spaces/:sid", &["delete", "put"]),
+    route("/s/:token", &["get"]),
     route("/api/token-saver", &["get"]),
     route("/api/tooling", &["get"]),
     route("/api/workspace", &["get", "put"]),
@@ -307,10 +315,18 @@ fn security_for(path: &str) -> SecurityLevel {
     if matches!(
         path,
         "/api/health" | "/api/openapi.json" | "/api/auth/login"
-    ) {
+    ) || path.starts_with("/s/")
+    {
+        // /s/:token (CXA-F069): the unguessable share token IS the credential,
+        // so the page is public exactly like the login route.
         return SecurityLevel::Public;
     }
-    if path.starts_with("/api/auth/users") || path.starts_with("/api/auth/tokens") {
+    if path.starts_with("/api/auth/users")
+        || path.starts_with("/api/auth/tokens")
+        || path.contains("/share-links")
+    {
+        // Share-link management is an admin surface: the handlers enforce
+        // manage rights on top of auth_mw's membership gate (CXA-F069).
         return SecurityLevel::Admin;
     }
     SecurityLevel::Authenticated

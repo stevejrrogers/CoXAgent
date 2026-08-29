@@ -260,6 +260,11 @@ pub struct WorkflowConfig {
     /// linked back so no work is lost). 0 = default (2).
     #[serde(default)]
     pub pr_stale_days: u64,
+    /// How many days back the reverted-work scan (CXA-F047) may link a
+    /// `Revert` commit to the deploy record it undid. Reverts older than this
+    /// are history, not feedback. 0 = default (30).
+    #[serde(default)]
+    pub revert_scan_days: u64,
     /// Per-phase cadence knobs (docs budget, debt sweep, architecture audit).
     #[serde(default)]
     pub cadence: CadenceConfig,
@@ -367,6 +372,29 @@ pub struct HumanConfig {
     /// Adaptive approval: routine work proceeds with an undo window instead of
     /// waiting for a rubber stamp (docs/ADAPTIVE_APPROVAL.md).
     pub adaptive: AdaptiveConfig,
+    /// Per-user focus windows (CXA-F176), keyed by bare username: while a
+    /// user's window is active, low-urgency questions addressed to them are
+    /// held and flush once as a digest at the window's end instead of
+    /// arriving one interrupt at a time. Absent = deliver immediately
+    /// (the behaviour this feature must not change).
+    #[serde(default)]
+    pub focus_windows: std::collections::BTreeMap<String, FocusWindow>,
+}
+
+/// One person's focus-window ("quiet hours") settings (CXA-F176). Every
+/// field defaults, so a pre-existing `coxagent.json` loads unchanged.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FocusWindow {
+    /// Window `"HH:MM-HH:MM"` in UTC (same format and midnight-wrap rule as
+    /// [`WorkflowConfig::quiet_hours_utc`], reusing `in_quiet_window`). While
+    /// `now` is inside it, deferrable questions addressed to this user are
+    /// held; the first cycle after it ends flushes them as one digest.
+    /// Malformed = no window — a typo must never be able to hide questions.
+    pub window_utc: String,
+    /// Opt-in switch for defer-to-digest. Off = questions reach this user
+    /// immediately even with a window configured.
+    pub defer_to_digest: bool,
 }
 
 /// See docs/ADAPTIVE_APPROVAL.md. Off by default: a project starts with the
@@ -429,6 +457,16 @@ impl WorkflowConfig {
             2
         } else {
             self.pr_stale_days
+        }
+    }
+
+    /// See the `revert_scan_days` field; 0 = default (30 days).
+    #[must_use]
+    pub fn revert_scan_days(&self) -> u64 {
+        if self.revert_scan_days == 0 {
+            30
+        } else {
+            self.revert_scan_days
         }
     }
 }
@@ -494,6 +532,7 @@ impl Default for WorkflowConfig {
             human: HumanConfig::default(),
             backlog_cap: 0,
             pr_stale_days: 0,
+            revert_scan_days: 0,
             cadence: CadenceConfig::default(),
             quiet_hours_utc: String::new(),
             bug_burn_floor: None,
@@ -870,6 +909,32 @@ mod tests {
         assert!(!in_quiet_window("bogus", 0));
         assert!(!in_quiet_window("25:00-26:00", 0));
         assert!(!in_quiet_window("", 0));
+    }
+
+    #[test]
+    fn focus_windows_are_additive_and_round_trip() {
+        // A pre-existing human section (CXA-F176 does not exist in it) must
+        // load unchanged: no focus windows, no defer — today's behaviour.
+        let old = r#"{"gate_ready":true,"question_sla_minutes":30}"#;
+        let human: HumanConfig = serde_json::from_str(old).expect("old human config loads");
+        assert!(human.focus_windows.is_empty());
+        assert!(human.gate_ready);
+        assert_eq!(human.question_sla_minutes, 30);
+
+        // A new document round-trips its per-user windows verbatim.
+        let with_window = r#"{"focus_windows":{
+            "luffy":{"window_utc":"09:00-12:00","defer_to_digest":true}
+        }}"#;
+        let human: HumanConfig = serde_json::from_str(with_window).expect("new human config loads");
+        let fw = human
+            .focus_windows
+            .get("luffy")
+            .expect("window keyed by bare username");
+        assert_eq!(fw.window_utc, "09:00-12:00");
+        assert!(fw.defer_to_digest);
+        let rewritten = serde_json::to_string(&human).expect("serialize");
+        let back: HumanConfig = serde_json::from_str(&rewritten).expect("deserialize");
+        assert_eq!(back, human);
     }
 
     #[test]

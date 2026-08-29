@@ -24,6 +24,9 @@ pub(super) const PID: &str = "demo";
 pub(super) const OTHER_PID: &str = "elsewhere";
 /// Alice's session — member of [`PID`].
 pub(super) const INSIDE_SESSION: &str = "session-inside";
+/// Carol's session — member-tier (BE) member of [`PID`]: can work the
+/// project but must never administer its share links (CXA-F069).
+pub(super) const MEMBER_SESSION: &str = "session-member";
 /// Mallory's session — member of [`OTHER_PID`] only, authenticated globally.
 pub(super) const OUTSIDE_SESSION: &str = "session-outside";
 /// A lead-tier session — manage rights hub-wide, but member of [`OTHER_PID`]
@@ -65,6 +68,7 @@ impl AuthPort for StubAuth {
     async fn user_for(&self, token: &str) -> Option<AuthUser> {
         match token {
             INSIDE_SESSION => Some(principal("alice", AuthRole::Admin, &[PID])),
+            MEMBER_SESSION => Some(principal("carol", AuthRole::Be, &[PID])),
             OUTSIDE_SESSION => Some(principal("mallory", AuthRole::Be, &[OTHER_PID])),
             LEAD_ELSEWHERE_SESSION => Some(principal("morgan", AuthRole::Manager, &[OTHER_PID])),
             _ => None,
@@ -308,7 +312,10 @@ pub(super) async fn app_with(
 /// `serve_full` layers it (route_layer + with_state).
 pub(super) fn deployed_router(state: AppState) -> Router {
     Router::new()
-        .route("/api/projects/:pid/store", post(store_rpc::store_rpc_ep))
+        .route(
+            "/api/projects/:pid/store",
+            post(store_rpc::store_rpc_ep).get(store_rpc::store_audit_ep),
+        )
         .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth_mw))
         .with_state(state)
 }
@@ -318,7 +325,10 @@ pub(super) fn deployed_router(state: AppState) -> Router {
 /// under `auth_mw` (the P5a defense-in-depth promise in store_rpc.rs).
 pub(super) fn handler_router(state: AppState) -> Router {
     Router::new()
-        .route("/api/projects/:pid/store", post(store_rpc::store_rpc_ep))
+        .route(
+            "/api/projects/:pid/store",
+            post(store_rpc::store_rpc_ep).get(store_rpc::store_audit_ep),
+        )
         .with_state(state)
 }
 
@@ -362,6 +372,31 @@ pub(super) async fn post_store(
     session: Option<&str>,
 ) -> axum::response::Response {
     post_store_at(router, PID, op, args, authorization, session).await
+}
+
+/// GET one store op (the read-only audit surface) against project `pid`,
+/// with optional `Authorization` / session cookie values.
+pub(super) async fn get_store_at(
+    router: Router,
+    pid: &str,
+    op: Option<&str>,
+    authorization: Option<&str>,
+    session: Option<&str>,
+) -> axum::response::Response {
+    let query = op.map_or_else(String::new, |op| format!("?op={op}"));
+    let mut builder = Request::builder()
+        .method("GET")
+        .uri(format!("/api/projects/{pid}/store{query}"));
+    if let Some(value) = authorization {
+        builder = builder.header(header::AUTHORIZATION, value);
+    }
+    if let Some(token) = session {
+        builder = builder.header(header::COOKIE, format!("{SESSION_COOKIE}={token}"));
+    }
+    router
+        .oneshot(builder.body(Body::empty()).expect("well-formed request"))
+        .await
+        .expect("in-process request")
 }
 
 /// Drain a response body into text for assertions.

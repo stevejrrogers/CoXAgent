@@ -17,6 +17,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// 3. Review comments starting with `LESSON:` become team lessons.
     #[allow(clippy::too_many_lines)] // three linear hygiene passes; splitting hurts readability
     pub(super) async fn forge_hygiene(&self) {
+        // 0. LEARN: merged-then-reverted work (CXA-F047) — needs only local
+        //    git, not the forge, so it runs before the forge gate below.
+        self.learn_reverted_work().await;
         let Some(forge) = &self.forge else {
             return;
         };

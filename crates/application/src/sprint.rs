@@ -2,9 +2,15 @@
 //! at the start of each cycle; it opens the first sprint and rolls over to a
 //! new one when the window elapses, committing the open feature backlog.
 
+use crate::backlog_scoping::open_backlog;
 use crate::selection::below_bug_burn_floor;
 use crate::state::{ProjectState, Sprint};
 use coxagent_domain::{Priority, Status, TicketId, TicketType};
+
+/// Scope bookkeeping lives in its own unit since CXA-C015; re-exported so
+/// every existing `sprint::done_count` call site (metrics, ceremonies, the
+/// presentation server) keeps its path.
+pub use crate::backlog_scoping::done_count;
 
 /// Open the first sprint or roll over an elapsed one. Returns the number of a
 /// newly opened sprint, or `None` when the current sprint is still running.
@@ -315,112 +321,6 @@ fn goal_from(state: &ProjectState, committed: &[TicketId]) -> String {
     }
 }
 
-/// Unshipped work a sprint commits to. Bugs count too — the sprint board used
-/// to track only features/chores, so a team heads-down on a bug burndown
-/// looked idle ("sprint không work gì hết") while two DEVs were mid-fix.
-/// Open bugs commit first (they outrank new work), then features/chores.
-/// `bug_burn_floor` (CXA-F028) scopes the commitment to bugs at or above that
-/// priority: the high-severity burn parks cosmetics instead of committing them.
-fn open_backlog(state: &ProjectState, bug_burn_floor: Option<Priority>) -> Vec<TicketId> {
-    let cap = sprint_capacity(state);
-    // A bug-heavy backlog must not lock FEATURE work out of every sprint:
-    // reserve one slot for a READY feature/chore so DEV-FEATURE always has
-    // something scoped to build. Without this, any sprint where open bugs do
-    // not fit within capacity commits only bugs and ready features starve
-    // under the sprint-scope gate — a full Ready queue, yet an idle dev.
-    let mut picked: Vec<TicketId> = Vec::new();
-    if let Some(ready) = state
-        .tickets
-        .iter()
-        .find(|t| {
-            matches!(t.ticket_type(), TicketType::Feature | TicketType::Chore)
-                && t.status() == Status::Ready
-        })
-        .map(|t| t.id().clone())
-    {
-        picked.push(ready);
-    }
-    // Burn-down scope (CXA-F030): every open bug that blocks or precedes the
-    // next feature work IS the sprint's job — committed in full, never
-    // capacity-capped. Capping it is how a burn-down sprint ships with its
-    // own blockers still uncommitted. Disjoint from the seat above (scope is
-    // bugs, the seat is a feature/chore), so nothing dedupes here.
-    picked.extend(crate::selection::burn_down_scope(state));
-    // Open bugs get the next seats, but only within remaining capacity — the
-    // reserved feature slot above is never displaced by bug pressure. Bugs
-    // below the burn floor are skipped: parked, not committed.
-    let mut bug_budget = cap.saturating_sub(picked.len());
-    for t in state.tickets.iter().filter(|t| {
-        t.ticket_type() == TicketType::Bug
-            && t.status() == Status::Open
-            && !below_bug_burn_floor(bug_burn_floor, t.priority())
-    }) {
-        if bug_budget == 0 {
-            break;
-        }
-        if picked.contains(t.id()) {
-            continue;
-        }
-        picked.push(t.id().clone());
-        bug_budget -= 1;
-    }
-    // Remaining capacity: the rest of the actionable features/chores.
-    let seats = cap.saturating_sub(picked.len());
-    let already_picked: std::collections::BTreeSet<TicketId> = picked.iter().cloned().collect();
-    picked.extend(
-        state
-            .tickets
-            .iter()
-            .filter(|t| {
-                matches!(t.ticket_type(), TicketType::Feature | TicketType::Chore)
-                    && !matches!(
-                        t.status(),
-                        Status::Done | Status::Documented | Status::Rejected
-                    )
-                    && !already_picked.contains(t.id())
-            })
-            .take(seats)
-            .map(|t| t.id().clone()),
-    );
-    picked
-}
-
-/// How much to commit to one sprint: what the team has actually been finishing,
-/// with a little stretch, never less than a few.
-///
-/// Committing the WHOLE backlog made every sprint a lie — 59 tickets in, ~0
-/// out, every retro reporting 0% velocity and carrying all 59 forward. A sprint
-/// that contains everything says nothing about what the team intends to do
-/// next, and a goal derived from it is noise.
-fn sprint_capacity(state: &ProjectState) -> usize {
-    const FLOOR: usize = 3;
-    let history: Vec<usize> = state.sprints.iter().rev().take(5).map(|s| s.done).collect();
-    if history.is_empty() {
-        return FLOOR * 2;
-    }
-    let avg = history.iter().sum::<usize>() / history.len().max(1);
-    // A half-step of stretch over the measured average — enough to pull ahead
-    // on a good sprint, not enough to make the number meaningless again.
-    (avg + avg / 2).max(FLOOR)
-}
-
-/// How many committed tickets have shipped — for the burndown/progress view.
-#[must_use]
-pub fn done_count(state: &ProjectState) -> usize {
-    let Some(sprint) = &state.sprint else {
-        return 0;
-    };
-    sprint
-        .committed
-        .iter()
-        .filter(|id| {
-            state
-                .ticket(id)
-                .is_some_and(|t| matches!(t.status(), Status::Done | Status::Documented))
-        })
-        .count()
-}
-
 /// Queue a sprint to run after the current one. Returns the new plan's id.
 pub fn queue_sprint(state: &mut ProjectState, goal: &str, tickets: Vec<TicketId>, by: &str) -> u64 {
     let id = state.sprint_queue.iter().map(|p| p.id).max().unwrap_or(0) + 1;
@@ -615,54 +515,9 @@ pub fn top_up_scope(state: &mut ProjectState, floor: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coxagent_domain::{Complexity, Priority, Role, TechnicalDesign, Ticket, TicketType};
-
-    fn feature(id: &str) -> Ticket {
-        Ticket::new(
-            TicketId::new(id).expect("id"),
-            TicketType::Feature,
-            "f",
-            "",
-            Priority::High,
-            Complexity::Small,
-            false,
-        )
-        .expect("t")
-    }
-
-    fn bug(id: &str) -> Ticket {
-        Ticket::new(
-            TicketId::new(id).expect("id"),
-            TicketType::Bug,
-            "b",
-            "",
-            Priority::High,
-            Complexity::Small,
-            false,
-        )
-        .expect("t")
-    }
-
-    fn bug_prio(id: &str, prio: Priority) -> Ticket {
-        Ticket::new(
-            TicketId::new(id).expect("id"),
-            TicketType::Bug,
-            "b",
-            "",
-            prio,
-            Complexity::Small,
-            false,
-        )
-        .expect("t")
-    }
-
-    fn ready_feature(id: &str) -> Ticket {
-        let mut t = feature(id);
-        t.set_technical_design(Role::Sa, TechnicalDesign::default())
-            .expect("design");
-        t.transition_to(Role::Sa, Status::Ready).expect("ready");
-        t
-    }
+    // The ticket builders moved with the scope bookkeeping (CXA-C015); the
+    // lifecycle tests reach across the sibling boundary for the same fixtures.
+    use crate::backlog_scoping::fixtures::{bug, bug_prio, feature, ready_feature};
 
     #[test]
     fn rollover_consumes_the_planned_queue_front_first() {
@@ -887,84 +742,7 @@ mod tests {
         assert_eq!(refill_empty_scope(&mut state), 0);
     }
 
-    #[test]
-    fn a_bug_heavy_backlog_still_reserves_a_ready_feature_slot() {
-        // A fresh state commits to 6 (FLOOR*2). A bug-heavy backlog used to
-        // fill every seat with open bugs, locking a ready feature out of the
-        // sprint entirely — an idle DEV-FEATURE with a full Ready queue. The
-        // reserved feature slot prevents that.
-        let state = ProjectState {
-            tickets: vec![ready_feature("F001"), bug("B001"), bug("B002"), bug("B003")],
-            ..ProjectState::default()
-        };
-        let committed = open_backlog(&state, None);
-        assert!(
-            committed.contains(&TicketId::new("F001").expect("id")),
-            "a ready feature must keep a scout seat even under bug pressure"
-        );
-        // The reserved feature is NOT displaced: it sits at the front.
-        assert_eq!(committed[0], TicketId::new("F001").expect("id"));
-    }
-
-    #[test]
-    fn no_ready_feature_means_bugs_take_the_whole_backlog() {
-        let state = ProjectState {
-            tickets: vec![bug("B001"), bug("B002"), bug("B003"), bug("B004")],
-            ..ProjectState::default()
-        };
-        let committed = open_backlog(&state, None);
-        assert!(
-            committed.iter().all(|id| id.to_string().starts_with('B')),
-            "without a ready feature, the sprint is bugs-only"
-        );
-    }
-
     // ---- CXA-F028: the bug-burn floor scopes commitment and DEV work. ----
-
-    #[test]
-    fn a_burn_floor_scopes_commitment_to_at_or_above_floor_bugs() {
-        let state = ProjectState {
-            tickets: vec![
-                ready_feature("F001"),
-                bug_prio("B-HIGH", Priority::High),
-                bug_prio("B-MED", Priority::Medium),
-                bug_prio("B-LOW", Priority::Low),
-            ],
-            ..ProjectState::default()
-        };
-        let committed = open_backlog(&state, Some(Priority::High));
-        assert!(
-            committed.contains(&TicketId::new("B-HIGH").expect("id")),
-            "high-severity bugs are the burn's target"
-        );
-        assert!(
-            !committed.contains(&TicketId::new("B-MED").expect("id")),
-            "medium bugs are parked below a High floor"
-        );
-        assert!(
-            !committed.contains(&TicketId::new("B-LOW").expect("id")),
-            "low bugs are parked below a High floor"
-        );
-        // The reserved feature slot survives the floor.
-        assert!(committed.contains(&TicketId::new("F001").expect("id")));
-    }
-
-    #[test]
-    fn no_floor_commits_every_open_bug_exactly_as_before() {
-        let state = ProjectState {
-            tickets: vec![
-                bug_prio("B-HIGH", Priority::High),
-                bug_prio("B-MED", Priority::Medium),
-                bug_prio("B-LOW", Priority::Low),
-            ],
-            ..ProjectState::default()
-        };
-        assert_eq!(
-            open_backlog(&state, None).len(),
-            3,
-            "floor=None burns every open bug (the historical behaviour)"
-        );
-    }
 
     #[test]
     fn rollover_mirrors_the_config_floor_onto_the_new_sprint() {
@@ -1156,40 +934,5 @@ mod tests {
             .expect("fmt");
         state.sprint.as_mut().expect("s").started_at = old;
         assert_eq!(advance(&mut state, 1000, SprintPolicy::days(1)), Some(2));
-    }
-}
-
-#[cfg(test)]
-mod capacity_tests {
-    use super::sprint_capacity;
-    use crate::state::{ProjectState, SprintRecord};
-
-    fn with_history(done: &[usize]) -> ProjectState {
-        let mut s = ProjectState::default();
-        for (i, d) in done.iter().enumerate() {
-            s.sprints.push(SprintRecord {
-                number: u32::try_from(i).unwrap_or(0) + 1,
-                goal: String::new(),
-                committed: 50,
-                done: *d,
-                at: String::new(),
-            });
-        }
-        s
-    }
-
-    #[test]
-    fn capacity_follows_what_the_team_actually_finished() {
-        // A team shipping ~4 a sprint commits to 6, not to the whole backlog.
-        assert_eq!(sprint_capacity(&with_history(&[4, 4, 4])), 6);
-        // A brand-new project has no history to go on; start modest.
-        assert_eq!(sprint_capacity(&with_history(&[])), 6);
-        // Even a team that shipped nothing commits to something — a sprint of
-        // zero would never recover.
-        assert_eq!(sprint_capacity(&with_history(&[0, 0])), 3);
-        // Only the recent past counts: an old heroic sprint does not license
-        // over-committing forever.
-        let long = with_history(&[40, 1, 1, 1, 1, 1]);
-        assert_eq!(sprint_capacity(&long), 3);
     }
 }

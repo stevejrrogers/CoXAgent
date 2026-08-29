@@ -137,6 +137,15 @@ function alertsHtml(s,m,spend){
   if(bud&&spend.total_cost_usd>=bud)al.push(["red","alert-triangle","Budget cap reached",money(spend.total_cost_usd)+" of "+money(bud)+" — loop paused"]);
   else if(bud&&spend.total_cost_usd>=bud*0.8)al.push(["amber","alert-triangle","Budget nearly reached",Math.round(spend.total_cost_usd/bud*100)+"% of "+money(bud)]);
   if(m.openBugs>=5)al.push(["amber","bug",m.openBugs+" open bugs","DEV-BUG is prioritising fixes over features"]);
+  // Merged-then-reverted work (CXA-F047): shipped value that did not stick.
+  // Amber while detections wait on a human; red once confirmed — a fact, not
+  // a suspicion, and planning discounts it next cycle.
+  const rv=s.reverted_work||[];
+  if(rv.length){
+    const pend=rv.filter(e=>e.decision==="pending").length,okd=rv.length-pend;
+    if(pend)al.push(["amber","arrow-back-up","Reverted work",pend+" detected revert"+(pend===1?" needs":"s need")+" your review — decide in the Inbox"]);
+    else if(okd)al.push(["red","arrow-back-up","Reverted work",okd+" confirmed revert"+(okd===1?"":"s")+" — planning weights them down next cycle"]);
+  }
   if(!al.length)return "";
   return al.map(([c,ic,t,d])=>`<div class="panel" style="margin-bottom:12px;display:flex;align-items:center;gap:12px;border-color:var(--${c})">
     <i class="ti ti-${ic}" style="font-size:20px;color:var(--${c})"></i>
@@ -460,6 +469,30 @@ function ucolumn([k,l,c,statuses],ts){const items=ts.filter(t=>statuses.includes
     .sort((a,b)=>(a.type==="bug")-(b.type==="bug")); // bugs after features in the same column
   return `<div class="col"><h3><span class="dot" style="background:var(${c})"></span>${l}<span class="n">${items.length}</span></h3>${items.length?items.map(card).join(""):'<div class="empty">—</div>'}</div>`;}
 
+// Merged-then-reverted work (CXA-F047) on the Work board: the most recent
+// events, with the approve/dismiss decision pending ones still wait on.
+// Renders nothing when the ledger is empty — the board reads as before.
+function renderRevertedWork(s){
+  const el=document.getElementById("board-reverts");if(!el)return;
+  const rv=s.reverted_work||[];
+  if(!rv.length){el.innerHTML="";return;}
+  const row=e=>`<div class="rel" style="align-items:center">
+    <span class="rv" style="background:color-mix(in srgb,var(--red) 14%,transparent);color:var(--red)"><i class="ti ti-arrow-back-up"></i></span>
+    <div class="rt">${esc(e.ticket)} — reverted work<div class="rd">${esc(e.subject)} · ${esc(e.role)} · ${e.decision==="pending"?"awaiting review":esc(e.decision)}</div></div>
+    ${e.decision==="pending"?`<span class="ibx-acts" onclick="event.stopPropagation()">${ibtn("Dismiss",`inboxRevert('${esc(e.sha)}','dismiss')`)+ibtn("Confirm",`inboxRevert('${esc(e.sha)}','approve')`,1)}</span>`:""}</div>`;
+  el.innerHTML=`<div class="panel" style="margin-bottom:12px"><h4><i class="ti ti-arrow-back-up" style="color:var(--red)"></i> Reverted work</h4>${[...rv].reverse().slice(0,5).map(row).join("")}</div>`;
+}
+
+// Engine-health detail for one agent role: what failed, how often, and when —
+// the line on the card is the headline, this is the story.
+function showRoleHealth(role){
+  const hl=(STATE.role_health||{})[role];if(!hl)return;
+  const when=hl.last_error_at?relTime(hl.last_error_at):"—";
+  coxModal({title:role+" · engine health",
+    message:`${hl.errors} error(s), ${hl.timeouts} timeout(s) recorded.\n\nMost recent (${when}):\n${hl.last_error||"—"}\n\nTimeouts mean the provider stalled — failover retried on the fallback chain. Frequent timeouts under parallel load usually mean the concurrency is too high for the provider; lower it in Settings → Workflow.`,
+    confirmText:"OK",cancelText:"Open live log"}).then(ok=>{if(!ok)openAgent(role);});
+}
+
 function renderSidebar(s){
   document.getElementById("ver").textContent=s.current_version||"0.0.0";
   document.getElementById("pn-tickets").textContent=(s.tickets||[]).length+" tickets";
@@ -561,7 +594,7 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
       // stamped from the run that actually happened, so failover shows through.
       const engBadge=eng?`<span class="ag-eng" title="engine actually running this agent">${esc(eng)}</span>`:'';
       const hl=(s.role_health||{})[r];
-      const healthHtml=hl&&hl.errors>0?`<div class="ag-health" title="${esc(hl.last_error||'')}"><i class="ti ti-alert-triangle"></i> ${hl.errors} error${hl.errors===1?'':'s'}${hl.timeouts?` · ${hl.timeouts} timeout${hl.timeouts===1?'':'s'}`:''}${hl.timeouts>=3?' · <b>provider under load — consider a lower concurrency</b>':''}</div>`:'';
+      const healthHtml=hl&&hl.errors>0?`<div class="ag-health" title="click for details" onclick="event.stopPropagation();showRoleHealth('${esc(r)}')"><i class="ti ti-alert-triangle"></i> ${hl.errors} error${hl.errors===1?'':'s'}${hl.timeouts?` · ${hl.timeouts} timeout${hl.timeouts===1?'':'s'}`:''}${hl.timeouts>=3?' · <b>provider under load — consider a lower concurrency</b>':''}</div>`:'';
       return `<div class="agent ${live?'run':''}" onclick="openAgent('${r}')" style="cursor:pointer">
         <div class="ag-head"><div class="av" style="background:${col}22;color:${col}">${initials(r)}<span class="sr"></span></div>
           <div class="ag-id"><div class="rl">${r}${engBadge}</div><div class="ds">${d}</div></div>
@@ -586,6 +619,7 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
     let all=(s.tickets||[]);if(BF!=="all")all=all.filter(t=>t.priority===BF);
     if(SF!=="all")all=all.filter(t=>t.status===SF);
     document.getElementById("board-cols").innerHTML=UCOLS.map(c=>ucolumn(c,all)).join("");
+    renderRevertedWork(s);
     renderSprintPanel(s);
     renderBacklogPanel(s);
   }else if(CUR==="activity"){
