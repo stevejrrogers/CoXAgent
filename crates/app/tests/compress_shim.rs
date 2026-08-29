@@ -236,23 +236,26 @@ struct Shimmed {
 
 impl Shimmed {
     fn new() -> Self {
+        Self::with_cmd_and_exe("git", env!("CARGO_BIN_EXE_coxagent"))
+    }
+
+    /// A shim for `cmd` whose baked compress binary is `exe` — pass a
+    /// nonexistent path to reproduce CXA-B109's purged-worktree state. The
+    /// fake binary ignores its argv, so one fake serves every subcommand.
+    fn with_cmd_and_exe(cmd: &str, exe: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let shim_dir = dir.path().join("shims");
         let fake_dir = dir.path().join("bin");
         std::fs::create_dir_all(&shim_dir).unwrap();
         std::fs::create_dir_all(&fake_dir).unwrap();
 
-        let shim = shim_dir.join("git");
+        let shim = shim_dir.join(cmd);
         write_exec(
             &shim,
-            &coxagent_app::shim_script(
-                "git",
-                &shim_dir.display().to_string(),
-                env!("CARGO_BIN_EXE_coxagent"),
-            ),
+            &coxagent_app::shim_script(cmd, &shim_dir.display().to_string(), exe),
         );
         write_exec(
-            &fake_dir.join("git"),
+            &fake_dir.join(cmd),
             &format!(
                 "#!/usr/bin/env bash\n\
                  for ((i=0;i<{FAKE_LINES};i++)); do printf '%s\\n' '{FAKE_LINE}'; done\n\
@@ -419,11 +422,19 @@ const REPRO_LINES: usize = 3_000;
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 /// The directory holding the real `git`, skipping any shim directory that
-/// happens to be on the ambient `PATH` (an agent shell has one).
+/// happens to be on the ambient `PATH` (an agent shell has one). CXA-B109 made
+/// the directory name pid-suffixed (`coxagent-shims-<pid>`), so match the
+/// prefix every instance shares instead of one exact name.
+fn is_shim_dir(d: &Path) -> bool {
+    d.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with("coxagent-shims"))
+}
+
 fn real_git_dir() -> PathBuf {
     let path = std::env::var_os("PATH").expect("PATH is unset");
     std::env::split_paths(&path)
-        .find(|d| !d.ends_with("coxagent-shims") && d.join("git").is_file())
+        .find(|d| !is_shim_dir(d) && d.join("git").is_file())
         .expect("no real `git` found on PATH")
 }
 
@@ -592,4 +603,48 @@ fn the_same_content_is_compressed_for_porcelain_and_other_tools() {
         );
         assert!(String::from_utf8_lossy(&out).contains("output compressed"));
     }
+}
+
+/// CXA-B109 regression guard, at the shim level: the compress binary's path is
+/// baked into every shim script at generation time, and the shim directory is
+/// shared — so when the hub that wrote them ran from a worktree the janitor
+/// later purged, the baked binary vanished. Unguarded, the pipeline's second
+/// stage dies at exec and the first stage SIGPIPEs: exit 141, ZERO bytes of
+/// output, for every shimmed tool call until another hub rewrites the shims.
+/// The shim must degrade to `exec "$real"` — exact output beats no output.
+/// Fails on pre-fix code (empty stdout, bash's exec error on stderr).
+#[test]
+fn a_vanished_compress_binary_degrades_to_the_real_binary() {
+    let vanished = "/coxagent-cxa-b109/purged-worktree/target/debug/coxagent";
+    assert!(!Path::new(vanished).exists(), "the baked binary must be gone");
+
+    // A plain-pipeline command (no exactness probe — the path the ticket is
+    // about): every byte must come from the real binary, streams separate,
+    // exit code the wrapped one.
+    let sh = Shimmed::with_cmd_and_exe("node", vanished);
+    let out = sh.run(&["--version"]);
+    assert_byte_exact("vanished-exe node stdout", &fake_stdout(), &out.stdout);
+    assert_byte_exact("vanished-exe node stderr", &fake_stderr(), &out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(FAKE_EXIT),
+        "vanished-exe node: exit code"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !err.contains("No such file or directory"),
+        "the shim leaked its own exec failure to the caller: {err:.200}"
+    );
+
+    // The exact-aware path (`git` + probe) must degrade the same way instead
+    // of trusting a probe that can no longer run.
+    let git_sh = Shimmed::with_cmd_and_exe("git", vanished);
+    let out = git_sh.run(&["show", "HEAD:big.rs"]);
+    assert_byte_exact("vanished-exe git show stdout", &fake_stdout(), &out.stdout);
+    assert_byte_exact("vanished-exe git show stderr", &fake_stderr(), &out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(FAKE_EXIT),
+        "vanished-exe git show: exit code"
+    );
 }

@@ -16,6 +16,14 @@ use super::*;
 /// subcommand that merge is itself corruption — a warning git wrote to stderr
 /// lands in the middle of the file content, and the caller's stderr comes back
 /// empty — so those bypass the pipeline entirely and `exec` the real binary.
+///
+/// CXA-B109: the compress binary's path is baked in at generation time and can
+/// vanish underneath the script (a hub wrote these shims from a worktree the
+/// janitor later purged). Without a guard, the pipeline's second stage dies at
+/// exec and the first stage SIGPIPEs — exit 141, zero bytes of output, for
+/// every shimmed tool call. Before piping, the script therefore checks the
+/// baked binary and degrades to `exec "$real"`: exact, uncompressed output
+/// beats no output.
 /// Public so the COX-B015 regression test can drive the *real* script rather
 /// than a hand-copied duplicate — a copy is exactly how a shim regression
 /// hides from its own guard.
@@ -46,6 +54,7 @@ pub fn shim_script(cmd: &str, shim_dir: &str, exe: &str) -> String {
          [ -z \"$real\" ] && {{ echo \"cox-shim: $cmd not found\" >&2; exit 127; }}\n\
          if [ \"${{COX_COMPRESS:-1}}\" = \"1\" ] && [ ! -t 1 ]; then\n\
          {exact_bypass}\
+         \x20 [ -x \"{exe}\" ] || exec \"$real\" \"$@\"\n\
          \x20 set -o pipefail\n\
          \x20 \"$real\" \"$@\" 2>&1 | \"{exe}\" compress --cmd \"$cmd\" -- \"$@\"\n\
          \x20 exit \"${{PIPESTATUS[0]:-0}}\"\n\
@@ -54,9 +63,23 @@ pub fn shim_script(cmd: &str, shim_dir: &str, exe: &str) -> String {
     )
 }
 
+/// One shim directory per hub instance: `temp/coxagent-shims-<pid>`. Pure so
+/// the naming rule is testable without touching the real temp dir.
+///
+/// CXA-B109: the directory used to be the shared name `coxagent-shims`, so
+/// every hub on the host wrote the same scripts and whoever wrote last decided
+/// which binary path every OTHER hub's shims baked in — when that binary's
+/// worktree was purged, every shimmed tool call host-wide lost its output. The
+/// pid is unique among live processes, so concurrent hubs never collide, and a
+/// recycled pid merely claims a dead instance's leftovers as its own.
+#[must_use]
+pub fn shim_dir_for_process(temp_dir: &Path, pid: u32) -> PathBuf {
+    temp_dir.join(format!("coxagent-shims-{pid}"))
+}
+
 pub(crate) fn setup_command_shims() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    let dir = std::env::temp_dir().join("coxagent-shims");
+    let dir = shim_dir_for_process(&std::env::temp_dir(), std::process::id());
     std::fs::create_dir_all(&dir).ok()?;
     let dir_disp = dir.display().to_string();
     let exe_disp = exe.display().to_string();
@@ -83,5 +106,38 @@ pub(crate) fn enable_command_shims() {
     }
     if let Some(dir) = setup_command_shims() {
         std::env::set_var("COXAGENT_SHIM_DIR", dir);
+    }
+}
+
+#[cfg(test)]
+mod shim_dir_tests {
+    use super::shim_dir_for_process;
+    use std::path::Path;
+
+    /// CXA-B109: two hub instances must never share one shim directory — the
+    /// shared `coxagent-shims` name let the last writer's baked binary path
+    /// decide for every hub on the host, and a purged worktree then ate every
+    /// shimmed tool call's output host-wide.
+    #[test]
+    fn distinct_hub_instances_get_distinct_shim_directories() {
+        let temp = Path::new("/tmp");
+        let a = shim_dir_for_process(temp, 100);
+        let b = shim_dir_for_process(temp, 200);
+        assert_ne!(a, b, "two live hubs would overwrite each other's shims");
+        assert_eq!(shim_dir_for_process(temp, 100), a, "a hub must be stable");
+    }
+
+    /// The name must stay recognisable as a shim directory: the COX-B015
+    /// integration guard filters these directories out of the ambient PATH
+    /// when it looks for the real `git`, and an agent debugging PATH oddities
+    /// should be able to spot them too.
+    #[test]
+    fn the_directory_name_stays_recognisable_as_a_shim_dir() {
+        let dir = shim_dir_for_process(Path::new("/var/folders/x/T"), 4242);
+        assert_eq!(
+            dir,
+            Path::new("/var/folders/x/T/coxagent-shims-4242"),
+            "the pid-suffixed name must keep the coxagent-shims prefix"
+        );
     }
 }
