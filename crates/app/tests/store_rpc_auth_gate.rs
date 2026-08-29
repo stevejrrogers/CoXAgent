@@ -215,7 +215,10 @@ async fn store_requires_a_manage_principal_for_every_op() {
         // [`PID`] is deliberately not registered with this hub. A 401/403 here
         // would mean the RBAC bar is miswired for this op.
         let (status, body) = store_op(PORT, Some(AuthRole::Admin), op).await;
-        assert_ne!(status, 401, "admin must clear auth on /store?op={op} — got: {body}");
+        assert_ne!(
+            status, 401,
+            "admin must clear auth on /store?op={op} — got: {body}"
+        );
         assert_ne!(
             status, 403,
             "admin must clear the manage bar on /store?op={op} — got: {body}"

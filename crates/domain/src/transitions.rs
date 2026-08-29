@@ -127,12 +127,28 @@ mod tests {
         let f = TicketType::Feature;
         assert!(transition_allowed(f, Status::Done, Status::Pending));
         assert!(transition_allowed(f, Status::Documented, Status::Pending));
-        assert!(transition_allowed(TicketType::Bug, Status::Verified, Status::Open));
+        assert!(transition_allowed(
+            TicketType::Bug,
+            Status::Verified,
+            Status::Open
+        ));
         // Not a free-for-all: only PO/User (and System) may demote.
-        assert!(can_transition(Role::System, Status::Documented, Status::Pending));
+        assert!(can_transition(
+            Role::System,
+            Status::Documented,
+            Status::Pending
+        ));
         assert!(can_transition(Role::Po, Status::Done, Status::Pending));
-        assert!(!can_transition(Role::DevFeature, Status::Done, Status::Pending));
-        assert!(!can_transition(Role::Docs, Status::Documented, Status::Pending));
+        assert!(!can_transition(
+            Role::DevFeature,
+            Status::Done,
+            Status::Pending
+        ));
+        assert!(!can_transition(
+            Role::Docs,
+            Status::Documented,
+            Status::Pending
+        ));
     }
 
     #[test]

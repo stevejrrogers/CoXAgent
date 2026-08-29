@@ -133,10 +133,7 @@ mod tdd_tests {
     #[tokio::test]
     async fn ac2_exact_criterion_text_still_lands_the_verdict() {
         // Baseline that already works and must keep working.
-        assert_eq!(
-            case_status_after_verdict(AC).await,
-            TestCaseStatus::Passed
-        );
+        assert_eq!(case_status_after_verdict(AC).await, TestCaseStatus::Passed);
     }
 
     #[tokio::test]
@@ -144,8 +141,9 @@ mod tdd_tests {
         // One word dropped: normalized Levenshtein distance is far below 0.3
         // and keyword overlap is total — the generated matrix must still mark
         // the criterion COVERED instead of dropping the verdict.
-        let status = case_status_after_verdict("the bug can no longer be reproduced on fresh checkout")
-            .await;
+        let status =
+            case_status_after_verdict("the bug can no longer be reproduced on fresh checkout")
+                .await;
         assert_eq!(
             status,
             TestCaseStatus::Passed,

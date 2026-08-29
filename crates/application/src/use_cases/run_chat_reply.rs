@@ -1078,27 +1078,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             "(The app auto-deploys via docker compose after DEV each cycle; you can also deploy \
              on request with ACTION: deploy.)\n",
         );
-        // Open backlog so the agent knows what's there and can avoid duplicates.
-        let pending: Vec<_> = s
-            .tickets
-            .iter()
-            .filter(|t| matches!(t.status(), Status::Pending | Status::Ready | Status::Open))
-            .take(10)
-            .collect();
-        if !pending.is_empty() {
-            out.push_str("Open tickets (don't file duplicates):\n");
-            for t in pending {
-                let _ = writeln!(
-                    out,
-                    "- {} [{:?}] {} ({:?})",
-                    t.id(),
-                    t.ticket_type(),
-                    t.title(),
-                    t.priority()
-                );
-            }
-        }
-        push_team_memory(&mut out, &s);
+        push_backlog_and_health(&s, &mut out);
         out.push_str("Recent team channel (oldest first — this is the conversation you are in):\n");
         let recent: Vec<_> = s
             .comments
@@ -1131,15 +1111,15 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
                 self.lang.reply_directive()
             )
         };
-        let (value_task, design_task, process_task) = (
+        let (po_task, sa_task, scrum_task) = (
             view("PO (product owner)", "value & priority"),
             view("SA (architect)", "technical feasibility & design"),
             view("SM (scrum master)", "process, risk & sequencing"),
         );
         let (po, sa, sm) = tokio::join!(
-            self.run("PO", &value_task),
-            self.run("SA", &design_task),
-            self.run("SM", &process_task),
+            self.run("PO", &po_task),
+            self.run("SA", &sa_task),
+            self.run("SM", &scrum_task),
         );
         let mut takes = String::new();
         for (who, t) in [("PO", &po), ("SA", &sa), ("SM", &sm)] {
@@ -1291,17 +1271,40 @@ const NEEDS_YES: &[&str] = &[
     "import",
 ];
 
-/// The team's shared memory and the human's plan: decisions/conventions,
-/// planned sprints, held tickets, engine health. Appended to the reply
-/// context so the agent can honour decisions, see the plan to talk about it,
-/// and answer "why is BA slow" with a real reason.
-fn push_team_memory(out: &mut String, s: &ProjectState) {
+/// Appends the work-surface part of the agent briefing — open backlog, team
+/// decisions, planned sprints, on-hold tickets, engine health — to `out`.
+/// Split out of [`RunChatReplyUseCase::context`] so each half stays reviewable;
+/// the agent must see the plan and the blockers to talk about them.
+fn push_backlog_and_health(s: &ProjectState, out: &mut String) {
+    use coxagent_domain::Status;
+    // Open backlog so the agent knows what's there and can avoid duplicates.
+    let pending: Vec<_> = s
+        .tickets
+        .iter()
+        .filter(|t| matches!(t.status(), Status::Pending | Status::Ready | Status::Open))
+        .take(10)
+        .collect();
+    if !pending.is_empty() {
+        out.push_str("Open tickets (don't file duplicates):\n");
+        for t in pending {
+            let _ = writeln!(
+                out,
+                "- {} [{:?}] {} ({:?})",
+                t.id(),
+                t.ticket_type(),
+                t.title(),
+                t.priority()
+            );
+        }
+    }
     if !s.decisions.is_empty() {
         out.push_str("Team decisions/conventions (honour these):\n");
         for d in s.decisions.iter().rev().take(6).rev() {
             let _ = writeln!(out, "- {d}");
         }
     }
+    // Planned sprints + parked work — the human plans here; the agent must
+    // see the plan to talk about it.
     if !s.sprint_queue.is_empty() {
         out.push_str("Planned sprints (run in this order after the current one):\n");
         for (i, q) in s.sprint_queue.iter().enumerate() {
