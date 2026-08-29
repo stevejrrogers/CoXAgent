@@ -32,3 +32,24 @@ test('the settings view loads cleanly', async ({ page }) => {
   // Config comes back over the wire and paints real content.
   await expect(body).not.toBeEmpty();
 });
+
+test('every sidebar view renders something and stays console-clean', async ({ page }) => {
+  // The gate CXA-F233 needed: its new menu shipped with no script tag and a
+  // made-up icon — clicking it threw and rendered nothing, and no spec
+  // visited the view so nothing screamed. Now every sidebar entry is visited.
+  const errors: string[] = [];
+  armConsoleGate(page, errors);
+  await openApp(page);
+  const views = await page.$$eval('.side a[data-v]', els => els.map(e => e.getAttribute('data-v')));
+  expect(views.length).toBeGreaterThan(10);
+  for (const v of views) {
+    if (v === 'terminal') continue; // needs a PTY session — covered elsewhere
+    await page.locator(`.side a[data-v="${v}"]`).click();
+    await page.waitForTimeout(400);
+    const visible = await page.$$eval('.view', els =>
+      els.filter(e => (e as HTMLElement).offsetParent !== null)
+        .map(e => (e as HTMLElement).innerText.trim().length));
+    expect(visible.some(len => len > 0), `view "${v}" rendered empty`).toBeTruthy();
+  }
+  await assertNoConsoleErrors(errors);
+});

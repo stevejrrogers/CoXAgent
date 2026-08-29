@@ -85,3 +85,13 @@ may only shrink — fixing a file without delisting it also fails.
   Read it before making changes around the state store / API transport /
   auth hardening. It lists committed work and the pending P5a (auth
   enforcement) recipe that is not yet landed.
+
+## New-view checklist (learned from CXA-F233 shipping a dead menu)
+
+Any change that adds a sidebar view MUST, in the same PR:
+1. add the `<script src="/assets/js/<file>.js">` tag to `index.html` — the
+   server-side `APP_JS` registration alone serves the file but never loads it;
+2. use an icon that actually exists in the vendored Tabler set (check
+   https://tabler.io/icons — `ti-waves` does not exist; the menu shipped blank);
+3. extend or rely on the e2e "every sidebar view renders" spec — a view that
+   throws on open or renders empty fails the suite and must not merge.
