@@ -13,3 +13,15 @@ test('chat mode shows seeded messages and search finds them', async ({ page }) =
   await assertNoConsoleErrors(errors);
   await expect(page).toHaveScreenshot('chat.png', { fullPage: false });
 });
+
+test('switching Manage → Chat lands in chat mode, not Overview', async ({ page }) => {
+  await openApp(page);
+  await page.evaluate(() => { (window as any).nav('mg-spaces'); });
+  await page.evaluate(() => { (window as any).setMode('chat'); });
+  await expect(page.locator('body')).toHaveClass(/mode-chat/);
+  await expect(page.locator('#chat-input')).toBeVisible();
+  // And leaving chat returns to a workspace view, not a manage one.
+  await page.evaluate(() => { (window as any).setMode('workspace'); });
+  await expect(page.locator('body')).not.toHaveClass(/mode-chat/);
+  await expect(page.locator('body')).not.toHaveClass(/mode-manage/);
+});

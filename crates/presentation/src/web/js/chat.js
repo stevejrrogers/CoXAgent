@@ -484,7 +484,13 @@ function applyMode(){
     setTimeout(()=>{const i=document.getElementById("chat-input");if(i)i.focus();},40);}
   // Entering Manage lands on Spaces; leaving it returns to the workspace views.
   if(manage&&!String(CUR).startsWith("mg-"))nav("mg-spaces");
-  if(!manage&&String(CUR).startsWith("mg-"))nav("overview");
+  // Only nav() out of a manage view when landing in WORKSPACE. Going manage →
+  // chat must not call nav(): its exit-chat-on-sidebar-click guard fires on the
+  // internal call and stomps the chat mode we just set (Manage → Chat used to
+  // dump you on Overview). Park CUR quietly instead — the chat overlay covers
+  // the screen, and leaving chat later re-runs this branch and navs properly.
+  if(!manage&&!chat&&String(CUR).startsWith("mg-"))nav("overview");
+  if(chat&&String(CUR).startsWith("mg-"))CUR="overview";
   updateModeBadge();
   try{updateSegments();}catch(e){}
 }
