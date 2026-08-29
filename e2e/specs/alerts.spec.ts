@@ -8,7 +8,7 @@ test('the activity view renders the outbound alerts panel', async ({ page }) => 
   armConsoleGate(page, errors);
   await openApp(page);
 
-  await page.locator('a[data-v="activity"]').click();
+  await page.evaluate(() => { (window as any).nav('activity'); }); // demoted from the sidebar — reached from Fleet river
   await expect(page.locator('#alerts-body')).toBeVisible();
   // No webhook configured in the fixture: the panel renders its empty state,
   // not an error.
