@@ -678,6 +678,7 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
       if(day&&day!==lastDay){lastDay=day;html+=`<div class="tl-day">${esc(day)}</div>`;}
       html+=actItem(a);}
     document.getElementById("activity-full").innerHTML=act.length?`<div class="timeline">${html}</div>`:'<div class="empty">no activity yet</div>';
+    if(typeof renderAlerts==="function")renderAlerts();
     renderTranscripts();
   }else if(CUR==="insights"){
     const sp=s.spend||{by_role:{}};const tok=(sp.input_tokens||0)+(sp.output_tokens||0);

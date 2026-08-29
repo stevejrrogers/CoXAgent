@@ -235,6 +235,7 @@ pub fn handle(store: Arc<dyn StateStorePort>) -> ProjectHandle {
         alias: "demo".to_owned(),
         store,
         runner: Arc::new(coxagent_application::use_cases::RunnerHandle::new()),
+        outbox: None,
         config_path: dir.join("coxagent.json"),
         engine: Arc::new(StubEngine),
         work_dir: dir.clone(),

@@ -245,6 +245,8 @@
         <div class="filters"><span style="font-size:12px;color:var(--muted)">Filter</span><select class="sel" id="act-filter" onchange="renderActive()"><option value="">all agents</option></select>
           <div style="flex:1"></div><a onclick="window.open(api('/audit'))" class="fchip" style="text-decoration:none;cursor:pointer"><i class="ti ti-download" style="font-size:14px"></i> Export audit</a></div>
         <div class="panel"><div id="activity-full"></div></div>
+        <div class="sec" style="margin-top:20px">Outbound alerts <span style="font-size:11px;color:var(--dim);font-weight:400">· webhook delivery history — retried with backoff until acknowledged or failed</span></div>
+        <div class="panel"><div id="alerts-body"><div class="empty">loading…</div></div></div>
         <div class="sec" style="margin-top:20px">Agent transcripts <span style="font-size:11px;color:var(--dim);font-weight:400">· full prompt + output per run</span></div>
         <div class="panel"><div id="transcript-list"></div></div>
       </div>
@@ -783,6 +785,7 @@
 <script src="/assets/js/mcp.js"></script>
 <script src="/assets/js/docs.js"></script>
 <script src="/assets/js/inbox.js"></script>
+<script src="/assets/js/alerts.js"></script>
 <script src="/assets/js/shell.js"></script>
 </body>
 </html>
