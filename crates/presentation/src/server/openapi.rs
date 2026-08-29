@@ -105,6 +105,7 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/chat/ws", &["get"]),
     route("/api/engines", &["get"]),
     route("/api/engines/opencode/models", &["get"]),
+    route("/api/fleet/river", &["get"]),
     route("/api/health", &["get"]),
     route("/api/manage/overview", &["get"]),
     route("/api/manage/spaces/:sid", &["get"]),
