@@ -134,6 +134,7 @@ mod tdd_tests {
                 releases: ReleasesConfig {
                     enabled: true,
                     cut_every_days: 0,
+                    cut_only_verified: true,
                 },
                 ..Config::default()
             })

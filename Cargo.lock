@@ -563,6 +563,7 @@ version = "2.28.0"
 dependencies = [
  "semver",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "time",
  "uuid",
