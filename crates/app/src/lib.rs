@@ -9,7 +9,7 @@ mod onboard;
 mod shutdown;
 
 use coxagent_application::config::{
-    Config, DeployConfig, GitConfig, PolicyConfig, ReleasesConfig, WorkflowConfig,
+    Config, DepsConfig, DeployConfig, GitConfig, PolicyConfig, ReleasesConfig, WorkflowConfig,
 };
 use coxagent_application::ports::outbound::{SandboxStatus, StateStorePort};
 use coxagent_application::use_cases::{RecoverUseCase, RunBaUseCase, RunCycleUseCase};
@@ -646,6 +646,7 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
             releases: ReleasesConfig::default(),
             coverage: coxagent_application::config::CoverageConfig::default(),
             artifacts: coxagent_application::config::ArtifactsConfig::default(),
+            deps: DepsConfig::default(),
         },
         logs_dir(&base),
         None,

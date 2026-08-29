@@ -25,6 +25,6 @@ pub use goal::{Goal, GoalStatus};
 pub use ids::{GoalId, TicketId, WorkerId};
 // Value objects (kind/priority/sizing/status/role) come from `kinds`; the
 // aggregate and its design structs come from `ticket`.
-pub use kinds::{Complexity, Priority, Role, Status, TicketType};
+pub use kinds::{Complexity, InterventionKind, Priority, Role, Status, TicketType};
 pub use ticket::{Design, TechnicalDesign, Ticket, UxDesign};
 pub use version::{Bump, SemVer};
