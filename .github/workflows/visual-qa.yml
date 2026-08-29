@@ -34,8 +34,9 @@ jobs:
   visual-regression:
 
     # GHA is disabled for this private repo — see "ci: disable GitHub Actions"
-    # on main. Keep 'if: false' so no hosted run is attempted (matches ci.yml /
-    # desktop.yml). Re-enable by removing this line when a paid plan or public repo.
+    # on main. Keep 'if: false' so no hosted run is attempted (matches
+    # desktop.yml; ci.yml's deploy-smoke was re-enabled in CXA-B079). Re-enable
+    # by removing this line when a paid plan or public repo.
     #
     # When enabled, runs macOS because e2e golden screenshots are committed as *-darwin.png;
     # Linux looks for *-linux.png and fails every screenshot ("missing snapshot"),
