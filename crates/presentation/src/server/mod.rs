@@ -118,6 +118,13 @@ const XTERM_FIT_JS: &str = include_str!("../web/xterm-addon-fit.min.js");
 // load order (they share one global scope; the split is for merge-conflict
 // surface, not modularity). Embedded like everything else: one binary.
 const APP_CSS: &str = include_str!("../web/app.css");
+// Vendored Tabler icons webfont (pinned v3.24.0, MIT) — embedded for the same
+// reason as Mermaid above: deployed containers have no CDN egress, and a
+// webfont that fails to load leaves every `.ti-*` glyph with zero ink (the
+// icon characters exist only as CSS `content`, so there is no text fallback).
+// CXA-B112: the sign-in CTA rendered text-only in deploys for exactly this.
+const TABLER_CSS: &str = include_str!("../web/tabler-icons.min.css");
+const TABLER_WOFF2: &[u8] = include_bytes!("../web/fonts/tabler-icons.woff2");
 const APP_JS: &[(&str, &str)] = &[
     // Vendored Mermaid (pinned v11 UMD build) so Wiki pages render
     // sequence/flow diagrams offline — the hub never loads from a CDN.
@@ -627,6 +634,14 @@ pub async fn serve_full(
             "/assets/xterm-addon-fit.min.js",
             get(|| async { ([("content-type", "application/javascript")], XTERM_FIT_JS) }),
         )
+        .route(
+            "/assets/tabler-icons.min.css",
+            get(|| async { ([("content-type", "text/css; charset=utf-8")], TABLER_CSS) }),
+        )
+        .route(
+            "/assets/fonts/tabler-icons.woff2",
+            get(|| async { ([("content-type", "font/woff2")], TABLER_WOFF2) }),
+        )
         .route("/api/health", get(health))
         .route("/api/openapi.json", get(openapi_ep))
         .route("/api/mcp", post(mcp_ep))
@@ -1063,6 +1078,7 @@ async fn index() -> impl IntoResponse {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
             APP_CSS.hash(&mut h);
+            TABLER_CSS.hash(&mut h);
             for (_, body) in APP_JS {
                 body.hash(&mut h);
             }
@@ -1071,20 +1087,26 @@ async fn index() -> impl IntoResponse {
         };
         INDEX_HTML
             .replace("/assets/app.css", &format!("/assets/app.css?v={v}"))
+            .replace(
+                "/assets/tabler-icons.min.css",
+                &format!("/assets/tabler-icons.min.css?v={v}"),
+            )
             .replace(".js\"></script>", &format!(".js?v={v}\"></script>"))
     });
     // Always revalidate so a rebuilt dashboard is picked up on reload (the SPA is
     // small; no-cache avoids stale UI after an upgrade).
     //
     // CSP + hardening headers. The dashboard uses inline <script>/<style> (a
-    // single embedded file) so 'unsafe-inline' is required there; the Inter font
-    // and Tabler icon webfont come from Google Fonts / jsDelivr, so those hosts
-    // are allow-listed for style/font. Everything else is locked to same-origin,
-    // WebSocket to self, images/fonts to data:, and framing is denied.
+    // single embedded file) so 'unsafe-inline' is required there; the Inter
+    // font still comes from Google Fonts, so that host is allow-listed for
+    // style/font. The Tabler icon webfont is vendored (served from 'self'),
+    // like Mermaid and xterm, so deploys without CDN egress still get icons.
+    // Everything else is locked to same-origin, WebSocket to self,
+    // images/fonts to data:, and framing is denied.
     const CSP: &str = "default-src 'self'; \
         script-src 'self' 'unsafe-inline'; \
-        style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; \
-        font-src 'self' data: https://fonts.gstatic.com https://cdn.jsdelivr.net; \
+        style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
+        font-src 'self' data: https://fonts.gstatic.com; \
         img-src 'self' data:; \
         connect-src 'self' ws: wss:; \
         object-src 'none'; base-uri 'self'; frame-ancestors 'none'";
