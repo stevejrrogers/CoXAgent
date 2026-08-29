@@ -24,6 +24,9 @@ pub(super) const PID: &str = "demo";
 pub(super) const OTHER_PID: &str = "elsewhere";
 /// Alice's session — member of [`PID`].
 pub(super) const INSIDE_SESSION: &str = "session-inside";
+/// Carol's session — member-tier (BE) member of [`PID`]: can work the
+/// project but must never administer its share links (CXA-F069).
+pub(super) const MEMBER_SESSION: &str = "session-member";
 /// Mallory's session — member of [`OTHER_PID`] only, authenticated globally.
 pub(super) const OUTSIDE_SESSION: &str = "session-outside";
 /// A lead-tier session — manage rights hub-wide, but member of [`OTHER_PID`]
@@ -65,6 +68,7 @@ impl AuthPort for StubAuth {
     async fn user_for(&self, token: &str) -> Option<AuthUser> {
         match token {
             INSIDE_SESSION => Some(principal("alice", AuthRole::Admin, &[PID])),
+            MEMBER_SESSION => Some(principal("carol", AuthRole::Be, &[PID])),
             OUTSIDE_SESSION => Some(principal("mallory", AuthRole::Be, &[OTHER_PID])),
             LEAD_ELSEWHERE_SESSION => Some(principal("morgan", AuthRole::Manager, &[OTHER_PID])),
             _ => None,

@@ -500,6 +500,7 @@ pub(crate) async fn build_project(
         }
     }
 
+    crate::spawn_worktree_janitor(work_dir.clone());
     tracing::info!(
         "[{id}] spawning {} worker runner(s) (total {} runners)",
         concurrency.saturating_sub(1),

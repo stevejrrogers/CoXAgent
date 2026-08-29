@@ -182,6 +182,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     complexity: Complexity::Medium,
                     has_ui: false,
                     acceptance_criteria: vec![format!("App answers on 127.0.0.1:{port} again")],
+                    goal: None,
                 })
                 .await;
             let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {

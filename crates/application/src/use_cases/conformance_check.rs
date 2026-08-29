@@ -94,6 +94,7 @@ impl<S: StateStorePort> RunConformanceUseCase<S> {
                     complexity: Complexity::Medium,
                     has_ui: false,
                     acceptance_criteria: Vec::new(),
+                    goal: None,
                 })
                 .await;
             match outcome {

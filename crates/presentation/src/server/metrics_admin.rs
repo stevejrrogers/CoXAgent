@@ -86,9 +86,7 @@ pub(super) fn spawn_metrics_admin(registry: Arc<MetricsRegistry>) {
     });
 }
 
-async fn metrics_ep(
-    State(registry): State<Arc<MetricsRegistry>>,
-) -> impl IntoResponse {
+async fn metrics_ep(State(registry): State<Arc<MetricsRegistry>>) -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, PROMETHEUS_CONTENT_TYPE)],
         encode_prometheus(&registry),
@@ -110,9 +108,7 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
-    async fn serve(
-        path: &str,
-    ) -> axum::response::Response {
+    async fn serve(path: &str) -> axum::response::Response {
         let registry = Arc::new(MetricsRegistry::new());
         metrics_admin_router(registry)
             .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
@@ -151,7 +147,10 @@ mod tests {
             .expect("content-type header")
             .to_str()
             .expect("ascii header");
-        assert!(content_type.starts_with("application/json"), "{content_type}");
+        assert!(
+            content_type.starts_with("application/json"),
+            "{content_type}"
+        );
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();

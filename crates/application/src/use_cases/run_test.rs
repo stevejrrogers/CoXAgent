@@ -147,6 +147,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
                     complexity: bug.complexity,
                     has_ui: bug.has_ui,
                     acceptance_criteria: Vec::new(),
+                    goal: None,
                 })
                 .await?;
             filed.push(id);
@@ -223,6 +224,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
                         "PASS on current master; regression test fails on pre-fix \
                          code and reproduces cleanly; root cause fixed at source.",
                     );
+                    // Goal-line outcome ledger (CXA-F228): this verification is
+                    // a delivered outcome — freeze the provenance now.
+                    state.record_verified_outcome(&id.to_string());
                     promoted = true;
                 }
             }

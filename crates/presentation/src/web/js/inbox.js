@@ -62,7 +62,9 @@ async function renderInbox(){
   el.innerHTML='<div class="muted" style="padding:20px">Loading…</div>';
   const data=await loadInbox();
   const all=data.items||[];
-  const mineN=all.filter(i=>i.can_act).length;
+  // Held-for-digest questions (CXA-F176) wait on me, but deliberately do not
+  // count as fresh interrupts — they surface in one batch at the window end.
+  const mineN=all.filter(i=>i.can_act&&!i.deferred).length;
   inboxBadge(mineN);
   const flt=inboxFilter();
   const chip=(v,lbl,n)=>`<button class="ibx-chip${flt===v?' on':''}" onclick="setInboxFilter('${v}')">${lbl}${n!=null?` <span class="ibx-n">${n}</span>`:""}</button>`;
@@ -72,8 +74,21 @@ async function renderInbox(){
     el.innerHTML='<div class="empty" style="padding:48px 20px;text-align:center">🎉 Nothing waits on you — the team is fully unblocked.</div>';
     return;
   }
-  items.sort((a,b)=>(b.escalated?1:0)-(a.escalated?1:0));
+  // Escalated first, then live items, held-for-digest ones last: the queue
+  // reads in interruption order, queued-for-digest at the bottom.
+  items.sort((a,b)=>(b.escalated?1:0)-(a.escalated?1:0)||(a.deferred?1:0)-(b.deferred?1:0));
   let html=bar;
+  // On-hold tickets collapse into ONE card: the auto-hold sweep can park a
+  // hundred exhausted tickets at once, and a card per ticket buries the items
+  // that actually need a decision today. The board's status filter is the
+  // right place to browse them.
+  const held=items.filter(i=>i.kind==="on_hold");
+  if(held.length){
+    const sample=held.slice(0,3).map(h=>esc(h.ticket)).join(", ");
+    html+=inboxCard("on_hold",`${held.length} ticket${held.length===1?"":"s"} parked · e.g. ${sample}`,
+      "Blocked on the outside world — resume each from its ticket when unblocked",
+      ibtn("View on board",`SF='on_hold';nav('board');setWorkTab('board')`,1));
+  }
   if(!items.length){
     html+='<div class="empty" style="padding:24px;text-align:center">Nothing needs you right now — switch to <b>All</b> to see the team\'s queue.</div>';
     el.innerHTML=html;return;
@@ -103,9 +118,7 @@ async function renderInbox(){
            ibtn("Verified",`inboxAct('${esc(it.ticket)}','verify')`,1)
           :noRight(it.role)),it.ticket);
     }else if(it.kind==="on_hold"){
-      html+=inboxCard("on_hold",esc(it.ticket)+(it.reason?" · "+esc(it.reason):""),esc(it.title),
-        ibtn("Open",`showTicket('${esc(it.ticket)}')`)+
-        (act?ibtn("Resume",`holdTicket('${esc(it.ticket)}',false)`,1):noRight(it.role)),it.ticket);
+      continue; // collapsed into the single summary card above
     }else if(it.kind==="assigned"){
       html+=inboxCard("assigned",esc(it.ticket)+" · "+esc(it.status||""),esc(it.title),
         ibtn("Return to agents",`inboxUnassign('${esc(it.ticket)}')`),it.ticket);
@@ -113,7 +126,10 @@ async function renderInbox(){
       const ageMin=it.asked_at?Math.max(0,Math.round((Date.now()-new Date(it.asked_at))/60000)):null;
       const age=ageMin==null?"":(ageMin<60?` · waiting ${ageMin}m`:` · waiting ${Math.round(ageMin/60)}h`);
       const late=it.escalated?` <span style="color:var(--red);font-weight:700">past SLA</span>`:"";
-      html+=inboxCard("question",esc(it.from)+(it.ticket?" · "+esc(it.ticket):"")+age+late,esc(it.body),
+      // Held for the owner's focus-window digest (CXA-F176): visibly queued,
+      // not a fresh interrupt — answering early is still allowed.
+      const held=it.deferred?` <span style="font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:var(--dim);background:color-mix(in srgb,var(--dim) 12%,transparent);border:1px solid var(--border);border-radius:20px;padding:2px 8px">held for digest</span>`:"";
+      html+=inboxCard("question",esc(it.from)+(it.ticket?" · "+esc(it.ticket):"")+age+late+held,esc(it.body),
         ibtn("Answer in Scrum",`nav('discuss')`,1));
     }else if(it.kind==="auto_approved"){
       html+=inboxCard("auto_approved",esc(it.ticket)+" · undo for "+it.minutes_left+"m",esc(it.title),
@@ -220,5 +236,6 @@ async function inboxUnassign(id){
   renderInbox();
 }
 
-// Keep the badge honest even when the user lives in other tabs.
-setInterval(async()=>{try{if(typeof PID!=="undefined"&&PID){const d=await loadInbox();inboxBadge((d.items||[]).filter(i=>i.can_act).length);}}catch(e){}},60000);
+// Keep the badge honest even when the user lives in other tabs. Held-for-
+// digest questions (CXA-F176) do not count — they batch into one flush.
+setInterval(async()=>{try{if(typeof PID!=="undefined"&&PID){const d=await loadInbox();inboxBadge((d.items||[]).filter(i=>i.can_act&&!i.deferred).length);}}catch(e){}},60000);
