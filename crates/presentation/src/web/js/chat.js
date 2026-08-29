@@ -1841,13 +1841,44 @@ function renderEngineAlert(s){
     </div>`;
   }).join("");
 }
-function depChips(ids){
+function depChips(ids,live){
   if(!ids||!ids.length)return '<span style="color:var(--dim)">—</span>';
   return ids.map(id=>{const dt=(STATE.tickets||[]).find(x=>x.id===id);
-    const done=dt&&(dt.status==="done"||dt.status==="documented");
-    const col=done?"var(--green)":(dt?"var(--amber)":"var(--dim)");
-    return `<span onclick="showTicket('${id}')" title="${dt?esc(dt.title)+' · '+esc(dt.status):'unknown'}" style="cursor:pointer;display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:3px 8px;border-radius:7px;background:${col}22;color:${col};margin-right:5px">
-      <i class="ti ti-${done?'check':'circle'}" style="font-size:11px"></i>${esc(id)}</span>`;}).join("");}
+    // `live` carries the radar's authoritative statuses from the detail
+    // payload (CXA-F237 AC1); the 1 Hz snapshot is only the fallback.
+    const st=(live&&live[id])||(dt&&dt.status)||"";
+    const done=st==="done"||st==="documented"||st==="verified";
+    const col=done?"var(--green)":(st?"var(--amber)":"var(--dim)");
+    const liveTag=st&&!done?` <span style="opacity:.85">· ${esc(st)}</span>`:"";
+    return `<span onclick="showTicket('${id}')" title="${dt?esc(dt.title)+' · '+esc(dt.status):'unknown dependency — no such ticket in this project'}" style="cursor:pointer;display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:3px 8px;border-radius:7px;background:${col}22;color:${col};margin-right:5px">
+      <i class="ti ti-${done?'check':'circle'}" style="font-size:11px"></i>${esc(id)}${liveTag}</span>`;}).join("");}
+// Live statuses of this ticket's blockers, from the detail payload's radar
+// field — the server derived them against the state the detail was served
+// from, so they are the statuses the surface must show.
+function blockedStatuses(t){const m={};(t.blocked_by||[]).forEach(b=>{m[b.ticket]=b.status;});return m;}
+// Mermaid source for the ticket's dependency closure (CXA-F237): prerequisites
+// point left, cycle members carry a textual marker (never color alone), and a
+// depends_on id absent from the project state renders as an unknown node.
+function dependencyMermaid(t,g){
+  const meta={};(g.nodes||[]).forEach(n=>{meta[n.id]=n;});
+  const out={};(g.edges||[]).forEach(e=>{(out[e.dependent]=out[e.dependent]||[]).push(e.prerequisite);});
+  // Closure walk over the ticket's dependency edges, visited-set guarded so a
+  // declared cycle terminates instead of looping forever (AC2).
+  const want=new Set([t.id]),q=[t.id];
+  while(q.length){const id=q.shift();for(const d of(out[id]||[])){if(!want.has(d)){want.add(d);if(meta[d])q.push(d);}}}
+  // Sequential node keys: punctuation-heavy ids must never collide into one
+  // mermaid node, and labels drop quote characters so a hand-edited id cannot
+  // corrupt the diagram source (it degrades to a plain label instead).
+  const keys={},keyFor=id=>keys[id]||(keys[id]="n"+Object.keys(keys).length);
+  const safe=id=>String(id).replace(/["\\]/g,"");
+  const label=id=>{const n=meta[id];if(!n)return safe(id)+" · unknown";
+    return (n.cycle?"⟳ ":"")+safe(id)+" · "+n.status+(n.cycle?" (cycle)":"");};
+  const lines=["graph RL"];let any=false;
+  (g.edges||[]).forEach(e=>{if(!want.has(e.dependent))return;any=true;
+    lines.push(`  ${keyFor(e.dependent)}["${label(e.dependent)}"] --> ${keyFor(e.prerequisite)}["${label(e.prerequisite)}"]`);});
+  if(!any)lines.push(`  ${keyFor(t.id)}["${label(t.id)}"]`);
+  return lines.join("\n");
+}
 async function holdTicket(id,hold){
   let reason="";
   if(hold){
@@ -1882,6 +1913,19 @@ async function showTicket(id){
     }catch(e){}
     body.innerHTML='<span class="x" onclick="close_(\'ov-ticket\')"><i class="ti ti-x"></i></span><div class="empty">ticket not found in any project</div>';return;}
   const d=t.design||{},tech=d.technical,ux=d.ux,ac=t.acceptance_criteria||[];
+  // Dependency graph (CXA-F237): the ticket's transitive closure rendered from
+  // the project's derived graph. Only fetched when the ticket DECLARES deps,
+  // and only rendered when the ticket belongs to THIS project's graph — the
+  // graph is enrichment, so a failed fetch degrades to no section while the
+  // detail itself stays usable.
+  let depGraphSection="";
+  if((t.depends_on||[]).length){
+    try{
+      const g=await(await fetch(api("/dependencies"))).json();
+      const src=(g.nodes||[]).some(n=>n.id===t.id)?dependencyMermaid(t,g):"";
+      if(src)depGraphSection=`<div class="mrow" style="display:block"><span class="lbl">Dependency graph</span><pre class="mermaid" style="margin-top:7px">${esc(src)}</pre></div>`;
+    }catch(e){}
+  }
   let h=`<span class="x" onclick="close_('ov-ticket')"><i class="ti ti-x"></i></span><h3>${esc(t.title)}</h3>
     <div class="msub">${esc(t.id)} · ${esc(t.type)}</div>
     <div class="tk-tabs" role="tablist">
@@ -1902,8 +1946,10 @@ async function showTicket(id){
           <select id="tk-assign-sel" style="background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:7px;padding:4px 8px;font-size:12px"><option value="">choose person…</option></select>
           <button class="tk-btn" style="padding:4px 10px;font-size:11px" onclick="assignTicket('${t.id}',document.getElementById('tk-assign-sel').value)"><i class="ti ti-user-plus"></i> Assign</button>`}
       </div></div>
-    <div class="mrow"><span class="lbl">Blocked by</span>${depChips(t.depends_on)}</div>
+    <div class="mrow"><span class="lbl">Blocked by</span>${depChips(t.depends_on,blockedStatuses(t))}</div>
     <div class="mrow"><span class="lbl">Blocks</span>${depChips((STATE.tickets||[]).filter(x=>(x.depends_on||[]).includes(t.id)).map(x=>x.id))}</div>
+    ${(t.unknown_dependencies||[]).length?`<div class="mrow"><span class="lbl">Unknown dependencies</span>${t.unknown_dependencies.map(id=>`<span title="no such ticket in this project — the scheduler treats it as NOT satisfied" style="display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:3px 8px;border-radius:7px;background:color-mix(in srgb,var(--red) 14%,transparent);color:var(--red);margin-right:5px"><i class="ti ti-alert-triangle" style="font-size:11px"></i>${esc(id)} · unknown</span>`).join("")}</div>`:''}
+    ${depGraphSection}
     <div class="mrow" style="display:block"><span class="lbl">Description</span><div class="doc-body md" style="margin-top:7px;color:var(--muted);line-height:1.6;font-size:13px">${t.description?mdRender(t.description):'—'}</div></div>
     <div class="mrow" style="display:block"><span class="lbl">Acceptance criteria</span>${ac.length?`<div class="aclist">${ac.map(c=>`<div class="acitem"><i class="ti ti-square-check"></i> ${esc(c)}</div>`).join("")}</div>`:'<div style="margin-top:6px;color:var(--dim);font-size:12px">— none defined yet</div>'}</div>`
     +(function(){const tcs=t.test_cases||[];if(!tcs.length)return '';

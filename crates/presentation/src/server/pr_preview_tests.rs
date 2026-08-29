@@ -130,6 +130,7 @@ fn project_handle_with_raw_host_port(
         deploy: Some(deploy),
         storage: None,
         files: None,
+        deps_discovery: None,
     };
     (dir, handle)
 }
@@ -168,6 +169,7 @@ fn project_handle_with_raw_config(
         deploy: Some(deploy),
         storage: None,
         files: None,
+        deps_discovery: None,
     };
     (dir, handle)
 }
@@ -315,6 +317,7 @@ async fn git_preview_fixture(
         deploy: Some(deploy),
         storage: None,
         files: None,
+        deps_discovery: None,
     };
     (bare, work, handle)
 }
