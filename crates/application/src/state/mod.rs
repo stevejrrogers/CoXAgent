@@ -683,6 +683,7 @@ impl ProjectState {
             answered_at: String::new(),
             forwarded: false,
             escalated: false,
+            deferred: false,
         });
         // Keep the log bounded; answered questions age out before open ones.
         while self.questions.len() > 40 {
