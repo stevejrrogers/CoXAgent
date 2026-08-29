@@ -692,6 +692,7 @@ mod tests {
                 ProjectState::default(),
             )),
             runner: std::sync::Arc::new(coxagent_application::use_cases::RunnerHandle::default()),
+            outbox: None,
             config_path: std::path::PathBuf::from("/tmp/coxagent.json"),
             engine: std::sync::Arc::new(store_rpc_test_support::UnusedEngine),
             work_dir: std::path::PathBuf::from("/tmp"),
