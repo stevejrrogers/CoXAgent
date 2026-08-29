@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 mod chat;
 mod docs;
+mod drift;
 mod goals;
 mod governance;
 mod integrity;
@@ -17,6 +18,7 @@ mod work;
 
 pub use chat::*;
 pub use docs::*;
+pub use drift::*;
 pub use goals::*;
 pub use governance::*;
 pub use integrity::*;
@@ -454,6 +456,12 @@ pub struct ProjectState {
     /// state persisted before this existed loads clean — no migration.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub governance_interventions: Vec<InterventionRecord>,
+    /// Open architecture-drift alerts (CXA-F226): one per standing conformance
+    /// violation, deduped by (area, message), each linking the bug filed for
+    /// it. Deliberately serialized even when empty (like `engine_incidents`)
+    /// — the dashboard's zero indicator must read 0, never absence.
+    #[serde(default)]
+    pub drift_alerts: Vec<DriftAlert>,
 }
 
 /// One day's open/fixed/verified bug counts — the persisted burn-down point
@@ -568,6 +576,7 @@ impl Default for ProjectState {
             rolled_back_commits: std::collections::BTreeSet::new(),
             bug_snapshots: std::collections::BTreeMap::new(),
             governance_interventions: Vec::new(),
+            drift_alerts: Vec::new(),
         }
     }
 }

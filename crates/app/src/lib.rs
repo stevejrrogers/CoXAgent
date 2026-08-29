@@ -9,7 +9,7 @@ mod onboard;
 mod shutdown;
 
 use coxagent_application::config::{
-    Config, DepsConfig, DeployConfig, GitConfig, PolicyConfig, ReleasesConfig, WorkflowConfig,
+    Config, DeployConfig, DepsConfig, GitConfig, PolicyConfig, ReleasesConfig, WorkflowConfig,
 };
 use coxagent_application::ports::outbound::{SandboxStatus, StateStorePort};
 use coxagent_application::use_cases::{RecoverUseCase, RunBaUseCase, RunCycleUseCase};
@@ -151,12 +151,26 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
                 coxagent_infrastructure::FsWorkspaceFiles::new(),
             )));
             let filed = uc.execute().await?;
-            if filed.is_empty() {
+            let state = store.load().await?;
+            if filed.is_empty() && state.drift_alerts.is_empty() {
                 Ok("architecture conformance: OK (no drift)\n".to_owned())
             } else {
-                let mut out = format!("architecture drift — filed {} bug(s):\n", filed.len());
-                for id in &filed {
-                    let _ = writeln!(out, "  {id}");
+                // The drift alerts themselves — area, message, and the bug
+                // each links to — not just the ids filed this pass; a re-run
+                // over standing drift must still name what is violating.
+                let mut out = format!(
+                    "architecture drift — {} open alert(s):\n",
+                    state.drift_alerts.len()
+                );
+                for a in &state.drift_alerts {
+                    let _ = writeln!(out, "  [{}] {} — {}", a.area, a.message, a.ticket);
+                }
+                if !filed.is_empty() {
+                    let _ = write!(out, "filed {} bug(s):", filed.len());
+                    for id in &filed {
+                        let _ = write!(out, " {id}");
+                    }
+                    out.push('\n');
                 }
                 Ok(out)
             }
