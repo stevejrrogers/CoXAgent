@@ -315,6 +315,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 complexity: coxagent_domain::ticket::Complexity::Medium,
                 has_ui: false,
                 acceptance_criteria: accepted,
+                goal: None,
             })
             .await
         else {

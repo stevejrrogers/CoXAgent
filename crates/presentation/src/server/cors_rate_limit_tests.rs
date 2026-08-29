@@ -84,21 +84,47 @@ async fn ac3_ac4_rate_limit_covers_every_api_auth_route_not_just_login() {
     // /api/auth/2fa/* are limited; see rate_limit.rs's `path` check).
     let router = test_router(1, Duration::from_secs(60));
 
-    let first = router
+    // Read-only session-gated GETs ride a roomier bucket (12× the strict
+    // window) so page loads cannot starve sign-ins — but they ARE still
+    // limited: the 13th within the window must 429.
+    for i in 0..12 {
+        let r = router
+            .clone()
+            .oneshot(get_request("/api/auth/sessions", None))
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            StatusCode::OK,
+            "read-only GET {i} within the roomy bucket"
+        );
+    }
+    let overflow = router
         .clone()
         .oneshot(get_request("/api/auth/sessions", None))
         .await
         .unwrap();
-    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(
+        overflow.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "the read-only bucket is bigger, not unlimited — AC3/4 still hold"
+    );
 
-    let second = router
-        .oneshot(get_request("/api/auth/sessions", None))
+    // The strict window still guards the credential surface unchanged.
+    let login_first = router
+        .clone()
+        .oneshot(method_request("POST", "/api/auth/login", None))
+        .await
+        .unwrap();
+    assert_ne!(login_first.status(), StatusCode::TOO_MANY_REQUESTS);
+    let login_second = router
+        .oneshot(method_request("POST", "/api/auth/login", None))
         .await
         .unwrap();
     assert_eq!(
-        second.status(),
+        login_second.status(),
         StatusCode::TOO_MANY_REQUESTS,
-        "a second request to any /api/auth/* route beyond the limit must return 429"
+        "a second login attempt beyond the strict limit must return 429"
     );
 }
 

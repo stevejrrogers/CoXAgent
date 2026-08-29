@@ -571,6 +571,7 @@ mod tests {
             length_cycles: 5,
             committed: vec![f1.clone()],
             started_at: "2026-07-01T00:00:00Z".into(),
+            bug_burn_floor: None,
         });
         s.tickets.push(ticket("F001"));
         let v = compute_velocity(&s);

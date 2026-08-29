@@ -909,7 +909,9 @@ fn build_engine(
             SandboxStatus::Unavailable(_) | SandboxStatus::Denied(_)
         )
     {
-        tracing::warn!("workflow.sandbox is on but no sandbox backend is available — agents run unsandboxed");
+        tracing::warn!(
+            "workflow.sandbox is on but no sandbox backend is available — agents run unsandboxed"
+        );
     }
     let fallbacks = effective_fallbacks(config);
     let default = build_failover(
@@ -950,6 +952,31 @@ fn build_engine(
             ""
         }
     );
+    // Provider catalogs drift: a saved `opencode` model can vanish upstream
+    // (bizbrain dropped DeepSeek-V4-Pro and every run failed with an opaque
+    // "Unexpected server error"). Compare what the config names against what
+    // `opencode models` offers RIGHT NOW and say so at boot, while an operator
+    // is still looking at the log — instead of the silent per-run failures.
+    {
+        use coxagent_application::config::EngineKind;
+        let offered = coxagent_infrastructure::engine::discover_opencode_models();
+        if !offered.is_empty() {
+            let check = |label: &str, choice: &coxagent_application::config::EngineChoice| {
+                if matches!(choice.engine, EngineKind::Opencode)
+                    && !offered.iter().any(|m| m == &choice.model)
+                {
+                    tracing::warn!(
+                        "{label} names opencode model '{}' which `opencode models` no longer offers — the provider may have removed it; its runs will fail until the config is updated",
+                        choice.model
+                    );
+                }
+            };
+            check("default engine", &config.engine.default);
+            for (role, choice) in &config.engine.per_role {
+                check(&format!("per-role engine for {role:?}"), choice);
+            }
+        }
+    }
     let router = RoutingEngine::new(default, per_role);
     let logged = TranscriptEngine::new(router, logs_dir);
     let meter: Meter = Arc::new(Mutex::new(Spend::default()));
@@ -1450,6 +1477,172 @@ pub(crate) fn worktree_at(work_dir: PathBuf, slug: &str) -> PathBuf {
     }
 }
 
+/// Worktree janitor: the per-slot checkouts under `.coxagent-worktrees/` each
+/// grow their own multi-GB cargo `target/`, and releasing a slot only detached
+/// its branch — the directories (and 150+ GB of build artifacts) accumulated
+/// forever until the DISK filled mid-build. Every sweep:
+///   1. deletes stray files dumped in the worktrees root (agent scratch);
+///   2. removes husk dirs git no longer lists as worktrees;
+///   3. `git worktree remove --force`s registered trees idle > 48 h;
+///   4. deletes the `target/` of trees idle > 6 h (rebuilt on next use).
+/// Best-effort throughout: a busy tree just gets skipped this round.
+pub(crate) fn spawn_worktree_janitor(work_dir: std::path::PathBuf) {
+    tokio::spawn(async move {
+        loop {
+            let reclaimed = worktree_janitor_sweep(&work_dir);
+            if reclaimed > 0 {
+                tracing::info!(
+                    "worktree janitor reclaimed ~{} MB under .coxagent-worktrees",
+                    reclaimed / (1024 * 1024)
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(6 * 3600)).await;
+        }
+    });
+}
+
+/// One sweep; returns roughly how many bytes were deleted.
+fn worktree_janitor_sweep(work_dir: &std::path::Path) -> u64 {
+    let root = match work_dir.parent() {
+        Some(p) => p.join(".coxagent-worktrees"),
+        None => return 0,
+    };
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return 0;
+    };
+    // What git still considers a live worktree of this repo.
+    let listed = std::process::Command::new("git")
+        .arg("-C")
+        .arg(work_dir)
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+    let now = std::time::SystemTime::now();
+    let idle_hours = |p: &std::path::Path| -> u64 {
+        p.metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| now.duration_since(t).ok())
+            .map_or(0, |d| d.as_secs() / 3600)
+    };
+    let mut reclaimed = 0u64;
+    for e in entries.flatten() {
+        let path = e.path();
+        let name = e.file_name().to_string_lossy().to_string();
+        if name == "logs" {
+            continue; // live transcript streams
+        }
+        let is_dir = path.is_dir();
+        if !is_dir {
+            // Stray agent scratch files dumped next to the worktrees.
+            reclaimed += path.metadata().map_or(0, |m| m.len());
+            let _ = std::fs::remove_file(&path);
+            continue;
+        }
+        let registered = listed.contains(&path.display().to_string());
+        let idle = idle_hours(&path);
+        if !registered {
+            if idle >= 24 {
+                reclaimed += dir_size(&path);
+                let _ = std::fs::remove_dir_all(&path);
+            }
+            continue;
+        }
+        if idle >= 48 {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(work_dir)
+                .args(["worktree", "remove", "--force"])
+                .arg(&path)
+                .status()
+                .is_ok_and(|s| s.success());
+            if ok {
+                continue;
+            }
+        }
+        let target = path.join("target");
+        if target.is_dir() {
+            // Idle trees lose their target outright; a tree that never idles
+            // (the review worktree wakes every 90 s) still gets capped by
+            // SIZE — its artifacts accumulate forever otherwise (65 GB seen).
+            // `.cargo-lock` is touched by every cargo invocation, so a stale
+            // lock means no build is running right now.
+            const TARGET_CAP_BYTES: u64 = 20 * 1024 * 1024 * 1024;
+            let building_recently = ["debug", "release"].iter().any(|prof| {
+                let lock = target.join(prof).join(".cargo-lock");
+                lock.metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| now.duration_since(t).ok())
+                    .is_some_and(|d| d.as_secs() < 600)
+            });
+            let oversized = dir_size(&target) > TARGET_CAP_BYTES;
+            if (idle >= 6 || oversized) && !building_recently {
+                reclaimed += dir_size(&target);
+                let _ = std::fs::remove_dir_all(&target);
+            } else if !building_recently {
+                // The live-cache case: cargo never garbage-collects, so every
+                // dependency bump leaves its old artifacts behind forever —
+                // most of a 65 GB target is corpses the current build never
+                // reads. Trim files untouched for 7 days; the hot incremental
+                // cache stays, so the next run is still fast.
+                reclaimed += trim_stale_files(&target, now, 7 * 24 * 3600);
+            }
+        }
+    }
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(work_dir)
+        .args(["worktree", "prune"])
+        .status();
+    reclaimed
+}
+
+/// Delete files under `p` whose mtime is older than `max_age_secs`; returns
+/// bytes reclaimed. Directories are left in place (cargo recreates freely).
+fn trim_stale_files(p: &std::path::Path, now: std::time::SystemTime, max_age_secs: u64) -> u64 {
+    let mut reclaimed = 0u64;
+    let Ok(rd) = std::fs::read_dir(p) else {
+        return 0;
+    };
+    for e in rd.flatten() {
+        let path = e.path();
+        if path.is_dir() {
+            reclaimed += trim_stale_files(&path, now, max_age_secs);
+            continue;
+        }
+        let stale = path
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|d| d.as_secs() > max_age_secs);
+        if stale {
+            reclaimed += path.metadata().map_or(0, |m| m.len());
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+    reclaimed
+}
+
+/// Rough recursive size; good enough for a log line.
+fn dir_size(p: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(rd) = std::fs::read_dir(p) {
+        for e in rd.flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                total += dir_size(&path);
+            } else {
+                total += path.metadata().map_or(0, |m| m.len());
+            }
+        }
+    }
+    total
+}
+
 /// Append one compression sample (`before after` bytes) to the shim dir's
 /// savings log, so the dashboard can report the token-saver's effectiveness.
 /// Best-effort and cheap; skips no-op passes and when no shim dir is set.
@@ -1500,6 +1693,7 @@ async fn run_probe(hub: &str, project: &str) -> Result<String, Box<dyn std::erro
         base_url: hub.trim_end_matches('/').to_owned(),
         project_id: project.to_owned(),
         token,
+        timeout: RestConfig::timeout_from_env(),
     };
     let store = RestStateStore::new(cfg)?;
     let worker = ["HOSTNAME", "HOST"]

@@ -436,8 +436,7 @@ fn regex_lite_like_named_entity(s: &str) -> bool {
             let end = (i + 2..n).take(12).find(|&j| bytes[j] == b';');
             if let Some(end) = end {
                 let name = &s[i + 1..end];
-                if !name.starts_with('#')
-                    && !matches!(name, "amp" | "lt" | "gt" | "quot" | "apos")
+                if !name.starts_with('#') && !matches!(name, "amp" | "lt" | "gt" | "quot" | "apos")
                 {
                     return true;
                 }
@@ -558,6 +557,7 @@ mod tests {
                 complexity: Complexity::Small,
                 has_ui: true,
                 acceptance_criteria: Vec::new(),
+                goal: None,
             })
             .await
             .expect("seed");
@@ -606,25 +606,25 @@ mod tests {
 
     #[test]
     fn renderable_svg_rejects_html_entity() {
-        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg"><text x="40" y="52">A &middot; B</text></svg>"##;
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg"><text x="40" y="52">A &middot; B</text></svg>"#;
         assert!(!renderable_svg(svg));
     }
 
     #[test]
     fn renderable_svg_rejects_unquoted_attribute() {
-        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg"><text x=40 y=52>Login</text></svg>"##;
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg"><text x=40 y=52>Login</text></svg>"#;
         assert!(!renderable_svg(svg));
     }
 
     #[test]
     fn renderable_svg_rejects_empty_stub() {
-        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg"></svg>"##;
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg"></svg>"#;
         assert!(!renderable_svg(svg));
     }
 
     #[test]
     fn renderable_svg_accepts_numeric_entity() {
-        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg"><text x="40" y="52">A &#183; B</text></svg>"##;
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg"><text x="40" y="52">A &#183; B</text></svg>"#;
         assert!(renderable_svg(svg));
     }
 }

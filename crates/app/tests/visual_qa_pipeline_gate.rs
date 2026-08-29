@@ -17,14 +17,17 @@
 //!   4 · files a Bug ticket through GitHub CLI when something regresses
 //!   5 · comments back on the PR linking that ticket / artifact so humans see it
 
-#![allow(clippy::unwrap_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used)] // test file — panics are the failure mode
 
 use std::path::{Path, PathBuf};
 
 const WORKFLOW_REL: &str = ".github/workflows/visual-qa.yml";
 
 fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap()
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap()
 }
 
 /// Read + parse the shipped workflow as YAML value trees. Parsing into
@@ -82,7 +85,10 @@ fn command(step: &serde_yaml::Value) -> String {
 fn workflow_exists_and_is_valid_with_one_check_job() {
     // Criterion 0 · The one canonical path exists on main and parses as valid YAML,
     // carrying exactly one job so it paints one unambiguous green-or-red check per PR.
-    assert!(repo_root().join(WORKFLOW_REL).is_file(), "{WORKFLOW_REL} missing from main");
+    assert!(
+        repo_root().join(WORKFLOW_REL).is_file(),
+        "{WORKFLOW_REL} missing from main"
+    );
     load();
 }
 
@@ -94,9 +100,15 @@ fn triggers_on_pull_request_open_and_sync() {
     let types_node = doc["on"]["pull_request"]["types"]
         .as_sequence()
         .expect("must declare pull_request.types");
-    let types: Vec<String> = types_node.iter().map(|t| t.as_str().unwrap().to_string()).collect();
+    let types: Vec<String> = types_node
+        .iter()
+        .map(|t| t.as_str().unwrap().to_string())
+        .collect();
     assert!(types.iter().any(|t| t == "opened"), "must fire on opened");
-    assert!(types.iter().any(|t| t == "synchronize"), "must fire on synchronize");
+    assert!(
+        types.iter().any(|t| t == "synchronize"),
+        "must fire on synchronize"
+    );
 }
 
 #[test]
@@ -158,7 +170,7 @@ fn failing_prs_file_a_bug_ticket_and_post_a_link() {
     // placeholder, which each shell step can never resolve — the defect that sank
     // the original CXA-F006 #221).
     let mut any_commenter = false;
-    for s in all_steps.clone().into_iter() {
+    for s in all_steps.clone() {
         if !(command(s).contains("pr comment") || command(s).contains("issues.createcomment")) {
             continue;
         }

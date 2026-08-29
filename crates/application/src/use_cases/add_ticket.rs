@@ -3,7 +3,7 @@
 
 use crate::error::AppError;
 use crate::ports::outbound::StateStorePort;
-use coxagent_domain::{Complexity, Priority, Ticket, TicketId, TicketType};
+use coxagent_domain::{Complexity, GoalId, Priority, Ticket, TicketId, TicketType};
 use std::sync::Arc;
 
 /// Input for adding a ticket. Id minting lives here for now (per-type prefix).
@@ -16,6 +16,11 @@ pub struct AddTicketInput {
     pub has_ui: bool,
     /// Up to 5 acceptance criteria (blanks trimmed, extras dropped).
     pub acceptance_criteria: Vec<String>,
+    /// The declared product goal this ticket advances (CXA-F228), bound at
+    /// creation. Validated against the project's goals here — the one shared
+    /// creation path — so a ticket can never declare a goal the project has
+    /// not stated, or one whose gate has retired.
+    pub goal: Option<GoalId>,
 }
 
 /// Marker prefix on the duplicate-refusal error, so best-effort callers that
@@ -88,6 +93,30 @@ impl<S: StateStorePort + ?Sized> AddTicketUseCase<S> {
             .into());
         }
 
+        // Goal gate at the ONE shared creation path (CXA-F228): a declared
+        // goal must exist and its gate must still be open. Same shape as the
+        // duplicate gate above — a refusal here is data, not a crash.
+        if let Some(gid) = &input.goal {
+            match state.goals.iter().find(|g| &g.id == gid) {
+                None => {
+                    return Err(crate::error::PortError::Backend(format!(
+                        "ticket refused: declared goal {gid} is not one of this \
+                         project's stated goals"
+                    ))
+                    .into());
+                }
+                Some(g) if !g.is_active() => {
+                    return Err(crate::error::PortError::Backend(format!(
+                        "ticket refused: goal {gid} ({}) is retired — its gate is \
+                         closed to new work",
+                        g.title
+                    ))
+                    .into());
+                }
+                Some(_) => {}
+            }
+        }
+
         let id = mint_id(input.ticket_type, &state)?;
         let mut ticket = Ticket::new(
             id.clone(),
@@ -99,6 +128,11 @@ impl<S: StateStorePort + ?Sized> AddTicketUseCase<S> {
             input.has_ui,
         )?;
         ticket.set_acceptance_criteria(input.acceptance_criteria);
+        if let Some(gid) = input.goal {
+            // The use case just validated the association; System is the
+            // machine's bookkeeping authority for this mechanical bind.
+            ticket.set_goal_id(coxagent_domain::Role::System, gid)?;
+        }
         state.tickets.push(ticket);
 
         state.validate().map_err(crate::error::PortError::Corrupt)?;
@@ -181,7 +215,58 @@ mod tests {
             complexity: Complexity::Small,
             has_ui: false,
             acceptance_criteria: Vec::new(),
+            goal: None,
         }
+    }
+
+    async fn state_with_goal(
+        title: &str,
+        retire: bool,
+    ) -> (Arc<MemStore>, coxagent_domain::GoalId) {
+        let store = Arc::new(MemStore::default());
+        let mut s = store.load().await.expect("load");
+        let gid = s.add_goal(title).expect("goal");
+        if retire {
+            s.retire_goal(&gid);
+        }
+        store.save(&s).await.expect("save");
+        (store, gid)
+    }
+
+    #[tokio::test]
+    async fn binds_a_declared_goal_at_creation() {
+        let (store, gid) = state_with_goal("Faster merges", false).await;
+        let uc = AddTicketUseCase::new(Arc::clone(&store));
+        let mut input = input(TicketType::Feature);
+        input.goal = Some(gid.clone());
+        let id = uc.execute(input).await.expect("added");
+        let s = store.load().await.expect("load");
+        let t = s.ticket(&id).expect("ticket");
+        assert_eq!(t.goal_id().map(GoalId::as_str), Some("G001"));
+    }
+
+    #[tokio::test]
+    async fn refuses_a_goal_the_project_never_declared() {
+        let store = Arc::new(MemStore::default());
+        let uc = AddTicketUseCase::new(Arc::clone(&store));
+        let mut input = input(TicketType::Feature);
+        input.goal = Some(coxagent_domain::GoalId::new("G999").expect("gid"));
+        let err = uc.execute(input).await.expect_err("refused");
+        assert!(
+            err.to_string()
+                .contains("not one of this project's stated goals"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn refuses_a_retired_goal_line() {
+        let (store, gid) = state_with_goal("Old line", true).await;
+        let uc = AddTicketUseCase::new(Arc::clone(&store));
+        let mut input = input(TicketType::Feature);
+        input.goal = Some(gid);
+        let err = uc.execute(input).await.expect_err("refused");
+        assert!(err.to_string().contains("retired"), "{err}");
     }
 
     #[tokio::test]
@@ -212,9 +297,12 @@ mod tests {
     async fn refuses_near_duplicate_titles_from_any_caller() {
         let store = Arc::new(MemStore::default());
         let uc = AddTicketUseCase::new(Arc::clone(&store));
-        uc.execute(input_titled(TicketType::Feature, "Bug triage and burn-down cadence"))
-            .await
-            .expect("first");
+        uc.execute(input_titled(
+            TicketType::Feature,
+            "Bug triage and burn-down cadence",
+        ))
+        .await
+        .expect("first");
         // A rephrasing of the same ceremony theme — the class that produced
         // five near-identical tickets in one week — is refused.
         assert!(uc
@@ -232,7 +320,10 @@ mod tests {
         let store = Arc::new(MemStore::default());
         let uc = AddTicketUseCase::new(Arc::clone(&store));
         let id = uc
-            .execute(input_titled(TicketType::Feature, "Bug triage and burn-down cadence"))
+            .execute(input_titled(
+                TicketType::Feature,
+                "Bug triage and burn-down cadence",
+            ))
             .await
             .expect("first");
         // A human rejects the theme…
@@ -250,7 +341,7 @@ mod tests {
         let err = uc
             .execute(input_titled(
                 TicketType::Feature,
-                "Backlog triage: assess bug risk and burn down"
+                "Backlog triage: assess bug risk and burn down",
             ))
             .await
             .expect_err("refused");

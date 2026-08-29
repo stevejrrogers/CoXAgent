@@ -28,6 +28,12 @@ pub enum DomainError {
     #[error("ticket not ready: missing {missing}")]
     NotReady { missing: &'static str },
 
+    #[error(
+        "cannot verify: {uncovered} acceptance criterion(s) not demonstrated by a passing \
+         test (first: `{first}`)"
+    )]
+    CoverageIncomplete { uncovered: usize, first: String },
+
     #[error("invalid version string `{0}`")]
     InvalidVersion(String),
 
