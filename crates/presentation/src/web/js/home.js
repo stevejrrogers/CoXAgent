@@ -276,6 +276,38 @@ function blockedBadge(s,t){
   const chain=b.blockers.map(esc).join(" ← ");
   return ` <span title="waiting on: ${chain}" style="display:inline-flex;align-items:center;gap:3px;padding:1px 8px;border-radius:20px;font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;background:color-mix(in srgb,var(--red) 16%,transparent);color:var(--red)"><i class="ti ti-lock" style="font-size:10px"></i>BLOCKED</span> <span title="waiting on: ${chain}" style="font-size:10.5px;color:var(--muted)">${chain}</span>`;
 }
+// Collapsed-section memory for the Jira-style backlog (keys: "active", "q<id>").
+function spqCollapsed(){
+  try{return new Set(JSON.parse(localStorage.getItem("coxsprintcollapse")||"[]"));}catch(e){return new Set();}
+}
+function spqToggle(key){
+  const c=spqCollapsed();
+  if(c.has(key))c.delete(key);else c.add(key);
+  try{localStorage.setItem("coxsprintcollapse",JSON.stringify([...c]));}catch(e){}
+  renderActive();
+}
+// Per-status mini-summary for a sprint section header: "3 ready · 1 in progress".
+function spqSummary(ts){
+  const order=["pending","ready","open","in_progress","review","done","documented","verified","on_hold"];
+  const n={};for(const t of ts)n[t.status]=(n[t.status]||0)+1;
+  return order.filter(k=>n[k]).map(k=>`${n[k]} ${k.replace(/_/g," ")}`).join(" · ");
+}
+// One full ticket row inside a sprint section — Jira-style: icon, id, title,
+// priority + status chips, and a remove control. `src` tags the drag source so
+// dropping on another section moves rather than copies.
+function spqTicketRow(t,id,src,removeHtml){
+  const pc={high:"var(--red)",medium:"var(--amber)",low:"var(--muted)"};
+  if(!t)return `<div class="spq-row spq-gone"><span class="spq-id">${esc(id)}</span><span class="spq-title" style="color:var(--dim)">(not in this project)</span>${removeHtml}</div>`;
+  const col=pc[t.priority]||"var(--muted)";
+  const done=["done","documented","verified"].includes(t.status);
+  return `<div class="spq-row${done?' spq-done':''}" draggable="true" ondragstart="spqDrag(event,'${esc(t.id)}','${src}')" onclick="showTicket('${esc(t.id)}')">
+    <span class="spq-type" style="color:${col}"><i class="ti ti-${t.type==='bug'?'bug':'bulb'}"></i></span>
+    <span class="spq-id">${esc(t.id)}</span>
+    <span class="spq-title">${esc(t.title||'(removed)')}</span>
+    <span class="spq-pchip" style="background:color-mix(in srgb,${col} 14%,transparent);color:${col}">${esc(t.priority||'—')}</span>
+    <span class="spq-schip${done?' ok':''}">${esc(String(t.status).replace(/_/g," "))}</span>
+    ${removeHtml}</div>`;
+}
 function renderBacklogPanel(s){
   const el=document.getElementById("backlog-body");
   const rank={high:0,medium:1,low:2};
@@ -284,35 +316,44 @@ function renderBacklogPanel(s){
   const committed=new Set((s.sprint&&s.sprint.committed)||[]);
   const pc={high:"var(--red)",medium:"var(--amber)",low:"var(--muted)"};
   const byId=id=>(s.tickets||[]).find(x=>x.id===id);
+  const collapsed=spqCollapsed();
+  const chev=key=>`<button class="spq-chev" onclick="event.stopPropagation();spqToggle('${key}')" title="${collapsed.has(key)?'Expand':'Collapse'}"><i class="ti ti-chevron-${collapsed.has(key)?'right':'down'}"></i></button>`;
   // 1) The running sprint, always on top.
   const sp=s.sprint;
   let activeHtml="";
   if(sp){
     const cm=(sp.committed||[]).map(byId).filter(Boolean);
-    const done=cm.filter(t=>["done","documented","verified"].includes(t.status)).length;
-    activeHtml=`<div class="panel spq-card spq-active" ondragover="spqOver(event,this)" ondragleave="spqLeave(this)" ondrop="spqDrop(event,null)">
-      <div class="spq-head"><span class="pbadge on">● running</span><b>Sprint #${sp.number}</b>
+    const sum=spqSummary(cm);
+    const rows=(sp.committed||[]).map(id=>spqTicketRow(byId(id),id,'active',
+      `<button class="sp-scope" onclick="event.stopPropagation();sprintScope('${esc(id)}',false)" title="Drop from the running sprint">− sprint</button>`)).join("");
+    activeHtml=`<div class="panel spq-card spq-sec spq-active" ondragover="spqOver(event,this)" ondragleave="spqLeave(this)" ondrop="spqDrop(event,null)">
+      <div class="spq-head">${chev('active')}<span class="pbadge on">● running</span><b>Sprint #${sp.number}</b>
         <span class="spq-goal">${esc(sp.goal)}</span>
-        <span class="spq-n">${done}/${cm.length} done</span>
-        <a onclick="setWorkTab('sprint')" style="cursor:pointer;color:var(--accent2);font-size:11.5px;margin-left:auto">open board →</a></div>
-      <div class="spq-tk">${(sp.committed||[]).map(id=>{const t=byId(id);const col=t?(pc[t.priority]||"var(--muted)"):"var(--muted)";
-        return `<span class="spq-chip" style="border-color:${col}55" onclick="showTicket('${esc(id)}')">${esc(id)}</span>`;}).join("")||'<span class="empty" style="padding:4px">empty — drag tickets here</span>'}</div>
+        <span class="spq-n">${(sp.committed||[]).length} ticket${(sp.committed||[]).length===1?"":"s"}${sum?` · ${sum}`:""}</span>
+        <a onclick="setWorkTab('sprint')" style="cursor:pointer;color:var(--accent2);font-size:11.5px;margin-left:auto;white-space:nowrap">open board →</a></div>
+      ${collapsed.has('active')?'':`<div class="spq-rows">${rows||'<div class="empty" style="padding:8px 4px">empty — drag tickets here</div>'}</div>`}
     </div>`;
   }
   // 2) Queued sprints, in run order.
   const queue=s.sprint_queue||[];
-  const qHtml=queue.map((q,i)=>`<div class="panel spq-card" ondragover="spqOver(event,this)" ondragleave="spqLeave(this)" ondrop="spqDrop(event,${q.id})">
-    <div class="spq-head"><span class="spq-ord">#${i+1} up next</span><span class="spq-goal">${esc(q.goal)}</span>
-      <span class="spq-n">${(q.tickets||[]).length} ticket${(q.tickets||[]).length===1?"":"s"}</span>
+  const qHtml=queue.map((q,i)=>{
+    const key='q'+q.id;
+    const ts=(q.tickets||[]).map(byId).filter(Boolean);
+    const sum=spqSummary(ts);
+    const rows=(q.tickets||[]).map(id=>spqTicketRow(byId(id),id,String(q.id),
+      `<button class="sp-scope" onclick="event.stopPropagation();spqScope(${q.id},null,'${esc(id)}')" title="Remove from this plan">✕</button>`)).join("");
+    return `<div class="panel spq-card spq-sec" ondragover="spqOver(event,this)" ondragleave="spqLeave(this)" ondrop="spqDrop(event,${q.id})">
+    <div class="spq-head">${chev(key)}<span class="spq-ord">#${i+1} up next</span>
+      <span class="spq-goal" onclick="spqRename(${q.id},'${esc(q.goal).replace(/'/g,"\\'")}')" title="Rename the goal" style="cursor:text">${esc(q.goal)}</span>
+      <span class="spq-n">${(q.tickets||[]).length} ticket${(q.tickets||[]).length===1?"":"s"}${sum?` · ${sum}`:""}</span>
       ${q.by?`<span class="spq-by" title="planned by">${esc(q.by)}</span>`:""}
       <span style="margin-left:auto;display:flex;gap:4px">
         <button class="sp-scope" onclick="spqMove(${q.id},'up')" title="Run earlier" ${i===0?'disabled style="opacity:.35"':''}>↑</button>
         <button class="sp-scope" onclick="spqMove(${q.id},'down')" title="Run later" ${i===queue.length-1?'disabled style="opacity:.35"':''}>↓</button>
         <button class="sp-scope" onclick="spqRename(${q.id},'${esc(q.goal).replace(/'/g,"\\'")}')" title="Rename the goal"><i class="ti ti-pencil"></i></button>
         <button class="sp-scope" onclick="spqDelete(${q.id})" title="Drop this planned sprint">✕ plan</button></span></div>
-    <div class="spq-tk">${(q.tickets||[]).map(id=>{const t=byId(id);const col=t?(pc[t.priority]||"var(--muted)"):"var(--muted)";
-      return `<span class="spq-chip" style="border-color:${col}55" onclick="showTicket('${esc(id)}')">${esc(id)}<i class="ti ti-x" onclick="event.stopPropagation();spqScope(${q.id},null,'${esc(id)}')" title="remove"></i></span>`;}).join("")||'<span class="empty" style="padding:4px">no tickets yet — drag from the backlog below</span>'}</div>
-  </div>`).join("");
+    ${collapsed.has(key)?'':`<div class="spq-rows">${rows||'<div class="empty" style="padding:8px 4px">no tickets yet — drag from the backlog below</div>'}</div>`}
+  </div>`;}).join("");
   // 3) The prioritised backlog list, draggable into any sprint above.
   window._blkSel=window._blkSel||new Set();
   const sel=window._blkSel;
@@ -363,14 +404,20 @@ async function blkAct(kind,arg){
   window._blkSel.clear();await refreshDisc();
 }
 // --- Sprint-queue interactions (drag a backlog row onto a sprint card) ---
-function spqDrag(ev,id){ev.dataTransfer.setData("text/ticket",id);ev.dataTransfer.effectAllowed="copy";}
+function spqDrag(ev,id,src){ev.dataTransfer.setData("text/ticket",id);ev.dataTransfer.setData("text/src",src||"");ev.dataTransfer.effectAllowed="copy";}
 function spqOver(ev,el){ev.preventDefault();ev.dataTransfer.dropEffect="copy";el.classList.add("spq-hot");}
 function spqLeave(el){el.classList.remove("spq-hot");}
+// Drop onto a sprint section. `qid` null = the running sprint. A row dragged
+// out of another section MOVES: add to the target, then remove from the source.
 async function spqDrop(ev,qid){
   ev.preventDefault();ev.currentTarget.classList.remove("spq-hot");
   const id=ev.dataTransfer.getData("text/ticket");if(!id)return;
-  if(qid==null){await sprintScope(id,true);return;} // the running sprint
-  await spqScope(qid,id,null);
+  const src=ev.dataTransfer.getData("text/src")||"";
+  const tgt=qid==null?"active":String(qid);
+  if(src===tgt)return; // dropped where it already lives
+  if(qid==null)await sprintScope(id,true);else await spqScope(qid,id,null);
+  if(src==="active")await sprintScope(id,false);
+  else if(src)await spqScope(Number(src),null,id);
 }
 async function spqScope(qid,add,remove){
   try{
