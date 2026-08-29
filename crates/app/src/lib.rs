@@ -367,6 +367,30 @@ mod shim_script_tests {
         let script = shim_script("git", "/tmp/coxagent-shims", "/opt/coxagent");
         assert!(script.contains(r#"[ "$d" = "/tmp/coxagent-shims" ] && continue"#));
     }
+
+    /// CXA-B109: the compress binary's path is baked in at generation time and
+    /// can vanish (a hub wrote the shims from a worktree the janitor purged).
+    /// Unguarded, the pipeline's writer SIGPIPEs into the dead second stage —
+    /// exit 141, zero output, for every shimmed tool call. Every shim must
+    /// check the baked binary before piping and degrade to `exec "$real"`.
+    #[test]
+    fn every_shim_degrades_to_the_real_binary_when_compress_is_gone() {
+        for cmd in SHIM_CMDS {
+            let script = shim_script(cmd, "/tmp/coxagent-shims", "/opt/coxagent");
+            let guard = script
+                .find(r#"[ -x "/opt/coxagent" ] || exec "$real" "$@""#)
+                .unwrap_or_else(|| {
+                    panic!("{cmd} shim has no fallback for a vanished compress binary")
+                });
+            let merge = script
+                .find("2>&1")
+                .expect("shim lost its compress pipeline");
+            assert!(
+                guard < merge,
+                "{cmd} shim checks the compress binary only after the pipeline:\n{script}"
+            );
+        }
+    }
 }
 
 /// Answer a code-graph query for agents (and humans) — structured, token-cheap

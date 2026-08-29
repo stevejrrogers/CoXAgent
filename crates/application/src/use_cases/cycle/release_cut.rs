@@ -368,6 +368,7 @@ pub(super) fn days_between(a: &str, b: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::use_cases::release_assembly::cut_manifest;
 
     fn v(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| (*s).to_owned()).collect()
@@ -450,5 +451,75 @@ mod tests {
         assert_eq!(days_between("2026-08-10", "2026-08-17"), 7);
         assert_eq!(days_between("2026-08-17", "2026-08-17"), 0);
         assert_eq!(days_between("garbage", "2026-08-17"), 0);
+    }
+
+    /// A state with one Verified bug (CXA-B001) and one Fixed bug (CXA-B002),
+    /// each walked along the bug lifecycle's only legal route.
+    fn state_with_verified_and_fixed() -> crate::state::ProjectState {
+        use coxagent_domain::{Complexity, Priority, Role, Status, Ticket, TicketId, TicketType};
+        let bug = |id: &str| {
+            Ticket::new(
+                TicketId::new(id).expect("id"),
+                TicketType::Bug,
+                format!("defect {id}"),
+                "repro",
+                Priority::High,
+                Complexity::Small,
+                false,
+            )
+            .expect("ticket")
+        };
+        let mut fixed = bug("CXA-B002");
+        fixed.claim(Role::DevBug, "dev", "t").expect("claim");
+        fixed
+            .transition_to(Role::DevBug, Status::Fixed)
+            .expect("fix");
+        let mut verified = bug("CXA-B001");
+        verified.claim(Role::DevBug, "dev", "t").expect("claim");
+        verified
+            .transition_to(Role::DevBug, Status::Fixed)
+            .expect("fix");
+        verified
+            .transition_to(Role::Test, Status::Verified)
+            .expect("verify");
+        crate::state::ProjectState {
+            tickets: vec![verified, fixed],
+            ..crate::state::ProjectState::default()
+        }
+    }
+
+    #[test]
+    fn manifest_gate_computes_bump_and_changelog_only_over_included_subjects() {
+        let state = state_with_verified_and_fixed();
+        let subjects = v(&[
+            "feat(cxa): ship the flow #CXA-B001",  // verified → in
+            "fix(cxa): partial support #CXA-B002", // Fixed-only → excluded
+            "chore: no ticket ref",                // ref-less → excluded
+        ]);
+        let m = cut_manifest(&state, &subjects);
+
+        // The bump is computed ONLY over the included set: the excluded fix
+        // cannot sneak a patch in, the included feat still makes a minor.
+        assert_eq!(classify_bump(&m.included), Some(Bump::Minor));
+        // The changelog body corresponds one-to-one to manifest inclusions.
+        let body = changelog("2.27.0", &m.included);
+        assert!(body.contains("#CXA-B001"));
+        assert!(!body.contains("partial support"));
+        assert!(!body.contains("no ticket ref"));
+        // The SM note surfaces bundles plus included/excluded ticket ids.
+        assert!(m.note.contains("included: CXA-B001"), "{}", m.note);
+        assert!(m.note.contains("excluded: CXA-B002"), "{}", m.note);
+        assert!(m.note.contains("Unattributed [CXA-B001]"), "{}", m.note);
+    }
+
+    #[test]
+    fn manifest_gate_yields_no_note_and_no_subjects_from_an_empty_verified_set() {
+        // AC5 at the cut: zero Verified-complete tickets → no included
+        // subjects (so no bump, no PR) and a note with nothing to list.
+        let state = crate::state::ProjectState::default();
+        let m = cut_manifest(&state, &v(&["feat: orphaned work"]));
+        assert!(m.included.is_empty());
+        assert_eq!(m.note, "");
+        assert_eq!(classify_bump(&m.included), None, "no candidate is produced");
     }
 }
