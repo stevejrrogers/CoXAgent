@@ -94,7 +94,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .take(3)
             .collect();
         let n_actions = actions.len();
-        self.apply_sentinel(&today, &report, &actions, n_actions).await;
+        self.apply_sentinel(&today, &report, &actions, n_actions)
+            .await;
     }
 
     /// Persist the sentinel's answer: report page, `[trend]` tickets, chat.
@@ -183,8 +184,7 @@ fn build_digest(state: &crate::state::ProjectState) -> String {
         .cycle_scores
         .iter()
         .filter(|c| {
-            crate::use_cases::cycle::seconds_since_public(&c.at)
-                .is_some_and(|s| s <= 7 * 86_400)
+            crate::use_cases::cycle::seconds_since_public(&c.at).is_some_and(|s| s <= 7 * 86_400)
         })
         .collect();
     let (mut a, mut b, mut cg, mut dg, mut cost, mut shipped, mut runs) =
@@ -257,7 +257,11 @@ fn build_digest(state: &crate::state::ProjectState) -> String {
         .map(|r| format!("#{} {}/{}", r.number, r.done, r.committed))
         .collect();
     if !last.is_empty() {
-        let _ = writeln!(d, "sprints_done/committed (newest first): {}", last.join(", "));
+        let _ = writeln!(
+            d,
+            "sprints_done/committed (newest first): {}",
+            last.join(", ")
+        );
     }
     // Spend by role this lifetime window (metered).
     let mut roles: Vec<(&String, &f64)> = state.spend.metered_cost_by_role.iter().collect();

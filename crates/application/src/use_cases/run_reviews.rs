@@ -254,6 +254,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunArchitectureAud
                     complexity: it.complexity,
                     has_ui: false,
                     acceptance_criteria: Vec::new(),
+                    goal: None,
                 })
                 .await
             {

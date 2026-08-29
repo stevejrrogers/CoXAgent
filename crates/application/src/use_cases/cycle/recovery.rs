@@ -127,29 +127,22 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         true
     }
 
-    /// A restructure is planned or underway: architecture refactor mode is on,
-    /// or the PO's sprint goal reads like a refactor/migration.
+    /// A restructure is planned or underway — `refactor_mode`, and ONLY that.
+    ///
+    /// This used to also sniff the sprint goal for keywords ("refactor",
+    /// "migrat", …). But the PO writes goals by quoting ticket TITLES, so a
+    /// sprint shipping a chore named "Refactor: Generate OpenAPI spec" read as
+    /// a full restructure: the clean-base gate armed itself, demanded zero open
+    /// PRs, and paused BOTH dev lanes for days while SA/PD kept designing —
+    /// 194 tickets piled up at `ready` with nobody allowed to build them.
+    /// Free prose is not a mode switch. The SA sets `refactor_mode`
+    /// deliberately (`call_refactor_sprint`) and ceremonies clear it when the
+    /// refactor chores are done; that explicit lifecycle is the whole signal.
     pub(super) async fn clean_base_required(&self) -> bool {
-        let Ok(state) = self.store.load().await else {
-            return false;
-        };
-        if state.refactor_mode {
-            return true;
-        }
-        let goal = state
-            .sprint
-            .as_ref()
-            .map(|s| s.goal.to_lowercase())
-            .unwrap_or_default();
-        [
-            "refactor",
-            "restructure",
-            "migrat",
-            "tái cấu trúc",
-            "cấu trúc lại",
-        ]
-        .iter()
-        .any(|k| goal.contains(k))
+        self.store
+            .load()
+            .await
+            .is_ok_and(|state| state.refactor_mode)
     }
 
     /// Ops/SRE monitor: once the app has been deployed, ping its published port
@@ -189,6 +182,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     complexity: Complexity::Medium,
                     has_ui: false,
                     acceptance_criteria: vec![format!("App answers on 127.0.0.1:{port} again")],
+                    goal: None,
                 })
                 .await;
             let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {

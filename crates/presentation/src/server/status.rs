@@ -99,8 +99,7 @@ pub(super) fn lite_state_value(state: &coxagent_application::ProjectState) -> se
         // (newest 50) — history beyond that comes from the paginated REST
         // list. Bounded-500 chat serialized 4 channels per tick was a real
         // drag on the chat pane.
-        let mut seen: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
+        let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         let keep: Vec<bool> = chat
             .iter()
             .rev()
@@ -191,6 +190,31 @@ pub(super) async fn metrics_trends_ep(
             let day = today.get(..10).unwrap_or("").to_owned();
             Json(coxagent_application::metrics_health::compute_trends(
                 &state, days, &day,
+            ))
+            .into_response()
+        }
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Bug burn-down history (CXA-F032): per-day open/fixed/verified counts over
+/// the dashboard window plus the net open-bug change across the last two
+/// known days (`delta_24h`, positive = backlog burned down). Same auth surface
+/// as the other `/metrics` reads: project membership via `auth_mw`.
+pub(super) async fn metrics_burndown_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    match p.store.load().await {
+        Ok(state) => {
+            let day = now_rfc3339().get(..10).unwrap_or("").to_owned();
+            Json(coxagent_application::metrics::compute_burndown(
+                &state,
+                &day,
+                coxagent_application::metrics::BURNDOWN_WINDOW_DAYS,
             ))
             .into_response()
         }

@@ -293,7 +293,8 @@ pub struct TestOutput {
 #[derive(Debug, Clone, Deserialize)]
 pub struct TestVerdict {
     /// The EXACT acceptance-criterion text this verdict is for. The system
-    /// matches it word-for-word against the ticket's test cases.
+    /// matches it word-for-word against the ticket's test cases, falling back
+    /// to keyword + fuzzy overlap (CXA-F024) when the agent paraphrased.
     #[serde(default)]
     pub ac: String,
     #[serde(default)]
@@ -305,6 +306,12 @@ pub struct TestVerdict {
     /// or empty when none applies.
     #[serde(default)]
     pub route: String,
+    /// Relative paths of the test files that demonstrate this criterion
+    /// (CXA-F024 traceability), or empty when the evidence is an API
+    /// request/response rather than a file-based test. Optional — the agent
+    /// may omit it, and older outputs never had it.
+    #[serde(default)]
+    pub tests: Vec<String>,
 }
 
 /// Parse the TEST engine output into (bugs, verdicts). Accepts BOTH the new

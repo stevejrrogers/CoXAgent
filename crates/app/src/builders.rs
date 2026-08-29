@@ -40,6 +40,9 @@ pub(crate) async fn make_store(
                 token: std::env::var("COXAGENT_REMOTE_TOKEN")
                     .ok()
                     .filter(|t| !t.is_empty()),
+                // CXA-F029 bug #2: per-deployment request deadline; defaults to
+                // the previously hard-coded 120 s.
+                timeout: RestConfig::timeout_from_env(),
             };
             let store = RestStateStore::new(cfg)?;
             tracing::info!("[{id}] state store: REMOTE gateway");
@@ -431,9 +434,8 @@ pub(crate) async fn build_project(
             // Same-process hub: reviews/holds/latency write straight to the
             // shared store — the Null fallback silently dropped them all.
             leader.with_reporter(Arc::new(
-                coxagent_application::ports::outbound::StorePrReporter::new(
-                    Arc::clone(&store) as Arc<dyn coxagent_application::ports::outbound::StateStorePort>,
-                ),
+                coxagent_application::ports::outbound::StorePrReporter::new(Arc::clone(&store)
+                    as Arc<dyn coxagent_application::ports::outbound::StateStorePort>),
             ))
         };
         let wh = Arc::clone(&handle);
@@ -476,10 +478,8 @@ pub(crate) async fn build_project(
                 // Same-process hub: reviews/holds/latency write straight to
                 // the shared store — the Null fallback silently dropped them.
                 reviewer.with_reporter(Arc::new(
-                    coxagent_application::ports::outbound::StorePrReporter::new(
-                        Arc::clone(&store)
-                            as Arc<dyn coxagent_application::ports::outbound::StateStorePort>,
-                    ),
+                    coxagent_application::ports::outbound::StorePrReporter::new(Arc::clone(&store)
+                        as Arc<dyn coxagent_application::ports::outbound::StateStorePort>),
                 ))
             };
             let rh = Arc::clone(&handle);
@@ -500,6 +500,7 @@ pub(crate) async fn build_project(
         }
     }
 
+    crate::spawn_worktree_janitor(work_dir.clone());
     tracing::info!(
         "[{id}] spawning {} worker runner(s) (total {} runners)",
         concurrency.saturating_sub(1),
@@ -560,9 +561,8 @@ pub(crate) async fn build_project(
             // Same-process hub: reviews/holds/latency write straight to the
             // shared store — the Null fallback silently dropped them all.
             worker.with_reporter(Arc::new(
-                coxagent_application::ports::outbound::StorePrReporter::new(
-                    Arc::clone(&store) as Arc<dyn coxagent_application::ports::outbound::StateStorePort>,
-                ),
+                coxagent_application::ports::outbound::StorePrReporter::new(Arc::clone(&store)
+                    as Arc<dyn coxagent_application::ports::outbound::StateStorePort>),
             ))
         };
         let wh = Arc::clone(&handle);

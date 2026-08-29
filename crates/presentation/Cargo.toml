@@ -22,6 +22,7 @@ serde.workspace = true
 serde_json.workspace = true
 time.workspace = true
 tracing.workspace = true
+uuid.workspace = true
 portable-pty = "0.9.0"
 futures-util = "0.3.33"
 tower-http = { workspace = true }

@@ -17,6 +17,49 @@ pub struct DeployRecord {
     pub at: String,
 }
 
+/// A human's verdict on one detected revert (CXA-F047). Detection is a
+/// heuristic over commit subjects, so a `Revert` of a docs bump or a CI
+/// change would look identical to reverted shipped work — the decision is
+/// what turns a suspicion into a fact the loop is allowed to learn from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RevertDecision {
+    #[default]
+    Pending,
+    Approved,
+    Dismissed,
+}
+
+/// One merged-then-reverted work event (CXA-F047): git history shows a commit
+/// undoing work this team shipped, attributed to the ticket and the agent role
+/// that produced it. First-class state (alongside `history`) so approval
+/// survives restarts and re-scans never re-flag what a human already decided.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevertEvent {
+    /// The revert commit's sha — the identity a re-scan dedupes against.
+    pub sha: String,
+    /// The revert commit's subject, verbatim.
+    pub subject: String,
+    /// The shipping ticket id (resolved from deploy history).
+    pub ticket: String,
+    /// Role label that shipped the ticket (`DEV-FEATURE`).
+    pub role: String,
+    /// RFC3339 commit date of the revert.
+    pub reverted_at: String,
+    /// RFC3339 when the scan detected it.
+    pub detected_at: String,
+    pub decision: RevertDecision,
+    /// RFC3339 when the human decided (absent while pending).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_at: Option<String>,
+    /// Who decided (username, or the runner for auto-dismissals).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_by: Option<String>,
+}
+
+/// Keep the revert ledger bounded.
+pub const MAX_REVERT_EVENTS: usize = 100;
+
 /// A live engine-infrastructure problem: expired auth, a model the provider
 /// rejected, a quota wall. These are not ticket failures and not the team's
 /// fault, but they stop everything — so they are surfaced as an open incident

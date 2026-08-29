@@ -441,6 +441,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
                     complexity: cx,
                     has_ui: ui,
                     acceptance_criteria: ac,
+                    goal: None,
                 })
                 .await
                 .ok()?;
@@ -612,6 +613,7 @@ mod tests {
                 complexity: Complexity::Small,
                 has_ui,
                 acceptance_criteria: Vec::new(),
+                goal: None,
             })
             .await
             .expect("seed");
@@ -707,6 +709,7 @@ mod tests {
                 length_cycles: 10,
                 committed: vec![TicketId::new("CXA-F001").expect("id")],
                 started_at: String::new(),
+                bug_burn_floor: None,
             }),
             ..ProjectState::default()
         };

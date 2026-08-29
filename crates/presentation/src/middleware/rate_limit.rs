@@ -127,7 +127,22 @@ pub async fn rate_limit_mw(
     // the actual client, not the shared TCP peer.
     let path = req.uri().path();
     if path.starts_with("/api/auth/") {
-        let key = client_key(&req, trust_proxy);
+        // Every /api/auth/* route stays limited (COX-C016 AC3/4), but the
+        // session-gated read-only GETs get their own, far roomier bucket:
+        // they are dashboard chrome fetched once per page load, and counting
+        // them against login's strict window let ordinary page loads (or a
+        // UI render burst) starve real sign-ins into a 429 storm. Credential
+        // guessing happens on POST login/2FA — that window is unchanged.
+        let read_only = req.method() == axum::http::Method::GET
+            && matches!(path, "/api/auth/sessions" | "/api/auth/me");
+        let (key, max) = if read_only {
+            (
+                format!("{}:ro", client_key(&req, trust_proxy)),
+                max.saturating_mul(12),
+            )
+        } else {
+            (client_key(&req, trust_proxy), max)
+        };
         if !limiter.check(&key, max, window, Instant::now()) {
             tracing::warn!(
                 client = %key,

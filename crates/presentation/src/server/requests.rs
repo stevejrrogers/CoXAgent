@@ -58,11 +58,29 @@ pub(super) struct CreateTicketReq {
     pub(super) has_ui: bool,
     #[serde(default)]
     pub(super) acceptance_criteria: Vec<String>,
+    /// Declared product goal (stable id, e.g. `G001`) this ticket advances.
+    /// Optional: absent/blank means no declared goal (unattributed until
+    /// backfilled). Validated by the use case against the project's goals.
+    #[serde(default)]
+    pub(super) goal: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
 pub(super) struct DiscussReq {
     pub(super) topic: String,
+}
+
+/// Declare or restate a product goal (CXA-F228).
+#[derive(serde::Deserialize)]
+pub(super) struct GoalTitleReq {
+    pub(super) title: String,
+}
+
+/// Bind a ticket to a declared product goal (the post-creation backfill
+/// path that attributes tickets verified before goal-line tracking shipped).
+#[derive(serde::Deserialize)]
+pub(super) struct SetTicketGoalReq {
+    pub(super) goal_id: String,
 }
 
 #[derive(serde::Deserialize)]

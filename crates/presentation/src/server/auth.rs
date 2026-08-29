@@ -155,6 +155,63 @@ pub(super) fn is_store_rpc_path(path: &str) -> bool {
         .is_some_and(|pid| !pid.is_empty() && !pid.contains('/'))
 }
 
+/// The audit-log form of a request path. Revoking a share link carries the
+/// token in the URL — the very credential being killed (CXA-F069 AC5: a share
+/// token may never appear in logs) — so that one segment is masked before
+/// anything is recorded. Every other path passes through untouched.
+fn audit_safe_path(path: &str) -> String {
+    const MARK: &str = "/share-links/";
+    match path.split_once(MARK) {
+        Some((head, token)) if !token.is_empty() && !token.contains('/') => {
+            format!("{head}{MARK}<redacted>")
+        }
+        _ => path.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod audit_safe_path_tests {
+    use super::audit_safe_path;
+
+    #[test]
+    fn a_share_link_revoke_url_is_recorded_without_its_token() {
+        assert_eq!(
+            audit_safe_path("/api/projects/demo/share-links/abc123"),
+            "/api/projects/demo/share-links/<redacted>",
+            "the token being revoked must never reach the audit log"
+        );
+    }
+
+    #[test]
+    fn every_other_path_is_recorded_verbatim() {
+        // Create/list have no token segment after the marker.
+        assert_eq!(
+            audit_safe_path("/api/projects/demo/share-links"),
+            "/api/projects/demo/share-links"
+        );
+        assert_eq!(
+            audit_safe_path("/api/projects/demo/ticket/CXC-F001/priority"),
+            "/api/projects/demo/ticket/CXC-F001/priority"
+        );
+        assert_eq!(audit_safe_path("/join/tok"), "/join/tok");
+    }
+
+    #[test]
+    fn shapes_that_are_not_a_bare_token_segment_are_not_masked() {
+        // An empty or multi-segment tail is not a token; masking it would
+        // misrecord the URL. The share-link route only ever puts one segment
+        // there, so anything else is a different (unrouted) path.
+        assert_eq!(
+            audit_safe_path("/api/projects/demo/share-links/"),
+            "/api/projects/demo/share-links/"
+        );
+        assert_eq!(
+            audit_safe_path("/api/projects/demo/share-links/a/b"),
+            "/api/projects/demo/share-links/a/b"
+        );
+    }
+}
+
 /// RBAC gate. Open (pass-through) when no auth is configured. Otherwise: the
 /// SPA shell, health, and login are public; every other route needs a valid
 /// session, and mutating methods (except logout) need an admin.
@@ -207,6 +264,11 @@ pub(super) async fn auth_mw(
         // Invite flow: the invite token IS the credential for joining.
         || path.starts_with("/join/")
         || path == "/api/workspace/join"
+        // Share-link status page (CXA-F069): the unguessable share token IS
+        // the credential — no session, exactly like /join/:token. The page
+        // handler answers 404 for unknown/revoked tokens, so probing learns
+        // nothing.
+        || path.starts_with("/s/")
     {
         return next.run(req).await;
     }
@@ -217,6 +279,9 @@ pub(super) async fn auth_mw(
         )
             .into_response();
     };
+    // Audit entries record the path; share-link revoke URLs must not leak the
+    // token they are killing (see `audit_safe_path`).
+    let audit_path = audit_safe_path(&path);
     let is_write = matches!(
         *req.method(),
         axum::http::Method::POST
@@ -251,7 +316,7 @@ pub(super) async fn auth_mw(
         audit_push(
             &app.audit,
             &username,
-            format!("{method} {path}"),
+            format!("{method} {audit_path}"),
             StatusCode::FORBIDDEN.as_u16(),
         )
         .await;
@@ -264,7 +329,7 @@ pub(super) async fn auth_mw(
     // MCP dispatch requires write access, even for read-only JSON-RPC methods,
     // because the HTTP verb alone can't distinguish read from write operations.
     if path == "/api/mcp" && !user.role.can_write() {
-        audit_push(&app.audit, &username, format!("{method} {path}"), 403).await;
+        audit_push(&app.audit, &username, format!("{method} {audit_path}"), 403).await;
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({ "error": "insufficient role" })),
@@ -277,7 +342,7 @@ pub(super) async fn auth_mw(
         let is_super_or_admin = user.role == coxagent_application::auth::AuthRole::Super
             || user.role == coxagent_application::auth::AuthRole::Admin;
         if !is_super_or_admin && !user.projects.iter().any(|p| p == pid) {
-            audit_push(&app.audit, &username, format!("{method} {path}"), 403).await;
+            audit_push(&app.audit, &username, format!("{method} {audit_path}"), 403).await;
             return (
                 StatusCode::FORBIDDEN,
                 Json(serde_json::json!({ "error": "not a member of this project" })),
@@ -293,7 +358,7 @@ pub(super) async fn auth_mw(
         audit_push(
             &app.audit,
             &username,
-            format!("{method} {path}"),
+            format!("{method} {audit_path}"),
             StatusCode::FORBIDDEN.as_u16(),
         )
         .await;
@@ -309,7 +374,7 @@ pub(super) async fn auth_mw(
         audit_push(
             &app.audit,
             &username,
-            format!("{method} {path}"),
+            format!("{method} {audit_path}"),
             resp.status().as_u16(),
         )
         .await;
