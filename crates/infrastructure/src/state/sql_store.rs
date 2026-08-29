@@ -490,13 +490,13 @@ impl SqlStateStore {
     /// sound for intra-process writers sharing one store instance).
     async fn persist_at_revision(
         &self,
-        state: ProjectState,
+        mut state: ProjectState,
         expected_revision: Option<i64>,
     ) -> Result<(), PortError> {
         // The pre-existing schema-level validation is untouched; the
         // structural-integrity audit (CXA-F229) is the additional gate. The
         // ledger is memory-only here, so every refusal is also logged.
-        if let Err(e) = gate_save(&state, &self.quarantine) {
+        if let Err(e) = gate_save(&mut state, &self.quarantine) {
             tracing::error!(
                 "[{}] write-back refused by structural integrity audit: {e}",
                 self.project_id
