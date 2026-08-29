@@ -47,6 +47,7 @@ mod deps;
 mod docs;
 mod downloads;
 mod engines;
+mod fleet;
 mod forge;
 mod goals;
 mod guards;
@@ -80,6 +81,7 @@ use comments::*;
 use docs::*;
 use downloads::*;
 use engines::*;
+use fleet::*;
 use forge::*;
 use guards::*;
 use hub_docs::*;
@@ -117,6 +119,7 @@ const APP_JS: &[(&str, &str)] = &[
     ("core.js", include_str!("../web/js/core.js")),
     ("manage.js", include_str!("../web/js/manage.js")),
     ("home.js", include_str!("../web/js/home.js")),
+    ("river.js", include_str!("../web/js/river.js")),
     ("chat.js", include_str!("../web/js/chat.js")),
     ("mcp.js", include_str!("../web/js/mcp.js")),
     ("docs.js", include_str!("../web/js/docs.js")),
@@ -731,6 +734,10 @@ pub async fn serve_full(
         .route("/api/chat/media/:file", get(syschat_media_ep))
         .route("/api/engines", get(engines_ep))
         .route("/api/engines/opencode/models", get(opencode_models_ep))
+        // Cross-project live agent activity river (CXA-F233): every registered
+        // project's runner phase + activity in ONE SSE stream, filterable by
+        // project id and agent phase (see fleet.rs).
+        .route("/api/fleet/river", get(fleet_river_ep))
         .route("/api/tooling", get(tooling_ep))
         .route("/api/analyze-goal", post(analyze_goal_ep))
         .route("/api/projects", get(list_projects).post(create_project))
