@@ -224,6 +224,47 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         if !files.write_bytes(&out, &bytes).await {
             return;
         }
+        // The eye a TEXT model can actually use: the rendered DOM as text.
+        // "Open the PNG with your file tools" asked a text engine to read
+        // pixels — it hallucinated. What is ON the screen, as text, it can
+        // genuinely judge (empty views, error strings, placeholder junk).
+        let dom_extract = match shot
+            .capture_dom(&format!("http://127.0.0.1:{port}/"))
+            .await
+        {
+            Some(html) => {
+                let text = html_to_text(&html);
+                let extract: String = text.chars().take(2500).collect();
+                format!(
+                    "\n\nRendered page text (what the screen actually shows, extracted \
+                     from the live DOM — judge THIS, it is ground truth):\n---\n{extract}\n---"
+                )
+            }
+            None => String::new(),
+        };
+        // The human Verify gate should see the same picture: attach it to the
+        // ticket instead of leaving it as a loose workdir file only agents see.
+        if let Some(storage) = &self.storage {
+            let key = format!("visual-qa/{ticket}-{}.png", crate::state::now_rfc3339());
+            if storage.put(&key, &bytes, "image/png").await.is_ok() {
+                let rec = crate::state::TicketAttachment {
+                    name: format!("visual-qa-{ticket}.png"),
+                    key,
+                    content_type: "image/png".to_owned(),
+                    by: "PD".to_owned(),
+                    at: crate::state::now_rfc3339(),
+                };
+                let tid = ticket.to_string();
+                let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |st| {
+                    st.ticket_attachments
+                        .entry(tid.clone())
+                        .or_default()
+                        .push(rec.clone());
+                    Ok(())
+                })
+                .await;
+            }
+        }
         self.report("PD", "visual QA on the deployed UI");
         let request = crate::ports::outbound::AgentRequest {
             role: coxagent_domain::Role::Pd,
@@ -235,7 +276,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                  design system and basic UI craft (alignment, contrast, spacing, \
                  broken layout, placeholder junk). Output ONLY a JSON array of at \
                  most 2 CONCRETE, visible defects: \
-                 [{{\"title\": string, \"description\": string}}] — or [] if it looks right.",
+                 [{{\"title\": string, \"description\": string}}] — or [] if it looks right.{dom_extract}",
             ),
             work_dir: self.work_dir.clone(),
             timeout: std::time::Duration::from_secs(600),
@@ -378,5 +419,77 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 let _ = self.store.save(&st).await;
             }
         }
+    }
+}
+
+/// Crude but dependency-free HTML → visible-text: drops script/style bodies,
+/// strips tags, collapses whitespace. Fidelity is "what words are on the
+/// screen", which is exactly what a text-only reviewer can judge.
+fn html_to_text(html: &str) -> String {
+    let mut out = String::with_capacity(html.len() / 8);
+    let mut chars = html.char_indices().peekable();
+    let lower = html.to_ascii_lowercase();
+    let mut skip_until: Option<&str> = None;
+    let mut in_tag = false;
+    while let Some((i, c)) = chars.next() {
+        if let Some(end) = skip_until {
+            if lower[i..].starts_with(end) {
+                skip_until = None;
+            }
+            continue;
+        }
+        if c == '<' {
+            if lower[i..].starts_with("<script") {
+                skip_until = Some("</script>");
+                continue;
+            }
+            if lower[i..].starts_with("<style") {
+                skip_until = Some("</style>");
+                continue;
+            }
+            in_tag = true;
+            continue;
+        }
+        if c == '>' {
+            if in_tag {
+                in_tag = false;
+                out.push(' ');
+            }
+            continue;
+        }
+        if !in_tag {
+            out.push(c);
+        }
+        let _ = chars.peek();
+    }
+    let mut collapsed = String::with_capacity(out.len());
+    let mut last_ws = true;
+    for c in out.chars() {
+        if c.is_whitespace() {
+            if !last_ws {
+                collapsed.push(' ');
+            }
+            last_ws = true;
+        } else {
+            collapsed.push(c);
+            last_ws = false;
+        }
+    }
+    collapsed
+}
+
+#[cfg(test)]
+mod html_text_tests {
+    use super::html_to_text;
+
+    #[test]
+    fn strips_tags_scripts_and_collapses_whitespace() {
+        let html = "<html><head><style>.a{color:red}</style><script>var x=1;</script></head>\
+                    <body><div class=\"view\">Sprint   #600</div><span>3 tickets</span></body></html>";
+        let t = html_to_text(html);
+        assert!(t.contains("Sprint #600"), "{t}");
+        assert!(t.contains("3 tickets"), "{t}");
+        assert!(!t.contains("color:red"), "{t}");
+        assert!(!t.contains("var x"), "{t}");
     }
 }
