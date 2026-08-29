@@ -10,6 +10,7 @@ pub mod codegraph;
 pub mod config;
 pub mod config_parse;
 pub mod conformance;
+pub mod dependency_radar;
 pub mod deps_scan;
 pub mod error;
 pub mod faults;

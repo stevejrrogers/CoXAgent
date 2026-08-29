@@ -680,6 +680,9 @@ pub(crate) async fn build_project(
         files: Some(std::sync::Arc::new(
             coxagent_infrastructure::FsWorkspaceFiles::new(),
         )),
+        deps_discovery: Some(Arc::new(
+            coxagent_infrastructure::FsLockfileDiscovery::new(),
+        )),
         deploy: Some(Arc::new(DockerComposeDeploy::new())),
         outbox: Some(outbox),
         storage: Some(build_storage().await.unwrap_or_else(|| {

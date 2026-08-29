@@ -33,6 +33,7 @@ pub mod run_sa;
 pub mod run_standup;
 pub mod run_test;
 pub mod runner;
+pub mod scan_deps;
 
 pub use add_ticket::{AddTicketInput, AddTicketUseCase};
 pub use analyze_attachment::{AnalyzeAttachmentUseCase, ReadableAttachment};
@@ -71,6 +72,7 @@ pub use run_sa::RunSaUseCase;
 pub use run_standup::RunStandupUseCase;
 pub use run_test::RunTestUseCase;
 pub use runner::{run_forever, RunnerHandle, RunnerSnapshot};
+pub use scan_deps::{FindingReport, ScanDependenciesUseCase, ScanDepsInput, ScanDepsOutcome};
 
 #[cfg(test)]
 mod mod_guard_tests;
