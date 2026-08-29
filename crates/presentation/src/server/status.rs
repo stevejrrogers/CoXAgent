@@ -119,6 +119,19 @@ pub(super) fn lite_state_value(state: &coxagent_application::ProjectState) -> se
         let mut it = keep_fwd.into_iter();
         chat.retain(|_| it.next().unwrap_or(false));
     }
+    // Dependency radar (CXA-F237): read-only derived summary on top of the
+    // SAME snapshot served today — why each Ready ticket is not running (the
+    // full blocking chain, powering the backlog BLOCKED badge) and the
+    // critical path to the next release. Pure derivation, no persisted
+    // change. A project with nothing to report emits no `derived` key at all,
+    // so clients treat absence as an empty radar rather than an error.
+    let radar = coxagent_application::dependency_radar::radar(state);
+    let derived = serde_json::to_value(&radar).unwrap_or_default();
+    if derived.as_object().is_some_and(|o| !o.is_empty()) {
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("derived".into(), derived);
+        }
+    }
     v
 }
 
@@ -131,6 +144,47 @@ pub(super) async fn state_ep(
     };
     match p.store.load().await {
         Ok(state) => Json(lite_state_value(&state)).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// The project's dependency graph (CXA-F237 AC5), derived ONLY from
+/// `ProjectState`: nodes are exactly the tickets in state with their live
+/// status, edges exactly the declared `depends_on` pairs — nothing fabricated
+/// (an edge to an id the state does not know is still served; the absent id
+/// simply has no node and surfaces as unknown). `cycle` flags members of a
+/// `depends_on` cycle so the render can mark them instead of hanging on them.
+pub(super) async fn dependencies_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    match p.store.load().await {
+        Ok(state) => {
+            use coxagent_application::dependency_radar::{cycle_members, dependency_graph};
+            let (nodes, edges) = dependency_graph(&state);
+            let cycles = cycle_members(&state);
+            Json(serde_json::json!({
+                "nodes": nodes
+                    .iter()
+                    .map(|n| serde_json::json!({
+                        "id": n.id.as_str(),
+                        "status": n.status,
+                        "cycle": cycles.contains(&n.id),
+                    }))
+                    .collect::<Vec<_>>(),
+                "edges": edges
+                    .iter()
+                    .map(|e| serde_json::json!({
+                        "dependent": e.dependent.as_str(),
+                        "prerequisite": e.prerequisite.as_str(),
+                    }))
+                    .collect::<Vec<_>>(),
+            }))
+            .into_response()
+        }
         Err(e) => internal_error(&e.to_string()),
     }
 }

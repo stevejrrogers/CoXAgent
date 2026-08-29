@@ -743,6 +743,7 @@ pub async fn serve_full(
             post(store_rpc::store_rpc_ep).get(store_rpc::store_audit_ep),
         )
         .route("/api/projects/:pid/state", get(state_ep))
+        .route("/api/projects/:pid/dependencies", get(dependencies_ep))
         .route("/api/projects/:pid/metrics", get(metrics_ep))
         .route(
             "/api/projects/:pid/metrics/summary",
