@@ -22,6 +22,7 @@ const INBOX_KIND={
   auto_approved:{label:"Auto-approved",ic:"ti-robot",col:"var(--dim)"},
   pr_stuck:{label:"PR stuck — needs you",ic:"ti-alert-triangle",col:"var(--red)"},
   human_eyes:{label:"Needs human eyes",ic:"ti-eye-exclamation",col:"var(--amber)"},
+  reverted_work:{label:"Reverted work — confirm or dismiss",ic:"ti-arrow-back-up",col:"var(--red)"},
   on_hold:{label:"On hold — resume when unblocked",ic:"ti-player-pause",col:"var(--amber)"},
 };
 
@@ -130,6 +131,16 @@ async function renderInbox(){
           ?ibtn("Dismiss",`inboxHumanPr(${it.number},'dismiss')`)+
            ibtn("Land it",`inboxHumanPr(${it.number},'approve')`,1)
           :noRight(it.role)));
+    }else if(it.kind==="reverted_work"){
+      // A scan suspected shipped work was undone (CXA-F047). The meta line
+      // carries the shipping ticket and role; confirming it is what allows
+      // planning to learn — dismissing it marks the suspicion a false one.
+      html+=inboxCard("reverted_work",esc(it.ticket)+" · "+esc(it.role||"")+" · "+esc((it.at||"").slice(0,10)),esc(it.subject),
+        ibtn("Open ticket",`showTicket('${esc(it.ticket)}')`)+
+        (act
+          ?ibtn("Dismiss",`inboxRevert('${esc(it.sha)}','dismiss')`)+
+           ibtn("Confirm revert",`inboxRevert('${esc(it.sha)}','approve')`,1)
+          :noRight(it.role)),it.ticket);
     }else if(it.kind==="pr_stuck"){
       // The team tried, the SA rescued it, and it is still not moving. Say what
       // was tried and give the two moves a person actually has.
@@ -188,6 +199,20 @@ async function inboxHumanPr(number,action){
     toasty(action==="approve"?("PR #"+number+" landed"):("Hold on #"+number+" dismissed"),"ok");
   }catch(e){toasty("Network error","err");}
   renderInbox();
+}
+
+// Decide a detected revert (CXA-F047): confirm the shipped work really was
+// undone — the only verdict planning is allowed to learn from — or dismiss
+// the suspicion (a non-code revert, e.g. a docs or CI bump).
+async function inboxRevert(sha,action){
+  try{
+    const r=await fetch(api("/reverts/"+encodeURIComponent(sha)),
+      {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action})});
+    if(!r.ok){toasty(await r.text()||"Failed","err");return;}
+    toasty(action==="approve"?"Revert confirmed — planning will weigh it":"Revert dismissed — not counted","ok");
+  }catch(e){toasty("Network error","err");}
+  renderInbox();
+  if(typeof CUR!=="undefined"&&(CUR==="overview"||CUR==="board"))renderActive();
 }
 
 async function inboxUnassign(id){

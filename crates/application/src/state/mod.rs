@@ -84,6 +84,11 @@ pub struct ProjectState {
     pub tickets: Vec<Ticket>,
     #[serde(default)]
     pub history: Vec<DeployRecord>,
+    /// Merged-then-reverted work (CXA-F047): revert commits the scan linked to
+    /// shipped tickets, each with a human approve/dismiss verdict. Bounded,
+    /// newest last — approved events are what planning is allowed to learn from.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reverted_work: Vec<RevertEvent>,
     #[serde(default)]
     pub activity: Vec<ActivityEntry>,
     #[serde(default)]
@@ -447,6 +452,7 @@ impl Default for ProjectState {
             current_version: SemVer::default(),
             tickets: Vec::new(),
             history: Vec::new(),
+            reverted_work: Vec::new(),
             activity: Vec::new(),
             spend: Spend::default(),
             sprint: None,
@@ -530,6 +536,46 @@ impl ProjectState {
         if overflow > 0 {
             self.activity.drain(0..overflow);
         }
+    }
+
+    /// Record one detected revert (CXA-F047), deduped by commit sha — the
+    /// ledger and the human decision surface are both keyed by sha, so one
+    /// git undo is one event no matter how attribution drifts between scans.
+    /// A re-scan must never re-flag (or double-count) a commit this ledger
+    /// already holds, whatever its decision. Returns whether the event is
+    /// NEW; callers announce it only then.
+    pub fn record_revert(&mut self, ev: RevertEvent) -> bool {
+        if self.reverted_work.iter().any(|e| e.sha == ev.sha) {
+            return false;
+        }
+        self.reverted_work.push(ev);
+        let overflow = self.reverted_work.len().saturating_sub(MAX_REVERT_EVENTS);
+        if overflow > 0 {
+            self.reverted_work.drain(0..overflow);
+        }
+        true
+    }
+
+    /// Apply a human's approve/dismiss verdict to the revert commit `sha`
+    /// (CXA-F047). Returns whether a PENDING event was found and decided —
+    /// an already-decided event is never re-decided.
+    pub fn decide_revert(
+        &mut self,
+        sha: &str,
+        decision: RevertDecision,
+        by: &str,
+    ) -> bool {
+        let Some(ev) = self
+            .reverted_work
+            .iter_mut()
+            .find(|e| e.sha == sha && e.decision == RevertDecision::Pending)
+        else {
+            return false;
+        };
+        ev.decision = decision;
+        ev.decided_at = Some(now_rfc3339());
+        ev.decided_by = Some(by.to_owned());
+        true
     }
 
     /// Attach a piece of DoD evidence to a ticket (bounded: 6 per ticket,
