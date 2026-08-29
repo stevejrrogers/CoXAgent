@@ -3,6 +3,7 @@
 //! compose file, so non-dockerised projects don't error the cycle.
 
 use async_trait::async_trait;
+use coxagent_application::ports::outbound::deploy::COMPOSE_FILES;
 use coxagent_application::ports::outbound::{DeployPort, DeployReport};
 use coxagent_application::PortError;
 use std::path::Path;
@@ -13,12 +14,6 @@ use tokio::process::Command;
 // that shared policy for why port-eviction must never touch the live hub.
 use super::reclaimable::{reclaimable_compose_project, reclaimable_raw_container};
 
-const COMPOSE_FILES: &[&str] = &[
-    "docker-compose.yml",
-    "docker-compose.yaml",
-    "compose.yml",
-    "compose.yaml",
-];
 const DEPLOY_TIMEOUT: Duration = Duration::from_secs(900);
 
 /// Keys every secret-bearing compose file this adapter can meet requires via
@@ -823,6 +818,19 @@ fn linux_c_toolchain_present() -> bool {
 
 #[async_trait]
 impl DeployPort for DockerComposeDeploy {
+    /// The one honest check that `docker compose` (CLI + plugin) can run:
+    /// asking it for its version, exactly like `daemon_up` asks the daemon.
+    async fn compose_available(&self) -> bool {
+        Command::new("docker")
+            .args(["compose", "version"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+            .is_ok_and(|s| s.success())
+    }
+
     async fn lint(&self, work_dir: &Path) -> Result<Option<u64>, PortError> {
         // Rust-only for now: clippy's error count is the lint currency the
         // DoD gate compares against the project baseline.
