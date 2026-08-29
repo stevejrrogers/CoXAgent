@@ -182,6 +182,8 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/prs/:num/diff", &["get"]),
     route("/api/projects/:pid/reverts/:sha", &["post"]),
     route("/api/projects/:pid/runner", &["get"]),
+    route("/api/projects/:pid/share-links", &["get", "post"]),
+    route("/api/projects/:pid/share-links/:token", &["delete"]),
     route("/api/projects/:pid/sprint/:action", &["post"]),
     route("/api/projects/:pid/sprint/close", &["post"]),
     route("/api/projects/:pid/sprint/goal", &["post"]),
@@ -216,6 +218,7 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/workspace", &["get"]),
     route("/api/spaces", &["get", "post"]),
     route("/api/spaces/:sid", &["delete", "put"]),
+    route("/s/:token", &["get"]),
     route("/api/token-saver", &["get"]),
     route("/api/tooling", &["get"]),
     route("/api/workspace", &["get", "put"]),
@@ -308,10 +311,18 @@ fn security_for(path: &str) -> SecurityLevel {
     if matches!(
         path,
         "/api/health" | "/api/openapi.json" | "/api/auth/login"
-    ) {
+    ) || path.starts_with("/s/")
+    {
+        // /s/:token (CXA-F069): the unguessable share token IS the credential,
+        // so the page is public exactly like the login route.
         return SecurityLevel::Public;
     }
-    if path.starts_with("/api/auth/users") || path.starts_with("/api/auth/tokens") {
+    if path.starts_with("/api/auth/users")
+        || path.starts_with("/api/auth/tokens")
+        || path.contains("/share-links")
+    {
+        // Share-link management is an admin surface: the handlers enforce
+        // manage rights on top of auth_mw's membership gate (CXA-F069).
         return SecurityLevel::Admin;
     }
     SecurityLevel::Authenticated
