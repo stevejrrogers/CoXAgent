@@ -138,7 +138,10 @@ pub(super) async fn inbox_ep(
             }));
         }
     }
-    // Questions addressed to me (`@username`, or my bare username).
+    // Questions addressed to me (`@username`, or my bare username). A
+    // question held for my focus-window digest (CXA-F176) still shows here —
+    // the queue stays honest — but carries `deferred` so the UI renders it
+    // as queued-for-digest rather than a fresh interrupt.
     for q in &state.questions {
         if q.answer.is_empty()
             && (q.to.eq_ignore_ascii_case(&me) || q.to.eq_ignore_ascii_case(&format!("@{me}")))
@@ -147,6 +150,7 @@ pub(super) async fn inbox_ep(
                 "kind": "question", "id": q.id, "ticket": q.ticket,
                 "from": q.from, "body": q.body,
                 "asked_at": q.asked_at, "escalated": q.escalated,
+                "deferred": q.deferred,
                 "role": "you", "can_act": true,
             }));
         }

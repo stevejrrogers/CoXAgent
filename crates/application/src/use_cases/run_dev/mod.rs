@@ -538,9 +538,29 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 // the behaviour we want.
                 if let Some((to, body)) = parse_ask(&o.stdout) {
                     let (key, from) = (id.to_string(), format!("{:?}", self.mode.role()));
+                    // A person-addressed question may be held for their
+                    // focus-window digest (CXA-F176) instead of landing as
+                    // its own interrupt — a pure call over config + clock.
+                    let human = self.config.workflow.human.clone();
+                    let sla = human.question_sla_minutes;
+                    let defer = crate::use_cases::question_batching::should_defer(
+                        &human,
+                        &to,
+                        crate::use_cases::question_batching::now_minutes_utc(),
+                        0,
+                        sla,
+                    );
                     let asked =
                         crate::ports::outbound::mutate_state(self.store.as_ref(), move |st| {
                             if st.ask_question(&key, &from, &to, &body) {
+                                if defer {
+                                    // The question was just pushed: the tail
+                                    // IS the new one, still inside the same
+                                    // write pass.
+                                    if let Some(q) = st.questions.last_mut() {
+                                        q.deferred = true;
+                                    }
+                                }
                                 let msg = format!("❓ {from} → {to}: {body}");
                                 st.post_comment(&from, &msg, Some(key.clone()));
                             }
@@ -1268,7 +1288,13 @@ pub fn parse_ask(stdout: &str) -> Option<(String, String)> {
             continue;
         };
         let role = role.trim().to_uppercase();
-        if !matches!(role.as_str(), "BA" | "SA") {
+        // `ASK @username:` is the agent → human hop (docs/HYBRID_TEAM.md):
+        // the question enters that person's inbox with an SLA. The username
+        // must be a single token — anything else is not an addressee.
+        let is_person = role.len() > 1
+            && role.starts_with('@')
+            && role[1..].chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+        if !matches!(role.as_str(), "BA" | "SA") && !is_person {
             continue;
         }
         let q = question.trim();
@@ -1562,6 +1588,22 @@ mod tests {
         // A bare marker with no real question is not a question.
         assert!(parse_ask("ASK BA: ?").is_none());
         assert!(parse_ask("no question here").is_none());
+    }
+
+    #[test]
+    fn parse_ask_reaches_a_person_by_at_username() {
+        use super::parse_ask;
+        // The agent → human hop (docs/HYBRID_TEAM.md): a question the
+        // answering role cannot ground goes to a named person's inbox.
+        let (to, q) = parse_ask("ASK @luffy: the customer decided archive semantics verbally — soft delete?")
+            .expect("person question");
+        assert_eq!(to, "@LUFFY");
+        assert!(q.starts_with("the customer decided"), "{q}");
+        // Not an addressee: bare marker, whitespace in the name, or empty.
+        assert!(parse_ask("ASK @: is this a question?").is_none());
+        assert!(parse_ask("ASK @luffy zoro: shared question?").is_none());
+        // The role-level hop is untouched.
+        assert!(parse_ask("ASK SA: how does the store behave?").is_some());
     }
 
     /// Shells to the real `git` binary — `tree_fingerprint` parses actual

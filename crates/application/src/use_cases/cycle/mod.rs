@@ -1031,6 +1031,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // cheap compared with a wrong implementation. Bounded per cycle.
         Box::pin(self.answer_open_questions()).await;
         self.escalate_stale_human_questions().await;
+        // Focus windows over: held questions flush as one digest each
+        // (CXA-F176), before anything else assumes the inbox is current.
+        self.flush_focus_digests().await;
         // Fill the acceptance criteria BEFORE the gate judges the ticket: a
         // ticket nobody can check is one a human can only bounce, and the
         // missing AC alone scores it out of the auto lane.
