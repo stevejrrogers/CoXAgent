@@ -960,6 +960,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cut_only_verified_defaults_on_and_survives_old_documents() {
+        // CXA-F231: an existing coxagent.json without the knob keeps the
+        // honest-by-default gate ON (documents-old = gate-on, never off).
+        let old = r#"{"releases":{"enabled":true,"cut_every_days":7}}"#;
+        let cfg: serde_json::Value = serde_json::from_str(old).expect("old doc parses");
+        let releases: ReleasesConfig =
+            serde_json::from_value(cfg["releases"].clone()).expect("old releases load");
+        assert!(
+            releases.cut_only_verified,
+            "old documents default the gate on"
+        );
+        // And the explicit opt-out is honored verbatim.
+        let off = r#"{"releases":{"enabled":true,"cut_every_days":7,"cut_only_verified":false}}"#;
+        let cfg: serde_json::Value = serde_json::from_str(off).expect("new doc parses");
+        let releases: ReleasesConfig =
+            serde_json::from_value(cfg["releases"].clone()).expect("new releases load");
+        assert!(!releases.cut_only_verified);
+    }
+
+    #[test]
     fn quiet_window_handles_wrap_zero_and_garbage() {
         // Plain window.
         assert!(in_quiet_window("02:00-07:00", 3 * 60));
