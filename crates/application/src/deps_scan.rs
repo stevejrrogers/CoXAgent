@@ -298,8 +298,13 @@ pub fn scan_locks(
 /// via `depends_on`, so all supply-chain work lands under one umbrella.
 pub const MASTER_EPIC_ID: &str = "DEP-AUDIT-001";
 
-/// A unique, deterministic ticket id for a remediation — one per dependency so
-/// re-running a scan never duplicates an already-filed proposal.
+/// Id-scheme prefix for routine upgrade Chore tickets.
+const ROUTINE_ID_SCHEME: &str = "DEP";
+/// Id-scheme prefix for urgent CVE Bug tickets.
+const CVE_ID_SCHEME: &str = "CVE";
+
+/// A unique, deterministic ticket id for a remediation — one per dependency per
+/// finding kind so re-running a scan never duplicates an already-filed proposal.
 ///
 /// The mapping must be INJECTIVE over every possible package name: two distinct
 /// dependencies can never share an id, regardless of which ones appear together
@@ -313,8 +318,15 @@ pub const MASTER_EPIC_ID: &str = "DEP-AUDIT-001";
 /// So letters/digits are emitted verbatim (most crate/npm/poetry names stay
 /// readable) and every other byte becomes an unambiguous fixed-width token that
 /// no concatenation of other outputs can reproduce.
-fn ticket_id_for(dep: &str) -> String {
-    let mut out = String::from("DEP");
+///
+/// `scheme` makes the id KIND-distinct ([CXA-B110]): a routine-upgrade Chore and an
+/// urgent-CVE Bug for the same package must never share an id, or the exact-id
+/// existence check lets whichever kind was filed first permanently block the other
+/// — a filed routine Chore once silenced every later urgent CVE for that package.
+/// The prefixes `DEP` / `CVE` differ in their first byte, so the two id spaces are
+/// disjoint while sharing the same injective body encoding.
+fn ticket_id_for(scheme: &str, dep: &str) -> String {
+    let mut out = String::from(scheme);
     for b in dep.as_bytes() {
         if b.is_ascii_alphanumeric() {
             out.push(*b as char);
@@ -402,7 +414,12 @@ fn already_remediated_for(state: &ProjectState, dep: &str, is_urgent_cve: bool) 
 /// Both are pre-linked to the master epic via `depends_on`.
 #[must_use]
 fn propose_one(state: &mut ProjectState, finding: &ScanFinding) -> Option<TicketId> {
-    let Ok(id) = TicketId::new(ticket_id_for(&finding.package)) else {
+    let scheme = if finding.urgent_cve_severity.is_some() {
+        CVE_ID_SCHEME
+    } else {
+        ROUTINE_ID_SCHEME
+    };
+    let Ok(id) = TicketId::new(ticket_id_for(scheme, &finding.package)) else {
         return None;
     };
     if state.tickets.iter().any(|t| t.id() == &id)
@@ -670,9 +687,73 @@ version = \"0.9.0\"
     #[test]
     fn scoped_names_get_distinct_ids_from_flat_spellings() {
         // '@scope/pkg' and a plain dotted/hyphenated spelling once shared '-' runs.
-        let pkg_a = ticket_id_for("@scope/pkg");
-        let pkg_b = ticket_id_for("-scope-pkg");
+        let pkg_a = ticket_id_for(ROUTINE_ID_SCHEME, "@scope/pkg");
+        let pkg_b = ticket_id_for(ROUTINE_ID_SCHEME, "-scope-pkg");
         assert_ne!(pkg_a, pkg_b);
+        // CXA-B110: the kind schemes share the body encoding but must stay disjoint —
+        // otherwise the exact-id existence check re-merges the two kinds again.
+        assert_ne!(
+            ticket_id_for(ROUTINE_ID_SCHEME, "@scope/pkg"),
+            ticket_id_for(CVE_ID_SCHEME, "@scope/pkg")
+        );
+    }
+
+    #[test]
+    fn filed_routine_upgrade_chore_does_not_block_a_later_urgent_cve_bug() {
+        // CXA-B110 regression. Both remediation kinds once minted the same 'DEP…' id,
+        // so the exact-id existence check — which runs BEFORE the kind-aware evidence
+        // gate — let a pass-1 routine-upgrade Chore permanently swallow a later urgent
+        // CVE Bug for the same package. Kind-distinct id schemes (DEP… / CVE…) make
+        // that existence check kind-aware without ever minting duplicate ids.
+        let mut state = ProjectState::default();
+
+        // Pass 1: a real upgrade gap files a routine Chore via apply_findings.
+        let upgrade = ScanFinding {
+            package: "@scope/pkg".to_string(),
+            current_version: "7.8.9".to_string(),
+            latest_version: Some("9.0.0".to_string()),
+            tier: Some(BumpTier::Major),
+            urgent_cve_severity: None,
+            affected_files: vec!["package-lock.json".to_string()],
+        };
+        let chore_ids = apply_findings(&mut state, std::slice::from_ref(&upgrade));
+        assert_eq!(chore_ids.len(), 1, "pass 1 must file the routine upgrade");
+        let chore = state.ticket(&chore_ids[0]).expect("filed chore");
+        assert_eq!(chore.ticket_type(), TicketType::Chore);
+
+        // Pass 2: same lock, upgrade gap closed (registry caught up), but the package
+        // now carries a high CVE. The filed Chore must not suppress the Bug.
+        let cve = ScanFinding {
+            package: "@scope/pkg".to_string(),
+            current_version: "7.8.9".to_string(),
+            latest_version: Some("7.8.9".to_string()),
+            tier: None,
+            urgent_cve_severity: Some("high".to_string()),
+            affected_files: vec!["package-lock.json".to_string()],
+        };
+        let bug_ids = apply_findings(&mut state, std::slice::from_ref(&cve));
+        assert_eq!(
+            bug_ids.len(),
+            1,
+            "urgent CVE must be filed even though a routine Chore exists for the package"
+        );
+        let bug = state.ticket(&bug_ids[0]).expect("filed bug");
+        assert_eq!(bug.ticket_type(), TicketType::Bug);
+        assert_eq!(bug.priority(), Priority::High);
+        assert_ne!(
+            bug_ids[0], chore_ids[0],
+            "the two kinds must never share a ticket id"
+        );
+
+        // Pass 3: idempotency holds per kind — re-scans file nothing new.
+        assert!(
+            apply_findings(&mut state, std::slice::from_ref(&cve)).is_empty(),
+            "repeat CVE must not duplicate the filed Bug"
+        );
+        assert!(
+            apply_findings(&mut state, std::slice::from_ref(&upgrade)).is_empty(),
+            "repeat routine finding must not duplicate the filed Chore"
+        );
     }
 
     #[test]
