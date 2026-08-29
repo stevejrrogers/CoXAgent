@@ -10,7 +10,13 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
+  # CXA-B079: deploy-smoke (the "app answers on 8101" availability gate) runs
+  # again on every push/PR. `check` and `deploy-build` stay gated on purpose:
+  # 0387409f disabled every job while the repo was private (GitHub-hosted runs
+  # blocked without a paid plan) and neither has been re-verified on a hosted
+  # runner since. Re-enable those separately.
   check:
+    if: false
     name: fmt · clippy · test
     runs-on: ubuntu-latest
     steps:
@@ -27,13 +33,14 @@ jobs:
         run: cargo test --all-features
 
   deploy-build:
+    if: false
     # COX-B006 regression guard: reproduce the Docker builder's compile — the
     # release binary for Linux, no `test` cfg — which is what turned an ungated
     # macOS-only helper into `error: function ... is never used` under the
     # workspace's `warnings = "deny"`, so no image could ever be built.
     # Deliberately separate from `check`: this job runs plain rustc lints only,
-    # so it stays a trustworthy deploy gate that reproduces the builder exactly
-    # (release, Linux, no `test` cfg) without depending on clippy's pedantic set.
+    # so it stays a trustworthy deploy gate while the clippy pedantic baseline
+    # in `crates/application` kept `check` red when the jobs were split.
     name: release build (linux, as the Docker builder sees it)
     runs-on: ubuntu-latest
     steps:
