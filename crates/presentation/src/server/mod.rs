@@ -1236,6 +1236,7 @@ mod pr_preview_tests;
 mod pr_review_gate_tests;
 #[cfg(test)]
 mod share_link_tests;
+#[cfg(test)]
 mod store_rpc_audit_tests;
 #[cfg(test)]
 mod store_rpc_auth_enforcement_tests;
@@ -1243,5 +1244,6 @@ mod store_rpc_auth_enforcement_tests;
 mod store_rpc_guard_tests;
 #[cfg(test)]
 mod store_rpc_stale_write_tests;
+#[cfg(test)]
 #[cfg(test)]
 mod store_rpc_test_support;
