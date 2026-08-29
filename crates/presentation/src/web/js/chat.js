@@ -1866,13 +1866,17 @@ function dependencyMermaid(t,g){
   // declared cycle terminates instead of looping forever (AC2).
   const want=new Set([t.id]),q=[t.id];
   while(q.length){const id=q.shift();for(const d of(out[id]||[])){if(!want.has(d)){want.add(d);if(meta[d])q.push(d);}}}
-  const key=id=>"n"+String(id).replace(/[^A-Za-z0-9]/g,"_");
-  const label=id=>{const n=meta[id];if(!n)return id+" · unknown";
-    return (n.cycle?"⟳ ":"")+id+" · "+n.status+(n.cycle?" (cycle)":"");};
+  // Sequential node keys: punctuation-heavy ids must never collide into one
+  // mermaid node, and labels drop quote characters so a hand-edited id cannot
+  // corrupt the diagram source (it degrades to a plain label instead).
+  const keys={},keyFor=id=>keys[id]||(keys[id]="n"+Object.keys(keys).length);
+  const safe=id=>String(id).replace(/["\\]/g,"");
+  const label=id=>{const n=meta[id];if(!n)return safe(id)+" · unknown";
+    return (n.cycle?"⟳ ":"")+safe(id)+" · "+n.status+(n.cycle?" (cycle)":"");};
   const lines=["graph RL"];let any=false;
   (g.edges||[]).forEach(e=>{if(!want.has(e.dependent))return;any=true;
-    lines.push(`  ${key(e.dependent)}["${label(e.dependent)}"] --> ${key(e.prerequisite)}["${label(e.prerequisite)}"]`);});
-  if(!any)lines.push(`  ${key(t.id)}["${label(t.id)}"]`);
+    lines.push(`  ${keyFor(e.dependent)}["${label(e.dependent)}"] --> ${keyFor(e.prerequisite)}["${label(e.prerequisite)}"]`);});
+  if(!any)lines.push(`  ${keyFor(t.id)}["${label(t.id)}"]`);
   return lines.join("\n");
 }
 async function holdTicket(id,hold){

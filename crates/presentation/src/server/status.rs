@@ -495,3 +495,87 @@ mod settings_config_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod radar_state_tests {
+    use super::lite_state_value;
+    use coxagent_application::state::ProjectState;
+    use coxagent_domain::{
+        Complexity, Priority, Role, Status, TechnicalDesign, Ticket, TicketId, TicketType,
+    };
+
+    fn tid(s: &str) -> TicketId {
+        TicketId::new(s).expect("valid ticket id")
+    }
+
+    /// A Ready feature declaring `deps` — same legal-edge walk the radar
+    /// suite's fixtures use.
+    fn ready_feature(id: &str, deps: &[&str]) -> Ticket {
+        let mut t = Ticket::new(
+            tid(id),
+            TicketType::Feature,
+            format!("feature {id}"),
+            "fixture",
+            Priority::Medium,
+            Complexity::Medium,
+            false,
+        )
+        .expect("ticket");
+        for dep in deps {
+            t.add_dependency(Role::Sa, tid(dep))
+                .expect("SA declares the dependency");
+        }
+        t.set_technical_design(Role::Sa, TechnicalDesign::default())
+            .expect("attach design");
+        t.transition_to(Role::Sa, Status::Ready).expect("ready");
+        t
+    }
+
+    fn state_with(tickets: Vec<Ticket>) -> ProjectState {
+        ProjectState {
+            tickets,
+            ..ProjectState::default()
+        }
+    }
+
+    /// The wire contract the backlog badge depends on (CXA-F237): a blocked
+    /// Ready ticket surfaces `derived.blocked` with its full blocking chain.
+    #[test]
+    fn a_blocked_ready_ticket_rides_the_state_snapshot_with_its_chain() {
+        let state = state_with(vec![
+            ready_feature("FEAT-A", &[]),
+            ready_feature("FEAT-B", &["FEAT-A"]),
+        ]);
+        let v = lite_state_value(&state);
+        let derived = v.get("derived").expect("the radar must be on the snapshot");
+        let blocked = derived
+            .get("blocked")
+            .and_then(|b| b.as_array())
+            .expect("blocked list");
+        assert_eq!(blocked.len(), 1, "only FEAT-B qualifies");
+        assert_eq!(
+            blocked[0].get("id").and_then(|i| i.as_str()),
+            Some("FEAT-B")
+        );
+        assert_eq!(
+            blocked[0]
+                .get("blockers")
+                .and_then(|b| b.as_array())
+                .map(std::vec::Vec::len),
+            Some(1)
+        );
+    }
+
+    /// Nothing to report → NO `derived` key at all: clients treat absence as
+    /// an empty radar rather than an error (the SA design's omission rule).
+    #[test]
+    fn a_project_with_nothing_to_report_emits_no_derived_key() {
+        let v = lite_state_value(&ProjectState::default());
+        assert!(v.get("derived").is_none());
+        let v = lite_state_value(&state_with(vec![
+            ready_feature("FEAT-A", &[]),
+            ready_feature("FEAT-B", &[]),
+        ]));
+        assert!(v.get("derived").is_none(), "unblocked work is no finding");
+    }
+}

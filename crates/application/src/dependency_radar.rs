@@ -25,7 +25,7 @@
 use crate::state::ProjectState;
 use coxagent_domain::{Priority, Status, TicketId};
 use serde::Serialize;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// One blocker as the ticket-detail surface reports it: the blocking ticket
 /// and its LIVE status at the moment of the report.
@@ -168,25 +168,29 @@ pub fn cycle_members(state: &ProjectState) -> BTreeSet<TicketId> {
 /// from the project state — the 'unknown dependency' surface. Unknown ids are
 /// never treated as satisfied (the DEV gate refuses the ticket), and they are
 /// kept off the graph's node set; they are a radar finding of their own.
+/// Repeated entries in one ticket's `depends_on` (possible only in a restored
+/// or hand-edited state — `Ticket::add_dependency` refuses duplicates) are
+/// reported once.
 #[must_use]
 pub fn unknown_dependencies(state: &ProjectState) -> Vec<(TicketId, TicketId)> {
-    state
-        .tickets
-        .iter()
-        .flat_map(|t| {
-            t.depends_on()
-                .iter()
-                .map(move |dep| (t.id().clone(), dep.clone()))
-        })
-        .filter(|(_, dep)| state.ticket(dep).is_none())
-        .collect()
+    let mut out = Vec::new();
+    for t in &state.tickets {
+        let mut seen = HashSet::new();
+        for dep in t.depends_on() {
+            if seen.insert(dep.clone()) && state.ticket(dep).is_none() {
+                out.push((t.id().clone(), dep.clone()));
+            }
+        }
+    }
+    out
 }
 
 /// The nodes/edges the dependencies endpoint serves, derived ONLY from
 /// `ProjectState`: nodes are exactly the tickets in state (no phantom node for
 /// an unknown dependency), edges are exactly the declared `depends_on` pairs
 /// (including an edge whose target is absent — it IS a declared entry; the
-/// absent id surfaces as unknown, not as a node).
+/// absent id surfaces as unknown, not as a node). A repeated entry in one
+/// ticket's `depends_on` is served once: the edge exists, it is not doubled.
 #[must_use]
 pub fn dependency_graph(state: &ProjectState) -> (Vec<GraphNode>, Vec<GraphEdge>) {
     let nodes = state
@@ -197,35 +201,47 @@ pub fn dependency_graph(state: &ProjectState) -> (Vec<GraphNode>, Vec<GraphEdge>
             status: t.status(),
         })
         .collect();
-    let edges = state
-        .tickets
-        .iter()
-        .flat_map(|t| {
-            t.depends_on().iter().map(move |dep| GraphEdge {
-                dependent: t.id().clone(),
-                prerequisite: dep.clone(),
-            })
-        })
-        .collect();
+    let mut edges = Vec::new();
+    for t in &state.tickets {
+        let mut seen = HashSet::new();
+        for dep in t.depends_on() {
+            if seen.insert(dep.clone()) {
+                edges.push(GraphEdge {
+                    dependent: t.id().clone(),
+                    prerequisite: dep.clone(),
+                });
+            }
+        }
+    }
     (nodes, edges)
 }
 
 /// The critical path to the next release: the longest chain of unfinished
 /// (not shipped-complete) dependency work, dependent-first, matching
-/// [`blocking_chain`]'s order. Equal-length chains are broken by the highest
+/// [`blocking_chain`]'s order. A chain spans at least one dependency EDGE — a
+/// lone unfinished ticket with nothing waiting on it is workable work, not a
+/// queue, and is no finding. Equal-length chains are broken by the highest
 /// priority on the chain, then by the lexicographically smaller id sequence —
-/// deterministic on every snapshot. Terminates on cyclic state (visited-set
-/// guard): a back-edge is simply not followed.
+/// deterministic on every snapshot. Memoized per node, so a diamond-heavy DAG
+/// costs nodes×edges and can never blow up exponentially on fan-in; the
+/// visited-set guard makes a cyclic state terminate too (a back-edge is
+/// simply not followed).
 #[must_use]
 pub fn critical_path(state: &ProjectState) -> Vec<TicketId> {
     let mut best: Vec<TicketId> = Vec::new();
+    let mut memo: HashMap<TicketId, Vec<TicketId>> = HashMap::new();
     for t in &state.tickets {
         if resolved(t.status()) {
             continue;
         }
         let mut candidate = vec![t.id().clone()];
-        candidate.extend(longest_unresolved_from(state, t.id(), &HashSet::new()));
-        if better_chain(state, &candidate, &best) {
+        candidate.extend(longest_unresolved_from(
+            state,
+            t.id(),
+            &HashSet::new(),
+            &mut memo,
+        ));
+        if candidate.len() >= 2 && better_chain(state, &candidate, &best) {
             best = candidate;
         }
     }
@@ -234,12 +250,20 @@ pub fn critical_path(state: &ProjectState) -> Vec<TicketId> {
 
 /// The longest unresolved chain reachable from `ticket`'s dependencies,
 /// excluding `ticket` itself. `seen` carries the nodes on the current walk so
-/// a dependency cycle terminates the walk instead of recursing forever.
+/// a dependency cycle terminates the walk instead of recursing forever;
+/// `memo` caches each node's best suffix so shared sub-chains are computed
+/// once. On a DAG (everything that passes `ProjectState::validate`) the cache
+/// is exact — the walk's ancestors can never reappear as descendants — so the
+/// memo never trades correctness for speed.
 fn longest_unresolved_from(
     state: &ProjectState,
     ticket: &TicketId,
     seen: &HashSet<TicketId>,
+    memo: &mut HashMap<TicketId, Vec<TicketId>>,
 ) -> Vec<TicketId> {
+    if let Some(cached) = memo.get(ticket) {
+        return cached.clone();
+    }
     let Some(t) = state.ticket(ticket) else {
         return Vec::new();
     };
@@ -257,11 +281,12 @@ fn longest_unresolved_from(
             continue;
         }
         let mut candidate = vec![dep.clone()];
-        candidate.extend(longest_unresolved_from(state, dep, &seen));
+        candidate.extend(longest_unresolved_from(state, dep, &seen, memo));
         if better_chain(state, &candidate, &best) {
             best = candidate;
         }
     }
+    memo.insert(ticket.clone(), best.clone());
     best
 }
 
@@ -279,8 +304,10 @@ fn better_chain(state: &ProjectState, candidate: &[TicketId], best: &[TicketId])
             .max()
             .unwrap_or(0)
     };
-    if prio(candidate) != prio(best) {
-        return prio(candidate) > prio(best);
+    let candidate_prio = prio(candidate);
+    let best_prio = prio(best);
+    if candidate_prio != best_prio {
+        return candidate_prio > best_prio;
     }
     candidate
         .iter()
@@ -550,5 +577,97 @@ mod tests {
         let (nodes, edges) = dependency_graph(&state);
         assert_eq!(nodes.len(), 1, "no phantom node for the absent id");
         assert_eq!(edges.len(), 1, "the declared edge is still served");
+    }
+
+    // --- review findings: fan-in blowup and duplicate declared entries ---
+
+    #[test]
+    fn critical_path_survives_a_diamond_heavy_dag_without_blowing_up() {
+        // 24 chained diamonds: F(i) is waited on by two parallel tickets, both
+        // waited on by F(i+1). Every simple path is a candidate chain, so an
+        // un-memoized walk explodes combinatorially (2^24 here) — the same
+        // "must not hang" class AC2 guards for cycles, via fan-in. The
+        // memoized walk costs nodes×edges and stays instant.
+        let mut tickets = Vec::new();
+        for i in 0..=24 {
+            let id = format!("FEAT-F{i:02}");
+            tickets.push(
+                Ticket::new(
+                    tid(&id),
+                    TicketType::Feature,
+                    format!("gate {i}"),
+                    "fixture",
+                    Priority::Medium,
+                    Complexity::Medium,
+                    false,
+                )
+                .expect("ticket"),
+            );
+            if i < 24 {
+                for side in ["A", "B"] {
+                    tickets
+                        .last_mut()
+                        .expect("just pushed")
+                        .add_dependency(Role::Sa, tid(&format!("FEAT-{side}{i:02}")))
+                        .expect("dep");
+                }
+                for side in ["A", "B"] {
+                    let mut mid = Ticket::new(
+                        tid(&format!("FEAT-{side}{i:02}")),
+                        TicketType::Feature,
+                        format!("parallel {side}{i}"),
+                        "fixture",
+                        Priority::Medium,
+                        Complexity::Medium,
+                        false,
+                    )
+                    .expect("ticket");
+                    mid.add_dependency(Role::Sa, tid(&format!("FEAT-F{:02}", i + 1)))
+                        .expect("dep");
+                    tickets.push(mid);
+                }
+            }
+        }
+        let state = state_with(tickets);
+        // Longest chain: F00 -> A00 -> F01 -> ... -> F24 — 25 gates + 24
+        // parallels. Equal length and priority at every diamond, so the id
+        // tie-break deterministically picks every A side.
+        let path = critical_path(&state);
+        assert_eq!(path.len(), 49, "the full chain, one side per diamond");
+        assert_eq!(path[0], tid("FEAT-F00"));
+        assert_eq!(path[1], tid("FEAT-A00"));
+        assert_eq!(path[2], tid("FEAT-F01"));
+    }
+
+    #[test]
+    fn a_repeated_declared_dependency_is_reported_once_everywhere() {
+        // `add_dependency` refuses duplicates, but a restored or hand-edited
+        // state file can carry a repeated entry: every surface must treat the
+        // pair as ONE edge/finding, never echo it. The duplicate arrives the
+        // way such states really do — through the persisted JSON shape.
+        let b = feature_at("FEAT-B", Status::Ready, &["FEAT-A", "FEAT-ZZZ"]);
+        let mut raw = serde_json::to_value(&b).expect("ticket serializes");
+        raw["depends_on"] = serde_json::json!(["FEAT-A", "FEAT-A", "FEAT-ZZZ", "FEAT-ZZZ"]);
+        let b: Ticket = serde_json::from_value(raw).expect("restored ticket deserializes");
+        let state = state_with(vec![feature_at("FEAT-A", Status::InProgress, &[]), b]);
+        assert_eq!(
+            blocked_by(&state, &tid("FEAT-B")),
+            vec![Blocker {
+                ticket: tid("FEAT-A"),
+                status: Status::InProgress,
+            }],
+            "one blocker, not one per repeated entry"
+        );
+        assert_eq!(
+            unknown_dependencies(&state),
+            vec![(tid("FEAT-B"), tid("FEAT-ZZZ"))],
+            "one unknown finding, not one per repeated entry"
+        );
+        let (_, edges) = dependency_graph(&state);
+        assert_eq!(
+            edges.len(),
+            2,
+            "B->A and B->ZZZ once each: the pair exists, it is not doubled"
+        );
     }
 }
