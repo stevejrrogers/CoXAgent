@@ -545,6 +545,7 @@ function renderSidebar(s){
   document.title="CoXAgent · "+(document.getElementById("proj-name").textContent||"");}
 function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overview")return;
   if(CUR==="overview"){
+    renderDriftAlerts(s);
     if(!(s.tickets||[]).length&&!(s.activity||[]).length){
       document.getElementById("kpis").innerHTML=`<div class="panel" style="grid-column:1/-1;text-align:center;padding:40px 20px">
         <i class="ti ti-rocket" style="font-size:34px;color:var(--accent2)"></i>
