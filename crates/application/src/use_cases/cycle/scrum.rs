@@ -316,6 +316,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         if !should_record_cycle(scored_max, report.cycle) {
             return;
         }
+        // Governance-attention delta (CXA-F230): the human gate decisions that
+        // landed since the previous scorecard — so each scorecard carries the
+        // operator attention its cycle consumed, chartable like the spend.
+        // Only computed once the cycle is accepted, so a rejected re-score
+        // (leader handover) burns no work.
+        let last_scored_at = state
+            .cycle_scores
+            .iter()
+            .filter(|c| c.cycle < report.cycle)
+            .map(|c| c.at.clone())
+            .max()
+            .unwrap_or_default();
+        let (attention_by_area, attention_by_kind) = state.attention_delta_since(&last_scored_at);
         state.cycle_scores.push(CycleScore {
             cycle: report.cycle,
             at: crate::state::now_rfc3339(),
@@ -328,6 +341,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             grade,
             phase_secs,
             phase_cost,
+            attention_by_area,
+            attention_by_kind,
         });
         let overflow = state.cycle_scores.len().saturating_sub(100);
         if overflow > 0 {

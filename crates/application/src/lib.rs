@@ -14,6 +14,7 @@ pub mod error;
 pub mod faults;
 pub mod metrics;
 pub mod metrics_burndown;
+pub mod metrics_governance;
 pub mod metrics_health;
 pub mod metrics_registry;
 pub mod parsing;
@@ -32,8 +33,8 @@ pub mod verify_cache;
 
 pub use auth::{AuthPort, AuthRole, AuthUser, LoginResult, TokenInfo};
 pub use config::{
-    BudgetCaps, Config, CoverageConfig, DeployConfig, EngineChoice, EngineKind, EngineMapping,
-    LiveBudget, Mode, PolicyConfig, WorkflowConfig, CONFIG_SCHEMA_VERSION,
+    BudgetCaps, Config, CoverageConfig, DepsConfig, DeployConfig, EngineChoice, EngineKind,
+    EngineMapping, LiveBudget, Mode, PolicyConfig, WorkflowConfig, CONFIG_SCHEMA_VERSION,
 };
 pub use config_parse::{parse_config, ConfigParseError};
 pub use error::{AppError, PortError};

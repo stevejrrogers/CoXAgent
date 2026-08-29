@@ -134,7 +134,10 @@ pub(super) async fn chat_post_ep(
                 .with_files(p2.files.clone())
                 .with_reply_channel(Some(reply_channel))
                 .with_actor_role(actor_role);
-                let _ = uc.execute(&msg).await;
+                // Box::pin: the use-case future grew past clippy's 16 KB
+                // large-future limit when the governance ledger joined
+                // ProjectState (CXA-F230) — same future, just heap-pinned.
+                let _ = Box::pin(uc.execute(&msg)).await;
             });
         }
         Json(serde_json::json!({ "ok": true })).into_response()
@@ -1180,7 +1183,9 @@ pub(super) async fn chat_reply_ep(
         };
         uc = uc.with_forge(Arc::clone(f), target, cfg.git.require_ci);
     }
-    match uc.execute(msg).await {
+    // Same Box::pin as the spawned path above: the future crossed clippy's
+    // 16 KB large-future limit when the governance ledger joined ProjectState.
+    match Box::pin(uc.execute(msg)).await {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => internal_error(&e.to_string()),
     }

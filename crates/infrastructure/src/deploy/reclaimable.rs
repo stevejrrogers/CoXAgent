@@ -1,5 +1,6 @@
-//! The single source of truth for which docker compose projects — and which
-//! raw, label-less containers — an automated pass may tear down.
+//! The single source of truth for which docker resources an automated pass
+//! may tear down: compose projects via [`reclaimable_compose_project`] and
+//! raw, label-less containers via [`reclaimable_raw_container`].
 //!
 //! Both the deploy port-eviction self-heal (see [`docker_compose`]) and the
 //! hourly docker janitor (see `crates/presentation/src/server/docs.rs`) decide
@@ -50,6 +51,8 @@ pub fn reclaimable_compose_project(project: &str) -> bool {
 /// hub or shared infra launched via plain `docker run`, and any foreign
 /// container, are NEVER touched — an empty or unrecognisable name is treated
 /// as foreign (cannot prove ownership → do not destroy).
+/// CXA-B085: the deploy self-heal once force-stopped an unrelated `nginx`
+/// squatting :8101 because it looked only at the port.
 #[must_use]
 pub fn reclaimable_raw_container(container_name: &str) -> bool {
     reclaimable_name(container_name)
@@ -126,7 +129,12 @@ mod tests {
     /// so a `cox-` name is a leftover of our own preview (B080's raw fallback).
     #[test]
     fn our_cox_named_raw_container_is_reclaimable() {
-        for name in ["cox-cxa-codebase-coxagent-1", "cox--stale-preview-hub-1"] {
+        for name in [
+            "cox-cxa-codebase-coxagent-1",
+            "cox--stale-preview-hub-1",
+            "cox--slot-b-hub",
+            "cox-my-project-web-1",
+        ] {
             assert!(
                 reclaimable_raw_container(name),
                 "{name} is demonstrably our own leftover and may be stopped by id"

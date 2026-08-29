@@ -856,6 +856,29 @@ impl Default for CoverageConfig {
     }
 }
 
+/// Dependency-health scan policy (CXA-F009).
+///
+/// Like [`CoverageConfig`], defaults come from an EXPLICIT container [`Default`]
+/// (`enabled = true`) so an unset knob is documented-and-on rather than Rust's
+/// derived zero-value silently turning the governance scan off.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DepsConfig {
+    #[serde(default = "default_deps_enabled")]
+    pub enabled: bool,
+}
+
+fn default_deps_enabled() -> bool {
+    true
+}
+
+impl Default for DepsConfig {
+    fn default() -> Self {
+        DepsConfig {
+            enabled: default_deps_enabled(),
+        }
+    }
+}
+
 /// Top-level configuration persisted as `coxagent.json`.
 ///
 /// EVERY section is `#[serde(default)]`, so a document written by an older
@@ -889,6 +912,11 @@ pub struct Config {
     /// Gap-detection coverage policy (enabled state + threshold).
     #[serde(default)]
     pub coverage: CoverageConfig,
+    /// Dependency-health scan policy (CXA-F009). When enabled, the periodic
+    /// self-tuning scan reads lock files, flags outdated/vulnerable packages,
+    /// and files remediation tickets against a master 'Dependency Audit' epic.
+    #[serde(default)]
+    pub deps: DepsConfig,
 }
 
 #[cfg(test)]
