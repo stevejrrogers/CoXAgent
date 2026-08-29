@@ -123,6 +123,7 @@ const APP_JS: &[(&str, &str)] = &[
     ("mcp.js", include_str!("../web/js/mcp.js")),
     ("docs.js", include_str!("../web/js/docs.js")),
     ("inbox.js", include_str!("../web/js/inbox.js")),
+    ("drift.js", include_str!("../web/js/drift.js")),
     ("shell.js", include_str!("../web/js/shell.js")),
 ];
 
