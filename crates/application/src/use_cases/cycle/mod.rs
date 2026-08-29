@@ -36,6 +36,7 @@ mod ops;
 mod qa_evidence;
 mod recovery;
 mod release_cut;
+mod revert_learning;
 mod trend;
 
 /// Local, non-pushed ref updated after every deploy that passes both

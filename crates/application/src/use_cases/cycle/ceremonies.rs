@@ -315,6 +315,29 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             ),
             None,
         );
+        // CXA-F047: approved reverted work is part of the sprint's real story.
+        // Name it in the retro so the same approach is not re-filed next
+        // sprint — and only APPROVED events speak here, same as in planning.
+        let reverted: Vec<String> = state
+            .reverted_work
+            .iter()
+            .filter(|e| e.decision == crate::state::RevertDecision::Approved)
+            .map(|e| {
+                let subject: String = e.subject.chars().take(80).collect();
+                format!("{} (`{}`)", e.ticket, subject)
+            })
+            .collect();
+        if !reverted.is_empty() {
+            state.post_comment(
+                "SM",
+                &format!(
+                    "↩️ Reverted work acknowledged: {}. Planning discounts these next cycle \
+                     — the same approach should not be re-filed as-is.",
+                    reverted.join(", ")
+                ),
+                None,
+            );
+        }
         state.log_activity(
             "SM",
             &format!("sprint {} review & retro", closing.number),
