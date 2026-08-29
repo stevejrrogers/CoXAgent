@@ -52,8 +52,8 @@ pub use metrics_registry::{
 };
 pub use state::{
     Attachment, Channel, ChatMsg, Comment, DesignSystem, DocPage, GoalOutcome, GoalOutcomeReport,
-    HealthCheckResult, Milestone, OutcomeLedgerEntry, PrReview, ProjectState, Reaction, Spend,
-    Sprint, UnattributedOutcome, GENERAL_CHANNEL, SCHEMA_VERSION,
+    HealthCheckResult, Milestone, OutboxEntry, OutboxStatus, OutcomeLedgerEntry, PrReview,
+    ProjectState, Reaction, Spend, Sprint, UnattributedOutcome, GENERAL_CHANNEL, SCHEMA_VERSION,
 };
 pub use system_chat::{ChatContext, ProjectRef, SystemChat, UserRef, Webhook};
 

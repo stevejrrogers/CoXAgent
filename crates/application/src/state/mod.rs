@@ -12,6 +12,7 @@ mod goals;
 mod governance;
 mod integrity;
 mod ops;
+mod outbox;
 mod work;
 
 pub use chat::*;
@@ -20,6 +21,7 @@ pub use goals::*;
 pub use governance::*;
 pub use integrity::*;
 pub use ops::*;
+pub use outbox::*;
 pub use work::*;
 
 /// Current on-disk schema version. Bumped when the serialized shape changes;
@@ -1465,6 +1467,15 @@ pub fn now_rfc3339() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default()
+}
+
+/// Unix seconds now — the clock the outbox's retry deadlines and leases use.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // seconds since UNIX_EPOCH fits i64 for a very long time
+pub fn unix_now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
 }
 
 /// Derive a short uppercase alias from a project name: its capital letters

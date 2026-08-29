@@ -94,6 +94,7 @@
     </div>
     <nav class="nav" id="ws-nav">
       <a data-v="home" id="nav-home" onclick="nav('home')"><i class="ti ti-home"></i> Home</a>
+      <a data-v="river" onclick="nav('river')"><i class="ti ti-waves"></i> Fleet river</a>
       <a data-v="overview" class="on" onclick="nav('overview')"><i class="ti ti-layout-dashboard"></i> Overview</a>
       <a data-v="team" onclick="nav('team')"><i class="ti ti-robot"></i> Agents</a>
       <a data-v="inbox" onclick="nav('inbox')"><i class="ti ti-inbox"></i> Inbox <span id="inbox-badge" style="display:none;margin-left:auto;background:var(--red);color:#fff;border-radius:9px;font-size:10px;font-weight:700;padding:1px 6px;line-height:14px">0</span></a>
@@ -192,6 +193,7 @@
           </aside>
         </div>
       </div>
+      <div class="view" id="view-river"><div id="river-body" style="max-width:900px"></div></div>
       <div class="view on" id="view-overview">
         <div id="ov-drain"></div>
         <div id="ov-alerts"></div>
@@ -245,6 +247,8 @@
         <div class="filters"><span style="font-size:12px;color:var(--muted)">Filter</span><select class="sel" id="act-filter" onchange="renderActive()"><option value="">all agents</option></select>
           <div style="flex:1"></div><a onclick="window.open(api('/audit'))" class="fchip" style="text-decoration:none;cursor:pointer"><i class="ti ti-download" style="font-size:14px"></i> Export audit</a></div>
         <div class="panel"><div id="activity-full"></div></div>
+        <div class="sec" style="margin-top:20px">Outbound alerts <span style="font-size:11px;color:var(--dim);font-weight:400">· webhook delivery history — retried with backoff until acknowledged or failed</span></div>
+        <div class="panel"><div id="alerts-body"><div class="empty">loading…</div></div></div>
         <div class="sec" style="margin-top:20px">Agent transcripts <span style="font-size:11px;color:var(--dim);font-weight:400">· full prompt + output per run</span></div>
         <div class="panel"><div id="transcript-list"></div></div>
       </div>
@@ -783,6 +787,7 @@
 <script src="/assets/js/mcp.js"></script>
 <script src="/assets/js/docs.js"></script>
 <script src="/assets/js/inbox.js"></script>
+<script src="/assets/js/alerts.js"></script>
 <script src="/assets/js/shell.js"></script>
 </body>
 </html>
