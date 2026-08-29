@@ -43,7 +43,12 @@ fn fixed_bug(acceptance_criteria: &[&str]) -> Ticket {
         false,
     )
     .expect("valid ticket");
-    t.set_acceptance_criteria(acceptance_criteria.iter().map(|s| (*s).to_owned()).collect());
+    t.set_acceptance_criteria(
+        acceptance_criteria
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect(),
+    );
     t.ensure_test_cases_from_acceptance();
     t.claim(Role::DevBug, "dev@host", "2026-08-20T00:00:00Z")
         .expect("unclaimed bug is claimable");
@@ -134,7 +139,11 @@ fn ac3_fully_covered_ticket_still_reaches_verified() {
     // over-block a fully verified ticket.
     let mut t = fixed_bug(&[AC_REGRESSION, AC_TEST_SHIPPED]);
     pass_case(&mut t, AC_REGRESSION, "repro gone on main");
-    pass_case(&mut t, AC_TEST_SHIPPED, "regression test fails on pre-fix code");
+    pass_case(
+        &mut t,
+        AC_TEST_SHIPPED,
+        "regression test fails on pre-fix code",
+    );
     t.transition_to(Role::Test, Status::Verified)
         .expect("COVERED criteria must allow Verified");
     assert_eq!(t.status(), Status::Verified);
