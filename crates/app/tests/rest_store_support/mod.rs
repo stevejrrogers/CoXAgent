@@ -245,6 +245,7 @@ pub fn handle(store: Arc<dyn StateStorePort>) -> ProjectHandle {
         deploy: None,
         storage: None,
         files: None,
+        deps_discovery: None,
     }
 }
 

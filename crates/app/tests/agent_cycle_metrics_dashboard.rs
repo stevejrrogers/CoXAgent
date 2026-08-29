@@ -64,6 +64,7 @@ fn handle(id: &str, state: ProjectState) -> ProjectHandle {
         forge: None,
         deploy: None,
         files: None,
+        deps_discovery: None,
         storage: None,
     }
 }

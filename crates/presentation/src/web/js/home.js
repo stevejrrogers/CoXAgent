@@ -265,6 +265,17 @@ function spBurndown(total,doneN,elapsed,len){
     </svg>
     <div style="display:flex;gap:16px;font-size:10.5px;color:var(--dim);margin-top:2px"><span><b style="color:var(--accent2)">━</b> remaining (${remaining})</span><span><b style="color:var(--muted)">┄</b> ideal</span></div></div>`;
 }
+// BLOCKED badge (CXA-F237): the backlog row answers "why is this Ready ticket
+// not running?" straight from the server's derived radar — the full blocking
+// chain, rendered as text beside the badge so meaning never rides on color
+// alone. Only Ready tickets appear in the radar; anything else needs no badge.
+function blockedBadge(s,t){
+  if(t.status!=="ready")return"";
+  const b=((s.derived||{}).blocked||[]).find(x=>x.id===t.id);
+  if(!b||!(b.blockers||[]).length)return"";
+  const chain=b.blockers.map(esc).join(" ← ");
+  return ` <span title="waiting on: ${chain}" style="display:inline-flex;align-items:center;gap:3px;padding:1px 8px;border-radius:20px;font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;background:color-mix(in srgb,var(--red) 16%,transparent);color:var(--red)"><i class="ti ti-lock" style="font-size:10px"></i>BLOCKED</span> <span title="waiting on: ${chain}" style="font-size:10.5px;color:var(--muted)">${chain}</span>`;
+}
 function renderBacklogPanel(s){
   const el=document.getElementById("backlog-body");
   const rank={high:0,medium:1,low:2};
@@ -308,7 +319,7 @@ function renderBacklogPanel(s){
   for(const id of [...sel])if(!items.some(t=>t.id===id))sel.delete(id);
   const rows=items.map(t=>{const col=pc[t.priority]||"var(--muted)";const inSp=committed.has(t.id);
     return `<div class="act" draggable="true" ondragstart="spqDrag(event,'${esc(t.id)}')" onclick="showTicket('${t.id}')" style="cursor:pointer"><input type="checkbox" class="blk-chk" ${sel.has(t.id)?'checked':''} onclick="event.stopPropagation();blkToggle('${esc(t.id)}',this.checked)"/><div class="ad" style="background:${col}22;color:${col}"><i class="ti ti-${t.type==='bug'?'bug':'bulb'}" style="font-size:13px"></i></div>
-      <div class="atx"><span class="tk">${esc(t.id)}</span> ${esc(t.title)} <span class="fchip" style="padding:1px 8px;font-size:10px;border:none;background:${col}22;color:${col}">${esc(t.priority||'—')}</span>${inSp?' <span class="fchip" style="padding:1px 8px;font-size:10px;border:none;background:var(--accentbg);color:var(--accent2)">in sprint</span>':''}</div>
+      <div class="atx"><span class="tk">${esc(t.id)}</span> ${esc(t.title)} <span class="fchip" style="padding:1px 8px;font-size:10px;border:none;background:${col}22;color:${col}">${esc(t.priority||'—')}</span>${inSp?' <span class="fchip" style="padding:1px 8px;font-size:10px;border:none;background:var(--accentbg);color:var(--accent2)">in sprint</span>':''}${blockedBadge(s,t)}</div>
       ${t.status==="on_hold"?'':`<button class="sp-scope" onclick="event.stopPropagation();sprintScope('${t.id}',${inSp?"false":"true"})" title="${inSp?'Drop from the running sprint':'Pull into the running sprint'}">${inSp?'− sprint':'+ sprint'}</button>`}
       <span class="tm"${t.status==="on_hold"?' style="color:var(--amber)"':''}>${t.status==="on_hold"?'on hold':esc(t.status)}</span></div>`;}).join("");
   el.innerHTML=`${activeHtml}${qHtml}

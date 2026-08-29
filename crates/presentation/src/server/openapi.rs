@@ -155,6 +155,8 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/config", &["get", "put"]),
     route("/api/projects/:pid/context", &["get", "post"]),
     route("/api/projects/:pid/control/:action", &["post"]),
+    route("/api/projects/:pid/dependencies", &["get"]),
+    route("/api/projects/:pid/deps/scan", &["post"]),
     route("/api/projects/:pid/digest", &["post"]),
     route("/api/projects/:pid/discuss", &["post"]),
     route("/api/projects/:pid/doc-folders", &["get", "post"]),
