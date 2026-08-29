@@ -59,6 +59,7 @@ mod metrics_admin;
 mod openapi;
 mod people;
 mod pr_listing;
+mod preflight;
 mod projects;
 mod realtime;
 mod requests;
@@ -93,6 +94,7 @@ use metrics_admin::spawn_metrics_admin;
 use openapi::*;
 use people::*;
 use pr_listing::*;
+use preflight::*;
 use projects::*;
 use realtime::*;
 use requests::*;
@@ -752,6 +754,7 @@ pub async fn serve_full(
             post(store_rpc::store_rpc_ep).get(store_rpc::store_audit_ep),
         )
         .route("/api/projects/:pid/state", get(state_ep))
+        .route("/api/projects/:pid/preflight", get(preflight_ep))
         .route("/api/projects/:pid/metrics", get(metrics_ep))
         .route(
             "/api/projects/:pid/metrics/summary",

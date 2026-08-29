@@ -14,6 +14,7 @@ pub mod manual_rollback;
 pub mod merge_policy;
 pub mod merge_sweep;
 pub mod question_batching;
+pub mod readiness_preflight;
 pub mod recover;
 pub mod refine_ticket;
 pub mod release_assembly;
@@ -48,6 +49,9 @@ pub use merge_policy::{
 };
 pub use merge_sweep::{merge_sweep, SweepOutcome};
 pub use question_batching::{flush_batches, select_deferred, should_defer};
+pub use readiness_preflight::{
+    run_preflight, PreflightItem, PreflightReport, PreflightSnapshot, PreflightProbe,
+};
 pub use recover::RecoverUseCase;
 pub use refine_ticket::{RefineTicketUseCase, RefinedTicket, TeamNote};
 pub use release_assembly::{
