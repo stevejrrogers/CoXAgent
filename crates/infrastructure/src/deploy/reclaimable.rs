@@ -1,5 +1,6 @@
-//! The single source of truth for which docker compose projects an automated
-//! pass may tear down.
+//! The single source of truth for which docker resources an automated pass
+//! may tear down: compose projects via [`reclaimable_compose_project`] and
+//! label-less raw containers via [`reclaimable_raw_container`].
 //!
 //! Both the deploy port-eviction self-heal (see [`docker_compose`]) and the
 //! hourly docker janitor (see `crates/presentation/src/server/docs.rs`) decide
@@ -32,9 +33,26 @@ pub fn reclaimable_compose_project(project: &str) -> bool {
     lower.starts_with("cox-")
 }
 
+/// Whether a label-less ("raw `docker run`") container may be safely stopped
+/// by id by an automated pass.
+///
+/// A raw container carries no compose-project label, so its NAME is the only
+/// ownership signal left. Agent-managed deploys always name their containers
+/// after their `cox-<parent>-<dir>` project (see
+/// `docker_compose::compose_project_name`), so the same namespace rules as
+/// [`reclaimable_compose_project`] apply verbatim: a `cox-`-prefixed name is
+/// an agent preview we may stop, while the live hub, shared infra, and
+/// anything outside our namespace — including docker's anonymous generated
+/// names — are NEVER touched. CXA-B085: the deploy self-heal once force-stopped
+/// an unrelated `nginx` squatting :8101 because it looked only at the port.
+#[must_use]
+pub fn reclaimable_raw_container(name: &str) -> bool {
+    reclaimable_compose_project(name)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::reclaimable_compose_project;
+    use super::{reclaimable_compose_project, reclaimable_raw_container};
 
     #[test]
     fn agent_preview_projects_are_reclaimable() {
@@ -94,6 +112,45 @@ mod tests {
             assert!(
                 !reclaimable_compose_project(foreign),
                 "{foreign} is outside our namespace and must never be reclaimed"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_named_raw_containers_are_reclaimable() {
+        for name in ["cox--slot-b-hub", "cox-my-project-web-1", "cox-cxa-codebase-app-1"] {
+            assert!(
+                reclaimable_raw_container(name),
+                "{name} is an agent-managed raw container and must be reclaimable"
+            );
+        }
+    }
+
+    /// The CXA-B085 repro: a bare `docker run -p 8101:80 nginx` yields a holder
+    /// with no compose label and a name (docker-generated or image-derived)
+    /// that carries no ownership signal — never ours to stop.
+    #[test]
+    fn anonymous_raw_containers_are_never_reclaimable() {
+        for name in ["nginx", "sharp_poincare", "quirky_turing"] {
+            assert!(
+                !reclaimable_raw_container(name),
+                "{name} is an anonymous raw container and must never be stopped"
+            );
+        }
+    }
+
+    #[test]
+    fn protected_and_foreign_raw_names_are_never_reclaimable() {
+        for name in [
+            "coxagent",
+            "cox-infra-db",
+            "COXAGENT",
+            "Cox-Infra-Db",
+            "someone-elses-stack",
+        ] {
+            assert!(
+                !reclaimable_raw_container(name),
+                "{name} must never be stopped by id regardless of case"
             );
         }
     }

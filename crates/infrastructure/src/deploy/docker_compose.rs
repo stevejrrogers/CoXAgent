@@ -11,7 +11,7 @@ use tokio::process::Command;
 
 // Deploy may tear down only what [`reclaimable_compose_project`] allows — see
 // that shared policy for why port-eviction must never touch the live hub.
-use super::reclaimable::reclaimable_compose_project;
+use super::reclaimable::{reclaimable_compose_project, reclaimable_raw_container};
 
 const COMPOSE_FILES: &[&str] = &[
     "docker-compose.yml",
@@ -635,27 +635,48 @@ async fn apply_resource_limits(proj: &str) {
     }
 }
 
-/// The id of ANY container publishing `port` (compose-labelled or not).
-async fn container_on_port(port: &str) -> Option<String> {
+/// The `(id, container name)` of the first container publishing `port`, or
+/// `None` when docker yields nothing usable. Only reached on the label-less
+/// branch — [`compose_project_on_port`] is consulted first — and a holder this
+/// cannot name is treated as unknown, never as ours to stop.
+async fn raw_container_on_port(port: &str) -> Option<(String, String)> {
     let out = Command::new("docker")
         .args([
             "ps",
             "--filter",
             &format!("publish={port}"),
             "--format",
-            "{{.ID}}",
+            "{{.ID}} {{.Names}}",
         ])
         .stdin(std::process::Stdio::null())
         .output()
         .await
         .ok()?;
-    let id = String::from_utf8_lossy(&out.stdout)
+    String::from_utf8_lossy(&out.stdout)
         .lines()
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_owned();
-    (!id.is_empty()).then_some(id)
+        .find_map(parse_holder_line)
+}
+
+/// Pure parse of one `docker ps` identity line into `(id, name)`; `None` for
+/// anything malformed, so a holder with no recoverable name can never be
+/// classified as ours to stop (CXA-B085).
+fn parse_holder_line(line: &str) -> Option<(String, String)> {
+    let line = line.trim();
+    let (id, name) = line.split_once(' ')?;
+    let name = name.trim();
+    let name = name.strip_prefix('/').unwrap_or(name);
+    if id.is_empty() || name.is_empty() {
+        return None;
+    }
+    Some((id.to_owned(), name.to_owned()))
+}
+
+/// Pure eviction verdict for one label-less port holder (CXA-B085):
+/// `Some(id)` — stop that exact container because its name proves an
+/// agent-managed `cox-` container; `None` — foreign, anonymous or protected,
+/// leave it strictly alone and report the collision instead.
+fn raw_stop_target(id: &str, name: &str) -> Option<String> {
+    reclaimable_raw_container(name).then(|| id.to_owned())
 }
 
 /// Deterministic compose project name for a deploy dir: `cox-<parent>-<dir>`
@@ -1188,9 +1209,11 @@ impl DeployPort for DockerComposeDeploy {
         // notices.
         let mut evicted = None;
         // Up to two eviction+retry rounds: round 1 handles a stale compose
-        // project; round 2 (or when no compose label exists) stops whatever
-        // raw container is squatting the port. Docker also needs a beat to
-        // release a freshly-stopped binding, hence the short sleep.
+        // project; round 2 (or when no compose label exists) stops a raw
+        // squatter only when its name proves this deploy namespace owns it —
+        // anything else is reported as a collision, never touched (CXA-B085).
+        // Docker also needs a beat to release a freshly-stopped binding, hence
+        // the short sleep.
         for round in 0..2u8 {
             if output.status.success() {
                 break;
@@ -1217,14 +1240,25 @@ impl DeployPort for DockerComposeDeploy {
                     .output()
                     .await;
                 evicted = Some(format!("compose project `{project}`"));
-            } else if let Some(id) = container_on_port(&port).await {
-                let _ = Command::new("docker")
-                    .args(["stop", &id])
-                    .stdin(std::process::Stdio::null())
-                    .kill_on_drop(true)
-                    .output()
-                    .await;
-                evicted = Some(format!("container `{id}`"));
+            } else if let Some((id, name)) = raw_container_on_port(&port).await {
+                // CXA-B085 ownership guard: a label-less holder is stopped by
+                // id only when its NAME proves an agent-managed `cox-`
+                // container. A foreign or anonymous raw squatter (e.g. a bare
+                // `docker run -p 8101:80 nginx`) is never touched — the deploy
+                // reports the collision instead of killing an unrelated
+                // service.
+                match raw_stop_target(&id, &name) {
+                    Some(target) => {
+                        let _ = Command::new("docker")
+                            .args(["stop", &target])
+                            .stdin(std::process::Stdio::null())
+                            .kill_on_drop(true)
+                            .output()
+                            .await;
+                        evicted = Some(format!("container `{name}`"));
+                    }
+                    None => break,
+                }
             } else if round > 0 {
                 break; // nothing visible holds the port — give up, report
             }
@@ -1293,7 +1327,72 @@ mod tests {
     // The deploy port-eviction decision routes through the single shared
     // reclaimability policy (`crate::deploy::reclaimable`), whose own unit
     // tests own the full blast-radius matrix — live hub, shared infra,
-    // case-insensitivity and foreign projects.
+    // case-insensitivity and foreign projects — for both compose projects and
+    // label-less raw containers (CXA-B085).
+
+    /// CXA-B085 regression guard: a label-less holder is stopped by id only
+    /// when its name proves an agent-managed `cox-` container.
+    #[test]
+    fn agent_named_raw_holder_is_stopped_by_id() {
+        assert_eq!(
+            raw_stop_target("deadbeef", "cox--slot-b-hub"),
+            Some("deadbeef".to_owned())
+        );
+        assert_eq!(
+            raw_stop_target("deadbeef", "cox-my-project-web-1"),
+            Some("deadbeef".to_owned())
+        );
+    }
+
+    /// The CXA-B085 repro: a bare `docker run -p 8101:80 nginx` squatting the
+    /// port must never be force-stopped — the old code stopped whatever id
+    /// published the port with no ownership check at all.
+    #[test]
+    fn anonymous_raw_holder_is_never_stopped() {
+        assert_eq!(raw_stop_target("deadbeef", "nginx"), None);
+        assert_eq!(raw_stop_target("deadbeef", "sharp_poincare"), None);
+    }
+
+    #[test]
+    fn protected_and_foreign_raw_holders_are_never_stopped() {
+        for name in [
+            "coxagent",
+            "coxagent-gateway",
+            "cox-infra",
+            "cox-infra-db",
+            "COXAGENT",
+            "Cox-Infra-Db",
+            "someone-elses-stack",
+            "myapp-prod",
+        ] {
+            assert_eq!(
+                raw_stop_target("deadbeef", name),
+                None,
+                "{name} must never be stopped by id"
+            );
+        }
+    }
+
+    /// The identity parse fails closed: a holder line docker renders without a
+    /// usable id+name pair yields `None`, and the caller treats unknown as
+    /// never-touch.
+    #[test]
+    fn holder_line_parses_id_and_name_and_fails_closed() {
+        assert_eq!(
+            parse_holder_line("deadbeef nginx"),
+            Some(("deadbeef".to_owned(), "nginx".to_owned()))
+        );
+        // Defensively normalize a leading '/' (docker renders it in some name
+        // fields) so a cox-owned holder can never be misread as foreign.
+        assert_eq!(
+            parse_holder_line("deadbeef /cox--slot-b-hub"),
+            Some(("deadbeef".to_owned(), "cox--slot-b-hub".to_owned()))
+        );
+        assert_eq!(parse_holder_line(""), None);
+        assert_eq!(parse_holder_line("deadbeef"), None);
+        assert_eq!(parse_holder_line("deadbeef "), None);
+        assert_eq!(parse_holder_line("  /nginx"), None);
+    }
 
     /// Regression guard for CXA-B010 + CXA-B017: every site that runs compose
     /// against this repo's secret-bearing docker-compose.yml must seed
