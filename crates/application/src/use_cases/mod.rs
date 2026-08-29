@@ -14,6 +14,7 @@ pub mod manual_rollback;
 pub mod merge_policy;
 pub mod merge_sweep;
 pub mod question_batching;
+pub mod readiness_preflight;
 pub mod recover;
 pub mod refine_ticket;
 pub mod release_assembly;
@@ -33,6 +34,7 @@ pub mod run_sa;
 pub mod run_standup;
 pub mod run_test;
 pub mod runner;
+pub mod scan_deps;
 
 pub use add_ticket::{AddTicketInput, AddTicketUseCase};
 pub use analyze_attachment::{AnalyzeAttachmentUseCase, ReadableAttachment};
@@ -48,6 +50,9 @@ pub use merge_policy::{
 };
 pub use merge_sweep::{merge_sweep, SweepOutcome};
 pub use question_batching::{flush_batches, select_deferred, should_defer};
+pub use readiness_preflight::{
+    run_preflight, PreflightItem, PreflightReport, PreflightSnapshot, PreflightProbe,
+};
 pub use recover::RecoverUseCase;
 pub use refine_ticket::{RefineTicketUseCase, RefinedTicket, TeamNote};
 pub use release_assembly::{
@@ -71,6 +76,7 @@ pub use run_sa::RunSaUseCase;
 pub use run_standup::RunStandupUseCase;
 pub use run_test::RunTestUseCase;
 pub use runner::{run_forever, RunnerHandle, RunnerSnapshot};
+pub use scan_deps::{FindingReport, ScanDependenciesUseCase, ScanDepsInput, ScanDepsOutcome};
 
 #[cfg(test)]
 mod mod_guard_tests;

@@ -303,6 +303,15 @@ pub(crate) async fn build_project(
         }
     }
     let webhook = config.workflow.webhook_url.clone();
+    // Durable outbound alert delivery (CXA-F235): one spool per project, shared
+    // by every runner's notifier, the background flusher and the dashboard's
+    // delivery-history view.
+    let outbox = coxagent_infrastructure::spool_in_dir(state_dir);
+    if let Some(url) = webhook.as_deref().filter(|u| !u.is_empty()) {
+        // One background flusher per project — never per runner — so three
+        // polling loops don't race the same spool's leases.
+        coxagent_infrastructure::spawn_outbox_flusher(Arc::clone(&outbox), url.to_owned());
+    }
     // Shared, live-adjustable budget caps — seeded from config, updated by the
     // config API, read by the loop each cycle (so edits apply without a restart).
     let live_budget: coxagent_application::LiveBudget =
@@ -427,7 +436,11 @@ pub(crate) async fn build_project(
         } else {
             leader
         };
-        let leader = leader.with_notifier(build_notifier(Arc::clone(&store), webhook.clone()));
+        let leader = leader.with_notifier(build_notifier(
+            Arc::clone(&store),
+            webhook.clone(),
+            Arc::clone(&outbox),
+        ));
         let leader = if let Some(r) = build_pr_reporter(&config, auth, id, id).await {
             leader.with_reporter(r)
         } else {
@@ -470,8 +483,11 @@ pub(crate) async fn build_project(
             } else {
                 reviewer
             };
-            let reviewer =
-                reviewer.with_notifier(build_notifier(Arc::clone(&store), webhook.clone()));
+            let reviewer = reviewer.with_notifier(build_notifier(
+                Arc::clone(&store),
+                webhook.clone(),
+                Arc::clone(&outbox),
+            ));
             let reviewer = if let Some(r) = build_pr_reporter(&config, auth, id, id).await {
                 reviewer.with_reporter(r)
             } else {
@@ -554,7 +570,11 @@ pub(crate) async fn build_project(
         } else {
             worker
         };
-        let worker = worker.with_notifier(build_notifier(Arc::clone(&store), webhook.clone()));
+        let worker = worker.with_notifier(build_notifier(
+            Arc::clone(&store),
+            webhook.clone(),
+            Arc::clone(&outbox),
+        ));
         let worker = if let Some(r) = build_pr_reporter(&config, auth, id, id).await {
             worker.with_reporter(r)
         } else {
@@ -660,7 +680,11 @@ pub(crate) async fn build_project(
         files: Some(std::sync::Arc::new(
             coxagent_infrastructure::FsWorkspaceFiles::new(),
         )),
+        deps_discovery: Some(Arc::new(
+            coxagent_infrastructure::FsLockfileDiscovery::new(),
+        )),
         deploy: Some(Arc::new(DockerComposeDeploy::new())),
+        outbox: Some(outbox),
         storage: Some(build_storage().await.unwrap_or_else(|| {
             Arc::new(coxagent_infrastructure::storage::LocalStorage::new(
                 std::env::var_os("HOME")
@@ -982,15 +1006,19 @@ pub(crate) async fn build_pr_reporter(
 
 /// The event notifier for a runner: always the project's own team chat (with a
 /// native push via the app's chat-notification path), plus an external webhook
-/// when one is configured.
+/// when one is configured. The webhook sink is durable (CXA-F235): events are
+/// spooled to the project's outbox and an independent flusher delivers them
+/// with backoff + idempotency keys, so a down webhook delays an alert instead
+/// of silently losing it.
 pub(crate) fn build_notifier(
     store: Arc<AnyStateStore>,
     webhook: Option<String>,
+    outbox: std::sync::Arc<dyn coxagent_application::ports::outbound::OutboxStorePort>,
 ) -> Arc<dyn coxagent_application::ports::outbound::NotifierPort> {
     use coxagent_application::ports::outbound::{ChatNotifier, FanoutNotifier, NotifierPort};
     let mut sinks: Vec<Arc<dyn NotifierPort>> = vec![Arc::new(ChatNotifier::new(store))];
-    if let Some(url) = webhook.filter(|u| !u.is_empty()) {
-        sinks.push(Arc::new(WebhookNotifier::new(url)));
+    if webhook.is_some_and(|u| !u.is_empty()) {
+        sinks.push(Arc::new(WebhookNotifier::new(outbox)));
     }
     Arc::new(FanoutNotifier(sinks))
 }

@@ -1093,6 +1093,13 @@ async fn run_loop(
     }
 
     let webhook = config.workflow.webhook_url.clone();
+    // Durable outbound alert delivery (CXA-F235): the headless runner spools
+    // its webhook alerts to the project's outbox and drains them in the
+    // background, same as an in-hub runner.
+    let outbox = coxagent_infrastructure::spool_in_dir(state_dir);
+    if let Some(url) = webhook.as_deref().filter(|u| !u.is_empty()) {
+        coxagent_infrastructure::spawn_outbox_flusher(Arc::clone(&outbox), url.to_owned());
+    }
     // Worker identity for the shared registry + claim ownership. A headless
     // worker has no web login, so it takes its name from COXAGENT_OPERATOR.
     let operator = std::env::var("COXAGENT_OPERATOR")
@@ -1148,7 +1155,7 @@ async fn run_loop(
     if let Some(f) = forge {
         uc = uc.with_forge(f);
     }
-    uc = uc.with_notifier(build_notifier(Arc::clone(&store), webhook));
+    uc = uc.with_notifier(build_notifier(Arc::clone(&store), webhook, outbox));
     // Heartbeat the shared worker registry with the live role + ticket each phase,
     // so every dashboard shows this headless team's current agent.
     let hb_store = Arc::clone(&store);

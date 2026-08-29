@@ -1,6 +1,6 @@
 // App shell: project switching, files browser, codemap, settings, boot.
 // Split from index.html — classic script, load order matters (one shared scope).
-function switchProject(id){PID=id;INIT_ACT=false;GOAL_LOADED_PID=null;localStorage.setItem("coxpid",id);closeProjMenu();renderProjBtn();loadBudget();loadComments();connect();if(CUR==="codemap"&&window._cmTab==="files"){window._wsPath="";loadWorkspace("");}
+function switchProject(id){PID=id;INIT_ACT=false;GOAL_LOADED_PID=null;ALERTS_AT=0;ALERTS_CACHE=[];localStorage.setItem("coxpid",id);closeProjMenu();renderProjBtn();loadBudget();loadComments();connect();if(CUR==="codemap"&&window._cmTab==="files"){window._wsPath="";loadWorkspace("");}
   termKill();if(CUR==="terminal")openTerminal();
   // Chat is system-wide; switching project only refreshes which project channels show.
   loadChannels();}

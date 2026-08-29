@@ -1,6 +1,7 @@
 //! Outbound ports — interfaces the application needs the outside world to fulfil.
 
 pub mod audit;
+pub mod deps;
 pub mod deploy;
 pub mod doc_store;
 pub mod engine;
@@ -9,6 +10,7 @@ pub mod git;
 pub mod janitor;
 pub mod kv_doc;
 pub mod notify;
+pub mod outbox;
 pub mod pr_report;
 pub mod probe;
 pub mod screenshot;
@@ -21,6 +23,7 @@ pub use deploy::{
     is_publishable_host_port, parse_deploy_host_port, verify_deploy_health,
     verify_deploy_health_probe, CrossCheck, DeployPort, DeployReport, LintReport,
 };
+pub use deps::{DependencyDiscoveryPort, Lockfile};
 pub use doc_store::DocStorePort;
 pub use engine::{AgentEnginePort, AgentOutcome, AgentRequest, SandboxStatus, Usage};
 pub use forge::{ForgePort, PrFeedback, PullRequest};
@@ -28,6 +31,7 @@ pub use git::{GitAuthor, GitPort, SyncBase, WorkingTreeDiff};
 pub use janitor::ProcessJanitorPort;
 pub use kv_doc::KvDocPort;
 pub use notify::{ChatNotifier, FanoutNotifier, NotifierPort, NotifyEvent, NullNotifier};
+pub use outbox::{MemoryOutboxStore, OutboxStorePort};
 pub use pr_report::{NullPrReporter, PrOpen, PrReporterPort, StorePrReporter};
 pub use probe::{ApiProbePort, ApiProof};
 pub use screenshot::ScreenshotPort;

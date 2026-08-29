@@ -13,6 +13,7 @@ mod goals;
 mod governance;
 mod integrity;
 mod ops;
+mod outbox;
 mod work;
 
 pub use chat::*;
@@ -22,6 +23,7 @@ pub use goals::*;
 pub use governance::*;
 pub use integrity::*;
 pub use ops::*;
+pub use outbox::*;
 pub use work::*;
 
 /// Current on-disk schema version. Bumped when the serialized shape changes;
@@ -300,6 +302,19 @@ pub struct ProjectState {
     /// dashboard. All deterministic; SM announces every change.
     #[serde(default, skip_serializing_if = "Tuning::is_default")]
     pub tuning: Tuning,
+    /// Operator freeze/override per self-tuning brake (CXA-F238), keyed by
+    /// brake field name (`bugs_first` / `skip_ba`). Composed AFTER the
+    /// autonomous decision each tuning pass and expired against a bound, so
+    /// an override steers the loop without rewriting its hysteresis state.
+    /// Persists across restarts until cleared by another operator action or
+    /// its own expiry.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub tuning_overrides: std::collections::BTreeMap<String, BrakeHold>,
+    /// Append-only brake-cockpit audit trail (CXA-F238): one entry per brake
+    /// field change, whoever wrote it — the autonomous pass included. Bounded,
+    /// newest last; see [`MAX_TUNING_HISTORY`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tuning_history: Vec<TuningAuditEntry>,
     /// Definition-of-Done evidence per ticket (bounded per ticket) — a ticket
     /// only reaches Verified with context-appropriate proof attached.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -469,6 +484,11 @@ pub const MAX_BUG_SNAPSHOT_DAYS: usize = 366;
 /// revision means a storm of failures still stays bounded and readable.
 pub const MAX_INCIDENTS: usize = 12;
 
+/// Cap on the brake-cockpit audit trail (CXA-F238): ~500 entries covers months
+/// of daily flips plus every operator intervention; older entries drop as new
+/// ones arrive so the trail cannot grow without bound.
+pub const MAX_TUNING_HISTORY: usize = 500;
+
 impl Default for ProjectState {
     fn default() -> Self {
         Self {
@@ -529,6 +549,8 @@ impl Default for ProjectState {
             swept_tickets: std::collections::BTreeSet::new(),
             cost_approved: std::collections::BTreeSet::new(),
             tuning: Tuning::default(),
+            tuning_overrides: std::collections::BTreeMap::new(),
+            tuning_history: Vec::new(),
             ticket_evidence: std::collections::BTreeMap::new(),
             drain_notice_sprint: 0,
             ticket_fail_attempts: std::collections::BTreeMap::new(),
@@ -641,6 +663,17 @@ impl ProjectState {
         let overflow = log.len().saturating_sub(6);
         if overflow > 0 {
             log.drain(0..overflow);
+        }
+    }
+
+    /// Append one brake-cockpit audit entry (CXA-F238), pruning the oldest
+    /// past [`MAX_TUNING_HISTORY`]. Never fails: a full trail drops history,
+    /// it does not block the tuning write it is recording.
+    pub fn record_tuning_change(&mut self, entry: TuningAuditEntry) {
+        self.tuning_history.push(entry);
+        let overflow = self.tuning_history.len().saturating_sub(MAX_TUNING_HISTORY);
+        if overflow > 0 {
+            self.tuning_history.drain(0..overflow);
         }
     }
 
@@ -1443,6 +1476,15 @@ pub fn now_rfc3339() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default()
+}
+
+/// Unix seconds now — the clock the outbox's retry deadlines and leases use.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // seconds since UNIX_EPOCH fits i64 for a very long time
+pub fn unix_now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
 }
 
 /// Derive a short uppercase alias from a project name: its capital letters

@@ -36,6 +36,7 @@ use crate::middleware::{
     cors_layer, rate_limit_mw, telemetry_mw, RateLimiter, AUTH_RATE_MAX, AUTH_RATE_WINDOW,
 };
 
+mod alerts;
 mod assets;
 mod auth;
 mod background;
@@ -43,6 +44,7 @@ mod broken_projects;
 mod channels;
 mod chat;
 mod comments;
+mod deps;
 mod docs;
 mod downloads;
 mod engines;
@@ -58,6 +60,7 @@ mod metrics_admin;
 mod openapi;
 mod people;
 mod pr_listing;
+mod preflight;
 mod projects;
 mod realtime;
 mod requests;
@@ -67,8 +70,10 @@ mod share_page;
 mod status;
 mod store_rpc;
 mod transcripts;
+mod tunecockpit;
 mod work;
 
+use alerts::*;
 use assets::*;
 use auth::*;
 use background::*;
@@ -91,6 +96,7 @@ use metrics_admin::spawn_metrics_admin;
 use openapi::*;
 use people::*;
 use pr_listing::*;
+use preflight::*;
 use projects::*;
 use realtime::*;
 use requests::*;
@@ -99,6 +105,7 @@ use share_link::*;
 use share_page::*;
 use status::*;
 use transcripts::*;
+use tunecockpit::*;
 use work::*;
 
 /// The embedded single-page dashboard.
@@ -124,6 +131,7 @@ const APP_JS: &[(&str, &str)] = &[
     ("docs.js", include_str!("../web/js/docs.js")),
     ("inbox.js", include_str!("../web/js/inbox.js")),
     ("drift.js", include_str!("../web/js/drift.js")),
+    ("alerts.js", include_str!("../web/js/alerts.js")),
     ("shell.js", include_str!("../web/js/shell.js")),
 ];
 
@@ -168,9 +176,17 @@ pub struct ProjectHandle {
     /// Blob storage (MinIO/S3 or the local blob dir) for ticket attachments
     /// and evidence media.
     pub storage: Option<Arc<dyn coxagent_application::ports::outbound::StoragePort>>,
+    /// Durable outbound-alert spool (CXA-F235): powers the operator's
+    /// delivery-history view and one-click replay. `None` where the
+    /// composition root has no webhook sink to spool for.
+    pub outbox: Option<Arc<dyn coxagent_application::ports::outbound::OutboxStorePort>>,
     /// Workspace file access for on-demand reviews; injected by the
     /// composition root so this layer stays free of infrastructure.
     pub files: Option<Arc<dyn coxagent_application::ports::outbound::WorkspaceFilesPort>>,
+    /// Lockfile discovery for the dependency-health scan (CXA-B111); injected
+    /// by the composition root so this layer stays free of infrastructure.
+    pub deps_discovery:
+        Option<Arc<dyn coxagent_application::ports::outbound::DependencyDiscoveryPort>>,
 }
 
 /// Builds a fresh project on demand (scaffold + register), injected by the
@@ -746,6 +762,8 @@ pub async fn serve_full(
             post(store_rpc::store_rpc_ep).get(store_rpc::store_audit_ep),
         )
         .route("/api/projects/:pid/state", get(state_ep))
+        .route("/api/projects/:pid/preflight", get(preflight_ep))
+        .route("/api/projects/:pid/dependencies", get(dependencies_ep))
         .route("/api/projects/:pid/metrics", get(metrics_ep))
         .route(
             "/api/projects/:pid/metrics/summary",
@@ -761,9 +779,19 @@ pub async fn serve_full(
         .route("/api/projects/:pid/workers", get(workers_ep))
         .route("/api/token-saver", get(token_saver_ep))
         .route("/api/projects/:pid/audit", get(audit_ep))
+        .route("/api/projects/:pid/alerts", get(list_alerts_ep))
+        .route(
+            "/api/projects/:pid/alerts/:id/replay",
+            post(replay_alert_ep),
+        )
         .route("/api/projects/:pid/config", get(get_config).put(put_config))
         .route("/api/projects/:pid/control/:action", post(control_ep))
         .route("/api/projects/:pid/burn-mode", post(burn_mode_ep))
+        .route("/api/projects/:pid/brakes", get(brakes_ep))
+        .route(
+            "/api/projects/:pid/brakes/:brake/hold",
+            post(brake_hold_ep).delete(brake_hold_clear_ep),
+        )
         .route("/api/projects/:pid/sprint/goal", post(set_sprint_goal_ep))
         .route("/api/projects/:pid/sprint/close", post(sprint_close_ep))
         .route("/api/projects/:pid/sprint-queue", post(queue_sprint_ep))
@@ -785,6 +813,7 @@ pub async fn serve_full(
         )
         .route("/api/projects/:pid/sprint/:action", post(sprint_scope_ep))
         .route("/api/projects/:pid/digest", post(digest_ep))
+        .route("/api/projects/:pid/deps/scan", post(deps::scan_ep))
         .route("/api/projects/:pid/merge-sweep", post(merge_sweep_ep))
         .route(
             "/api/workspace",
@@ -1234,6 +1263,8 @@ fn internal_error(msg: &str) -> axum::response::Response {
         .into_response()
 }
 
+#[cfg(test)]
+mod alerts_tests;
 #[cfg(test)]
 mod avatar_media_security_tests;
 #[cfg(test)]
