@@ -1485,6 +1485,7 @@ pub(crate) fn worktree_at(work_dir: PathBuf, slug: &str) -> PathBuf {
 ///   2. removes husk dirs git no longer lists as worktrees;
 ///   3. `git worktree remove --force`s registered trees idle > 48 h;
 ///   4. deletes the `target/` of trees idle > 6 h (rebuilt on next use).
+///
 /// Best-effort throughout: a busy tree just gets skipped this round.
 pub(crate) fn spawn_worktree_janitor(work_dir: std::path::PathBuf) {
     tokio::spawn(async move {
