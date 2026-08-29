@@ -105,7 +105,7 @@ test('a sprint can be queued from the backlog tab and dropped again', async ({ p
   }, { pid, qid });
   await page.locator('#work-seg button[data-w="board"]').click();
   await page.locator('#work-seg button[data-w="backlog"]').click();
-  await expect(page.locator('#backlog-body .spq-chip', { hasText: 'F001' })).toBeVisible();
+  await expect(page.locator('#backlog-body .spq-card .spq-row', { hasText: 'F001' })).toBeVisible();
 
   // Drop the plan — the fixture leaves exactly as the other specs expect.
   await card.locator('button', { hasText: 'plan' }).click();
