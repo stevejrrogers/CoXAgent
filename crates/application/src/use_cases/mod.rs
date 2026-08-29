@@ -16,6 +16,7 @@ pub mod merge_sweep;
 pub mod question_batching;
 pub mod recover;
 pub mod refine_ticket;
+pub mod release_assembly;
 pub mod run_ba;
 pub mod run_chat_reply;
 pub mod run_design_system;
@@ -49,6 +50,11 @@ pub use merge_sweep::{merge_sweep, SweepOutcome};
 pub use question_batching::{flush_batches, select_deferred, should_defer};
 pub use recover::RecoverUseCase;
 pub use refine_ticket::{RefineTicketUseCase, RefinedTicket, TeamNote};
+pub use release_assembly::{
+    assemble, cut_manifest, extract_ticket_refs, filter_verified_subjects, is_verified_complete,
+    rc_members, verified_complete_ids, BlockedCandidate, CutManifest, RcAssembly, RcBundle,
+    SubjectManifest,
+};
 pub use run_ba::RunBaUseCase;
 pub use run_chat_reply::RunChatReplyUseCase;
 pub use run_design_system::RunDesignSystemUseCase;
@@ -68,6 +74,8 @@ pub use runner::{run_forever, RunnerHandle, RunnerSnapshot};
 
 #[cfg(test)]
 mod mod_guard_tests;
+#[cfg(test)]
+mod release_assembly_tests;
 #[cfg(test)]
 mod run_releases_tdd_tests;
 #[cfg(test)]

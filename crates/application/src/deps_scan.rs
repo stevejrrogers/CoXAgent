@@ -298,8 +298,17 @@ pub fn scan_locks(
 /// via `depends_on`, so all supply-chain work lands under one umbrella.
 pub const MASTER_EPIC_ID: &str = "DEP-AUDIT-001";
 
-/// A unique, deterministic ticket id for a remediation — one per dependency so
-/// re-running a scan never duplicates an already-filed proposal.
+/// Id-scheme prefix for routine upgrade Chore tickets.
+const ROUTINE_ID_SCHEME: &str = "DEP";
+/// Id-scheme prefix for urgent CVE Bug tickets.
+const CVE_ID_SCHEME: &str = "CVE";
+/// Evidence label recorded for a routine (non-CVE) upgrade remediation.
+const ROUTINE_EVIDENCE_LABEL: &str = "scan result";
+/// Evidence label recorded for an urgent-CVE remediation.
+const CVE_EVIDENCE_LABEL: &str = "cve finding";
+
+/// A unique, deterministic ticket id for a remediation — one per dependency per
+/// finding kind so re-running a scan never duplicates an already-filed proposal.
 ///
 /// The mapping must be INJECTIVE over every possible package name: two distinct
 /// dependencies can never share an id, regardless of which ones appear together
@@ -313,8 +322,15 @@ pub const MASTER_EPIC_ID: &str = "DEP-AUDIT-001";
 /// So letters/digits are emitted verbatim (most crate/npm/poetry names stay
 /// readable) and every other byte becomes an unambiguous fixed-width token that
 /// no concatenation of other outputs can reproduce.
-fn ticket_id_for(dep: &str) -> String {
-    let mut out = String::from("DEP");
+///
+/// `scheme` makes the id KIND-distinct ([CXA-B110]): a routine-upgrade Chore and an
+/// urgent-CVE Bug for the same package must never share an id, or the exact-id
+/// existence check lets whichever kind was filed first permanently block the other
+/// — a filed routine Chore once silenced every later urgent CVE for that package.
+/// The prefixes `DEP` / `CVE` differ in their first byte, so the two id spaces are
+/// disjoint while sharing the same injective body encoding.
+fn ticket_id_for(scheme: &str, dep: &str) -> String {
+    let mut out = String::from(scheme);
     for b in dep.as_bytes() {
         if b.is_ascii_alphanumeric() {
             out.push(*b as char);
@@ -374,23 +390,27 @@ fn link_to_epic(ticket: &mut DomainTicket) {
 /// lossy ids like `DEP-scope-pkg`, post-upgrade ones under fixed-width hex like
 /// `DEP<40>scope<2f>pkg`, so an exact-id match alone cannot recognise an already-remediated dep
 /// across that boundary. Every remediation records its originating scan context — `kind ==
-/// "dependency-scan"`, label `"scan result"` (routine upgrade Chore) or `"cve finding"`
-/// (urgent-CVE Bug), detail starting with `<package>@` — so we can match on that instead.
+/// "dependency-scan"`, label [`ROUTINE_EVIDENCE_LABEL`] (routine upgrade Chore) or
+/// [`CVE_EVIDENCE_LABEL`] (urgent-CVE Bug), detail starting with `<package>@` — so we can match
+/// on that instead.
 ///
-/// The suppression must be *finding-kind aware*, otherwise any first-ever evidence permanently
-/// silences every later finding for the same package forever ([CXA-B099]): a stale legacy "scan
-/// result" Chore must never block filing a fresh urgent CVE Bug for that package months later.
+/// The suppression must be *finding-kind aware in BOTH directions* ([CXA-B099], [CXA-B108]),
+/// otherwise any first-ever evidence permanently silences later findings for the same package
+/// forever: a stale legacy "scan result" Chore must never block filing a fresh urgent CVE Bug
+/// for that package months later, and symmetrically a prior "cve finding" Bug must never block
+/// a fresh routine upgrade Chore — a routine finding is suppressed only by prior routine
+/// evidence, an urgent CVE only by prior CVE evidence.
 #[must_use]
 fn already_remediated_for(state: &ProjectState, dep: &str, is_urgent_cve: bool) -> bool {
     let prefix = format!("{dep}@");
+    let suppressor = if is_urgent_cve {
+        CVE_EVIDENCE_LABEL
+    } else {
+        ROUTINE_EVIDENCE_LABEL
+    };
     state.ticket_evidence.values().any(|list| {
         list.iter().any(|e| {
-            if e.kind != "dependency-scan" || !e.detail.starts_with(&prefix) {
-                return false;
-            }
-            // A routine upgrade suppresses only another routine upgrade; an urgent CVE is only
-            // suppressed by a prior "cve finding", never by older non-CVE remediation ([CXA-B099]).
-            !is_urgent_cve || e.label == "cve finding"
+            e.kind == "dependency-scan" && e.detail.starts_with(&prefix) && e.label == suppressor
         })
     })
 }
@@ -402,7 +422,12 @@ fn already_remediated_for(state: &ProjectState, dep: &str, is_urgent_cve: bool) 
 /// Both are pre-linked to the master epic via `depends_on`.
 #[must_use]
 fn propose_one(state: &mut ProjectState, finding: &ScanFinding) -> Option<TicketId> {
-    let Ok(id) = TicketId::new(ticket_id_for(&finding.package)) else {
+    let scheme = if finding.urgent_cve_severity.is_some() {
+        CVE_ID_SCHEME
+    } else {
+        ROUTINE_ID_SCHEME
+    };
+    let Ok(id) = TicketId::new(ticket_id_for(scheme, &finding.package)) else {
         return None;
     };
     if state.tickets.iter().any(|t| t.id() == &id)
@@ -444,7 +469,7 @@ fn propose_one(state: &mut ProjectState, finding: &ScanFinding) -> Option<Ticket
         state.add_evidence(
             created_id.to_string().as_str(),
             "dependency-scan",
-            "cve finding",
+            CVE_EVIDENCE_LABEL,
             &format!(
                 "{}@{} severity={}",
                 finding.package, finding.current_version, sev
@@ -479,7 +504,7 @@ fn propose_one(state: &mut ProjectState, finding: &ScanFinding) -> Option<Ticket
     state.add_evidence(
         created_id.to_string().as_str(),
         "dependency-scan",
-        "scan result",
+        ROUTINE_EVIDENCE_LABEL,
         &format!(
             "{}@{}->{} tagged {}",
             finding.package, finding.current_version, latest, tier_label
@@ -670,9 +695,73 @@ version = \"0.9.0\"
     #[test]
     fn scoped_names_get_distinct_ids_from_flat_spellings() {
         // '@scope/pkg' and a plain dotted/hyphenated spelling once shared '-' runs.
-        let pkg_a = ticket_id_for("@scope/pkg");
-        let pkg_b = ticket_id_for("-scope-pkg");
+        let pkg_a = ticket_id_for(ROUTINE_ID_SCHEME, "@scope/pkg");
+        let pkg_b = ticket_id_for(ROUTINE_ID_SCHEME, "-scope-pkg");
         assert_ne!(pkg_a, pkg_b);
+        // CXA-B110: the kind schemes share the body encoding but must stay disjoint —
+        // otherwise the exact-id existence check re-merges the two kinds again.
+        assert_ne!(
+            ticket_id_for(ROUTINE_ID_SCHEME, "@scope/pkg"),
+            ticket_id_for(CVE_ID_SCHEME, "@scope/pkg")
+        );
+    }
+
+    #[test]
+    fn filed_routine_upgrade_chore_does_not_block_a_later_urgent_cve_bug() {
+        // CXA-B110 regression. Both remediation kinds once minted the same 'DEP…' id,
+        // so the exact-id existence check — which runs BEFORE the kind-aware evidence
+        // gate — let a pass-1 routine-upgrade Chore permanently swallow a later urgent
+        // CVE Bug for the same package. Kind-distinct id schemes (DEP… / CVE…) make
+        // that existence check kind-aware without ever minting duplicate ids.
+        let mut state = ProjectState::default();
+
+        // Pass 1: a real upgrade gap files a routine Chore via apply_findings.
+        let upgrade = ScanFinding {
+            package: "@scope/pkg".to_string(),
+            current_version: "7.8.9".to_string(),
+            latest_version: Some("9.0.0".to_string()),
+            tier: Some(BumpTier::Major),
+            urgent_cve_severity: None,
+            affected_files: vec!["package-lock.json".to_string()],
+        };
+        let chore_ids = apply_findings(&mut state, std::slice::from_ref(&upgrade));
+        assert_eq!(chore_ids.len(), 1, "pass 1 must file the routine upgrade");
+        let chore = state.ticket(&chore_ids[0]).expect("filed chore");
+        assert_eq!(chore.ticket_type(), TicketType::Chore);
+
+        // Pass 2: same lock, upgrade gap closed (registry caught up), but the package
+        // now carries a high CVE. The filed Chore must not suppress the Bug.
+        let cve = ScanFinding {
+            package: "@scope/pkg".to_string(),
+            current_version: "7.8.9".to_string(),
+            latest_version: Some("7.8.9".to_string()),
+            tier: None,
+            urgent_cve_severity: Some("high".to_string()),
+            affected_files: vec!["package-lock.json".to_string()],
+        };
+        let bug_ids = apply_findings(&mut state, std::slice::from_ref(&cve));
+        assert_eq!(
+            bug_ids.len(),
+            1,
+            "urgent CVE must be filed even though a routine Chore exists for the package"
+        );
+        let bug = state.ticket(&bug_ids[0]).expect("filed bug");
+        assert_eq!(bug.ticket_type(), TicketType::Bug);
+        assert_eq!(bug.priority(), Priority::High);
+        assert_ne!(
+            bug_ids[0], chore_ids[0],
+            "the two kinds must never share a ticket id"
+        );
+
+        // Pass 3: idempotency holds per kind — re-scans file nothing new.
+        assert!(
+            apply_findings(&mut state, std::slice::from_ref(&cve)).is_empty(),
+            "repeat CVE must not duplicate the filed Bug"
+        );
+        assert!(
+            apply_findings(&mut state, std::slice::from_ref(&upgrade)).is_empty(),
+            "repeat routine finding must not duplicate the filed Chore"
+        );
     }
 
     #[test]
@@ -736,6 +825,41 @@ version = \"0.9.0\"
             apply_findings(&mut state, std::slice::from_ref(&finding)).is_empty(),
             "repeat CVE must not file a duplicate Bug"
         );
+    }
+
+    #[test]
+    fn prior_cve_finding_does_not_permanently_suppress_routine_upgrade() {
+        // CXA-B108 regression: kind-awareness cuts both ways. Suppression used to be
+        // `!is_urgent_cve || e.label == "cve finding"`, so for a routine finding ANY prior
+        // evidence kind matched — and evidence is never pruned, so one CVE remediation
+        // permanently silenced every future routine dep-hygiene chore for that package.
+        // A prior "cve finding" must not suppress a ROUTINE upgrade; only a prior
+        // "scan result" may.
+        let mut state = ProjectState::default();
+        state.add_evidence(
+            "DEP-cve-scope-pkg",
+            "dependency-scan",
+            "cve finding",
+            "@scope/pkg@7.8.9 severity=high",
+        );
+
+        let finding = ScanFinding {
+            package: "@scope/pkg".to_string(),
+            current_version: "7.8.9".to_string(),
+            latest_version: Some("10.2.0".to_string()),
+            tier: Some(BumpTier::Major),
+            urgent_cve_severity: None,
+            affected_files: vec!["package-lock.json".to_string()],
+        };
+
+        let ids = apply_findings(&mut state, std::slice::from_ref(&finding));
+        assert_eq!(
+            ids.len(),
+            1,
+            "routine upgrade must file despite prior cve-finding evidence"
+        );
+        let t = state.ticket(&ids[0]).expect("filed chore");
+        assert_eq!(t.ticket_type(), TicketType::Chore);
     }
 
     #[test]
