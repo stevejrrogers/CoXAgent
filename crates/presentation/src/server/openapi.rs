@@ -127,6 +127,8 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/agent-evals", &["get"]),
     route("/api/projects/:pid/agent-log", &["get"]),
     route("/api/projects/:pid/agent-log/stream", &["get"]),
+    route("/api/projects/:pid/alerts", &["get"]),
+    route("/api/projects/:pid/alerts/:id/replay", &["post"]),
     route("/api/projects/:pid/architecture-review", &["post"]),
     route("/api/projects/:pid/attachment", &["get"]),
     route("/api/projects/:pid/audit", &["get"]),

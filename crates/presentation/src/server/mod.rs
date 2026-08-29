@@ -36,6 +36,7 @@ use crate::middleware::{
     cors_layer, rate_limit_mw, telemetry_mw, RateLimiter, AUTH_RATE_MAX, AUTH_RATE_WINDOW,
 };
 
+mod alerts;
 mod assets;
 mod auth;
 mod background;
@@ -70,6 +71,7 @@ mod store_rpc;
 mod transcripts;
 mod work;
 
+use alerts::*;
 use assets::*;
 use auth::*;
 use background::*;
@@ -124,6 +126,7 @@ const APP_JS: &[(&str, &str)] = &[
     ("mcp.js", include_str!("../web/js/mcp.js")),
     ("docs.js", include_str!("../web/js/docs.js")),
     ("inbox.js", include_str!("../web/js/inbox.js")),
+    ("alerts.js", include_str!("../web/js/alerts.js")),
     ("shell.js", include_str!("../web/js/shell.js")),
 ];
 
@@ -168,6 +171,10 @@ pub struct ProjectHandle {
     /// Blob storage (MinIO/S3 or the local blob dir) for ticket attachments
     /// and evidence media.
     pub storage: Option<Arc<dyn coxagent_application::ports::outbound::StoragePort>>,
+    /// Durable outbound-alert spool (CXA-F235): powers the operator's
+    /// delivery-history view and one-click replay. `None` where the
+    /// composition root has no webhook sink to spool for.
+    pub outbox: Option<Arc<dyn coxagent_application::ports::outbound::OutboxStorePort>>,
     /// Workspace file access for on-demand reviews; injected by the
     /// composition root so this layer stays free of infrastructure.
     pub files: Option<Arc<dyn coxagent_application::ports::outbound::WorkspaceFilesPort>>,
@@ -765,6 +772,11 @@ pub async fn serve_full(
         .route("/api/projects/:pid/workers", get(workers_ep))
         .route("/api/token-saver", get(token_saver_ep))
         .route("/api/projects/:pid/audit", get(audit_ep))
+        .route("/api/projects/:pid/alerts", get(list_alerts_ep))
+        .route(
+            "/api/projects/:pid/alerts/:id/replay",
+            post(replay_alert_ep),
+        )
         .route("/api/projects/:pid/config", get(get_config).put(put_config))
         .route("/api/projects/:pid/control/:action", post(control_ep))
         .route("/api/projects/:pid/burn-mode", post(burn_mode_ep))
@@ -1239,6 +1251,8 @@ fn internal_error(msg: &str) -> axum::response::Response {
         .into_response()
 }
 
+#[cfg(test)]
+mod alerts_tests;
 #[cfg(test)]
 mod avatar_media_security_tests;
 #[cfg(test)]

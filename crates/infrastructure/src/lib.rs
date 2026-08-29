@@ -15,6 +15,7 @@ pub mod forge;
 pub mod git;
 pub mod kv_doc;
 pub mod notifier;
+pub mod outbox;
 pub mod pr_report;
 pub mod probe;
 pub mod proc;
@@ -38,7 +39,8 @@ pub use engine::{
 pub use forge::{github_forge, probe_git_access, GhApiForge, GhForge, GlForge};
 pub use git::SystemGit;
 pub use kv_doc::PgKvDoc;
-pub use notifier::WebhookNotifier;
+pub use notifier::{spawn_outbox_flusher, WebhookNotifier};
+pub use outbox::{spool_in_dir, FileOutboxStore};
 pub use pr_report::HttpPrReporter;
 pub use sql_auth::SqlAuthService;
 pub use state::{AnyStateStore, JsonStateStore, RestConfig, RestStateStore, SqlStateStore};
