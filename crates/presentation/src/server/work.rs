@@ -314,10 +314,17 @@ pub(super) async fn unpark_ticket(
 pub(super) async fn approve_cost(
     State(app): State<AppState>,
     Path((pid, id)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
     let Some(p) = app.project(&pid).await else {
         return not_found();
     };
+    // Attribution only — the gate decision itself stays open to whoever could
+    // always take it; the ledger records WHO paid attention, it does not start
+    // refusing decisions.
+    let me = super::guards::principal_name(&app, &headers)
+        .await
+        .unwrap_or_else(|| "operator".to_owned());
     let Ok(mut state) = p.store.load().await else {
         return internal_error("load failed");
     };
@@ -326,7 +333,14 @@ pub(super) async fn approve_cost(
     {
         return (axum::http::StatusCode::NOT_FOUND, "no such ticket").into_response();
     }
+    // Governance-attention ledger (CXA-F230): record the FIRST approval only —
+    // re-approving an already-approved ticket is a no-op repeat, and counting
+    // it again would inflate the operator's attributed effort (AC5).
+    let first_approval = !state.cost_approved.contains(&id);
     state.cost_approved.insert(id.clone());
+    if first_approval {
+        state.record_intervention(coxagent_domain::InterventionKind::CostApprove, &id, &me);
+    }
     state.log_activity("USER", "approved cost", Some(id));
     match p.store.save(&state).await {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
