@@ -812,6 +812,10 @@
   .sec{font-size:12px;font-weight:600;color:var(--dim);text-transform:uppercase;letter-spacing:.07em;margin:26px 0 13px;display:flex;align-items:center;gap:8px}
   .sec:first-child{margin-top:0}
   .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(158px,1fr));gap:13px}
+  /* Overview's agent-injected blocks (drift, go-live, alerts, drain) stack as
+     plain divs; give every populated one the same 18px rhythm so panels never
+     cram together. Child inline margins collapse into this (max wins). */
+  #ov-drain:not(:empty),#ov-alerts:not(:empty),#ov-drift:not(:empty),#ov-preflight:not(:empty),#ov-goal:not(:empty){margin-bottom:18px}
   .hgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
   .hcard{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:13px 15px}
   .hcard .hval{font-size:22px;font-weight:700;line-height:1.1}
@@ -1236,7 +1240,10 @@
   .cal-wrap .cal-hdr .cal-dhdr .gd .dn{font-size:20px;font-weight:800;line-height:1}
   .cal-wrap.day .cal-hdr .cal-dhdr .gd{text-align:left;padding:8px 12px;font-size:13px}
   .cal-wrap.day .cal-hdr .cal-dhdr .gd .dn{font-size:24px}
-  .cal-wrap .cal-scroll{overflow-y:auto;max-height:calc(100vh - 260px);position:relative;display:flex}
+  /* padding-top clears the first hour label: .ghour sits 7px ABOVE its
+     gridline (top:-7px), so without headroom "00:00" clips under the day
+     header. Applies to both flex children, so labels stay line-aligned. */
+  .cal-wrap .cal-scroll{overflow-y:auto;max-height:calc(100vh - 260px);position:relative;display:flex;padding-top:9px}
   .cal-wrap .cal-scroll .cal-ghdr{width:50px;flex:none;position:sticky;left:0;z-index:1;background:var(--card)}
   .cal-wrap .cal-scroll .cal-ghdr .ghour{height:60px;display:flex;align-items:flex-start;justify-content:flex-end;padding:0 6px;font-size:10px;color:var(--dim);font-weight:500;position:relative;top:-7px}
   .cal-wrap .cal-scroll .cal-body{flex:1;display:flex;position:relative;min-height:1440px}
@@ -1384,6 +1391,9 @@
   .wssec{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--dim);margin-bottom:12px}
   .wshead{display:flex;align-items:center;justify-content:space-between}
   .wsgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:14px}
+  /* An empty-state inside the grid must span the full row, not sit squeezed
+     into the first ~250px column looking like a stray label. */
+  .wsgrid .empty{grid-column:1/-1}
   .wscard{border:1px solid var(--border);border-radius:15px;background:var(--card);padding:17px;cursor:pointer;transition:border-color .15s,transform .15s,box-shadow .15s}
   .wscard:hover{border-color:var(--accent2);transform:translateY(-3px);box-shadow:0 12px 30px rgba(0,0,0,.22)}
   .wsc-h{display:flex;align-items:center;gap:8px}
