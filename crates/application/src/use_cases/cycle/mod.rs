@@ -25,6 +25,7 @@ mod debt_sweep;
 mod escalation;
 mod preflight;
 mod scrum;
+mod ship_truth;
 mod sm_watch;
 mod wiring;
 
@@ -36,6 +37,7 @@ mod ops;
 mod qa_evidence;
 mod recovery;
 mod release_cut;
+mod revert_learning;
 mod trend;
 
 /// Local, non-pushed ref updated after every deploy that passes both
@@ -174,6 +176,10 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     /// Polled between phases: `true` = the user pressed Pause, stop starting
     /// new phases and end this cycle early. `None` (tests/headless) = never.
     pause_check: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
+    /// Whether this runner competes for the project leader lease (default
+    /// true). Worker slots co-located with a primary runner set false — see
+    /// the election comment in `run_cycle`.
+    leader_election: bool,
     /// Per-phase wall-clock tracker: `report()` marks each phase switch, the
     /// scorecard drains the totals at cycle end. `(current phase, since)` plus
     /// accumulated seconds per phase label.
@@ -236,6 +242,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             phase: None,
             reloader: None,
             pause_check: None,
+            leader_election: true,
             phase_track: Mutex::new((None, std::collections::BTreeMap::new())),
             worker: String::new(),
             caps: crate::ports::outbound::WorkerCaps::default(),
@@ -473,7 +480,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             return;
         };
         let base = self.flow_base();
-        let _ = git.raw(&self.work_dir, &["fetch", "-q", "origin", base]).await;
+        let _ = git
+            .raw(&self.work_dir, &["fetch", "-q", "origin", base])
+            .await;
         let (ok, text) = git
             .raw(
                 &self.work_dir,
@@ -678,7 +687,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             self.worker.clone()
         };
         let now = crate::state::now_rfc3339();
-        let leader = self.store.acquire_leader(&me, &now).await.unwrap_or(true);
+        // Leader election stays MACHINE-level (each machine's primary runner
+        // competes, so a dead machine hands ceremonies to another — the
+        // multi-user requirement). Worker SLOTS on the same machine never
+        // compete: the lease rotating across co-located slots produced the
+        // scorecard-numbering and version-ping-pong bugs, and a worker whose
+        // machine is alive has a primary runner right next to it.
+        let leader = if self.leader_election {
+            self.store.acquire_leader(&me, &now).await.unwrap_or(true)
+        } else {
+            false
+        };
         // Authoritative cycle number: the persistent, project-wide counter the
         // leader advances once per cycle. Scoring *and* cadence key off this,
         // NOT the per-process local number — so restarts / leader handovers
@@ -758,6 +777,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // One digest per UTC day into the team chat: shipped/spend/sprint at
             // a glance, so the user doesn't need the dashboard open to keep up.
             self.post_daily_digest().await;
+            // One bug-count snapshot per UTC day: the persisted burn-down
+            // history the metrics dashboard and the self-tuning escalation
+            // read (CXA-F032). Recorded BEFORE self-tune so today's delta is
+            // already on file when the tuner evaluates it.
+            self.record_daily_bug_snapshot().await;
 
             // Self-correcting memory: audit the engine's per-machine notes
             // against the current process law once a day.
@@ -774,6 +798,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // surfaces (inflow vs outflow, failure hotspots, grade/cost
             // direction) and propose — never decide — system-level work.
             self.trend_sentinel().await;
+            self.ship_truth_sweep().await;
             // Stop starting, start finishing: review + merge the PR queue at
             // the TOP of the cycle. This used to run at the very end — after
             // codegraph, ceremonies and the (tens-of-minutes) dev phases — so
@@ -944,11 +969,39 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 Err(e) => report.errors.push(format!("DEV-BUG: {e}")),
             }
         }
-        let bugs_first = self.store.load().await.is_ok_and(|s| s.tuning.bugs_first);
-        if bugs_first {
+        // The bugs-first brake gives bugs the dev SLOT — it must never starve
+        // the slot outright. With every bug parked/held the bug pass claims
+        // nothing, and an unconditional brake deadlocked BOTH lanes for 50+
+        // cycles (features locked "for bugs", no bug workable). The brake only
+        // holds when this cycle actually spent its slot on a bug.
+        let brake_state = self.store.load().await.ok();
+        let reactive_brake = brake_state.as_ref().is_some_and(|s| s.tuning.bugs_first);
+        let burn_hold = brake_state
+            .as_ref()
+            .is_some_and(crate::selection::burn_mode_holds);
+        // Human burn mode (CXA-F030), layered on the reactive brake: when its
+        // explicit exit gate is met the mode clears itself through the store —
+        // the burn-down sprint ends by itself instead of waiting for a person.
+        // Best-effort: a lost race just re-evaluates and re-clears next cycle.
+        if let Some(s) = &brake_state {
+            if s.tuning.burn_mode && !burn_hold {
+                let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |st| {
+                    crate::selection::clear_burn_mode_if_gate_met(st);
+                    Ok(())
+                })
+                .await;
+            }
+        }
+        let bug_slot_worked = report.bug_fixed.is_some();
+        if reactive_brake && bug_slot_worked {
             report
                 .errors
                 .push("DEV-FEATURE: paused by self-tuning — burning down bugs first".to_owned());
+        }
+        if burn_hold && bug_slot_worked {
+            report.errors.push(
+                "DEV-FEATURE: paused by burn mode — open bugs still above the exit gate".to_owned(),
+            );
         }
         if self.pause_requested() {
             report
@@ -956,7 +1009,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 .push("cycle cut short — paused by user".to_owned());
             return report;
         }
-        if self.config.workflow.feature_dev_enabled && !queue_full && !bugs_first {
+        // Either brake pauses features (OR); both honour the deadlock valve.
+        let feature_paused = brake_state
+            .as_ref()
+            .is_some_and(|s| crate::selection::dev_feature_paused(s, bug_slot_worked));
+        if self.config.workflow.feature_dev_enabled && !queue_full && !feature_paused {
             // Before building, make sure the next feature has a clear definition
             // of done — DEV raises unclear tickets and the BA fills them in.
             self.clarify_next_feature().await;
@@ -976,6 +1033,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // cheap compared with a wrong implementation. Bounded per cycle.
         Box::pin(self.answer_open_questions()).await;
         self.escalate_stale_human_questions().await;
+        // Focus windows over: held questions flush as one digest each
+        // (CXA-F176), before anything else assumes the inbox is current.
+        self.flush_focus_digests().await;
         // Fill the acceptance criteria BEFORE the gate judges the ticket: a
         // ticket nobody can check is one a human can only bounce, and the
         // missing AC alone scores it out of the auto lane.
@@ -1314,6 +1374,28 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .file_name()
             .and_then(|n| n.to_str())
             .is_some_and(|n| n.contains("-slot-"))
+    }
+
+    /// Turn leader-lease competition off for co-located worker slots.
+    #[must_use]
+    pub fn with_leader_election(mut self, enabled: bool) -> Self {
+        self.leader_election = enabled;
+        self
+    }
+
+    /// One dedicated REVIEW pass — the P1 job of the event-dispatch plan
+    /// (docs/proposals/event-dispatch.md): forge hygiene + PR review/merge +
+    /// feedback fixes, on their own fast loop so a one-hour DEV phase never
+    /// delays a ripe PR by a whole cycle. Reuses the full gate stack
+    /// (landed-proof, fix-on-fix brake, human-eyes, competing-PR resolver).
+    /// Callers gate on pause; this gates on quiet hours and open incidents.
+    pub async fn run_review_pass(&self) {
+        if self.quiet_hours_block().await || self.engine_incident_open().await {
+            return;
+        }
+        self.forge_hygiene().await;
+        self.review_open_prs().await;
+        self.address_pr_feedback().await;
     }
 
     /// Drain the per-phase wall-clock totals (closing any open phase) — called

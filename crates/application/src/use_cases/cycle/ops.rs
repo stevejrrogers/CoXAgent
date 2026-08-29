@@ -495,6 +495,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 acceptance_criteria: vec![
                     "The app is reachable and serving a known-good build".to_owned()
                 ],
+                goal: None,
             })
             .await
             .ok()
@@ -561,6 +562,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 complexity: coxagent_domain::ticket::Complexity::Medium,
                 has_ui: false,
                 acceptance_criteria: acceptance,
+                goal: None,
             })
             .await
             .ok()
@@ -682,6 +684,20 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             if ok {
                 self.log_git(&format!(
                     "hygiene: stashed orphan WIP from {branch} — recover with `git stash list`"
+                ))
+                .await;
+            }
+        } else if dirty && branch == base {
+            // Residue ON the base blocks every branch checkout too — the
+            // repeating "checkout failed: The following untracked working
+            // tree files would be overwritten" (COX-B016/B080, hourly). This
+            // runs at the TOP of a cycle, before any phase edits — dirt here
+            // is leftovers, never live work.
+            let msg = format!("hygiene: untracked/dirty residue on {base}");
+            let (ok, _) = git.raw(wd, &["stash", "push", "-u", "-m", &msg]).await;
+            if ok {
+                self.log_git(&format!(
+                    "hygiene: stashed residue blocking checkouts on {base} — `git stash list`"
                 ))
                 .await;
             }

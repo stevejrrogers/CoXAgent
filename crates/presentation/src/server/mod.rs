@@ -32,7 +32,9 @@ use tokio::sync::RwLock;
 use tokio_stream::wrappers::IntervalStream;
 use tokio_stream::{Stream, StreamExt};
 
-use crate::middleware::{cors_layer, rate_limit_mw, RateLimiter, AUTH_RATE_MAX, AUTH_RATE_WINDOW};
+use crate::middleware::{
+    cors_layer, rate_limit_mw, telemetry_mw, RateLimiter, AUTH_RATE_MAX, AUTH_RATE_WINDOW,
+};
 
 mod assets;
 mod auth;
@@ -45,11 +47,13 @@ mod docs;
 mod downloads;
 mod engines;
 mod forge;
+mod goals;
 mod guards;
 mod hub_docs;
 mod inbox;
 mod manage;
 mod meetings;
+mod metrics_admin;
 mod openapi;
 mod people;
 mod pr_listing;
@@ -57,6 +61,8 @@ mod projects;
 mod realtime;
 mod requests;
 mod security;
+mod share_link;
+mod share_page;
 mod status;
 mod store_rpc;
 mod transcripts;
@@ -79,6 +85,7 @@ use hub_docs::*;
 use inbox::*;
 use manage::*;
 use meetings::*;
+use metrics_admin::spawn_metrics_admin;
 use openapi::*;
 use people::*;
 use pr_listing::*;
@@ -86,6 +93,8 @@ use projects::*;
 use realtime::*;
 use requests::*;
 use security::*;
+use share_link::*;
+use share_page::*;
 use status::*;
 use transcripts::*;
 use work::*;
@@ -724,7 +733,10 @@ pub async fn serve_full(
             "/api/projects/:pid",
             axum::routing::delete(delete_project_ep).patch(rename_project_ep),
         )
-        .route("/api/projects/:pid/store", post(store_rpc::store_rpc_ep))
+        .route(
+            "/api/projects/:pid/store",
+            post(store_rpc::store_rpc_ep).get(store_rpc::store_audit_ep),
+        )
         .route("/api/projects/:pid/state", get(state_ep))
         .route("/api/projects/:pid/metrics", get(metrics_ep))
         .route(
@@ -732,6 +744,10 @@ pub async fn serve_full(
             get(metrics_summary_ep),
         )
         .route("/api/projects/:pid/metrics/trends", get(metrics_trends_ep))
+        .route(
+            "/api/projects/:pid/metrics/burndown",
+            get(metrics_burndown_ep),
+        )
         .route("/api/projects/:pid/agent-evals", get(agent_evals_ep))
         .route("/api/projects/:pid/runner", get(runner_ep))
         .route("/api/projects/:pid/workers", get(workers_ep))
@@ -739,8 +755,26 @@ pub async fn serve_full(
         .route("/api/projects/:pid/audit", get(audit_ep))
         .route("/api/projects/:pid/config", get(get_config).put(put_config))
         .route("/api/projects/:pid/control/:action", post(control_ep))
+        .route("/api/projects/:pid/burn-mode", post(burn_mode_ep))
         .route("/api/projects/:pid/sprint/goal", post(set_sprint_goal_ep))
         .route("/api/projects/:pid/sprint/close", post(sprint_close_ep))
+        .route("/api/projects/:pid/sprint-queue", post(queue_sprint_ep))
+        .route(
+            "/api/projects/:pid/sprint-queue/:qid/scope",
+            post(queue_scope_ep),
+        )
+        .route(
+            "/api/projects/:pid/sprint-queue/:qid/rename",
+            post(queue_rename_ep),
+        )
+        .route(
+            "/api/projects/:pid/sprint-queue/:qid/move/:dir",
+            post(queue_move_ep),
+        )
+        .route(
+            "/api/projects/:pid/sprint-queue/:qid",
+            axum::routing::delete(queue_delete_ep),
+        )
         .route("/api/projects/:pid/sprint/:action", post(sprint_scope_ep))
         .route("/api/projects/:pid/digest", post(digest_ep))
         .route("/api/projects/:pid/merge-sweep", post(merge_sweep_ep))
@@ -764,6 +798,18 @@ pub async fn serve_full(
         .route("/api/me/agents", get(my_agents_ep))
         .route("/join/:token", get(join_page_ep))
         .route("/api/workspace/join", post(join_ep))
+        // Public share-link status page (CXA-F069): the token IS the
+        // credential, so no session is required (allowlisted in auth_mw).
+        .route("/s/:token", get(share_page_ep))
+        // Share-link management (admin): mint, list, revoke.
+        .route(
+            "/api/projects/:pid/share-links",
+            get(share_link_list_ep).post(share_link_create_ep),
+        )
+        .route(
+            "/api/projects/:pid/share-links/:token",
+            axum::routing::delete(share_link_revoke_ep),
+        )
         .route(
             "/api/projects/:pid/operators/:operator/:action",
             post(operator_control_ep),
@@ -808,15 +854,31 @@ pub async fn serve_full(
         .route("/api/projects/:pid/ticket/:id/priority", post(set_priority))
         .route("/api/projects/:pid/ticket/:id/reject", post(reject_ticket))
         .route(
+            "/api/projects/:pid/ticket/:id/status/:action",
+            post(hold_ticket_ep),
+        )
+        .route(
             "/api/projects/:pid/ticket/:id/approve-cost",
             post(approve_cost),
         )
         .route("/api/projects/:pid/inbox", get(inbox_ep))
+        .route("/api/projects/:pid/goals", post(goals::add_goal_ep))
+        .route("/api/projects/:pid/goals/outcomes", get(goals::outcomes_ep))
+        .route(
+            "/api/projects/:pid/goals/:gid/rename",
+            post(goals::rename_goal_ep),
+        )
+        .route(
+            "/api/projects/:pid/ticket/:id/goal",
+            post(goals::ticket_set_goal_ep),
+        )
         .route("/api/projects/:pid/pr/:number/human", post(human_pr_ep))
+        .route("/api/projects/:pid/reverts/:sha", post(revert_decision_ep))
         .route("/api/projects/:pid/attachment", get(attachment_ep))
         .route(
             "/api/projects/:pid/ticket/:id/attachments",
             post(upload_attachment_ep)
+                .delete(delete_attachment_ep)
                 .layer(axum::extract::DefaultBodyLimit::max(25 * 1024 * 1024)),
         )
         .route("/api/projects/:pid/ticket/:id/ready", post(human_ready_ep))
@@ -919,6 +981,24 @@ pub async fn serve_full(
             trust_proxy,
         )
     }));
+
+    // --- HTTP telemetry layer (outermost, CXA-C039) ---
+    // Sits outside CORS/rate-limit/auth so the recorded status is the one the
+    // client actually sees (429s included), exactly once per request. The
+    // registry is shared with the metrics admin listener below; its creation
+    // also starts the uptime clock.
+    let registry = Arc::new(coxagent_application::MetricsRegistry::new());
+    let telemetry_registry = Arc::clone(&registry);
+    let app = app.layer(axum::middleware::from_fn(move |req, next| {
+        telemetry_mw(req, next, Arc::clone(&telemetry_registry))
+    }));
+
+    // --- Metrics admin listener (CXA-C039) ---
+    // Served by gateway/realtime roles (and the all-in-one); knowledge pods
+    // run batch loops only — same surface rule as the Redis bus bridge.
+    if !matches!(hub_role(), HubRole::Knowledge) {
+        spawn_metrics_admin(registry);
+    }
 
     // Bind loopback by default (safe for local use); a container sets
     // COXAGENT_HOST=0.0.0.0 so published ports are reachable from the host.
@@ -1078,10 +1158,44 @@ struct SprintGoalReq {
     goal: String,
 }
 
+/// Turn the human burn mode (CXA-F030) on/off and set its numeric exit gate.
+#[derive(serde::Deserialize)]
+struct BurnModeReq {
+    enabled: bool,
+    /// Clear the mode by itself once the open-bug count reaches this;
+    /// `null` keeps it on until switched off by hand.
+    #[serde(default)]
+    target: Option<u32>,
+}
+
 /// Which tickets to pull into (or drop from) the running sprint.
 #[derive(serde::Deserialize)]
 struct SprintScopeReq {
     tickets: Vec<String>,
+}
+
+/// Why a ticket is being put on hold.
+#[derive(serde::Deserialize)]
+struct HoldReq {
+    #[serde(default)]
+    reason: String,
+}
+
+/// A sprint queued to run after the current one (goal + optional ticket picks).
+#[derive(serde::Deserialize)]
+struct QueueSprintReq {
+    goal: String,
+    #[serde(default)]
+    tickets: Vec<String>,
+}
+
+/// Ticket adds/removes on one queued sprint.
+#[derive(serde::Deserialize)]
+struct QueueScopeReq {
+    #[serde(default)]
+    add: Vec<String>,
+    #[serde(default)]
+    remove: Vec<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1120,3 +1234,15 @@ mod cors_rate_limit_tests;
 mod pr_preview_tests;
 #[cfg(test)]
 mod pr_review_gate_tests;
+#[cfg(test)]
+mod share_link_tests;
+#[cfg(test)]
+mod store_rpc_audit_tests;
+#[cfg(test)]
+mod store_rpc_auth_enforcement_tests;
+#[cfg(test)]
+mod store_rpc_guard_tests;
+#[cfg(test)]
+mod store_rpc_stale_write_tests;
+#[cfg(test)]
+mod store_rpc_test_support;

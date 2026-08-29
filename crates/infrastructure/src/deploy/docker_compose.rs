@@ -11,7 +11,7 @@ use tokio::process::Command;
 
 // Deploy may tear down only what [`reclaimable_compose_project`] allows — see
 // that shared policy for why port-eviction must never touch the live hub.
-use super::reclaimable::reclaimable_compose_project;
+use super::reclaimable::{reclaimable_compose_project, reclaimable_raw_container};
 
 const COMPOSE_FILES: &[&str] = &[
     "docker-compose.yml",
@@ -636,27 +636,28 @@ async fn apply_resource_limits(proj: &str) {
     }
 }
 
-/// The id of ANY container publishing `port` (compose-labelled or not).
-async fn container_on_port(port: &str) -> Option<String> {
+/// The id and name of the first container publishing `port` (compose-labelled
+/// or not). The name is the only ownership signal a label-less container has.
+async fn container_on_port(port: &str) -> Option<(String, String)> {
     let out = Command::new("docker")
         .args([
             "ps",
             "--filter",
             &format!("publish={port}"),
             "--format",
-            "{{.ID}}",
+            "{{.ID}}\t{{.Names}}",
         ])
         .stdin(std::process::Stdio::null())
         .output()
         .await
         .ok()?;
-    let id = String::from_utf8_lossy(&out.stdout)
+    let line = String::from_utf8_lossy(&out.stdout)
         .lines()
-        .next()
-        .unwrap_or("")
-        .trim()
+        .next()?
         .to_owned();
-    (!id.is_empty()).then_some(id)
+    let (id, name) = line.split_once('\t')?;
+    let holder = (id.trim().to_owned(), name.trim().to_owned());
+    (!holder.0.is_empty()).then_some(holder)
 }
 
 /// Deterministic compose project name for a deploy dir: `cox-<parent>-<dir>`
@@ -1189,9 +1190,10 @@ impl DeployPort for DockerComposeDeploy {
         // notices.
         let mut evicted = None;
         // Up to two eviction+retry rounds: round 1 handles a stale compose
-        // project; round 2 (or when no compose label exists) stops whatever
-        // raw container is squatting the port. Docker also needs a beat to
-        // release a freshly-stopped binding, hence the short sleep.
+        // project; round 2 (or when no compose label exists) stops a raw
+        // container squatting the port — but only one demonstrably ours by
+        // name (CXA-B083). Docker also needs a beat to release a
+        // freshly-stopped binding, hence the short sleep.
         for round in 0..2u8 {
             if output.status.success() {
                 break;
@@ -1218,7 +1220,17 @@ impl DeployPort for DockerComposeDeploy {
                     .output()
                     .await;
                 evicted = Some(format!("compose project `{project}`"));
-            } else if let Some(id) = container_on_port(&port).await {
+            } else if let Some((id, name)) = container_on_port(&port).await {
+                // Same ownership policy as compose projects, applied to the
+                // container NAME — the only ownership signal a label-less
+                // container has (CXA-B083). The live hub or shared infra
+                // launched via plain `docker run`, and any foreign container,
+                // are NEVER stopped to free the port; only a demonstrably ours
+                // (`cox-`-named) squatter may be, anything else is reported
+                // as a collision exactly like a protected compose project.
+                if !reclaimable_raw_container(&name) {
+                    break;
+                }
                 let _ = Command::new("docker")
                     .args(["stop", &id])
                     .stdin(std::process::Stdio::null())
@@ -1291,10 +1303,10 @@ impl DeployPort for DockerComposeDeploy {
 mod tests {
     use super::*;
 
-    /// The deploy port-eviction decision routes through the single shared
-    /// reclaimability policy (`crate::deploy::reclaimable`), whose own unit
-    /// tests own the full blast-radius matrix — live hub, shared infra,
-    /// case-insensitivity and foreign projects.
+    // The deploy port-eviction decision routes through the single shared
+    // reclaimability policy (`crate::deploy::reclaimable`), whose own unit
+    // tests own the full blast-radius matrix — live hub, shared infra,
+    // case-insensitivity and foreign projects.
 
     /// Regression guard for CXA-B010 + CXA-B017: every site that runs compose
     /// against this repo's secret-bearing docker-compose.yml must seed

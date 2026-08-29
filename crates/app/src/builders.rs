@@ -40,6 +40,9 @@ pub(crate) async fn make_store(
                 token: std::env::var("COXAGENT_REMOTE_TOKEN")
                     .ok()
                     .filter(|t| !t.is_empty()),
+                // CXA-F029 bug #2: per-deployment request deadline; defaults to
+                // the previously hard-coded 120 s.
+                timeout: RestConfig::timeout_from_env(),
             };
             let store = RestStateStore::new(cfg)?;
             tracing::info!("[{id}] state store: REMOTE gateway");
@@ -428,12 +431,76 @@ pub(crate) async fn build_project(
         let leader = if let Some(r) = build_pr_reporter(&config, auth, id, id).await {
             leader.with_reporter(r)
         } else {
-            leader
+            // Same-process hub: reviews/holds/latency write straight to the
+            // shared store — the Null fallback silently dropped them all.
+            leader.with_reporter(Arc::new(
+                coxagent_application::ports::outbound::StorePrReporter::new(Arc::clone(&store)
+                    as Arc<dyn coxagent_application::ports::outbound::StateStorePort>),
+            ))
         };
         let wh = Arc::clone(&handle);
         tokio::spawn(async move { run_forever(wh, leader, sleep).await });
+
+        // Event-dispatch P1 (docs/proposals/event-dispatch.md): a DEDICATED
+        // review runner on its own fast loop, so a one-hour DEV phase never
+        // delays a ripe PR by a whole cycle. It reuses the full gate stack;
+        // duplicate work across machines is stopped by the per-PR review
+        // lease + head-sha guard. It respects Pause and stops with the hub.
+        if config.git.enabled && forge.is_some() {
+            let reviewer = RunCycleUseCase::new(
+                Arc::clone(&store),
+                engine.clone(),
+                config.clone(),
+                worktree_at(work_dir.clone(), &format!("{id}-review")),
+                context.clone(),
+            )
+            .with_leader_election(false)
+            .with_meter(meter.clone())
+            .with_live_budget(Arc::clone(&live_budget))
+            .with_deploy(Arc::new(DockerComposeDeploy::new()))
+            .with_host_port_probe(host_port_probe)
+            .with_git(Arc::new(coxagent_infrastructure::SystemGit::new()))
+            .with_files(Some(Arc::new(
+                coxagent_infrastructure::FsWorkspaceFiles::new(),
+            )));
+            let mut reviewer = reviewer;
+            reviewer.set_worker(format!("review@{}", worker_host()));
+            let reviewer = if let Some(ref f) = forge {
+                reviewer.with_forge(Arc::clone(f))
+            } else {
+                reviewer
+            };
+            let reviewer =
+                reviewer.with_notifier(build_notifier(Arc::clone(&store), webhook.clone()));
+            let reviewer = if let Some(r) = build_pr_reporter(&config, auth, id, id).await {
+                reviewer.with_reporter(r)
+            } else {
+                // Same-process hub: reviews/holds/latency write straight to
+                // the shared store — the Null fallback silently dropped them.
+                reviewer.with_reporter(Arc::new(
+                    coxagent_application::ports::outbound::StorePrReporter::new(Arc::clone(&store)
+                        as Arc<dyn coxagent_application::ports::outbound::StateStorePort>),
+                ))
+            };
+            let rh = Arc::clone(&handle);
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(90)).await;
+                    let snap = rh.snapshot();
+                    if snap.mode == "stopped" {
+                        break;
+                    }
+                    if snap.mode != "running" {
+                        continue; // paused — the review loop pauses with the team
+                    }
+                    reviewer.run_review_pass().await;
+                }
+            });
+            tracing::info!("[{id}] dedicated review runner armed (90s loop)");
+        }
     }
 
+    crate::spawn_worktree_janitor(work_dir.clone());
     tracing::info!(
         "[{id}] spawning {} worker runner(s) (total {} runners)",
         concurrency.saturating_sub(1),
@@ -452,6 +519,11 @@ pub(crate) async fn build_project(
             slot_dir,
             context.clone(),
         )
+        // Co-located slots never compete for the machine's leader lease —
+        // rotation across slots produced the scorecard-numbering and
+        // version-ping-pong bugs. Machine-level election (slot 0) remains,
+        // so multi-machine teams still fail ceremonies over.
+        .with_leader_election(false)
         .with_meter(meter.clone())
         .with_live_budget(Arc::clone(&live_budget))
         .with_deploy(Arc::new(DockerComposeDeploy::new()))
@@ -486,7 +558,12 @@ pub(crate) async fn build_project(
         let worker = if let Some(r) = build_pr_reporter(&config, auth, id, id).await {
             worker.with_reporter(r)
         } else {
-            worker
+            // Same-process hub: reviews/holds/latency write straight to the
+            // shared store — the Null fallback silently dropped them all.
+            worker.with_reporter(Arc::new(
+                coxagent_application::ports::outbound::StorePrReporter::new(Arc::clone(&store)
+                    as Arc<dyn coxagent_application::ports::outbound::StateStorePort>),
+            ))
         };
         let wh = Arc::clone(&handle);
         tokio::spawn(async move { run_forever(wh, worker, Duration::from_secs(5)).await });
@@ -892,7 +969,7 @@ pub(crate) async fn build_pr_reporter(
 ) -> Option<Arc<dyn coxagent_application::ports::outbound::PrReporterPort>> {
     let server_url = config.git.server_url.trim();
     if server_url.is_empty() {
-        return None;
+        return None; // in-process runners get a StorePrReporter from the caller
     }
     let token = match auth {
         Some(auth) => ensure_internal_pr_token(auth, identity).await?,

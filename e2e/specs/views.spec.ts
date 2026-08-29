@@ -6,7 +6,7 @@ test('overview draws its KPI tiles', async ({ page }) => {
   const errors: string[] = [];
   armConsoleGate(page, errors);
   await openApp(page);
-  for (const label of ['Shipped', 'In flight', 'Open bugs', 'Documented', 'Releases']) {
+  for (const label of ['Shipped', 'In flight', 'Documented', 'Releases']) {
     await expect(page.locator('#kpis')).toContainText(label);
   }
   await assertNoConsoleErrors(errors);

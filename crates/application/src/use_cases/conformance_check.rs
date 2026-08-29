@@ -85,7 +85,7 @@ impl<S: StateStorePort> RunConformanceUseCase<S> {
             if existing.contains(&title.to_lowercase()) {
                 continue;
             }
-            let id = adder
+            let outcome = adder
                 .execute(AddTicketInput {
                     ticket_type: TicketType::Bug,
                     title,
@@ -94,9 +94,18 @@ impl<S: StateStorePort> RunConformanceUseCase<S> {
                     complexity: Complexity::Medium,
                     has_ui: false,
                     acceptance_criteria: Vec::new(),
+                    goal: None,
                 })
-                .await?;
-            filed.push(id);
+                .await;
+            match outcome {
+                Ok(id) => filed.push(id),
+                // Two drifts can share a theme in one sweep; the gate refusing
+                // the second is correct — skip it, never abort the sweep.
+                Err(e)
+                    if e.to_string()
+                        .contains(crate::use_cases::add_ticket::DUPLICATE_REFUSED) => {}
+                Err(e) => return Err(e),
+            }
         }
         Ok(filed)
     }

@@ -37,6 +37,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 complexity: Complexity::Medium,
                 has_ui: false,
                 acceptance_criteria: vec!["The full test suite passes".to_owned()],
+                goal: None,
             })
             .await
             .ok()
@@ -271,6 +272,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     complexity: coxagent_domain::ticket::Complexity::Small,
                     has_ui: true,
                     acceptance_criteria: Vec::new(),
+                    goal: None,
                 })
                 .await
             {

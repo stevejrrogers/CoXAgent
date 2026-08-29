@@ -1028,6 +1028,27 @@
   .acitem{display:flex;gap:8px;align-items:flex-start;font-size:13px;color:var(--text);line-height:1.5;background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:7px 11px}
   .acitem i{color:var(--accent2);font-size:15px;margin-top:1px;flex:none}
   .tclist{margin-top:8px;display:flex;flex-direction:column;gap:8px}
+  /* Ticket-detail tabs (CXA-F024): Details | Test Coverage. */
+  .tk-tabs{display:flex;gap:8px;margin:10px 0 4px}
+  .tk-tab{display:inline-flex;align-items:center;gap:6px;background:transparent;border:1px solid transparent;
+    border-radius:10px;color:var(--muted);padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer;
+    font-family:inherit;transition:background .15s,color .15s,border-color .15s}
+  .tk-tab:hover{background:color-mix(in srgb,var(--text) 6%,transparent)}
+  .tk-tab.on{background:color-mix(in srgb,var(--accent) 14%,transparent);color:var(--accent2)}
+  .cov-row{display:flex;gap:12px;align-items:flex-start;padding:10px 2px;border-bottom:1px solid var(--border)}
+  .cov-row:last-child{border-bottom:none}
+  .cov-badge{flex:none;min-width:150px;display:inline-flex;align-items:center;gap:5px;font-size:10px;font-weight:700;
+    letter-spacing:.4px;text-transform:uppercase;margin-top:2px}
+  .cov-body{flex:1;min-width:0}
+  .cov-ac{font-size:13px;color:var(--text);line-height:1.55}
+  .cov-srcs{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+  .cov-src{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:var(--card2);
+    border:1px solid var(--border);border-radius:20px;padding:2px 8px;color:var(--muted);
+    font-family:ui-monospace,Menlo,monospace;font-size:11.5px}
+  .cov-empty{display:flex;flex-direction:column;align-items:center;text-align:center;padding:26px 8px}
+  .cov-empty i{font-size:34px;color:var(--accent);opacity:.7}
+  .cov-empty-t{margin-top:8px;font-size:15px;font-weight:600;color:var(--muted)}
+  .cov-empty-s{margin-top:4px;font-size:12.5px;color:var(--dim)}
   .tcitem{display:flex;flex-direction:column;gap:6px;background:var(--card2);border:1px solid var(--border);border-radius:9px;padding:9px 11px}
   .tcrow{display:flex;gap:8px;align-items:center}
   .tcrow>i{font-size:15px;flex:none}
@@ -1717,3 +1738,42 @@ textarea.np-in{resize:vertical;line-height:1.5}
 .cps-bar{height:8px;border-radius:4px;background:var(--accent2);opacity:.65;min-width:4px}
 .cps-val{font-size:11px;color:var(--muted)}
 .tso-skew{font-size:10px;color:var(--amber);background:color-mix(in srgb,var(--amber) 12%,transparent);border-radius:6px;padding:1px 6px;white-space:nowrap}
+.chatmore{display:flex;justify-content:center;padding:8px 0}
+.attlight{position:fixed;inset:0;background:rgba(8,10,14,.88);display:none;z-index:300;
+  align-items:center;justify-content:center;flex-direction:column;gap:10px;cursor:zoom-out}
+.attlight.open{display:flex}
+.attlight img{max-width:92vw;max-height:84vh;border-radius:10px;background:#fff}
+.attlight iframe{width:88vw;height:84vh;border:none;border-radius:10px;background:#fff}
+.attlight-name{color:#dfe6ec;font-size:13px}
+.attlight-nav{position:absolute;top:50%;transform:translateY(-50%);width:44px;height:64px;
+  border:none;border-radius:10px;background:rgba(255,255,255,.12);color:#fff;font-size:30px;
+  cursor:pointer;line-height:1}
+.attlight-nav:hover{background:rgba(255,255,255,.24)}
+.attlight-nav.prev{left:14px}.attlight-nav.next{right:14px}
+.att-card{position:relative}
+.att-del{position:absolute;top:4px;right:4px;width:20px;height:20px;border:none;border-radius:50%;
+  background:rgba(0,0,0,.55);color:#fff;font-size:14px;line-height:1;cursor:pointer;
+  display:none;align-items:center;justify-content:center;z-index:2}
+.att-card:hover .att-del{display:flex}
+.att-del:hover{background:var(--red,#d33)}
+
+/* Sprint queue (Work → Backlog): running sprint, queued plans, backlog list. */
+.spq-card{margin-bottom:10px;padding:12px 14px;transition:border-color .15s,background .15s}
+.spq-card.spq-hot{border-color:var(--accent2);background:var(--accentbg)}
+.spq-active{border-left:3px solid var(--accent2)}
+.spq-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.spq-ord{font-size:10.5px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:var(--amber)}
+.spq-goal{font-size:13px;font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.spq-n{font-size:11px;color:var(--dim)}
+.spq-by{font-size:10.5px;color:var(--dim);border:1px solid var(--border2);border-radius:20px;padding:1px 8px}
+.spq-tk{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.spq-chip{font-size:11px;font-family:ui-monospace,Menlo,monospace;border:1px solid var(--border2);border-radius:6px;padding:2px 7px;cursor:pointer;display:inline-flex;align-items:center;gap:5px}
+.spq-chip:hover{border-color:var(--accent2)}
+.spq-chip .ti-x{font-size:10px;color:var(--dim)} .spq-chip .ti-x:hover{color:var(--red)}
+
+/* Agent card engine-health line (Agents view). */
+.ag-health{margin-top:6px;font-size:11px;color:var(--amber);display:flex;gap:5px;align-items:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ag-health b{font-weight:600}
+/* Backlog bulk-selection bar. */
+.blk-bar{display:flex;gap:8px;align-items:center;padding:8px 12px;border:1px solid var(--accent2);border-radius:10px;background:var(--accentbg);margin-bottom:10px;font-size:12px;flex-wrap:wrap}
+.blk-chk{accent-color:var(--accent2);width:14px;height:14px;flex:none;cursor:pointer}

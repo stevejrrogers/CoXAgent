@@ -4,14 +4,18 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod auth;
+pub mod backlog_scoping;
 pub mod codegraph;
 pub mod config;
 pub mod config_parse;
 pub mod conformance;
+pub mod deps_scan;
 pub mod error;
 pub mod faults;
 pub mod metrics;
+pub mod metrics_burndown;
 pub mod metrics_health;
+pub mod metrics_registry;
 pub mod parsing;
 pub mod policy;
 pub mod ports;
@@ -33,9 +37,14 @@ pub use config::{
 };
 pub use config_parse::{parse_config, ConfigParseError};
 pub use error::{AppError, PortError};
+pub use metrics_registry::{
+    encode_prometheus, label_bucket, MetricsRegistry, HTTP_REQUESTS, HTTP_REQUEST_DURATION,
+    PROCESS_UPTIME, PROMETHEUS_CONTENT_TYPE,
+};
 pub use state::{
-    Attachment, Channel, ChatMsg, Comment, DesignSystem, DocPage, HealthCheckResult, Milestone,
-    PrReview, ProjectState, Reaction, Spend, Sprint, GENERAL_CHANNEL, SCHEMA_VERSION,
+    Attachment, Channel, ChatMsg, Comment, DesignSystem, DocPage, GoalOutcome, GoalOutcomeReport,
+    HealthCheckResult, Milestone, OutcomeLedgerEntry, PrReview, ProjectState, Reaction, Spend,
+    Sprint, UnattributedOutcome, GENERAL_CHANNEL, SCHEMA_VERSION,
 };
 pub use system_chat::{ChatContext, ProjectRef, SystemChat, UserRef, Webhook};
 

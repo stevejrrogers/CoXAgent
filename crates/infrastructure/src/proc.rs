@@ -262,6 +262,11 @@ fn confined_command(program: impl AsRef<OsStr>, work_dir: &Path) -> Command {
             cmd.arg(a);
         }
         cmd.arg("nice").arg("-n").arg("10").arg(program.as_ref());
+        // Own process group, same as the macOS branch above: bwrap must lead
+        // it so kill_group's `kill -9 -<pid>` (a process-GROUP signal) can
+        // actually reap the whole tree on timeout, not just fail silently
+        // because pid never led a group (COX-B046).
+        cmd.process_group(0);
         cmd
     }
 }
@@ -468,6 +473,45 @@ mod tests {
         assert_eq!(status, SandboxStatus::NotRequested);
     }
 
+    /// AC (COX-B046): a sandboxed command on Linux must lead its own process
+    /// group, exactly like the macOS Seatbelt and `low_priority` branches —
+    /// otherwise `kill_group`'s `kill -9 -<pid>` targets a group `pid` never
+    /// led and silently fails, orphaning the whole bwrap tree (and any dev
+    /// server/build it spawned) past a timeout.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn agent_command_leads_its_own_process_group_on_linux() {
+        if !bwrap_available() {
+            return; // no bwrap on this host — nothing to verify here.
+        }
+        let ws = std::env::temp_dir().join(format!("cox-sbx-pgrp-{}", std::process::id()));
+        std::fs::create_dir_all(&ws).unwrap();
+        let (mut c, status) = agent_command("/bin/sh", &ws, true);
+        assert_eq!(status, SandboxStatus::Confined("bwrap"));
+        let mut child = c.arg("-c").arg("sleep 5").spawn().unwrap();
+        let pid = child.id().expect("spawned child has a pid");
+
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        let pgrp: u32 = stat
+            .rsplit(')')
+            .next()
+            .expect("stat has a comm field")
+            .split_whitespace()
+            .nth(2)
+            .expect("stat has a pgrp field")
+            .parse()
+            .expect("pgrp is numeric");
+        assert_eq!(
+            pgrp, pid,
+            "bwrap must lead its own process group (process_group(0)) so \
+             kill_group's process-group signal can reach it and every child \
+             it spawns"
+        );
+
+        let _ = child.kill().await;
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
     /// AC: under `bwrap`, writes outside the workspace/tool-cache allowlist
     /// are denied while reads outside the allowlist remain unrestricted —
     /// the same contract `sandboxed_command_blocks_writes_outside_workspace`
@@ -613,5 +657,37 @@ mod tests {
             .is_ok_and(|s| s.success());
         assert!(!alive, "grandchild {bg} must be dead");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// COX-B046 regression: `kill_group`'s `kill -9 -<pid>` targets a process
+    /// GROUP — it only works if `pid` actually leads one. The macOS arm of
+    /// `confined_command` already calls `process_group(0)`; the Linux (bwrap)
+    /// arm didn't, so a sandboxed agent that hung past its timeout on Linux
+    /// was never reaped and its spawned dev server/build kept running as an
+    /// orphan. Source-inspection, not an execution test, because the Linux
+    /// arm is `#[cfg(target_os = "linux")]` and cannot compile on this host.
+    #[test]
+    fn confined_command_sets_process_group_on_every_platform_arm() {
+        const SRC: &str = include_str!("proc.rs");
+        let start = SRC
+            .find("fn confined_command")
+            .expect("confined_command exists");
+        let body = &SRC[start..];
+        let end = body.find("\n}\n").expect("function body ends");
+        let body = &body[..end];
+        let linux_start = body
+            .find("target_os = \"linux\"")
+            .expect("confined_command has a linux arm");
+        let (macos_arm, linux_arm) = body.split_at(linux_start);
+        assert!(
+            macos_arm.contains("process_group(0)"),
+            "macOS arm must lead its own process group"
+        );
+        assert!(
+            linux_arm.contains("process_group(0)"),
+            "Linux arm must lead its own process group too — otherwise \
+             kill_group's process-group signal silently fails to reap a \
+             timed-out sandboxed agent and its children"
+        );
     }
 }

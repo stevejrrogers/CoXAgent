@@ -416,8 +416,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                         "TDD: ticket {id} ({title}) is about to be implemented. Write \
                          FAILING tests that encode EXACTLY these acceptance criteria — \
                          nothing else, no implementation, no fixing existing tests:\n- {}\n\
-                         Put them where this project keeps tests, compiling but failing \
-                         for the right reason. Commit nothing.",
+                         Put them where this project keeps tests, as PURE function tests \
+                         over the state/domain types that exist in the codebase — never a \
+                         fake HTTP server, host harness or network port. Every fixture must \
+                         be buildable from data the codebase actually has; if an acceptance \
+                         criterion asserts data that does not exist in the codebase, that is \
+                         a design gap — do NOT fabricate it, report it. The tests must \
+                         COMPILE (no word-salad signatures, no invented identifiers) and \
+                         fail only for the missing behaviour. Commit nothing.",
                         criteria.join("\n- ")
                     ),
                     work_dir: self.work_dir.clone(),
@@ -532,9 +538,29 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 // the behaviour we want.
                 if let Some((to, body)) = parse_ask(&o.stdout) {
                     let (key, from) = (id.to_string(), format!("{:?}", self.mode.role()));
+                    // A person-addressed question may be held for their
+                    // focus-window digest (CXA-F176) instead of landing as
+                    // its own interrupt — a pure call over config + clock.
+                    let human = self.config.workflow.human.clone();
+                    let sla = human.question_sla_minutes;
+                    let defer = crate::use_cases::question_batching::should_defer(
+                        &human,
+                        &to,
+                        crate::use_cases::question_batching::now_minutes_utc(),
+                        0,
+                        sla,
+                    );
                     let asked =
                         crate::ports::outbound::mutate_state(self.store.as_ref(), move |st| {
                             if st.ask_question(&key, &from, &to, &body) {
+                                if defer {
+                                    // The question was just pushed: the tail
+                                    // IS the new one, still inside the same
+                                    // write pass.
+                                    if let Some(q) = st.questions.last_mut() {
+                                        q.deferred = true;
+                                    }
+                                }
                                 let msg = format!("❓ {from} → {to}: {body}");
                                 st.post_comment(&from, &msg, Some(key.clone()));
                             }
@@ -1290,7 +1316,13 @@ pub fn parse_ask(stdout: &str) -> Option<(String, String)> {
             continue;
         };
         let role = role.trim().to_uppercase();
-        if !matches!(role.as_str(), "BA" | "SA") {
+        // `ASK @username:` is the agent → human hop (docs/HYBRID_TEAM.md):
+        // the question enters that person's inbox with an SLA. The username
+        // must be a single token — anything else is not an addressee.
+        let is_person = role.len() > 1
+            && role.starts_with('@')
+            && role[1..].chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+        if !matches!(role.as_str(), "BA" | "SA") && !is_person {
             continue;
         }
         let q = question.trim();
@@ -1584,6 +1616,116 @@ mod tests {
         // A bare marker with no real question is not a question.
         assert!(parse_ask("ASK BA: ?").is_none());
         assert!(parse_ask("no question here").is_none());
+    }
+
+    #[test]
+    fn parse_ask_reaches_a_person_by_at_username() {
+        use super::parse_ask;
+        // The agent → human hop (docs/HYBRID_TEAM.md): a question the
+        // answering role cannot ground goes to a named person's inbox.
+        let (to, q) = parse_ask("ASK @luffy: the customer decided archive semantics verbally — soft delete?")
+            .expect("person question");
+        assert_eq!(to, "@LUFFY");
+        assert!(q.starts_with("the customer decided"), "{q}");
+        // Not an addressee: bare marker, whitespace in the name, or empty.
+        assert!(parse_ask("ASK @: is this a question?").is_none());
+        assert!(parse_ask("ASK @luffy zoro: shared question?").is_none());
+        // The role-level hop is untouched.
+        assert!(parse_ask("ASK SA: how does the store behave?").is_some());
+    }
+
+    /// An engine whose only act is to ask a person — the run must park the
+    /// ticket on the question, not on a failure.
+    struct AskEngine;
+    #[async_trait::async_trait]
+    impl AgentEnginePort for AskEngine {
+        fn id(&self) -> &'static str {
+            "ask"
+        }
+        async fn run(&self, _r: AgentRequest) -> Result<AgentOutcome, PortError> {
+            Ok(AgentOutcome {
+                stdout: "ASK @luffy: the customer decided archive semantics verbally — soft \
+                         delete or purge?"
+                    .to_owned(),
+                stderr: String::new(),
+                exit_code: Some(0),
+                usage: None,
+                trace: String::new(),
+                session_id: None,
+                sandbox: SandboxStatus::default(),
+                engine: String::new(),
+            })
+        }
+    }
+
+    /// A focus window that is active RIGHT NOW, whatever time the test runs
+    /// (wraps midnight cleanly for the last two minutes of the day).
+    fn window_covering_now() -> String {
+        let now = crate::use_cases::question_batching::now_minutes_utc();
+        let end = (now + 2) % (24 * 60);
+        format!(
+            "{:02}:{:02}-{:02}:{:02}",
+            now / 60,
+            now % 60,
+            end / 60,
+            end % 60
+        )
+    }
+
+    fn store_with_ready_feature() -> Arc<MemStore> {
+        Arc::new(MemStore {
+            state: Mutex::new(ProjectState {
+                tickets: vec![ready_feature("FEAT-001")],
+                ..ProjectState::default()
+            }),
+        })
+    }
+
+    // (AC1) With a focus window configured for the addressee, a new
+    // person-addressed question is queued (deferred) instead of landing as
+    // its own interrupt.
+    #[tokio::test]
+    async fn a_person_question_inside_their_focus_window_is_held_for_the_digest() {
+        let mut config = Config::default();
+        config.workflow.human.focus_windows.insert(
+            "luffy".to_owned(),
+            crate::config::FocusWindow {
+                window_utc: window_covering_now(),
+                defer_to_digest: true,
+            },
+        );
+        let store = store_with_ready_feature();
+        let uc = RunDevUseCase::new(
+            Arc::clone(&store),
+            Arc::new(AskEngine),
+            config,
+            PathBuf::from("/tmp"),
+            DevMode::Feature,
+        );
+        // The ask parks the run: nothing was "done", the question waits.
+        assert!(uc.execute().await.expect("run").is_none());
+        let state = store.load().await.expect("load");
+        let q = &state.questions[0];
+        assert_eq!(q.to, "@LUFFY");
+        assert!(q.deferred, "held for the owner's focus-window digest");
+        assert!(!q.escalated, "the window, not the SLA, is what holds it");
+    }
+
+    // (AC boundary) Without a window the same question delivers immediately —
+    // today's behaviour, unchanged.
+    #[tokio::test]
+    async fn without_a_focus_window_a_person_question_delivers_immediately() {
+        let store = store_with_ready_feature();
+        let uc = RunDevUseCase::new(
+            Arc::clone(&store),
+            Arc::new(AskEngine),
+            Config::default(),
+            PathBuf::from("/tmp"),
+            DevMode::Feature,
+        );
+        assert!(uc.execute().await.expect("run").is_none());
+        let state = store.load().await.expect("load");
+        assert!(!state.questions[0].deferred);
     }
 
     /// Shells to the real `git` binary — `tree_fingerprint` parses actual

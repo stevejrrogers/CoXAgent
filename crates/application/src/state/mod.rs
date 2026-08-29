@@ -3,16 +3,20 @@
 //! Kept in the application layer because `schema_version` is a persistence
 //! concern; the domain stays free of it.
 
-use coxagent_domain::{DebtSignal, SemVer, Ticket, TicketId};
+use coxagent_domain::{DebtSignal, Goal, SemVer, Ticket, TicketId};
 use serde::{Deserialize, Serialize};
 
 mod chat;
 mod docs;
+mod goals;
+mod integrity;
 mod ops;
 mod work;
 
 pub use chat::*;
 pub use docs::*;
+pub use goals::*;
+pub use integrity::*;
 pub use ops::*;
 pub use work::*;
 
@@ -84,6 +88,11 @@ pub struct ProjectState {
     pub tickets: Vec<Ticket>,
     #[serde(default)]
     pub history: Vec<DeployRecord>,
+    /// Merged-then-reverted work (CXA-F047): revert commits the scan linked to
+    /// shipped tickets, each with a human approve/dismiss verdict. Bounded,
+    /// newest last — approved events are what planning is allowed to learn from.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reverted_work: Vec<RevertEvent>,
     #[serde(default)]
     pub activity: Vec<ActivityEntry>,
     #[serde(default)]
@@ -92,6 +101,18 @@ pub struct ProjectState {
     pub sprint: Option<Sprint>,
     #[serde(default)]
     pub sprints: Vec<SprintRecord>,
+    /// Upcoming sprints prepared ahead of time, consumed front-first at
+    /// rollover. See [`PlannedSprint`].
+    #[serde(default)]
+    pub sprint_queue: Vec<PlannedSprint>,
+    /// Why each on-hold ticket is parked (ticket id → reason). Written on
+    /// hold (human or the auto-hold sweep), cleared on resume.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub hold_reasons: std::collections::BTreeMap<String, String>,
+    /// Per-role engine health (role label → counters), fed by the cycle's
+    /// error report. Rendered on the Agents view.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub role_health: std::collections::BTreeMap<String, RoleHealth>,
     #[serde(default)]
     pub deploy: Option<DeployStatus>,
     /// Discussion threads: per-ticket and team-channel comments.
@@ -129,6 +150,17 @@ pub struct ProjectState {
     /// Product milestones the sprints work toward (authored once by the PO).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub milestones: Vec<Milestone>,
+    /// Declared product goals with stable ids (CXA-F228) — the lines the PO's
+    /// goal gate proposes against. Associations and ledger entries bind to
+    /// `Goal::id`, never to the title, so rewording a goal never rewrites
+    /// attribution. Absent until the first goal is declared.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub goals: Vec<Goal>,
+    /// Append-only outcome ledger (CXA-F228): one entry per ticket that
+    /// reached `Verified`, freezing ticket -> declared goal -> capture commit
+    /// -> verification timestamp. Newest last; see [`MAX_OUTCOME_LEDGER`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outcome_ledger: Vec<OutcomeLedgerEntry>,
     /// Living documentation pages (product + technical) written by agents/humans.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub docs: Vec<DocPage>,
@@ -193,6 +225,13 @@ pub struct ProjectState {
     /// burning tokens forever; entries are dropped when the PR closes.
     #[serde(default)]
     pub pr_fix_attempts: std::collections::BTreeMap<u64, u32>,
+    /// How many times in a ROW the SA reviewer failed to render a verdict on
+    /// each open PR (engine crash / unparseable JSON), so a PR the reviewer
+    /// silently chokes on is surfaced to a human instead of starving forever.
+    /// Cleared whenever the PR gets a real review or the record is reset on
+    /// merge/close.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub pr_review_skips: std::collections::BTreeMap<u64, u32>,
     /// Engine conversation id of the last fix run per PR — the next fix round
     /// RESUMES that conversation (the agent still has the branch, the feedback
     /// and its own changes in context) instead of starting cold. Dropped with
@@ -384,7 +423,30 @@ pub struct ProjectState {
     /// is verified. Consult-only against state — no git ref changes.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub rolled_back_commits: std::collections::BTreeSet<String>,
+    /// One bug-status count per UTC day (`YYYY-MM-DD` → counts), recorded by
+    /// the leader cycle so the burn-down history survives restarts instead of
+    /// leaving only today's snapshot in `metrics::compute` (CXA-F032). Bounded
+    /// by [`MAX_BUG_SNAPSHOT_DAYS`]; every added field is serde-defaulted so
+    /// the schema stays at version 1.
+    #[serde(default)]
+    pub bug_snapshots: std::collections::BTreeMap<String, BugSnapshot>,
 }
+
+/// One day's open/fixed/verified bug counts — the persisted burn-down point
+/// (CXA-F032).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct BugSnapshot {
+    #[serde(default)]
+    pub open: u32,
+    #[serde(default)]
+    pub fixed: u32,
+    #[serde(default)]
+    pub verified: u32,
+}
+
+/// Cap on persisted daily bug snapshots — a full leap year of days; older
+/// entries are dropped as new ones arrive so state cannot grow without bound.
+pub const MAX_BUG_SNAPSHOT_DAYS: usize = 366;
 
 /// Cap on how many incident records are kept (newest first). One per deploy
 /// revision means a storm of failures still stays bounded and readable.
@@ -405,10 +467,14 @@ impl Default for ProjectState {
             current_version: SemVer::default(),
             tickets: Vec::new(),
             history: Vec::new(),
+            reverted_work: Vec::new(),
             activity: Vec::new(),
             spend: Spend::default(),
             sprint: None,
             sprints: Vec::new(),
+            sprint_queue: Vec::new(),
+            hold_reasons: std::collections::BTreeMap::new(),
+            role_health: std::collections::BTreeMap::new(),
             deploy: None,
             comments: Vec::new(),
             reviews: Vec::new(),
@@ -419,6 +485,8 @@ impl Default for ProjectState {
             channels: Vec::new(),
             design_system: None,
             milestones: Vec::new(),
+            goals: Vec::new(),
+            outcome_ledger: Vec::new(),
             docs: Vec::new(),
             doc_folders: Vec::new(),
             doc_refresh: std::collections::BTreeMap::new(),
@@ -431,6 +499,7 @@ impl Default for ProjectState {
             sprint_goal: String::new(),
             last_digest_day: String::new(),
             pr_fix_attempts: std::collections::BTreeMap::new(),
+            pr_review_skips: std::collections::BTreeMap::new(),
             pr_sessions: std::collections::BTreeMap::new(),
             ticket_sessions: std::collections::BTreeMap::new(),
             cost_holds: std::collections::BTreeMap::new(),
@@ -466,6 +535,7 @@ impl Default for ProjectState {
             last_rollback: None,
             incidents: Vec::new(),
             rolled_back_commits: std::collections::BTreeSet::new(),
+            bug_snapshots: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -483,6 +553,41 @@ impl ProjectState {
         if overflow > 0 {
             self.activity.drain(0..overflow);
         }
+    }
+
+    /// Record one detected revert (CXA-F047), deduped by commit sha — the
+    /// ledger and the human decision surface are both keyed by sha, so one
+    /// git undo is one event no matter how attribution drifts between scans.
+    /// A re-scan must never re-flag (or double-count) a commit this ledger
+    /// already holds, whatever its decision. Returns whether the event is
+    /// NEW; callers announce it only then.
+    pub fn record_revert(&mut self, ev: RevertEvent) -> bool {
+        if self.reverted_work.iter().any(|e| e.sha == ev.sha) {
+            return false;
+        }
+        self.reverted_work.push(ev);
+        let overflow = self.reverted_work.len().saturating_sub(MAX_REVERT_EVENTS);
+        if overflow > 0 {
+            self.reverted_work.drain(0..overflow);
+        }
+        true
+    }
+
+    /// Apply a human's approve/dismiss verdict to the revert commit `sha`
+    /// (CXA-F047). Returns whether a PENDING event was found and decided —
+    /// an already-decided event is never re-decided.
+    pub fn decide_revert(&mut self, sha: &str, decision: RevertDecision, by: &str) -> bool {
+        let Some(ev) = self
+            .reverted_work
+            .iter_mut()
+            .find(|e| e.sha == sha && e.decision == RevertDecision::Pending)
+        else {
+            return false;
+        };
+        ev.decision = decision;
+        ev.decided_at = Some(now_rfc3339());
+        ev.decided_by = Some(by.to_owned());
+        true
     }
 
     /// Attach a piece of DoD evidence to a ticket (bounded: 6 per ticket,
@@ -580,6 +685,7 @@ impl ProjectState {
             answered_at: String::new(),
             forwarded: false,
             escalated: false,
+            deferred: false,
         });
         // Keep the log bounded; answered questions age out before open ones.
         while self.questions.len() > 40 {
@@ -724,15 +830,37 @@ impl ProjectState {
 
     /// Record (or replace) the SA agent's latest review verdict for a PR.
     pub fn upsert_review(&mut self, number: u64, decision: &str, summary: &str, head_sha: &str) {
+        // PR-open → verdict latency, from the mirrored open-PR record: the
+        // dispatch model's headline health metric. First verdict wins — a
+        // re-review of a moved head measures the fix loop, not dispatch.
+        let latency_secs = self
+            .open_prs
+            .iter()
+            .find(|p| p.number == number)
+            .and_then(|p| {
+                let fmt = &time::format_description::well_known::Rfc3339;
+                let created = time::OffsetDateTime::parse(&p.created, fmt).ok()?;
+                let secs = (time::OffsetDateTime::now_utc() - created).whole_seconds();
+                u64::try_from(secs).ok()
+            })
+            .or_else(|| {
+                self.reviews
+                    .iter()
+                    .find(|r| r.number == number)
+                    .and_then(|r| r.latency_secs)
+            });
         let review = PrReview {
             number,
             decision: decision.to_owned(),
             summary: summary.to_owned(),
             at: now_rfc3339(),
             head_sha: head_sha.to_owned(),
+            latency_secs,
         };
         if let Some(r) = self.reviews.iter_mut().find(|r| r.number == number) {
+            let first_latency = r.latency_secs.or(review.latency_secs);
             *r = review;
+            r.latency_secs = first_latency;
         } else {
             self.reviews.push(review);
         }

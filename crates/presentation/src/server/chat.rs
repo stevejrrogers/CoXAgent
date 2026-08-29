@@ -71,7 +71,7 @@ pub(super) async fn chat_list_ep(
         .into_iter()
         .filter(|m| m.channel == channel)
         .collect();
-    Json(chat).into_response()
+    Json(paginate_tail(&chat, q.limit, q.before.as_deref())).into_response()
 }
 
 /// Post a team-chat message as the signed-in user. Any authenticated principal
@@ -383,13 +383,43 @@ pub(super) async fn syschat_messages_ep(
         let Ok(state) = p.store.load().await else {
             return internal_error("load failed");
         };
-        return Json(state.chat_in(&room)).into_response();
+        return Json(paginate_tail(
+            &state.chat_in(&room),
+            q.limit,
+            q.before.as_deref(),
+        ))
+        .into_response();
     }
     let sc = app.syschat.inner.lock().await;
     if !sc.can_view(&channel, &user, &ctx) {
         return Json(Vec::<coxagent_application::ChatMsg>::new()).into_response();
     }
-    Json(sc.messages_in(&channel)).into_response()
+    Json(paginate_tail(
+        &sc.messages_in(&channel),
+        q.limit,
+        q.before.as_deref(),
+    ))
+    .into_response()
+}
+
+/// Newest-`limit` slice of a chronologically ordered message list, optionally
+/// only messages strictly OLDER than the `before` id (the load-more cursor).
+/// Order is preserved (oldest→newest within the returned window).
+fn paginate_tail(
+    msgs: &[coxagent_application::ChatMsg],
+    limit: Option<usize>,
+    before: Option<&str>,
+) -> Vec<coxagent_application::ChatMsg> {
+    let limit = limit.unwrap_or(50).clamp(1, 500);
+    let upper = match before {
+        Some(id) => match msgs.iter().position(|m| m.id == id) {
+            Some(i) => i,
+            None => msgs.len(), // unknown cursor: serve the newest window
+        },
+        None => msgs.len(),
+    };
+    let lower = upper.saturating_sub(limit);
+    msgs[lower..upper].to_vec()
 }
 
 /// Post a message to a system channel over REST (WS is the primary path).

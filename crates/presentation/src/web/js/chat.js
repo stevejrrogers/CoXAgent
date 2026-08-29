@@ -141,19 +141,46 @@ function selectChannel(id){
 async function loadChatHistory(){
   const chan=CURCHAN;
   try{
-    const r=await fetch("/api/chat/messages?channel="+encodeURIComponent(chan));
+    // Newest 50 only — history beyond that arrives via loadOlderChat().
+    const r=await fetch("/api/chat/messages?channel="+encodeURIComponent(chan)+"&limit=50");
     if(!r.ok)throw new Error(r.status);
     const data=await r.json();
     if(chan!==CURCHAN)return; // channel switched mid-flight
     CHAT=data;CHAT_LOAD_ERR=false;
+    CHAT_MORE=data.length>=50; // a full window suggests older history exists
   }catch(e){
     if(chan!==CURCHAN)return;
     // Distinguish a failed load from a genuinely empty room (see renderChatList):
     // clear so we never bleed another channel's messages, and flag the error.
-    CHAT=[];CHAT_LOAD_ERR=true;
+    CHAT=[];CHAT_LOAD_ERR=true;CHAT_MORE=false;
   }
   CHAT.forEach(markSeen); // history is not "new" — don't notify for it
   renderChatList(true);
+}
+// Load-more: fetch the window OLDER than the oldest rendered message and
+// prepend, keeping the scroll anchored on what the reader was looking at.
+let CHAT_MORE=false,CHAT_LOADING_MORE=false;
+async function loadOlderChat(){
+  if(CHAT_LOADING_MORE||!CHAT.length)return;
+  CHAT_LOADING_MORE=true;
+  const chan=CURCHAN,oldest=CHAT[0]&&CHAT[0].id;
+  try{
+    const r=await fetch("/api/chat/messages?channel="+encodeURIComponent(chan)
+      +"&limit=50&before="+encodeURIComponent(oldest||""));
+    if(r.ok){
+      const older=await r.json();
+      if(chan===CURCHAN&&older.length){
+        const box=document.getElementById("chat-msgs");
+        const keepH=box?box.scrollHeight:0;
+        older.forEach(markSeen);
+        CHAT=older.concat(CHAT);
+        CHAT_MORE=older.length>=50;
+        renderChatList(false);
+        if(box)box.scrollTop=box.scrollHeight-keepH; // anchor the view
+      }else{CHAT_MORE=false;renderChatList(false);}
+    }
+  }catch(e){}
+  CHAT_LOADING_MORE=false;
 }
 // `parent` is set when the + on a channel row was used: the new room is opened
 // inside that one and starts with its members.
@@ -178,7 +205,7 @@ async function createChannel(parent){
   }catch(e){toasty("could not create channel","err");}
 }
 async function inviteToChannel(){
-  const who=await coxModal({title:"Invite to channel",message:"Username cần mời. Tip: thêm \" +invite\" để họ cũng được quyền mời người khác.",input:{placeholder:"username  (+invite)"},confirmText:"Invite"});
+  const who=await coxModal({title:"Invite to channel",message:"Username to invite. Tip: add \" +invite\" so they can invite others too.",input:{placeholder:"username  (+invite)"},confirmText:"Invite"});
   if(!who||!who.trim())return;
   let user=who.trim(),delegate=false;
   if(/\+invite\s*$/i.test(user)){delegate=true;user=user.replace(/\+invite\s*$/i,"").trim();}
@@ -263,7 +290,7 @@ function renderChannelSettings(){
   }
 }
 async function deleteChannel(id){
-  const ok=await coxModal({title:"Delete #"+id,message:"Xoá channel này và mọi sub-channel của nó? Không hoàn tác được.",confirmText:"Delete"});
+  const ok=await coxModal({title:"Delete #"+id,message:"Delete this channel and all its sub-channels? This cannot be undone.",confirmText:"Delete"});
   if(!ok)return;
   try{
     const r=await fetch("/api/chat/channels/"+encodeURIComponent(id),{method:"DELETE"});
@@ -457,7 +484,13 @@ function applyMode(){
     setTimeout(()=>{const i=document.getElementById("chat-input");if(i)i.focus();},40);}
   // Entering Manage lands on Spaces; leaving it returns to the workspace views.
   if(manage&&!String(CUR).startsWith("mg-"))nav("mg-spaces");
-  if(!manage&&String(CUR).startsWith("mg-"))nav("overview");
+  // Only nav() out of a manage view when landing in WORKSPACE. Going manage →
+  // chat must not call nav(): its exit-chat-on-sidebar-click guard fires on the
+  // internal call and stomps the chat mode we just set (Manage → Chat used to
+  // dump you on Overview). Park CUR quietly instead — the chat overlay covers
+  // the screen, and leaving chat later re-runs this branch and navs properly.
+  if(!manage&&!chat&&String(CUR).startsWith("mg-"))nav("overview");
+  if(chat&&String(CUR).startsWith("mg-"))CUR="overview";
   updateModeBadge();
   try{updateSegments();}catch(e){}
 }
@@ -844,7 +877,7 @@ function renderMeetUpNext(){
                     :d.toLocaleDateString([],{weekday:"short"})+" "+d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
     const live=meetLive(m);
     const n=(m.participants||[]).length;
-    return `<div class="meet-up" onclick="openMeeting('${esc(m.id)}')" title="${esc(m.title)} · ${n} người">
+    return `<div class="meet-up" onclick="openMeeting('${esc(m.id)}')" title="${esc(m.title)} · ${n} people">
       ${live?'<span class="mu-live"></span>':`<span class="mu-time">${esc(when)}</span>`}
       <span class="mu-title">${esc(m.title)}</span>
       ${live?`<span class="mu-join" onclick="event.stopPropagation();joinMeeting('${esc(m.id)}')">Join</span>`:`<span class="mu-time">${n}👤</span>`}</div>`;
@@ -1563,6 +1596,9 @@ function renderChatList(force){
     : '<div class="chatempty"><i class="ti ti-message-circle-2"></i><div>No messages yet</div><span>Say hello to your teammates.</span></div>';
     return;}
   let lastDay="",html="";
+  if(typeof CHAT_MORE!=="undefined"&&CHAT_MORE){
+    html+='<div class="chatmore"><button class="tk-btn" onclick="loadOlderChat()"><i class="ti ti-history"></i> Load older messages</button></div>';
+  }
   let prev=null;
   msgs.forEach(m=>{
     // Deleted messages always render as a tombstone (was inconsistent before:
@@ -1653,7 +1689,7 @@ async function removeAvatar(){
     else toasty(await r.text()||"Could not remove","err");
   }catch(e){toasty("Network error","err");}}
 async function uploadAvatar(input){const f=input.files[0];input.value="";if(!f)return;
-  if(f.size>2*1024*1024){toasty("Ảnh tối đa 2MB","err");return;}
+  if(f.size>2*1024*1024){toasty("Image max 2MB","err");return;}
   const fd=new FormData();fd.append("file",f);
   try{const r=await fetch("/api/profile/avatar",{method:"POST",body:fd});
     if(r.ok){await loadProfiles();try{renderMe();}catch(e){}openProfile("profile");toasty("Avatar updated","ok");renderChatList(true);}
@@ -1756,10 +1792,10 @@ function renderHealth(s){
   el.innerHTML=`<div class="sec" style="margin-top:20px"><i class="ti ti-heart-rate-monitor" style="color:var(--accent2)"></i> Team health</div>
     <div class="hgrid">
       ${card("Sprint velocity",velo,veloSub,"var(--green)")}
-      ${card("WIP (in progress)",wip,wip>6?'high — cân nhắc giảm':'ok',wip>6?'var(--amber)':'var(--text)')}
-      ${card("Open bugs",openBugs,"chưa fix",openBugs>4?'var(--red)':'var(--text)')}
+      ${card("WIP (in progress)",wip,wip>6?'high — consider reducing':'ok',wip>6?'var(--amber)':'var(--text)')}
+      ${card("Open bugs",openBugs,"unfixed",openBugs>4?'var(--red)':'var(--text)')}
       ${card("PR reject rate",reviewTotal?rejectRate+'%':'—',`${appr}✓ / ${chg}✗`,rejectRate>50?'var(--amber)':'var(--text)')}
-      ${card("Refactor debt",refactors,"ticket refactor mở",refactors>0?'var(--amber)':'var(--text)')}
+      ${card("Refactor debt",refactors,"open refactor tickets",refactors>0?'var(--amber)':'var(--text)')}
       ${card("Team memory",mem,"decisions + lessons","var(--accent2)")}
     </div>`;
 }
@@ -1812,6 +1848,20 @@ function depChips(ids){
     const col=done?"var(--green)":(dt?"var(--amber)":"var(--dim)");
     return `<span onclick="showTicket('${id}')" title="${dt?esc(dt.title)+' · '+esc(dt.status):'unknown'}" style="cursor:pointer;display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:3px 8px;border-radius:7px;background:${col}22;color:${col};margin-right:5px">
       <i class="ti ti-${done?'check':'circle'}" style="font-size:11px"></i>${esc(id)}</span>`;}).join("");}
+async function holdTicket(id,hold){
+  let reason="";
+  if(hold){
+    reason=await coxModal({title:"Hold "+id,message:"Why is it parked? Shown on the ticket so future-you knows what unblocks it.",input:{placeholder:"e.g. waiting on GitHub billing"},confirmText:"Hold"});
+    if(reason===undefined||reason===null||reason===false)return;
+  }
+  try{
+    const r=await fetch(api("/ticket/"+encodeURIComponent(id)+"/status/"+(hold?"hold":"resume")),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({reason:String(reason||"")})});
+    if(!r.ok){toasty((await r.text())||"Status change failed","err");return;}
+    toasty(hold?`${id} on hold — sprints skip it until resumed`:`${id} resumed`);
+    close_('ov-ticket');await refreshDisc();
+  }catch(e){toasty("Network error","err");}
+}
+
 async function showTicket(id){
   // Full detail (incl. design specs stripped from list payloads) loads on demand.
   const body=document.getElementById("ticket-body");
@@ -1819,11 +1869,27 @@ async function showTicket(id){
   document.getElementById("ov-ticket").classList.add("open");
   let t=null;try{t=await(await fetch(api("/ticket/"+encodeURIComponent(id)))).json();}catch(e){}
   if(!t||!t.id){t=(STATE.tickets||[]).find(x=>x.id===id);}
-  if(!t){body.innerHTML='<span class="x" onclick="close_(\'ov-ticket\')"><i class="ti ti-x"></i></span><div class="empty">ticket not found</div>';return;}
+  if(!t){
+    // Hub chat mentions tickets from EVERY project; the viewer may be sitting
+    // in another one. Find the ticket's home, switch there, and reopen.
+    try{
+      const ov=await(await fetch("/api/workspace/overview")).json();
+      for(const p of (ov.projects||[])){
+        if(p.id===PID)continue;
+        const rr=await fetch("/api/projects/"+encodeURIComponent(p.id)+"/ticket/"+encodeURIComponent(id));
+        if(rr.ok){switchProject(p.id);setTimeout(()=>showTicket(id),900);return;}
+      }
+    }catch(e){}
+    body.innerHTML='<span class="x" onclick="close_(\'ov-ticket\')"><i class="ti ti-x"></i></span><div class="empty">ticket not found in any project</div>';return;}
   const d=t.design||{},tech=d.technical,ux=d.ux,ac=t.acceptance_criteria||[];
   let h=`<span class="x" onclick="close_('ov-ticket')"><i class="ti ti-x"></i></span><h3>${esc(t.title)}</h3>
     <div class="msub">${esc(t.id)} · ${esc(t.type)}</div>
-    <div class="mrow"><span class="lbl">Status</span><b>${esc(t.status)}</b></div>
+    <div class="tk-tabs" role="tablist">
+      <button class="tk-tab on" data-tk-tab="details" onclick="tkTab('details')"><i class="ti ti-list-details"></i> Details</button>
+      <button class="tk-tab" data-tk-tab="coverage" onclick="tkTab('coverage')"><i class="ti ti-shield-check"></i> Test Coverage</button>
+    </div>
+    <div class="tk-pane" id="tk-pane-details">
+    <div class="mrow"><span class="lbl">Status</span><b>${t.status==="on_hold"?'<span style="color:var(--amber)">on hold</span>':esc(t.status)}</b>${t.status==="on_hold"&&(STATE.hold_reasons||{})[t.id]?`<span style="font-size:11.5px;color:var(--dim);margin-left:8px">· ${esc(STATE.hold_reasons[t.id])}</span>`:""}${(typeof canManage==="function"&&canManage())?(["pending","ready","open"].includes(t.status)?` <button class="tk-btn" style="margin-left:10px" onclick="holdTicket('${t.id}',true)" title="Park it — sprints and agents skip it until resumed"><i class="ti ti-player-pause"></i> Hold</button>`:(t.status==="on_hold"?` <button class="tk-btn go" style="margin-left:10px" onclick="holdTicket('${t.id}',false)"><i class="ti ti-player-play"></i> Resume</button>`:"")):""}</div>
     <div class="mrow"><span class="lbl">Priority</span>
       <div style="display:flex;gap:6px;align-items:center">
         ${["high","medium","low"].map(p=>`<span onclick="setPriority('${t.id}','${p}')" style="cursor:pointer;font-size:11px;padding:3px 10px;border-radius:7px;font-weight:600;${t.priority===p?`background:var(--accentbg);color:var(--accent2)`:'background:var(--card2);color:var(--muted)'}">${p}</span>`).join("")}
@@ -1852,18 +1918,23 @@ async function showTicket(id){
   if(ux)h+=`<div class="mrow" style="display:block;border:none"><span class="lbl">UI/UX spec</span><pre>${esc(ux.user_flow)}\nscreens: ${esc((ux.screens||[]).join(", "))}</pre></div>`;
   // Design attachments: PD mockups + user uploads. Bytes come from blob
   // storage via the attachment endpoint; records live on the state.
-  {const atts=((window.STATE&&STATE.ticket_attachments)||{})[t.id]||[];
-   const grid=atts.map(a=>{
-     const u=api("/attachment?key="+encodeURIComponent(a.key));
-     const isImg=(a.content_type||"").startsWith("image/");
-     return isImg
-       ?`<a href="${esc(u)}" target="_blank" class="att-card" title="${esc(a.name)} · ${esc(a.by)}"><img src="${esc(u)}" alt="${esc(a.name)}" loading="lazy"><span>${esc(a.name)}</span></a>`
-       :`<a href="${esc(u)}" target="_blank" class="att-card att-file" title="${esc(a.name)} · ${esc(a.by)}"><i class="ti ti-file"></i><span>${esc(a.name)}</span></a>`;
+  {const atts=(t.attachments)||((window.STATE&&STATE.ticket_attachments)||{})[t.id]||[];
+   // Gallery list for the lightbox: prev/next walks every attachment of the
+   // ticket in grid order. In-app only, never target=_blank: from the desktop
+   // shell a new tab opens an EXTERNAL browser with no session cookie — 401.
+   ATT_GALLERY=atts.map(a=>({url:api("/attachment?key="+encodeURIComponent(a.key)),
+     name:a.name,img:(a.content_type||"").startsWith("image/")}));
+   const grid=ATT_GALLERY.map((g,i)=>{
+     const del=`<button class="att-del" title="Remove attachment" onclick="event.stopPropagation();deleteAttachment('${t.id}','${esc(atts[i].key)}')">&times;</button>`;
+     return g.img
+       ?`<div class="att-card" onclick="event.stopPropagation();showAttachment(${i})" title="${esc(g.name)} · ${esc(atts[i].by)}">${del}<img src="${esc(g.url)}" alt="${esc(g.name)}" loading="lazy"><span>${esc(g.name)}</span></div>`
+       :`<div class="att-card att-file" onclick="event.stopPropagation();showAttachment(${i})" title="${esc(g.name)} · ${esc(atts[i].by)}">${del}<i class="ti ti-file"></i><span>${esc(g.name)}</span></div>`;
    }).join("");
    h+=`<div class="mrow" style="display:block;border:none"><span class="lbl">Design & attachments</span>
      <div class="att-grid" id="att-grid">${grid||'<div style="color:var(--dim);font-size:12px;margin-top:6px">— none yet (PD attaches mockups here)</div>'}</div>
      <input type="file" id="att-file" style="display:none" onchange="uploadAttachment('${t.id}',this)">
      <button class="tk-btn" style="margin-top:8px" onclick="document.getElementById('att-file').click()"><i class="ti ti-paperclip"></i> Attach file</button></div>`;}
+  h+=`</div>`+covPane(t);
   const canWork=["pending","ready","open"].includes(t.status);
   if(t.cost_hold!=null&&!t.cost_approved)h+=`<div class="mrow" style="display:block;border:1px solid var(--amber);border-radius:9px;padding:10px 12px;background:color-mix(in srgb,var(--amber) 9%,transparent)"><span style="color:var(--amber);font-weight:700"><i class="ti ti-currency-dollar"></i> Held for cost approval</span><div style="font-size:12.5px;color:var(--muted);margin-top:4px">Estimated ~$${(+t.cost_hold).toFixed(2)}/run exceeds the approval gate. Agents will skip this ticket until you approve it.</div><button class="pri" style="margin-top:8px" onclick="approveCost('${t.id}')"><i class="ti ti-check"></i> Approve run</button></div>`;
   h+=`<div class="tk-actions">
@@ -1881,6 +1952,65 @@ async function showTicket(id){
   renderTicketComments(t.id);
   // Ticket descriptions can carry ```mermaid fences too (SA designs often do).
   if(typeof renderMermaidIn==="function")renderMermaidIn(body);}
+// Ticket-detail tabs (CXA-F024): Details vs Test Coverage. Pure visibility
+// toggle — both panes render once, switching never refetches.
+function tkTab(name){
+  document.querySelectorAll("#ov-ticket .tk-tab").forEach(b=>b.classList.toggle("on",b.dataset.tkTab===name));
+  for(const p of["details","coverage"]){const el=document.getElementById("tk-pane-"+p);if(el)el.hidden=p!==name;}
+}
+// The Test Coverage pane (CXA-F024): one row per acceptance criterion with its
+// coverage status and the evidence addressing it — test files, or an API
+// request/response for non-UI tickets. Status text is always shown next to its
+// color, so no state rides on color alone.
+function covPane(t){
+  // Absent field (stale snapshot payload, detail fetch failed) renders an
+  // empty pane — same degradation as the Test cases section. Only a PRESENT
+  // empty matrix may claim "no criteria to cover".
+  if(!Array.isArray(t.coverage_matrix))return `<div class="tk-pane" id="tk-pane-coverage" hidden></div>`;
+  const cm=t.coverage_matrix;
+  if(!cm.length)return `<div class="tk-pane" id="tk-pane-coverage" hidden><div class="cov-empty"><i class="ti ti-shield-check"></i><div class="cov-empty-t">No acceptance criteria to cover</div><div class="cov-empty-s">Nothing is gated for verification on this ticket.</div></div></div>`;
+  const meta={covered:["var(--green)","ti-circle-check","COVERED"],partially_covered:["var(--amber)","ti-alert-triangle","PARTIALLY COVERED"],not_tested:["var(--red)","ti-circle-dashed","NOT TESTED"]};
+  const rows=cm.map(e=>{
+    const m=meta[e.status]||meta.not_tested;
+    const srcs=(e.sources||[]).filter(Boolean).map(s=>`<span class="cov-src" title="${esc(s)}">${esc(s)}</span>`).join("");
+    return `<div class="cov-row"><div class="cov-badge" style="color:${m[0]}"><i class="ti ${m[1]}"></i>${m[2]}</div><div class="cov-body"><div class="cov-ac">${esc(e.criterion)}</div>${srcs?`<div class="cov-srcs">${srcs}</div>`:""}</div></div>`;
+  }).join("");
+  return `<div class="tk-pane" id="tk-pane-coverage" hidden><div class="covlist">${rows}</div></div>`;
+}
+// In-app attachment viewer: full-screen overlay, same session. Gallery-aware:
+// ‹ › buttons and ←/→ keys walk ATT_GALLERY; Esc or backdrop click closes.
+// Non-image types render through an <iframe> (PDF etc.).
+let ATT_GALLERY=[],ATT_IDX=0;
+function showAttachment(i){
+  if(!ATT_GALLERY.length)return;
+  ATT_IDX=((i%ATT_GALLERY.length)+ATT_GALLERY.length)%ATT_GALLERY.length;
+  const g=ATT_GALLERY[ATT_IDX];
+  let ov=document.getElementById("att-light");
+  if(!ov){ov=document.createElement("div");ov.id="att-light";ov.className="attlight";
+    ov.onclick=e=>{if(e.target===ov)ov.classList.remove("open");};
+    document.body.appendChild(ov);
+    document.addEventListener("keydown",e=>{
+      if(!ov.classList.contains("open"))return;
+      if(e.key==="Escape")ov.classList.remove("open");
+      else if(e.key==="ArrowLeft")showAttachment(ATT_IDX-1);
+      else if(e.key==="ArrowRight")showAttachment(ATT_IDX+1);});}
+  const many=ATT_GALLERY.length>1;
+  ov.innerHTML=`<div class="attlight-name">${esc(g.name)}${many?` · ${ATT_IDX+1}/${ATT_GALLERY.length}`:''}</div>`
+    +(g.img?`<img src="${esc(g.url)}" alt="${esc(g.name)}">`
+           :`<iframe src="${esc(g.url)}" title="${esc(g.name)}"></iframe>`)
+    +(many?`<button class="attlight-nav prev" onclick="event.stopPropagation();showAttachment(ATT_IDX-1)">‹</button>
+            <button class="attlight-nav next" onclick="event.stopPropagation();showAttachment(ATT_IDX+1)">›</button>`:'');
+  ov.classList.add("open");
+}
+// Remove one attachment record (confirm first), then refresh the modal.
+async function deleteAttachment(id,key){
+  if(!confirm("Remove this attachment?"))return;
+  const r=await fetch(api("/ticket/"+encodeURIComponent(id)+"/attachments?key="+encodeURIComponent(key)),
+    {method:"DELETE"});
+  if(!r.ok){toasty("Delete failed","err");return;}
+  toasty("Attachment removed");
+  showTicket(id);
+}
 // Upload one attachment: raw bytes body, MIME in Content-Type, name in query.
 async function uploadAttachment(id,input){
   const f=input.files&&input.files[0];if(!f)return;
@@ -1994,6 +2124,10 @@ async function loadSettings(){
   try{const r=await fetch(api("/config"));const b=await r.json();if(r.ok)cfg=b;else cfgErr=b;}
   catch(e){cfgErr={error:"the hub could not be reached"};}
   window._cfg=cfg;
+  // The opencode catalog drifts (providers add/remove models); re-ask on every
+  // Settings open instead of once per page session, so the dropdowns and the
+  // stale-model warning below reflect what the CLI offers right now.
+  try{await loadOpencodeModels();}catch(e){}
   if(cfgErr){
     document.getElementById("settings-body").innerHTML=`
       <div class="panel" style="border-color:var(--red)">
@@ -2072,13 +2206,19 @@ async function loadSettings(){
     <div class="settab" data-p="engines">
       ${detBanner}
       <div style="margin:-2px 0 12px"><button onclick="checkAgentSetup(true)" class="btn-ghost"><i class="ti ti-robot"></i> Agent setup guide</button></div>
+      ${(()=>{const d=(cfg.engine&&cfg.engine.default)||{};
+        if(d.engine!=="opencode"||!OC_MODELS.length)return"";
+        const stale=[];
+        const chk=(label,ch)=>{if(ch&&ch.engine==="opencode"&&ch.model&&!OC_MODELS.includes(ch.model))stale.push(`${label}: <code>${esc(ch.model)}</code>`);};
+        chk("default",d);Object.entries((cfg.engine&&cfg.engine.per_role)||{}).forEach(([r,ch])=>chk(r,ch));
+        return stale.length?`<div class="panel" style="border-color:var(--amber);margin-bottom:12px;font-size:12.5px"><i class="ti ti-alert-triangle" style="color:var(--amber)"></i> The provider no longer offers ${stale.join(", ")} — runs on it fail until you pick a model from the current list.</div>`:"";})()}
       <div class="panel frm">${defRow}
         <div class="fr"><span class="lbl">Auto failover</span>
           <select id="eng-autofb"><option value="true" ${(cfg.engine&&cfg.engine.auto_fallback!==false)?'selected':''}>on</option><option value="false" ${(cfg.engine&&cfg.engine.auto_fallback===false)?'selected':''}>off</option></select>
           <span class="hint">on (default): auto-use every installed CLI + a cheaper tier as fallback — no manual list needed</span></div>
         <div class="fr" style="align-items:flex-start"><span class="lbl">Extra fallbacks</span>
-          <textarea id="eng-fallbacks" rows="2" style="flex:1;min-width:0;background:var(--card);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:8px 11px;font-size:12.5px;font-family:ui-monospace,Menlo,monospace" placeholder="one per line: &lt;engine&gt; &lt;model&gt;\ne.g.  opencode gpt-4o\n      gemini gemini-2.0-flash">${(cfg.engine&&cfg.engine.fallbacks||[]).map(f=>`${f.engine} ${f.model}`).join("\n")}</textarea>
-          <span class="hint">tried in order when the primary hits a quota/rate-limit wall or stalls (timeout). Same CLI, cheaper model works too, e.g. <code>claude haiku</code></span></div>
+          <textarea id="eng-fallbacks" rows="2" style="flex:2 1 280px;min-width:220px;background:var(--card);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:8px 11px;font-size:12.5px;font-family:ui-monospace,Menlo,monospace" placeholder="one per line: &lt;engine&gt; &lt;model&gt;\ne.g.  opencode gpt-4o\n      gemini gemini-2.0-flash">${(cfg.engine&&cfg.engine.fallbacks||[]).map(f=>`${f.engine} ${f.model}`).join("\n")}</textarea>
+          <span class="hint" style="flex:1 1 160px;min-width:0">tried in order when the primary hits a quota/rate-limit wall or stalls (timeout). Same CLI, cheaper model works too, e.g. <code>claude haiku</code></span></div>
         <button type="button" class="set-expand ${anyOverride?'open':''}" onclick="toggleRoleOverrides(this)"><i class="ti ti-chevron-right"></i> Per-agent model overrides <span style="color:var(--dim);font-weight:400">· optional — give any agent a different model</span></button>
         <div class="role-overrides" ${anyOverride?'':'hidden'}>${roleRows}</div>
       </div>
@@ -2095,10 +2235,11 @@ async function loadSettings(){
           <input id="wf-sp" type="number" min="1" value="${wf.sprint_length_cycles??10}" style="width:90px;${wf.sprint_unit==='cycles'?'':'display:none'}"/>
           <span class="hint">days = wall-clock sprints (recommended — cycles speed up and slow down); cycles = roll on the loop counter</span></div>
         <div class="fr"><span class="lbl">BA every N cycles</span><input id="wf-ba" type="number" min="0" value="${wf.ba_every_n_cycles??4}" style="width:90px"/><span class="hint">0 disables BA</span></div>
+        <div class="fr"><span class="lbl">DEV scope floor</span><input id="wf-floor" type="number" min="0" value="${wf.dev_scope_floor??4}" style="width:90px"/><span class="hint">keep at least this many actionable tickets committed — the mid-sprint top-up pulls more from the backlog; 0 disables</span></div>
         <div class="fr"><span class="lbl">Feature dev</span><select id="wf-fd"><option value="true" ${wf.feature_dev_enabled!==false?'selected':''}>enabled</option><option value="false" ${wf.feature_dev_enabled===false?'selected':''}>disabled</option></select></div>
         <div class="fr"><span class="lbl">Ops monitor</span><select id="wf-ops"><option value="true" ${wf.ops_monitor!==false?'selected':''}>on</option><option value="false" ${wf.ops_monitor===false?'selected':''}>off</option></select><span class="hint">pings the deployed app; files a bug + alerts on an outage</span></div>
         <div class="fr"><span class="lbl">Token saver</span><select id="wf-ts"><option value="true" ${wf.token_saver!==false?'selected':''}>on — compress diffs/logs &amp; terse agent output</option><option value="false" ${wf.token_saver===false?'selected':''}>off — full verbosity</option></select><span class="hint">cuts engine spend on big reviews with no loss of the actual change</span></div>
-        <div class="fr"><span class="lbl">Agent sandbox</span><select id="wf-sbx"><option value="false" ${wf.sandbox!==true?'selected':''}>off — agents write anywhere your user can</option><option value="true" ${wf.sandbox===true?'selected':''}>on — file writes confined to this workspace (macOS)</option></select><span class="hint">a confused agent can't damage files outside the project; toolchain caches stay writable</span></div>
+        <div class="fr"><span class="lbl">Agent sandbox</span><select id="wf-sbx"><option value="false" ${wf.sandbox!==true?'selected':''}>off — agents write anywhere your user can</option><option value="true" ${wf.sandbox===true?'selected':''}>on — file writes confined to this workspace (macOS Seatbelt / Linux Bubblewrap)</option></select><span class="hint">a confused agent can't damage files outside the project; toolchain caches stay writable</span></div>
         <div class="fr"><span class="lbl">TDD gate</span><select id="wf-tdd"><option value="true" ${wf.tdd!==false?'selected':''}>on — TEST writes failing tests from acceptance criteria before DEV codes</option><option value="false" ${wf.tdd===false?'selected':''}>off</option></select><span class="hint">"done" becomes machine-checkable before implementation starts</span></div>
         <div class="fr"><span class="lbl">Cost approval gate</span><input id="wf-gate" type="number" step="0.5" min="0" placeholder="off" value="${wf.approve_over_usd??''}" style="width:110px"><span class="hint">USD — tickets estimated above this wait for your approval; empty = off</span></div>
         <div class="fr"><span class="lbl">Escalation ladder</span><input id="en-esc" placeholder="engine defaults (claude → opus; opencode → custom providers first)" value="${esc(((cfg.engine||{}).escalation||[]).join(', '))}" style="min-width:280px"><span class="hint">comma-separated models tried on RETRIES of a failed ticket, strongest last</span></div>
