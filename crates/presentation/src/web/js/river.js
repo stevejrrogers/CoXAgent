@@ -11,13 +11,17 @@ function riverUrl(){
   if(RIVER_FPHASE)q.push("phase="+encodeURIComponent(RIVER_FPHASE));
   return "/api/fleet/river"+(q.length?"?"+q.join("&"):"");
 }
+function riverLive(on){
+  const d=document.getElementById("river-live");if(d)d.className="dot "+(on?"live":"off");
+}
 function closeFleetRiver(){if(RIVER_ES){try{RIVER_ES.close();}catch(_){}RIVER_ES=null;}}
 function openFleetRiver(){
   closeFleetRiver();
   renderRiverShell();
+  riverLive(false);
   const es=new EventSource(riverUrl());RIVER_ES=es;
   es.onmessage=e=>{let d=null;try{d=JSON.parse(e.data);}catch(_){return;}handleRiverEvent(d);};
-  es.onerror=()=>{setConn(false);};
+  es.onerror=()=>{setConn(false);riverLive(false);};
 }
 function setRiverProj(v){RIVER_FPROJ=v||"";openFleetRiver();}
 function setRiverPhase(v){RIVER_FPHASE=v||"";openFleetRiver();}
@@ -25,7 +29,7 @@ function renderRiverShell(){
   const el=document.getElementById("river-body");if(!el)return;
   const phases=[["","All phases"]].concat(AGENTS.map(a=>[a[0],a[0]]));
   el.innerHTML=`<div class="panel" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px">
-      <span class="dot live" id="river-live"></span>
+      <span class="dot off" id="river-live"></span>
       <b style="font-size:13px">Live agent activity</b>
       <span style="font-size:11px;color:var(--dim)">every project · every agent · real-time</span>
       <span style="flex:1"></span>
@@ -45,6 +49,13 @@ function handleRiverEvent(d){
     RIVER_PROJECTS=Array.isArray(d.projects)?d.projects:[];
     RIVER_STATES={};
     renderRiverShell();renderRiverStrip();
+    riverLive(true);
+    // A fleet whose every registration is broken has nothing to stream into
+    // the feed — say so instead of leaving a "connecting…" that never lands.
+    if(!RIVER_PROJECTS.some(p=>!p.broken)){
+      const feed=document.getElementById("river-feed");
+      if(feed)feed.innerHTML='<div class="empty">no live agents to stream — fix the broken configs above</div>';
+    }
     setConn(true);
   }else if(d.type==="empty"){
     // The friendly empty-state payload (an empty fleet, or a filter that
@@ -54,6 +65,7 @@ function handleRiverEvent(d){
       <div class="riv-empty-t">${esc(d.message||"Nothing is flowing right now")}</div>
       <div class="riv-empty-s">Add a project from Home, or clear the filters above — the river starts on its own.</div></div>`;
     const strip=document.getElementById("river-strip");if(strip)strip.innerHTML="";
+    riverLive(true);setConn(true);
   }else if(d.type==="project_broken"){
     // A registered project that failed to load keeps its reason marker in the
     // fleet view — visible, actionable, never silently dropped (COX-B043).
@@ -62,6 +74,7 @@ function handleRiverEvent(d){
   }else if(d.type==="project_state"){
     RIVER_STATES[d.project_id]={name:d.name,alias:d.alias,runner:d.runner,needs_human:!!d.needs_human,insufficient:!!d.insufficient_data,viewers:d.viewers};
     renderRiverStrip();
+    riverLive(true);
     setConn(true);
   }else if(d.type==="agent_activity"){
     riverRow(d);
@@ -69,8 +82,8 @@ function handleRiverEvent(d){
 }
 function riverPhaseLabel(s){
   const r=(s&&s.runner)||{};
-  if(r.active_role)return r.active_role.replace(/_/g,"-")+(r.active_note?` · ${esc(r.active_note)}`:"");
-  return r.mode==="running"?`cycle ${r.cycle||0}`:(r.mode||"idle");
+  if(r.active_role)return esc(r.active_role.replace(/_/g,"-"))+(r.active_note?` · ${esc(r.active_note)}`:"");
+  return r.mode==="running"?`cycle ${r.cycle||0}`:esc(r.mode||"idle");
 }
 // The per-project strip: one card per included project — its live runner
 // phase, who is online, and the two flags the river derives for it.
@@ -83,13 +96,13 @@ function renderRiverStrip(){
     if(s&&s.broken)return `<div class="riv-proj" title="${escAttr((s.error||"invalid config")+" — "+(s.config_path||""))}">
       <span class="sdot" style="background:var(--card2)"></span>
       <b class="riv-pname" style="color:var(--muted)">${esc(p.name||p.id)}</b>
-      <span class="riv-human"><i class="ti ti-alert-triangle"></i> NOT LOADED</span>
+      <span class="riv-alert"><i class="ti ti-alert-triangle"></i> NOT LOADED</span>
       <span class="riv-phase">${esc(s.error||"invalid config")}</span>
       <span style="flex:1"></span><span class="riv-insuff">fix the config, then restart the hub</span>
     </div>`;
     const live=s&&s.runner&&s.runner.mode==="running";
     const flags=[];
-    if(s&&s.needs_human)flags.push('<span class="riv-human"><i class="ti ti-hand-stop"></i> HUMAN ACTION NEEDED</span>');
+    if(s&&s.needs_human)flags.push('<span class="riv-alert"><i class="ti ti-hand-stop"></i> HUMAN ACTION NEEDED</span>');
     if(s&&s.insufficient)flags.push('<span class="riv-insuff" title="fewer than two cycles completed">(insufficient data)</span>');
     const online=s&&Array.isArray(s.online)?s.online:[];
     return `<div class="riv-proj">
@@ -110,7 +123,6 @@ function riverRow(d){
   const first=feed.querySelector(".riv-empty, .empty");if(first)first.remove();
   const e=d.entry||{};
   const p=(RIVER_PROJECTS.find(x=>x.id===d.project_id)||{name:d.project_id});
-  const st=RIVER_STATES[d.project_id];
   const col=cvar(AC[e.agent]||"--muted");
   const row=document.createElement("div");
   row.className="riv-row"+(d.needs_human?" riv-needs":"");
@@ -120,7 +132,7 @@ function riverRow(d){
       <span class="tl-act">${esc(e.action||"")}</span>
       ${e.ticket?`<span class="tk">${esc(e.ticket)}</span>`:""}
       <span class="riv-projtag"><span class="sdot" style="background:${projColor(d.project_id)}"></span>${esc(p.name||p.id)}</span>
-      ${d.needs_human?'<span class="riv-human"><i class="ti ti-hand-stop"></i> HUMAN ACTION NEEDED</span>':""}
+      ${d.needs_human?'<span class="riv-alert"><i class="ti ti-hand-stop"></i> HUMAN ACTION NEEDED</span>':""}
     </div>
     <div class="tl-t">${esc(relTime(e.at))}${d.insufficient_data?' · <span class="riv-insuff">(insufficient data)</span>':""}</div></div>`;
   feed.prepend(row);
