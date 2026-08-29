@@ -1800,6 +1800,23 @@ textarea.np-in{resize:vertical;line-height:1.5}
 .spq-chip{font-size:11px;font-family:ui-monospace,Menlo,monospace;border:1px solid var(--border2);border-radius:6px;padding:2px 7px;cursor:pointer;display:inline-flex;align-items:center;gap:5px}
 .spq-chip:hover{border-color:var(--accent2)}
 .spq-chip .ti-x{font-size:10px;color:var(--dim)} .spq-chip .ti-x:hover{color:var(--red)}
+/* Jira-style sprint sections: header row + full ticket rows */
+.spq-sec{padding:10px 12px}
+.spq-chev{background:none;border:none;color:var(--dim);cursor:pointer;padding:2px;display:inline-flex;align-items:center;font-size:14px;border-radius:6px}
+.spq-chev:hover{color:var(--fg);background:var(--border2)}
+.spq-rows{margin-top:8px;border-top:1px solid var(--border2)}
+.spq-row{display:flex;align-items:center;gap:8px;padding:6px 4px;border-bottom:1px solid var(--border2);cursor:pointer;font-size:12.5px;min-width:0}
+.spq-row:last-child{border-bottom:none}
+.spq-row:hover{background:var(--accentbg)}
+.spq-row.spq-done .spq-title{color:var(--dim);text-decoration:line-through}
+.spq-type{flex:none;display:inline-flex;font-size:13px;width:18px;justify-content:center}
+.spq-id{flex:none;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--muted)}
+.spq-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
+.spq-pchip{flex:none;font-size:10px;font-weight:600;border-radius:20px;padding:1px 8px}
+.spq-schip{flex:none;font-size:10px;color:var(--muted);border:1px solid var(--border2);border-radius:20px;padding:1px 8px;text-transform:capitalize}
+.spq-schip.ok{color:var(--green);border-color:color-mix(in srgb,var(--green) 40%,transparent)}
+.spq-row .sp-scope{flex:none;opacity:0;transition:opacity .12s}
+.spq-row:hover .sp-scope{opacity:1}
 
 /* Agent card engine-health line (Agents view). */
 .ag-health{margin-top:6px;font-size:11px;color:var(--amber);display:flex;gap:5px;align-items:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
