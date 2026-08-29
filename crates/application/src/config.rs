@@ -801,7 +801,7 @@ impl Default for GitConfig {
 /// chore. `enabled` is off by default: creating a git tag mutates the managed
 /// codebase's history, so an existing project's release history is never
 /// touched until an operator opts in — the same convention as `GitConfig`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReleasesConfig {
     /// Master switch. When false, the cycle never tags or files releases,
     /// no matter how many milestones have been reached.
@@ -813,6 +813,27 @@ pub struct ReleasesConfig {
     /// a release PR that a person lands from the Inbox. The merge tags it.
     #[serde(default)]
     pub cut_every_days: u64,
+    /// CXA-F231: when true (the default), a cut's version bump and changelog
+    /// are computed ONLY over commit subjects whose ticket references are all
+    /// Verified-complete (`is_verified_complete`) — unverified or ref-less
+    /// subjects never enter the release notes. Turn off to restore the
+    /// pre-F231 all-subjects behavior during migration.
+    #[serde(default = "default_cut_only_verified")]
+    pub cut_only_verified: bool,
+}
+
+fn default_cut_only_verified() -> bool {
+    true
+}
+
+impl Default for ReleasesConfig {
+    fn default() -> Self {
+        ReleasesConfig {
+            enabled: false,
+            cut_every_days: 0,
+            cut_only_verified: default_cut_only_verified(),
+        }
+    }
 }
 
 /// Version of the persisted `coxagent.json` schema this build understands.
@@ -894,6 +915,26 @@ pub struct Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cut_only_verified_defaults_on_and_survives_old_documents() {
+        // CXA-F231: an existing coxagent.json without the knob keeps the
+        // honest-by-default gate ON (documents-old = gate-on, never off).
+        let old = r#"{"releases":{"enabled":true,"cut_every_days":7}}"#;
+        let cfg: serde_json::Value = serde_json::from_str(old).expect("old doc parses");
+        let releases: ReleasesConfig =
+            serde_json::from_value(cfg["releases"].clone()).expect("old releases load");
+        assert!(
+            releases.cut_only_verified,
+            "old documents default the gate on"
+        );
+        // And the explicit opt-out is honored verbatim.
+        let off = r#"{"releases":{"enabled":true,"cut_every_days":7,"cut_only_verified":false}}"#;
+        let cfg: serde_json::Value = serde_json::from_str(off).expect("new doc parses");
+        let releases: ReleasesConfig =
+            serde_json::from_value(cfg["releases"].clone()).expect("new releases load");
+        assert!(!releases.cut_only_verified);
+    }
 
     #[test]
     fn quiet_window_handles_wrap_zero_and_garbage() {
