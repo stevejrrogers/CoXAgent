@@ -36,15 +36,16 @@ pub use config::{
 };
 pub use config_parse::{parse_config, ConfigParseError};
 pub use error::{AppError, PortError};
-pub use state::{
-    Attachment, Channel, ChatMsg, Comment, DesignSystem, DocPage, HealthCheckResult, Milestone,
-    PrReview, ProjectState, Reaction, Spend, Sprint, GENERAL_CHANNEL, SCHEMA_VERSION,
-};
-pub use system_chat::{ChatContext, ProjectRef, SystemChat, UserRef, Webhook};
 pub use metrics_registry::{
-    encode_prometheus, label_bucket, MetricsRegistry, HTTP_REQUEST_DURATION, HTTP_REQUESTS,
+    encode_prometheus, label_bucket, MetricsRegistry, HTTP_REQUESTS, HTTP_REQUEST_DURATION,
     PROCESS_UPTIME, PROMETHEUS_CONTENT_TYPE,
 };
+pub use state::{
+    Attachment, Channel, ChatMsg, Comment, DesignSystem, DocPage, GoalOutcome, GoalOutcomeReport,
+    HealthCheckResult, Milestone, OutcomeLedgerEntry, PrReview, ProjectState, Reaction, Spend,
+    Sprint, UnattributedOutcome, GENERAL_CHANNEL, SCHEMA_VERSION,
+};
+pub use system_chat::{ChatContext, ProjectRef, SystemChat, UserRef, Webhook};
 
 /// Test-only filesystem adapter: the real disk behind the files port, for
 /// tests that build fixtures in a temp dir. `#[cfg(test)]` code may use

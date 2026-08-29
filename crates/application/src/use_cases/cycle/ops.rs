@@ -496,6 +496,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 acceptance_criteria: vec![
                     "The app is reachable and serving a known-good build".to_owned()
                 ],
+                goal: None,
             })
             .await
             .ok()
@@ -562,6 +563,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 complexity: coxagent_domain::ticket::Complexity::Medium,
                 has_ui: false,
                 acceptance_criteria: acceptance,
+                goal: None,
             })
             .await
             .ok()

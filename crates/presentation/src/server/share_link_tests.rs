@@ -24,8 +24,8 @@ use axum::body::Body;
 use coxagent_application::state::ProjectState;
 use std::sync::Arc;
 use store_rpc_test_support::{
-    CountingStore, INSIDE_BEARER, LEAD_ELSEWHERE_SESSION, MEMBER_SESSION, OTHER_PID, PID, StubAuth,
-    app_with, body_text,
+    app_with, body_text, CountingStore, StubAuth, INSIDE_BEARER, LEAD_ELSEWHERE_SESSION,
+    MEMBER_SESSION, OTHER_PID, PID,
 };
 use tower::ServiceExt;
 

@@ -30,8 +30,8 @@ use coxagent_application::{PortError, ProjectState};
 use coxagent_domain::{SemVer, TicketId};
 use coxagent_infrastructure::JsonStateStore;
 use rest_store_support::{
-    boot, handle, now_rfc3339, rest_store, sample_bug, sample_ticket, ADMIN_BEARER, AUTH_PORT,
-    COORD_PORT, JSON_PORT, MEMBER_BEARER, NOW, OCC_PORT, StubAuth, VersionedStore,
+    boot, handle, now_rfc3339, rest_store, sample_bug, sample_ticket, StubAuth, VersionedStore,
+    ADMIN_BEARER, AUTH_PORT, COORD_PORT, JSON_PORT, MEMBER_BEARER, NOW, OCC_PORT,
 };
 
 /// AC1 + AC5, state half: a runner fronted at the gateway satisfies the very
@@ -81,7 +81,10 @@ async fn rest_store_satisfies_state_store_contract_over_the_gateway() {
     with_bug.tickets.push(sample_bug("CXC-101"));
     store.save(&with_bug).await.expect("save bug");
     let id = TicketId::new("CXC-101").expect("id");
-    assert!(store.claim_ticket(&id, "dev@mac", NOW).await.expect("claim"));
+    assert!(store
+        .claim_ticket(&id, "dev@mac", NOW)
+        .await
+        .expect("claim"));
     assert!(
         !store
             .claim_ticket(&id, "other@mac", NOW)
@@ -90,7 +93,10 @@ async fn rest_store_satisfies_state_store_contract_over_the_gateway() {
         "an already-claimed ticket must not be re-won"
     );
     let missing = TicketId::new("CXC-999").expect("id");
-    assert!(!store.claim_ticket(&missing, "dev@mac", NOW).await.expect("missing"));
+    assert!(!store
+        .claim_ticket(&missing, "dev@mac", NOW)
+        .await
+        .expect("missing"));
     let claimed = store.load().await.expect("reload claimed");
     let bug = claimed
         .tickets
@@ -124,24 +130,18 @@ async fn rest_store_drives_coordination_ops_through_the_gateway() {
 
     // 2. Stage leases: exclusive per (ticket, stage), independent across
     // stages.
-    assert!(
-        store
-            .claim_stage(&id, "sa", "dev@mac", NOW)
-            .await
-            .expect("stage claim")
-    );
-    assert!(
-        !store
-            .claim_stage(&id, "sa", "rival@mac", NOW)
-            .await
-            .expect("rival stage denied")
-    );
-    assert!(
-        store
-            .claim_stage(&id, "pd", "rival@mac", NOW)
-            .await
-            .expect("other stage independent")
-    );
+    assert!(store
+        .claim_stage(&id, "sa", "dev@mac", NOW)
+        .await
+        .expect("stage claim"));
+    assert!(!store
+        .claim_stage(&id, "sa", "rival@mac", NOW)
+        .await
+        .expect("rival stage denied"));
+    assert!(store
+        .claim_stage(&id, "pd", "rival@mac", NOW)
+        .await
+        .expect("other stage independent"));
     // 3. Release dispatches through the gateway and succeeds. (Every backend
     // today keeps `release_stage` at the port's no-op default — the lease
     // frees via TTL, not release — so a freed-then-reclaimed assertion here
@@ -183,12 +183,10 @@ async fn rest_store_drives_coordination_ops_through_the_gateway() {
         store.get_desired("operator").await.expect("get_desired"),
         None
     );
-    assert!(
-        store
-            .acquire_operator("operator", "instance-1")
-            .await
-            .expect("acquire_operator")
-    );
+    assert!(store
+        .acquire_operator("operator", "instance-1")
+        .await
+        .expect("acquire_operator"));
 
     // 6. The JSON backend tracks no revisions: `current_version` stays at
     // the port default (`None`), same answer the in-process adapter gives.
@@ -246,7 +244,9 @@ async fn rest_store_rejects_stale_revision_write_with_conflict() {
     };
     match store.save_expecting(&ours_stale, Some(1)).await {
         Err(PortError::Conflict(_)) => {}
-        other => panic!("expected Conflict for a stale rev-1 write over a rev-2 head — got {other:?}"),
+        other => {
+            panic!("expected Conflict for a stale rev-1 write over a rev-2 head — got {other:?}")
+        }
     }
     // The stale revision we captured is what actually crossed the wire.
     assert_eq!(
