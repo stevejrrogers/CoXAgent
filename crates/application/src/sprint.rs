@@ -399,9 +399,21 @@ fn sprint_capacity(state: &ProjectState) -> usize {
         return FLOOR * 2;
     }
     let avg = history.iter().sum::<usize>() / history.len().max(1);
-    // A half-step of stretch over the measured average — enough to pull ahead
-    // on a good sprint, not enough to make the number meaningless again.
-    (avg + avg / 2).max(FLOOR)
+    // Approved reverted work (CXA-F047) is value the velocity history credits
+    // but the product never kept: each human-confirmed revert hands back one
+    // seat, so the next cycle plans against delivery that actually stuck.
+    // DELIBERATE timescale: the discount is durable (per-ticket learning),
+    // unlike the last-5-sprint velocity window — a confirmed revert stays a
+    // fact about that ticket. Only APPROVED events weigh in — a pending
+    // detection may be a false positive and a dismissed one was judged to
+    // be. The ledger is bounded (oldest trimmed) and clamped by FLOOR below,
+    // so the discount can never zero out planning.
+    let reverted = state
+        .reverted_work
+        .iter()
+        .filter(|e| e.decision == crate::state::RevertDecision::Approved)
+        .count();
+    (avg + avg / 2).saturating_sub(reverted).max(FLOOR)
 }
 
 /// How many committed tickets have shipped — for the burndown/progress view.
@@ -615,6 +627,7 @@ pub fn top_up_scope(state: &mut ProjectState, floor: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::SprintRecord;
     use coxagent_domain::{Complexity, Priority, Role, TechnicalDesign, Ticket, TicketType};
 
     fn feature(id: &str) -> Ticket {
@@ -662,6 +675,92 @@ mod tests {
             .expect("design");
         t.transition_to(Role::Sa, Status::Ready).expect("ready");
         t
+    }
+
+    // ---- CXA-F047: approved reverted work discounts next-cycle planning. ----
+
+    fn revert_event(
+        ticket: &str,
+        decision: crate::state::RevertDecision,
+    ) -> crate::state::RevertEvent {
+        let at = crate::state::now_rfc3339();
+        crate::state::RevertEvent {
+            sha: format!("sha-{ticket}"),
+            subject: format!("Revert \"feat({ticket}): w\""),
+            ticket: ticket.to_owned(),
+            role: "DEV-FEATURE".to_owned(),
+            reverted_at: at.clone(),
+            detected_at: at,
+            decision,
+            decided_at: None,
+            decided_by: None,
+        }
+    }
+
+    fn velocity_state(dones: &[usize], reverts: &[crate::state::RevertEvent]) -> ProjectState {
+        ProjectState {
+            sprints: dones
+                .iter()
+                .enumerate()
+                .map(|(i, done)| SprintRecord {
+                    number: u32::try_from(i + 1).unwrap_or(1),
+                    goal: "g".to_owned(),
+                    committed: *done,
+                    done: *done,
+                    at: String::new(),
+                })
+                .collect(),
+            reverted_work: reverts.to_vec(),
+            ..ProjectState::default()
+        }
+    }
+
+    #[test]
+    fn approved_reverts_discount_next_cycle_planning() {
+        // Velocity 6 → capacity 9 (half-step of stretch).
+        let clean = velocity_state(&[6, 6], &[]);
+        assert_eq!(sprint_capacity(&clean), 9);
+        // Only APPROVED events weigh in: a pending detection may be a false
+        // positive and a dismissed one was judged to be.
+        let pending = velocity_state(
+            &[6, 6],
+            &[revert_event(
+                "CXA-F041",
+                crate::state::RevertDecision::Pending,
+            )],
+        );
+        assert_eq!(sprint_capacity(&pending), 9);
+        let dismissed = velocity_state(
+            &[6, 6],
+            &[revert_event(
+                "CXA-F041",
+                crate::state::RevertDecision::Dismissed,
+            )],
+        );
+        assert_eq!(sprint_capacity(&dismissed), 9);
+        let approved = velocity_state(
+            &[6, 6],
+            &[
+                revert_event("CXA-F041", crate::state::RevertDecision::Approved),
+                revert_event("CXA-B002", crate::state::RevertDecision::Approved),
+            ],
+        );
+        assert_eq!(sprint_capacity(&approved), 7);
+    }
+
+    #[test]
+    fn the_revert_discount_never_breaks_the_capacity_floor() {
+        // Even a revert per sprint keeps the sprint meaningful (FLOOR).
+        let reverts: Vec<_> = (0..12)
+            .map(|i| {
+                revert_event(
+                    &format!("CXA-F0{i:02}"),
+                    crate::state::RevertDecision::Approved,
+                )
+            })
+            .collect();
+        let state = velocity_state(&[6, 6], &reverts);
+        assert_eq!(sprint_capacity(&state), 3);
     }
 
     #[test]

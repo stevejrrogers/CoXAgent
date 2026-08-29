@@ -164,6 +164,22 @@ pub(super) async fn inbox_ep(
             "role": "SA/dev", "can_act": my_role.can_review(),
         }));
     }
+    // Merged-then-reverted work (CXA-F047): the scan suspected a shipped
+    // ticket's work was undone. Only a person can confirm it — the verdict is
+    // what planning is allowed to learn from, so unconfirmed suspicions wait
+    // here instead of silently weighting the next sprint.
+    for ev in state
+        .reverted_work
+        .iter()
+        .filter(|e| e.decision == coxagent_application::state::RevertDecision::Pending)
+    {
+        items.push(serde_json::json!({
+            "kind": "reverted_work", "sha": ev.sha,
+            "ticket": ev.ticket, "subject": ev.subject,
+            "role": ev.role, "at": ev.reverted_at,
+            "can_act": my_role.can_review(),
+        }));
+    }
     // PRs approved by the SA but held for human eyes.
     if let Some(forge) = &p.forge {
         if let Ok(prs) = forge.list_open_prs().await {
@@ -355,7 +371,7 @@ pub(super) async fn human_pr_ep(
     State(app): State<AppState>,
     Path((pid, number)): Path<(String, u64)>,
     headers: axum::http::HeaderMap,
-    Json(req): Json<HumanPrReq>,
+    Json(req): Json<HumanActionReq>,
 ) -> axum::response::Response {
     let Some(p) = app.project(&pid).await else {
         return not_found();
@@ -414,10 +430,88 @@ pub(super) async fn human_pr_ep(
     Json(serde_json::json!({ "ok": true, "action": req.action })).into_response()
 }
 
+/// The one-field body every human one-click decision endpoint takes: which
+/// of the two verdicts the person chose ("approve" / "dismiss").
 #[derive(serde::Deserialize)]
-pub(super) struct HumanPrReq {
+pub(super) struct HumanActionReq {
     #[serde(default)]
     pub(super) action: String,
+}
+
+/// POST `/api/projects/:pid/reverts/:sha` — a person decides one detected
+/// revert (CXA-F047). `{"action":"approve"}` confirms the shipped work really
+/// was undone — the only verdict next-cycle planning may learn from;
+/// `{"action":"dismiss"}` records it as a false positive. Already-decided
+/// events are final, so a double submit cannot flip a verdict.
+pub(super) async fn revert_decision_ep(
+    State(app): State<AppState>,
+    Path((pid, sha)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<HumanActionReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Some(me) = gate_principal(&app, &headers, coxagent_application::AuthRole::can_review).await
+    else {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            "your role may not take this decision",
+        )
+            .into_response();
+    };
+    let decision = match req.action.as_str() {
+        "approve" => coxagent_application::state::RevertDecision::Approved,
+        "dismiss" => coxagent_application::state::RevertDecision::Dismissed,
+        other => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("action must be approve or dismiss, got {other}"),
+            )
+                .into_response()
+        }
+    };
+    let verb = if req.action == "approve" {
+        "approved"
+    } else {
+        "dismissed"
+    };
+    let sha = sha.trim().to_owned();
+    if sha.is_empty() {
+        return (axum::http::StatusCode::BAD_REQUEST, "missing sha").into_response();
+    }
+    let mut decided = false;
+    let mut ticket = String::new();
+    if coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        ticket = s
+            .reverted_work
+            .iter()
+            .find(|e| e.sha == sha)
+            .map(|e| e.ticket.clone())
+            .unwrap_or_default();
+        decided = s.decide_revert(&sha, decision, &me);
+        if decided {
+            s.log_activity(
+                "USER",
+                &format!("{me} {verb} reverted work {ticket}"),
+                Some(ticket.clone()),
+            );
+        }
+        Ok(())
+    })
+    .await
+    .is_err()
+    {
+        return internal_error("store write failed");
+    }
+    if !decided {
+        return (
+            axum::http::StatusCode::CONFLICT,
+            "no pending revert with that sha",
+        )
+            .into_response();
+    }
+    Json(serde_json::json!({ "ok": true, "action": req.action })).into_response()
 }
 
 /// POST `/api/projects/:pid/ticket/:id/ready` — a person approves a designed
