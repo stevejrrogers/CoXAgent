@@ -47,6 +47,7 @@ mod docs;
 mod downloads;
 mod engines;
 mod forge;
+mod goals;
 mod guards;
 mod hub_docs;
 mod inbox;
@@ -77,7 +78,6 @@ use chat::*;
 use comments::*;
 use docs::*;
 use downloads::*;
-use metrics_admin::spawn_metrics_admin;
 use engines::*;
 use forge::*;
 use guards::*;
@@ -85,6 +85,7 @@ use hub_docs::*;
 use inbox::*;
 use manage::*;
 use meetings::*;
+use metrics_admin::spawn_metrics_admin;
 use openapi::*;
 use people::*;
 use pr_listing::*;
@@ -732,7 +733,10 @@ pub async fn serve_full(
             "/api/projects/:pid",
             axum::routing::delete(delete_project_ep).patch(rename_project_ep),
         )
-        .route("/api/projects/:pid/store", post(store_rpc::store_rpc_ep))
+        .route(
+            "/api/projects/:pid/store",
+            post(store_rpc::store_rpc_ep).get(store_rpc::store_audit_ep),
+        )
         .route("/api/projects/:pid/state", get(state_ep))
         .route("/api/projects/:pid/metrics", get(metrics_ep))
         .route(
@@ -858,6 +862,16 @@ pub async fn serve_full(
             post(approve_cost),
         )
         .route("/api/projects/:pid/inbox", get(inbox_ep))
+        .route("/api/projects/:pid/goals", post(goals::add_goal_ep))
+        .route("/api/projects/:pid/goals/outcomes", get(goals::outcomes_ep))
+        .route(
+            "/api/projects/:pid/goals/:gid/rename",
+            post(goals::rename_goal_ep),
+        )
+        .route(
+            "/api/projects/:pid/ticket/:id/goal",
+            post(goals::ticket_set_goal_ep),
+        )
         .route("/api/projects/:pid/pr/:number/human", post(human_pr_ep))
         .route("/api/projects/:pid/reverts/:sha", post(revert_decision_ep))
         .route("/api/projects/:pid/attachment", get(attachment_ep))
@@ -1222,6 +1236,8 @@ mod pr_preview_tests;
 mod pr_review_gate_tests;
 #[cfg(test)]
 mod share_link_tests;
+#[cfg(test)]
+mod store_rpc_audit_tests;
 #[cfg(test)]
 mod store_rpc_auth_enforcement_tests;
 #[cfg(test)]

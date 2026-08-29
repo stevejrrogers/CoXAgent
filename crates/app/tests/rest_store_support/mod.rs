@@ -15,8 +15,8 @@ use coxagent_application::auth::{
     AuthPort, AuthRole, AuthUser, LoginResult, SessionInfo, TokenInfo,
 };
 use coxagent_application::config::BudgetCaps;
-use coxagent_application::ports::outbound::{AgentEnginePort, AgentOutcome, AgentRequest};
 use coxagent_application::ports::outbound::StateStorePort;
+use coxagent_application::ports::outbound::{AgentEnginePort, AgentOutcome, AgentRequest};
 use coxagent_application::{PortError, ProjectState};
 use coxagent_domain::{Complexity, Priority, Ticket, TicketId, TicketType};
 use coxagent_infrastructure::{RestConfig, RestStateStore};

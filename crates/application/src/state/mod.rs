@@ -3,16 +3,20 @@
 //! Kept in the application layer because `schema_version` is a persistence
 //! concern; the domain stays free of it.
 
-use coxagent_domain::{DebtSignal, SemVer, Ticket, TicketId};
+use coxagent_domain::{DebtSignal, Goal, SemVer, Ticket, TicketId};
 use serde::{Deserialize, Serialize};
 
 mod chat;
 mod docs;
+mod goals;
+mod integrity;
 mod ops;
 mod work;
 
 pub use chat::*;
 pub use docs::*;
+pub use goals::*;
+pub use integrity::*;
 pub use ops::*;
 pub use work::*;
 
@@ -146,6 +150,17 @@ pub struct ProjectState {
     /// Product milestones the sprints work toward (authored once by the PO).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub milestones: Vec<Milestone>,
+    /// Declared product goals with stable ids (CXA-F228) — the lines the PO's
+    /// goal gate proposes against. Associations and ledger entries bind to
+    /// `Goal::id`, never to the title, so rewording a goal never rewrites
+    /// attribution. Absent until the first goal is declared.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub goals: Vec<Goal>,
+    /// Append-only outcome ledger (CXA-F228): one entry per ticket that
+    /// reached `Verified`, freezing ticket -> declared goal -> capture commit
+    /// -> verification timestamp. Newest last; see [`MAX_OUTCOME_LEDGER`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outcome_ledger: Vec<OutcomeLedgerEntry>,
     /// Living documentation pages (product + technical) written by agents/humans.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub docs: Vec<DocPage>,
@@ -470,6 +485,8 @@ impl Default for ProjectState {
             channels: Vec::new(),
             design_system: None,
             milestones: Vec::new(),
+            goals: Vec::new(),
+            outcome_ledger: Vec::new(),
             docs: Vec::new(),
             doc_folders: Vec::new(),
             doc_refresh: std::collections::BTreeMap::new(),
@@ -559,12 +576,7 @@ impl ProjectState {
     /// Apply a human's approve/dismiss verdict to the revert commit `sha`
     /// (CXA-F047). Returns whether a PENDING event was found and decided —
     /// an already-decided event is never re-decided.
-    pub fn decide_revert(
-        &mut self,
-        sha: &str,
-        decision: RevertDecision,
-        by: &str,
-    ) -> bool {
+    pub fn decide_revert(&mut self, sha: &str, decision: RevertDecision, by: &str) -> bool {
         let Some(ev) = self
             .reverted_work
             .iter_mut()
@@ -673,6 +685,7 @@ impl ProjectState {
             answered_at: String::new(),
             forwarded: false,
             escalated: false,
+            deferred: false,
         });
         // Keep the log bounded; answered questions age out before open ones.
         while self.questions.len() > 40 {

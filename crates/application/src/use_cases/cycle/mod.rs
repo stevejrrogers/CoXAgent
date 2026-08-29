@@ -25,6 +25,7 @@ mod debt_sweep;
 mod escalation;
 mod preflight;
 mod scrum;
+mod ship_truth;
 mod sm_watch;
 mod wiring;
 
@@ -797,6 +798,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // surfaces (inflow vs outflow, failure hotspots, grade/cost
             // direction) and propose — never decide — system-level work.
             self.trend_sentinel().await;
+            self.ship_truth_sweep().await;
             // Stop starting, start finishing: review + merge the PR queue at
             // the TOP of the cycle. This used to run at the very end — after
             // codegraph, ceremonies and the (tens-of-minutes) dev phases — so
@@ -1031,6 +1033,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // cheap compared with a wrong implementation. Bounded per cycle.
         Box::pin(self.answer_open_questions()).await;
         self.escalate_stale_human_questions().await;
+        // Focus windows over: held questions flush as one digest each
+        // (CXA-F176), before anything else assumes the inbox is current.
+        self.flush_focus_digests().await;
         // Fill the acceptance criteria BEFORE the gate judges the ticket: a
         // ticket nobody can check is one a human can only bounce, and the
         // missing AC alone scores it out of the auto lane.

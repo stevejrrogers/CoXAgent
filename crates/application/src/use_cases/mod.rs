@@ -13,6 +13,7 @@ pub mod json_repair;
 pub mod manual_rollback;
 pub mod merge_policy;
 pub mod merge_sweep;
+pub mod question_batching;
 pub mod recover;
 pub mod refine_ticket;
 pub mod run_ba;
@@ -45,6 +46,7 @@ pub use merge_policy::{
     MAX_TICKET_RESCUES,
 };
 pub use merge_sweep::{merge_sweep, SweepOutcome};
+pub use question_batching::{flush_batches, select_deferred, should_defer};
 pub use recover::RecoverUseCase;
 pub use refine_ticket::{RefineTicketUseCase, RefinedTicket, TeamNote};
 pub use run_ba::RunBaUseCase;

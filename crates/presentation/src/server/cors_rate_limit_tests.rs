@@ -93,7 +93,11 @@ async fn ac3_ac4_rate_limit_covers_every_api_auth_route_not_just_login() {
             .oneshot(get_request("/api/auth/sessions", None))
             .await
             .unwrap();
-        assert_eq!(r.status(), StatusCode::OK, "read-only GET {i} within the roomy bucket");
+        assert_eq!(
+            r.status(),
+            StatusCode::OK,
+            "read-only GET {i} within the roomy bucket"
+        );
     }
     let overflow = router
         .clone()

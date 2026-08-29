@@ -36,14 +36,14 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use async_trait::async_trait;
-use coxagent_application::PortError;
 use coxagent_application::config::{Config, GitConfig};
 use coxagent_application::ports::outbound::{
     AgentEnginePort, AgentOutcome, AgentRequest, GitAuthor, GitPort, SandboxStatus, StateStorePort,
     SyncBase,
 };
-use coxagent_application::state::{ActivityEntry, DeployRecord, ProjectState, now_rfc3339};
+use coxagent_application::state::{now_rfc3339, ActivityEntry, DeployRecord, ProjectState};
 use coxagent_application::use_cases::RunCycleUseCase;
+use coxagent_application::PortError;
 use coxagent_domain::{Complexity, Priority, Role, SemVer, Status, Ticket, TicketId, TicketType};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
