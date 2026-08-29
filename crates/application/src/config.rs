@@ -260,6 +260,11 @@ pub struct WorkflowConfig {
     /// linked back so no work is lost). 0 = default (2).
     #[serde(default)]
     pub pr_stale_days: u64,
+    /// How many days back the reverted-work scan (CXA-F047) may link a
+    /// `Revert` commit to the deploy record it undid. Reverts older than this
+    /// are history, not feedback. 0 = default (30).
+    #[serde(default)]
+    pub revert_scan_days: u64,
     /// Per-phase cadence knobs (docs budget, debt sweep, architecture audit).
     #[serde(default)]
     pub cadence: CadenceConfig,
@@ -431,6 +436,16 @@ impl WorkflowConfig {
             self.pr_stale_days
         }
     }
+
+    /// See the `revert_scan_days` field; 0 = default (30 days).
+    #[must_use]
+    pub fn revert_scan_days(&self) -> u64 {
+        if self.revert_scan_days == 0 {
+            30
+        } else {
+            self.revert_scan_days
+        }
+    }
 }
 
 fn default_max_open_prs() -> u32 {
@@ -494,6 +509,7 @@ impl Default for WorkflowConfig {
             human: HumanConfig::default(),
             backlog_cap: 0,
             pr_stale_days: 0,
+            revert_scan_days: 0,
             cadence: CadenceConfig::default(),
             quiet_hours_utc: String::new(),
             bug_burn_floor: None,

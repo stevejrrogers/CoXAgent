@@ -859,6 +859,7 @@ pub async fn serve_full(
         )
         .route("/api/projects/:pid/inbox", get(inbox_ep))
         .route("/api/projects/:pid/pr/:number/human", post(human_pr_ep))
+        .route("/api/projects/:pid/reverts/:sha", post(revert_decision_ep))
         .route("/api/projects/:pid/attachment", get(attachment_ep))
         .route(
             "/api/projects/:pid/ticket/:id/attachments",

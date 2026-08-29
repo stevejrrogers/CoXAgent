@@ -180,6 +180,7 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/prs", &["get"]),
     route("/api/projects/:pid/prs/:num/:action", &["post"]),
     route("/api/projects/:pid/prs/:num/diff", &["get"]),
+    route("/api/projects/:pid/reverts/:sha", &["post"]),
     route("/api/projects/:pid/runner", &["get"]),
     route("/api/projects/:pid/share-links", &["get", "post"]),
     route("/api/projects/:pid/share-links/:token", &["delete"]),
