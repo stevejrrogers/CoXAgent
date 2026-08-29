@@ -654,7 +654,10 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
     renderCycleScores(s);
     renderTeamsOnline();
     renderSessions();
-    if(ME&&ME.role==="admin")renderTeamPeople();
+    // Populate whenever the card is VISIBLE — applyRole shows .admin-only for
+    // admins AND open/local mode (no auth). Gating on role==="admin" alone left
+    // the card stuck on "loading…" forever in open mode.
+    if(!ME||!ME.auth||ME.role==="admin")renderTeamPeople();
   }else if(CUR==="board"){
     let feats=(s.tickets||[]).filter(t=>t.type!=="bug"),bugs=(s.tickets||[]).filter(t=>t.type==="bug");
     if(BF!=="all"){feats=feats.filter(t=>t.priority===BF);bugs=bugs.filter(t=>t.priority===BF);}
