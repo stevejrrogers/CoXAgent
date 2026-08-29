@@ -1245,5 +1245,4 @@ mod store_rpc_guard_tests;
 #[cfg(test)]
 mod store_rpc_stale_write_tests;
 #[cfg(test)]
-#[cfg(test)]
 mod store_rpc_test_support;

@@ -61,7 +61,7 @@ pub fn next_feature_work(state: &ProjectState) -> Option<TicketId> {
 /// feature work (the feature's `depends_on` names it) or precedes it in the
 /// backlog. These bugs stand between the team and its next feature, so a
 /// sprint opened over them commits the scope IN FULL — never capacity-capped
-/// (see `sprint::open_backlog`).
+/// (see `backlog_scoping::open_backlog`).
 #[must_use]
 pub fn burn_down_scope(state: &ProjectState) -> Vec<TicketId> {
     let Some(feature) = next_feature_work(state) else {
