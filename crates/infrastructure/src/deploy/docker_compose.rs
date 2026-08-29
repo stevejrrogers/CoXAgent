@@ -638,7 +638,7 @@ async fn apply_resource_limits(proj: &str) {
 /// The `(id, container name)` of the first container publishing `port`, or
 /// `None` when docker yields nothing usable. Only reached on the label-less
 /// branch — [`compose_project_on_port`] is consulted first — and a holder this
-/// cannot name is treated as unknown, never as ours to stop.
+/// cannot name is treated as unknown, never as ours to stop (CXA-B083/B085).
 async fn raw_container_on_port(port: &str) -> Option<(String, String)> {
     let out = Command::new("docker")
         .args([
@@ -646,7 +646,7 @@ async fn raw_container_on_port(port: &str) -> Option<(String, String)> {
             "--filter",
             &format!("publish={port}"),
             "--format",
-            "{{.ID}} {{.Names}}",
+            "{{.ID}}\t{{.Names}}",
         ])
         .stdin(std::process::Stdio::null())
         .output()
@@ -659,10 +659,11 @@ async fn raw_container_on_port(port: &str) -> Option<(String, String)> {
 
 /// Pure parse of one `docker ps` identity line into `(id, name)`; `None` for
 /// anything malformed, so a holder with no recoverable name can never be
-/// classified as ours to stop (CXA-B085).
+/// classified as ours to stop (CXA-B085). Tolerates either separator docker
+/// renders between `{{.ID}}` and `{{.Names}}` (tab or space).
 fn parse_holder_line(line: &str) -> Option<(String, String)> {
     let line = line.trim();
-    let (id, name) = line.split_once(' ')?;
+    let (id, name) = line.split_once(char::is_whitespace)?;
     let name = name.trim();
     let name = name.strip_prefix('/').unwrap_or(name);
     if id.is_empty() || name.is_empty() {
@@ -1211,9 +1212,9 @@ impl DeployPort for DockerComposeDeploy {
         // Up to two eviction+retry rounds: round 1 handles a stale compose
         // project; round 2 (or when no compose label exists) stops a raw
         // squatter only when its name proves this deploy namespace owns it —
-        // anything else is reported as a collision, never touched (CXA-B085).
-        // Docker also needs a beat to release a freshly-stopped binding, hence
-        // the short sleep.
+        // anything else is reported as a collision, never touched
+        // (CXA-B083/B085). Docker also needs a beat to release a
+        // freshly-stopped binding, hence the short sleep.
         for round in 0..2u8 {
             if output.status.success() {
                 break;
@@ -1241,12 +1242,15 @@ impl DeployPort for DockerComposeDeploy {
                     .await;
                 evicted = Some(format!("compose project `{project}`"));
             } else if let Some((id, name)) = raw_container_on_port(&port).await {
-                // CXA-B085 ownership guard: a label-less holder is stopped by
+                // Same ownership policy as compose projects, applied to the
+                // container NAME — the only ownership signal a label-less
+                // container has (CXA-B083). A label-less holder is stopped by
                 // id only when its NAME proves an agent-managed `cox-`
-                // container. A foreign or anonymous raw squatter (e.g. a bare
-                // `docker run -p 8101:80 nginx`) is never touched — the deploy
-                // reports the collision instead of killing an unrelated
-                // service.
+                // container; the live hub or shared infra launched via plain
+                // `docker run`, and any foreign or anonymous raw squatter
+                // (e.g. a bare `docker run -p 8101:80 nginx`), is never
+                // touched — the deploy reports the collision instead of
+                // killing an unrelated service (CXA-B085).
                 match raw_stop_target(&id, &name) {
                     Some(target) => {
                         let _ = Command::new("docker")
@@ -1328,7 +1332,7 @@ mod tests {
     // reclaimability policy (`crate::deploy::reclaimable`), whose own unit
     // tests own the full blast-radius matrix — live hub, shared infra,
     // case-insensitivity and foreign projects — for both compose projects and
-    // label-less raw containers (CXA-B085).
+    // label-less raw containers (CXA-B083/B085).
 
     /// CXA-B085 regression guard: a label-less holder is stopped by id only
     /// when its name proves an agent-managed `cox-` container.
@@ -1382,6 +1386,11 @@ mod tests {
             parse_holder_line("deadbeef nginx"),
             Some(("deadbeef".to_owned(), "nginx".to_owned()))
         );
+        // The `{{.ID}}\t{{.Names}}` format docker actually renders (tab).
+        assert_eq!(
+            parse_holder_line("deadbeef\tcox--slot-b-hub"),
+            Some(("deadbeef".to_owned(), "cox--slot-b-hub".to_owned()))
+        );
         // Defensively normalize a leading '/' (docker renders it in some name
         // fields) so a cox-owned holder can never be misread as foreign.
         assert_eq!(
@@ -1391,6 +1400,7 @@ mod tests {
         assert_eq!(parse_holder_line(""), None);
         assert_eq!(parse_holder_line("deadbeef"), None);
         assert_eq!(parse_holder_line("deadbeef "), None);
+        assert_eq!(parse_holder_line("deadbeef\t"), None);
         assert_eq!(parse_holder_line("  /nginx"), None);
     }
 

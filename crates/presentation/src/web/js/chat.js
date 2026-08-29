@@ -205,7 +205,7 @@ async function createChannel(parent){
   }catch(e){toasty("could not create channel","err");}
 }
 async function inviteToChannel(){
-  const who=await coxModal({title:"Invite to channel",message:"Username cần mời. Tip: thêm \" +invite\" để họ cũng được quyền mời người khác.",input:{placeholder:"username  (+invite)"},confirmText:"Invite"});
+  const who=await coxModal({title:"Invite to channel",message:"Username to invite. Tip: add \" +invite\" so they can invite others too.",input:{placeholder:"username  (+invite)"},confirmText:"Invite"});
   if(!who||!who.trim())return;
   let user=who.trim(),delegate=false;
   if(/\+invite\s*$/i.test(user)){delegate=true;user=user.replace(/\+invite\s*$/i,"").trim();}
@@ -290,7 +290,7 @@ function renderChannelSettings(){
   }
 }
 async function deleteChannel(id){
-  const ok=await coxModal({title:"Delete #"+id,message:"Xoá channel này và mọi sub-channel của nó? Không hoàn tác được.",confirmText:"Delete"});
+  const ok=await coxModal({title:"Delete #"+id,message:"Delete this channel and all its sub-channels? This cannot be undone.",confirmText:"Delete"});
   if(!ok)return;
   try{
     const r=await fetch("/api/chat/channels/"+encodeURIComponent(id),{method:"DELETE"});
@@ -484,7 +484,13 @@ function applyMode(){
     setTimeout(()=>{const i=document.getElementById("chat-input");if(i)i.focus();},40);}
   // Entering Manage lands on Spaces; leaving it returns to the workspace views.
   if(manage&&!String(CUR).startsWith("mg-"))nav("mg-spaces");
-  if(!manage&&String(CUR).startsWith("mg-"))nav("overview");
+  // Only nav() out of a manage view when landing in WORKSPACE. Going manage →
+  // chat must not call nav(): its exit-chat-on-sidebar-click guard fires on the
+  // internal call and stomps the chat mode we just set (Manage → Chat used to
+  // dump you on Overview). Park CUR quietly instead — the chat overlay covers
+  // the screen, and leaving chat later re-runs this branch and navs properly.
+  if(!manage&&!chat&&String(CUR).startsWith("mg-"))nav("overview");
+  if(chat&&String(CUR).startsWith("mg-"))CUR="overview";
   updateModeBadge();
   try{updateSegments();}catch(e){}
 }
@@ -871,7 +877,7 @@ function renderMeetUpNext(){
                     :d.toLocaleDateString([],{weekday:"short"})+" "+d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
     const live=meetLive(m);
     const n=(m.participants||[]).length;
-    return `<div class="meet-up" onclick="openMeeting('${esc(m.id)}')" title="${esc(m.title)} · ${n} người">
+    return `<div class="meet-up" onclick="openMeeting('${esc(m.id)}')" title="${esc(m.title)} · ${n} people">
       ${live?'<span class="mu-live"></span>':`<span class="mu-time">${esc(when)}</span>`}
       <span class="mu-title">${esc(m.title)}</span>
       ${live?`<span class="mu-join" onclick="event.stopPropagation();joinMeeting('${esc(m.id)}')">Join</span>`:`<span class="mu-time">${n}👤</span>`}</div>`;
@@ -1591,7 +1597,7 @@ function renderChatList(force){
     return;}
   let lastDay="",html="";
   if(typeof CHAT_MORE!=="undefined"&&CHAT_MORE){
-    html+='<div class="chatmore"><button class="tk-btn" onclick="loadOlderChat()"><i class="ti ti-history"></i> Tải tin cũ hơn</button></div>';
+    html+='<div class="chatmore"><button class="tk-btn" onclick="loadOlderChat()"><i class="ti ti-history"></i> Load older messages</button></div>';
   }
   let prev=null;
   msgs.forEach(m=>{
@@ -1683,7 +1689,7 @@ async function removeAvatar(){
     else toasty(await r.text()||"Could not remove","err");
   }catch(e){toasty("Network error","err");}}
 async function uploadAvatar(input){const f=input.files[0];input.value="";if(!f)return;
-  if(f.size>2*1024*1024){toasty("Ảnh tối đa 2MB","err");return;}
+  if(f.size>2*1024*1024){toasty("Image max 2MB","err");return;}
   const fd=new FormData();fd.append("file",f);
   try{const r=await fetch("/api/profile/avatar",{method:"POST",body:fd});
     if(r.ok){await loadProfiles();try{renderMe();}catch(e){}openProfile("profile");toasty("Avatar updated","ok");renderChatList(true);}
@@ -1786,10 +1792,10 @@ function renderHealth(s){
   el.innerHTML=`<div class="sec" style="margin-top:20px"><i class="ti ti-heart-rate-monitor" style="color:var(--accent2)"></i> Team health</div>
     <div class="hgrid">
       ${card("Sprint velocity",velo,veloSub,"var(--green)")}
-      ${card("WIP (in progress)",wip,wip>6?'high — cân nhắc giảm':'ok',wip>6?'var(--amber)':'var(--text)')}
-      ${card("Open bugs",openBugs,"chưa fix",openBugs>4?'var(--red)':'var(--text)')}
+      ${card("WIP (in progress)",wip,wip>6?'high — consider reducing':'ok',wip>6?'var(--amber)':'var(--text)')}
+      ${card("Open bugs",openBugs,"unfixed",openBugs>4?'var(--red)':'var(--text)')}
       ${card("PR reject rate",reviewTotal?rejectRate+'%':'—',`${appr}✓ / ${chg}✗`,rejectRate>50?'var(--amber)':'var(--text)')}
-      ${card("Refactor debt",refactors,"ticket refactor mở",refactors>0?'var(--amber)':'var(--text)')}
+      ${card("Refactor debt",refactors,"open refactor tickets",refactors>0?'var(--amber)':'var(--text)')}
       ${card("Team memory",mem,"decisions + lessons","var(--accent2)")}
     </div>`;
 }
@@ -1842,6 +1848,20 @@ function depChips(ids){
     const col=done?"var(--green)":(dt?"var(--amber)":"var(--dim)");
     return `<span onclick="showTicket('${id}')" title="${dt?esc(dt.title)+' · '+esc(dt.status):'unknown'}" style="cursor:pointer;display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:3px 8px;border-radius:7px;background:${col}22;color:${col};margin-right:5px">
       <i class="ti ti-${done?'check':'circle'}" style="font-size:11px"></i>${esc(id)}</span>`;}).join("");}
+async function holdTicket(id,hold){
+  let reason="";
+  if(hold){
+    reason=await coxModal({title:"Hold "+id,message:"Why is it parked? Shown on the ticket so future-you knows what unblocks it.",input:{placeholder:"e.g. waiting on GitHub billing"},confirmText:"Hold"});
+    if(reason===undefined||reason===null||reason===false)return;
+  }
+  try{
+    const r=await fetch(api("/ticket/"+encodeURIComponent(id)+"/status/"+(hold?"hold":"resume")),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({reason:String(reason||"")})});
+    if(!r.ok){toasty((await r.text())||"Status change failed","err");return;}
+    toasty(hold?`${id} on hold — sprints skip it until resumed`:`${id} resumed`);
+    close_('ov-ticket');await refreshDisc();
+  }catch(e){toasty("Network error","err");}
+}
+
 async function showTicket(id){
   // Full detail (incl. design specs stripped from list payloads) loads on demand.
   const body=document.getElementById("ticket-body");
@@ -1864,7 +1884,12 @@ async function showTicket(id){
   const d=t.design||{},tech=d.technical,ux=d.ux,ac=t.acceptance_criteria||[];
   let h=`<span class="x" onclick="close_('ov-ticket')"><i class="ti ti-x"></i></span><h3>${esc(t.title)}</h3>
     <div class="msub">${esc(t.id)} · ${esc(t.type)}</div>
-    <div class="mrow"><span class="lbl">Status</span><b>${esc(t.status)}</b></div>
+    <div class="tk-tabs" role="tablist">
+      <button class="tk-tab on" data-tk-tab="details" onclick="tkTab('details')"><i class="ti ti-list-details"></i> Details</button>
+      <button class="tk-tab" data-tk-tab="coverage" onclick="tkTab('coverage')"><i class="ti ti-shield-check"></i> Test Coverage</button>
+    </div>
+    <div class="tk-pane" id="tk-pane-details">
+    <div class="mrow"><span class="lbl">Status</span><b>${t.status==="on_hold"?'<span style="color:var(--amber)">on hold</span>':esc(t.status)}</b>${t.status==="on_hold"&&(STATE.hold_reasons||{})[t.id]?`<span style="font-size:11.5px;color:var(--dim);margin-left:8px">· ${esc(STATE.hold_reasons[t.id])}</span>`:""}${(typeof canManage==="function"&&canManage())?(["pending","ready","open"].includes(t.status)?` <button class="tk-btn" style="margin-left:10px" onclick="holdTicket('${t.id}',true)" title="Park it — sprints and agents skip it until resumed"><i class="ti ti-player-pause"></i> Hold</button>`:(t.status==="on_hold"?` <button class="tk-btn go" style="margin-left:10px" onclick="holdTicket('${t.id}',false)"><i class="ti ti-player-play"></i> Resume</button>`:"")):""}</div>
     <div class="mrow"><span class="lbl">Priority</span>
       <div style="display:flex;gap:6px;align-items:center">
         ${["high","medium","low"].map(p=>`<span onclick="setPriority('${t.id}','${p}')" style="cursor:pointer;font-size:11px;padding:3px 10px;border-radius:7px;font-weight:600;${t.priority===p?`background:var(--accentbg);color:var(--accent2)`:'background:var(--card2);color:var(--muted)'}">${p}</span>`).join("")}
@@ -1909,6 +1934,7 @@ async function showTicket(id){
      <div class="att-grid" id="att-grid">${grid||'<div style="color:var(--dim);font-size:12px;margin-top:6px">— none yet (PD attaches mockups here)</div>'}</div>
      <input type="file" id="att-file" style="display:none" onchange="uploadAttachment('${t.id}',this)">
      <button class="tk-btn" style="margin-top:8px" onclick="document.getElementById('att-file').click()"><i class="ti ti-paperclip"></i> Attach file</button></div>`;}
+  h+=`</div>`+covPane(t);
   const canWork=["pending","ready","open"].includes(t.status);
   if(t.cost_hold!=null&&!t.cost_approved)h+=`<div class="mrow" style="display:block;border:1px solid var(--amber);border-radius:9px;padding:10px 12px;background:color-mix(in srgb,var(--amber) 9%,transparent)"><span style="color:var(--amber);font-weight:700"><i class="ti ti-currency-dollar"></i> Held for cost approval</span><div style="font-size:12.5px;color:var(--muted);margin-top:4px">Estimated ~$${(+t.cost_hold).toFixed(2)}/run exceeds the approval gate. Agents will skip this ticket until you approve it.</div><button class="pri" style="margin-top:8px" onclick="approveCost('${t.id}')"><i class="ti ti-check"></i> Approve run</button></div>`;
   h+=`<div class="tk-actions">
@@ -1926,6 +1952,31 @@ async function showTicket(id){
   renderTicketComments(t.id);
   // Ticket descriptions can carry ```mermaid fences too (SA designs often do).
   if(typeof renderMermaidIn==="function")renderMermaidIn(body);}
+// Ticket-detail tabs (CXA-F024): Details vs Test Coverage. Pure visibility
+// toggle — both panes render once, switching never refetches.
+function tkTab(name){
+  document.querySelectorAll("#ov-ticket .tk-tab").forEach(b=>b.classList.toggle("on",b.dataset.tkTab===name));
+  for(const p of["details","coverage"]){const el=document.getElementById("tk-pane-"+p);if(el)el.hidden=p!==name;}
+}
+// The Test Coverage pane (CXA-F024): one row per acceptance criterion with its
+// coverage status and the evidence addressing it — test files, or an API
+// request/response for non-UI tickets. Status text is always shown next to its
+// color, so no state rides on color alone.
+function covPane(t){
+  // Absent field (stale snapshot payload, detail fetch failed) renders an
+  // empty pane — same degradation as the Test cases section. Only a PRESENT
+  // empty matrix may claim "no criteria to cover".
+  if(!Array.isArray(t.coverage_matrix))return `<div class="tk-pane" id="tk-pane-coverage" hidden></div>`;
+  const cm=t.coverage_matrix;
+  if(!cm.length)return `<div class="tk-pane" id="tk-pane-coverage" hidden><div class="cov-empty"><i class="ti ti-shield-check"></i><div class="cov-empty-t">No acceptance criteria to cover</div><div class="cov-empty-s">Nothing is gated for verification on this ticket.</div></div></div>`;
+  const meta={covered:["var(--green)","ti-circle-check","COVERED"],partially_covered:["var(--amber)","ti-alert-triangle","PARTIALLY COVERED"],not_tested:["var(--red)","ti-circle-dashed","NOT TESTED"]};
+  const rows=cm.map(e=>{
+    const m=meta[e.status]||meta.not_tested;
+    const srcs=(e.sources||[]).filter(Boolean).map(s=>`<span class="cov-src" title="${esc(s)}">${esc(s)}</span>`).join("");
+    return `<div class="cov-row"><div class="cov-badge" style="color:${m[0]}"><i class="ti ${m[1]}"></i>${m[2]}</div><div class="cov-body"><div class="cov-ac">${esc(e.criterion)}</div>${srcs?`<div class="cov-srcs">${srcs}</div>`:""}</div></div>`;
+  }).join("");
+  return `<div class="tk-pane" id="tk-pane-coverage" hidden><div class="covlist">${rows}</div></div>`;
+}
 // In-app attachment viewer: full-screen overlay, same session. Gallery-aware:
 // ‹ › buttons and ←/→ keys walk ATT_GALLERY; Esc or backdrop click closes.
 // Non-image types render through an <iframe> (PDF etc.).
@@ -2073,6 +2124,10 @@ async function loadSettings(){
   try{const r=await fetch(api("/config"));const b=await r.json();if(r.ok)cfg=b;else cfgErr=b;}
   catch(e){cfgErr={error:"the hub could not be reached"};}
   window._cfg=cfg;
+  // The opencode catalog drifts (providers add/remove models); re-ask on every
+  // Settings open instead of once per page session, so the dropdowns and the
+  // stale-model warning below reflect what the CLI offers right now.
+  try{await loadOpencodeModels();}catch(e){}
   if(cfgErr){
     document.getElementById("settings-body").innerHTML=`
       <div class="panel" style="border-color:var(--red)">
@@ -2151,13 +2206,19 @@ async function loadSettings(){
     <div class="settab" data-p="engines">
       ${detBanner}
       <div style="margin:-2px 0 12px"><button onclick="checkAgentSetup(true)" class="btn-ghost"><i class="ti ti-robot"></i> Agent setup guide</button></div>
+      ${(()=>{const d=(cfg.engine&&cfg.engine.default)||{};
+        if(d.engine!=="opencode"||!OC_MODELS.length)return"";
+        const stale=[];
+        const chk=(label,ch)=>{if(ch&&ch.engine==="opencode"&&ch.model&&!OC_MODELS.includes(ch.model))stale.push(`${label}: <code>${esc(ch.model)}</code>`);};
+        chk("default",d);Object.entries((cfg.engine&&cfg.engine.per_role)||{}).forEach(([r,ch])=>chk(r,ch));
+        return stale.length?`<div class="panel" style="border-color:var(--amber);margin-bottom:12px;font-size:12.5px"><i class="ti ti-alert-triangle" style="color:var(--amber)"></i> The provider no longer offers ${stale.join(", ")} — runs on it fail until you pick a model from the current list.</div>`:"";})()}
       <div class="panel frm">${defRow}
         <div class="fr"><span class="lbl">Auto failover</span>
           <select id="eng-autofb"><option value="true" ${(cfg.engine&&cfg.engine.auto_fallback!==false)?'selected':''}>on</option><option value="false" ${(cfg.engine&&cfg.engine.auto_fallback===false)?'selected':''}>off</option></select>
           <span class="hint">on (default): auto-use every installed CLI + a cheaper tier as fallback — no manual list needed</span></div>
         <div class="fr" style="align-items:flex-start"><span class="lbl">Extra fallbacks</span>
-          <textarea id="eng-fallbacks" rows="2" style="flex:1;min-width:0;background:var(--card);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:8px 11px;font-size:12.5px;font-family:ui-monospace,Menlo,monospace" placeholder="one per line: &lt;engine&gt; &lt;model&gt;\ne.g.  opencode gpt-4o\n      gemini gemini-2.0-flash">${(cfg.engine&&cfg.engine.fallbacks||[]).map(f=>`${f.engine} ${f.model}`).join("\n")}</textarea>
-          <span class="hint">tried in order when the primary hits a quota/rate-limit wall or stalls (timeout). Same CLI, cheaper model works too, e.g. <code>claude haiku</code></span></div>
+          <textarea id="eng-fallbacks" rows="2" style="flex:2 1 280px;min-width:220px;background:var(--card);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:8px 11px;font-size:12.5px;font-family:ui-monospace,Menlo,monospace" placeholder="one per line: &lt;engine&gt; &lt;model&gt;\ne.g.  opencode gpt-4o\n      gemini gemini-2.0-flash">${(cfg.engine&&cfg.engine.fallbacks||[]).map(f=>`${f.engine} ${f.model}`).join("\n")}</textarea>
+          <span class="hint" style="flex:1 1 160px;min-width:0">tried in order when the primary hits a quota/rate-limit wall or stalls (timeout). Same CLI, cheaper model works too, e.g. <code>claude haiku</code></span></div>
         <button type="button" class="set-expand ${anyOverride?'open':''}" onclick="toggleRoleOverrides(this)"><i class="ti ti-chevron-right"></i> Per-agent model overrides <span style="color:var(--dim);font-weight:400">· optional — give any agent a different model</span></button>
         <div class="role-overrides" ${anyOverride?'':'hidden'}>${roleRows}</div>
       </div>
@@ -2174,10 +2235,11 @@ async function loadSettings(){
           <input id="wf-sp" type="number" min="1" value="${wf.sprint_length_cycles??10}" style="width:90px;${wf.sprint_unit==='cycles'?'':'display:none'}"/>
           <span class="hint">days = wall-clock sprints (recommended — cycles speed up and slow down); cycles = roll on the loop counter</span></div>
         <div class="fr"><span class="lbl">BA every N cycles</span><input id="wf-ba" type="number" min="0" value="${wf.ba_every_n_cycles??4}" style="width:90px"/><span class="hint">0 disables BA</span></div>
+        <div class="fr"><span class="lbl">DEV scope floor</span><input id="wf-floor" type="number" min="0" value="${wf.dev_scope_floor??4}" style="width:90px"/><span class="hint">keep at least this many actionable tickets committed — the mid-sprint top-up pulls more from the backlog; 0 disables</span></div>
         <div class="fr"><span class="lbl">Feature dev</span><select id="wf-fd"><option value="true" ${wf.feature_dev_enabled!==false?'selected':''}>enabled</option><option value="false" ${wf.feature_dev_enabled===false?'selected':''}>disabled</option></select></div>
         <div class="fr"><span class="lbl">Ops monitor</span><select id="wf-ops"><option value="true" ${wf.ops_monitor!==false?'selected':''}>on</option><option value="false" ${wf.ops_monitor===false?'selected':''}>off</option></select><span class="hint">pings the deployed app; files a bug + alerts on an outage</span></div>
         <div class="fr"><span class="lbl">Token saver</span><select id="wf-ts"><option value="true" ${wf.token_saver!==false?'selected':''}>on — compress diffs/logs &amp; terse agent output</option><option value="false" ${wf.token_saver===false?'selected':''}>off — full verbosity</option></select><span class="hint">cuts engine spend on big reviews with no loss of the actual change</span></div>
-        <div class="fr"><span class="lbl">Agent sandbox</span><select id="wf-sbx"><option value="false" ${wf.sandbox!==true?'selected':''}>off — agents write anywhere your user can</option><option value="true" ${wf.sandbox===true?'selected':''}>on — file writes confined to this workspace (macOS)</option></select><span class="hint">a confused agent can't damage files outside the project; toolchain caches stay writable</span></div>
+        <div class="fr"><span class="lbl">Agent sandbox</span><select id="wf-sbx"><option value="false" ${wf.sandbox!==true?'selected':''}>off — agents write anywhere your user can</option><option value="true" ${wf.sandbox===true?'selected':''}>on — file writes confined to this workspace (macOS Seatbelt / Linux Bubblewrap)</option></select><span class="hint">a confused agent can't damage files outside the project; toolchain caches stay writable</span></div>
         <div class="fr"><span class="lbl">TDD gate</span><select id="wf-tdd"><option value="true" ${wf.tdd!==false?'selected':''}>on — TEST writes failing tests from acceptance criteria before DEV codes</option><option value="false" ${wf.tdd===false?'selected':''}>off</option></select><span class="hint">"done" becomes machine-checkable before implementation starts</span></div>
         <div class="fr"><span class="lbl">Cost approval gate</span><input id="wf-gate" type="number" step="0.5" min="0" placeholder="off" value="${wf.approve_over_usd??''}" style="width:110px"><span class="hint">USD — tickets estimated above this wait for your approval; empty = off</span></div>
         <div class="fr"><span class="lbl">Escalation ladder</span><input id="en-esc" placeholder="engine defaults (claude → opus; opencode → custom providers first)" value="${esc(((cfg.engine||{}).escalation||[]).join(', '))}" style="min-width:280px"><span class="hint">comma-separated models tried on RETRIES of a failed ticket, strongest last</span></div>

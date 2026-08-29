@@ -50,6 +50,12 @@ pub enum Status {
     Done,
     Documented,
     Rejected,
+    /// Parked by a person (PO/SM/user): deliberately out of play — sprint
+    /// auto-commit, refill and agent pickup all skip it — but NOT rejected:
+    /// it resumes to `Pending` (feature/chore) or `Open` (bug) when unblocked.
+    /// Built for work blocked on the outside world (a billing account, a
+    /// vendor), which otherwise re-enters every sprint and starves DEV.
+    OnHold,
     // Bug lifecycle
     Open,
     Fixed,

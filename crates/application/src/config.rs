@@ -3,7 +3,7 @@
 //!
 //! Pure data; loading from `coxagent.json` is an adapter concern.
 
-use coxagent_domain::Role;
+use coxagent_domain::{Priority, Role};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -209,6 +209,12 @@ pub struct WorkflowConfig {
     /// Days per sprint when `sprint_unit` is `days`.
     #[serde(default = "default_sprint_days")]
     pub sprint_length_days: u64,
+    /// The floor under a running sprint's actionable scope: when fewer than
+    /// this many committed tickets are still workable, the mid-sprint top-up
+    /// commits more from the backlog. Raise it to keep more DEV work in
+    /// flight; 0 disables the top-up.
+    #[serde(default = "default_scope_floor")]
+    pub dev_scope_floor: usize,
     /// Ops/SRE monitor (default on): after a deploy, the leader pings the app on
     /// its published port each cycle and files a high-priority bug + alerts the
     /// chat if it went down — so the team also runs what it ships.
@@ -236,8 +242,9 @@ pub struct WorkflowConfig {
     #[serde(default = "default_true")]
     pub tdd: bool,
     /// Sandbox agent CLIs: confine their file WRITES to the project workspace
-    /// and tool caches (macOS Seatbelt today; other platforms run unsandboxed
-    /// with a warning). Off by default — turn on for untrusted codebases.
+    /// and tool caches (macOS via Seatbelt, Linux via Bubblewrap when `bwrap`
+    /// is on `PATH`; platforms without a backend run unsandboxed with a
+    /// warning). Off by default — turn on for untrusted codebases.
     #[serde(default)]
     pub sandbox: bool,
     /// Hybrid-team knobs: which lifecycle moves wait for a person, and where
@@ -253,6 +260,11 @@ pub struct WorkflowConfig {
     /// linked back so no work is lost). 0 = default (2).
     #[serde(default)]
     pub pr_stale_days: u64,
+    /// How many days back the reverted-work scan (CXA-F047) may link a
+    /// `Revert` commit to the deploy record it undid. Reverts older than this
+    /// are history, not feedback. 0 = default (30).
+    #[serde(default)]
+    pub revert_scan_days: u64,
     /// Per-phase cadence knobs (docs budget, debt sweep, architecture audit).
     #[serde(default)]
     pub cadence: CadenceConfig,
@@ -264,6 +276,14 @@ pub struct WorkflowConfig {
     /// Empty = no window.
     #[serde(default)]
     pub quiet_hours_utc: String,
+    /// Bug-burn floor (CXA-F028): when set, a scrum sprint commits only open
+    /// bugs AT OR ABOVE this priority and the DEV bug queue ignores the rest —
+    /// the "one-week high-severity burn" knob that parks cosmetic bugs for the
+    /// burn's duration without losing them. Reuses the existing three-level
+    /// [`Priority`] as the severity axis. Absent/`None` = burn every open bug
+    /// (the historical behaviour), so existing configs deserialize unchanged.
+    #[serde(default)]
+    pub bug_burn_floor: Option<Priority>,
 }
 
 /// How often the periodic phases run. Zeros mean "use the built-in default" so
@@ -352,6 +372,29 @@ pub struct HumanConfig {
     /// Adaptive approval: routine work proceeds with an undo window instead of
     /// waiting for a rubber stamp (docs/ADAPTIVE_APPROVAL.md).
     pub adaptive: AdaptiveConfig,
+    /// Per-user focus windows (CXA-F176), keyed by bare username: while a
+    /// user's window is active, low-urgency questions addressed to them are
+    /// held and flush once as a digest at the window's end instead of
+    /// arriving one interrupt at a time. Absent = deliver immediately
+    /// (the behaviour this feature must not change).
+    #[serde(default)]
+    pub focus_windows: std::collections::BTreeMap<String, FocusWindow>,
+}
+
+/// One person's focus-window ("quiet hours") settings (CXA-F176). Every
+/// field defaults, so a pre-existing `coxagent.json` loads unchanged.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FocusWindow {
+    /// Window `"HH:MM-HH:MM"` in UTC (same format and midnight-wrap rule as
+    /// [`WorkflowConfig::quiet_hours_utc`], reusing `in_quiet_window`). While
+    /// `now` is inside it, deferrable questions addressed to this user are
+    /// held; the first cycle after it ends flushes them as one digest.
+    /// Malformed = no window — a typo must never be able to hide questions.
+    pub window_utc: String,
+    /// Opt-in switch for defer-to-digest. Off = questions reach this user
+    /// immediately even with a window configured.
+    pub defer_to_digest: bool,
 }
 
 /// See docs/ADAPTIVE_APPROVAL.md. Off by default: a project starts with the
@@ -416,6 +459,16 @@ impl WorkflowConfig {
             self.pr_stale_days
         }
     }
+
+    /// See the `revert_scan_days` field; 0 = default (30 days).
+    #[must_use]
+    pub fn revert_scan_days(&self) -> u64 {
+        if self.revert_scan_days == 0 {
+            30
+        } else {
+            self.revert_scan_days
+        }
+    }
 }
 
 fn default_max_open_prs() -> u32 {
@@ -432,6 +485,10 @@ fn default_sprint_len() -> u64 {
 
 fn default_sprint_days() -> u64 {
     1
+}
+
+fn default_scope_floor() -> usize {
+    4
 }
 
 fn default_concurrency() -> u32 {
@@ -456,6 +513,7 @@ impl Default for WorkflowConfig {
     fn default() -> Self {
         Self {
             ba_every_n_cycles: 4,
+            dev_scope_floor: default_scope_floor(),
             feature_dev_enabled: true,
             ops_monitor: true,
             sleep_seconds: 30,
@@ -474,8 +532,10 @@ impl Default for WorkflowConfig {
             human: HumanConfig::default(),
             backlog_cap: 0,
             pr_stale_days: 0,
+            revert_scan_days: 0,
             cadence: CadenceConfig::default(),
             quiet_hours_utc: String::new(),
+            bug_burn_floor: None,
         }
     }
 }
@@ -674,6 +734,27 @@ pub struct GitConfig {
     /// with an internally-minted token, so no forge secret lives in config.
     #[serde(default)]
     pub server_url: String,
+    /// How many consecutive times the SA reviewer may silently fail to render
+    /// a verdict on a PR (engine crash / unparseable JSON) before the runner
+    /// surfaces it to a human instead of letting the PR starve undistributed.
+    /// Default 4. 0 = never surface the skip (old behaviour).
+    #[serde(default = "default_review_max_skips")]
+    pub review_max_skips: u32,
+    /// How long (hours) a mergeable CLEAN PR may sit open with NO review
+    /// verdict before the runner stops waiting for the SA and verifies +
+    /// merges it itself (an anti-starvation deadline, only when `auto_merge`
+    /// is on). It still passes `verify_merged_result` and the size/human-eyes
+    /// gates before landing. 0 = disabled (never auto-land a never-reviewed PR).
+    #[serde(default = "default_review_deadline_hours")]
+    pub review_deadline_hours: u32,
+}
+
+fn default_review_max_skips() -> u32 {
+    4
+}
+
+fn default_review_deadline_hours() -> u32 {
+    12
 }
 
 fn default_true() -> bool {
@@ -709,6 +790,8 @@ impl Default for GitConfig {
             max_open_prs: default_max_open_prs(),
             max_changed_lines: default_max_changed_lines(),
             server_url: String::new(),
+            review_max_skips: default_review_max_skips(),
+            review_deadline_hours: default_review_deadline_hours(),
         }
     }
 }
@@ -857,6 +940,32 @@ mod tests {
     }
 
     #[test]
+    fn focus_windows_are_additive_and_round_trip() {
+        // A pre-existing human section (CXA-F176 does not exist in it) must
+        // load unchanged: no focus windows, no defer — today's behaviour.
+        let old = r#"{"gate_ready":true,"question_sla_minutes":30}"#;
+        let human: HumanConfig = serde_json::from_str(old).expect("old human config loads");
+        assert!(human.focus_windows.is_empty());
+        assert!(human.gate_ready);
+        assert_eq!(human.question_sla_minutes, 30);
+
+        // A new document round-trips its per-user windows verbatim.
+        let with_window = r#"{"focus_windows":{
+            "luffy":{"window_utc":"09:00-12:00","defer_to_digest":true}
+        }}"#;
+        let human: HumanConfig = serde_json::from_str(with_window).expect("new human config loads");
+        let fw = human
+            .focus_windows
+            .get("luffy")
+            .expect("window keyed by bare username");
+        assert_eq!(fw.window_utc, "09:00-12:00");
+        assert!(fw.defer_to_digest);
+        let rewritten = serde_json::to_string(&human).expect("serialize");
+        let back: HumanConfig = serde_json::from_str(&rewritten).expect("deserialize");
+        assert_eq!(back, human);
+    }
+
+    #[test]
     fn cadence_zeros_mean_defaults() {
         let c = CadenceConfig::default();
         assert_eq!(c.docs_refreshes_per_day(), 5);
@@ -920,5 +1029,31 @@ mod tests {
 
         assert_eq!(cfg.policy.forbidden_paths, ["infra/"]);
         assert_eq!(cfg.engine.default.model, "sonnet");
+    }
+
+    /// CXA-F028: the bug-burn floor is optional and backward compatible — a
+    /// config document that never mentions it burns every open bug exactly as
+    /// before; naming it picks the minimum severity.
+    #[test]
+    fn bug_burn_floor_is_absent_by_default_and_parses_the_priority_names() {
+        let cfg: Config = serde_json::from_str("{}").expect("legacy config");
+        assert_eq!(
+            cfg.workflow.bug_burn_floor, None,
+            "absent = burn everything"
+        );
+
+        let cfg: Config = serde_json::from_str(
+            r#"{"workflow":{"ba_every_n_cycles":4,"feature_dev_enabled":true,
+                "sleep_seconds":30,"bug_burn_floor":"high"}}"#,
+        )
+        .expect("floor config");
+        assert_eq!(cfg.workflow.bug_burn_floor, Some(Priority::High));
+
+        let cfg: Config = serde_json::from_str(
+            r#"{"workflow":{"ba_every_n_cycles":4,"feature_dev_enabled":true,
+                "sleep_seconds":30,"bug_burn_floor":"low"}}"#,
+        )
+        .expect("floor config");
+        assert_eq!(cfg.workflow.bug_burn_floor, Some(Priority::Low));
     }
 }
