@@ -167,7 +167,13 @@ impl JsonStateStore {
     /// the structural-integrity audit (CXA-F229) is the additional gate that
     /// refuses a corrupted post-state and quarantines its payload.
     fn write_locked(&self, state: &ProjectState) -> Result<(), PortError> {
-        gate_save(state, &self.quarantine)?;
+        // gate_save may HEAL (drop dangling ticket-keyed entries) — work on a
+        // clone so the healed shape is what gets persisted.
+        let mut state = state.clone();
+        let state = {
+            gate_save(&mut state, &self.quarantine)?;
+            &state
+        };
 
         let json =
             serde_json::to_vec_pretty(state).map_err(|e| PortError::Backend(e.to_string()))?;
