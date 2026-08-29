@@ -167,7 +167,7 @@ function renderPreflight(){const el=document.getElementById("ov-preflight");if(!
     <span style="font-size:11.5px;color:var(--muted)">${esc(i.detail||"")}</span></div>`).join("");
   const verdict=pf.ready?`<span style="color:var(--green);font-size:12px;font-weight:700">ready to go</span>`
     :`<span style="color:var(--red);font-size:12px;font-weight:700">not ready — ${(pf.blocking||[]).length} blocker(s)</span>`;
-  el.innerHTML=`<div class="panel" style="margin-top:20px"><h4><i class="ti ti-shield-check" style="color:var(--accent2)"></i> Go-live readiness <span style="margin-left:auto;font-weight:400">${verdict}</span></h4>
+  el.innerHTML=`<div class="panel"><h4><i class="ti ti-shield-check" style="color:var(--accent2)"></i> Go-live readiness <span style="margin-left:auto;font-weight:400">${verdict}</span></h4>
     ${rows||'<div style="font-size:12px;color:var(--muted)">No line items reported.</div>'}</div>`;}
 let PID=null, ES=null, poll=null;
 const api=p=>"/api/projects/"+encodeURIComponent(PID)+p;
