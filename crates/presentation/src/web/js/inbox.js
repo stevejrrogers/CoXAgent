@@ -78,6 +78,17 @@ async function renderInbox(){
   // reads in interruption order, queued-for-digest at the bottom.
   items.sort((a,b)=>(b.escalated?1:0)-(a.escalated?1:0)||(a.deferred?1:0)-(b.deferred?1:0));
   let html=bar;
+  // On-hold tickets collapse into ONE card: the auto-hold sweep can park a
+  // hundred exhausted tickets at once, and a card per ticket buries the items
+  // that actually need a decision today. The board's status filter is the
+  // right place to browse them.
+  const held=items.filter(i=>i.kind==="on_hold");
+  if(held.length){
+    const sample=held.slice(0,3).map(h=>esc(h.ticket)).join(", ");
+    html+=inboxCard("on_hold",`${held.length} ticket${held.length===1?"":"s"} parked · e.g. ${sample}`,
+      "Blocked on the outside world — resume each from its ticket when unblocked",
+      ibtn("View on board",`SF='on_hold';nav('board');setWorkTab('board')`,1));
+  }
   if(!items.length){
     html+='<div class="empty" style="padding:24px;text-align:center">Nothing needs you right now — switch to <b>All</b> to see the team\'s queue.</div>';
     el.innerHTML=html;return;
@@ -107,9 +118,7 @@ async function renderInbox(){
            ibtn("Verified",`inboxAct('${esc(it.ticket)}','verify')`,1)
           :noRight(it.role)),it.ticket);
     }else if(it.kind==="on_hold"){
-      html+=inboxCard("on_hold",esc(it.ticket)+(it.reason?" · "+esc(it.reason):""),esc(it.title),
-        ibtn("Open",`showTicket('${esc(it.ticket)}')`)+
-        (act?ibtn("Resume",`holdTicket('${esc(it.ticket)}',false)`,1):noRight(it.role)),it.ticket);
+      continue; // collapsed into the single summary card above
     }else if(it.kind==="assigned"){
       html+=inboxCard("assigned",esc(it.ticket)+" · "+esc(it.status||""),esc(it.title),
         ibtn("Return to agents",`inboxUnassign('${esc(it.ticket)}')`),it.ticket);
