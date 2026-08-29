@@ -20,6 +20,74 @@ pub enum TicketType {
     Chore,
 }
 
+impl TicketType {
+    /// Stable snake_case key, matching the serde wire form — the key every
+    /// aggregated map (metrics, ledgers) uses so dashboard code never
+    /// re-derives it from `format!("{:?}", ..)`.
+    #[must_use]
+    pub fn key(&self) -> &'static str {
+        match self {
+            TicketType::Feature => "feature",
+            TicketType::Bug => "bug",
+            TicketType::Chore => "chore",
+        }
+    }
+}
+
+/// One discrete operator gate decision, as recorded by the human
+/// governance-attention ledger (CXA-F230). One variant per human decision
+/// surface, named for the endpoint event that produces it — the ledger maps
+/// every recorded intervention back to exactly one of these, so aggregation
+/// never has to parse action prose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InterventionKind {
+    /// A person approved a designed ticket into `Ready` (`POST …/ready`).
+    ReadyApprove,
+    /// A person passed a fixed ticket at the verify gate (`POST …/verify`).
+    VerifyPass,
+    /// A person sent a fixed ticket back at the verify gate (`POST …/send-back`).
+    VerifySendBack,
+    /// A person approved a cost-held ticket to run (`POST …/approve-cost`).
+    CostApprove,
+    /// A person landed a PR the machine held for human eyes (`POST …/pr/:n/human`
+    /// with `action=approve`).
+    HumanPrReviewed,
+    /// A person dismissed a PR's human-eyes hold (`…/pr/:n/human` with
+    /// `action=dismiss`).
+    HumanPrDismissed,
+    /// A person pulled an auto-approval back to `Pending` (`POST …/undo-approval`).
+    UndoAutoApprove,
+}
+
+impl InterventionKind {
+    /// Stable snake_case wire key (the serde form), used as the map key in
+    /// every aggregated attention row.
+    #[must_use]
+    pub fn key(&self) -> &'static str {
+        match self {
+            InterventionKind::ReadyApprove => "ready_approve",
+            InterventionKind::VerifyPass => "verify_pass",
+            InterventionKind::VerifySendBack => "verify_send_back",
+            InterventionKind::CostApprove => "cost_approve",
+            InterventionKind::HumanPrReviewed => "human_pr_reviewed",
+            InterventionKind::HumanPrDismissed => "human_pr_dismissed",
+            InterventionKind::UndoAutoApprove => "undo_auto_approve",
+        }
+    }
+
+    /// Every kind, in the stable order aggregated rows are zero-filled in.
+    pub const ALL: [InterventionKind; 7] = [
+        InterventionKind::ReadyApprove,
+        InterventionKind::VerifyPass,
+        InterventionKind::VerifySendBack,
+        InterventionKind::CostApprove,
+        InterventionKind::HumanPrReviewed,
+        InterventionKind::HumanPrDismissed,
+        InterventionKind::UndoAutoApprove,
+    ];
+}
+
 /// Three-level priority — deliberately coarse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
