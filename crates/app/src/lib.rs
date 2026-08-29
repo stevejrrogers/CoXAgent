@@ -1563,9 +1563,33 @@ fn worktree_janitor_sweep(work_dir: &std::path::Path) -> u64 {
             }
         }
         let target = path.join("target");
-        if idle >= 6 && target.is_dir() {
-            reclaimed += dir_size(&target);
-            let _ = std::fs::remove_dir_all(&target);
+        if target.is_dir() {
+            // Idle trees lose their target outright; a tree that never idles
+            // (the review worktree wakes every 90 s) still gets capped by
+            // SIZE — its artifacts accumulate forever otherwise (65 GB seen).
+            // `.cargo-lock` is touched by every cargo invocation, so a stale
+            // lock means no build is running right now.
+            const TARGET_CAP_BYTES: u64 = 20 * 1024 * 1024 * 1024;
+            let building_recently = ["debug", "release"].iter().any(|prof| {
+                let lock = target.join(prof).join(".cargo-lock");
+                lock.metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| now.duration_since(t).ok())
+                    .is_some_and(|d| d.as_secs() < 600)
+            });
+            let oversized = dir_size(&target) > TARGET_CAP_BYTES;
+            if (idle >= 6 || oversized) && !building_recently {
+                reclaimed += dir_size(&target);
+                let _ = std::fs::remove_dir_all(&target);
+            } else if !building_recently {
+                // The live-cache case: cargo never garbage-collects, so every
+                // dependency bump leaves its old artifacts behind forever —
+                // most of a 65 GB target is corpses the current build never
+                // reads. Trim files untouched for 7 days; the hot incremental
+                // cache stays, so the next run is still fast.
+                reclaimed += trim_stale_files(&target, now, 7 * 24 * 3600);
+            }
         }
     }
     let _ = std::process::Command::new("git")
@@ -1573,6 +1597,33 @@ fn worktree_janitor_sweep(work_dir: &std::path::Path) -> u64 {
         .arg(work_dir)
         .args(["worktree", "prune"])
         .status();
+    reclaimed
+}
+
+/// Delete files under `p` whose mtime is older than `max_age_secs`; returns
+/// bytes reclaimed. Directories are left in place (cargo recreates freely).
+fn trim_stale_files(p: &std::path::Path, now: std::time::SystemTime, max_age_secs: u64) -> u64 {
+    let mut reclaimed = 0u64;
+    let Ok(rd) = std::fs::read_dir(p) else {
+        return 0;
+    };
+    for e in rd.flatten() {
+        let path = e.path();
+        if path.is_dir() {
+            reclaimed += trim_stale_files(&path, now, max_age_secs);
+            continue;
+        }
+        let stale = path
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|d| d.as_secs() > max_age_secs);
+        if stale {
+            reclaimed += path.metadata().map_or(0, |m| m.len());
+            let _ = std::fs::remove_file(&path);
+        }
+    }
     reclaimed
 }
 
