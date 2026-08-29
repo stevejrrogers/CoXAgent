@@ -32,7 +32,9 @@ use tokio::sync::RwLock;
 use tokio_stream::wrappers::IntervalStream;
 use tokio_stream::{Stream, StreamExt};
 
-use crate::middleware::{cors_layer, rate_limit_mw, RateLimiter, AUTH_RATE_MAX, AUTH_RATE_WINDOW};
+use crate::middleware::{
+    cors_layer, rate_limit_mw, telemetry_mw, RateLimiter, AUTH_RATE_MAX, AUTH_RATE_WINDOW,
+};
 
 mod assets;
 mod auth;
@@ -50,6 +52,7 @@ mod hub_docs;
 mod inbox;
 mod manage;
 mod meetings;
+mod metrics_admin;
 mod openapi;
 mod people;
 mod pr_listing;
@@ -72,6 +75,7 @@ use chat::*;
 use comments::*;
 use docs::*;
 use downloads::*;
+use metrics_admin::spawn_metrics_admin;
 use engines::*;
 use forge::*;
 use guards::*;
@@ -946,6 +950,24 @@ pub async fn serve_full(
             trust_proxy,
         )
     }));
+
+    // --- HTTP telemetry layer (outermost, CXA-C039) ---
+    // Sits outside CORS/rate-limit/auth so the recorded status is the one the
+    // client actually sees (429s included), exactly once per request. The
+    // registry is shared with the metrics admin listener below; its creation
+    // also starts the uptime clock.
+    let registry = Arc::new(coxagent_application::MetricsRegistry::new());
+    let telemetry_registry = Arc::clone(&registry);
+    let app = app.layer(axum::middleware::from_fn(move |req, next| {
+        telemetry_mw(req, next, Arc::clone(&telemetry_registry))
+    }));
+
+    // --- Metrics admin listener (CXA-C039) ---
+    // Served by gateway/realtime roles (and the all-in-one); knowledge pods
+    // run batch loops only — same surface rule as the Redis bus bridge.
+    if !matches!(hub_role(), HubRole::Knowledge) {
+        spawn_metrics_admin(registry);
+    }
 
     // Bind loopback by default (safe for local use); a container sets
     // COXAGENT_HOST=0.0.0.0 so published ports are reachable from the host.

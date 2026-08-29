@@ -222,8 +222,14 @@ export COXAGENT_AUTH_DSN="$COXAGENT_DB_DSN"                         # accounts i
 export COXAGENT_REDIS_URL='redis://host:6379'                      # sessions + coordination
 export COXAGENT_MONGO_URL='mongodb://host:27017'                   # docs (optional)
 export COXAGENT_S3_ENDPOINT='http://host:9000'                     # media (optional)
+export COXAGENT_METRICS_PORT='9010'                                # Prometheus scrape (loopback, default 9010)
 coxagent hub --registry registry.json --port 4000
 ```
+
+The hub also serves Prometheus metrics (`GET /metrics`) and a liveness probe
+(`GET /healthz`) on a loopback-only admin listener — `127.0.0.1` and
+deliberately unauthenticated, so scrape it locally or through a trusted
+sidecar. Never publish it directly.
 
 The desktop app reads these from a `coordination.json` next to the registry, so a
 Finder launch is distributed without env. Extra operators join the same project
