@@ -43,6 +43,7 @@ mod broken_projects;
 mod channels;
 mod chat;
 mod comments;
+mod deps;
 mod docs;
 mod downloads;
 mod engines;
@@ -167,6 +168,10 @@ pub struct ProjectHandle {
     /// Workspace file access for on-demand reviews; injected by the
     /// composition root so this layer stays free of infrastructure.
     pub files: Option<Arc<dyn coxagent_application::ports::outbound::WorkspaceFilesPort>>,
+    /// Lockfile discovery for the dependency-health scan (CXA-B111); injected
+    /// by the composition root so this layer stays free of infrastructure.
+    pub deps_discovery:
+        Option<Arc<dyn coxagent_application::ports::outbound::DependencyDiscoveryPort>>,
 }
 
 /// Builds a fresh project on demand (scaffold + register), injected by the
@@ -777,6 +782,7 @@ pub async fn serve_full(
         )
         .route("/api/projects/:pid/sprint/:action", post(sprint_scope_ep))
         .route("/api/projects/:pid/digest", post(digest_ep))
+        .route("/api/projects/:pid/deps/scan", post(deps::scan_ep))
         .route("/api/projects/:pid/merge-sweep", post(merge_sweep_ep))
         .route(
             "/api/workspace",

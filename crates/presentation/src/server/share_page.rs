@@ -703,6 +703,7 @@ mod tests {
             deploy: None,
             storage: None,
             files: None,
+            deps_discovery: None,
         }
     }
 

@@ -295,6 +295,7 @@ pub(super) async fn app_with(
         deploy: None,
         storage: None,
         files: None,
+        deps_discovery: None,
     };
     build_state(
         vec![handle],
