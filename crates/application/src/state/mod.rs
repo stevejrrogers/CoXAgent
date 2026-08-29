@@ -92,6 +92,18 @@ pub struct ProjectState {
     pub sprint: Option<Sprint>,
     #[serde(default)]
     pub sprints: Vec<SprintRecord>,
+    /// Upcoming sprints prepared ahead of time, consumed front-first at
+    /// rollover. See [`PlannedSprint`].
+    #[serde(default)]
+    pub sprint_queue: Vec<PlannedSprint>,
+    /// Why each on-hold ticket is parked (ticket id → reason). Written on
+    /// hold (human or the auto-hold sweep), cleared on resume.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub hold_reasons: std::collections::BTreeMap<String, String>,
+    /// Per-role engine health (role label → counters), fed by the cycle's
+    /// error report. Rendered on the Agents view.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub role_health: std::collections::BTreeMap<String, RoleHealth>,
     #[serde(default)]
     pub deploy: Option<DeployStatus>,
     /// Discussion threads: per-ticket and team-channel comments.
@@ -193,6 +205,13 @@ pub struct ProjectState {
     /// burning tokens forever; entries are dropped when the PR closes.
     #[serde(default)]
     pub pr_fix_attempts: std::collections::BTreeMap<u64, u32>,
+    /// How many times in a ROW the SA reviewer failed to render a verdict on
+    /// each open PR (engine crash / unparseable JSON), so a PR the reviewer
+    /// silently chokes on is surfaced to a human instead of starving forever.
+    /// Cleared whenever the PR gets a real review or the record is reset on
+    /// merge/close.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub pr_review_skips: std::collections::BTreeMap<u64, u32>,
     /// Engine conversation id of the last fix run per PR — the next fix round
     /// RESUMES that conversation (the agent still has the branch, the feedback
     /// and its own changes in context) instead of starting cold. Dropped with
@@ -384,7 +403,30 @@ pub struct ProjectState {
     /// is verified. Consult-only against state — no git ref changes.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub rolled_back_commits: std::collections::BTreeSet<String>,
+    /// One bug-status count per UTC day (`YYYY-MM-DD` → counts), recorded by
+    /// the leader cycle so the burn-down history survives restarts instead of
+    /// leaving only today's snapshot in `metrics::compute` (CXA-F032). Bounded
+    /// by [`MAX_BUG_SNAPSHOT_DAYS`]; every added field is serde-defaulted so
+    /// the schema stays at version 1.
+    #[serde(default)]
+    pub bug_snapshots: std::collections::BTreeMap<String, BugSnapshot>,
 }
+
+/// One day's open/fixed/verified bug counts — the persisted burn-down point
+/// (CXA-F032).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct BugSnapshot {
+    #[serde(default)]
+    pub open: u32,
+    #[serde(default)]
+    pub fixed: u32,
+    #[serde(default)]
+    pub verified: u32,
+}
+
+/// Cap on persisted daily bug snapshots — a full leap year of days; older
+/// entries are dropped as new ones arrive so state cannot grow without bound.
+pub const MAX_BUG_SNAPSHOT_DAYS: usize = 366;
 
 /// Cap on how many incident records are kept (newest first). One per deploy
 /// revision means a storm of failures still stays bounded and readable.
@@ -409,6 +451,9 @@ impl Default for ProjectState {
             spend: Spend::default(),
             sprint: None,
             sprints: Vec::new(),
+            sprint_queue: Vec::new(),
+            hold_reasons: std::collections::BTreeMap::new(),
+            role_health: std::collections::BTreeMap::new(),
             deploy: None,
             comments: Vec::new(),
             reviews: Vec::new(),
@@ -431,6 +476,7 @@ impl Default for ProjectState {
             sprint_goal: String::new(),
             last_digest_day: String::new(),
             pr_fix_attempts: std::collections::BTreeMap::new(),
+            pr_review_skips: std::collections::BTreeMap::new(),
             pr_sessions: std::collections::BTreeMap::new(),
             ticket_sessions: std::collections::BTreeMap::new(),
             cost_holds: std::collections::BTreeMap::new(),
@@ -466,6 +512,7 @@ impl Default for ProjectState {
             last_rollback: None,
             incidents: Vec::new(),
             rolled_back_commits: std::collections::BTreeSet::new(),
+            bug_snapshots: std::collections::BTreeMap::new(),
         }
     }
 }

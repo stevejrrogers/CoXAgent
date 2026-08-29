@@ -775,6 +775,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // One digest per UTC day into the team chat: shipped/spend/sprint at
             // a glance, so the user doesn't need the dashboard open to keep up.
             self.post_daily_digest().await;
+            // One bug-count snapshot per UTC day: the persisted burn-down
+            // history the metrics dashboard and the self-tuning escalation
+            // read (CXA-F032). Recorded BEFORE self-tune so today's delta is
+            // already on file when the tuner evaluates it.
+            self.record_daily_bug_snapshot().await;
 
             // Self-correcting memory: audit the engine's per-machine notes
             // against the current process law once a day.
@@ -961,11 +966,39 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 Err(e) => report.errors.push(format!("DEV-BUG: {e}")),
             }
         }
-        let bugs_first = self.store.load().await.is_ok_and(|s| s.tuning.bugs_first);
-        if bugs_first {
+        // The bugs-first brake gives bugs the dev SLOT — it must never starve
+        // the slot outright. With every bug parked/held the bug pass claims
+        // nothing, and an unconditional brake deadlocked BOTH lanes for 50+
+        // cycles (features locked "for bugs", no bug workable). The brake only
+        // holds when this cycle actually spent its slot on a bug.
+        let brake_state = self.store.load().await.ok();
+        let reactive_brake = brake_state.as_ref().is_some_and(|s| s.tuning.bugs_first);
+        let burn_hold = brake_state
+            .as_ref()
+            .is_some_and(crate::selection::burn_mode_holds);
+        // Human burn mode (CXA-F030), layered on the reactive brake: when its
+        // explicit exit gate is met the mode clears itself through the store —
+        // the burn-down sprint ends by itself instead of waiting for a person.
+        // Best-effort: a lost race just re-evaluates and re-clears next cycle.
+        if let Some(s) = &brake_state {
+            if s.tuning.burn_mode && !burn_hold {
+                let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |st| {
+                    crate::selection::clear_burn_mode_if_gate_met(st);
+                    Ok(())
+                })
+                .await;
+            }
+        }
+        let bug_slot_worked = report.bug_fixed.is_some();
+        if reactive_brake && bug_slot_worked {
             report
                 .errors
                 .push("DEV-FEATURE: paused by self-tuning — burning down bugs first".to_owned());
+        }
+        if burn_hold && bug_slot_worked {
+            report.errors.push(
+                "DEV-FEATURE: paused by burn mode — open bugs still above the exit gate".to_owned(),
+            );
         }
         if self.pause_requested() {
             report
@@ -973,7 +1006,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 .push("cycle cut short — paused by user".to_owned());
             return report;
         }
-        if self.config.workflow.feature_dev_enabled && !queue_full && !bugs_first {
+        // Either brake pauses features (OR); both honour the deadlock valve.
+        let feature_paused = brake_state
+            .as_ref()
+            .is_some_and(|s| crate::selection::dev_feature_paused(s, bug_slot_worked));
+        if self.config.workflow.feature_dev_enabled && !queue_full && !feature_paused {
             // Before building, make sure the next feature has a clear definition
             // of done — DEV raises unclear tickets and the BA fills them in.
             self.clarify_next_feature().await;

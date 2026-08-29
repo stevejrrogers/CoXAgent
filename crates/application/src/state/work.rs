@@ -153,6 +153,47 @@ pub struct Sprint {
     /// seven-minute "sprints" in two days — ceremony noise with no meaning.
     #[serde(default)]
     pub started_at: String,
+    /// Bug-burn floor mirrored from `WorkflowConfig` when this sprint opened
+    /// (CXA-F028). Selection reads it from HERE so the DEV scope stays a pure
+    /// function of persisted state — config never leaks into selection call
+    /// sites. `None` (old snapshots) = burn every open bug, exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bug_burn_floor: Option<coxagent_domain::Priority>,
+}
+
+/// A sprint prepared ahead of time (by the PO or a person) and queued to run
+/// after the current one. Rollover consumes the queue front-first: its goal
+/// and ticket set become the next sprint's, so planning can run several
+/// sprints ahead of execution. An empty queue leaves rollover exactly as it
+/// always was (goal chip, then capacity-based auto-commit).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannedSprint {
+    /// Stable id unique within the queue (monotonic; survives reorders).
+    pub id: u64,
+    pub goal: String,
+    /// Tickets picked for this sprint. Validated again at rollover — shipped
+    /// or deleted tickets are silently skipped.
+    #[serde(default)]
+    pub tickets: Vec<TicketId>,
+    #[serde(default)]
+    pub created_at: String,
+    /// Who queued it ("po" for the agent, else a username).
+    #[serde(default)]
+    pub by: String,
+}
+
+/// Cumulative engine-health counters for one agent role — errors and
+/// timeout-class failures with the most recent message, so the Agents view
+/// can say "BA is failing 40% of runs on this model" instead of a person
+/// grepping hub.log for it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleHealth {
+    pub errors: u64,
+    pub timeouts: u64,
+    #[serde(default)]
+    pub last_error: String,
+    #[serde(default)]
+    pub last_error_at: String,
 }
 
 /// A closed sprint's outcome — the velocity history.
@@ -278,6 +319,17 @@ pub struct Tuning {
     /// until the queue drains.
     #[serde(default)]
     pub skip_ba: bool,
+    /// Human burn mode (CXA-F030): a person pauses feature work and the team
+    /// burns down open bugs until the exit gate releases it. Unlike
+    /// `bugs_first` — recomputed from the evals each day — this is a human
+    /// decision the loop must honour and never overwrite.
+    #[serde(default)]
+    pub burn_mode: bool,
+    /// The burn mode's explicit exit gate: once the open-bug count is at or
+    /// below this, the mode clears itself and features resume. Absent means
+    /// no numeric gate — the mode then holds until switched off by hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub burn_until_bugs_le: Option<u32>,
     /// The day (`YYYY-MM-DD`) tuning was last evaluated.
     #[serde(default)]
     pub last_eval_day: String,
@@ -286,7 +338,11 @@ pub struct Tuning {
 impl Tuning {
     #[must_use]
     pub fn is_default(&self) -> bool {
-        !self.bugs_first && !self.skip_ba && self.last_eval_day.is_empty()
+        !self.bugs_first
+            && !self.skip_ba
+            && !self.burn_mode
+            && self.burn_until_bugs_le.is_none()
+            && self.last_eval_day.is_empty()
     }
 }
 
@@ -332,6 +388,71 @@ mod attempt_failure_tests {
 }
 
 #[cfg(test)]
+mod sprint_floor_tests {
+    use super::{ProjectState, Sprint};
+    use coxagent_domain::Priority;
+
+    fn sprint_with_floor(floor: Option<Priority>) -> Sprint {
+        Sprint {
+            number: 1,
+            goal: "burn".to_owned(),
+            started_cycle: 1,
+            length_cycles: 10,
+            committed: Vec::new(),
+            started_at: String::new(),
+            bug_burn_floor: floor,
+        }
+    }
+
+    #[test]
+    fn the_floor_round_trips_through_the_sprint_record() {
+        for floor in [None, Some(Priority::Low), Some(Priority::High)] {
+            let s = ProjectState {
+                sprint: Some(sprint_with_floor(floor)),
+                ..ProjectState::default()
+            };
+            let doc = serde_json::to_value(&s).expect("serialize");
+            let back: ProjectState = serde_json::from_value(doc).expect("deserialize");
+            assert_eq!(back.sprint.expect("sprint").bug_burn_floor, floor);
+        }
+    }
+
+    #[test]
+    fn a_sprint_snapshot_from_before_the_floor_still_loads() {
+        // Projects persisted before CXA-F028 have no `bug_burn_floor` key on
+        // their sprint; the load must give None (burn everything), not fail.
+        let mut doc = serde_json::to_value(ProjectState {
+            sprint: Some(sprint_with_floor(Some(Priority::High))),
+            ..ProjectState::default()
+        })
+        .expect("serialize");
+        doc.as_object_mut()
+            .expect("object")
+            .get_mut("sprint")
+            .expect("sprint key")
+            .as_object_mut()
+            .expect("sprint object")
+            .remove("bug_burn_floor");
+        let back: ProjectState = serde_json::from_value(doc).expect("legacy sprint loads");
+        assert_eq!(back.sprint.expect("sprint").bug_burn_floor, None);
+    }
+
+    #[test]
+    fn an_absent_floor_is_not_serialized_into_new_snapshots() {
+        // Old stores stay byte-shaped like before when the floor is unused.
+        let doc = serde_json::to_value(ProjectState {
+            sprint: Some(sprint_with_floor(None)),
+            ..ProjectState::default()
+        })
+        .expect("serialize");
+        assert!(
+            doc.pointer("/sprint/bug_burn_floor").is_none(),
+            "None must not add a key old readers never saw"
+        );
+    }
+}
+
+#[cfg(test)]
 mod daily_job_tests {
     use super::ProjectState;
 
@@ -365,5 +486,85 @@ mod daily_job_tests {
             .remove("engine_incidents");
         let back: ProjectState = serde_json::from_value(doc).expect("legacy state loads");
         assert!(back.daily_jobs.is_empty() && back.engine_incidents.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod burn_mode_tests {
+    use super::{ProjectState, Tuning};
+    use crate::ports::outbound::{mutate_state, StateStorePort};
+    use crate::PortError;
+    use async_trait::async_trait;
+    use std::sync::{Arc, Mutex};
+
+    /// In-memory store — the round-trip needs no filesystem.
+    #[derive(Default)]
+    struct MemStore {
+        state: Mutex<ProjectState>,
+    }
+
+    #[async_trait]
+    impl StateStorePort for MemStore {
+        async fn load(&self) -> Result<ProjectState, PortError> {
+            Ok(self.state.lock().map_err(poison)?.clone())
+        }
+        async fn save(&self, state: &ProjectState) -> Result<(), PortError> {
+            state.validate().map_err(PortError::Corrupt)?;
+            *self.state.lock().map_err(poison)? = state.clone();
+            Ok(())
+        }
+    }
+
+    fn poison<T>(_: std::sync::PoisonError<T>) -> PortError {
+        PortError::Backend("lock poisoned".to_owned())
+    }
+
+    #[test]
+    fn is_default_covers_the_burn_mode_fields() {
+        assert!(Tuning::default().is_default());
+        let engaged = Tuning {
+            burn_mode: true,
+            ..Tuning::default()
+        };
+        assert!(!engaged.is_default());
+        let gated = Tuning {
+            burn_until_bugs_le: Some(0),
+            ..Tuning::default()
+        };
+        assert!(
+            !gated.is_default(),
+            "a stored exit gate must survive: `tuning` is skipped from the persisted \
+             document only while is_default() holds"
+        );
+    }
+
+    #[test]
+    fn state_written_before_burn_mode_existed_still_loads() {
+        // Projects on disk predate the burn-mode fields; a missing key must
+        // not fail the load and strand a whole project.
+        let mut doc = serde_json::to_value(ProjectState::default()).expect("serialize");
+        doc.as_object_mut().expect("object").remove("tuning");
+        let back: ProjectState = serde_json::from_value(doc).expect("load legacy state");
+        assert!(!back.tuning.burn_mode);
+        assert!(back.tuning.burn_until_bugs_le.is_none());
+    }
+
+    #[tokio::test]
+    async fn burn_mode_set_through_the_store_round_trips() {
+        let store = Arc::new(MemStore::default());
+        mutate_state(store.as_ref(), |s| {
+            s.tuning.burn_mode = true;
+            s.tuning.burn_until_bugs_le = Some(2);
+            Ok(())
+        })
+        .await
+        .expect("set through the store");
+        let s = store.load().await.expect("load");
+        assert!(s.tuning.burn_mode);
+        assert_eq!(s.tuning.burn_until_bugs_le, Some(2));
+        // And it must be PERSISTED, not skipped as default tuning.
+        let doc = serde_json::to_value(&s).expect("serialize");
+        assert_eq!(doc["tuning"]["burn_mode"], serde_json::json!(true));
+        assert_eq!(doc["tuning"]["burn_until_bugs_le"], serde_json::json!(2));
     }
 }

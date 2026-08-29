@@ -274,16 +274,38 @@ pub(super) async fn store_rpc_ep(
     let Some(p) = app.project(&pid).await else {
         return super::not_found();
     };
-    // P5a defense-in-depth: when hub auth is configured every op needs a valid
-    // principal — mirroring chat/inbox/etc. The route-level `auth_mw` already
-    // rejects anonymous traffic while /store sits under it; this keeps access
-    // gated even if /store ever moves out from under that middleware.
-    let authorized = match &app.auth {
-        Some(auth) => super::resolve_principal(auth, &headers).await.is_some(),
-        None => true,
-    };
-    if !authorized {
-        return (axum::http::StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    // P5a defense-in-depth: when hub auth is configured every op needs a
+    // manage-tier principal who is a member of :pid (Super/Admin exempt) — the
+    // exact policy `auth_mw` enforces for this path (write gate ->
+    // `can_manage`, plus per-project membership). The middleware already
+    // rejects traffic while /store sits under it; enforcing the same decision
+    // HERE keeps the adapter closed even if /store ever moves out from under
+    // that middleware — an authenticated-but-outsider session must be refused
+    // by the endpoint itself instead of being forwarded to the store adapter.
+    if let Some(auth) = &app.auth {
+        let Some(user) = super::resolve_principal(auth, &headers).await else {
+            return (axum::http::StatusCode::UNAUTHORIZED, "sign in first").into_response();
+        };
+        if !user.role.can_manage() {
+            return (
+                axum::http::StatusCode::FORBIDDEN,
+                axum::Json(serde_json::json!({
+                    "error": "management role required"
+                })),
+            )
+                .into_response();
+        }
+        let is_super_or_admin = user.role == coxagent_application::auth::AuthRole::Super
+            || user.role == coxagent_application::auth::AuthRole::Admin;
+        if !is_super_or_admin && !user.projects.iter().any(|p| p == &pid) {
+            return (
+                axum::http::StatusCode::FORBIDDEN,
+                axum::Json(serde_json::json!({
+                    "error": "not a member of this project"
+                })),
+            )
+                .into_response();
+        }
     }
     match q.op.as_str() {
         "load" => op_load(&p).await,

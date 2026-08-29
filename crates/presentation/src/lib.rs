@@ -65,5 +65,6 @@ fn status_label(status: Status) -> &'static str {
         Status::Open => "open",
         Status::Fixed => "fixed",
         Status::Verified => "verified",
+        Status::OnHold => "on_hold",
     }
 }
