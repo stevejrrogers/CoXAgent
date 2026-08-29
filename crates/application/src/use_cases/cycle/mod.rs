@@ -25,6 +25,7 @@ mod debt_sweep;
 mod escalation;
 mod preflight;
 mod scrum;
+mod ship_truth;
 mod sm_watch;
 mod wiring;
 
@@ -797,6 +798,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // surfaces (inflow vs outflow, failure hotspots, grade/cost
             // direction) and propose — never decide — system-level work.
             self.trend_sentinel().await;
+            self.ship_truth_sweep().await;
             // Stop starting, start finishing: review + merge the PR queue at
             // the TOP of the cycle. This used to run at the very end — after
             // codegraph, ceremonies and the (tens-of-minutes) dev phases — so
