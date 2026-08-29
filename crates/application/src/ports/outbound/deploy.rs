@@ -220,6 +220,23 @@ pub trait DeployPort: Send + Sync {
         self.run_tests(work_dir).await
     }
 
+    /// Run the repo's browser e2e suite (if it has one) in `work_dir`,
+    /// seeding `e2e/node_modules` from `seed_modules` when provided so a
+    /// fresh verification worktree does not pay an npm install per PR.
+    /// Default: report "not deployed" success — adapters without a browser
+    /// runner change nothing.
+    async fn run_e2e(
+        &self,
+        _work_dir: &Path,
+        _seed_modules: Option<&Path>,
+    ) -> Result<DeployReport, PortError> {
+        Ok(DeployReport {
+            success: true,
+            deployed: false,
+            summary: "no e2e runner".to_owned(),
+        })
+    }
+
     async fn run_tests(&self, work_dir: &Path) -> Result<DeployReport, PortError> {
         let _ = work_dir;
         Ok(DeployReport {
