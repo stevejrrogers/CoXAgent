@@ -282,8 +282,9 @@ pub fn compute(state: &ProjectState) -> Metrics {
     }
 }
 
-/// Today's UTC calendar day, injected the same way the health overlay's
-/// `now_day` is so tests can pin time.
+/// Today's UTC calendar day — `compute` reads the clock like `agent_evals`
+/// already does (the parameterized analytics live in `metrics_health`, whose
+/// endpoints inject `now_day` so tests can pin time).
 #[must_use]
 fn now_day() -> String {
     crate::state::now_rfc3339().get(..10).unwrap_or_default().to_owned()

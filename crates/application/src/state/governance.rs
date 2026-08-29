@@ -125,6 +125,10 @@ impl ProjectState {
     /// 24h cutoff). The cycle scorecard folds this delta into its
     /// accumulators so each scorecard is a self-contained snapshot of the
     /// human attention that landed during its cycle.
+    ///
+    /// Dedupes by decision identity exactly like the summary aggregation —
+    /// a same-resolution double-write must not count once here and once
+    /// there (AC5 covers every aggregated total, not just the dashboard's).
     #[must_use]
     pub fn attention_delta_since(
         &self,
@@ -133,10 +137,11 @@ impl ProjectState {
         std::collections::BTreeMap<String, u64>,
         std::collections::BTreeMap<String, u64>,
     ) {
+        let mut seen = std::collections::BTreeSet::new();
         let mut by_area = std::collections::BTreeMap::new();
         let mut by_kind = std::collections::BTreeMap::new();
         for rec in &self.governance_interventions {
-            if rec.at.as_str() <= since {
+            if rec.at.as_str() <= since || !seen.insert(rec.decision_identity()) {
                 continue;
             }
             if let Some(area) = rec.area {
@@ -301,5 +306,24 @@ mod tests {
         let (by_area, by_kind) = s.attention_delta_since("");
         assert!(by_area.is_empty());
         assert_eq!(by_kind.get("cost_approve").copied(), Some(1));
+    }
+
+    #[test]
+    fn the_delta_dedupes_a_same_resolution_double_write() {
+        // AC5 covers every aggregated total: the scorecard's delta counts a
+        // concurrent double-write once, exactly like the dashboard summary.
+        let mut s = ProjectState::default();
+        let decision = |at: &str| InterventionRecord {
+            kind: InterventionKind::HumanPrReviewed,
+            ticket: "CXC-F001".into(),
+            area: Some(TicketType::Feature),
+            by: "po".into(),
+            at: at.to_owned(),
+        };
+        s.push_intervention(decision("2026-08-01T10:00:00.100000Z"));
+        s.push_intervention(decision("2026-08-01T10:00:00.900000Z"));
+        let (by_area, by_kind) = s.attention_delta_since("");
+        assert_eq!(by_area.get("feature").copied(), Some(1));
+        assert_eq!(by_kind.get("human_pr_reviewed").copied(), Some(1));
     }
 }

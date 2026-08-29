@@ -32,7 +32,8 @@ pub type AttentionRow = BTreeMap<String, u64>;
 
 /// The attributed view of the operator's own review effort (CXA-F230): counts
 /// per ticket class and intervention kind, the ledger total, and the explicit
-/// `unattributed` bucket for records that could not be attributed.
+/// `unattributed` bucket for records that could not be attributed. Attributed
+/// volume is derivable as `interventions_total - unattributed`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct AttentionSummary {
     /// Ticket-class key (`feature`|`bug`|`chore`) → per-kind counts. All
@@ -40,8 +41,6 @@ pub struct AttentionSummary {
     pub attention_by_area: BTreeMap<String, AttentionRow>,
     /// Every deduped decision in the ledger, attributed or not.
     pub interventions_total: u64,
-    /// The subset that carried a resolvable ticket class.
-    pub attributed_total: u64,
     /// Records lacking a derivable ticket class (owner or area unknown) —
     /// reported explicitly, never silently assigned or dropped (AC4).
     pub unattributed: u64,
@@ -130,12 +129,12 @@ fn deduped(state: &ProjectState) -> Vec<&InterventionRecord> {
 #[must_use]
 pub fn attention_summary(state: &ProjectState, now_day: &str) -> AttentionSummary {
     let mut by_area: BTreeMap<String, AttentionRow> = BTreeMap::new();
-    let mut attributed = 0_u64;
+    let mut total = 0_u64;
     let mut unattributed = 0_u64;
     for rec in deduped(state) {
+        total += 1;
         match rec.area {
             Some(area) => {
-                attributed += 1;
                 let row = by_area
                     .entry(area.key().to_owned())
                     .or_insert_with(zero_row);
@@ -152,8 +151,7 @@ pub fn attention_summary(state: &ProjectState, now_day: &str) -> AttentionSummar
     let anomaly = detect_attention_anomaly(state, now_day);
     AttentionSummary {
         attention_by_area: by_area,
-        interventions_total: attributed + unattributed,
-        attributed_total: attributed,
+        interventions_total: total,
         unattributed,
         anomaly,
     }
@@ -376,8 +374,12 @@ mod tests {
         );
         let sum = attention_summary(&s, "2026-08-14");
         assert_eq!(sum.interventions_total, 3);
-        assert_eq!(sum.attributed_total, 3);
         assert_eq!(sum.unattributed, 0);
+        // Attributed volume is the per-area rows' sum.
+        assert_eq!(
+            sum.attention_by_area.values().map(|r| r.values().sum::<u64>()).sum::<u64>(),
+            3
+        );
         assert_eq!(
             sum.attention_by_area["feature"]
                 .get("ready_approve")
@@ -403,7 +405,8 @@ mod tests {
         let sum = attention_summary(&s, "2026-08-14");
         assert_eq!(sum.interventions_total, 1);
         assert_eq!(sum.unattributed, 1);
-        assert_eq!(sum.attributed_total, 0);
+        // Nothing attributed: the per-area rows are all zero.
+        assert!(sum.attention_by_area.values().all(|r| r.values().all(|v| *v == 0)));
     }
 
     #[test]

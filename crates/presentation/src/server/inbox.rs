@@ -660,13 +660,17 @@ async fn human_transition(
     // Governance-attention ledger (CXA-F230): the verdict just taken is a
     // measured moment of operator review effort, attributed to the ticket's
     // class. The transition guards above make a duplicate submit a 409 before
-    // any record exists, so one resolution is one record.
-    let kind = if to == coxagent_domain::Status::Verified {
-        coxagent_domain::InterventionKind::VerifyPass
-    } else {
-        coxagent_domain::InterventionKind::ReadyApprove
+    // any record exists, so one resolution is one record. Explicitly mapped
+    // per target status — a future caller adding a third target must decide
+    // what kind it is, never silently inherit ReadyApprove.
+    let kind = match to {
+        coxagent_domain::Status::Verified => Some(coxagent_domain::InterventionKind::VerifyPass),
+        coxagent_domain::Status::Ready => Some(coxagent_domain::InterventionKind::ReadyApprove),
+        _ => None,
     };
-    state.record_intervention(kind, id, &me);
+    if let Some(kind) = kind {
+        state.record_intervention(kind, id, &me);
+    }
     let label = format!("{to:?}").to_lowercase();
     // Teach the adaptive gate: every human decision is a sample
     // (docs/ADAPTIVE_APPROVAL.md).

@@ -165,13 +165,16 @@ function velocityHtml(sprints){
 }
 // Human governance-attention ledger (CXA-F230): where the operator's own
 // review effort goes, per ticket class and gate kind. Reads the analytics
-// response the backend already computes (60s cache — the same pattern the
-// token-saver panel uses), because the raw ledger never rides the 1 Hz state
-// snapshot. Zero gates render NOTHING: until a first decision lands, the
-// overview reads exactly as before.
+// response the backend already computes (60s cache, keyed by project — the
+// same pattern the token-saver panel uses), because the raw ledger never
+// rides the 1 Hz state snapshot. Zero gates render NOTHING: until a first
+// decision lands, the overview reads exactly as before.
 function loadGovernanceAttention(){
+  // The cache is keyed by project: switching projects must never show the
+  // previous project's attention data for the rest of the cache window.
+  if(window._govPid!==PID){window._gov=null;window._govAt=0;}
   if(window._govAt&&Date.now()-window._govAt<60000){renderGovernanceAttention();return;}
-  window._govAt=Date.now();
+  window._govPid=PID;window._govAt=Date.now();
   fetch(api("/metrics/summary")).then(r=>r.json()).then(d=>{
     window._gov=(d&&d.attention)?d.attention:null;
     if(CUR==="overview")renderGovernanceAttention();
@@ -180,7 +183,7 @@ function loadGovernanceAttention(){
 function renderGovernanceAttention(){
   const el=document.getElementById("ov-attention");if(!el)return;
   const a=window._gov;
-  if(!a||!a.interventions_total){el.innerHTML="";return;}
+  if(!a||!a.interventions_total){setHTML(el,"");return;}
   const kinds={ready_approve:"ready",verify_pass:"verify ✓",verify_send_back:"verify ↩",cost_approve:"cost",human_pr_reviewed:"PR landed",human_pr_dismissed:"PR dismissed",undo_auto_approve:"undo approval"};
   const rows=Object.entries(a.attention_by_area||{}).map(([area,counts])=>({
     area,total:Object.values(counts||{}).reduce((x,y)=>x+(y||0),0),counts:counts||{}
@@ -197,16 +200,17 @@ function renderGovernanceAttention(){
   const anomaly=a.anomaly?`<div style="display:flex;align-items:flex-start;gap:10px;margin-top:10px;padding:9px 12px;border:1px solid var(--border2);border-left:3px solid var(--amber);border-radius:10px;background:var(--card)">
     <i class="ti ti-alert-triangle" style="color:var(--amber);font-size:15px"></i>
     <div style="font-size:12px;color:var(--muted)"><b style="color:var(--text);text-transform:capitalize">${esc(a.anomaly.area)}</b> governance attention spiked — ${a.anomaly.recent_interventions} decisions in 3 days vs ${Number(a.anomaly.baseline_mean).toFixed(1)}/day trailing, with 0 verified tickets of that class in 14 days. Tune the gate, don't just enforce it.</div></div>`:"";
-  return `<div class="sec" style="margin-top:22px">Governance attention <span style="font-size:11px;color:var(--dim);font-weight:400">· your own review effort by ticket class — ${a.interventions_total} gate decision${a.interventions_total===1?"":"s"} recorded</span></div>
+  setHTML(el,`<div class="sec" style="margin-top:22px">Governance attention <span style="font-size:11px;color:var(--dim);font-weight:400">· your own review effort by ticket class — ${a.interventions_total} gate decision${a.interventions_total===1?"":"s"} recorded</span></div>
     <div class="panel">
       ${rows.map(bar).join("")}
       ${a.unattributed?`<div style="font-size:11px;color:var(--dim);margin-top:8px"><i class="ti ti-eye-off"></i> ${a.unattributed} unattributed — decisions with no resolvable ticket class, counted but never guessed</div>`:""}
       ${anomaly}
-    </div>`;
+    </div>`);
 }
 function chartsHtml(s){
   const ts=s.tickets||[],h=s.history||[];
-  if(!ts.length&&!h.length)return "";  // Ticket status distribution (stacked bar).
+  if(!ts.length&&!h.length)return "";
+  // Ticket status distribution (stacked bar).
   const order=[["pending","--muted"],["ready","--accent2"],["in_progress","--amber"],["done","--green"],["documented","--teal"],["open","--red"],["fixed","--amber"],["verified","--green"],["rejected","--dim"]];
   const counts={};ts.forEach(t=>counts[t.status]=(counts[t.status]||0)+1);
   const total=ts.length||1;
@@ -549,6 +553,7 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
       document.getElementById("ov-deploy").innerHTML='';
       document.getElementById("ov-activity").innerHTML='<div class="empty">activity appears as agents work</div>';
       document.getElementById("ov-changelog").innerHTML='<div class="empty">no releases yet</div>';
+      const gov=document.getElementById("ov-attention");if(gov)gov.innerHTML='';
       return;
     }
     const m=metricsFrom(s);
