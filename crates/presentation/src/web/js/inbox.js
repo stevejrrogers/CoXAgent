@@ -22,6 +22,8 @@ const INBOX_KIND={
   auto_approved:{label:"Auto-approved",ic:"ti-robot",col:"var(--dim)"},
   pr_stuck:{label:"PR stuck — needs you",ic:"ti-alert-triangle",col:"var(--red)"},
   human_eyes:{label:"Needs human eyes",ic:"ti-eye-exclamation",col:"var(--amber)"},
+  reverted_work:{label:"Reverted work — confirm or dismiss",ic:"ti-arrow-back-up",col:"var(--red)"},
+  on_hold:{label:"On hold — resume when unblocked",ic:"ti-player-pause",col:"var(--amber)"},
 };
 
 function inboxCard(kind,meta,title,actions,ticket){
@@ -67,13 +69,13 @@ async function renderInbox(){
   const bar=`<div class="ibx-filters">${chip("","All",all.length)}${chip("mine","Assigned to me",mineN)}</div>`;
   const items=flt==="mine"?all.filter(i=>i.can_act):all;
   if(!all.length){
-    el.innerHTML='<div class="card" style="padding:28px;text-align:center" class="muted">🎉 Nothing waits on the team.</div>';
+    el.innerHTML='<div class="empty" style="padding:48px 20px;text-align:center">🎉 Nothing waits on you — the team is fully unblocked.</div>';
     return;
   }
   items.sort((a,b)=>(b.escalated?1:0)-(a.escalated?1:0));
   let html=bar;
   if(!items.length){
-    html+='<div class="card" style="padding:24px;text-align:center" class="muted">Nothing needs you right now — switch to <b>All</b> to see the team\'s queue.</div>';
+    html+='<div class="empty" style="padding:24px;text-align:center">Nothing needs you right now — switch to <b>All</b> to see the team\'s queue.</div>';
     el.innerHTML=html;return;
   }
   for(const it of items){
@@ -100,6 +102,10 @@ async function renderInbox(){
           ?ibtn("Send back",`inboxSendBack('${esc(it.ticket)}')`)+
            ibtn("Verified",`inboxAct('${esc(it.ticket)}','verify')`,1)
           :noRight(it.role)),it.ticket);
+    }else if(it.kind==="on_hold"){
+      html+=inboxCard("on_hold",esc(it.ticket)+(it.reason?" · "+esc(it.reason):""),esc(it.title),
+        ibtn("Open",`showTicket('${esc(it.ticket)}')`)+
+        (act?ibtn("Resume",`holdTicket('${esc(it.ticket)}',false)`,1):noRight(it.role)),it.ticket);
     }else if(it.kind==="assigned"){
       html+=inboxCard("assigned",esc(it.ticket)+" · "+esc(it.status||""),esc(it.title),
         ibtn("Return to agents",`inboxUnassign('${esc(it.ticket)}')`),it.ticket);
@@ -125,6 +131,16 @@ async function renderInbox(){
           ?ibtn("Dismiss",`inboxHumanPr(${it.number},'dismiss')`)+
            ibtn("Land it",`inboxHumanPr(${it.number},'approve')`,1)
           :noRight(it.role)));
+    }else if(it.kind==="reverted_work"){
+      // A scan suspected shipped work was undone (CXA-F047). The meta line
+      // carries the shipping ticket and role; confirming it is what allows
+      // planning to learn — dismissing it marks the suspicion a false one.
+      html+=inboxCard("reverted_work",esc(it.ticket)+" · "+esc(it.role||"")+" · "+esc((it.at||"").slice(0,10)),esc(it.subject),
+        ibtn("Open ticket",`showTicket('${esc(it.ticket)}')`)+
+        (act
+          ?ibtn("Dismiss",`inboxRevert('${esc(it.sha)}','dismiss')`)+
+           ibtn("Confirm revert",`inboxRevert('${esc(it.sha)}','approve')`,1)
+          :noRight(it.role)),it.ticket);
     }else if(it.kind==="pr_stuck"){
       // The team tried, the SA rescued it, and it is still not moving. Say what
       // was tried and give the two moves a person actually has.
@@ -139,7 +155,7 @@ async function renderInbox(){
 
 async function inboxAct(id,action){
   if(action==="reject"){
-    const reason=await coxModal({title:"Reject "+id,message:"Lý do? (agents học từ đây — cùng lý do 2 lần là nó tự sửa trước khi hỏi lại)",input:{placeholder:"vd: thiếu acceptance criteria"},confirmText:"Reject"});
+    const reason=await coxModal({title:"Reject "+id,message:"Why? (agents learn from this — the same reason twice and they fix it before asking again)",input:{placeholder:"e.g. missing acceptance criteria"},confirmText:"Reject"});
     if(reason===null||reason===undefined)return;
     try{await fetch(api("/ticket/"+encodeURIComponent(id)+"/reject"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({reason:String(reason||"")})});}catch(e){}
     renderInbox();return;
@@ -155,8 +171,8 @@ async function inboxAct(id,action){
 // goes on the ticket, which is what steers the next attempt.
 async function inboxSendBack(id){
   const reason=await coxModal({title:"Send back "+id,
-    message:"Vì sao chưa nghiệm thu được? (lý do đi kèm ticket — agent đọc và làm lại theo đó)",
-    input:{placeholder:"vd: không có evidence cho acceptance criteria #2"},confirmText:"Send back"});
+    message:"Why can't this be accepted yet? (the reason goes on the ticket — the agent reads it and redoes the work accordingly)",
+    input:{placeholder:"e.g. no evidence for acceptance criteria #2"},confirmText:"Send back"});
   if(reason===null||reason===undefined)return;
   try{
     const r=await fetch(api("/ticket/"+encodeURIComponent(id)+"/send-back"),
@@ -183,6 +199,20 @@ async function inboxHumanPr(number,action){
     toasty(action==="approve"?("PR #"+number+" landed"):("Hold on #"+number+" dismissed"),"ok");
   }catch(e){toasty("Network error","err");}
   renderInbox();
+}
+
+// Decide a detected revert (CXA-F047): confirm the shipped work really was
+// undone — the only verdict planning is allowed to learn from — or dismiss
+// the suspicion (a non-code revert, e.g. a docs or CI bump).
+async function inboxRevert(sha,action){
+  try{
+    const r=await fetch(api("/reverts/"+encodeURIComponent(sha)),
+      {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action})});
+    if(!r.ok){toasty(await r.text()||"Failed","err");return;}
+    toasty(action==="approve"?"Revert confirmed — planning will weigh it":"Revert dismissed — not counted","ok");
+  }catch(e){toasty("Network error","err");}
+  renderInbox();
+  if(typeof CUR!=="undefined"&&(CUR==="overview"||CUR==="board"))renderActive();
 }
 
 async function inboxUnassign(id){

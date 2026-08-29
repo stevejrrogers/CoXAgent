@@ -39,9 +39,9 @@
       <div class="frm">
         <div class="fr"><span class="lbl">Name</span><input id="spm-name" placeholder="e.g. Product Team A" maxlength="60"></div>
         <div class="fr"><span class="lbl">Tagline</span><input id="spm-tag" placeholder="what this space builds" maxlength="160"></div>
-        <div class="fr" id="spm-budget-row"><span class="lbl">Budget/mo</span><input id="spm-budget" type="number" min="0" step="10" placeholder="USD — 0 = không giới hạn" style="width:180px"><span class="hint" style="font-size:11px;color:var(--dim)">cảnh báo khi space đốt vượt mức</span></div>
+        <div class="fr" id="spm-budget-row"><span class="lbl">Budget/mo</span><input id="spm-budget" type="number" min="0" step="10" placeholder="USD — 0 = unlimited" style="width:180px"><span class="hint" style="font-size:11px;color:var(--dim)">warns when the space burns past this</span></div>
         <div class="fr" style="align-items:flex-start"><span class="lbl">Admins</span><div id="spm-admins-box" style="flex:1"></div></div>
-        <div class="fr" style="align-items:flex-start" id="spm-members-row"><span class="lbl">Members</span><div style="flex:1"><div id="spm-members-box"></div><div class="hint" style="font-size:11px;color:var(--dim);margin-top:5px">member được tự gán vào mọi project của space</div></div></div>
+        <div class="fr" style="align-items:flex-start" id="spm-members-row"><span class="lbl">Members</span><div style="flex:1"><div id="spm-members-box"></div><div class="hint" style="font-size:11px;color:var(--dim);margin-top:5px">members are auto-assigned to every project in the space</div></div></div>
         <div class="fr" style="align-items:flex-start"><span class="lbl">Projects</span><div id="spm-projects-box" style="flex:1"></div></div>
       </div>
       <div class="coxmodal-acts" style="margin-top:14px">
@@ -234,6 +234,7 @@
         </div>
         <div id="work-board">
           <div class="filters" id="board-filters" style="margin:0 0 10px"></div>
+          <div id="board-reverts"></div>
           <div class="cols" id="board-cols"></div>
         </div>
         <div id="work-sprint" style="display:none"><div id="sprint-body"></div></div>
@@ -728,7 +729,7 @@
     <span class="x" onclick="close_('ov-newproj')"><i class="ti ti-x"></i></span>
     <div class="np-head">
       <div class="np-mark"><i class="ti ti-folder-plus"></i></div>
-      <div><h3>New project</h3><div class="np-sub">Team agents nhận việc ngay khi project sẵn sàng.</div></div>
+      <div><h3>New project</h3><div class="np-sub">Team agents pick up work as soon as the project is ready.</div></div>
     </div>
     <div style="display:flex;gap:4px;background:var(--card2);border:1px solid var(--border2);border-radius:11px;padding:3px;margin-bottom:16px">
       <button id="npm-new" class="npmode on" onclick="setProjMode('new')"><i class="ti ti-sparkles"></i> Start fresh</button>

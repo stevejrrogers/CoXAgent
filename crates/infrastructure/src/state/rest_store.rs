@@ -9,6 +9,11 @@ use coxagent_domain::TicketId;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+/// Per-request deadline the REST client enforces by default, identical to the
+/// value this adapter hard-coded before CXA-F029 bug #2 — existing deployments
+/// behave byte-for-byte the same unless the operator overrides it.
+pub const DEFAULT_TIMEOUT_SECS: u64 = 120;
+
 /// Point this adapter at one project on a control-plane gateway.
 #[derive(Clone)]
 pub struct RestConfig {
@@ -18,6 +23,10 @@ pub struct RestConfig {
     pub project_id: String,
     /// Optional bearer token for RBAC-enabled gateways; empty for open mode.
     pub token: Option<String>,
+    /// Client-side deadline for one store request. Defaults to
+    /// [`DEFAULT_TIMEOUT_SECS`] via [`RestConfig::timeout_from_env`]; operators
+    /// of slow gateways raise it with `COXAGENT_REMOTE_STORE_TIMEOUT_SECS`.
+    pub timeout: Duration,
 }
 
 impl RestConfig {
@@ -27,6 +36,20 @@ impl RestConfig {
             self.base_url.trim_end_matches('/'),
             self.project_id
         )
+    }
+
+    /// The timeout [`RestStateStore`] should be built with: whole seconds from
+    /// `COXAGENT_REMOTE_STORE_TIMEOUT_SECS`, or [`DEFAULT_TIMEOUT_SECS`] when
+    /// unset, unparsable, or zero (a zero deadline would fail every call).
+    pub fn timeout_from_env() -> Duration {
+        std::env::var("COXAGENT_REMOTE_STORE_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|&secs| secs > 0)
+            .map_or(
+                Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+                Duration::from_secs,
+            )
     }
 }
 
@@ -78,10 +101,30 @@ impl RestStateStore {
         Ok(Self { cfg })
     }
 
+    /// The remedy for a gateway auth rejection, or `None` for any other
+    /// status. Pure so the failure-path wording is unit-testable without a
+    /// live gateway (CXA-F029 bug #3: a bare `401 - ` told the operator
+    /// nothing about the bearer they were missing).
+    fn credential_hint(code: reqwest::StatusCode) -> Option<&'static str> {
+        match code {
+            reqwest::StatusCode::UNAUTHORIZED => Some(
+                "the gateway requires a bearer: set COXAGENT_REMOTE_TOKEN to a \
+                 personal API token (minted automatically at hub sign-in, or \
+                 create one under API tokens in the hub UI)",
+            ),
+            reqwest::StatusCode::FORBIDDEN => Some(
+                "the presented credential is valid but lacks rights for this \
+                 project: sign in as the operator that owns it, or present a \
+                 token for a manage-tier member",
+            ),
+            _ => None,
+        }
+    }
+
     async fn post(&self, op: &str, body: Body) -> Result<reqwest::Response, PortError> {
         let url = format!("{}?op={op}", self.cfg.endpoint());
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(120))
+            .timeout(self.cfg.timeout)
             .build()
             .map_err(|e| PortError::Backend(format!("http build: {e}")))?;
         let mut rb = client.post(url).json(&body);
@@ -98,8 +141,11 @@ impl RestStateStore {
         if !resp.status().is_success() {
             let code = resp.status();
             let text = resp.text().await.unwrap_or_default();
+            let hint = Self::credential_hint(code)
+                .map(|h| format!(" ({h})"))
+                .unwrap_or_default();
             return Err(PortError::Backend(format!(
-                "remote store {op}: {code} - {text}"
+                "remote store {op}: {code} - {text}{hint}"
             )));
         }
         Ok(resp)
@@ -284,5 +330,80 @@ impl RestStateStore {
             .await
             .map_err(|e| PortError::Backend(e.to_string()))?;
         Ok(w.won)
+    }
+}
+
+#[cfg(test)]
+mod rest_config_tests {
+    use super::*;
+
+    /// `COXAGENT_REMOTE_STORE_TIMEOUT_SECS` is process-global; serialize the
+    /// tests that touch it so parallel test threads cannot clobber each other.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn credential_hint_names_the_bearer_remedy_on_auth_failures() {
+        let hint = RestStateStore::credential_hint(reqwest::StatusCode::UNAUTHORIZED)
+            .expect("401 must carry a remedy");
+        assert!(
+            hint.contains("COXAGENT_REMOTE_TOKEN"),
+            "the 401 remedy must name the env var the operator can set: {hint}"
+        );
+
+        let hint = RestStateStore::credential_hint(reqwest::StatusCode::FORBIDDEN)
+            .expect("403 must carry a remedy");
+        assert!(
+            hint.contains("manage-tier") || hint.contains("rights"),
+            "the 403 remedy must point at the rights gap, not the token: {hint}"
+        );
+    }
+
+    #[test]
+    fn credential_hint_is_silent_for_non_auth_failures() {
+        for code in [
+            reqwest::StatusCode::NOT_FOUND,
+            reqwest::StatusCode::BAD_REQUEST,
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            assert!(
+                RestStateStore::credential_hint(code).is_none(),
+                "{code} is not a credential problem — no remedy hint"
+            );
+        }
+    }
+
+    #[test]
+    fn timeout_defaults_to_the_previously_hardcoded_deadline() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        std::env::remove_var("COXAGENT_REMOTE_STORE_TIMEOUT_SECS");
+        assert_eq!(
+            RestConfig::timeout_from_env(),
+            Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+            "no env override must reproduce the old hard-coded 120 s exactly"
+        );
+    }
+
+    #[test]
+    fn timeout_env_override_wins_and_garbage_falls_back() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+
+        std::env::set_var("COXAGENT_REMOTE_STORE_TIMEOUT_SECS", "300");
+        assert_eq!(
+            RestConfig::timeout_from_env(),
+            Duration::from_secs(300),
+            "a valid operator override must win"
+        );
+
+        for garbage in ["not-a-number", "0", "-5", ""] {
+            std::env::set_var("COXAGENT_REMOTE_STORE_TIMEOUT_SECS", garbage);
+            assert_eq!(
+                RestConfig::timeout_from_env(),
+                Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+                "unparsable/zero override {garbage:?} must keep the safe default"
+            );
+        }
+
+        std::env::remove_var("COXAGENT_REMOTE_STORE_TIMEOUT_SECS");
     }
 }

@@ -55,7 +55,17 @@ the hub instead of the runner, and an empty code map. Before adding any 'detect'
 - Run what you changed and read the output. A ticket is not evidence; a green unit test \
 is not evidence that the running system behaves. Curl the endpoint, read the log, inspect \
 the row, look at the rendered page — the defects that matter most are the ones no \
-acceptance criterion thought to ask about.";
+acceptance criterion thought to ask about.
+- Every gate names its EXIT before it ships. A gate that can hold work must state what \
+unblocks it and who performs that action — and that actor must exist and be able to act. \
+'Letting review land it' while the reviewer kept failing left one mergeable PR parked \
+forever, and the clean-base gate it fed paused ALL dev work for days while designers piled \
+up 194 ready tickets nobody was allowed to build. If a gate's exit depends on another \
+process succeeding, the gate must also handle that process NOT succeeding.
+- Free prose is never a mode switch. Sprint goals, ticket titles and chat quote each \
+other, so keyword-sniffing them flips modes by accident — a chore literally NAMED \
+'Refactor: …' armed a whole-team clean-base hold. Modes are explicit state with a set \
+and a clear lifecycle (like `refactor_mode`), never a substring match.";
 
 pub const ENGINEERING_STANDARDS: &str = "\
 ENGINEERING STANDARDS (non-negotiable house rules):\n\
@@ -317,7 +327,7 @@ array: [].\n\
 `verdicts` is a JSON array with ONE entry per acceptance criterion of EVERY ticket in \
 JUST SHIPPED — you must explicitly verify each one against the live app. Each entry \
 exactly:\n\
-{\"ac\": string, \"passed\": boolean, \"note\": string, \"route\": string}\n\
+{\"ac\": string, \"passed\": boolean, \"note\": string, \"route\": string, \"tests\": [string]}\n\
 - `ac`: the EXACT acceptance-criterion text from the JUST SHIPPED block (match it \
 word-for-word; do not paraphrase — the system marks that ticket's test case by this text).\n\
 - `passed`: true only when you actually verified the behavior end-to-end on the deployed \
@@ -325,7 +335,10 @@ build; false when it fails or you could not verify it.\n\
 - `note`: one line of concrete evidence — the command/request you ran and the actual \
 response, or what blocked verification.\n\
 - `route`: the URL path on the running app that demonstrates this criterion (e.g. \
-\"/settings\"), or \"\" when none applies — it becomes the per-test-case screenshot.";
+\"/settings\"), or \"\" when none applies — it becomes the per-test-case screenshot.\n\
+- `tests`: relative paths of the test files that demonstrate this criterion \
+(e.g. \"crates/domain/tests/gate.rs\"), or [] when the evidence is an API \
+request/response instead of a file-based test.";
 
 /// Tech Writer — documents ONE verified feature in full for the team Wiki.
 pub const DOCS: &str = "\

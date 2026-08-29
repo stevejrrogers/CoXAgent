@@ -23,7 +23,7 @@ async function renderMgAudit(){
   let rows=[];try{const r=await fetch("/api/audit-log");if(r.ok)rows=await r.json();}catch(e){}
   const q=(window._mgaq||"").toLowerCase();
   const list=rows.filter(e=>!q||JSON.stringify(e).toLowerCase().includes(q)).slice(0,300);
-  el.innerHTML=`<div class="dmsearch" style="margin-bottom:12px;max-width:340px"><i class="ti ti-search"></i><input placeholder="Lọc theo user, path, status…" value="${esc(window._mgaq||"")}" oninput="window._mgaq=this.value;renderMgAudit()"></div>
+  el.innerHTML=`<div class="dmsearch" style="margin-bottom:12px;max-width:340px"><i class="ti ti-search"></i><input placeholder="Filter by user, path, status…" value="${esc(window._mgaq||"")}" oninput="window._mgaq=this.value;renderMgAudit()"></div>
   <div class="panel" style="font-family:ui-monospace,monospace;font-size:12px">${list.map(e=>{
     const bad=(e.status||200)>=400;
     return `<div class="wsrow" style="border:none;border-bottom:1px solid var(--border);border-radius:0;background:transparent;padding:7px 4px;gap:12px">
@@ -32,7 +32,7 @@ async function renderMgAudit(){
       <span style="min-width:52px;font-weight:700">${esc((e.action||"").split(" ")[0])}</span>
       <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc((e.action||"").split(" ").slice(1).join(" "))}</span>
       <span style="color:${bad?"var(--red)":"var(--green)"}">${esc(String(e.status||""))}</span></div>`;
-  }).join("")||'<div class="empty">chưa có bản ghi audit nào khớp</div>'}</div>`;
+  }).join("")||'<div class="empty">no matching audit records</div>'}</div>`;
 }
 function renderMgSpaces(){
   const el=document.getElementById("mg-spaces-body");if(!el||!MG)return;
@@ -41,7 +41,7 @@ function renderMgSpaces(){
   const allP=(MG.spaces||[]).flatMap(s=>s.projects||[]).concat(MG.unassigned_projects||[]);
   el.innerHTML=`
     <div class="wshero" style="margin-bottom:18px"><div class="wsmark"><i class="ti ti-shield-cog"></i></div>
-      <div><div class="wsname">Hub control</div><div class="wstag">mọi space · mọi project · một màn hình</div></div>
+      <div><div class="wsname">Hub control</div><div class="wstag">every space · every project · one screen</div></div>
       <div class="wsstats">${stat(t.projects||0,"Projects")}${stat((MG.spaces||[]).length,"Spaces")}${stat(t.users||0,"Users")}${stat(t.online||0,"Online")}${stat(money(t.spend||0),"Spend")}</div></div>
     <div class="wshead" style="margin-bottom:12px"><span class="wssec" style="margin:0">Spaces</span>
       <button class="pri" onclick="openSpaceModal()"><i class="ti ti-plus"></i> New space</button></div>
@@ -53,8 +53,8 @@ function renderMgSpaces(){
         <div class="mg-roles">${Object.entries(sp.roles||{}).map(([r,n])=>roleChip(r,n)).join("")||'<span class="wsc-off">no members</span>'}</div>
         <div class="wsc-stats"><span>📁 ${(sp.projects||[]).length} projects</span><span>👥 ${sp.members||0}</span><span style="color:${sp.budget_usd&&sp.spend>=sp.budget_usd?"var(--red)":sp.budget_usd&&sp.spend>=sp.budget_usd*.8?"var(--amber)":"var(--amber)"}">🔥 ${money(sp.spend||0)}${sp.budget_usd?` / ${money(sp.budget_usd)}`:""}</span>${sp.budget_usd&&sp.spend>=sp.budget_usd?'<span style="color:var(--red);font-weight:700">⛔ over budget</span>':""}</div>
         <div class="wsc-online">${(sp.online||[]).slice(0,8).map(o=>`<span class="wsava on" title="${esc(o)}">${esc(initials(o))}</span>`).join("")||'<span class="wsc-off">no one online</span>'}</div>
-      </div>`).join("")||'<div class="empty">chưa có space — bấm New space</div>'}</div>
-    ${(MG.unassigned_projects||[]).length?`<div class="panel" style="margin-top:14px;font-size:12.5px;color:var(--muted)"><i class="ti ti-alert-triangle" style="color:var(--amber)"></i> Chưa thuộc space nào: <b>${esc((MG.unassigned_projects||[]).join(", "))}</b> — gán qua Edit space.</div>`:""}`;
+      </div>`).join("")||'<div class="empty">no spaces yet — click New space</div>'}</div>
+    ${(MG.unassigned_projects||[]).length?`<div class="panel" style="margin-top:14px;font-size:12.5px;color:var(--muted)"><i class="ti ti-alert-triangle" style="color:var(--amber)"></i> Not in any space: <b>${esc((MG.unassigned_projects||[]).join(", "))}</b> — assign via Edit space.</div>`:""}`;
 }
 // Space create/edit lives in a modal OUTSIDE the re-rendered view, so the live
 // refresh (SSE/3s poll) can repaint the Spaces grid freely without touching it.
@@ -65,7 +65,7 @@ let SPM_LITE=null; // set = space-admin lite edit (name/tagline only, from Home)
 function openSpaceModalLite(sp){
   SPM_ID=sp.id;SPM_LITE=sp;
   document.getElementById("spm-title").textContent="Edit space — "+sp.name;
-  document.getElementById("spm-msg").textContent="Đổi tên / tagline. Thành viên & projects do Super Admin quản trong Manage.";
+  document.getElementById("spm-msg").textContent="Rename / tagline. Members & projects are managed by the Super Admin in Manage.";
   document.getElementById("spm-name").value=sp.name;
   document.getElementById("spm-tag").value=sp.tagline||"";
   document.getElementById("spm-admins-box").closest(".fr").style.display="none";
@@ -86,7 +86,7 @@ function openSpaceModal(id){
   // editing) the ones already in THIS space.
   const allP=[...new Set(((MG||{}).unassigned_projects||[]).concat(sp?(sp.projects||[]):[]))];
   document.getElementById("spm-title").textContent=sp?("Edit space — "+sp.name):"New space";
-  document.getElementById("spm-msg").textContent=sp?"":"Nhóm projects + chỉ định space admin.";
+  document.getElementById("spm-msg").textContent=sp?"":"Group projects + appoint a space admin.";
   document.getElementById("spm-name").value=sp?sp.name:"";
   document.getElementById("spm-tag").value=sp?(sp.tagline||""):"";
   document.getElementById("spm-budget").value=sp&&sp.budget_usd?sp.budget_usd:"";
@@ -106,7 +106,7 @@ function closeSpaceModal(){document.getElementById("sp-modal").hidden=true;SPM_I
   document.getElementById("spm-projects-box").closest(".fr").style.display="";
   document.getElementById("spm-members-row").style.display="";}
 async function submitSpaceModal(){
-  const name=val("spm-name").trim();if(!name){toasty("Đặt tên space","warn");return;}
+  const name=val("spm-name").trim();if(!name){toasty("Name the space","warn");return;}
   const lite=SPM_LITE;
   const body=JSON.stringify(lite
     ?{name,tagline:val("spm-tag"),admins:lite.admins||[],projects:lite.projects||[],members:lite.members||[],budget_usd:lite.budget_usd||0}
@@ -117,7 +117,7 @@ async function submitSpaceModal(){
       ?fetch("/api/spaces/"+encodeURIComponent(SPM_ID),{method:"PUT",headers:{"Content-Type":"application/json"},body})
       :fetch("/api/spaces",{method:"POST",headers:{"Content-Type":"application/json"},body}));
     if(r.ok){
-      toasty(SPM_ID?"Đã lưu":"Space đã tạo","ok");
+      toasty(SPM_ID?"Saved":"Space created","ok");
       const id=SPM_ID;closeSpaceModal();
       if(lite){renderHome();}
       else{MG=null;await renderManage();if(id&&CUR==="mg-space")openMgSpace(id);}
@@ -160,7 +160,7 @@ function renderMgSpaceDetail(d){
         <div class="wsc-stats" style="margin-top:6px"><span>${fmtK(p.tokens||0)} tok</span><span style="color:var(--amber)">${money(p.spend||0)}</span></div>
         ${sprint}
         <div class="wsc-online">${(p.online||[]).map(o=>`<span class="wsava on" title="${esc(o)}">${esc(initials(o))}</span>`).join("")||'<span class="wsc-off">no one online</span>'}</div>
-      </div>`;}).join("")||'<div class="empty">space chưa có project — gán qua Edit space</div>'}</div>
+      </div>`;}).join("")||'<div class="empty">no projects in this space — assign via Edit space</div>'}</div>
     <div class="wssec">Members</div>
     <div class="panel">${ms.sort((a,b)=>(b.spend||0)-(a.spend||0)).map(m=>`
       <div class="wsrow"><span class="wsava">${esc(initials(m.name||m.username))}</span>
@@ -169,7 +169,7 @@ function renderMgSpaceDetail(d){
         <span class="wsspend">${money(m.spend||0)}</span></div>`).join("")||'<div class="empty">no members</div>'}</div>`;
 }
 async function mgDeleteSpace(id){
-  if(!(await coxModal({title:"Xoá space "+id+"?",message:"Không xoá project hay user — chỉ bỏ nhóm tổ chức này.",danger:true,confirmText:"Delete"})))return;
+  if(!(await coxModal({title:"Delete space "+id+"?",message:"Doesn't delete projects or users — only removes this organizational grouping.",danger:true,confirmText:"Delete"})))return;
   try{await fetch("/api/spaces/"+encodeURIComponent(id),{method:"DELETE"});closeSpaceModal();MG=null;nav("mg-spaces");renderManage();}catch(e){toasty("Network error","err");}}
 function renderMgPeople(){
   const el=document.getElementById("mg-people-body");if(!el||!MG)return;
@@ -193,15 +193,15 @@ function renderMgPeople(){
     <button class="pri add-user-btn" onclick="openInvite()"><i class="ti ti-user-plus"></i> Add user</button>
   </div>
   <div class="sec" style="display:flex;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap">
-    <div class="dmsearch" style="max-width:220px;margin:0"><i class="ti ti-search"></i><input placeholder="Tìm user…" value="${esc(q)}" oninput="window._mgq=this.value;renderMgPeople()"></div>
+    <div class="dmsearch" style="max-width:220px;margin:0"><i class="ti ti-search"></i><input placeholder="Find user…" value="${esc(q)}" oninput="window._mgq=this.value;renderMgPeople()"></div>
     <select class="sel" style="max-width:200px;height:36px;font-size:12.5px;padding:0 10px" onchange="window._mgspace=this.value;renderMgPeople()">${spaceOpts}</select>
     <select class="sel" style="max-width:200px;height:36px;font-size:12.5px;padding:0 10px" onchange="window._mgproj=this.value;renderMgPeople()">${projOpts}</select>
   </div>
   <div class="panel">${list.sort(function(a,b){return(b.spend||0)-(a.spend||0);}).map(function(u){
     return `<div class="wsrow"><span class="wsava">${esc(initials(u.name||u.username))}</span>
       <span class="wsproj">${esc(u.name||u.username)} <span style="color:var(--dim);font-weight:400">@${esc(u.username)}</span></span>
-      <span class="wsstate">${esc(spaceOf(u)||"chưa thuộc space")} · ${(u.projects||[]).length} projects</span>
-      <span class="wsspend" title="tổng token đã đốt">${money(u.spend||0)}</span>
+      <span class="wsstate">${esc(spaceOf(u)||"no space")} · ${(u.projects||[]).length} projects</span>
+      <span class="wsspend" title="total tokens burned">${money(u.spend||0)}</span>
       <select onchange="mgSetRole('${esc(u.username)}',this.value,'${esc(u.name||"")}')" class="mg-rolesel">
         ${roles.map(function(r){return '<option value="'+r+'"'+(u.role===r?' selected':'')+'>'+roleLabel(r)+'</option>';}).join("")}
       </select></div>`;}).join("")||'<div class="empty">no users</div>'}</div>`;

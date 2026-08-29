@@ -226,6 +226,7 @@ mod tests {
                 length_cycles: 5,
                 committed: Vec::new(),
                 started_at: started_at.to_owned(),
+                bug_burn_floor: None,
             }),
             ..ProjectState::default()
         }

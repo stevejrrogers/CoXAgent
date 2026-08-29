@@ -61,8 +61,10 @@ fn compose(root: &Path, args: &[&str]) -> std::process::Output {
 /// rather than importing it: only agent-managed preview deployments (`cox-...`)
 /// are evictable. The live hub (`coxagent`) and shared backing infra (`cox-infra`)
 /// are NEVER touched — tearing those down to free :8101 would be a self-inflicted
-/// outage, and they bind port 4000 anyway (see AGENTS.md). Anything outside our own
-/// namespace is foreign and left alone; raw non-compose containers are stopped by id.
+/// outage, and they bind port 4000 anyway (see AGENTS.md). Anything outside our
+/// own namespace is foreign and left alone; raw non-compose containers are
+/// stopped by id only when their container NAME itself proves them ours
+/// (CXA-B083).
 fn reclaimable(project: &str) -> bool {
     let lower = project.to_ascii_lowercase();
     if lower == "cox-infra"
@@ -75,60 +77,32 @@ fn reclaimable(project: &str) -> bool {
     lower.starts_with("cox-")
 }
 
-/// The container ids of every running container publishing HOST_PORT.
-fn holders_on_host_port() -> Vec<String> {
-    let out = Command::new("docker")
-        .args(["ps", "-q", "--filter", &format!("publish={HOST_PORT}")])
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        .unwrap_or_default();
-    out.lines()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(ToOwned::to_owned)
-        .collect()
-}
-
-/// Exclusive, ephemeral ownership of the stack for one run: brought up here,
-/// torn down when this value drops, even on panic, so a failing run never
-/// leaves a container holding the host port.
-struct Stack {
-    root: PathBuf,
-}
-
-impl Stack {
-    /// Claims host port HOST_PORT for THIS build's verification pass.
-    ///
-    /// Tears down whatever currently holds the port before `up` — both anything
-    /// left under this directory's compose project by an earlier aborted run and
-    /// any FOREIGN agent-preview stack squatting :8101 (see [`clear_host_port`]) —
-    /// so the probe below can only ever reach an image freshly built from THIS
-    /// tree, never a stale unrelated container answering 200 there. Symmetric with
-    /// [`Drop`]; each claim starts from nothing.
-    fn claim(root: PathBuf) -> Self {
-        let stack = Self { root };
-        clear_host_port();
-        stack.down();
-        stack
-    }
-
-    fn down(&self) {
-        let _ = compose(&self.root, &["down", "-v"]);
-    }
-}
-
-/// What an automated pass should do about one container squatting HOST_PORT,
-/// decided purely over its recoverable identifiers so every branch is
-/// deterministically testable without invoking docker.
+/// What one container squatting HOST_PORT means for this smoke gate — decided as
+/// a pure function of that container's recovered ownership identity so every
+/// branch is deterministically testable without invoking docker (CXA-B082/B083).
 #[derive(Debug, PartialEq)]
-enum Eviction {
-    /// The holder belongs to a reclaimable agent-preview compose project —
-    /// tear that whole project down to release the port cleanly.
-    ComposeProject(String),
-    /// An unlabelled holder positively identified as OUR OWN reclaimable
+enum HolderDecision {
+    /// Belongs to a reclaimable agent-preview compose project — tear that whole
+    /// project down to release its ports cleanly.
+    EvictComposeProject(String),
+    /// An unlabelled holder whose NAME proves it to be our own reclaimable
     /// agent-preview (`docker run --name cox--…`) — stop just it by id.
-    RawContainer(String),
+    EvictRawContainer(String),
+}
+
+impl HolderDecision {
+    fn evict(&self) {
+        match self {
+            HolderDecision::EvictComposeProject(project) => {
+                let _ = Command::new("docker")
+                    .args(["compose", "-p", project.as_str(), "down", "--remove-orphans"])
+                    .output();
+            }
+            HolderDecision::EvictRawContainer(id) => {
+                let _ = Command::new("docker").args(["stop", id]).output();
+            }
+        }
+    }
 }
 
 /// The field separator between recoverable identifiers in one inspect pass —
@@ -137,8 +111,7 @@ const IDENT_SEP: char = '\u{1e}';
 
 /// Recoverable ownership identifiers of one running holder, fetched together so
 /// classification needs exactly one `docker inspect` per squatter even when the
-/// compose-project label is absent (the raw `docker run` case this guard exists
-/// for).
+/// compose-project label is absent (the raw `docker run` case CXA-B083 closed).
 ///
 /// Nothing here is read from disk or spawned ad-hoc; [`inspect_holder`] takes
 /// one snapshot of the outside world and every subsequent decision is a pure
@@ -212,51 +185,158 @@ fn inspect_holder(id: &str) -> Option<HolderIdentity> {
 ///   via plain `docker run -p 8101:…` could be silently killed. Now anonymous and
 ///   foreign holders — and anything named like our protected control plane — are
 ///   left strictly alone.
-fn classify_holder(identity: &HolderIdentity, id: String) -> Option<Eviction> {
+///
+/// A `None` verdict never drops a holder silently: [`plan_holders`] turns every
+/// non-evictable holder into a skip-with-report (CXA-B082) instead of failing
+/// red or touching their stack.
+fn decide_holder(identity: Option<&HolderIdentity>, id: String) -> Option<HolderDecision> {
+    let Some(identity) = identity else {
+        // Inspect gave nothing recoverable — ownership cannot be proven, so the
+        // holder is declined (and later reported, never touched).
+        return None;
+    };
     if !identity.owner_project.is_empty() {
         return if reclaimable(&identity.owner_project) {
-            Some(Eviction::ComposeProject(identity.owner_project.clone()))
+            Some(HolderDecision::EvictComposeProject(
+                identity.owner_project.clone(),
+            ))
         } else {
-            // A protected/foreign compose project is never touched; there may be
-            // another squatter sharing :8101 (IPv4+IPv6), so this returns only
-            // this one's verdict.
+            // A protected/foreign compose project is never touched.
             None
         };
     }
-    // `container_name` is already normalized (trimmed, leading `/` stripped)
-    // by `HolderIdentity::new`; an empty value means no usable name to judge.
-    if identity.container_name.is_empty() {
-        // No owner label and no usable name → cannot prove ownership → leave alone.
-        return None;
-    }
+    // Unlabelled raw holder: `container_name` is already normalized (trimmed,
+    // leading `/` stripped) by `HolderIdentity::new`; an empty value — like any
+    // non-agent name — fails `reclaimable`, so the holder is left alone.
     if reclaimable(&identity.container_name) {
-        Some(Eviction::RawContainer(id))
+        Some(HolderDecision::EvictRawContainer(id))
     } else {
         None
     }
 }
 
-fn execute_eviction(action: Eviction) {
-    match action {
-        Eviction::ComposeProject(project) => {
-            let _ = Command::new("docker")
-                .args(["compose", "-p", &project, "down", "--remove-orphans"])
-                .output();
-        }
-        Eviction::RawContainer(id) => {
-            let _ = Command::new("docker").args(["stop", &id]).output();
-        }
+/// Whether this smoke gate may bind HOST_PORT and verify this build's stack.
+#[derive(Debug, PartialEq)]
+enum PortState {
+    /// Every holder on :8101 is evictable — free them and verify normally.
+    Verifiable,
+    /// A protected or foreign holder (compose project or raw container) holds
+    /// :8101; we refuse to destroy unrelated user infrastructure (CXA-B082
+    /// re-scope), and because HOST_PORT is fixed we cannot bind either.
+    /// Verification skips with this holder named instead of failing red or
+    /// tearing their stack down.
+    BlockedByForeign(String),
+}
+
+/// What this smoke gate plans to do about :8101 — computed PURELY from one
+/// immutable host-port snapshot so every branch is deterministically testable
+/// without invoking docker (CXA-B082). Each entry is `(container id, recovered
+/// identity)` for one container publishing HOST_PORT.
+#[derive(Debug, PartialEq)]
+enum PortPlan {
+    /// Every holder on :8101 may be reclaimed — schedule those teardowns below,
+    /// then verify normally.
+    EvictThenVerify(Vec<HolderDecision>),
+    /// A protected or foreign holder keeps :8101; refuse to destroy it, touch
+    /// nothing else either (see [`plan_holders`]).
+    Skip(String),
+}
+
+/// Best human-identifiable owner of a non-evictable holder for the skip
+/// report: the compose project label when present, else the container name
+/// (a raw squatter has no project), else the raw container id.
+fn holder_report_name(identity: Option<&HolderIdentity>, id: &str) -> String {
+    match identity {
+        Some(i) if !i.owner_project.is_empty() => i.owner_project.clone(),
+        Some(i) if !i.container_name.is_empty() => i.container_name.clone(),
+        _ => id.to_owned(),
     }
 }
 
-fn clear_host_port() {
-    for id in holders_on_host_port() {
-        let Some(identity) = inspect_holder(&id) else {
-            continue;
-        };
-        if let Some(action) = classify_holder(&identity, id.clone()) {
-            execute_eviction(action);
+/// Any single protected/foreign holder wins over every eviction below: even after
+/// stopping reclaimable squatters another address-family duplicate held by a
+/// protected project could keep :8101 bound, so once blocked we never risk a
+/// half-cleared port or touch their stack — no teardown runs at all ([CXA-B082]
+/// safest choice).
+fn plan_holders(holders: &[(String, Option<HolderIdentity>)]) -> PortPlan {
+    let mut blocked: Option<String> = None;
+    let mut actions = Vec::new();
+    for (id, identity) in holders {
+        match decide_holder(identity.as_ref(), id.clone()) {
+            None => {
+                if blocked.is_none() {
+                    blocked = Some(holder_report_name(identity.as_ref(), id));
+                }
+            }
+            Some(action) => actions.push(action),
         }
+    }
+    match blocked {
+        Some(owner) => PortPlan::Skip(owner),
+        None => PortPlan::EvictThenVerify(actions),
+    }
+}
+
+fn assess_host_port() -> PortState {
+    let snapshot = holders_on_host_port()
+        .into_iter()
+        .map(|id| {
+            let identity = inspect_holder(&id);
+            (id, identity)
+        })
+        .collect::<Vec<_>>();
+    match plan_holders(&snapshot) {
+        // First EVICT every reclaimable squatter / raw container queued above...
+        PortPlan::EvictThenVerify(actions) => {
+            for action in &actions {
+                action.evict();
+            }
+            // ...only then signal that verification may bind HOST_PORT fresh.
+            // A half-cleared port after any failed stop still lets this proceed —
+            // the probe will simply fail like any binding collision would have.
+            PortState::Verifiable
+        }
+        // Skip-with-report; not even one reclaimable squatter sharing the port with
+        // a protected stack gets torn down first ([CXA-B082] safest choice).
+        PortPlan::Skip(owner) => PortState::BlockedByForeign(owner),
+    }
+}
+
+/// The container ids of every running container publishing HOST_PORT.
+fn holders_on_host_port() -> Vec<String> {
+    let out = Command::new("docker")
+        .args(["ps", "-q", "--filter", &format!("publish={HOST_PORT}")])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    out.lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+/// Exclusive, ephemeral ownership of the stack for one run: brought up here,
+/// torn down when this value drops, even on panic, so a failing run never
+/// leaves a container holding the host port. Only ever constructed on the
+/// [`PortState::Verifiable`] path — when a protected/foreign holder keeps :8101
+/// we deliberately construct no stack and touch nothing (CXA-B082).
+struct Stack {
+    root: PathBuf,
+}
+
+impl Stack {
+    /// Brings THIS directory's own compose project down before `up`, symmetric
+    /// with [`Drop`], so each verification pass starts from nothing it owns.
+    fn claim(root: PathBuf) -> Self {
+        let stack = Self { root };
+        stack.down();
+        stack
+    }
+
+    fn down(&self) {
+        let _ = compose(&self.root, &["down", "-v"]);
     }
 }
 
@@ -282,6 +362,29 @@ async fn probe(client: &reqwest::Client) -> Option<u16> {
 #[ignore = "builds a release image and binds host port 8101; run with --ignored"]
 async fn compose_stack_comes_up_and_answers_on_the_published_port() {
     let root = repo_root();
+
+    // CXA-B082 re-scope + CXA-B083 name check: decide what owns :8101 BEFORE
+    // binding anything. A protected or foreign holder (someone else's compose
+    // stack — e.g. `cxa-backend`, a user's `myapp-prod` — or an unlabelled
+    // container that cannot prove it is ours) is never destroyed, and because
+    // HOST_PORT is fixed by our deploy config we cannot bind over it either; in
+    // that case we skip verification with a clear report instead of failing red
+    // or tearing unrelated infrastructure down. Reclaimable cox-preview
+    // squatters — labelled projects and name-proven raw containers alike — are
+    // still evicted here so normal runs verify in full, which always happens on
+    // ephemeral CI runners where no foreign stack can exist.
+    match assess_host_port() {
+        PortState::BlockedByForeign(owner) => {
+            eprintln!(
+                "deploy-smoke SKIPPED: host port {HOST_PORT} is held by `{owner}`, \
+                 which this gate refuses to tear down (CXA-B082). Verification \
+                 could not bind without destroying unrelated infrastructure."
+            );
+            return;
+        }
+        PortState::Verifiable => {}
+    }
+
     let stack = Stack::claim(root.clone());
 
     // The exact command docker-compose.yml documents. A compile error in the
@@ -313,46 +416,51 @@ async fn compose_stack_comes_up_and_answers_on_the_published_port() {
     );
 }
 
-/// The eviction decision is pure over the recovered identity; verify every
-/// branch without invoking docker, and pin that protected infrastructure can
-/// never be classified as downed — a regression here would be a self-inflicted
-/// outage (this module's stated intent: 'the live hub ... NEVER touched').
+/// The holder-decision and port-plan logic is pure over the recovered identity;
+/// verify every branch without invoking docker, and pin that protected
+/// infrastructure can never be classified as downed — a regression here would
+/// be a self-inflicted outage (CXA-B082 pins the skip-with-report contract,
+/// CXA-B083 pins the raw-container name check).
 #[cfg(test)]
-mod classify_tests {
-    use super::{classify_holder, Eviction, HolderIdentity};
+mod decide_tests {
+    use super::{decide_holder, plan_holders, HolderDecision, HolderIdentity, PortPlan};
 
     /// Build a holder from raw inspect fields: `owner_project` is
     /// `.Config.Labels["com.docker.compose.project"]` (empty for unlabelled raw
     /// containers); `container_name` mirrors docker's `.Name` after our own
     /// strip of its leading `/`.
-    fn holder(owner_project: &str, container_name: &str) -> HolderIdentity {
-        HolderIdentity {
+    fn holder(owner_project: &str, container_name: &str) -> Option<HolderIdentity> {
+        Some(HolderIdentity {
             owner_project: owner_project.to_owned(),
             container_name: container_name.to_owned(),
-        }
+        })
+    }
+
+    fn snapshot(id: &str, identity: Option<HolderIdentity>) -> (String, Option<HolderIdentity>) {
+        (id.to_owned(), identity)
     }
 
     #[test]
     fn reclaimable_agent_preview_is_torn_down_as_a_project() {
         assert_eq!(
-            classify_holder(&holder("cox--other-worktree", "ignored"), "abc".to_owned()),
-            Some(Eviction::ComposeProject("cox--other-worktree".to_owned()))
+            decide_holder(holder("cox--other-worktree", "ignored").as_ref(), "abc".to_owned()),
+            Some(HolderDecision::EvictComposeProject("cox--other-worktree".to_owned()))
         );
     }
 
+    /// CXA-B082 AC: a foreign non-cox compose project holding :8101 must NEVER be
+    /// torn down by this gate. `decide_holder` refuses to classify it for eviction,
+    /// so nothing of theirs is stopped.
     #[test]
-    fn foreign_non_preview_project_is_left_alone() {
-        assert_eq!(
-            classify_holder(&holder("someone-elses-stack", "ignored"), "abc".to_owned()),
-            None
-        );
+    fn foreign_non_preview_project_is_left_to_itself_not_destroyed() {
+        for foreign in ["someone-elses-stack", "cxa-backend", "myapp-prod"] {
+            assert_eq!(decide_holder(holder(foreign, "ignored").as_ref(), "abc".to_owned()), None);
+        }
     }
 
+    /// Protected hub/infra prefixes are likewise never evicted (casing-spoof safe).
     #[test]
-    fn live_hub_and_infra_prefixes_are_never_touched() {
-        // The same casing-spoofing set production deploy's shared policy guards
-        // against (reclaimable.rs), mirrored here so drift can never reintroduce
-        // an automated teardown of the control plane.
+    fn live_hub_and_infra_prefixes_can_not_be_classified_for_takedown() {
         for owner in [
             "coxagent",
             "coxagent-gateway",
@@ -368,60 +476,137 @@ mod classify_tests {
             "Cox-Infra-Db",
         ] {
             assert_eq!(
-                classify_holder(&holder(owner, "ignored"), "abc".to_owned()),
+                decide_holder(holder(owner, "ignored").as_ref(), "abc".to_owned()),
                 None,
                 "{owner} must never be evicted"
             );
         }
     }
 
+    /// An unlabelled `docker run --name cox--slot-b-hub -p 8101:… …` left by an
+    /// earlier aborted run IS ours to clear — the name itself proves it.
     #[test]
     fn reclaimable_raw_preview_container_is_stopped_by_id() {
-        // An unlabelled `docker run --name cox--slot-b-hub -p 8101:… …` left by an
-        // earlier aborted run IS ours to clear.
         assert_eq!(
-            classify_holder(&holder("", "cox--slot-b-hub"), "deadbeef".to_owned()),
-            Some(Eviction::RawContainer("deadbeef".to_owned()))
+            decide_holder(holder("", "cox--slot-b-hub").as_ref(), "deadbeef".to_owned()),
+            Some(HolderDecision::EvictRawContainer("deadbeef".to_owned()))
         );
     }
 
+    /// CXA-B083 regression guard: a raw holder we cannot prove to be ours is
+    /// NEVER force-stopped by id. This replaces the old rule (any unlabelled
+    /// container stopped by id) that let `docker run -p 8101:… nginx` kill
+    /// unrelated services. Covers both "inspect gave nothing at all" and "a
+    /// struct with no usable identity fields".
     #[test]
-    fn anonymous_raw_container_is_left_strictly_alone() {
-        // CXA-B083 regression guard: an unlabelled holder with no recoverable
-        // identity at all must NOT be force-stopped by id. This is exactly what a
-        // bare `docker run -p 8101:<port> <image>` produces once we stop reading a
-        // name where none exists.
+    fn unprovable_raw_holder_is_never_stopped_by_id() {
+        assert_eq!(decide_holder(None, "deadbeef".to_owned()), None);
         let anonymous = HolderIdentity {
             owner_project: String::new(),
             container_name: String::new(),
         };
-        assert_eq!(classify_holder(&anonymous, "deadbeef".to_owned()), None);
+        assert_eq!(decide_holder(Some(&anonymous), "deadbeef".to_owned()), None);
     }
 
+    /// The REPRO from CXA-B083 verbatim: `docker run -d -p 8101:80 nginx`
+    /// squats :8101 with no compose label and no agent-owned name. It is not
+    /// ours — it must survive untouched instead of being stopped by id.
     #[test]
     fn foreign_raw_container_is_not_stopped_by_id() {
-        // The REPRO from CXA-B083 verbatim: `docker run -d -p 8101:80 nginx`
-        // squats :8101 with no compose label and no agent-owned name. It is not
-        // ours — it must survive untouched instead of being stopped by id.
         for foreign in ["nginx", "my-app", "someone-svc"] {
             assert_eq!(
-                classify_holder(&holder("", foreign), "abc".to_owned()),
+                decide_holder(holder("", foreign).as_ref(), "abc".to_owned()),
                 None,
                 "{foreign} is not ours and must never be stopped"
             );
         }
     }
 
+    /// Even an unlabelled container whose NAME claims our control plane —
+    /// e.g. someone ran `docker run --name coxagent-db … -p 8101:` directly —
+    /// is protected exactly like its compose counterpart, not stopped by id.
     #[test]
     fn raw_container_named_like_protected_infra_is_not_stopped() {
-        // Even an unlabelled container whose NAME claims our control plane —
-        // e.g. someone ran `docker run --name coxagent-db … -p 8101:` directly —
-        // is protected exactly like its compose counterpart, not stopped by id.
         for protected in ["coxagent-hub", "coxagent-db", "cox-infra-redis"] {
             assert_eq!(
-                classify_holder(&holder("", protected), "abc".to_owned()),
+                decide_holder(holder("", protected).as_ref(), "abc".to_owned()),
                 None,
                 "{protected} must never be stopped even as a raw container"
+            );
+        }
+    }
+
+    /// CXA-B082 AC (aggregation half): every holder evictable → schedule those
+    /// teardowns and let verification proceed. A raw holder counts as evictable
+    /// only when its name proves it ours (CXA-B083), so the raw entry here is a
+    /// named cox-preview, not an anonymous container.
+    #[test]
+    fn only_reclaimable_holders_schedule_eviction() {
+        let holders = vec![
+            snapshot("abc", holder("cox--other-worktree", "ignored")),
+            snapshot("def", holder("", "cox--stale-raw")),
+            snapshot("ghi", holder("cox-cxa-codebase", "ignored")),
+        ];
+        assert_eq!(
+            plan_holders(&holders),
+            PortPlan::EvictThenVerify(vec![
+                HolderDecision::EvictComposeProject("cox--other-worktree".to_owned()),
+                HolderDecision::EvictRawContainer("def".to_owned()),
+                HolderDecision::EvictComposeProject("cox-cxa-codebase".to_owned()),
+            ])
+        );
+    }
+
+    /// CXA-B082 AC: a foreign non-cox compose project holding :8101 must not make
+    /// the gate fail red nor tear their stack down — it yields a skip with their
+    /// owner named.
+    #[test]
+    fn foreign_project_blocking_port_is_reported_as_a_skip() {
+        let holders = vec![snapshot("abc", holder("someone-elses-stack", "ignored"))];
+        assert_eq!(
+            plan_holders(&holders),
+            PortPlan::Skip("someone-elses-stack".to_owned())
+        );
+    }
+
+    /// CXA-B082's skip-with-report contract extended over CXA-B083's name check:
+    /// a foreign raw container is not stopped AND blocks the run as a skip,
+    /// reported by its container name since it has no project label.
+    #[test]
+    fn foreign_raw_container_blocks_as_a_skip_naming_the_container() {
+        let holders = vec![snapshot("abc", holder("", "nginx"))];
+        assert_eq!(plan_holders(&holders), PortPlan::Skip("nginx".to_owned()));
+    }
+
+    /// A holder with no recoverable identity at all (inspect failure or fully
+    /// anonymous container) is likewise never touched and reported by id.
+    #[test]
+    fn anonymous_holder_blocks_as_a_skip_naming_the_id() {
+        let holders = vec![snapshot("abc", None)];
+        assert_eq!(plan_holders(&holders), PortPlan::Skip("abc".to_owned()));
+    }
+
+    /// A single protected hub/infra holder blocks the whole run, even when other
+    /// squatters sharing :8101 would be reclaimable — we never half-clear the port
+    /// or touch anything while a protected stack is on it ([CXA-B082] safest).
+    #[test]
+    fn one_protected_or_mixed_blocking_holder_wins_over_every_reclaimable() {
+        for (foreign, reclaimable_present) in [
+            ("cxa-backend", false),
+            ("myapp-prod", true),
+            ("coxagent-db", true),
+        ] {
+            let mut holders = vec![snapshot("abc", holder(foreign, "ignored"))];
+            if reclaimable_present {
+                holders.push(snapshot("def", holder("cox--stale-preview", "ignored")));
+                // Skip must also short-circuit any raw-container teardown
+                // scheduled for name-proven cox previews.
+                holders.push(snapshot("ghi", holder("", "cox--stale-raw")));
+            }
+            assert_eq!(
+                plan_holders(&holders),
+                PortPlan::Skip(foreign.to_owned()),
+                "{foreign} should block verification without evicting co-squatters"
             );
         }
     }
@@ -457,8 +642,7 @@ mod parse_tests {
 
     #[test]
     fn labelled_holder_with_no_recoverable_name_is_still_some() {
-        let parsed =
-            HolderIdentity::new(&format!("someone-elses-stack{IDENT_SEP}\n"));
+        let parsed = HolderIdentity::new(&format!("someone-elses-stack{IDENT_SEP}\n"));
         assert!(parsed.is_some(), "label present");
         let identity = parsed.unwrap();
         assert_eq!(identity.owner_project, "someone-elses-stack");

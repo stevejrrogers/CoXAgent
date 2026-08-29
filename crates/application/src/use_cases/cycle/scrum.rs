@@ -275,6 +275,30 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .iter()
             .filter(|e| !e.contains("paused by self-tuning") && !e.contains("skipped"))
             .count() as u64;
+        // Feed per-role health from the error strings ("ROLE: message").
+        for e in report
+            .errors
+            .iter()
+            .filter(|e| !e.contains("paused by self-tuning") && !e.contains("skipped"))
+        {
+            let Some((role, msg)) = e.split_once(':') else {
+                continue;
+            };
+            let role = role.trim().to_owned();
+            if role.contains(' ') {
+                continue; // not a role prefix
+            }
+            let h = state.role_health.entry(role).or_default();
+            h.errors += 1;
+            let m = msg.trim();
+            if m.to_ascii_lowercase().contains("timed out")
+                || m.to_ascii_lowercase().contains("timeout")
+            {
+                h.timeouts += 1;
+            }
+            h.last_error = m.chars().take(160).collect();
+            h.last_error_at = crate::state::now_rfc3339();
+        }
         let incidents = state.engine_incidents.len() as u64;
         let grade = CycleScore::grade_of(shipped, runs, useful, incidents, errors);
         // The cycle counter is per-RUNNER (local, starts at 1 in the app loop).
