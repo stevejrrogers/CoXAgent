@@ -69,6 +69,7 @@ mod share_page;
 mod status;
 mod store_rpc;
 mod transcripts;
+mod tunecockpit;
 mod work;
 
 use alerts::*;
@@ -102,6 +103,7 @@ use share_link::*;
 use share_page::*;
 use status::*;
 use transcripts::*;
+use tunecockpit::*;
 use work::*;
 
 /// The embedded single-page dashboard.
@@ -781,6 +783,11 @@ pub async fn serve_full(
         .route("/api/projects/:pid/config", get(get_config).put(put_config))
         .route("/api/projects/:pid/control/:action", post(control_ep))
         .route("/api/projects/:pid/burn-mode", post(burn_mode_ep))
+        .route("/api/projects/:pid/brakes", get(brakes_ep))
+        .route(
+            "/api/projects/:pid/brakes/:brake/hold",
+            post(brake_hold_ep).delete(brake_hold_clear_ep),
+        )
         .route("/api/projects/:pid/sprint/goal", post(set_sprint_goal_ep))
         .route("/api/projects/:pid/sprint/close", post(sprint_close_ep))
         .route("/api/projects/:pid/sprint-queue", post(queue_sprint_ep))

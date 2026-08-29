@@ -306,6 +306,15 @@ pub use crate::metrics_burndown::{
     BURNDOWN_WINDOW_DAYS,
 };
 
+// The brake cockpit (CXA-F238): operator holds/overrides over the self-tuning
+// brakes, the audit trail helpers, and the dashboard read model — same seam.
+pub use crate::metrics_brakes::{
+    apply_brake_holds, brake_backlog, brake_cockpit, clear_brake_hold, is_brake_field,
+    reconcile_brake_holds, set_brake_hold, split_expired_holds, BrakeCard, BrakeCockpit,
+    BrakeHoldView, BrakeInputs, BrakeThresholds, BACKLOG_BRAKE_OFF, BACKLOG_BRAKE_ON,
+    CHURN_BRAKE_OFF, CHURN_BRAKE_ON,
+};
+
 fn status_key(s: Status) -> &'static str {
     match s {
         Status::Pending => "pending",
