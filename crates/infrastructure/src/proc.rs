@@ -264,7 +264,8 @@ fn confined_command(program: impl AsRef<OsStr>, work_dir: &Path) -> Command {
         cmd.arg("nice").arg("-n").arg("10").arg(program.as_ref());
         // Own process group, same as the macOS branch above: bwrap must lead
         // it so kill_group's `kill -9 -<pid>` (a process-GROUP signal) can
-        // actually reap the whole tree on timeout, not just fail silently.
+        // actually reap the whole tree on timeout, not just fail silently
+        // because pid never led a group (COX-B046).
         cmd.process_group(0);
         cmd
     }
@@ -470,6 +471,45 @@ mod tests {
         let (c, status) = agent_command("echo", std::path::Path::new("/srv/p"), false);
         assert_eq!(c.as_std().get_program(), "nice");
         assert_eq!(status, SandboxStatus::NotRequested);
+    }
+
+    /// AC (COX-B046): a sandboxed command on Linux must lead its own process
+    /// group, exactly like the macOS Seatbelt and `low_priority` branches —
+    /// otherwise `kill_group`'s `kill -9 -<pid>` targets a group `pid` never
+    /// led and silently fails, orphaning the whole bwrap tree (and any dev
+    /// server/build it spawned) past a timeout.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn agent_command_leads_its_own_process_group_on_linux() {
+        if !bwrap_available() {
+            return; // no bwrap on this host — nothing to verify here.
+        }
+        let ws = std::env::temp_dir().join(format!("cox-sbx-pgrp-{}", std::process::id()));
+        std::fs::create_dir_all(&ws).unwrap();
+        let (mut c, status) = agent_command("/bin/sh", &ws, true);
+        assert_eq!(status, SandboxStatus::Confined("bwrap"));
+        let mut child = c.arg("-c").arg("sleep 5").spawn().unwrap();
+        let pid = child.id().expect("spawned child has a pid");
+
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        let pgrp: u32 = stat
+            .rsplit(')')
+            .next()
+            .expect("stat has a comm field")
+            .split_whitespace()
+            .nth(2)
+            .expect("stat has a pgrp field")
+            .parse()
+            .expect("pgrp is numeric");
+        assert_eq!(
+            pgrp, pid,
+            "bwrap must lead its own process group (process_group(0)) so \
+             kill_group's process-group signal can reach it and every child \
+             it spawns"
+        );
+
+        let _ = child.kill().await;
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     /// AC: under `bwrap`, writes outside the workspace/tool-cache allowlist

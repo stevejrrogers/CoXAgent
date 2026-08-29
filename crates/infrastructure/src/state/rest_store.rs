@@ -46,7 +46,10 @@ impl RestConfig {
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())
             .filter(|&secs| secs > 0)
-            .map_or(Duration::from_secs(DEFAULT_TIMEOUT_SECS), Duration::from_secs)
+            .map_or(
+                Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+                Duration::from_secs,
+            )
     }
 }
 
