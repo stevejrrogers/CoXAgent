@@ -1039,6 +1039,46 @@ impl DeployPort for DockerComposeDeploy {
         self.run_test_command(work_dir, &cmd, &refs).await
     }
 
+    async fn run_e2e(
+        &self,
+        work_dir: &Path,
+        seed_modules: Option<&std::path::Path>,
+    ) -> Result<DeployReport, PortError> {
+        let e2e = work_dir.join("e2e");
+        if !e2e.join("playwright.config.ts").exists() {
+            return Ok(DeployReport {
+                success: true,
+                deployed: false,
+                summary: "no e2e suite".to_owned(),
+            });
+        }
+        // A fresh verification worktree has no node_modules; borrow the main
+        // checkout's via symlink instead of a per-PR npm install.
+        let nm = e2e.join("node_modules");
+        if !nm.exists() {
+            if let Some(seed) = seed_modules.filter(|s| s.exists()) {
+                let _ = std::os::unix::fs::symlink(seed, &nm);
+            }
+        }
+        if !nm.exists() {
+            let ok = std::process::Command::new("npm")
+                .arg("ci")
+                .arg("--silent")
+                .current_dir(&e2e)
+                .status()
+                .is_ok_and(|s| s.success());
+            if !ok {
+                return Ok(DeployReport {
+                    success: false,
+                    deployed: true,
+                    summary: "e2e: npm ci failed".to_owned(),
+                });
+            }
+        }
+        self.run_test_command(&e2e, "npx", &["playwright", "test", "--reporter=line"])
+            .await
+    }
+
     async fn run_tests(&self, work_dir: &Path) -> Result<DeployReport, PortError> {
         let Some((cmd, args)) = test_command(work_dir) else {
             return Ok(DeployReport {
