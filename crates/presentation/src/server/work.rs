@@ -241,6 +241,16 @@ pub(super) async fn create_ticket(
         Some("chore") => TicketType::Chore,
         _ => TicketType::Feature,
     };
+    // Declared product goal (CXA-F228): blank/absent means none; a non-blank
+    // id is parsed strictly so a malformed association is a 400, never a
+    // silently unattributed ticket.
+    let goal = match req.goal.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(g) => match coxagent_domain::GoalId::new(g) {
+            Ok(gid) => Some(gid),
+            Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        },
+    };
     let input = AddTicketInput {
         ticket_type,
         title: title.to_owned(),
@@ -249,6 +259,7 @@ pub(super) async fn create_ticket(
         complexity: req.complexity.unwrap_or(Complexity::Medium),
         has_ui: req.has_ui,
         acceptance_criteria: req.acceptance_criteria.clone(),
+        goal,
     };
     match AddTicketUseCase::new(Arc::clone(&p.store))
         .execute(input)

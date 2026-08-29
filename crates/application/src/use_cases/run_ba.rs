@@ -252,6 +252,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
                     complexity: p.complexity,
                     has_ui: p.has_ui,
                     acceptance_criteria: p.acceptance_criteria,
+                    goal: None,
                 })
                 .await?;
             created.push(id);

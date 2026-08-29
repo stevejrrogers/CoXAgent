@@ -47,6 +47,7 @@ mod docs;
 mod downloads;
 mod engines;
 mod forge;
+mod goals;
 mod guards;
 mod hub_docs;
 mod inbox;
@@ -77,7 +78,6 @@ use chat::*;
 use comments::*;
 use docs::*;
 use downloads::*;
-use metrics_admin::spawn_metrics_admin;
 use engines::*;
 use forge::*;
 use guards::*;
@@ -85,6 +85,7 @@ use hub_docs::*;
 use inbox::*;
 use manage::*;
 use meetings::*;
+use metrics_admin::spawn_metrics_admin;
 use openapi::*;
 use people::*;
 use pr_listing::*;
@@ -858,6 +859,16 @@ pub async fn serve_full(
             post(approve_cost),
         )
         .route("/api/projects/:pid/inbox", get(inbox_ep))
+        .route("/api/projects/:pid/goals", post(goals::add_goal_ep))
+        .route("/api/projects/:pid/goals/outcomes", get(goals::outcomes_ep))
+        .route(
+            "/api/projects/:pid/goals/:gid/rename",
+            post(goals::rename_goal_ep),
+        )
+        .route(
+            "/api/projects/:pid/ticket/:id/goal",
+            post(goals::ticket_set_goal_ep),
+        )
         .route("/api/projects/:pid/pr/:number/human", post(human_pr_ep))
         .route("/api/projects/:pid/reverts/:sha", post(revert_decision_ep))
         .route("/api/projects/:pid/attachment", get(attachment_ep))

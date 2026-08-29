@@ -13,10 +13,10 @@
 
 use super::RunCycleUseCase;
 use crate::ports::outbound::GitPort;
-use crate::state::{DeployRecord, RevertDecision, RevertEvent, now_rfc3339};
+use crate::state::{now_rfc3339, DeployRecord, RevertDecision, RevertEvent};
 use coxagent_domain::{Ticket, TicketType};
-use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 
 /// One revert commit the scan attributed to a shipped ticket.
 #[derive(Debug, Clone, PartialEq, Eq)]

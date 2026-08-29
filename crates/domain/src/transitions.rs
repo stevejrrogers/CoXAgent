@@ -110,6 +110,11 @@ pub fn field_permitted(actor: Role, field: &str) -> bool {
     match field {
         // Priority is PO's alone (User = super-PO).
         "priority" => matches!(actor, Role::Po | Role::User),
+        // Goal associations are scope decisions: which product line work
+        // advances. The PO's goal gate owns them (User = super-PO). Agents
+        // never re-point an association — the shared creation path binds the
+        // declared goal under System's bookkeeping authority.
+        "goal_id" => matches!(actor, Role::Po | Role::User),
         // SA owns technical design and dependency graph.
         "design.technical" | "depends_on" => actor == Role::Sa,
         // PD owns UX; SA may cover it when PD is disabled.

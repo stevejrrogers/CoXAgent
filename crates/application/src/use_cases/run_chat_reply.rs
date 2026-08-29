@@ -410,6 +410,9 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             // the agent TEST path has written since F022.
             if to == coxagent_domain::Status::Verified {
                 super::run_test::record_human_verify_evidence(s, &tid.to_string());
+                // Goal-line outcome ledger (CXA-F228): a human verdict is a
+                // delivered outcome like the agent path's.
+                s.record_verified_outcome(&tid.to_string());
             }
             s.log_activity(
                 "USER",
@@ -697,6 +700,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
                                     .and_then(serde_json::Value::as_bool)
                                     .unwrap_or(false),
                                 acceptance_criteria: vec![],
+                                goal: None,
                             })
                             .await
                             .ok();
@@ -983,6 +987,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
                     .as_ref()
                     .map(|r| r.acceptance_criteria.clone())
                     .unwrap_or_default(),
+                goal: None,
             })
             .await
         {

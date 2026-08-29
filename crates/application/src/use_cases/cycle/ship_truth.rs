@@ -48,8 +48,20 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             })
             .map(|t| t.id().to_string())
             .collect();
+        // A ticket whose PR is still OPEN is in flight, not a ghost — the
+        // sweep reopening it while DEV resolves merge conflicts would fork the
+        // same work twice (seen live with CXA-F229).
+        let in_flight = |id: &str| {
+            state
+                .open_prs
+                .iter()
+                .any(|pr| pr.title.contains(id) || pr.head.contains(id))
+        };
         let mut ghosts: Vec<String> = Vec::new();
         for id in shipped {
+            if in_flight(&id) {
+                continue;
+            }
             let (ok, out) = git
                 .raw(
                     &self.work_dir,
