@@ -9,12 +9,14 @@ use serde::{Deserialize, Serialize};
 mod chat;
 mod docs;
 mod goals;
+mod governance;
 mod ops;
 mod work;
 
 pub use chat::*;
 pub use docs::*;
 pub use goals::*;
+pub use governance::*;
 pub use ops::*;
 pub use work::*;
 
@@ -428,6 +430,13 @@ pub struct ProjectState {
     /// the schema stays at version 1.
     #[serde(default)]
     pub bug_snapshots: std::collections::BTreeMap<String, BugSnapshot>,
+    /// Human governance-attention ledger (CXA-F230): the append-only, bounded
+    /// record of every discrete operator review decision (ready approvals,
+    /// verify verdicts, cost approvals, PR hold resolutions, undo approvals),
+    /// each frozen with its ticket class and action time. serde-defaulted so
+    /// state persisted before this existed loads clean — no migration.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub governance_interventions: Vec<InterventionRecord>,
 }
 
 /// One day's open/fixed/verified bug counts — the persisted burn-down point
@@ -534,6 +543,7 @@ impl Default for ProjectState {
             incidents: Vec::new(),
             rolled_back_commits: std::collections::BTreeSet::new(),
             bug_snapshots: std::collections::BTreeMap::new(),
+            governance_interventions: Vec::new(),
         }
     }
 }

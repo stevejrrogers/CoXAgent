@@ -7,7 +7,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 
 /// A snapshot of team health derived from the project state.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Metrics {
     pub version: String,
     pub total_tickets: usize,
@@ -21,6 +21,10 @@ pub struct Metrics {
     pub deploys_by_day: Vec<DayCount>,
     /// Share of shipped work that was features vs bug fixes (0-100).
     pub feature_ratio_pct: u32,
+    /// The human governance-attention ledger, aggregated (CXA-F230) — the
+    /// operator-side mirror of the agent-side counts above. Additive; old
+    /// clients that never read the key are unaffected.
+    pub attention: crate::metrics_governance::AttentionSummary,
 }
 
 /// Per-role performance snapshot for the Agents "evals" panel — all
@@ -274,7 +278,15 @@ pub fn compute(state: &ProjectState) -> Metrics {
         releases,
         deploys_by_day,
         feature_ratio_pct,
+        attention: crate::metrics_governance::attention_summary(state, &now_day()),
     }
+}
+
+/// Today's UTC calendar day, injected the same way the health overlay's
+/// `now_day` is so tests can pin time.
+#[must_use]
+fn now_day() -> String {
+    crate::state::now_rfc3339().get(..10).unwrap_or_default().to_owned()
 }
 
 /// Whether a ticket id denotes a feature or chore. Ids are `F001` / `C001` or

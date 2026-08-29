@@ -420,8 +420,19 @@ pub(super) async fn human_pr_ep(
         "dismissed the hold on"
     };
     let note = format!("🧑‍⚖️ @{me} {verb} PR #{number} (held for human eyes).");
-    if coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
-        s.human_holds.remove(&number);
+    // Governance-attention ledger (CXA-F230): recorded inside the same atomic
+    // mutation, and ONLY when this call actually resolved the hold — the
+    // second of two concurrent resolutions finds nothing to remove and counts
+    // no effort (AC5).
+    let kind = if req.action == "approve" {
+        coxagent_domain::InterventionKind::HumanPrReviewed
+    } else {
+        coxagent_domain::InterventionKind::HumanPrDismissed
+    };
+    if coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), move |s| {
+        if s.human_holds.remove(&number).is_some() {
+            s.record_pr_intervention(kind, number, &me);
+        }
         s.log_activity("USER", &format!("{me} {verb} PR #{number}"), None);
         s.post_comment(&me, &note, None);
         Ok(())
@@ -595,7 +606,11 @@ pub(super) async fn send_back_ep(
         format!("↩️ {id} sent back by @{me}: {}", reason.trim())
     };
     state.log_activity("USER", "verification refused", Some(id.clone()));
-    state.post_comment(&me, &note, Some(id));
+    state.post_comment(&me, &note, Some(id.clone()));
+    // Governance-attention ledger (CXA-F230): a send-back is re-review churn
+    // the operator paid for — the exact signal the ledger exists to surface.
+    // The transition above is guarded, so a duplicate submit is a 409 here.
+    state.record_intervention(coxagent_domain::InterventionKind::VerifySendBack, &id, &me);
     match p.store.save(&state).await {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => internal_error(&e.to_string()),
@@ -642,6 +657,16 @@ async fn human_transition(
         // outcome like the agent path's.
         state.record_verified_outcome(id);
     }
+    // Governance-attention ledger (CXA-F230): the verdict just taken is a
+    // measured moment of operator review effort, attributed to the ticket's
+    // class. The transition guards above make a duplicate submit a 409 before
+    // any record exists, so one resolution is one record.
+    let kind = if to == coxagent_domain::Status::Verified {
+        coxagent_domain::InterventionKind::VerifyPass
+    } else {
+        coxagent_domain::InterventionKind::ReadyApprove
+    };
+    state.record_intervention(kind, id, &me);
     let label = format!("{to:?}").to_lowercase();
     // Teach the adaptive gate: every human decision is a sample
     // (docs/ADAPTIVE_APPROVAL.md).
@@ -769,6 +794,10 @@ pub(super) async fn undo_approval_ep(
         state.ask_again_shapes.push(shape.clone());
     }
     state.auto_approved_at.remove(&id);
+    // Governance-attention ledger (CXA-F230): an undo is the strongest form of
+    // gate friction the ledger tracks. The window membership check above
+    // refuses a second undo with a 409, so one pull-back is one record.
+    state.record_intervention(coxagent_domain::InterventionKind::UndoAutoApprove, &id, &me);
     let note = format!(
         "↩️ @{me} undid the auto-approval of {id} — `{shape}` goes back to asking a person."
     );

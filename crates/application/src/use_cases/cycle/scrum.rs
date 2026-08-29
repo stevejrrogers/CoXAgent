@@ -301,6 +301,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
         let incidents = state.engine_incidents.len() as u64;
         let grade = CycleScore::grade_of(shipped, runs, useful, incidents, errors);
+        // Governance-attention delta (CXA-F230): the human gate decisions that
+        // landed since the previous scorecard — so each scorecard carries the
+        // operator attention its cycle consumed, chartable like the spend.
+        let last_scored_at = state
+            .cycle_scores
+            .iter()
+            .filter(|c| c.cycle < report.cycle)
+            .map(|c| c.at.clone())
+            .max()
+            .unwrap_or_default();
+        let (attention_by_area, attention_by_kind) = state.attention_delta_since(&last_scored_at);
         // The cycle counter is per-RUNNER (local, starts at 1 in the app loop).
         // When the leader lease hands over — another runner takes the wheel, or
         // the same runner restarts mid-run — its counter resets, so 'cycle 1'
@@ -328,6 +339,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             grade,
             phase_secs,
             phase_cost,
+            attention_by_area,
+            attention_by_kind,
         });
         let overflow = state.cycle_scores.len().saturating_sub(100);
         if overflow > 0 {

@@ -13,6 +13,7 @@ pub mod error;
 pub mod faults;
 pub mod metrics;
 pub mod metrics_burndown;
+pub mod metrics_governance;
 pub mod metrics_health;
 pub mod metrics_registry;
 pub mod parsing;
