@@ -60,6 +60,8 @@ mod projects;
 mod realtime;
 mod requests;
 mod security;
+mod share_link;
+mod share_page;
 mod status;
 mod store_rpc;
 mod transcripts;
@@ -90,6 +92,8 @@ use projects::*;
 use realtime::*;
 use requests::*;
 use security::*;
+use share_link::*;
+use share_page::*;
 use status::*;
 use transcripts::*;
 use work::*;
@@ -790,6 +794,18 @@ pub async fn serve_full(
         .route("/api/me/agents", get(my_agents_ep))
         .route("/join/:token", get(join_page_ep))
         .route("/api/workspace/join", post(join_ep))
+        // Public share-link status page (CXA-F069): the token IS the
+        // credential, so no session is required (allowlisted in auth_mw).
+        .route("/s/:token", get(share_page_ep))
+        // Share-link management (admin): mint, list, revoke.
+        .route(
+            "/api/projects/:pid/share-links",
+            get(share_link_list_ep).post(share_link_create_ep),
+        )
+        .route(
+            "/api/projects/:pid/share-links/:token",
+            axum::routing::delete(share_link_revoke_ep),
+        )
         .route(
             "/api/projects/:pid/operators/:operator/:action",
             post(operator_control_ep),
@@ -1203,6 +1219,8 @@ mod cors_rate_limit_tests;
 mod pr_preview_tests;
 #[cfg(test)]
 mod pr_review_gate_tests;
+#[cfg(test)]
+mod share_link_tests;
 #[cfg(test)]
 mod store_rpc_auth_enforcement_tests;
 #[cfg(test)]

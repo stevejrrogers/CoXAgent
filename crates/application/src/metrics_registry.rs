@@ -231,6 +231,11 @@ fn get_or_admit<T: Default>(
 /// to the same key); every other path keeps at most its first two segments.
 /// This is what keeps a scanner probing `/api/projects/x/y/z/…` from minting
 /// unbounded series: N input paths produce O(1) family keys.
+///
+/// `/s/…` collapses WITHOUT its second segment (CXA-F069): there the segment
+/// is the share-link token itself — a credential — and a metric label is a
+/// log surface. Matched routes already record the `/s/:token` pattern; only
+/// this bucket path could ever see a raw token.
 #[must_use]
 pub fn label_bucket(raw: &str) -> String {
     let segments: Vec<&str> = raw.split('/').filter(|s| !s.is_empty()).collect();
@@ -238,6 +243,9 @@ pub fn label_bucket(raw: &str) -> String {
         [] => "/".to_owned(),
         ["api", "projects", _pid] => "/api/projects/:pid".to_owned(),
         ["api", "projects", _pid, ..] => "/api/projects/:pid/*".to_owned(),
+        ["s"] => "/s/:token".to_owned(),
+        ["s", _token] => "/s/:token".to_owned(),
+        ["s", ..] => "/s/:token/*".to_owned(),
         [one] => format!("/{one}"),
         [first, second, ..] => format!("/{first}/{second}"),
     }
@@ -541,6 +549,23 @@ mod tests {
         assert_eq!(label_bucket("/healthz"), "/healthz");
         assert_eq!(label_bucket("/"), "/");
         assert_eq!(registry.series_count(), 1, "10k inputs, one family series");
+    }
+
+    #[test]
+    fn label_bucket_never_records_a_share_token() {
+        // CXA-F069 AC5: the share token is a credential, and a metric label
+        // is a log surface — the bucket must collapse it away, even for the
+        // unmatched shapes (trailing segments) that miss the route pattern.
+        let token = "0123456789abcdef0123456789abcdef";
+        assert_eq!(label_bucket(&format!("/s/{token}")), "/s/:token");
+        assert_eq!(
+            label_bucket(&format!("/s/{token}/extra/segments")),
+            "/s/:token/*"
+        );
+        assert!(
+            !label_bucket(&format!("/s/{token}/x")).contains(token),
+            "the raw token must not survive bucketing"
+        );
     }
 
     #[test]
