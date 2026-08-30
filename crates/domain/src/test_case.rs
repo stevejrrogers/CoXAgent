@@ -84,9 +84,30 @@ pub struct CaseEvidence {
     /// Who/what verified it, or how to reproduce.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// The resolved live-reproduction URL for this criterion (CXA-F248): an
+    /// opaque, already-resolved address on the deployed app that a reviewer
+    /// can open to see the criterion demonstrated. `None` — never a blank or
+    /// guessed placeholder — when no route resolved onto a known live base.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repro: Option<String>,
     /// RFC3339 timestamp the evidence was captured.
     #[serde(default)]
     pub at: String,
+}
+
+impl CaseEvidence {
+    /// Bare evidence for a case that has provenance but no proof yet — the
+    /// repro setter hangs the resolved link off this without inventing an
+    /// image, note or timestamp.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            image: None,
+            note: None,
+            repro: None,
+            at: String::new(),
+        }
+    }
 }
 
 /// One test case on a ticket — the executable form of an acceptance
@@ -196,9 +217,11 @@ impl Ticket {
             TestCaseStatus::Failed
         };
         let keep_image = image.or_else(|| tc.evidence.as_ref().and_then(|e| e.image.clone()));
+        let keep_repro = tc.evidence.as_ref().and_then(|e| e.repro.clone());
         tc.evidence = Some(CaseEvidence {
             image: keep_image,
             note,
+            repro: keep_repro,
             at: at.clone(),
         });
         // History is the churn view's raw data (CXA-F251): EVERY call appends
@@ -229,9 +252,11 @@ impl Ticket {
             return false;
         };
         let note = tc.evidence.as_ref().and_then(|e| e.note.clone());
+        let repro = tc.evidence.as_ref().and_then(|e| e.repro.clone());
         tc.evidence = Some(CaseEvidence {
             image: Some(image),
             note,
+            repro,
             at: at.clone(),
         });
         // Appends as an EVIDENCE-REFRESH record, not a verdict (CXA-F251):
@@ -245,6 +270,28 @@ impl Ticket {
             at,
         });
         trim_verdict_history(tc);
+        true
+    }
+
+    /// Attach the resolved live-reproduction URL to a test case's evidence
+    /// without changing its verdict or the rest of the evidence (CXA-F248).
+    /// The caller resolves the verdict's route onto the known live base; a
+    /// blank url is refused so an unresolved route stays ABSENT rather than
+    /// becoming a fabricated link. Returns `false` when no case matched or
+    /// the url is blank.
+    pub fn set_test_case_repro(&mut self, description: &str, repro: String) -> bool {
+        if repro.trim().is_empty() {
+            return false;
+        }
+        let Some(tc) = self
+            .test_case_list_mut()
+            .iter_mut()
+            .find(|t| t.description == description)
+        else {
+            return false;
+        };
+        let evidence = tc.evidence.get_or_insert_with(CaseEvidence::empty);
+        evidence.repro = Some(repro);
         true
     }
 
@@ -376,6 +423,129 @@ mod tests {
         t.set_acceptance_criteria(vec!["ac".to_owned()]);
         t.ensure_test_cases_from_acceptance();
         assert!(!t.set_test_case_result("does not exist", true, None, None, "t1".into()));
+    }
+
+    // --- CXA-F248: per-criterion reproduction routes on CaseEvidence ----------
+
+    /// A ticket whose one criterion already carries note evidence — the state
+    /// every repro write must preserve.
+    fn case_with_note(note: &str) -> Ticket {
+        let mut t = feature();
+        t.set_acceptance_criteria(vec!["settings persist".to_owned()]);
+        t.ensure_test_cases_from_acceptance();
+        assert!(t.set_test_case_result(
+            "settings persist",
+            true,
+            Some(note.to_owned()),
+            None,
+            "t1".into(),
+        ));
+        t
+    }
+
+    /// Old snapshots deserialize unchanged: a record written before CXA-F248
+    /// carries no `repro` key, loads as `None`, and re-serializes without the
+    /// key — backward and forward compatible, no migration.
+    #[test]
+    fn repro_is_none_and_omitted_on_the_wire_for_pre_f248_records() {
+        let t = case_with_note("GET /settings 200");
+        let ev = t.test_cases()[0].evidence.as_ref().expect("evidence");
+        assert_eq!(ev.repro, None, "no route resolved yet — repro is None");
+        let v = serde_json::to_value(ev).expect("serialize");
+        assert!(
+            v.get("repro").is_none(),
+            "an unresolved route is OMITTED, never serialized as a guessed link: {v}"
+        );
+        let round: CaseEvidence = serde_json::from_value(v).expect("deserialize pre-F248 record");
+        assert_eq!(round, *ev, "old==new comparison holds through the round trip");
+    }
+
+    /// The full recording story: a resolved repro attaches beside existing
+    /// evidence without touching the verdict, survives a verdict-only re-run
+    /// and a screenshot pass, and rides persistence.
+    #[test]
+    fn set_repro_preserves_note_image_and_status() {
+        let mut t = case_with_note("GET /settings 200");
+        assert!(t.set_test_case_repro(
+            "settings persist",
+            "http://127.0.0.1:8101/settings".into(),
+        ));
+        let ev = t.test_cases()[0].evidence.as_ref().expect("evidence");
+        assert_eq!(
+            ev.repro.as_deref(),
+            Some("http://127.0.0.1:8101/settings"),
+            "the resolved route is recorded verbatim — the domain parses nothing"
+        );
+        assert_eq!(ev.note.as_deref(), Some("GET /settings 200"));
+        assert_eq!(t.test_cases()[0].status, TestCaseStatus::Passed);
+
+        // A screenshot pass attaches the image; the repro must survive it.
+        assert!(t.set_test_case_image("settings persist", "/api/projects/cxa/media/s.png".into(), "t2".into()));
+        // A re-run's verdict (no image) must not wipe either.
+        assert!(t.set_test_case_result("settings persist", false, Some("now failing".into()), None, "t3".into()));
+        let ev = t.test_cases()[0].evidence.as_ref().expect("evidence");
+        assert_eq!(ev.repro.as_deref(), Some("http://127.0.0.1:8101/settings"));
+        assert_eq!(ev.image.as_deref(), Some("/api/projects/cxa/media/s.png"));
+        assert_eq!(ev.note.as_deref(), Some("now failing"));
+        assert_eq!(t.test_cases()[0].status, TestCaseStatus::Failed);
+
+        // Persisted through the aggregate's serde and back.
+        let v = serde_json::to_value(&t).expect("serialize ticket");
+        let back: Ticket = serde_json::from_value(v).expect("deserialize ticket");
+        assert_eq!(back, t, "the recorded repro round-trips through the store payload");
+    }
+
+    /// An unresolved route never becomes a fabricated link: blank (and
+    /// whitespace-only) urls are refused, and an unknown case matches nothing.
+    #[test]
+    fn set_repro_refuses_blank_and_unknown_case() {
+        let mut t = case_with_note("GET /settings 200");
+        assert!(
+            !t.set_test_case_repro("settings persist", String::new()),
+            "empty is not a reproduction"
+        );
+        assert!(!t.set_test_case_repro("settings persist", "   ".into()));
+        assert!(!t.set_test_case_repro("no such criterion", "http://x/".into()));
+        let ev = t.test_cases()[0].evidence.as_ref().expect("evidence");
+        assert_eq!(ev.repro, None, "refusals leave the field absent");
+        assert_eq!(ev.note.as_deref(), Some("GET /settings 200"), "note untouched");
+    }
+
+    /// A re-run's freshly resolved route REPLACES the recorded one — the
+    /// freshest verification is what a reviewer should open.
+    #[test]
+    fn set_repro_overwrites_with_the_fresher_route() {
+        let mut t = case_with_note("GET /settings 200");
+        assert!(t.set_test_case_repro("settings persist", "http://127.0.0.1:8101/settings".into()));
+        assert!(
+            t.set_test_case_repro("settings persist", "http://127.0.0.1:8101/settings#v2".into())
+        );
+        assert_eq!(
+            t.test_cases()[0]
+                .evidence
+                .as_ref()
+                .expect("evidence")
+                .repro
+                .as_deref(),
+            Some("http://127.0.0.1:8101/settings#v2"),
+            "the latest resolved route wins"
+        );
+    }
+
+    /// Repro attaches even when the case has no evidence yet (no note/image):
+    /// the evidence record materializes with just the link.
+    #[test]
+    fn set_repro_creates_evidence_when_absent() {
+        let mut t = feature();
+        t.set_acceptance_criteria(vec!["bare criterion".to_owned()]);
+        t.ensure_test_cases_from_acceptance();
+        assert!(t.test_cases()[0].evidence.is_none());
+        assert!(t.set_test_case_repro("bare criterion", "http://127.0.0.1:8101/x".into()));
+        let ev = t.test_cases()[0].evidence.as_ref().expect("evidence created");
+        assert_eq!(ev.repro.as_deref(), Some("http://127.0.0.1:8101/x"));
+        assert_eq!(ev.image, None);
+        assert_eq!(ev.note, None);
+        assert_eq!(ev.at, "");
     }
 
     // --- Verdict-history churn data (CXA-F251) ---
