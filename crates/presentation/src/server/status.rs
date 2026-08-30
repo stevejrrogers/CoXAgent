@@ -30,7 +30,7 @@ pub(super) async fn build_state(
         docs_bus: Arc::new(RwLock::new(HashMap::new())),
         docs_editors: Arc::new(std::sync::Mutex::new(HashMap::new())),
         order: Arc::new(RwLock::new(order)),
-        broken: Arc::new(extras.broken),
+        broken: Arc::new(RwLock::new(extras.broken)),
         factory: extras.factory,
         auth: extras.auth,
         audit,

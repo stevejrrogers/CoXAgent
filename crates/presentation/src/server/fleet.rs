@@ -449,15 +449,17 @@ pub(super) async fn fleet_river_ep(
     // hides unrelated broken ones; no filter shows every visible registration.
     // Markers obey the same membership rule as live projects — a broken
     // project still carries its config path, which is not other teams' business.
-    let broken: Vec<BrokenProject> = app
-        .broken
-        .iter()
-        .filter(|b| {
-            may_see_broken(principal.as_ref(), &b.id)
-                && q.project_id.as_deref().map_or(true, |pid| pid == b.id)
-        })
-        .cloned()
-        .collect();
+    let broken: Vec<BrokenProject> = {
+        let broken = app.broken.read().await;
+        broken
+            .iter()
+            .filter(|b| {
+                may_see_broken(principal.as_ref(), &b.id)
+                    && q.project_id.as_deref().map_or(true, |pid| pid == b.id)
+            })
+            .cloned()
+            .collect()
+    };
     let guard = ViewerGuard::new(&app.viewers, viewer);
     let shared = Arc::new(tokio::sync::Mutex::new(RiverState {
         projects,

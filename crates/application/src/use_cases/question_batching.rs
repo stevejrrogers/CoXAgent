@@ -246,9 +246,12 @@ mod tests {
         state
             .questions
             .push(question("CXC-F002", "@LUFFY", "which storage?", true));
-        state
-            .questions
-            .push(question("CXC-B001", "@nami", "what does 'done' mean?", true));
+        state.questions.push(question(
+            "CXC-B001",
+            "@nami",
+            "what does 'done' mean?",
+            true,
+        ));
         // An agent-queue question and an answered one never batch.
         state
             .questions
@@ -281,7 +284,13 @@ mod tests {
         let off = human_with_window("luffy", "09:00-12:00", false);
         assert!(!should_defer(&off, "@luffy", inside, 0, 60));
         // No feature at all (default config) -> deliver now, always.
-        assert!(!should_defer(&HumanConfig::default(), "@luffy", inside, 0, 60));
+        assert!(!should_defer(
+            &HumanConfig::default(),
+            "@luffy",
+            inside,
+            0,
+            60
+        ));
         // Bare-username addressing is agent-queue territory, never batched:
         // every batching surface (selection, flush, escalation) handles only
         // @-person questions, so deferring these would lose them.
@@ -356,12 +365,21 @@ mod tests {
             false,
         )
         .expect("valid ticket");
-        done.transition_to(coxagent_domain::Role::DevBug, coxagent_domain::Status::InProgress)
-            .expect("legal route");
-        done.transition_to(coxagent_domain::Role::DevBug, coxagent_domain::Status::Fixed)
-            .expect("legal route");
-        done.transition_to(coxagent_domain::Role::Test, coxagent_domain::Status::Verified)
-            .expect("legal route");
+        done.transition_to(
+            coxagent_domain::Role::DevBug,
+            coxagent_domain::Status::InProgress,
+        )
+        .expect("legal route");
+        done.transition_to(
+            coxagent_domain::Role::DevBug,
+            coxagent_domain::Status::Fixed,
+        )
+        .expect("legal route");
+        done.transition_to(
+            coxagent_domain::Role::Test,
+            coxagent_domain::Status::Verified,
+        )
+        .expect("legal route");
         state.tickets.push(done);
         // The still-blocked question's ticket is alive and in play — the
         // question must survive the flush filter.

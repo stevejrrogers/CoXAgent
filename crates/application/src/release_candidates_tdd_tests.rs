@@ -28,7 +28,7 @@
 //!   [`a_rejected_ticket_neither_joins_nor_blocks_its_goal_bundle`],
 //!   [`an_on_hold_ticket_keeps_its_goal_line_from_proposing`]
 
-use crate::release_candidates::{ReleaseCandidate, is_verified_complete, release_candidates};
+use crate::release_candidates::{is_verified_complete, release_candidates, ReleaseCandidate};
 use crate::state::ProjectState;
 use coxagent_domain::{
     Complexity, GoalId, Priority, Role, Status, TechnicalDesign, Ticket, TicketId, TicketType,
@@ -72,7 +72,8 @@ fn verified_bug(id: &str, goal_id: Option<GoalId>, depends_on: &[&str]) -> Ticke
         "t0".into(),
     ));
     for to in [Status::InProgress, Status::Fixed, Status::Verified] {
-        t.transition_to(Role::System, to).expect("system walks to verified");
+        t.transition_to(Role::System, to)
+            .expect("system walks to verified");
     }
     t
 }
@@ -96,10 +97,12 @@ fn unverified_bug(id: &str, at: Status, goal_id: Option<GoalId>) -> Ticket {
     match at {
         Status::Open => {}
         Status::InProgress => {
-            t.transition_to(Role::System, Status::InProgress).expect("walk");
+            t.transition_to(Role::System, Status::InProgress)
+                .expect("walk");
         }
         Status::Fixed => {
-            t.transition_to(Role::System, Status::InProgress).expect("walk");
+            t.transition_to(Role::System, Status::InProgress)
+                .expect("walk");
             t.transition_to(Role::System, Status::Fixed).expect("walk");
         }
         _ => panic!("fixture supports Open/InProgress/Fixed only, got {at:?}"),
@@ -141,7 +144,8 @@ fn done_feature(id: &str, goal_id: Option<GoalId>) -> Ticket {
     )
     .expect("attach design");
     for to in [Status::Ready, Status::InProgress, Status::Done] {
-        t.transition_to(Role::System, to).expect("system walks to done");
+        t.transition_to(Role::System, to)
+            .expect("system walks to done");
     }
     t
 }
@@ -207,10 +211,17 @@ fn assembly_lists_only_verified_tickets_grouped_into_named_bundles() {
 
     let board = release_candidates(&state);
 
-    assert_eq!(board.len(), 2, "one bundle per fully-verified goal: {board:?}");
+    assert_eq!(
+        board.len(),
+        2,
+        "one bundle per fully-verified goal: {board:?}"
+    );
     for cand in &board {
         assert!(!cand.name.trim().is_empty(), "bundles are named: {cand:?}");
-        assert!(!cand.tickets.is_empty(), "a bundle groups its tickets: {cand:?}");
+        assert!(
+            !cand.tickets.is_empty(),
+            "a bundle groups its tickets: {cand:?}"
+        );
         assert!(
             cand.blocked.is_none(),
             "nothing blocks a fully-verified independent bundle: {cand:?}"
@@ -284,11 +295,18 @@ fn a_shared_unverified_prerequisite_is_surfaced_on_every_bundle_that_needs_it() 
     let p = unverified_bug("RC-201", Status::InProgress, None);
     let x1 = verified_bug("RC-202", Some(goal(1)), &["RC-201"]);
     let y1 = verified_bug("RC-203", Some(goal(2)), &["RC-201"]);
-    let state = state_with(&["Consumes foundation X", "Consumes foundation Y"], vec![p, x1, y1]);
+    let state = state_with(
+        &["Consumes foundation X", "Consumes foundation Y"],
+        vec![p, x1, y1],
+    );
 
     let board = release_candidates(&state);
 
-    assert_eq!(board.len(), 2, "both bundles are internally complete: {board:?}");
+    assert_eq!(
+        board.len(),
+        2,
+        "both bundles are internally complete: {board:?}"
+    );
     for cand in &board {
         let blocked = cand
             .blocked
@@ -321,7 +339,11 @@ fn an_unverified_prerequisite_blocks_the_dependent_candidate_with_an_explicit_re
 
     let board = release_candidates(&state);
 
-    assert_eq!(board.len(), 1, "the dependent bundle is still proposed: {board:?}");
+    assert_eq!(
+        board.len(),
+        1,
+        "the dependent bundle is still proposed: {board:?}"
+    );
     let cand = board.first().expect("one bundle");
     assert!(
         cand.tickets.iter().all(|t| t.as_str() != "RC-301"),
@@ -356,9 +378,10 @@ fn removing_a_ticket_leaves_unrelated_bundles_unchanged() {
     let after = release_candidates(&state);
 
     assert!(
-        !after
+        !after.iter().any(|c| c
+            .tickets
             .iter()
-            .any(|c| c.tickets.iter().any(|t| t.as_str() == "RC-401" || t.as_str() == "RC-402")),
+            .any(|t| t.as_str() == "RC-401" || t.as_str() == "RC-402")),
         "Alpha is now partially supported — its bundle does not survive: {after:?}"
     );
     assert_eq!(
@@ -380,7 +403,10 @@ fn removing_a_ticket_affects_only_candidates_that_actually_depend_on_it() {
     let a1 = verified_bug("RC-501", Some(goal(1)), &[]);
     let b1 = verified_bug("RC-502", Some(goal(2)), &["RC-501"]);
     let c1 = verified_bug("RC-503", Some(goal(3)), &[]);
-    let mut state = state_with(&["Foundation", "Built on it", "Independent"], vec![a1, b1, c1]);
+    let mut state = state_with(
+        &["Foundation", "Built on it", "Independent"],
+        vec![a1, b1, c1],
+    );
 
     let before = release_candidates(&state);
     assert_eq!(before.len(), 3, "{before:?}");
@@ -390,7 +416,9 @@ fn removing_a_ticket_affects_only_candidates_that_actually_depend_on_it() {
     let after = release_candidates(&state);
 
     assert!(
-        !after.iter().any(|c| c.tickets.iter().any(|t| t.as_str() == "RC-501")),
+        !after
+            .iter()
+            .any(|c| c.tickets.iter().any(|t| t.as_str() == "RC-501")),
         "the foundation's own bundle does not survive its removal: {after:?}"
     );
     let beta = bundle_containing(&after, "RC-502");
@@ -452,12 +480,18 @@ fn a_rejected_ticket_neither_joins_nor_blocks_its_goal_bundle() {
     let g = goal(1);
     let keep = verified_bug("RC-711", Some(g.clone()), &[]);
     let mut rejected = pending_feature("RC-712", Some(g));
-    rejected.transition_to(Role::Po, Status::Rejected).expect("reject");
+    rejected
+        .transition_to(Role::Po, Status::Rejected)
+        .expect("reject");
     let state = state_with(&["Partly rejected"], vec![keep, rejected]);
 
     let board = release_candidates(&state);
 
-    assert_eq!(board.len(), 1, "only the verified remainder bundles: {board:?}");
+    assert_eq!(
+        board.len(),
+        1,
+        "only the verified remainder bundles: {board:?}"
+    );
     let cand = board.first().expect("one bundle");
     assert_eq!(cand.tickets.len(), 1, "{cand:?}");
     assert_eq!(cand.tickets.first().expect("member").as_str(), "RC-711");
@@ -471,10 +505,15 @@ fn an_on_hold_ticket_keeps_its_goal_line_from_proposing() {
     let g = goal(1);
     let done = done_feature("RC-721", Some(g.clone()));
     let mut parked = pending_feature("RC-722", Some(g));
-    parked.transition_to(Role::Po, Status::OnHold).expect("hold");
+    parked
+        .transition_to(Role::Po, Status::OnHold)
+        .expect("hold");
     let state = state_with(&["Parked line"], vec![done, parked]);
 
     let board = release_candidates(&state);
 
-    assert!(board.is_empty(), "a parked member keeps the line out: {board:?}");
+    assert!(
+        board.is_empty(),
+        "a parked member keeps the line out: {board:?}"
+    );
 }

@@ -2,6 +2,11 @@
     --border:rgba(255,255,255,.07);--border2:rgba(255,255,255,.13);
     --text:#F1F2F6;--muted:#9A9DAB;--dim:#5E616C;
     --accent:#0891B2;--accenth:#0AA3C2;--accent2:#34D9EE;--accentbg:rgba(52,217,238,.14);
+    /* Filled buttons (CXA-B113): white labels on the bare accent reach only
+       3.68:1 — WCAG AA needs 4.5:1 — so buttons draw from a darker primary
+       step (the light theme's accent) and a hover lighten that stays inside
+       AA. Both themes share these values (light already used this accent). */
+    --pri-bg:#0E7490;--pri-bgh:#0D7C9B;
     --green:#4ADE80;--amber:#FBBF24;--red:#F87171;--blue:#60A5FA;--teal:#2DD4BF;--purple:#A78BFA;--r:14px}
   :root.light{--bg:#F5F5F7;--panel:#FFFFFF;--card:#FFFFFF;--card2:#F0F0F3;--hover:#E8E8EC;
     --border:rgba(0,0,0,.08);--border2:rgba(0,0,0,.14);
@@ -114,7 +119,7 @@
   .gc-note{flex:1;font-size:11px;color:var(--dim);display:inline-flex;align-items:center;gap:5px}
   .gc-btn{background:var(--card2);color:var(--muted);border:1px solid var(--border2);border-radius:8px;padding:7px 13px;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit}
   .gc-btn:hover{color:var(--text)}
-  .gc-btn.pri{background:var(--accent);color:#fff;border-color:transparent}
+  .gc-btn.pri{background:var(--pri-bg);color:#fff;border-color:transparent}
   .gc-btn[disabled]{opacity:.45;cursor:not-allowed}
   /* Code review */
   .revlist{display:flex;flex-direction:column;gap:10px}
@@ -785,7 +790,7 @@
   .ctlrow{display:grid;grid-template-columns:1fr 1fr;gap:6px}
   .ctlrow button{background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:9px;padding:8px;font-size:12px;font-weight:500;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:5px;font-family:inherit}
   .ctlrow button:hover{background:var(--hover);border-color:var(--border2)}
-  .ctlrow button.pri{grid-column:1/3;background:var(--accent);border-color:transparent;color:#fff} .ctlrow button.pri:hover{background:var(--accenth)}
+  .ctlrow button.pri{grid-column:1/3;background:var(--pri-bg);border-color:transparent;color:#fff} .ctlrow button.pri:hover{background:var(--pri-bgh)}
   .dot{width:7px;height:7px;border-radius:50%;background:var(--dim);flex-shrink:0}
   .dot.live{background:var(--green);box-shadow:0 0 0 3px rgba(74,222,128,.18);animation:pulse 1.8s infinite}
   .dot.paused{background:var(--amber)} .dot.off{background:var(--red)}
@@ -1620,10 +1625,10 @@
 body.viewer .ctlrow, body.viewer .projadd, body.viewer .pi-del, body.viewer .ticket-actions { display: none !important; }
 body:not(.admin) .admin-only { display: none !important; }
 body:not(.manage) .manage-only { display: none !important; }
-.pri{background:var(--accent);color:#fff;border:1px solid transparent;border-radius:9px;padding:9px 14px;font-size:13px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:6px;font-family:inherit}
+.pri{background:var(--pri-bg);color:#fff;border:1px solid transparent;border-radius:9px;padding:9px 14px;font-size:13px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:6px;font-family:inherit}
 .add-user-btn{padding:8px 16px;font-size:12.5px}
 .invite-btn{padding:9px 22px;font-size:13.5px}
-.pri:hover{background:var(--accenth)}
+.pri:hover{background:var(--pri-bgh)}
 .userbox{display:none;align-items:center;gap:9px;margin-top:auto;padding:8px 9px;background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--border2);border-radius:12px}
 .uavatar{width:34px;height:34px;flex-shrink:0;border-radius:9px;overflow:hidden;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));transition:box-shadow .15s,transform .15s}
 .uavatar:hover{box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 33%,transparent);transform:translateY(-1px)}
@@ -1800,6 +1805,23 @@ textarea.np-in{resize:vertical;line-height:1.5}
 .spq-chip{font-size:11px;font-family:ui-monospace,Menlo,monospace;border:1px solid var(--border2);border-radius:6px;padding:2px 7px;cursor:pointer;display:inline-flex;align-items:center;gap:5px}
 .spq-chip:hover{border-color:var(--accent2)}
 .spq-chip .ti-x{font-size:10px;color:var(--dim)} .spq-chip .ti-x:hover{color:var(--red)}
+/* Jira-style sprint sections: header row + full ticket rows */
+.spq-sec{padding:10px 12px}
+.spq-chev{background:none;border:none;color:var(--dim);cursor:pointer;padding:2px;display:inline-flex;align-items:center;font-size:14px;border-radius:6px}
+.spq-chev:hover{color:var(--fg);background:var(--border2)}
+.spq-rows{margin-top:8px;border-top:1px solid var(--border2)}
+.spq-row{display:flex;align-items:center;gap:8px;padding:6px 4px;border-bottom:1px solid var(--border2);cursor:pointer;font-size:12.5px;min-width:0}
+.spq-row:last-child{border-bottom:none}
+.spq-row:hover{background:var(--accentbg)}
+.spq-row.spq-done .spq-title{color:var(--dim);text-decoration:line-through}
+.spq-type{flex:none;display:inline-flex;font-size:13px;width:18px;justify-content:center}
+.spq-id{flex:none;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--muted)}
+.spq-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
+.spq-pchip{flex:none;font-size:10px;font-weight:600;border-radius:20px;padding:1px 8px}
+.spq-schip{flex:none;font-size:10px;color:var(--muted);border:1px solid var(--border2);border-radius:20px;padding:1px 8px;text-transform:capitalize}
+.spq-schip.ok{color:var(--green);border-color:color-mix(in srgb,var(--green) 40%,transparent)}
+.spq-row .sp-scope{flex:none;opacity:0;transition:opacity .12s}
+.spq-row:hover .sp-scope{opacity:1}
 
 /* Agent card engine-health line (Agents view). */
 .ag-health{margin-top:6px;font-size:11px;color:var(--amber);display:flex;gap:5px;align-items:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
