@@ -11,6 +11,9 @@ use std::collections::HashMap;
 // anchor and build manifest it belongs to; it is re-exported here so every
 // Config section type is reachable as `config::<Section>Config`.
 pub use crate::artifacts::ArtifactsConfig;
+// Same convention: the per-operator working-hours declaration types live with
+// their decision logic in [`crate::working_hours`].
+pub use crate::working_hours::OperatorWorkingHours;
 
 /// Known agent engine CLIs. `as_binary` gives the executable name to look for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -384,6 +387,17 @@ pub struct HumanConfig {
     /// (the behaviour this feature must not change).
     #[serde(default)]
     pub focus_windows: std::collections::BTreeMap<String, FocusWindow>,
+    /// Per-operator working hours (CXA-F234), keyed by bare username: the ONE
+    /// declaration ("Mon–Fri 09:00–17:30 at a fixed UTC offset", weekends off)
+    /// that decides whether a UTC instant is actionable for that operator —
+    /// the question every human-facing delivery decision consults. Absent
+    /// entry = the operator declared nothing and delivery behaves exactly as
+    /// before. Values are validated fail-closed at save
+    /// ([`crate::config_parse::parse_config`] names the offending field), so
+    /// an impossible tz or a malformed range can never load as "no hours".
+    /// Decisions live in [`crate::working_hours`].
+    #[serde(default)]
+    pub working_hours: std::collections::BTreeMap<String, OperatorWorkingHours>,
 }
 
 /// One person's focus-window ("quiet hours") settings (CXA-F176). Every
