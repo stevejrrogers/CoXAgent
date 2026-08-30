@@ -4,10 +4,11 @@
 //! so no use case knows or cares about it.
 
 use async_trait::async_trait;
+use coxagent_application::engine_provenance::{model_id, role_label};
 use coxagent_application::ports::outbound::{
     AgentEnginePort, AgentOutcome, AgentRequest, SandboxStatus,
 };
-use coxagent_application::state::Spend;
+use coxagent_application::state::{EngineAttempt, MeteredStep, Spend, StepProvenance};
 use coxagent_application::PortError;
 use std::sync::{Arc, Mutex};
 
@@ -38,6 +39,11 @@ impl<E: AgentEnginePort> AgentEnginePort for MeteringEngine<E> {
 
     async fn run(&self, request: AgentRequest) -> Result<AgentOutcome, PortError> {
         let role = role_key(request.role);
+        // Captured before the request moves into the inner engine: the
+        // provenance record needs the ticket label and the dashboard role.
+        let label = request.label.clone();
+        let dash_role = role_label(&request.role);
+        let escalation = request.escalation_level;
         // Measure the prompt we SEND per role (chars ≈ tokens/3.5): prompt
         // trimming without this number is guesswork — it names which role's
         // briefing blocks are actually fat before anyone cuts one.
@@ -55,6 +61,21 @@ impl<E: AgentEnginePort> AgentEnginePort for MeteringEngine<E> {
                     .insert(role.clone(), outcome.engine.clone());
             }
         }
+        // CXA-F257: capture per-step engine/model provenance — what ACTUALLY
+        // executed this run, post-failover and post-escalation. Rides the same
+        // meter → drain_meter fold as the spend counters, so use cases stay
+        // engine-agnostic and this capture adds zero new IO. The action names
+        // what the decorator itself knows — a retry on the escalation ladder
+        // and a failed final outcome are distinguishable to the reviewer, not
+        // a pile of identical "agent run" rows.
+        let mut action = String::from("agent run");
+        if escalation > 0 {
+            action = format!("{action} (escalation {escalation})");
+        }
+        if !outcome.succeeded() {
+            action.push_str(" — failed");
+        }
+        self.record_provenance(label, dash_role, &action, &outcome);
         if let Some(u) = outcome.usage {
             if let Ok(mut m) = self.meter.lock() {
                 m.total_cost_usd += u.cost_usd;
@@ -82,6 +103,14 @@ impl<E: AgentEnginePort> AgentEnginePort for MeteringEngine<E> {
             .inner
             .resume_run(role, session_id, follow_up, work_dir, timeout)
             .await?;
+        // A session resume has no ticket label — recorded with `ticket: None`
+        // and dropped from per-ticket provenance by the drain fold (CXA-F257).
+        self.record_provenance(
+            None,
+            role_label(&role),
+            "agent run (session resume)",
+            &outcome,
+        );
         if let Some(u) = outcome.usage {
             if let Ok(mut m) = self.meter.lock() {
                 m.total_cost_usd += u.cost_usd;
@@ -129,6 +158,46 @@ impl<E: AgentEnginePort> MeteringEngine<E> {
             }
         }
     }
+
+    /// Record one run's engine/model provenance into the meter's delta
+    /// (CXA-F257). The attempts come from the failover trail when the
+    /// outcome carries one (every attempt in order, primary first);
+    /// otherwise the single engine/model that produced this outcome. An
+    /// outcome with no engine stamp (a bare engine under test) still names
+    /// the configured engine — the engine field is never blank.
+    fn record_provenance(
+        &self,
+        ticket: Option<String>,
+        role: String,
+        action: &str,
+        outcome: &AgentOutcome,
+    ) {
+        let Ok(mut m) = self.meter.lock() else {
+            return;
+        };
+        let attempts = if outcome.attempts.is_empty() {
+            let engine = if outcome.engine.is_empty() {
+                self.inner.id().to_owned()
+            } else {
+                outcome.engine.clone()
+            };
+            vec![EngineAttempt {
+                engine,
+                model: model_id(&outcome.model),
+            }]
+        } else {
+            outcome.attempts.clone()
+        };
+        m.step_provenance.push(MeteredStep {
+            ticket,
+            step: StepProvenance {
+                at: coxagent_application::state::now_rfc3339(),
+                role,
+                action: action.to_owned(),
+                attempts,
+            },
+        });
+    }
 }
 
 fn role_key(role: coxagent_domain::Role) -> String {
@@ -167,6 +236,8 @@ mod tests {
                 session_id: None,
                 sandbox: SandboxStatus::NotRequested,
                 engine: "priced".to_owned(),
+                model: "priced-model".to_owned(),
+                attempts: Vec::new(),
             })
         }
     }
@@ -234,5 +305,109 @@ mod tests {
             "{}",
             m.last_sandbox_status
         );
+    }
+
+    /// CXA-F257: every run is captured as a provenance delta — role label,
+    /// ticket label, and the engine/model that actually executed — waiting
+    /// in the meter for the cycle's drain fold. Pure capture: only the meter
+    /// cell is touched, no IO.
+    #[tokio::test]
+    async fn every_run_captures_provenance_with_role_and_ticket_labels() {
+        let meter: Meter = Arc::new(Mutex::new(Spend::default()));
+        let eng = MeteringEngine::new(Priced(0.10), Arc::clone(&meter));
+        let mut r = req(Role::DevBug);
+        r.label = Some("CXA-F257".to_owned());
+        eng.run(r).await.unwrap();
+
+        let m = meter.lock().unwrap();
+        assert_eq!(m.step_provenance.len(), 1);
+        let ms = &m.step_provenance[0];
+        assert_eq!(ms.ticket.as_deref(), Some("CXA-F257"));
+        assert_eq!(
+            ms.step.role, "DEV-BUG",
+            "the dashboard label, not the serde key"
+        );
+        assert!(!ms.step.at.is_empty(), "the run is timestamped");
+        assert_eq!(ms.step.attempts.len(), 1);
+        assert_eq!(ms.step.attempts[0].engine, "priced");
+        assert_eq!(ms.step.attempts[0].model.as_deref(), Some("priced-model"));
+    }
+
+    /// A run whose outcome carries a failover trail keeps EVERY attempt in
+    /// order in its provenance record — not only the final engine (AC2).
+    /// `Trailed` is exactly what the FailoverEngine hands the decorator: an
+    /// outcome with the full attempt trail already stamped.
+    #[tokio::test]
+    async fn a_failed_over_outcome_captures_every_attempt_in_order() {
+        struct Trailed;
+        #[async_trait]
+        impl AgentEnginePort for Trailed {
+            fn id(&self) -> &'static str {
+                "trailed"
+            }
+            async fn run(&self, _r: AgentRequest) -> Result<AgentOutcome, PortError> {
+                Ok(AgentOutcome {
+                    exit_code: Some(0),
+                    engine: "opencode".to_owned(),
+                    model: "fallback-model".to_owned(),
+                    attempts: vec![
+                        EngineAttempt {
+                            engine: "claude".to_owned(),
+                            model: Some("opus".to_owned()),
+                        },
+                        EngineAttempt {
+                            engine: "opencode".to_owned(),
+                            model: Some("fallback-model".to_owned()),
+                        },
+                    ],
+                    ..AgentOutcome::default()
+                })
+            }
+        }
+        let meter: Meter = Arc::new(Mutex::new(Spend::default()));
+        let eng = MeteringEngine::new(Trailed, Arc::clone(&meter));
+        let mut r = req(Role::DevFeature);
+        r.label = Some("CXA-F258".to_owned());
+        eng.run(r).await.unwrap();
+
+        let m = meter.lock().unwrap();
+        assert_eq!(m.step_provenance.len(), 1);
+        let attempts = &m.step_provenance[0].step.attempts;
+        let engines: Vec<&str> = attempts.iter().map(|a| a.engine.as_str()).collect();
+        assert_eq!(engines, vec!["claude", "opencode"], "primary then fallback");
+        assert_eq!(attempts[0].model.as_deref(), Some("opus"));
+    }
+
+    /// A run with no label (ceremonies) and a session resume carry
+    /// `ticket: None` — the drain fold drops them from per-ticket
+    /// provenance, but the capture itself stays uniform.
+    #[tokio::test]
+    async fn unlabeled_runs_capture_with_no_ticket() {
+        let meter: Meter = Arc::new(Mutex::new(Spend::default()));
+        let eng = MeteringEngine::new(Priced(0.0), Arc::clone(&meter));
+        eng.run(req(Role::Docs)).await.unwrap();
+        let m = meter.lock().unwrap();
+        assert_eq!(m.step_provenance.len(), 1);
+        assert_eq!(m.step_provenance[0].ticket, None);
+        assert_eq!(m.step_provenance[0].step.role, "DOCS");
+    }
+
+    /// The action line names what the decorator actually knows: a retry on
+    /// the escalation ladder and a failed final outcome are distinguishable
+    /// to the reviewer, not a pile of identical "agent run" rows.
+    /// `Sandboxed(NotRequested)` exits 71 — a failed final outcome.
+    #[tokio::test]
+    async fn action_names_escalation_and_failure() {
+        let meter: Meter = Arc::new(Mutex::new(Spend::default()));
+        let eng = MeteringEngine::new(Sandboxed(SandboxStatus::NotRequested), Arc::clone(&meter));
+        let mut r = req(Role::DevFeature);
+        r.label = Some("CXA-F259".to_owned());
+        r.escalation_level = 2;
+        eng.run(r).await.unwrap();
+
+        let m = meter.lock().unwrap();
+        let action = &m.step_provenance[0].step.action;
+        assert!(action.contains("escalation 2"), "{action}");
+        assert!(action.contains("failed"), "{action}");
     }
 }

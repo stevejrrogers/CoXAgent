@@ -104,14 +104,33 @@ pub(super) async fn inbox_ep(
             // `repro_url` (CXA-F246) is the per-ticket link the evidence
             // funnel recorded at collection time — the exact base that
             // ticket's evidence was captured against, null when none.
-            items.push(serde_json::json!({
+            let mut card = serde_json::json!({
                 "kind": "verify", "ticket": id, "title": t.title(),
                 "role": "QA", "can_act": my_role.can_verify(),
                 "reproduce_url": coxagent_application::repro_url::compute_live_repro_url(
                     cfg.deploy.host_port,
                 ),
                 "repro_url": state.repro_urls.get(&id),
-            }));
+            });
+            // Engine & model provenance (CXA-F257): the attempts that produced
+            // the work this card asks the reviewer to approve — the most
+            // recent step's engine/model labels, rendered by the same pure
+            // function the detail view uses. Omitted when the ticket predates
+            // provenance capture, so the chip simply doesn't render.
+            let provenance: Vec<String> = state
+                .step_provenance(&id)
+                .last()
+                .map(|s| {
+                    s.attempts
+                        .iter()
+                        .map(coxagent_application::engine_provenance::attempt_label)
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !provenance.is_empty() {
+                card["provenance"] = serde_json::json!(provenance);
+            }
+            items.push(card);
             continue;
         }
         // On hold: parked on an outside blocker — the resume decision is a
