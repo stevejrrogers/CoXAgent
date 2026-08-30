@@ -26,6 +26,7 @@ mod escalation;
 mod gate_escalation;
 mod preflight;
 mod scrum;
+mod pr_truth;
 mod ship_truth;
 mod sm_watch;
 mod wiring;
@@ -747,6 +748,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // op this cycle fails in a chain (the 2026-08-16 all-D night). Clean
         // up before anything touches git.
         self.tree_hygiene().await;
+        // Brake-hold reconciliation BEFORE any phase reads the brakes
+        // (CXA-F238): an operator hold whose expiry bound elapsed must not
+        // survive to gate this cycle's BA/DEV phases.
+        self.reconcile_brake_holds().await;
         // Keep the code map fresh so `.coxagent/REPO_MAP.md` reflects the tree
         // the agents are about to work on (best-effort, token-saver-gated).
         // Leader-only: it writes shared files under the repo.
@@ -800,6 +805,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // direction) and propose — never decide — system-level work.
             self.trend_sentinel().await;
             self.ship_truth_sweep().await;
+            self.pr_truth_sweep().await;
             // Stop starting, start finishing: review + merge the PR queue at
             // the TOP of the cycle. This used to run at the very end — after
             // codegraph, ceremonies and the (tens-of-minutes) dev phases — so

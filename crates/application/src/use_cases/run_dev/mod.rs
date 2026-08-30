@@ -362,6 +362,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 }
             }
             if self.store.claim_ticket(&cand, &worker, &now).await? {
+                // Announce the START in the activity feed: it only ever logged
+                // completions, so two DEVs grinding in parallel were invisible
+                // in Fleet river until the first one finished — an operator
+                // watching the live stream saw an idle team doing work.
+                let role_label = self.role_name().to_owned();
+                let cid = cand.to_string();
+                let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+                    s.log_activity(&role_label, "started implementing", Some(cid.clone()));
+                    Ok(())
+                })
+                .await;
                 chosen = Some(cand);
                 break;
             }
@@ -1293,7 +1304,9 @@ pub fn parse_ask(stdout: &str) -> Option<(String, String)> {
         // must be a single token — anything else is not an addressee.
         let is_person = role.len() > 1
             && role.starts_with('@')
-            && role[1..].chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+            && role[1..]
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
         if !matches!(role.as_str(), "BA" | "SA") && !is_person {
             continue;
         }
@@ -1595,8 +1608,9 @@ mod tests {
         use super::parse_ask;
         // The agent → human hop (docs/HYBRID_TEAM.md): a question the
         // answering role cannot ground goes to a named person's inbox.
-        let (to, q) = parse_ask("ASK @luffy: the customer decided archive semantics verbally — soft delete?")
-            .expect("person question");
+        let (to, q) =
+            parse_ask("ASK @luffy: the customer decided archive semantics verbally — soft delete?")
+                .expect("person question");
         assert_eq!(to, "@LUFFY");
         assert!(q.starts_with("the customer decided"), "{q}");
         // Not an addressee: bare marker, whitespace in the name, or empty.

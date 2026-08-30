@@ -13,6 +13,11 @@
 //!
 //! The record here travels beside the healthy handles so the listing can say
 //! "this project is registered, and here is the field that stops it running".
+//!
+//! Since CXA-B114 the label is also no longer forever: the composition root
+//! retries failed loads in the background and ships a recovered handle to
+//! [`admit_recovered_projects`], which swaps the broken entry for a live one
+//! without a restart.
 
 use super::*;
 
@@ -56,9 +61,45 @@ pub(super) fn broken_entries(broken: &[BrokenProject]) -> Vec<serde_json::Value>
         .collect()
 }
 
+/// Admit projects the composition root recovered after boot (CXA-B114): each
+/// handle joins the live registry (map + order) and its broken entry — the
+/// label that said why it could not load — is cleared, so `/api/projects` and
+/// the fleet river reflect the recovery without a restart. A duplicate id
+/// (the project somehow already live) is refused rather than double-registered
+/// or allowed to mask a still-broken state.
+pub(super) async fn admit_recovered_projects(
+    app: AppState,
+    mut recoveries: tokio::sync::mpsc::Receiver<ProjectHandle>,
+) {
+    while let Some(p) = recoveries.recv().await {
+        let id = p.id.clone();
+        {
+            let mut projects = app.projects.write().await;
+            if projects.contains_key(&id) {
+                tracing::warn!("recovered project '{id}' is already live; refusing a duplicate");
+                continue;
+            }
+            projects.insert(id.clone(), p);
+        }
+        app.order.write().await.push(id.clone());
+        let mut broken = app.broken.write().await;
+        let stale = broken.iter().filter(|b| b.id == id).count();
+        broken.retain(|b| b.id != id);
+        drop(broken);
+        tracing::info!(
+            "project '{id}' recovered after boot — registered live, {stale} broken label(s) cleared"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{broken_entries, BrokenProject};
+    use super::super::status::build_state;
+    use super::super::store_rpc_test_support::UnusedEngine;
+    use super::{
+        admit_recovered_projects, broken_entries, AppState, BrokenProject, HubExtras, ProjectHandle,
+    };
+    use coxagent_application::use_cases::RunnerHandle;
 
     fn broken(id: &str, error: &str) -> BrokenProject {
         BrokenProject {
@@ -104,5 +145,135 @@ mod tests {
     #[test]
     fn a_hub_with_nothing_broken_appends_nothing() {
         assert!(broken_entries(&[]).is_empty());
+    }
+
+    // ---- CXA-B114: recovery admission ------------------------------------
+
+    /// A live-looking handle like the ones the composition root sends after a
+    /// successful background rebuild.
+    fn stub_handle(id: &str) -> ProjectHandle {
+        let dir = tempfile::tempdir().expect("tempdir").keep();
+        ProjectHandle {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            alias: String::new(),
+            store: std::sync::Arc::new(
+                coxagent_infrastructure::JsonStateStore::new(&dir).expect("store"),
+            ),
+            runner: std::sync::Arc::new(RunnerHandle::default()),
+            config_path: dir.join("coxagent.json"),
+            engine: std::sync::Arc::new(UnusedEngine),
+            work_dir: dir.clone(),
+            budget: std::sync::Arc::new(std::sync::Mutex::new(
+                coxagent_application::BudgetCaps::default(),
+            )),
+            context_path: dir.join("project_context.md"),
+            forge: None,
+            deploy: None,
+            outbox: None,
+            storage: None,
+            files: None,
+            deps_discovery: None,
+        }
+    }
+
+    /// An AppState carrying one broken registration, ready for an admit task.
+    async fn hub_with_broken(id: &str) -> AppState {
+        let hub_dir = tempfile::tempdir().expect("tempdir");
+        build_state(
+            Vec::new(),
+            std::sync::Arc::new(coxagent_infrastructure::MemoryAuditSink::default()),
+            HubExtras {
+                hub_dir: Some(hub_dir.path().to_path_buf()),
+                broken: vec![broken(id, "backend failure: connection: db error")],
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    /// The moment the recovered handle lands it must be served like any
+    /// project that loaded at boot — and its broken label must be gone.
+    #[tokio::test]
+    async fn a_recovered_project_joins_the_registry_and_clears_its_broken_label() {
+        let state = hub_with_broken("late").await;
+        let (admit, rx) = tokio::sync::mpsc::channel(1);
+        tokio::spawn(admit_recovered_projects(state.clone(), rx));
+
+        admit.send(stub_handle("late")).await.expect("admit");
+        for _ in 0..100 {
+            if state.project("late").await.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        assert!(
+            state.project("late").await.is_some(),
+            "the recovered handle must be served by every project route"
+        );
+        assert!(
+            state.broken.read().await.is_empty(),
+            "the stale broken label must not outlive the recovery"
+        );
+        assert_eq!(
+            state.order.read().await.last().map(String::as_str),
+            Some("late"),
+            "the recovered project joins the registration order"
+        );
+    }
+
+    /// An id that is somehow already live must not be double-registered — and
+    /// a still-present broken label for it must not be silently cleared by a
+    /// duplicate admission. A sentinel message after the duplicate proves the
+    /// duplicate was actually processed (FIFO) before the assertions run.
+    #[tokio::test]
+    async fn a_recovered_duplicate_is_refused_rather_than_double_registered() {
+        let hub_dir = tempfile::tempdir().expect("tempdir");
+        let state = build_state(
+            vec![stub_handle("cxa")],
+            std::sync::Arc::new(coxagent_infrastructure::MemoryAuditSink::default()),
+            HubExtras {
+                hub_dir: Some(hub_dir.path().to_path_buf()),
+                broken: vec![broken("cxa", "stale label")],
+                ..Default::default()
+            },
+        )
+        .await;
+        let (admit, rx) = tokio::sync::mpsc::channel(2);
+        tokio::spawn(admit_recovered_projects(state.clone(), rx));
+
+        let mut duplicate = stub_handle("cxa");
+        duplicate.name = "duplicate".to_owned();
+        admit.send(duplicate).await.expect("admit duplicate");
+        admit
+            .send(stub_handle("sentinel"))
+            .await
+            .expect("admit sentinel");
+        for _ in 0..100 {
+            if state.project("sentinel").await.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            state.project("sentinel").await.is_some(),
+            "the sentinel must be admitted for the ordering argument to hold"
+        );
+
+        let projects = state.projects.read().await;
+        assert_eq!(projects.len(), 2, "no second registration of 'cxa'");
+        assert_eq!(
+            projects.get("cxa").map(|p| p.name.as_str()),
+            Some("cxa"),
+            "the original handle is kept, not replaced by the duplicate"
+        );
+        drop(projects);
+        assert_eq!(
+            state.broken.read().await.len(),
+            1,
+            "the refused duplicate must not clear anything"
+        );
+        assert_eq!(state.order.read().await.len(), 2);
     }
 }

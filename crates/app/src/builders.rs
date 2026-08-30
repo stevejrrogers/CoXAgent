@@ -4,6 +4,7 @@
 //! engines, storage, MCP access. Config loading/self-heal lives in
 //! `config_load.rs`.
 
+use super::retry::{boot_backoff, retrying, BOOT_ATTEMPTS};
 use super::*;
 
 /// Build the state store for one project. Backend selection is ordered,
@@ -680,6 +681,9 @@ pub(crate) async fn build_project(
         files: Some(std::sync::Arc::new(
             coxagent_infrastructure::FsWorkspaceFiles::new(),
         )),
+        deps_discovery: Some(Arc::new(
+            coxagent_infrastructure::FsLockfileDiscovery::new(),
+        )),
         deploy: Some(Arc::new(DockerComposeDeploy::new())),
         outbox: Some(outbox),
         storage: Some(build_storage().await.unwrap_or_else(|| {
@@ -707,7 +711,18 @@ pub(crate) async fn build_syschat_store(
     let dsn = std::env::var("COXAGENT_DB_DSN")
         .ok()
         .filter(|s| !s.is_empty())?;
-    match coxagent_infrastructure::PgKvDoc::connect(&dsn).await {
+    // CXA-B114: one failed connect at boot used to downgrade the KV store to
+    // a local file for the process' whole lifetime; give a database that is
+    // still starting the same short boot window the project stores get.
+    let connect = || coxagent_infrastructure::PgKvDoc::connect(&dsn);
+    match retrying(
+        "system chat store connect",
+        BOOT_ATTEMPTS,
+        boot_backoff,
+        connect,
+    )
+    .await
+    {
         Ok(store) => {
             // One-time migration: seed the DB from the local file if the DB has
             // no system-chat doc yet but a file exists.
@@ -821,7 +836,10 @@ pub(crate) async fn build_audit() -> Arc<dyn coxagent_application::ports::outbou
         .and_then(|v| v.parse::<u32>().ok());
     if let Ok(dsn) = std::env::var("COXAGENT_DB_DSN") {
         if !dsn.is_empty() {
-            match SqlAuditSink::connect(&dsn, retention_days).await {
+            // CXA-B114: retry within the boot window instead of silently
+            // downgrading the durable trail to memory on a slow database.
+            let connect = || SqlAuditSink::connect(&dsn, retention_days);
+            match retrying("audit sink connect", BOOT_ATTEMPTS, boot_backoff, connect).await {
                 Ok(sink) => {
                     tracing::info!("audit sink: Postgres (retention: {retention_days:?} days)");
                     return Arc::new(sink);
@@ -855,7 +873,12 @@ pub(crate) async fn build_auth(
     // project can move its state to Postgres while keeping the local account file
     // (no forced re-login when going distributed on one host).
     if let Ok(dsn) = std::env::var("COXAGENT_AUTH_DSN") {
-        let mut svc = SqlAuthService::connect(&dsn).await?;
+        // CXA-B114: a database seconds from ready must not fail the whole hub
+        // (or serve) boot; retry within the boot window first.
+        let mut svc = retrying("auth store connect", BOOT_ATTEMPTS, boot_backoff, || {
+            SqlAuthService::connect(&dsn)
+        })
+        .await?;
         // Sessions are ephemeral TTL data — store them in Redis (native expiry)
         // when available, else they fall back to the Postgres auth_sessions table.
         if let Ok(url) = std::env::var("COXAGENT_REDIS_URL") {
