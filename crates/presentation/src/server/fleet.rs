@@ -253,6 +253,10 @@ fn project_state_payload(
         "viewers": viewers,
         "online": online,
         "needs_human": human_action_needed(state),
+        // What exactly is waiting on a person (PR number -> reason): the
+        // river's badge opens this list so "HUMAN ACTION NEEDED" is a door,
+        // not a mystery.
+        "human_holds": state.human_holds,
         "insufficient_data": insufficient_data(state),
     })
 }

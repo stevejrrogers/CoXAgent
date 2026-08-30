@@ -1,3 +1,13 @@
+
+// The header badge is a door, not a mystery: list exactly which PRs wait on a
+// person and jump to the Inbox where the approve buttons live.
+async function riverHolds(pid){
+  const s=RIVER_STATES[pid]||{};
+  const items=Object.entries(s.holds||{}).map(([n,r])=>"PR #"+n+" — "+r);
+  const msg=items.length?items.join("  ·  "):"Nothing pending — the hold just cleared.";
+  const ok=await coxModal({title:"Waiting on you",message:msg,confirmText:"Open Inbox",cancelText:"Close"});
+  if(ok)nav("inbox");
+}
 // Fleet river (CXA-F233): ONE live SSE stream of every agent across every
 // registered project — hub-level view, no PID. New activity appears as the
 // agents work; events carrying the human-hold flag are marked so an operator
@@ -78,7 +88,7 @@ function handleRiverEvent(d){
     RIVER_STATES[d.project_id]={name:d.name,alias:"",broken:true,error:d.error,config_path:d.config_path};
     renderRiverStrip();
   }else if(d.type==="project_state"){
-    RIVER_STATES[d.project_id]={name:d.name,alias:d.alias,runner:d.runner,needs_human:!!d.needs_human,insufficient:!!d.insufficient_data,viewers:d.viewers};
+    RIVER_STATES[d.project_id]={name:d.name,alias:d.alias,runner:d.runner,needs_human:!!d.needs_human,holds:d.human_holds||{},insufficient:!!d.insufficient_data,viewers:d.viewers};
     renderRiverStrip();
     riverLive(true);
     setConn(true);
@@ -108,7 +118,8 @@ function renderRiverStrip(){
     </div>`;
     const live=s&&s.runner&&s.runner.mode==="running";
     const flags=[];
-    if(s&&s.needs_human)flags.push('<span class="riv-alert"><i class="ti ti-hand-stop"></i> HUMAN ACTION NEEDED</span>');
+    if(s&&s.needs_human){const n=Object.keys(s.holds||{}).length;
+      flags.push('<span class="riv-alert" style="cursor:pointer" onclick="riverHolds(\''+p.id+'\')" title="click to see what needs you"><i class="ti ti-hand-stop"></i> HUMAN ACTION NEEDED'+(n?" ("+n+")":"")+'</span>');}
     if(s&&s.insufficient)flags.push('<span class="riv-insuff" title="fewer than two cycles completed">(insufficient data)</span>');
     const online=s&&Array.isArray(s.online)?s.online:[];
     return `<div class="riv-proj">
@@ -131,14 +142,13 @@ function riverRow(d){
   const p=(RIVER_PROJECTS.find(x=>x.id===d.project_id)||{name:d.project_id});
   const col=cvar(AC[e.agent]||"--muted");
   const row=document.createElement("div");
-  row.className="riv-row"+(d.needs_human?" riv-needs":"");
+  row.className="riv-row";
   row.innerHTML=`<div class="tl-node" style="--nc:${col}"><i class="ti ti-${actIcon(e.action)}"></i></div>
     <div class="tl-body"><div class="tl-line">
       <span class="riv-who" style="color:${col}">${esc(e.agent||"—")}</span>
       <span class="tl-act">${esc(e.action||"")}</span>
       ${e.ticket?`<span class="tk">${esc(e.ticket)}</span>`:""}
       <span class="riv-projtag"><span class="sdot" style="background:${projColor(d.project_id)}"></span>${esc(p.name||p.id)}</span>
-      ${d.needs_human?'<span class="riv-alert"><i class="ti ti-hand-stop"></i> HUMAN ACTION NEEDED</span>':""}
     </div>
     <div class="tl-t">${esc(relTime(e.at))}${d.insufficient_data?' · <span class="riv-insuff">(insufficient data)</span>':""}</div></div>`;
   feed.prepend(row);
