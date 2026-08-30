@@ -47,8 +47,10 @@ struct Finding {
 }
 
 /// Parse NUL-separated `git ls-files -s -z` records of the shape
-/// `<mode> <object> <stage>\t<path>`. Unparseable records are dropped: the
-/// sentinel check below is what guards the listing's completeness.
+/// `<mode> <object> <stage>\t<path>`. A record git could not have produced is
+/// skipped rather than guessed at; the real-tree test fails loudly on an empty
+/// parse, and the sentinel check below guards the listing's completeness, so
+/// wholesale format drift cannot read as a clean index.
 fn parse_entries(raw: &str) -> Vec<Entry> {
     raw.split('\0')
         .filter(|record| !record.is_empty())
@@ -76,10 +78,16 @@ fn parse_gitmodules(text: &str) -> BTreeSet<String> {
 }
 
 /// The whole CXA-B050 check: every gitlink must be a declared submodule.
+///
+/// A path is reported once even when the index lists it several times — an
+/// unresolved merge repeats it at stages 1/2/3, and a failure message naming
+/// the same path three times reads as three problems.
 fn scan(entries: &[Entry], declared: &BTreeSet<String>) -> Vec<Finding> {
+    let mut seen = BTreeSet::new();
     entries
         .iter()
         .filter(|e| e.mode == GITLINK && !declared.contains(&e.path))
+        .filter(|e| seen.insert(e.path.clone()))
         .map(|e| Finding {
             path: e.path.clone(),
         })
@@ -197,7 +205,46 @@ fn no_unresolvable_gitlink_is_tracked() {
 }
 
 // ---------------------------------------------------------------------------
-// The guard, run against the bug it was written for — proves it fails when it
+// The parsers, against the record shapes git actually emits.
+// ---------------------------------------------------------------------------
+
+/// One real record per index entry, NUL-terminated — gitlinks and blobs alike.
+#[test]
+fn parse_reads_mode_and_path_from_real_records() {
+    let entries = parse_entries(
+        "160000 ddf94e68294c3f8caa33f7271add901ac1fb2387 0\tmergetest\0\
+         100644 e9ecdbafb169864886d9f001e8dbcefebcde5d27 0\t.gitignore\0",
+    );
+    assert_eq!(
+        entries,
+        vec![entry("160000", "mergetest"), entry("100644", ".gitignore")]
+    );
+}
+
+/// The stage column is not part of the mode: a conflicted path appears at
+/// stages 1/2/3 with the same mode, which must still read as a gitlink.
+#[test]
+fn parse_keeps_the_mode_clean_of_the_stage_column() {
+    let entries = parse_entries(
+        "160000 ddf94e68294c3f8caa33f7271add901ac1fb2387 2\tmergetest\0\
+         160000 bf41249e2c29635566017b4b5c3b07c1492e33c2 3\tmergetest\0",
+    );
+    assert_eq!(entries.len(), 2, "one record per stage: {entries:?}");
+    assert!(entries.iter().all(|e| e.mode == "160000"), "{entries:?}");
+}
+
+/// Trailing NULs and records without a TAB are not entries.
+#[test]
+fn parse_skips_empty_and_garbage_records() {
+    // Split into two literals so the NUL is never followed by digits in
+    // source — `\0` + `100644` reads as an octal escape even though it is
+    // a terminator plus the next record's mode.
+    let raw = "\0\0no-tab-here\0".to_owned() + "100644 abc 0\tok\0";
+    let entries = parse_entries(&raw);
+    assert_eq!(entries, vec![entry("100644", "ok")]);
+}
+
+// ---------------------------------------------------------------------------
 // should, and does not fire on the shapes the repo legitimately tracks.
 // ---------------------------------------------------------------------------
 
@@ -253,10 +300,12 @@ fn ordinary_files_are_left_alone() {
     assert_eq!(findings, vec![], "only mode 160000 is a gitlink");
 }
 
-/// `path =` keys outside a submodule section would still map a path — flat
-/// matching is deliberately loose; the assert documents it rather than hiding.
+/// `path =` keys under any submodule section all map. Flat matching is
+/// deliberately loose: a stray `path =` key outside a submodule section would
+/// still map its path, and under-reporting a declared submodule fails the gate
+/// closed on a legitimate entry — it can never silently pass a gitlink.
 #[test]
-fn gitmodules_parsing_reads_every_path_key() {
+fn gitmodules_parsing_reads_every_declared_path() {
     let declared = parse_gitmodules(
         "[submodule \"a\"]\n\tpath = vendor/a\n\turl = ../a\n\
          [submodule \"b\"]\n\tpath = vendor/b\n",
@@ -265,6 +314,19 @@ fn gitmodules_parsing_reads_every_path_key() {
         declared,
         BTreeSet::from(["vendor/a".to_string(), "vendor/b".to_string()])
     );
+}
+
+/// An unresolved merge lists the same path at stages 1/2/3 — one problem, one
+/// finding, not three.
+#[test]
+fn conflicted_stage_entries_report_one_finding() {
+    let stages = [
+        entry("160000", "mergetest"),
+        entry("160000", "mergetest"),
+        entry("160000", "mergetest"),
+    ];
+    let findings = scan(&stages, &BTreeSet::new());
+    assert_eq!(findings.len(), 1, "one path, reported once: {findings:?}");
 }
 
 #[test]
