@@ -66,7 +66,7 @@ fn exact_verdict_covers_its_criterion_and_names_the_test_file() {
         &["crates/domain/tests/gate.rs"],
     );
 
-    assert!(record_verdicts(&mut state, &[v], "t1"));
+    assert!(record_verdicts(&mut state, &[v], "t1", None));
     let t = &state.tickets[0];
     assert_eq!(status_of(t, AC_REPRO), CoverageStatus::Covered);
     assert_eq!(status_of(t, AC_ROOT_CAUSE), CoverageStatus::NotTested);
@@ -89,7 +89,7 @@ fn paraphrased_verdict_is_fuzzy_matched_to_its_criterion() {
     state.tickets.push(fixed_bug(&[AC_REPRO]));
     let v = verdict("repro steps listed on ticket", true, "", &[]);
 
-    assert!(record_verdicts(&mut state, &[v], "t1"));
+    assert!(record_verdicts(&mut state, &[v], "t1", None));
     assert_eq!(
         status_of(&state.tickets[0], AC_REPRO),
         CoverageStatus::Covered
@@ -107,7 +107,7 @@ fn unmatched_verdict_attaches_to_nothing() {
     let v = verdict("login returns 500 on bad input", true, "", &[]);
 
     assert!(
-        !record_verdicts(&mut state, &[v], "t1"),
+        !record_verdicts(&mut state, &[v], "t1", None),
         "nothing matched, nothing changed"
     );
     assert_eq!(
@@ -122,7 +122,7 @@ fn failing_verdict_is_partially_covered_and_blocks_verified() {
     state.tickets.push(fixed_bug(&[AC_REPRO]));
     let v = verdict(AC_REPRO, false, "repro missing", &[]);
 
-    assert!(record_verdicts(&mut state, &[v], "t1"));
+    assert!(record_verdicts(&mut state, &[v], "t1", None));
     assert_eq!(
         status_of(&state.tickets[0], AC_REPRO),
         CoverageStatus::PartiallyCovered
@@ -143,7 +143,7 @@ fn api_request_response_covers_non_ui_criterion_without_file_link() {
     state.tickets.push(fixed_bug(&[AC_ROOT_CAUSE]));
     let v = verdict(AC_ROOT_CAUSE, true, "GET /api/health 200", &[]);
 
-    assert!(record_verdicts(&mut state, &[v], "t1"));
+    assert!(record_verdicts(&mut state, &[v], "t1", None));
     let t = &state.tickets[0];
     assert_eq!(status_of(t, AC_ROOT_CAUSE), CoverageStatus::Covered);
     let sources = &t.coverage_matrix()[0].sources;
