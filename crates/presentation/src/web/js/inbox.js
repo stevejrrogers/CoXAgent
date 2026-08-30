@@ -119,12 +119,18 @@ async function renderInbox(){
       // Static evidence says the fix worked; the live instance (CXA-F242-C)
       // lets the reviewer actually SEE it run. The card carries the URL only
       // when the project's deploy port resolves — otherwise no control at all,
-      // never a dead button.
+      // never a dead button. The control is a real anchor (CXA-F247): the
+      // open-in-new-tab contract lives on the element (target/rel), and the
+      // href only ever receives an https?:// URL — the whitelist runs BEFORE
+      // any markup, so a javascript:/data: scheme or a protocol-relative
+      // //host can never ride the click. Send back cites the same URL so the
+      // refusal reason can reference what was actually seen.
+      const liveUrl=(it.reproduce_url&&/^https?:\/\//i.test(it.reproduce_url))?it.reproduce_url:"";
       html+=inboxCard("verify",esc(it.ticket),esc(it.title),
-        (it.reproduce_url?ibtn("Open live instance",`window.open('${esc(it.reproduce_url)}','_blank')`):"")+
+        (liveUrl?`<a class="tk-btn ibx-btn" href="${escAttr(liveUrl)}" target="_blank" rel="noopener noreferrer">Open live preview</a>`:"")+
         ibtn("Evidence",`showTicket('${esc(it.ticket)}')`)+
         (act
-          ?ibtn("Send back",`inboxSendBack('${esc(it.ticket)}')`)+
+          ?ibtn("Send back",`inboxSendBack('${esc(it.ticket)}','${escAttr(liveUrl)}')`)+
            ibtn("Verified",`inboxAct('${esc(it.ticket)}','verify')`,1)
           :noRight(it.role)),it.ticket);
     }else if(it.kind==="on_hold"){
@@ -194,10 +200,13 @@ async function inboxAct(id,action){
 }
 
 // The verify gate's other answer: the fix is not demonstrated. The reason
-// goes on the ticket, which is what steers the next attempt.
-async function inboxSendBack(id){
+// goes on the ticket, which is what steers the next attempt. `url` is the
+// live instance the reviewer was shown (CXA-F247) — cited in the dialog so
+// the refusal reason can reference what was actually seen.
+async function inboxSendBack(id,url){
   const reason=await coxModal({title:"Send back "+id,
-    message:"Why can't this be accepted yet? (the reason goes on the ticket — the agent reads it and redoes the work accordingly)",
+    message:"Why can't this be accepted yet? (the reason goes on the ticket — the agent reads it and redoes the work accordingly)"+
+      (url?" Live instance reviewed: "+url:""),
     input:{placeholder:"e.g. no evidence for acceptance criteria #2"},confirmText:"Send back"});
   if(reason===null||reason===undefined)return;
   try{

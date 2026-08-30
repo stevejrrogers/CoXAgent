@@ -882,7 +882,7 @@
   .agpick:hover{color:var(--text)}
   /* ticket modal actions + inline edit */
   .tk-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px}
-  .tk-btn{display:inline-flex;align-items:center;gap:6px;background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:9px;padding:8px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit}
+  .tk-btn{display:inline-flex;align-items:center;gap:6px;background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:9px;padding:8px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;text-decoration:none}
   .tk-btn:hover{border-color:var(--border2)}
   .tk-btn.go{background:var(--accent2);color:#04121a;border-color:var(--accent2)}
   .tk-btn.danger{background:transparent;color:var(--red);border-color:color-mix(in srgb,var(--red) 55%,var(--border))}

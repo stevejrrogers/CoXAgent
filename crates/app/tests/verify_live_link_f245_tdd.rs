@@ -84,6 +84,15 @@ use coxagent_application::repro_url::compute_live_repro_url;
 /// must render (the design mockup's "Open live app" does not govern).
 const CONTROL_LABEL: &str = "Open live instance";
 
+/// The inbox CARD's live-link control. CXA-F247 superseded this ticket's
+/// `window.open` button on the card with a sanitized anchor named per F247's
+/// own AC ("Open-live-preview", normalized) — these three card guards moved
+/// with the mechanism per the header convention, keeping F245's substance
+/// (control linking reproduce_url, opens in a new tab, presence-guarded). The
+/// reviewer modal keeps the F245 button; AC2 below still pins it under
+/// CONTROL_LABEL.
+const CARD_LINK_LABEL: &str = "Open live preview";
+
 /// The payload field both verification views render — named verbatim by the
 /// ACs and already shipped by CXA-F244.
 const FIELD: &str = "reproduce_url";
@@ -244,9 +253,8 @@ fn the_server_payloads_the_views_read_already_carry_the_field() {
 /// AC1: "An inbox card of kind=verify renders an 'Open live instance' control
 /// linking to its reproduce_url when present" — the verify branch of the inbox
 /// render loop must render the control, and its link target must be the
-/// card's OWN `reproduce_url` field. RED: the branch renders only
-/// Evidence / Send back / Verified; `reproduce_url` appears nowhere in
-/// `web/js/inbox.js`.
+/// card's OWN `reproduce_url` field. Moved with the mechanism (CXA-F247): the
+/// card's control is now the sanitized anchor under CARD_LINK_LABEL.
 #[test]
 fn ac1_the_verify_card_renders_an_open_live_instance_control() {
     let inbox = read("crates/presentation/src/web/js/inbox.js");
@@ -258,22 +266,22 @@ fn ac1_the_verify_card_renders_an_open_live_instance_control() {
     );
     let f = flat(&branch);
     assert!(
-        f.contains(&flat(CONTROL_LABEL)),
-        "the verify inbox card must render an `{CONTROL_LABEL}` control — \
+        f.contains(&flat(CARD_LINK_LABEL)),
+        "the verify inbox card must render an `{CARD_LINK_LABEL}` control — \
          found branch: {branch}"
     );
     assert!(
         f.contains(&flat("it.reproduce_url")),
-        "the `{CONTROL_LABEL}` control must link the card's own \
+        "the `{CARD_LINK_LABEL}` control must link the card's own \
          it.{FIELD} — found branch: {branch}"
     );
 }
 
 /// AC1: "...opens it in a new tab" — the live instance is a DIFFERENT origin
-/// than the dashboard, and this codebase's new-tab pattern for exactly that
-/// case on inbox cards is `window.open(...,'_blank')` (the `human_eyes`
-/// "Open PR" card, the `pr_stuck` "Open on GitHub" card). RED: the verify
-/// branch contains no window.open at all.
+/// than the dashboard, so the control must open it outside this tab. Moved
+/// with the mechanism (CXA-F247): the card's control is a real anchor, so the
+/// new-tab contract lives on the element (`target="_blank"`) and the opened
+/// tab is severed from the dashboard (`rel="noopener"`).
 #[test]
 fn ac1_the_control_opens_the_live_instance_in_a_new_tab() {
     let inbox = read("crates/presentation/src/web/js/inbox.js");
@@ -285,14 +293,15 @@ fn ac1_the_control_opens_the_live_instance_in_a_new_tab() {
     );
     let f = flat(&branch);
     assert!(
-        f.contains("window.open("),
-        "the verify card's `{CONTROL_LABEL}` control must open the live \
-         instance — found branch: {branch}"
+        f.contains("target=\"_blank\""),
+        "the verify card's `{CARD_LINK_LABEL}` control must open the live \
+         instance in a NEW TAB (target=\"_blank\" on the anchor) — found \
+         branch: {branch}"
     );
     assert!(
-        f.contains("'_blank'"),
-        "the `{CONTROL_LABEL}` control must open the live instance in a NEW \
-         TAB (the `window.open(...,'_blank')` house pattern) — found branch: \
+        f.contains("rel=\"noopener"),
+        "the `{CARD_LINK_LABEL}` anchor must carry rel=\"noopener\" so the \
+         opened tab cannot reach back into the dashboard — found branch: \
          {branch}"
     );
 }
@@ -301,7 +310,7 @@ fn ac1_the_control_opens_the_live_instance_in_a_new_tab() {
 /// control's rendering must be GUARDED by the field's presence (the view
 /// code's `field?…:""` card-action idiom, cf. the human_eyes card's
 /// `it.url?`), so the absent case renders no link at all — not a dead button,
-/// not an empty href. RED: the branch never consults `it.reproduce_url`.
+/// not an empty href. Guarded under the F247 anchor label (mechanism moved).
 #[test]
 fn ac1_the_control_hides_entirely_when_reproduce_url_is_absent_or_null() {
     let inbox = read("crates/presentation/src/web/js/inbox.js");
@@ -312,8 +321,8 @@ fn ac1_the_control_hides_entirely_when_reproduce_url_is_absent_or_null() {
          moved; point this guard at the code that builds it"
     );
     assert!(
-        presence_guarded(&flat(&branch), "it.reproduce_url", &flat(CONTROL_LABEL)),
-        "the `{CONTROL_LABEL}` control must be rendered conditionally on \
+        presence_guarded(&flat(&branch), "it.reproduce_url", &flat(CARD_LINK_LABEL)),
+        "the `{CARD_LINK_LABEL}` control must be rendered conditionally on \
          it.{FIELD} presence (the `field?…:\"\"` card-action idiom) so it \
          hides entirely when the field is absent/null — found branch: {branch}"
     );
