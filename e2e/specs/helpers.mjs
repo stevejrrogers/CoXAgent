@@ -56,4 +56,22 @@ export async function openApp(page) {
   );
   await page.goto('/');
   await page.waitForLoadState('networkidle');
+  // The state snapshot arrives over SSE AFTER networkidle (the stream keeps
+  // the connection open, so idle fires first). A spec that drives the UI
+  // immediately — window.showTicket(...) — raced it and flaked. Wait until
+  // the app actually holds tickets before handing control to the spec.
+  // STATE is a classic-script `let` global — NOT a window property — so it
+  // is only reachable via bare identifier inside the page.
+  await page.waitForFunction(
+    () => {
+      try {
+        /* eslint-disable no-undef */
+        return typeof STATE !== 'undefined' && Array.isArray(STATE.tickets) && STATE.tickets.length > 0;
+      } catch {
+        return false;
+      }
+    },
+    null,
+    { timeout: 15000 },
+  );
 }

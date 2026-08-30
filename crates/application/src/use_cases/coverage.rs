@@ -150,10 +150,43 @@ pub fn sources_for(verdict: &TestVerdict) -> Vec<String> {
     Vec::new()
 }
 
+/// The live reproduction URL for a verdict's route (CXA-F248): the app path
+/// the TEST agent walked onto the deployed app's base (`http://127.0.0.1:{port}`,
+/// the same base the evidence collector captures against). `None` when either
+/// side is missing — no configured deploy base, or a value that is not an app
+/// path per the TEST prompt's contract ("/settings", "" when none applies) —
+/// so an unmappable route is OMITTED from the evidence, never turned into a
+/// fabricated/unvalidated hyperlink.
+///
+/// The path characters are restricted to what survives verbatim in a URL and
+/// inside a quoted HTML attribute when the review panel renders the link (the
+/// view's `esc()` does not escape quotes): quotes, angle brackets, backslash,
+/// backtick, whitespace and control characters never resolve.
+#[must_use]
+pub fn live_repro_url(route: &str, host_port: Option<u16>) -> Option<String> {
+    let r = route.trim();
+    let is_app_path = r.starts_with('/')
+        && r.bytes().all(|b| {
+            b.is_ascii_graphic() && !matches!(b, b'"' | b'\'' | b'<' | b'>' | b'\\' | b'`')
+        });
+    match host_port {
+        Some(port) if is_app_path => Some(format!("http://127.0.0.1:{port}{r}")),
+        _ => None,
+    }
+}
+
 /// Record one verdict onto its criterion: the verdict itself (a pass/fail on
-/// the case) plus the evidence sources. Provenance never changes a verdict's
-/// meaning; a re-run simply overwrites with fresher evidence.
-fn apply_verdict(ticket: &mut Ticket, criterion: &str, verdict: &TestVerdict, at: &str) -> bool {
+/// the case), the evidence sources, and the resolved live-reproduction URL
+/// when the verdict's route maps onto the deployed app. Provenance never
+/// changes a verdict's meaning; a re-run simply overwrites with fresher
+/// evidence.
+fn apply_verdict(
+    ticket: &mut Ticket,
+    criterion: &str,
+    verdict: &TestVerdict,
+    at: &str,
+    host_port: Option<u16>,
+) -> bool {
     ticket.ensure_test_cases_from_acceptance();
     let note = if verdict.note.trim().is_empty() {
         None
@@ -166,6 +199,9 @@ fn apply_verdict(ticket: &mut Ticket, criterion: &str, verdict: &TestVerdict, at
     if !sources.is_empty() {
         changed |= ticket.set_test_case_sources(criterion, sources);
     }
+    if let Some(url) = live_repro_url(&verdict.route, host_port) {
+        changed |= ticket.set_test_case_repro(criterion, url);
+    }
     changed
 }
 
@@ -173,8 +209,15 @@ fn apply_verdict(ticket: &mut Ticket, criterion: &str, verdict: &TestVerdict, at
 /// anything changed. Each verdict lands on the ticket whose acceptance
 /// criterion it names — exactly when possible, otherwise by the best keyword +
 /// fuzzy match above threshold across every ticket's criteria (the agent
-/// paraphrased; the evidence still belongs to that criterion).
-pub fn record_verdicts(state: &mut ProjectState, verdicts: &[TestVerdict], at: &str) -> bool {
+/// paraphrased; the evidence still belongs to that criterion). `host_port` is
+/// the deployed app's base for resolving per-criterion reproduction routes
+/// (CXA-F248); `None` — nothing deployed — leaves every repro unrecorded.
+pub fn record_verdicts(
+    state: &mut ProjectState,
+    verdicts: &[TestVerdict],
+    at: &str,
+    host_port: Option<u16>,
+) -> bool {
     let mut changed = false;
     for v in verdicts {
         let ac = v.ac.trim();
@@ -187,7 +230,7 @@ pub fn record_verdicts(state: &mut ProjectState, verdicts: &[TestVerdict], at: &
             .iter_mut()
             .find(|t| t.acceptance_criteria().iter().any(|c| c == ac))
         {
-            changed |= apply_verdict(t, ac, v, at);
+            changed |= apply_verdict(t, ac, v, at, host_port);
             continue;
         }
         // Fuzzy path: one best criterion across all tickets, above threshold.
@@ -210,7 +253,7 @@ pub fn record_verdicts(state: &mut ProjectState, verdicts: &[TestVerdict], at: &
                     })
                 });
         if let Some((_, i, criterion)) = best {
-            changed |= apply_verdict(&mut state.tickets[i], &criterion, v, at);
+            changed |= apply_verdict(&mut state.tickets[i], &criterion, v, at, host_port);
         }
     }
     changed
@@ -218,6 +261,7 @@ pub fn record_verdicts(state: &mut ProjectState, verdicts: &[TestVerdict], at: &
 
 #[cfg(test)]
 mod tests {
+    use coxagent_domain::{Complexity, Priority, TicketId, TicketType};
     use super::*;
 
     #[test]
@@ -302,5 +346,106 @@ mod tests {
             sources_for(&prose).is_empty(),
             "prose-only note has no source"
         );
+    }
+
+    /// CXA-F248 AC2: a route resolves ONLY onto the known live base (the
+    /// deployed app's host port, the collector's own capture base) and ONLY
+    /// when it is an app path per the TEST prompt's contract. Anything else —
+    /// no deploy base, empty route, bare word, agent-invented absolute URL —
+    /// produces NO link at all, never a fabricated/unvalidated one.
+    #[test]
+    fn live_repro_url_maps_only_onto_the_known_live_base() {
+        assert_eq!(
+            live_repro_url("/settings", Some(8101)).as_deref(),
+            Some("http://127.0.0.1:8101/settings"),
+            "an app path on a deployed app resolves to its page"
+        );
+        assert_eq!(
+            live_repro_url("  /settings#x  ", Some(8101)).as_deref(),
+            Some("http://127.0.0.1:8101/settings#x"),
+            "surrounding whitespace is trimmed, the route kept verbatim"
+        );
+        // The omission half — every unmappable shape stays absent.
+        assert_eq!(live_repro_url("/settings", None), None, "no deploy base, no link");
+        assert_eq!(live_repro_url("", Some(8101)), None, "no route, no link");
+        assert_eq!(live_repro_url("   ", Some(8101)), None, "blank route, no link");
+        assert_eq!(
+            live_repro_url("settings", Some(8101)),
+            None,
+            "a bare word is not the prompt's app-path contract — guessing a path would fabricate a link"
+        );
+        assert_eq!(
+            live_repro_url("http://evil.example/settings", Some(8101)),
+            None,
+            "an agent-invented absolute URL is not validated against the live base — omitted"
+        );
+        // Characters that could not sit verbatim inside a quoted HTML
+        // attribute when the panel renders the link (esc() does not escape
+        // quotes) are not URL path material — omitted, not sanitized by guess.
+        assert_eq!(
+            live_repro_url("/x\" onmouseover=\"alert(1)", Some(8101)),
+            None,
+            "a quote cannot break out of the rendered href attribute"
+        );
+        assert_eq!(live_repro_url("/a<b>c", Some(8101)), None, "no angle brackets");
+        assert_eq!(live_repro_url("/a b", Some(8101)), None, "no whitespace");
+        assert_eq!(
+            live_repro_url("/a?b=1&c=%20#anchor", Some(8101)).as_deref(),
+            Some("http://127.0.0.1:8101/a?b=1&c=%20#anchor"),
+            "legal URL syntax (query, percent-encoding, fragment) resolves"
+        );
+    }
+
+    /// CXA-F248 AC1 end to end over the real writer: a verdict with a route
+    /// and a configured deploy base records the resolved URL on the case's
+    /// evidence; with no base configured the same verdict records none.
+    #[test]
+    fn record_verdicts_write_the_resolved_route_onto_case_evidence() {
+        let verdict = TestVerdict {
+            ac: "settings persist".into(),
+            passed: true,
+            note: "GET /settings 200".into(),
+            route: "/settings".into(),
+            tests: Vec::new(),
+        };
+        let mut state = feature_state("F248", "settings persist");
+
+        assert!(record_verdicts(&mut state, std::slice::from_ref(&verdict), "t1", Some(8101)));
+        let ev = state.tickets[0].test_cases()[0]
+            .evidence
+            .as_ref()
+            .expect("evidence recorded");
+        assert_eq!(ev.repro.as_deref(), Some("http://127.0.0.1:8101/settings"));
+
+        // Nothing deployed — the route stays unrecorded rather than guessed.
+        let mut offline = feature_state("F249", "settings persist");
+        assert!(record_verdicts(&mut offline, &[verdict], "t1", None));
+        let ev = offline.tickets[0].test_cases()[0]
+            .evidence
+            .as_ref()
+            .expect("verdict itself still recorded");
+        assert_eq!(
+            ev.repro, None,
+            "no known live base — the route is omitted, never fabricated"
+        );
+        assert_eq!(ev.note.as_deref(), Some("GET /settings 200"));
+    }
+
+    /// A fresh feature ticket holding one criterion, in its own state.
+    fn feature_state(id: &str, ac: &str) -> ProjectState {
+        let mut t = Ticket::new(
+            TicketId::new(id).expect("id"),
+            TicketType::Feature,
+            "t",
+            "d",
+            Priority::Medium,
+            Complexity::Medium,
+            false,
+        )
+        .expect("ticket");
+        t.set_acceptance_criteria(vec![ac.to_owned()]);
+        let mut state = ProjectState::default();
+        state.tickets.push(t);
+        state
     }
 }

@@ -162,7 +162,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
         if !verdicts.is_empty() {
             let mut state = self.store.load().await?;
             let at = crate::state::now_rfc3339();
-            if crate::use_cases::coverage::record_verdicts(&mut state, &verdicts, &at) {
+            if crate::use_cases::coverage::record_verdicts(
+                &mut state,
+                &verdicts,
+                &at,
+                self.config.deploy.host_port,
+            ) {
                 let _ = self.store.save(&state).await;
             }
         }
