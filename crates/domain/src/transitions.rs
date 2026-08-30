@@ -78,7 +78,6 @@ pub fn can_transition(actor: Role, from: Status, to: Status) -> bool {
     if from == to {
         return true;
     }
-
     if actor == Role::System {
         return true;
     }
