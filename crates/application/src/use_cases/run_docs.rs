@@ -530,9 +530,18 @@ pub fn docs_gate_failures(raw: &str, work_dir: &std::path::Path) -> Option<Strin
     if cited.is_empty() {
         problems.push("`## Code map` lists no real file paths".to_owned());
     } else {
+        // A `path/file.rs:256` citation names a real place; the `:line`
+        // suffix is for the reader, not the filesystem — strip it before
+        // checking existence (rejecting it wedged pages at the fail cap).
         let missing: Vec<&str> = cited
             .iter()
-            .filter(|p| !work_dir.join(p).exists())
+            .filter(|p| {
+                let bare = p
+                    .rsplit_once(':')
+                    .filter(|(_, ln)| !ln.is_empty() && ln.chars().all(|c| c.is_ascii_digit()))
+                    .map_or(**p, |(path, _)| path);
+                !work_dir.join(bare).exists()
+            })
             .copied()
             .collect();
         if !missing.is_empty() {
@@ -805,6 +814,24 @@ fn sanitize_subfolder(raw: &str, existing: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn code_map_citations_with_line_suffixes_pass_the_gate() {
+        // `file.rs:256` names a real place; the `:line` suffix is for the
+        // reader. Before the strip, a page citing real files with line
+        // numbers failed to the cap and got parked.
+        let page = format!(
+            "## Overview\nx\n## How it works\nx\n## Usage\nx\n## Interface\nx\n\
+             ## Configuration\nx\n## Edge cases and limits\nx\n## Code map\n\
+             - src/lib.rs:3 the crate root\n\n**Keywords:** map\n{}",
+            "pad ".repeat(200)
+        );
+        let dir = std::env::current_dir().expect("cwd");
+        assert_eq!(docs_gate_failures(&page, &dir), None);
+        let bad = page.replace("src/lib.rs:3", "no/such/file.rs:9");
+        let failure = docs_gate_failures(&bad, &dir).expect("missing file still caught");
+        assert!(failure.contains("no/such/file.rs"));
+    }
     use crate::ports::outbound::{AgentOutcome, SandboxStatus};
     use crate::state::ProjectState;
     use coxagent_domain::{Complexity, Priority, TechnicalDesign, Ticket, TicketType};
