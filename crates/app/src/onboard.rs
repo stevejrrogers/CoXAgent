@@ -421,12 +421,33 @@ async fn seed_smart_tickets<S: StateStorePort + 'static>(
 /// Scaffold `coxagent.json`, a `project_context.md` template, and seed the
 /// FEAT-000 walking skeleton. Returns the message shown to the operator. Works
 /// with any [`StateStorePort`] (JSON file or Postgres).
+/// Refuse project scaffolding from inside an agent worktree. A TEST/DEV agent
+/// "testing project creation" from its sandbox ran the real CLI against the
+/// operator's global registry and minted six live `qab-N` cleanroom projects
+/// in one afternoon — cleanroom experiments belong in a temp dir, not the hub.
+fn refuse_agent_scaffold() -> Result<(), Box<dyn std::error::Error>> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    if cwd.components().any(|c| {
+        c.as_os_str()
+            .to_string_lossy()
+            .starts_with(".coxagent-worktrees")
+    }) {
+        return Err("refusing to scaffold a project from inside an agent worktree — \
+                    this would register a live project in the operator's hub. Use a \
+                    plain temp directory (outside .coxagent-worktrees) for cleanroom \
+                    tests."
+            .into());
+    }
+    Ok(())
+}
+
 pub async fn greenfield<S: StateStorePort + 'static>(
     store: &Arc<S>,
     state_dir: &Path,
     name: &str,
     alias: Option<String>,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    refuse_agent_scaffold()?;
     let mut existing = store.load().await?;
     if !existing.tickets.is_empty() {
         return Err("workspace already has tickets; refusing to re-onboard".into());
@@ -493,6 +514,7 @@ pub async fn brownfield<S: StateStorePort + 'static>(
     alias: Option<String>,
     codebase: &Path,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    refuse_agent_scaffold()?;
     if !codebase.exists() {
         return Err(format!("codebase path does not exist: {}", codebase.display()).into());
     }
