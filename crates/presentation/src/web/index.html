@@ -408,7 +408,7 @@
             <div class="chatcompose">
               <input type="file" id="disc-file" multiple style="display:none" onchange="pickFiles('disc',this)">
               <button class="att-btn" onclick="document.getElementById('disc-file').click()" title="Attach files"><i class="ti ti-paperclip"></i></button>
-              <span id="disc-toolbar"></span><input id="disc-input" placeholder="Message the team…  (type / for commands · Enter to send)" oninput="slashMenu()" onkeydown="if(!imeEnter(event)&&event.key==='Enter')sendComment()">
+              <span id="disc-toolbar"></span><input id="disc-input" placeholder="Message the team…  (type / for commands · Enter to send)" oninput="slashMenu()" onkeydown="if(!imeEnter(event)&&event.key==='Enter')sendComment()" onpaste="pasteFiles('disc',event)">
               <button class="pri" onclick="sendComment()"><i class="ti ti-send"></i></button>
             </div>
           </div>
@@ -474,7 +474,7 @@
               <button class="att-btn" onmousedown="event.preventDefault()" onclick="chatWrap('**')" title="Bold (**text**)"><i class="ti ti-bold"></i></button>
               <button class="att-btn" onmousedown="event.preventDefault()" onclick="chatWrap('*')" title="Italic (*text*)"><i class="ti ti-italic"></i></button>
               <button class="att-btn" onmousedown="event.preventDefault()" onclick="chatWrap('\`')" title="Code (\`code\`)"><i class="ti ti-code"></i></button>
-              <input id="chat-input" placeholder="Message your team…  (Enter to send · @ to mention · **bold** *italic* \`code\`)" autocomplete="off" oninput="mentionOnInput(this);startTyping()" onkeydown="chatInputKey(event)" onblur="setTimeout(closeMention,150)">
+              <input id="chat-input" placeholder="Message your team…  (Enter to send · @ to mention · **bold** *italic* \`code\`)" autocomplete="off" oninput="mentionOnInput(this);startTyping()" onkeydown="chatInputKey(event)" onblur="setTimeout(closeMention,150)" onpaste="pasteFiles('chat',event)">
               <button class="pri" onclick="sendChat()"><i class="ti ti-send"></i></button>
             </div>
           </div>
