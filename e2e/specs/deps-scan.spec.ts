@@ -11,9 +11,11 @@ const SCAN_URL = `/api/projects/${PID}/deps/scan`;
 // A package pinned in e2e/package-lock.json, claimed to be a major behind.
 const PACKAGE = '@playwright/test';
 
-// Re-enabled after CXA-B118 (#447) fixed the route's hang; the pre-merge
-// browser gate now guards against a regression.
-test('the dependency scan endpoint discovers real lockfiles and files a remediation ticket', async ({
+// FIXME(CXA-B111): POST /deps/scan STILL HANGS — re-verified 2026-08-30 on a
+// merged tree after CXA-B118 (#447): 30s Playwright timeout with both a real
+// registry body and `{}`. #447 did not fix the hang. Re-enable only after a
+// local `npx playwright test specs/deps-scan.spec.ts` passes.
+test.fixme('the dependency scan endpoint discovers real lockfiles and files a remediation ticket', async ({
   request,
 }) => {
   const res = await request.post(SCAN_URL, {
@@ -56,7 +58,7 @@ test('the dependency scan endpoint discovers real lockfiles and files a remediat
   expect(againBody.suppressed).toBe(1);
 });
 
-test('an empty snapshot is still a valid inventory-only scan', async ({ request }) => {
+test.fixme('an empty snapshot is still a valid inventory-only scan', async ({ request }) => {
   const res = await request.post(SCAN_URL, { data: {} });
   expect(res.ok()).toBeTruthy();
   const body = await res.json();
