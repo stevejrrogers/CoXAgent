@@ -63,6 +63,7 @@ mod pr_listing;
 mod preflight;
 mod projects;
 mod realtime;
+mod repro_url;
 mod requests;
 mod security;
 mod share_link;
@@ -99,6 +100,7 @@ use pr_listing::*;
 use preflight::*;
 use projects::*;
 use realtime::*;
+use repro_url::*;
 use requests::*;
 use security::*;
 use share_link::*;
@@ -954,6 +956,10 @@ pub async fn serve_full(
             post(human_verify_ep),
         )
         .route(
+            "/api/projects/:pid/ticket/:id/reproduction-url",
+            get(ticket_reproduction_url_ep),
+        )
+        .route(
             "/api/projects/:pid/ticket/:id/send-back",
             post(send_back_ep),
         )
@@ -1310,6 +1316,8 @@ mod cors_rate_limit_tests;
 mod pr_preview_tests;
 #[cfg(test)]
 mod pr_review_gate_tests;
+#[cfg(test)]
+mod repro_url_tests;
 #[cfg(test)]
 mod share_link_tests;
 #[cfg(test)]

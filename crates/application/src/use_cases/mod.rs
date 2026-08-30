@@ -18,6 +18,7 @@ pub mod readiness_preflight;
 pub mod recover;
 pub mod refine_ticket;
 pub mod release_assembly;
+pub mod repro_url;
 pub mod run_ba;
 pub mod run_chat_reply;
 pub mod run_design_system;
@@ -59,6 +60,9 @@ pub use release_assembly::{
     assemble, cut_manifest, extract_ticket_refs, filter_verified_subjects, is_verified_complete,
     rc_members, verified_complete_ids, BlockedCandidate, CutManifest, RcAssembly, RcBundle,
     SubjectManifest,
+};
+pub use repro_url::{
+    resolve_repro_url, ReproSource, ReproUrl, ReproUrlSnapshot, ResolveReproUrlUseCase,
 };
 pub use run_ba::RunBaUseCase;
 pub use run_chat_reply::RunChatReplyUseCase;
