@@ -200,7 +200,9 @@ pub(super) struct AgentLogStreamQuery {
 /// the old 1.5 s polling with push.
 ///
 /// Events:
-///   * `init`   — `{ offset, role, live }` snapshot kick-off (whole current tail)
+///   * `init`   — `{ offset, role, live }` snapshot kick-off, sent on EVERY
+///     fresh open (live:false when the log file is absent/empty — the
+///     client's terminal empty state depends on it)
 ///   * `line`   — one or more new bytes, JSON `{ text }` batched per poll
 ///   * `done`   — file gone / ended, client should close
 ///   * comment  — `: ping` heartbeat every ~15 s to keep proxies alive
@@ -234,11 +236,17 @@ pub(super) async fn agent_log_stream_ep(
     let live_flag = snapshot.trim().len() >= 20 && live.exists();
 
     let mut after = q.after.min(offset);
-    let mut pending = if q.after == 0 {
+    // CXA-B128: a fresh open (after == 0) ALWAYS gets the `init` kick-off —
+    // even when the live log does not exist yet. Withholding init used to
+    // leave the client's work-log panel on its indefinite "loading…"
+    // placeholder forever: no init → no renderAgentLog → no empty state, and
+    // a healthy connection fires no error either. The empty-file init carries
+    // live:false so the client paints its terminal "hasn't run yet" state.
+    let fresh = q.after == 0;
+    let mut pending = if fresh {
         // Fresh open: send the snapshot immediately.
-        let text = snapshot;
         after = offset;
-        text
+        snapshot
     } else {
         // Resume: only send what we haven't delivered yet (fetch now).
         let (tail, _) = read_live_upto(&live, q.after);
@@ -251,7 +259,8 @@ pub(super) async fn agent_log_stream_ep(
     let (tx, rx) = tokio::sync::mpsc::channel::<
         Result<axum::response::sse::Event, std::convert::Infallible>,
     >(64);
-    let send_init = !pending.is_empty();
+    let send_init = fresh || !pending.is_empty();
+    let has_snapshot = !pending.is_empty();
     std::thread::spawn(move || {
         let send = |tx: &tokio::sync::mpsc::Sender<_>, e: axum::response::sse::Event| {
             tx.blocking_send(Ok(e)).is_err()
@@ -270,12 +279,16 @@ pub(super) async fn agent_log_stream_ep(
             ) {
                 return;
             }
-            if send(
-                &tx,
-                axum::response::sse::Event::default()
-                    .event("line")
-                    .data(serde_json::json!({ "text": std::mem::take(&mut pending) }).to_string()),
-            ) {
+            // Only a non-empty snapshot becomes a `line`; the init event above
+            // already told the client there is nothing to show yet.
+            if has_snapshot
+                && send(
+                    &tx,
+                    axum::response::sse::Event::default()
+                        .event("line")
+                        .data(serde_json::json!({ "text": std::mem::take(&mut pending) }).to_string()),
+                )
+            {
                 return;
             }
         }
