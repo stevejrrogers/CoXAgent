@@ -127,7 +127,7 @@ async function renderInbox(){
       // refusal reason can reference what was actually seen.
       const liveUrl=(it.reproduce_url&&/^https?:\/\//i.test(it.reproduce_url))?it.reproduce_url:"";
       html+=inboxCard("verify",esc(it.ticket),esc(it.title),
-        (liveUrl?`<a class="tk-btn ibx-btn" href="${escAttr(liveUrl)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">Open live preview</a>`:"")+
+        (liveUrl?`<a class="tk-btn ibx-btn" href="${escAttr(liveUrl)}" target="_blank" rel="noopener noreferrer">Open live preview</a>`:"")+
         ibtn("Evidence",`showTicket('${esc(it.ticket)}')`)+
         (act
           ?ibtn("Send back",`inboxSendBack('${esc(it.ticket)}','${escAttr(liveUrl)}')`)+
