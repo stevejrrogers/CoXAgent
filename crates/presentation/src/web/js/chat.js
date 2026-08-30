@@ -2067,7 +2067,7 @@ async function showTicket(id){
     <button class="tk-btn" onclick="editTicket('${t.id}')"><i class="ti ti-edit"></i> Edit</button>
     ${canWork?`<button class="tk-btn go" onclick="workNext('${t.id}')"><i class="ti ti-player-play-filled"></i> Work on this next</button>`:''}
     ${(t.status==="pending"&&tech)?`<button class="tk-btn go" onclick="humanGate('${t.id}','ready')"><i class="ti ti-checks"></i> Approve → Ready</button>`:''}
-    ${t.status==="fixed"?`<button class="tk-btn" onclick="inboxSendBack('${t.id}')"><i class="ti ti-arrow-back-up"></i> Send back</button>`:''}
+    ${t.status==="fixed"?`<button class="tk-btn" onclick="inboxSendBack('${t.id}','${escAttr(t.reproduce_url||"")}')"><i class="ti ti-arrow-back-up"></i> Send back</button>`:''}
     ${t.reproduce_url?`<button class="tk-btn" title="Open live instance" onclick="window.open('${esc(t.reproduce_url)}','_blank')"><i class="ti ti-external-link"></i> Open live instance</button>`:''}
     ${t.status==="fixed"?`<button class="tk-btn go" onclick="humanGate('${t.id}','verify')"><i class="ti ti-shield-check"></i> Mark Verified</button>`:''}
     ${(t.status==="pending"||t.status==="open")?`<button class="tk-btn danger" onclick="rejectTicket('${t.id}')"><i class="ti ti-ban"></i> Reject</button>`:''}
