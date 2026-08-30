@@ -175,6 +175,14 @@ fn reclaim_shim_dirs_of_dead_hubs(temp_dir: &Path, my_pid: u32) {
 /// leftover; returns how many were removed. The listing and the snapshot
 /// arrive as data, so the only IO here is the removal itself.
 fn reap_listed_shim_dirs(entries: std::fs::ReadDir, my_pid: u32, live: &HashSet<u32>) -> usize {
+    if live.is_empty() {
+        // A `ps` that lists nothing while we ourselves are running is lying:
+        // an empty snapshot is not proof that every hub is dead, and believing
+        // it would delete live shims. Say so — a silent refusal would leave an
+        // operator staring at unreaped stale dirs with no explanation.
+        tracing::warn!("shim hygiene: live-pid snapshot is empty while this process runs — ps is misreporting; reaping nothing");
+        return 0;
+    }
     entries
         .flatten()
         .filter(|entry| {
@@ -189,21 +197,26 @@ fn reap_listed_shim_dirs(entries: std::fs::ReadDir, my_pid: u32, live: &HashSet<
 }
 
 /// Pure decision over one temp-dir entry name and a live-pid snapshot: a shim
-/// dir is stale iff it is pid-suffixed, the suffix parses as a pid, that pid
-/// is not OURS (a recycled pid legitimately claims a dead instance's leftovers
-/// — overwriting them is how the claim works), and the pid is not live. The
+/// dir is stale iff it is pid-suffixed, the suffix is plain decimal digits
+/// (exactly what `shim_dir_for_process` writes — `u32::from_str` would also
+/// accept a leading `+`, and a lookalike name is never ours), that pid is not
+/// OURS (a recycled pid legitimately claims a dead instance's leftovers —
+/// overwriting them is how the claim works), and the pid is not live. The
 /// legacy shared dir (no suffix) and non-numeric suffixes are never ours to
 /// reap.
 #[must_use]
 fn is_stale_shim_dir(name: &str, my_pid: u32, live: &HashSet<u32>) -> bool {
     name.strip_prefix(SHIM_DIR_PREFIX)
+        .filter(|suffix| !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()))
         .and_then(|suffix| suffix.parse::<u32>().ok())
         .is_some_and(|pid| pid != my_pid && !live.contains(&pid))
 }
 
 /// One snapshot of every live pid (`ps -A -o pid=`), so the whole sweep costs
-/// a single spawn however many dirs have rotted. `None` = liveness unknown —
-/// callers must treat every pid as alive and reap nothing.
+/// a single spawn however many dirs have rotted. `None` = liveness unknown,
+/// and an EMPTY set = a lying `ps` (this process is running, so something
+/// must be listed) — callers must treat both as "every pid is alive" and reap
+/// nothing.
 fn live_pid_snapshot() -> Option<HashSet<u32>> {
     let out = std::process::Command::new("ps")
         .args(["-A", "-o", "pid="])
@@ -343,19 +356,30 @@ mod shim_hygiene_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// A recycled pid: the current hub's OWN dir must never be swept even if
-    /// the liveness snapshot misreports it — overwriting a dead instance's
-    /// leftovers is exactly how a recycled pid claims them.
+    /// A snapshot that lists nothing is a LYING snapshot (`ps` exiting
+    /// successfully with zero pids while this very process runs), not proof
+    /// that every hub died — the sweep must refuse it wholesale, and our own
+    /// dir in particular must never go.
     #[test]
-    fn our_own_shim_dir_is_never_reaped() {
+    fn an_empty_liveness_snapshot_reaps_nothing() {
         let root = scratch("own");
         let mine = shim_dir_for_process(&root, std::process::id());
         std::fs::create_dir_all(&mine).unwrap();
+        let dead = shim_dir_for_process(&root, 999_999_999);
+        std::fs::create_dir_all(&dead).unwrap();
 
         let live: HashSet<u32> = HashSet::new(); // snapshot says nothing is alive
-        reap(&root, std::process::id(), &live);
+        let reaped = reap(&root, std::process::id(), &live);
 
+        assert_eq!(
+            reaped, 0,
+            "an empty snapshot must not be read as 'all dead'"
+        );
         assert!(mine.exists(), "the running hub's own shim dir must survive");
+        assert!(
+            dead.exists(),
+            "no dir may be judged dead on a lying snapshot"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -364,11 +388,19 @@ mod shim_hygiene_tests {
     fn a_suffix_that_is_not_a_pid_is_never_reaped() {
         let root = scratch("suffix");
         std::fs::create_dir_all(root.join(format!("{SHIM_DIR_PREFIX}garbage"))).unwrap();
+        std::fs::create_dir_all(root.join(format!("{SHIM_DIR_PREFIX}+5"))).unwrap();
         std::fs::create_dir_all(root.join(SHIM_DIR_PREFIX)).unwrap();
 
-        reap(&root, 1, &HashSet::new());
+        // A truthful-looking snapshot (something is alive) so the sweep
+        // actually reaches the per-name decision instead of refusing.
+        let live: HashSet<u32> = [2].into_iter().collect();
+        reap(&root, 1, &live);
 
         assert!(root.join(format!("{SHIM_DIR_PREFIX}garbage")).exists());
+        assert!(
+            root.join(format!("{SHIM_DIR_PREFIX}+5")).exists(),
+            "u32::from_str accepts a leading '+' — a lookalike name is never ours"
+        );
         assert!(root.join(SHIM_DIR_PREFIX).exists());
         std::fs::remove_dir_all(&root).ok();
     }
@@ -392,6 +424,14 @@ mod shim_hygiene_tests {
             "legacy shared name"
         );
         assert!(!is_stale_shim_dir("coxagent-shims-garbage", 333, &live));
+        assert!(
+            !is_stale_shim_dir("coxagent-shims-+5", 333, &live),
+            "u32::from_str accepts a leading '+' — a lookalike name is never ours"
+        );
+        assert!(
+            !is_stale_shim_dir("coxagent-shims-99999999999", 333, &live),
+            "all digits but past u32::MAX — parse fails, so it is spared, not reaped"
+        );
         assert!(!is_stale_shim_dir("unrelated", 333, &live));
     }
 
