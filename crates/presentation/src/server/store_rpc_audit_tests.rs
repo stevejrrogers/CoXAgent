@@ -4,8 +4,10 @@
 //     quarantine ledger, behind the exact auth layering the POST surface has.
 //   * `POST …/store?op=heal` — opt-in self-heal of dangling ticket-keyed map
 //     entries (audit-first-then-fix, through the port's guarded save path).
-//   * Write-back refusal: a mutation whose post-state fails the audit is
-//     refused and its payload quarantined (AC4), visible via the audit.
+//   * Write-back gate: a mutation whose post-state fails the audit is
+//     refused and its payload quarantined (AC4), visible via the audit —
+//     except dangling ticket-keyed entries, the one class with a safe
+//     repair, which the boundary heals in place and saves.
 //
 // Pure in-process verification (harness in `store_rpc_test_support`): requests
 // drive the real handler and the real `auth_mw` layering via
@@ -197,18 +199,76 @@ async fn unauthenticated_post_audit_and_heal_are_refused_before_the_store() {
 }
 
 // ---------------------------------------------------------------------------
-// Write-back refusal + quarantine (AC4)
+// Write-back gate at the boundary (AC4)
 // ---------------------------------------------------------------------------
+//
+// The gate refuses a mutation whose post-state fails the integrity audit —
+// except the one class with a safe repair: dangling ticket-keyed entries are
+// HEALED in place and the save succeeds (refusing them bricked every save on
+// first deploy, where decades of pre-auditor legacy keys failed the audit —
+// see `gate_save` in the store adapter). Both halves of that contract are
+// pinned here end-to-end through the real store.
+
+/// A healthy state whose deploy ordinal rolled back behind the recorded
+/// last-good deploy — an unhealable audit violation (which ordinal is real
+/// needs a human), so the write boundary must refuse and quarantine it.
+fn state_with_rolled_back_deploy_index() -> ProjectState {
+    let mut state = healthy_state();
+    state.deploy_index = 1;
+    state.last_good_deploy = Some(coxagent_application::state::KnownGoodDeploy {
+        sha: "abc".to_owned(),
+        at: String::new(),
+        deploy_index: 3,
+        summary: "s".to_owned(),
+    });
+    state
+}
 
 #[tokio::test]
-async fn a_save_whose_post_state_fails_the_audit_is_refused_and_quarantined() {
+async fn a_save_with_dangling_references_heals_at_the_write_boundary() {
     let (_dir, store) = store_seeded_with(&healthy_state());
     let app = app_with(None, store).await;
     let router = handler_router(app);
 
-    // The corrupted snapshot rides the exact wire shape a runner uses
+    // The dangling entry rides the exact wire shape a runner uses
     // (`op=save` with a full ProjectState in `data`).
     let payload = serde_json::to_string(&state_with_dangling_evidence()).expect("serialize");
+    let resp = post_store(
+        router.clone(),
+        "save",
+        serde_json::json!({ "data": payload }),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a dangling key has exactly one safe repair (drop it) — the boundary heals and saves"
+    );
+
+    // The persisted state is the healed one — healthy, no findings — and the
+    // ledger stays empty: healed saves are not quarantined.
+    let resp = get_store_at(router, PID, Some("audit"), None, None).await;
+    let doc: serde_json::Value = serde_json::from_str(&body_text(resp).await).expect("json body");
+    assert_eq!(
+        doc["healthy"],
+        serde_json::json!(true),
+        "healed, not refused"
+    );
+    assert_eq!(doc["findings"], serde_json::json!([]));
+    assert_eq!(doc["quarantined"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn a_save_failing_the_audit_unhealably_is_refused_and_quarantined() {
+    let (_dir, store) = store_seeded_with(&healthy_state());
+    let app = app_with(None, store).await;
+    let router = handler_router(app);
+
+    // The rolled-back ordinal rides the exact wire shape a runner uses
+    // (`op=save` with a full ProjectState in `data`).
+    let payload = serde_json::to_string(&state_with_rolled_back_deploy_index()).expect("serialize");
     let resp = post_store(
         router.clone(),
         "save",
@@ -241,13 +301,13 @@ async fn a_save_whose_post_state_fails_the_audit_is_refused_and_quarantined() {
     assert_eq!(quarantined.len(), 1, "the refused payload was quarantined");
     assert_eq!(
         quarantined[0]["rule_id"],
-        serde_json::json!("dangling_ticket_reference")
+        serde_json::json!("deploy_index_regression")
     );
     assert!(
         quarantined[0]["payload"]
             .as_str()
             .expect("payload")
-            .contains("ticket_evidence"),
+            .contains("deploy_index"),
         "the attempted payload itself is recorded"
     );
 }
