@@ -2058,9 +2058,14 @@ function fgItem(e){
   const inline=(e.kind==="api"||e.kind==="test")&&e.detail;
   let body="";
   if(e.kind==="screenshot"){
+    // The hidden twin handles the rare race where the server saw the
+    // artifact but storage lost it before the image rendered: the <img>
+    // error reveals the explicit 'missing artifact' state, never a
+    // silently broken image.
     const miss=`<div class="fg-missing"><i class="ti ti-alert-triangle"></i> missing artifact — the recorded screenshot is no longer on disk <span class="fg-path">${esc(e.detail)}</span></div>`;
     body=e.artifact==="ok"
-      ?`<img class="fg-shot" src="${esc(e.detail)}" alt="${esc(e.label)}" loading="lazy" onerror="this.nextElementSibling.hidden=false;this.remove()">${miss}`
+      ?`<img class="fg-shot" src="${esc(e.detail)}" alt="${esc(e.label)}" loading="lazy" onerror="this.nextElementSibling.hidden=false;this.remove()">`
+         +miss.replace('<div class="fg-missing">','<div class="fg-missing" hidden>')
       :miss;
   }else if(e.kind==="waived"){
     body=`<div class="fg-waiver"><i class="ti ti-gavel"></i> <b>Waiver</b> — granted ${who}: ${esc(e.detail)}</div>`;
