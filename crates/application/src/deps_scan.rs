@@ -20,7 +20,9 @@
 
 use std::collections::BTreeMap;
 
-use coxagent_domain::{Complexity, Priority, Role, Ticket as DomainTicket, TicketId, TicketType};
+use coxagent_domain::{
+    Complexity, Priority, Role, Status, Ticket as DomainTicket, TicketId, TicketType,
+};
 
 use crate::state::ProjectState;
 
@@ -400,6 +402,23 @@ fn link_to_epic(ticket: &mut DomainTicket) {
 /// for that package months later, and symmetrically a prior "cve finding" Bug must never block
 /// a fresh routine upgrade Chore — a routine finding is suppressed only by prior routine
 /// evidence, an urgent CVE only by prior CVE evidence.
+///
+/// The suppression must also be *outcome aware* ([CXA-B125]): evidence records that a
+/// remediation was FILED, never that it HAPPENED. When the human rejects the remediation
+/// ticket, the upgrade did not occur, so its leftover evidence must not keep reporting the
+/// package as already-remediated. Evidence whose owning ticket is absent stays suppressive —
+/// that is the pre-[CXA-B089] id-scheme ledger, matched precisely because its ticket no longer
+/// resolves under the current scheme.
+/// Whether `owner` — a `ticket_evidence` key — names a live ticket that is currently Rejected.
+/// Absent owners are not rejected (see [`already_remediated_for`]).
+fn owner_is_rejected(state: &ProjectState, owner: &str) -> bool {
+    state
+        .tickets
+        .iter()
+        .find(|t| t.id().as_str() == owner)
+        .is_some_and(|t| t.status() == Status::Rejected)
+}
+
 #[must_use]
 fn already_remediated_for(state: &ProjectState, dep: &str, is_urgent_cve: bool) -> bool {
     let prefix = format!("{dep}@");
@@ -408,10 +427,12 @@ fn already_remediated_for(state: &ProjectState, dep: &str, is_urgent_cve: bool) 
     } else {
         ROUTINE_EVIDENCE_LABEL
     };
-    state.ticket_evidence.values().any(|list| {
+    state.ticket_evidence.iter().any(|(owner, list)| {
+        // Cheap entry match first; the O(tickets) owner lookup only runs for a
+        // key whose evidence actually matches this finding.
         list.iter().any(|e| {
             e.kind == "dependency-scan" && e.detail.starts_with(&prefix) && e.label == suppressor
-        })
+        }) && !owner_is_rejected(state, owner)
     })
 }
 
@@ -936,6 +957,109 @@ version = \"0.9.0\"
         assert!(
             apply_findings(&mut state, std::slice::from_ref(&finding)).is_empty(),
             "routine upgrade already remediated across id schemes must not duplicate"
+        );
+    }
+
+    /// A live remediation ticket under a legacy id plus its evidence, rejected
+    /// by the PO when `reject` is true, otherwise left Pending.
+    fn state_with_legacy_remediation(reject: bool) -> ProjectState {
+        let mut state = ProjectState::default();
+        let mut ticket = DomainTicket::new(
+            TicketId::new("DEP-LEGACY-PKG".to_string()).expect("valid legacy id"),
+            TicketType::Chore,
+            "upgrade @scope/pkg (major)".to_string(),
+            String::new(),
+            Priority::Medium,
+            Complexity::Small,
+            false,
+        )
+        .expect("legacy remediation ticket must build");
+        if reject {
+            ticket
+                .transition_to(Role::Po, Status::Rejected)
+                .expect("Po may reject a pending chore");
+        }
+        state.tickets.push(ticket);
+        state.add_evidence(
+            "DEP-LEGACY-PKG",
+            "dependency-scan",
+            "scan result",
+            "@scope/pkg@7.8.9->9.0.0 tagged major",
+        );
+        state
+    }
+
+    fn routine_finding_for_scope_pkg() -> ScanFinding {
+        ScanFinding {
+            package: "@scope/pkg".to_string(),
+            current_version: "7.8.9".to_string(),
+            latest_version: Some("10.2.0".to_string()),
+            tier: Some(BumpTier::Major),
+            urgent_cve_severity: None,
+            affected_files: vec!["package-lock.json".to_string()],
+        }
+    }
+
+    #[test]
+    fn a_rejected_remediations_evidence_does_not_suppress_future_findings() {
+        // CXA-B125 regression: evidence records that a remediation was FILED, never
+        // that it HAPPENED. A human rejection means the upgrade did not occur, so the
+        // leftover "scan result" evidence must not silence every future finding for
+        // the package (the exact-id check cannot catch this across the id-scheme
+        // boundary — the rejected ticket carries a legacy id the new scheme never
+        // mints again).
+        let mut state = state_with_legacy_remediation(true);
+
+        let ids = apply_findings(
+            &mut state,
+            std::slice::from_ref(&routine_finding_for_scope_pkg()),
+        );
+        assert_eq!(
+            ids.len(),
+            1,
+            "a rejected remediation must not suppress a fresh remediation for the package"
+        );
+        let t = state.ticket(&ids[0]).expect("filed chore");
+        assert_eq!(t.ticket_type(), TicketType::Chore);
+    }
+
+    #[test]
+    fn a_live_unrejected_remediations_evidence_still_suppresses() {
+        // The complement: same legacy ticket + evidence, but NOT rejected — the
+        // remediation stands, so dedupe must keep suppressing across the scheme
+        // boundary (CXA-B093 behaviour, now pinned against the outcome-aware fix).
+        let mut state = state_with_legacy_remediation(false);
+
+        assert!(
+            apply_findings(
+                &mut state,
+                std::slice::from_ref(&routine_finding_for_scope_pkg())
+            )
+            .is_empty(),
+            "an unrejected remediation must still dedupe"
+        );
+    }
+
+    #[test]
+    fn a_rejected_current_scheme_ticket_still_blocks_refiling_under_its_own_id() {
+        // Rejection stays TERMINAL for the exact id (the add_ticket rule: a rejection
+        // is a human "no" to the whole theme — re-filing the same id every scan would
+        // spam). The CXA-B125 fix relaxes only the EVIDENCE predicate; the
+        // deterministic-id existence check is untouched. Pins the boundary so the
+        // evidence fix is never "completed" into a re-file loop.
+        let mut state = ProjectState::default();
+        let finding = routine_finding_for_scope_pkg();
+        let filed = apply_findings(&mut state, std::slice::from_ref(&finding));
+        assert_eq!(filed.len(), 1, "first pass files");
+        state
+            .ticket_mut(&filed[0])
+            .expect("filed ticket")
+            .transition_to(Role::Po, Status::Rejected)
+            .expect("Po may reject a pending chore");
+
+        assert!(
+            apply_findings(&mut state, std::slice::from_ref(&finding)).is_empty(),
+            "a rejected remediation ticket still occupies its own id — no re-file spam"
         );
     }
 }
