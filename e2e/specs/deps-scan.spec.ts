@@ -11,12 +11,9 @@ const SCAN_URL = `/api/projects/${PID}/deps/scan`;
 // A package pinned in e2e/package-lock.json, claimed to be a major behind.
 const PACKAGE = '@playwright/test';
 
-// FIXME(CXA-B111): POST /deps/scan HANGS — even with an empty body the
-// handler never responds (reproduced 20s+ with curl; suspected lock held
-// across await in the scan route). These specs were red from birth (merged
-// before the pre-merge browser gate existed) and the hang can wedge the
-// whole suite's server. Re-enable once the route answers.
-test.fixme('the dependency scan endpoint discovers real lockfiles and files a remediation ticket', async ({
+// Re-enabled after CXA-B118 (#447) fixed the route's hang; the pre-merge
+// browser gate now guards against a regression.
+test('the dependency scan endpoint discovers real lockfiles and files a remediation ticket', async ({
   request,
 }) => {
   const res = await request.post(SCAN_URL, {
@@ -59,7 +56,7 @@ test.fixme('the dependency scan endpoint discovers real lockfiles and files a re
   expect(againBody.suppressed).toBe(1);
 });
 
-test.fixme('an empty snapshot is still a valid inventory-only scan', async ({ request }) => {
+test('an empty snapshot is still a valid inventory-only scan', async ({ request }) => {
   const res = await request.post(SCAN_URL, { data: {} });
   expect(res.ok()).toBeTruthy();
   const body = await res.json();
