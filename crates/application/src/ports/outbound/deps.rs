@@ -28,7 +28,12 @@ pub trait DependencyDiscoveryPort: Send + Sync {
     /// owned by production code, not by the adapter. A missing root reads as
     /// an empty result — an empty workspace has nothing to scan.
     ///
+    /// The walk stays inside `root` (CXA-B118): symlinks are never followed —
+    /// not descended into, not read through — and the walk is bounded, so a
+    /// workspace beyond the bound is an error rather than a hung request.
+    ///
     /// # Errors
-    /// [`PortError::Backend`] when a discovered lockfile cannot be read.
+    /// [`PortError::Backend`] when a discovered lockfile cannot be read, or
+    /// when the workspace exceeds the adapter's discovery bound.
     async fn discover_lockfiles(&self, root: &Path) -> Result<Vec<Lockfile>, PortError>;
 }
