@@ -97,7 +97,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
             match &uploaded {
                 Some((url, size)) => {
-                    s.add_evidence(&key, "screenshot", "deployed UI screenshot", url);
+                    s.add_evidence_for(
+                        &key,
+                        "screenshot",
+                        "deployed UI screenshot",
+                        url,
+                        &["verify"],
+                        "TEST",
+                    );
                     s.post_comment_att(
                         "TEST",
                         &format!("📸 DoD evidence for {key}: screenshot of the deployed UI."),
@@ -111,11 +118,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     );
                 }
                 None => {
-                    s.add_evidence(
+                    s.add_evidence_for(
                         &key,
                         "waived",
                         "screenshot unavailable",
                         "no headless browser/storage on this host, or the app did not render",
+                        &["verify"],
+                        "TEST",
                     );
                 }
             }
@@ -127,11 +136,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let key = ticket.to_string();
         let Some(probe) = &self.probe else {
             let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
-                s.add_evidence(
+                s.add_evidence_for(
                     &key,
                     "waived",
                     "probe unavailable",
                     "no HTTP probe on this host",
+                    &["verify"],
+                    "TEST",
                 );
                 Ok(())
             })
@@ -151,7 +162,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             match &proof {
                 Some((url, p)) => {
                     let detail = format!("GET {url}\nHTTP {}\n{}", p.status, p.body_snippet.trim());
-                    s.add_evidence(&key, "api", "live request/response", &detail);
+                    s.add_evidence_for(
+                        &key,
+                        "api",
+                        "live request/response",
+                        &detail,
+                        &["verify"],
+                        "TEST",
+                    );
                     s.post_comment(
                         "TEST",
                         &format!("🧾 DoD evidence for {key} — live API proof:\n```\n{detail}\n```"),
@@ -159,11 +177,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     );
                 }
                 None => {
-                    s.add_evidence(
+                    s.add_evidence_for(
                         &key,
                         "waived",
                         "app did not answer",
                         "probe got no response on health or root",
+                        &["verify"],
+                        "TEST",
                     );
                 }
             }

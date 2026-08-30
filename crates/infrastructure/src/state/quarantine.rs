@@ -159,6 +159,8 @@ mod tests {
                 label: "orphan".to_owned(),
                 detail: "d".to_owned(),
                 at: String::new(),
+                source_gates: Vec::new(),
+                actor: String::new(),
             }],
         );
         state

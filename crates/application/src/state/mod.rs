@@ -634,11 +634,32 @@ impl ProjectState {
     /// Attach a piece of DoD evidence to a ticket (bounded: 6 per ticket,
     /// detail capped) — dashboards render these; TEST requires them.
     pub fn add_evidence(&mut self, ticket: &str, kind: &str, label: &str, detail: &str) {
+        self.add_evidence_for(ticket, kind, label, detail, &[], "");
+    }
+
+    /// Attach DoD evidence WITH its provenance (CXA-F241): which gate
+    /// decision(s) the item supports and who attached it. Every new capture
+    /// goes through here so the forensics view can attribute proof to the
+    /// exact gate transition it supported; [`Self::add_evidence`] callers
+    /// that cannot attribute (legacy/agent-internal ledgers) keep empty
+    /// provenance, which the view renders as provenance unknown — never a
+    /// guessed link.
+    pub fn add_evidence_for(
+        &mut self,
+        ticket: &str,
+        kind: &str,
+        label: &str,
+        detail: &str,
+        source_gates: &[&str],
+        actor: &str,
+    ) {
         let ev = Evidence {
             kind: kind.to_owned(),
             label: label.chars().take(120).collect(),
             detail: detail.chars().take(1200).collect(),
             at: now_rfc3339(),
+            source_gates: source_gates.iter().map(|g| (*g).to_owned()).collect(),
+            actor: actor.to_owned(),
         };
         let list = self.ticket_evidence.entry(ticket.to_owned()).or_default();
         list.push(ev);
