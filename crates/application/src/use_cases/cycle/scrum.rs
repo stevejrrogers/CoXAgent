@@ -231,6 +231,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     }
                     state.spend.engine_by_role.insert(role, eng);
                 }
+                // Per-step engine/model provenance (CXA-F257): one bounded
+                // record per captured run, appended to its ticket's log.
+                // Unlabeled runs (ceremonies, session resumes) carry no ticket
+                // and are dropped — provenance is per-ticket work.
+                for ms in std::mem::take(&mut m.step_provenance) {
+                    if let Some(ticket) = ms.ticket {
+                        state.record_step_provenance(&ticket, ms.step);
+                    }
+                }
                 // Attribute this cycle's spend to the operator that ran it, so
                 // each user's token usage is measurable in a shared project.
                 if !self.worker.is_empty() {

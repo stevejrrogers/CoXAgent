@@ -87,6 +87,8 @@ impl AgentEnginePort for HermesEngine {
             session_id: None,
             sandbox,
             engine: "hermes".to_owned(),
+            model: self.model.clone(),
+            attempts: Vec::new(),
         })
     }
 }

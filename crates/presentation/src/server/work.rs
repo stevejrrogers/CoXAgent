@@ -52,6 +52,18 @@ fn detail_awaits_verification(status: coxagent_domain::Status, evidence_attached
     status == coxagent_domain::Status::Fixed && evidence_attached
 }
 
+/// Engine & model provenance for the detail payload (CXA-F257): the ticket's
+/// bounded per-step log of which engine/model ACTUALLY executed, chronological.
+/// `None` when the ticket has no captured runs, so the payload is unchanged
+/// for tickets that predate provenance capture.
+fn provenance_field(
+    state: &coxagent_application::state::ProjectState,
+    id: &str,
+) -> Option<serde_json::Value> {
+    let prov = state.step_provenance(id);
+    (!prov.is_empty()).then(|| serde_json::to_value(prov).unwrap_or_default())
+}
+
 /// Full detail for one ticket — including the `design` specs stripped from list
 /// payloads — loaded only when the user opens it.
 pub(super) async fn ticket_detail_ep(
@@ -101,6 +113,15 @@ pub(super) async fn ticket_detail_ep(
                                 "evidence".into(),
                                 evidence_items_with_artifacts(ev, &artifacts).into(),
                             );
+                        }
+                        // Engine & model provenance (CXA-F257): which engine
+                        // and model actually executed each agent step on this
+                        // ticket, chronological — the verify gate approves
+                        // what ran, not what config asked for. Absent when
+                        // empty, so payloads for tickets with no captured
+                        // runs are unchanged for older readers.
+                        if let Some(pv) = provenance_field(&state, &id) {
+                            obj.insert("provenance".into(), pv);
                         }
                         // Live reproduction link (CXA-F244): offered exactly when
                         // the ticket awaits a human verdict (see
