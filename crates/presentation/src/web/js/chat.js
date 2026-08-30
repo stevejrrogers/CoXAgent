@@ -2202,6 +2202,20 @@ function fgPane(t){
       +`<span class="fg-gate-sub">no matching gate decision on this ticket — no link is guessed</span></div>`
       +unlinked.map(fgItem).join("")+`</div>`;
   }
+  // Engine & model provenance (CXA-F257): which engine/model actually executed
+  // each agent step, chronological — the verifier sees what produced the work,
+  // including mid-run failover (every attempt in order) and send-back cycles.
+  const prov=t.provenance||[];
+  if(prov.length){
+    h+=`<div class="fg-gate"><div class="fg-gate-h"><span class="fg-gate-id">ENGINE PROVENANCE</span>`
+      +`<span class="fg-gate-sub">engine &amp; model that executed each agent step — what ran, not what config asked for</span></div>`
+      +prov.map(s=>`<div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;padding:6px 0;border-bottom:1px solid var(--border)">`
+        +`<span style="font-size:10px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--dim)">${esc(s.role)}</span>`
+        +`<span style="font-size:12.5px;color:var(--text)">${esc(s.action)}</span>`
+        +`<span style="display:flex;gap:6px;flex-wrap:wrap">${(s.attempts||[]).map(provChip).join("")}</span>`
+        +`<span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;color:var(--dim);margin-left:auto">${esc(s.at)}</span></div>`).join("")
+      +`</div>`;
+  }
   return h+`</div></div>`;
 }
 // In-app attachment viewer: full-screen overlay, same session. Gallery-aware:

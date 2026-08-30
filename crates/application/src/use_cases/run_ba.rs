@@ -439,6 +439,8 @@ mod tests {
                 session_id: None,
                 sandbox: SandboxStatus::default(),
                 engine: String::new(),
+                model: String::new(),
+                attempts: Vec::new(),
             })
         }
     }
@@ -522,6 +524,8 @@ mod tests {
                         session_id: None,
                         sandbox: SandboxStatus::default(),
                         engine: String::new(),
+                        model: String::new(),
+                        attempts: Vec::new(),
                     }),
                     // No repair available: any SM call fails outright, so
                     // repair_json yields None and we fall through to salvage.
@@ -572,6 +576,8 @@ mod tests {
                     session_id: None,
                     sandbox: SandboxStatus::default(),
                     engine: String::new(),
+                    model: String::new(),
+                    attempts: Vec::new(),
                 })
             }
         }

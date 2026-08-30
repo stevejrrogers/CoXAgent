@@ -871,6 +871,8 @@ mod tests {
                 session_id: None,
                 sandbox: SandboxStatus::default(),
                 engine: String::new(),
+                model: String::new(),
+                attempts: Vec::new(),
             })
         }
     }

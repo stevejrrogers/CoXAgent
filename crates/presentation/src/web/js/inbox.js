@@ -126,7 +126,11 @@ async function renderInbox(){
       // //host can never ride the click. Send back cites the same URL so the
       // refusal reason can reference what was actually seen.
       const liveUrl=(it.reproduce_url&&/^https?:\/\//i.test(it.reproduce_url))?it.reproduce_url:"";
-      html+=inboxCard("verify",esc(it.ticket),esc(it.title),
+      // Engine & model provenance (CXA-F257): what actually produced the work
+      // this card asks the reviewer to approve — the most recent step's
+      // attempts, "model unknown" marked explicitly, never a blank field.
+      const prov=(it.provenance||[]).map(provChip).join(" ");
+      html+=inboxCard("verify",esc(it.ticket)+(prov?" "+prov:""),esc(it.title),
         (liveUrl?`<a class="tk-btn ibx-btn" href="${escAttr(liveUrl)}" target="_blank" rel="noopener noreferrer">Open live preview</a>`:"")+
         ibtn("Evidence",`showTicket('${esc(it.ticket)}')`)+
         (act
