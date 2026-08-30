@@ -279,8 +279,12 @@ pub(super) async fn delete_project_ep(
                 .args(["stop", &container_name])
                 .output()
             {
-                if !out.status.success() {
-                    tracing::warn!("delete_project: docker stop {container_name} failed");
+                // "No such container" is the COMMON case (most deletions are
+                // cleanroom projects that never deployed) — not worth a WARN
+                // that reads like something broke.
+                let err = String::from_utf8_lossy(&out.stderr);
+                if !out.status.success() && !err.contains("No such container") {
+                    tracing::warn!("delete_project: docker stop {container_name} failed: {}", err.trim());
                 }
             }
             let _ = std::process::Command::new("docker")
