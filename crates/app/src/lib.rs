@@ -9,7 +9,7 @@ mod onboard;
 mod shutdown;
 
 use coxagent_application::config::{
-    Config, DepsConfig, DeployConfig, GitConfig, PolicyConfig, ReleasesConfig, WorkflowConfig,
+    Config, DeployConfig, DepsConfig, GitConfig, PolicyConfig, ReleasesConfig, WorkflowConfig,
 };
 use coxagent_application::ports::outbound::{SandboxStatus, StateStorePort};
 use coxagent_application::use_cases::{RecoverUseCase, RunBaUseCase, RunCycleUseCase};
@@ -32,6 +32,8 @@ use std::time::Duration;
 mod builders;
 mod config_load;
 mod host_port;
+mod recovery;
+mod retry;
 mod shims;
 
 pub use builders::load_coordination;
@@ -41,6 +43,7 @@ use builders::*;
 use config_load::*;
 #[allow(clippy::wildcard_imports)] // one module, many files — see host_port.rs
 use host_port::*;
+use recovery::{build_registry, Entry, ProjectBuilder, RecoveryPolicy};
 pub use shims::shim_script;
 #[allow(clippy::wildcard_imports)] // one module, many files — see shims.rs
 use shims::*;
@@ -151,12 +154,26 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
                 coxagent_infrastructure::FsWorkspaceFiles::new(),
             )));
             let filed = uc.execute().await?;
-            if filed.is_empty() {
+            let state = store.load().await?;
+            if filed.is_empty() && state.drift_alerts.is_empty() {
                 Ok("architecture conformance: OK (no drift)\n".to_owned())
             } else {
-                let mut out = format!("architecture drift — filed {} bug(s):\n", filed.len());
-                for id in &filed {
-                    let _ = writeln!(out, "  {id}");
+                // The drift alerts themselves — area, message, and the bug
+                // each links to — not just the ids filed this pass; a re-run
+                // over standing drift must still name what is violating.
+                let mut out = format!(
+                    "architecture drift — {} open alert(s):\n",
+                    state.drift_alerts.len()
+                );
+                for a in &state.drift_alerts {
+                    let _ = writeln!(out, "  [{}] {} — {}", a.area, a.message, a.ticket);
+                }
+                if !filed.is_empty() {
+                    let _ = write!(out, "filed {} bug(s):", filed.len());
+                    for id in &filed {
+                        let _ = write!(out, " {id}");
+                    }
+                    out.push('\n');
                 }
                 Ok(out)
             }
@@ -367,6 +384,30 @@ mod shim_script_tests {
         let script = shim_script("git", "/tmp/coxagent-shims", "/opt/coxagent");
         assert!(script.contains(r#"[ "$d" = "/tmp/coxagent-shims" ] && continue"#));
     }
+
+    /// CXA-B109: the compress binary's path is baked in at generation time and
+    /// can vanish (a hub wrote the shims from a worktree the janitor purged).
+    /// Unguarded, the pipeline's writer SIGPIPEs into the dead second stage —
+    /// exit 141, zero output, for every shimmed tool call. Every shim must
+    /// check the baked binary before piping and degrade to `exec "$real"`.
+    #[test]
+    fn every_shim_degrades_to_the_real_binary_when_compress_is_gone() {
+        for cmd in SHIM_CMDS {
+            let script = shim_script(cmd, "/tmp/coxagent-shims", "/opt/coxagent");
+            let guard = script
+                .find(r#"[ -x "/opt/coxagent" ] || exec "$real" "$@""#)
+                .unwrap_or_else(|| {
+                    panic!("{cmd} shim has no fallback for a vanished compress binary")
+                });
+            let merge = script
+                .find("2>&1")
+                .expect("shim lost its compress pipeline");
+            assert!(
+                guard < merge,
+                "{cmd} shim checks the compress binary only after the pipeline:\n{script}"
+            );
+        }
+    }
 }
 
 /// Answer a code-graph query for agents (and humans) — structured, token-cheap
@@ -509,13 +550,6 @@ pub async fn operator_main(
 /// selected by `COXAGENT_ROLE`. The registry is a JSON array of
 /// `{ "id", "path" }` where `path` contains `state/` and `codebase/`.
 ///
-/// One entry of the hub registry JSON array.
-#[derive(serde::Deserialize)]
-struct Entry {
-    id: String,
-    path: PathBuf,
-}
-
 /// # Errors
 /// Returns an error when the registry can't be read or the port can't bind.
 #[allow(clippy::too_many_lines)] // one linear wiring pass; splitting hurts readability
@@ -570,30 +604,21 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
     // here would silently mint tokens nobody validates against.
     let auth = build_auth(registry.parent().unwrap_or_else(|| Path::new("."))).await?;
 
-    let mut projects = Vec::new();
-    let mut broken = Vec::new();
-    for e in entries {
-        let state_dir = e.path.join("state");
-        let work_dir = e.path.join("codebase");
-        match build_project(&e.id, &state_dir, work_dir, auth.as_ref()).await {
-            Ok(p) => {
-                tracing::info!("hub: registered project '{}'", p.id);
-                projects.push(p);
-            }
-            // Loud, and carried into the dashboard: a project that fails to
-            // load has no handle to serve, so without this record it would
-            // simply be absent from /api/projects and the person looking for
-            // it would have only the hub log to go on (COX-B043).
-            Err(err) => {
-                tracing::error!("hub: skipping '{}': {err}", e.id);
-                broken.push(coxagent_presentation::BrokenProject {
-                    id: e.id.clone(),
-                    config_path: e.path.join("coxagent.json"),
-                    error: err.to_string(),
-                });
-            }
-        }
-    }
+    // CXA-B114: a project whose store cannot connect at boot used to be
+    // parked in the broken list FOREVER — one failed DB connect at boot kept
+    // the project dead until someone restarted the app, even once the
+    // database was healthy again. Boot now retries transiently, and whatever
+    // still fails is rebuilt in the background and admitted live (through the
+    // `recoveries` inbox below) the moment its store recovers.
+    let (admit, recoveries) = tokio::sync::mpsc::channel(4);
+    let build: ProjectBuilder = {
+        let auth = auth.clone();
+        Arc::new(move |id: &str, state_dir: &Path, work_dir: PathBuf| {
+            let auth = auth.clone();
+            Box::pin(async move { build_project(id, state_dir, work_dir, auth.as_ref()).await })
+        })
+    };
+    let (projects, broken) = build_registry(entries, admit, build, RecoveryPolicy::default()).await;
 
     // Factory: onboard a brand-new project from the dashboard. New workspaces
     // land under the registry's directory and are appended to the registry file
@@ -645,6 +670,7 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
             policy: PolicyConfig::default(),
             releases: ReleasesConfig::default(),
             coverage: coxagent_application::config::CoverageConfig::default(),
+            artifacts: coxagent_application::config::ArtifactsConfig::default(),
             deps: DepsConfig::default(),
         },
         logs_dir(&base),
@@ -670,6 +696,9 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
         doc_store: build_doc_store().await,
         syschat_store: build_syschat_store(&base).await,
         broken,
+        // CXA-B114: recovered projects arrive here and join the live registry
+        // without a restart.
+        recoveries: Some(recoveries),
     };
     coxagent_presentation::serve_full(projects, port, audit, extras).await?;
     Ok(())
@@ -1054,6 +1083,13 @@ async fn run_loop(
     }
 
     let webhook = config.workflow.webhook_url.clone();
+    // Durable outbound alert delivery (CXA-F235): the headless runner spools
+    // its webhook alerts to the project's outbox and drains them in the
+    // background, same as an in-hub runner.
+    let outbox = coxagent_infrastructure::spool_in_dir(state_dir);
+    if let Some(url) = webhook.as_deref().filter(|u| !u.is_empty()) {
+        coxagent_infrastructure::spawn_outbox_flusher(Arc::clone(&outbox), url.to_owned());
+    }
     // Worker identity for the shared registry + claim ownership. A headless
     // worker has no web login, so it takes its name from COXAGENT_OPERATOR.
     let operator = std::env::var("COXAGENT_OPERATOR")
@@ -1109,7 +1145,7 @@ async fn run_loop(
     if let Some(f) = forge {
         uc = uc.with_forge(f);
     }
-    uc = uc.with_notifier(build_notifier(Arc::clone(&store), webhook));
+    uc = uc.with_notifier(build_notifier(Arc::clone(&store), webhook, outbox));
     // Heartbeat the shared worker registry with the live role + ticket each phase,
     // so every dashboard shows this headless team's current agent.
     let hb_store = Arc::clone(&store);

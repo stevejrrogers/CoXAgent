@@ -54,6 +54,7 @@ fn handle(id: &str, state: ProjectState) -> ProjectHandle {
         id: id.to_owned(),
         name: id.to_owned(),
         alias: id.to_owned(),
+        outbox: None,
         store: Arc::new(MemStore {
             state: Mutex::new(state),
         }),
@@ -66,6 +67,7 @@ fn handle(id: &str, state: ProjectState) -> ProjectHandle {
         forge: None,
         deploy: None,
         files: None,
+        deps_discovery: None,
         storage: None,
     }
 }

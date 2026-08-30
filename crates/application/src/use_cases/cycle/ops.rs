@@ -146,12 +146,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .map_or_else(|| std::path::PathBuf::from(&dirname), |p| p.join(&dirname))
     }
     /// Auto-rollback: on a deploy or post-deploy test failure, redeploy the
-    /// last version that passed both gates, in a dedicated secondary
-    /// worktree so the LIVE `work_dir` is never touched — the shared
-    /// environment stays trustworthy while the root cause works through the
-    /// backlog like any other bug. Opt-in (`config.deploy.auto_rollback`,
-    /// default off). Caps at one retry — a second failure escalates via the
-    /// bug+notify path instead of looping. Best-effort throughout.
+    /// last version that passed both gates. Opt-in
+    /// (`config.deploy.auto_rollback`, default off).
     pub(super) async fn attempt_rollback(
         &self,
         reason: &str,
@@ -161,6 +157,39 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         if !self.config.deploy.auto_rollback {
             return;
         }
+        self.revert_to_known_good(reason, failed_sha, report).await;
+    }
+
+    /// Auto-rollback entry for the live-health monitor (CXA-F240): an
+    /// already-live deployment stopped answering on its published port.
+    /// Opt-in separately from [`Self::attempt_rollback`]
+    /// (`config.deploy.live_health_auto_rollback`, default off) so enabling
+    /// one posture never silently enables the other.
+    pub(super) async fn attempt_live_health_rollback(
+        &self,
+        failed_sha: Option<String>,
+        report: &mut CycleReport,
+    ) {
+        if !self.config.deploy.live_health_auto_rollback {
+            return;
+        }
+        self.revert_to_known_good("live health failed", failed_sha, report)
+            .await;
+    }
+
+    /// Shared rollback machinery behind both opt-in entries: redeploy the
+    /// last version that passed both gates, in a dedicated secondary
+    /// worktree so the LIVE `work_dir` is never touched — the shared
+    /// environment stays trustworthy while the root cause works through the
+    /// backlog like any other bug, and an outage revert never collides with
+    /// active dev work. Caps at one retry — a second failure escalates via
+    /// the bug+notify path instead of looping. Best-effort throughout.
+    async fn revert_to_known_good(
+        &self,
+        reason: &str,
+        failed_sha: Option<String>,
+        report: &mut CycleReport,
+    ) {
         let (Some(deploy), Some(git)) = (&self.deploy, &self.git) else {
             return;
         };

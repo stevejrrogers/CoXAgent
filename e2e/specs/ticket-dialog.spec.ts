@@ -60,5 +60,18 @@ test('the read dialog shows a seeded ticket with its acceptance criteria', async
   await page.locator('.tk-tab[data-tk-tab="coverage"]').click();
   await expect(page.locator('#tk-pane-coverage')).toContainText('No acceptance criteria to cover');
 
+  // CXA-F241: the Forensics tab — per-gate evidence inspection. The seeded
+  // tickets carry no gate decisions and no evidence (DoD gates need a human
+  // or agent pass, which HTTP seeding cannot honestly produce), so the pane
+  // must render the explicit empty state: absence distinguishable from
+  // omission, never a blank pane.
+  await page.evaluate(() => window.showTicket('F001'));
+  await expect(dlg).toContainText('Search box scopes per tab');
+  await dlg.locator('.tk-tab[data-tk-tab="forensics"]').click();
+  const fg = dlg.locator('#tk-pane-forensics');
+  await expect(fg).toBeVisible();
+  await expect(dlg.locator('#tk-pane-details')).toBeHidden();
+  await expect(fg).toContainText('No DoD evidence captured for this ticket');
+
   await assertNoConsoleErrors(errors);
 });

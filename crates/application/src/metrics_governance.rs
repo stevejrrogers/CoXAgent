@@ -377,7 +377,10 @@ mod tests {
         assert_eq!(sum.unattributed, 0);
         // Attributed volume is the per-area rows' sum.
         assert_eq!(
-            sum.attention_by_area.values().map(|r| r.values().sum::<u64>()).sum::<u64>(),
+            sum.attention_by_area
+                .values()
+                .map(|r| r.values().sum::<u64>())
+                .sum::<u64>(),
             3
         );
         assert_eq!(
@@ -387,10 +390,15 @@ mod tests {
             Some(1)
         );
         assert_eq!(
-            sum.attention_by_area["bug"].get("verify_send_back").copied(),
+            sum.attention_by_area["bug"]
+                .get("verify_send_back")
+                .copied(),
             Some(1)
         );
-        assert_eq!(sum.attention_by_area["bug"].get("verify_pass").copied(), Some(1));
+        assert_eq!(
+            sum.attention_by_area["bug"].get("verify_pass").copied(),
+            Some(1)
+        );
         assert_eq!(sum.attention_by_area["chore"].values().sum::<u64>(), 0);
     }
 
@@ -400,13 +408,20 @@ mod tests {
         let mut s = ProjectState::default();
         push(
             &mut s,
-            rec(InterventionKind::HumanPrDismissed, None, "2026-08-01T10:00:00Z"),
+            rec(
+                InterventionKind::HumanPrDismissed,
+                None,
+                "2026-08-01T10:00:00Z",
+            ),
         );
         let sum = attention_summary(&s, "2026-08-14");
         assert_eq!(sum.interventions_total, 1);
         assert_eq!(sum.unattributed, 1);
         // Nothing attributed: the per-area rows are all zero.
-        assert!(sum.attention_by_area.values().all(|r| r.values().all(|v| *v == 0)));
+        assert!(sum
+            .attention_by_area
+            .values()
+            .all(|r| r.values().all(|v| *v == 0)));
     }
 
     #[test]
@@ -427,7 +442,9 @@ mod tests {
         let sum = attention_summary(&s, "2026-08-14");
         assert_eq!(sum.interventions_total, 1);
         assert_eq!(
-            sum.attention_by_area["feature"].get("human_pr_dismissed").copied(),
+            sum.attention_by_area["feature"]
+                .get("human_pr_dismissed")
+                .copied(),
             Some(1)
         );
         // A later re-decision of the same item is a second decision.
@@ -455,7 +472,11 @@ mod tests {
         assert_eq!(tr.points.len(), 5);
         assert_eq!(tr.points[0].day, "2025-12-30");
         assert!(tr.points[0].interventions.abs() < f64::EPSILON);
-        let jan1 = tr.points.iter().find(|p| p.day == "2026-01-01").expect("jan1");
+        let jan1 = tr
+            .points
+            .iter()
+            .find(|p| p.day == "2026-01-01")
+            .expect("jan1");
         assert!((jan1.interventions - 1.0).abs() < f64::EPSILON);
         // Empty days within a recorded project are explicit zeroes.
         assert_eq!(

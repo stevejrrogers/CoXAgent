@@ -256,7 +256,10 @@ mod tests {
         for _ in 0..(MAX_GOVERNANCE_INTERVENTIONS + 10) {
             s.record_intervention(InterventionKind::VerifyPass, "CXC-F001", "qa");
         }
-        assert_eq!(s.governance_interventions.len(), MAX_GOVERNANCE_INTERVENTIONS);
+        assert_eq!(
+            s.governance_interventions.len(),
+            MAX_GOVERNANCE_INTERVENTIONS
+        );
         // Newest last: the first kept record is the (max+10-kept+1)-th write.
         assert_eq!(s.governance_interventions[0].by, "qa");
     }

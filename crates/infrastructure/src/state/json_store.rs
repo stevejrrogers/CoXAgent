@@ -167,7 +167,13 @@ impl JsonStateStore {
     /// the structural-integrity audit (CXA-F229) is the additional gate that
     /// refuses a corrupted post-state and quarantines its payload.
     fn write_locked(&self, state: &ProjectState) -> Result<(), PortError> {
-        gate_save(state, &self.quarantine)?;
+        // gate_save may HEAL (drop dangling ticket-keyed entries) — work on a
+        // clone so the healed shape is what gets persisted.
+        let mut state = state.clone();
+        let state = {
+            gate_save(&mut state, &self.quarantine)?;
+            &state
+        };
 
         let json =
             serde_json::to_vec_pretty(state).map_err(|e| PortError::Backend(e.to_string()))?;
@@ -447,7 +453,7 @@ fn parse_checked(bytes: &[u8]) -> Result<ProjectState, PortError> {
 }
 
 /// Acquire an exclusive advisory lock on the lock file.
-fn acquire_lock(path: &Path) -> Result<File, PortError> {
+pub(crate) fn acquire_lock(path: &Path) -> Result<File, PortError> {
     let file = OpenOptions::new()
         .create(true)
         .write(true)
@@ -460,7 +466,7 @@ fn acquire_lock(path: &Path) -> Result<File, PortError> {
 
 /// Write bytes to a temp file in the same directory, fsync, then rename over the
 /// destination. Rename within a directory is atomic on POSIX and Windows.
-fn atomic_write(dir: &Path, final_path: &Path, bytes: &[u8]) -> Result<(), PortError> {
+pub(crate) fn atomic_write(dir: &Path, final_path: &Path, bytes: &[u8]) -> Result<(), PortError> {
     let tmp = dir.join(format!(".state.tmp.{}", std::process::id()));
     {
         let mut f = OpenOptions::new()

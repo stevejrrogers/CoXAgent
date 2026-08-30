@@ -8,18 +8,22 @@ use serde::{Deserialize, Serialize};
 
 mod chat;
 mod docs;
+mod drift;
 mod goals;
 mod governance;
 mod integrity;
 mod ops;
+mod outbox;
 mod work;
 
 pub use chat::*;
 pub use docs::*;
+pub use drift::*;
 pub use goals::*;
 pub use governance::*;
 pub use integrity::*;
 pub use ops::*;
+pub use outbox::*;
 pub use work::*;
 
 /// Current on-disk schema version. Bumped when the serialized shape changes;
@@ -298,6 +302,19 @@ pub struct ProjectState {
     /// dashboard. All deterministic; SM announces every change.
     #[serde(default, skip_serializing_if = "Tuning::is_default")]
     pub tuning: Tuning,
+    /// Operator freeze/override per self-tuning brake (CXA-F238), keyed by
+    /// brake field name (`bugs_first` / `skip_ba`). Composed AFTER the
+    /// autonomous decision each tuning pass and expired against a bound, so
+    /// an override steers the loop without rewriting its hysteresis state.
+    /// Persists across restarts until cleared by another operator action or
+    /// its own expiry.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub tuning_overrides: std::collections::BTreeMap<String, BrakeHold>,
+    /// Append-only brake-cockpit audit trail (CXA-F238): one entry per brake
+    /// field change, whoever wrote it — the autonomous pass included. Bounded,
+    /// newest last; see [`MAX_TUNING_HISTORY`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tuning_history: Vec<TuningAuditEntry>,
     /// Definition-of-Done evidence per ticket (bounded per ticket) — a ticket
     /// only reaches Verified with context-appropriate proof attached.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -377,6 +394,12 @@ pub struct ProjectState {
     /// tracked so it files exactly one bug per outage and can announce recovery.
     #[serde(default)]
     pub ops_down: bool,
+    /// Consecutive unhealthy Ops-monitor probes (one per leader cycle) for the
+    /// current outage — CXA-F240's "N consecutive checks" trigger: the
+    /// live-health auto-rollback fires when this reaches
+    /// `deploy.live_health_fail_checks`. Reset to 0 on the first healthy probe.
+    #[serde(default)]
+    pub ops_down_streak: u32,
     /// Spend accumulated on the current calendar day (UTC), for the daily budget
     /// policy. Resets when the day rolls over.
     #[serde(default)]
@@ -439,6 +462,12 @@ pub struct ProjectState {
     /// state persisted before this existed loads clean — no migration.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub governance_interventions: Vec<InterventionRecord>,
+    /// Open architecture-drift alerts (CXA-F226): one per standing conformance
+    /// violation, deduped by (area, message), each linking the bug filed for
+    /// it. Deliberately serialized even when empty (like `engine_incidents`)
+    /// — the dashboard's zero indicator must read 0, never absence.
+    #[serde(default)]
+    pub drift_alerts: Vec<DriftAlert>,
 }
 
 /// One day's open/fixed/verified bug counts — the persisted burn-down point
@@ -460,6 +489,11 @@ pub const MAX_BUG_SNAPSHOT_DAYS: usize = 366;
 /// Cap on how many incident records are kept (newest first). One per deploy
 /// revision means a storm of failures still stays bounded and readable.
 pub const MAX_INCIDENTS: usize = 12;
+
+/// Cap on the brake-cockpit audit trail (CXA-F238): ~500 entries covers months
+/// of daily flips plus every operator intervention; older entries drop as new
+/// ones arrive so the trail cannot grow without bound.
+pub const MAX_TUNING_HISTORY: usize = 500;
 
 impl Default for ProjectState {
     fn default() -> Self {
@@ -521,6 +555,8 @@ impl Default for ProjectState {
             swept_tickets: std::collections::BTreeSet::new(),
             cost_approved: std::collections::BTreeSet::new(),
             tuning: Tuning::default(),
+            tuning_overrides: std::collections::BTreeMap::new(),
+            tuning_history: Vec::new(),
             ticket_evidence: std::collections::BTreeMap::new(),
             drain_notice_sprint: 0,
             ticket_fail_attempts: std::collections::BTreeMap::new(),
@@ -534,6 +570,7 @@ impl Default for ProjectState {
             engine_incidents: Vec::new(),
             daily_jobs: std::collections::BTreeMap::new(),
             ops_down: false,
+            ops_down_streak: 0,
             spend_today_usd: 0.0,
             spend_day: String::new(),
             budget_warned_lifetime: false,
@@ -546,6 +583,7 @@ impl Default for ProjectState {
             rolled_back_commits: std::collections::BTreeSet::new(),
             bug_snapshots: std::collections::BTreeMap::new(),
             governance_interventions: Vec::new(),
+            drift_alerts: Vec::new(),
         }
     }
 }
@@ -603,11 +641,32 @@ impl ProjectState {
     /// Attach a piece of DoD evidence to a ticket (bounded: 6 per ticket,
     /// detail capped) — dashboards render these; TEST requires them.
     pub fn add_evidence(&mut self, ticket: &str, kind: &str, label: &str, detail: &str) {
+        self.add_evidence_for(ticket, kind, label, detail, &[], "");
+    }
+
+    /// Attach DoD evidence WITH its provenance (CXA-F241): which gate
+    /// decision(s) the item supports and who attached it. Every new capture
+    /// goes through here so the forensics view can attribute proof to the
+    /// exact gate transition it supported; [`Self::add_evidence`] callers
+    /// that cannot attribute (legacy/agent-internal ledgers) keep empty
+    /// provenance, which the view renders as provenance unknown — never a
+    /// guessed link.
+    pub fn add_evidence_for(
+        &mut self,
+        ticket: &str,
+        kind: &str,
+        label: &str,
+        detail: &str,
+        source_gates: &[&str],
+        actor: &str,
+    ) {
         let ev = Evidence {
             kind: kind.to_owned(),
             label: label.chars().take(120).collect(),
             detail: detail.chars().take(1200).collect(),
             at: now_rfc3339(),
+            source_gates: source_gates.iter().map(|g| (*g).to_owned()).collect(),
+            actor: actor.to_owned(),
         };
         let list = self.ticket_evidence.entry(ticket.to_owned()).or_default();
         list.push(ev);
@@ -632,6 +691,17 @@ impl ProjectState {
         let overflow = log.len().saturating_sub(6);
         if overflow > 0 {
             log.drain(0..overflow);
+        }
+    }
+
+    /// Append one brake-cockpit audit entry (CXA-F238), pruning the oldest
+    /// past [`MAX_TUNING_HISTORY`]. Never fails: a full trail drops history,
+    /// it does not block the tuning write it is recording.
+    pub fn record_tuning_change(&mut self, entry: TuningAuditEntry) {
+        self.tuning_history.push(entry);
+        let overflow = self.tuning_history.len().saturating_sub(MAX_TUNING_HISTORY);
+        if overflow > 0 {
+            self.tuning_history.drain(0..overflow);
         }
     }
 
@@ -1436,6 +1506,15 @@ pub fn now_rfc3339() -> String {
         .unwrap_or_default()
 }
 
+/// Unix seconds now — the clock the outbox's retry deadlines and leases use.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // seconds since UNIX_EPOCH fits i64 for a very long time
+pub fn unix_now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
+}
+
 /// Derive a short uppercase alias from a project name: its capital letters
 /// (`CoXChat` -> `CXC`), else the first three alphanumerics uppercased.
 #[must_use]
@@ -1666,5 +1745,25 @@ mod alias_tests {
         assert_eq!(ev.len(), 6, "keeps last 6");
         assert!(ev[0].label.contains("proof 2"), "oldest dropped");
         assert!(ev.iter().all(|e| e.detail.chars().count() <= 1200));
+    }
+
+    #[test]
+    fn linked_evidence_carries_its_gate_and_actor() {
+        // CXA-F241: the attributed capture path records WHICH gate decision
+        // the item supports and WHO attached it — and the plain path keeps
+        // recording unattributed (empty) provenance, which the forensics view
+        // renders as provenance unknown, never a guessed link.
+        let mut st = super::ProjectState::default();
+        st.add_evidence_for("T-1", "test", "REGRESSION TEST", "pass", &["verify"], "rev");
+        st.add_evidence("T-1", "api", "live request/response", "HTTP 200");
+        let ev = &st.ticket_evidence["T-1"];
+        assert_eq!(ev[0].source_gates, vec!["verify".to_owned()]);
+        assert_eq!(ev[0].actor, "rev");
+        assert!(ev[1].source_gates.is_empty() && ev[1].actor.is_empty());
+        // The bound is shared by both paths: one ticket never outgrows 6.
+        for i in 0..8 {
+            st.add_evidence_for("T-1", "test", &format!("r{i}"), "d", &["verify"], "rev");
+        }
+        assert_eq!(st.ticket_evidence["T-1"].len(), 6);
     }
 }

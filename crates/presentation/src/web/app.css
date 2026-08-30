@@ -2,6 +2,11 @@
     --border:rgba(255,255,255,.07);--border2:rgba(255,255,255,.13);
     --text:#F1F2F6;--muted:#9A9DAB;--dim:#5E616C;
     --accent:#0891B2;--accenth:#0AA3C2;--accent2:#34D9EE;--accentbg:rgba(52,217,238,.14);
+    /* Filled buttons (CXA-B113): white labels on the bare accent reach only
+       3.68:1 — WCAG AA needs 4.5:1 — so buttons draw from a darker primary
+       step (the light theme's accent) and a hover lighten that stays inside
+       AA. Both themes share these values (light already used this accent). */
+    --pri-bg:#0E7490;--pri-bgh:#0D7C9B;
     --green:#4ADE80;--amber:#FBBF24;--red:#F87171;--blue:#60A5FA;--teal:#2DD4BF;--purple:#A78BFA;--r:14px}
   :root.light{--bg:#F5F5F7;--panel:#FFFFFF;--card:#FFFFFF;--card2:#F0F0F3;--hover:#E8E8EC;
     --border:rgba(0,0,0,.08);--border2:rgba(0,0,0,.14);
@@ -114,7 +119,7 @@
   .gc-note{flex:1;font-size:11px;color:var(--dim);display:inline-flex;align-items:center;gap:5px}
   .gc-btn{background:var(--card2);color:var(--muted);border:1px solid var(--border2);border-radius:8px;padding:7px 13px;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit}
   .gc-btn:hover{color:var(--text)}
-  .gc-btn.pri{background:var(--accent);color:#fff;border-color:transparent}
+  .gc-btn.pri{background:var(--pri-bg);color:#fff;border-color:transparent}
   .gc-btn[disabled]{opacity:.45;cursor:not-allowed}
   /* Code review */
   .revlist{display:flex;flex-direction:column;gap:10px}
@@ -785,7 +790,7 @@
   .ctlrow{display:grid;grid-template-columns:1fr 1fr;gap:6px}
   .ctlrow button{background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:9px;padding:8px;font-size:12px;font-weight:500;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:5px;font-family:inherit}
   .ctlrow button:hover{background:var(--hover);border-color:var(--border2)}
-  .ctlrow button.pri{grid-column:1/3;background:var(--accent);border-color:transparent;color:#fff} .ctlrow button.pri:hover{background:var(--accenth)}
+  .ctlrow button.pri{grid-column:1/3;background:var(--pri-bg);border-color:transparent;color:#fff} .ctlrow button.pri:hover{background:var(--pri-bgh)}
   .dot{width:7px;height:7px;border-radius:50%;background:var(--dim);flex-shrink:0}
   .dot.live{background:var(--green);box-shadow:0 0 0 3px rgba(74,222,128,.18);animation:pulse 1.8s infinite}
   .dot.paused{background:var(--amber)} .dot.off{background:var(--red)}
@@ -812,6 +817,10 @@
   .sec{font-size:12px;font-weight:600;color:var(--dim);text-transform:uppercase;letter-spacing:.07em;margin:26px 0 13px;display:flex;align-items:center;gap:8px}
   .sec:first-child{margin-top:0}
   .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(158px,1fr));gap:13px}
+  /* Overview's agent-injected blocks (drift, go-live, alerts, drain) stack as
+     plain divs; give every populated one the same 18px rhythm so panels never
+     cram together. Child inline margins collapse into this (max wins). */
+  #ov-drain:not(:empty),#ov-alerts:not(:empty),#ov-drift:not(:empty),#ov-preflight:not(:empty),#ov-goal:not(:empty){margin-bottom:18px}
   .hgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
   .hcard{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:13px 15px}
   .hcard .hval{font-size:22px;font-weight:700;line-height:1.1}
@@ -923,6 +932,26 @@
   .b.high{background:rgba(248,113,113,.16);color:#fca5a5} .b.medium{background:rgba(251,191,36,.16);color:#fcd34d}
   .b.low{background:rgba(154,157,171,.16);color:var(--muted)} .b.ui{background:rgba(167,139,250,.16);color:#c4b5fd} .b.bug{background:rgba(248,113,113,.16);color:#fca5a5}
   .empty{color:var(--dim);font-size:12px;text-align:center;padding:22px 0}
+  /* Fleet river (CXA-F233): the cross-project live activity stream. */
+  .river-sel{background:var(--card2);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:7px 10px;font-family:inherit;font-size:12.5px;font-weight:600;cursor:pointer;transition:border-color .15s}
+  .river-sel:focus{outline:none;border-color:var(--accent)}
+  .riv-proj{display:flex;align-items:center;gap:9px;padding:8px 4px;border-bottom:1px solid var(--border);min-width:0}
+  .riv-proj:last-child{border-bottom:none}
+  .riv-pname{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .riv-alias{background:var(--accentbg);color:var(--accent2);font-size:10px;font-weight:600;padding:2px 7px;border-radius:6px}
+  .riv-phase{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .riv-online{font-size:11px;color:var(--muted);white-space:nowrap}
+  .riv-alert{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;background:color-mix(in srgb,var(--red) 16%,transparent);color:var(--red);padding:2px 8px;border-radius:20px;white-space:nowrap}
+  .riv-insuff{font-size:11px;color:var(--dim);font-style:italic;white-space:nowrap}
+  .riv-row{display:flex;gap:14px;align-items:flex-start;padding:6px 0;border-bottom:1px solid var(--border)}
+  .riv-row:last-child{border-bottom:none}
+  .riv-row.riv-needs{border-left:3px solid var(--red);padding-left:9px}
+  .riv-who{font-weight:600}
+  .riv-projtag{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;color:var(--muted);background:var(--card2);border-radius:20px;padding:2px 8px;white-space:nowrap}
+  .riv-empty{text-align:center;padding:34px 16px}
+  .riv-empty i{font-size:34px;color:var(--accent2);opacity:.7}
+  .riv-empty-t{font-size:15px;font-weight:600;color:var(--muted);margin:10px 0 4px}
+  .riv-empty-s{font-size:12.5px;color:var(--dim)}
   .filters{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;align-items:center}
   .fchip{background:var(--card);border:1px solid var(--border);border-radius:20px;padding:6px 13px;font-size:12px;color:var(--muted);cursor:pointer;font-weight:500}
   .seg{display:inline-flex;background:var(--card2);border:1px solid var(--border2);border-radius:10px;padding:3px;gap:2px}
@@ -1049,6 +1078,33 @@
   .cov-empty i{font-size:34px;color:var(--accent);opacity:.7}
   .cov-empty-t{margin-top:8px;font-size:15px;font-weight:600;color:var(--muted)}
   .cov-empty-s{margin-top:4px;font-size:12.5px;color:var(--dim)}
+  /* Evidence forensics pane (CXA-F241): per-gate proof inspection. */
+  .fglist{display:flex;flex-direction:column;gap:10px;margin-top:8px}
+  .fg-pair{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:8px;align-items:start}
+  .fg-pair .fg-gate{margin:0}
+  .fg-gate{background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:8px}
+  .fg-gate-h{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px}
+  .fg-gate-id{font-size:10px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--accent2);background:var(--accentbg);border-radius:20px;padding:2px 9px}
+  .fg-gate-sub{font-size:11.5px;color:var(--dim);font-family:ui-monospace,Menlo,monospace}
+  .fg-visit{font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:var(--muted)}
+  .fg-none{font-size:12px;color:var(--dim);font-style:italic}
+  .fg-item{background:var(--card);border:1px solid var(--border);border-radius:9px;padding:8px 11px;transition:border-color .15s,background .15s}
+  .fg-item.expandable{cursor:pointer}
+  .fg-item.expandable:hover{background:var(--hover)}
+  .fg-row{display:flex;gap:8px;align-items:center;min-width:0}
+  .fg-row>i{flex:none;font-size:15px}
+  .fg-kind{flex:none;font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase}
+  .fg-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;color:var(--text);font-weight:600}
+  .fg-when{flex:none;font-size:11px;color:var(--dim);font-family:ui-monospace,Menlo,monospace}
+  .fg-chev{flex:none;color:var(--dim);transition:transform .15s}
+  .fg-item.open .fg-chev{transform:rotate(90deg)}
+  .fg-prov{margin-top:4px;font-size:11.5px;color:var(--muted)}
+  .fg-pre{display:none;margin-top:7px;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:9px 11px;font-family:ui-monospace,Menlo,monospace;font-size:11.5px;line-height:1.55;color:var(--text);white-space:pre-wrap;word-break:break-word;max-height:340px;overflow:auto}
+  .fg-item.open .fg-pre{display:block}
+  .fg-shot{display:block;margin-top:7px;max-width:100%;max-height:420px;border:1px solid var(--border);border-radius:8px}
+  .fg-missing{display:flex;gap:7px;align-items:flex-start;margin-top:7px;font-size:12px;color:var(--amber);background:color-mix(in srgb,var(--amber) 9%,transparent);border:1px solid color-mix(in srgb,var(--amber) 55%,transparent);border-radius:8px;padding:7px 10px}
+  .fg-path{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;word-break:break-all}
+  .fg-waiver{display:flex;gap:7px;align-items:flex-start;font-size:12.5px;color:var(--text);background:color-mix(in srgb,var(--amber) 9%,transparent);border-left:3px solid var(--amber);border-radius:8px;padding:7px 10px;line-height:1.55}
   .tcitem{display:flex;flex-direction:column;gap:6px;background:var(--card2);border:1px solid var(--border);border-radius:9px;padding:9px 11px}
   .tcrow{display:flex;gap:8px;align-items:center}
   .tcrow>i{font-size:15px;flex:none}
@@ -1216,7 +1272,10 @@
   .cal-wrap .cal-hdr .cal-dhdr .gd .dn{font-size:20px;font-weight:800;line-height:1}
   .cal-wrap.day .cal-hdr .cal-dhdr .gd{text-align:left;padding:8px 12px;font-size:13px}
   .cal-wrap.day .cal-hdr .cal-dhdr .gd .dn{font-size:24px}
-  .cal-wrap .cal-scroll{overflow-y:auto;max-height:calc(100vh - 260px);position:relative;display:flex}
+  /* padding-top clears the first hour label: .ghour sits 7px ABOVE its
+     gridline (top:-7px), so without headroom "00:00" clips under the day
+     header. Applies to both flex children, so labels stay line-aligned. */
+  .cal-wrap .cal-scroll{overflow-y:auto;max-height:calc(100vh - 260px);position:relative;display:flex;padding-top:9px}
   .cal-wrap .cal-scroll .cal-ghdr{width:50px;flex:none;position:sticky;left:0;z-index:1;background:var(--card)}
   .cal-wrap .cal-scroll .cal-ghdr .ghour{height:60px;display:flex;align-items:flex-start;justify-content:flex-end;padding:0 6px;font-size:10px;color:var(--dim);font-weight:500;position:relative;top:-7px}
   .cal-wrap .cal-scroll .cal-body{flex:1;display:flex;position:relative;min-height:1440px}
@@ -1364,6 +1423,9 @@
   .wssec{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--dim);margin-bottom:12px}
   .wshead{display:flex;align-items:center;justify-content:space-between}
   .wsgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:14px}
+  /* An empty-state inside the grid must span the full row, not sit squeezed
+     into the first ~250px column looking like a stray label. */
+  .wsgrid .empty{grid-column:1/-1}
   .wscard{border:1px solid var(--border);border-radius:15px;background:var(--card);padding:17px;cursor:pointer;transition:border-color .15s,transform .15s,box-shadow .15s}
   .wscard:hover{border-color:var(--accent2);transform:translateY(-3px);box-shadow:0 12px 30px rgba(0,0,0,.22)}
   .wsc-h{display:flex;align-items:center;gap:8px}
@@ -1590,10 +1652,10 @@
 body.viewer .ctlrow, body.viewer .projadd, body.viewer .pi-del, body.viewer .ticket-actions { display: none !important; }
 body:not(.admin) .admin-only { display: none !important; }
 body:not(.manage) .manage-only { display: none !important; }
-.pri{background:var(--accent);color:#fff;border:1px solid transparent;border-radius:9px;padding:9px 14px;font-size:13px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:6px;font-family:inherit}
+.pri{background:var(--pri-bg);color:#fff;border:1px solid transparent;border-radius:9px;padding:9px 14px;font-size:13px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:6px;font-family:inherit}
 .add-user-btn{padding:8px 16px;font-size:12.5px}
 .invite-btn{padding:9px 22px;font-size:13.5px}
-.pri:hover{background:var(--accenth)}
+.pri:hover{background:var(--pri-bgh)}
 .userbox{display:none;align-items:center;gap:9px;margin-top:auto;padding:8px 9px;background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--border2);border-radius:12px}
 .uavatar{width:34px;height:34px;flex-shrink:0;border-radius:9px;overflow:hidden;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));transition:box-shadow .15s,transform .15s}
 .uavatar:hover{box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 33%,transparent);transform:translateY(-1px)}
@@ -1770,6 +1832,23 @@ textarea.np-in{resize:vertical;line-height:1.5}
 .spq-chip{font-size:11px;font-family:ui-monospace,Menlo,monospace;border:1px solid var(--border2);border-radius:6px;padding:2px 7px;cursor:pointer;display:inline-flex;align-items:center;gap:5px}
 .spq-chip:hover{border-color:var(--accent2)}
 .spq-chip .ti-x{font-size:10px;color:var(--dim)} .spq-chip .ti-x:hover{color:var(--red)}
+/* Jira-style sprint sections: header row + full ticket rows */
+.spq-sec{padding:10px 12px}
+.spq-chev{background:none;border:none;color:var(--dim);cursor:pointer;padding:2px;display:inline-flex;align-items:center;font-size:14px;border-radius:6px}
+.spq-chev:hover{color:var(--fg);background:var(--border2)}
+.spq-rows{margin-top:8px;border-top:1px solid var(--border2)}
+.spq-row{display:flex;align-items:center;gap:8px;padding:6px 4px;border-bottom:1px solid var(--border2);cursor:pointer;font-size:12.5px;min-width:0}
+.spq-row:last-child{border-bottom:none}
+.spq-row:hover{background:var(--accentbg)}
+.spq-row.spq-done .spq-title{color:var(--dim);text-decoration:line-through}
+.spq-type{flex:none;display:inline-flex;font-size:13px;width:18px;justify-content:center}
+.spq-id{flex:none;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--muted)}
+.spq-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
+.spq-pchip{flex:none;font-size:10px;font-weight:600;border-radius:20px;padding:1px 8px}
+.spq-schip{flex:none;font-size:10px;color:var(--muted);border:1px solid var(--border2);border-radius:20px;padding:1px 8px;text-transform:capitalize}
+.spq-schip.ok{color:var(--green);border-color:color-mix(in srgb,var(--green) 40%,transparent)}
+.spq-row .sp-scope{flex:none;opacity:0;transition:opacity .12s}
+.spq-row:hover .sp-scope{opacity:1}
 
 /* Agent card engine-health line (Agents view). */
 .ag-health{margin-top:6px;font-size:11px;color:var(--amber);display:flex;gap:5px;align-items:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

@@ -75,6 +75,28 @@ pub fn parse_config(text: &str) -> Result<Config, ConfigParseError> {
         }
     }
 
+    // Artifact-registry anchor (CXA-F224): the `artifacts` section carries its
+    // own schema version, anchored by ARTIFACT_SCHEMA_VERSION — the same
+    // fail-closed posture as the document-level anchor above. A registry
+    // written by a newer build is refused, naming the field, never silently
+    // re-defaulted into this build's view of the registry.
+    if let Some(artifact_schema) = header
+        .get("artifacts")
+        .and_then(|artifacts| artifacts.get("schema_version"))
+        .and_then(serde_json::Value::as_u64)
+    {
+        if artifact_schema > u64::from(crate::artifacts::ARTIFACT_SCHEMA_VERSION) {
+            return Err(ConfigParseError {
+                field: "artifacts.schema_version".to_owned(),
+                detail: format!(
+                    "persisted artifact schema_version {artifact_schema} is newer than \
+                     supported {}; upgrade coxagent",
+                    crate::artifacts::ARTIFACT_SCHEMA_VERSION
+                ),
+            });
+        }
+    }
+
     serde_path_to_error::deserialize(deserializer).map_err(|err| {
         let path = err.path().to_string();
         let inner = err.into_inner();

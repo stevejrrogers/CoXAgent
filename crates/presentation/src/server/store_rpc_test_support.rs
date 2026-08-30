@@ -289,12 +289,14 @@ pub(super) async fn app_with(
         config_path: work.path().join("coxagent.json"),
         engine: Arc::new(UnusedEngine),
         work_dir: work.path().to_path_buf(),
+        outbox: None,
         budget: Arc::new(Mutex::new(BudgetCaps::default())),
         context_path: work.path().join("project_context.md"),
         forge: None,
         deploy: None,
         storage: None,
         files: None,
+        deps_discovery: None,
     };
     build_state(
         vec![handle],
