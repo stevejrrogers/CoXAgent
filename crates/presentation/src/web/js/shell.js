@@ -235,6 +235,10 @@ async function teamAnalyze(){
       if(p.complexity)document.getElementById("nt-cx").value=p.complexity;
       document.getElementById("nt-ui").checked=!!p.has_ui;
       if(p.acceptance_criteria&&p.acceptance_criteria.length)document.getElementById("nt-ac").value=p.acceptance_criteria.join("\n");
+      // The refine replaced the idea — an earlier feasibility verdict no
+      // longer describes what is on screen; drop it rather than leave a
+      // stale estimate contradicting the rewritten fields.
+      const fp=document.getElementById("nt-feas");fp.style.display="none";fp.innerHTML="";
       const nb=document.getElementById("nt-notes");
       if(p.team_notes&&p.team_notes.length){
         nb.style.display="block";
@@ -301,6 +305,9 @@ async function checkFeasibility(){
           ?`${f.prior_art} similar ticket${f.prior_art===1?" has":"s have"} already shipped here — the team knows this shape.`
           :"Nothing of this shape has shipped here yet — filing it opens new ground for the team.";
         const gaps=(f.gaps&&f.gaps.length)?` Gaps as filed: ${f.gaps.map(g=>esc(g)).join("; ")}.`:"";
+        // Force-show: the dialog may have been closed and reopened while the
+        // request was in flight, which resets the panel to hidden.
+        panel.style.display="block";
         panel.innerHTML=`<div class="tk-notes-h"><i class="ti ${ic}" style="color:${col}"></i> ${v} <span style="color:var(--dim);font-weight:400">· filing risk ${f.score}/100</span></div><div style="font-size:12.5px;line-height:1.55">${prior}${gaps}</div>`;
       }
     }

@@ -307,7 +307,7 @@ const UX_WORDS: &[&str] = &[
 /// that exist before a design: complexity, criteria presence, UI, the title's
 /// routine-ness, discounted by prior art.
 #[must_use]
-pub fn assess_feasibility(t: &RefinedTicket, prior_art: usize) -> Feasibility {
+fn assess_feasibility(t: &RefinedTicket, prior_art: usize) -> Feasibility {
     let mut score: i32 = 20;
     let mut gaps: Vec<String> = Vec::new();
 
@@ -383,7 +383,7 @@ fn idea_shape(t: &RefinedTicket) -> String {
 /// How many tickets of the same shape already reached a terminal good state
 /// (Done / Verified / Documented). PURE over the shipped history.
 #[must_use]
-pub fn count_prior_art(t: &RefinedTicket, shipped: &[Ticket]) -> usize {
+fn count_prior_art(t: &RefinedTicket, shipped: &[Ticket]) -> usize {
     let key = idea_shape(t);
     shipped
         .iter()
@@ -444,31 +444,28 @@ mod tests {
             )
             .expect("design");
         }
-        match kind {
-            TicketType::Bug => {
-                // A bug with no criteria verifies freely (nothing uncovered).
-                let steps: &[Status] = match status {
-                    Status::Fixed => &[Status::InProgress, Status::Fixed],
-                    Status::Verified => &[Status::InProgress, Status::Fixed, Status::Verified],
-                    _ => &[],
-                };
-                for to in steps {
-                    t.transition_to(Role::System, *to).expect("legal edge");
-                }
+        if kind == TicketType::Bug {
+            // A bug with no criteria verifies freely (nothing uncovered).
+            let steps: &[Status] = match status {
+                Status::Fixed => &[Status::InProgress, Status::Fixed],
+                Status::Verified => &[Status::InProgress, Status::Fixed, Status::Verified],
+                _ => &[],
+            };
+            for to in steps {
+                t.transition_to(Role::System, *to).expect("legal edge");
             }
-            _ => {
-                let steps: &[Status] = match status {
-                    Status::Ready => &[Status::Ready],
-                    Status::InProgress => &[Status::Ready, Status::InProgress],
-                    Status::Done => &[Status::Ready, Status::InProgress, Status::Done],
-                    Status::Documented => {
-                        &[Status::Ready, Status::InProgress, Status::Done, Status::Documented]
-                    }
-                    _ => &[],
-                };
-                for to in steps {
-                    t.transition_to(Role::System, *to).expect("legal edge");
+        } else {
+            let steps: &[Status] = match status {
+                Status::Ready => &[Status::Ready],
+                Status::InProgress => &[Status::Ready, Status::InProgress],
+                Status::Done => &[Status::Ready, Status::InProgress, Status::Done],
+                Status::Documented => {
+                    &[Status::Ready, Status::InProgress, Status::Done, Status::Documented]
                 }
+                _ => &[],
+            };
+            for to in steps {
+                t.transition_to(Role::System, *to).expect("legal edge");
             }
         }
         t
@@ -565,5 +562,104 @@ mod tests {
         });
         let parsed: RefinedTicket = serde_json::from_value(without).expect("old payload");
         assert!(parsed.feasibility.is_none());
+    }
+
+    // --- execute() wiring: the same MemStore/CannedEngine doubles the sibling
+    // --- use cases test with — in-process, no server, no harness.
+
+    use crate::ports::outbound::{AgentOutcome, SandboxStatus};
+    use crate::state::ProjectState;
+    use crate::PortError;
+    use async_trait::async_trait;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct MemStore {
+        state: Mutex<ProjectState>,
+    }
+
+    #[async_trait]
+    impl StateStorePort for MemStore {
+        async fn load(&self) -> Result<ProjectState, PortError> {
+            Ok(self.state.lock().expect("lock").clone())
+        }
+        async fn save(&self, _state: &ProjectState) -> Result<(), PortError> {
+            Err(PortError::Backend("read-only double".to_owned()))
+        }
+    }
+
+    /// A store whose every load fails — the degradation path for the preview.
+    struct DownStore;
+
+    #[async_trait]
+    impl StateStorePort for DownStore {
+        async fn load(&self) -> Result<ProjectState, PortError> {
+            Err(PortError::Backend("store down".to_owned()))
+        }
+        async fn save(&self, _state: &ProjectState) -> Result<(), PortError> {
+            Err(PortError::Backend("store down".to_owned()))
+        }
+    }
+
+    struct CannedEngine {
+        stdout: String,
+    }
+
+    #[async_trait]
+    impl AgentEnginePort for CannedEngine {
+        fn id(&self) -> &'static str {
+            "canned"
+        }
+        async fn run(&self, _req: AgentRequest) -> Result<AgentOutcome, PortError> {
+            Ok(AgentOutcome {
+                stdout: self.stdout.clone(),
+                stderr: String::new(),
+                exit_code: Some(0),
+                usage: None,
+                trace: String::new(),
+                session_id: None,
+                sandbox: SandboxStatus::default(),
+                engine: String::new(),
+            })
+        }
+    }
+
+    fn canned_ba_json() -> String {
+        r#"{"title":"Add a password reset screen","description":"users are locked out",
+            "priority":"high","complexity":"medium","has_ui":true,
+            "acceptance_criteria":["Reset email sends"],
+            "team_notes":[{"role":"SA","note":"one endpoint"}]}"#
+            .to_owned()
+    }
+
+    #[tokio::test]
+    async fn execute_attaches_a_feasibility_verdict_from_store_prior_art() {
+        let mut state = ProjectState::default();
+        state
+            .tickets
+            .push(shipped("Add a login screen", TicketType::Feature, Complexity::Medium, Status::Done));
+        let store = Arc::new(MemStore {
+            state: Mutex::new(state),
+        });
+        let engine = Arc::new(CannedEngine {
+            stdout: canned_ba_json(),
+        });
+        let uc = RefineTicketUseCase::new(store, engine, PathBuf::from("/tmp"));
+        let t = uc.execute("users locked out", "").await.expect("refine");
+        let f = t.feasibility.expect("preview attached");
+        assert_eq!(f.prior_art, 1, "the Done feature/medium ticket is prior art");
+        assert_eq!(f.lane, FeasLane::Ask, "medium UI idea with one criterion still asks");
+        assert!(f.score > 0 && f.score <= 100);
+    }
+
+    #[tokio::test]
+    async fn execute_degrades_to_no_prior_art_when_the_store_is_down() {
+        let engine = Arc::new(CannedEngine {
+            stdout: canned_ba_json(),
+        });
+        let uc = RefineTicketUseCase::new(Arc::new(DownStore), engine, PathBuf::from("/tmp"));
+        let t = uc.execute("users locked out", "").await.expect("refine");
+        let f = t.feasibility.expect("preview still attached");
+        assert_eq!(f.prior_art, 0, "a dead store must not fail the refine");
     }
 }
