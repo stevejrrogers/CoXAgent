@@ -2035,7 +2035,11 @@ async function showTicket(id){
         // CXA-F251: the criterion's verdict trajectory across send-back
         // cycles — churn the raw per-cycle badge above cannot show.
         const traj=tcTrajHtml(t,tc);
-        return `<div class="tcitem"><div class="tcrow"><i class="ti ${badge[1]}" style="color:${badge[0]}"></i><span style="color:${badge[0]};font-weight:700;font-size:11px;text-transform:uppercase">${badge[2]}</span><div class="tcdesc">${esc(tc.description)}</div></div>${traj}${img}${note}</div>`;
+        // CXA-F248: the criterion's resolved live-reproduction URL (recorded by
+        // the TEST verdict flow). Rendered ONLY when present — a case with no
+        // resolved route gets no link, never a guessed href.
+        const rep=tc.evidence&&tc.evidence.repro?`<a class="tcrepro" href="${esc(tc.evidence.repro)}" target="_blank" rel="noopener" title="Open the live page that demonstrates this criterion"><i class="ti ti-external-link"></i> Live repro</a>`:'';
+        return `<div class="tcitem"><div class="tcrow"><i class="ti ${badge[1]}" style="color:${badge[0]}"></i><span style="color:${badge[0]};font-weight:700;font-size:11px;text-transform:uppercase">${badge[2]}</span><div class="tcdesc">${esc(tc.description)}</div></div>${traj}${img}${note}${rep}</div>`;
       }).join("")}</div></div>`;})()
   if(tech)h+=`<div class="mrow" style="display:block;border:none"><span class="lbl">Technical spec</span><pre>${esc(tech.approach)}\nfiles: ${esc((tech.files||[]).join(", "))}\napi: ${esc(tech.api_contract)}\ntest: ${esc(tech.test_plan)}</pre></div>`;
   if(ux)h+=`<div class="mrow" style="display:block;border:none"><span class="lbl">UI/UX spec</span><pre>${esc(ux.user_flow)}\nscreens: ${esc((ux.screens||[]).join(", "))}</pre></div>`;
