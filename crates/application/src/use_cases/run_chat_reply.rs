@@ -169,6 +169,12 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         if self.try_gate_command(msg).await {
             return Ok(());
         }
+        // Chat → ticket bridge: a channel message that names a ticket is a
+        // decision or clarification about it (SM scoping answers, PO calls).
+        // Journal it on that ticket so the NEXT dev/test run reads it in its
+        // briefing — otherwise the chốt lives only in chat where the agent
+        // doing the work never looks.
+        self.journal_ticket_mentions("CHAT", msg).await;
         let persona = route_persona(&msg.to_lowercase());
         let context = self.context().await;
         // A broad or strategic question deserves the TEAM, not one voice:
@@ -927,6 +933,32 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
 
     /// Create a ticket from a `<title> :: <description>` payload and confirm it in
     /// the channel, so a chat request turns into tracked, actionable work.
+    /// Append `msg` (trimmed) to the journal of every EXISTING ticket whose id
+    /// appears in it, so per-ticket briefings pick up decisions made in chat.
+    async fn journal_ticket_mentions(&self, who: &str, msg: &str) {
+        let Ok(state) = self.store.load().await else {
+            return;
+        };
+        let ids: Vec<String> = state
+            .tickets
+            .iter()
+            .map(|t| t.id().to_string())
+            .filter(|id| msg.contains(id.as_str()))
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        let note: String = msg.chars().take(500).collect();
+        let who = who.to_owned();
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+            for id in &ids {
+                s.journal_note(id, &format!("{who}: {note}"));
+            }
+            Ok(())
+        })
+        .await;
+    }
+
     async fn file_ticket(&self, kind: coxagent_domain::TicketType, payload: &str, author: &str) {
         use coxagent_domain::ticket::{Complexity, Priority};
         let (title, desc, prio, to_sprint) = parse_ticket_payload(payload);
@@ -1268,6 +1300,10 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
     }
 
     async fn post(&self, author: &str, body: &str) {
+        // Replies that name a ticket carry scoping decisions the next dev/test
+        // run must see — journal them on that ticket (same bridge as inbound
+        // messages; journal_note caps the tail so this cannot grow unbounded).
+        self.journal_ticket_mentions(author, body).await;
         if let Ok(mut state) = self.store.load().await {
             match &self.reply_channel {
                 // A channel is a conversation, not a report. Short answers
