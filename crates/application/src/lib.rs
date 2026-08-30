@@ -17,6 +17,7 @@ pub mod faults;
 pub mod metrics;
 pub mod metrics_brakes;
 pub mod metrics_burndown;
+pub mod metrics_gate;
 pub mod metrics_governance;
 pub mod metrics_health;
 pub mod metrics_registry;
@@ -41,9 +42,9 @@ mod release_candidates_tdd_tests;
 pub use artifacts::{ArtifactRegistry, ARTIFACT_SCHEMA_VERSION};
 pub use auth::{AuthPort, AuthRole, AuthUser, LoginResult, TokenInfo};
 pub use config::{
-    ArtifactsConfig, BudgetCaps, Config, CoverageConfig, DepsConfig, DeployConfig, EngineChoice,
-    EngineKind,
-    EngineMapping, LiveBudget, Mode, PolicyConfig, WorkflowConfig, CONFIG_SCHEMA_VERSION,
+    ArtifactsConfig, BudgetCaps, Config, CoverageConfig, DeployConfig, DepsConfig, EngineChoice,
+    EngineKind, EngineMapping, LiveBudget, Mode, PolicyConfig, WorkflowConfig,
+    CONFIG_SCHEMA_VERSION,
 };
 pub use config_parse::{parse_config, ConfigParseError};
 pub use error::{AppError, PortError};
