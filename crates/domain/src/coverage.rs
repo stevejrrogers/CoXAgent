@@ -123,6 +123,7 @@ mod tests {
             status,
             evidence: None,
             sources: Vec::new(),
+            history: Vec::new(),
         }
     }
 
