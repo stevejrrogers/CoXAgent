@@ -73,6 +73,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     }
     pub(super) async fn collect_ui_evidence(&self, ticket: &TicketId, port: u16) {
         let key = ticket.to_string();
+        // The resolved live link (CXA-F246), derived from the deploy config —
+        // recorded with the evidence below whatever the capture answers.
+        let repro = self.config.deploy.live_repro_url();
         let shot = match &self.shot {
             Some(shot) => shot.capture(&format!("http://127.0.0.1:{port}/")).await,
             None => None,
@@ -95,6 +98,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             _ => None,
         };
         let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+            // Per-ticket live link (CXA-F246): state.repro_urls[ticket]
+            // records the exact base the capture ran against; `None` records
+            // nothing — an unresolvable link is absent, never fabricated.
+            if let Some(url) = repro.as_deref() {
+                s.repro_urls.insert(key.clone(), url.to_owned());
+            }
             match &uploaded {
                 Some((url, size)) => {
                     s.add_evidence_for(
@@ -134,8 +143,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     }
     pub(super) async fn collect_api_evidence(&self, ticket: &TicketId, port: u16) {
         let key = ticket.to_string();
+        // Same per-ticket ledger write as the UI collector (CXA-F246): the
+        // resolved link is recorded whatever the probe answers.
+        let repro = self.config.deploy.live_repro_url();
         let Some(probe) = &self.probe else {
             let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+                if let Some(url) = repro.as_deref() {
+                    s.repro_urls.insert(key.clone(), url.to_owned());
+                }
                 s.add_evidence_for(
                     &key,
                     "waived",
@@ -159,6 +174,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             }
         }
         let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+            if let Some(url) = repro.as_deref() {
+                s.repro_urls.insert(key.clone(), url.to_owned());
+            }
             match &proof {
                 Some((url, p)) => {
                     let detail = format!("GET {url}\nHTTP {}\n{}", p.status, p.body_snippet.trim());

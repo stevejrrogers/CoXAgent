@@ -686,6 +686,21 @@ fn default_migration_detection_paths() -> Vec<String> {
     vec!["migrations".to_owned()]
 }
 
+impl DeployConfig {
+    /// The live reproduction base URL for this project's deployed app
+    /// (CXA-F246): the same `http://127.0.0.1:{host_port}/` base the
+    /// evidence-capture funnel shoots against, derived purely from this
+    /// config — no IO, so any verification surface can resolve it. `None`
+    /// when no `host_port` is configured: an unresolvable link is absent,
+    /// never fabricated. Delegates to
+    /// [`crate::repro_url::compute_live_repro_url`] so the URL format has
+    /// exactly one definition.
+    #[must_use]
+    pub fn live_repro_url(&self) -> Option<String> {
+        crate::repro_url::compute_live_repro_url(self.host_port)
+    }
+}
+
 impl Default for DeployConfig {
     fn default() -> Self {
         Self {
@@ -1170,5 +1185,32 @@ mod tests {
         )
         .expect("floor config");
         assert_eq!(cfg.workflow.bug_burn_floor, Some(Priority::Low));
+    }
+
+    /// CXA-F246 AC1: the live reproduction URL derives purely from the deploy
+    /// config — `Some(http://127.0.0.1:{host_port}/)` when the port is set
+    /// (the exact base qa_evidence captures against), `None` when absent.
+    #[test]
+    fn live_repro_url_resolves_the_capture_base_when_host_port_is_set() {
+        let deploy = DeployConfig {
+            host_port: Some(8101),
+            ..DeployConfig::default()
+        };
+        assert_eq!(
+            deploy.live_repro_url().as_deref(),
+            Some("http://127.0.0.1:8101/"),
+            "a set deploy.host_port resolves the capture-base URL"
+        );
+    }
+
+    /// CXA-F246 AC1: no configured `host_port` means nothing resolvable — the
+    /// gate is off, and the URL is absent rather than fabricated.
+    #[test]
+    fn live_repro_url_is_none_without_a_host_port() {
+        assert_eq!(
+            DeployConfig::default().live_repro_url(),
+            None,
+            "an absent deploy.host_port resolves nothing"
+        );
     }
 }

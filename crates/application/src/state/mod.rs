@@ -319,6 +319,15 @@ pub struct ProjectState {
     /// only reaches Verified with context-appropriate proof attached.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub ticket_evidence: std::collections::BTreeMap<String, Vec<Evidence>>,
+    /// Resolved live reproduction URL per shipped ticket (CXA-F246): ticket id
+    /// → the `http://127.0.0.1:{host_port}/` link the evidence-capture funnel
+    /// recorded when it collected the ticket's DoD evidence, so every verify
+    /// surface renders one clickable link without re-deriving it from config.
+    /// serde-defaulted (the `ticket_failures` additive precedent) so
+    /// pre-change snapshots load to an empty map — no migration, no schema
+    /// bump.
+    #[serde(default)]
+    pub repro_urls: std::collections::BTreeMap<String, String>,
     /// True while the team is in merge-queue RECOVERY: the open-PR count blew
     /// past twice the WIP limit, so cycles do merge/conflict work only until
     /// the queue is back under the limit.
@@ -558,6 +567,7 @@ impl Default for ProjectState {
             tuning_overrides: std::collections::BTreeMap::new(),
             tuning_history: Vec::new(),
             ticket_evidence: std::collections::BTreeMap::new(),
+            repro_urls: std::collections::BTreeMap::new(),
             drain_notice_sprint: 0,
             ticket_fail_attempts: std::collections::BTreeMap::new(),
             pr_rescue_attempts: std::collections::BTreeMap::new(),

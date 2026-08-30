@@ -101,12 +101,16 @@ pub(super) async fn inbox_ep(
             // right now, from the one resolvability source the F242 design
             // pins (deploy.host_port — the base qa_evidence captures against).
             // Null when no port is configured; additive to the card.
+            // `repro_url` (CXA-F246) is the per-ticket link the evidence
+            // funnel recorded at collection time — the exact base that
+            // ticket's evidence was captured against, null when none.
             items.push(serde_json::json!({
                 "kind": "verify", "ticket": id, "title": t.title(),
                 "role": "QA", "can_act": my_role.can_verify(),
                 "reproduce_url": coxagent_application::repro_url::compute_live_repro_url(
                     cfg.deploy.host_port,
                 ),
+                "repro_url": state.repro_urls.get(&id),
             }));
             continue;
         }
