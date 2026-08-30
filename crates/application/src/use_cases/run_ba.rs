@@ -150,6 +150,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
             "",
         )
         .await;
+        // Hoisted out of the task_prompt's format! args (clippy: format in
+        // format args) — same single allocation the inner format! made.
         let backlog_and_surface = format!("{backlog_block}{surface_block}");
         let request = AgentRequest {
             role: Role::Ba,
