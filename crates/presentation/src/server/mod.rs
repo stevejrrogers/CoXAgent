@@ -118,6 +118,13 @@ const XTERM_FIT_JS: &str = include_str!("../web/xterm-addon-fit.min.js");
 // load order (they share one global scope; the split is for merge-conflict
 // surface, not modularity). Embedded like everything else: one binary.
 const APP_CSS: &str = include_str!("../web/app.css");
+// Vendored Tabler icons webfont (pinned v3.24.0, MIT) — embedded for the same
+// reason as Mermaid above: deployed containers have no CDN egress, and a
+// webfont that fails to load leaves every `.ti-*` glyph with zero ink (the
+// icon characters exist only as CSS `content`, so there is no text fallback).
+// CXA-B112: the sign-in CTA rendered text-only in deploys for exactly this.
+const TABLER_CSS: &str = include_str!("../web/tabler-icons.min.css");
+const TABLER_WOFF2: &[u8] = include_bytes!("../web/fonts/tabler-icons.woff2");
 const APP_JS: &[(&str, &str)] = &[
     // Vendored Mermaid (pinned v11 UMD build) so Wiki pages render
     // sequence/flow diagrams offline — the hub never loads from a CDN.
@@ -258,10 +265,10 @@ struct AppState {
     docs_editors: Arc<std::sync::Mutex<HashMap<String, HashMap<String, usize>>>>,
     order: Arc<RwLock<Vec<String>>>,
     /// Registered projects that could not be loaded, kept so the listing can
-    /// name them and their reason (COX-B043). Fixed at boot: a config repaired
-    /// while the hub runs is picked up by restarting it, which is what loading
-    /// a project takes anyway.
-    broken: Arc<Vec<BrokenProject>>,
+    /// name them and their reason (COX-B043). Live, not frozen at boot: the
+    /// composition root retries failed loads (CXA-B114) and admits a
+    /// recovered project, whose entry is cleared here the moment it lands.
+    broken: Arc<RwLock<Vec<BrokenProject>>>,
     factory: Option<ProjectFactory>,
     auth: Option<Arc<dyn AuthPort>>,
     audit: Arc<dyn AuditPort>,
@@ -548,6 +555,11 @@ pub struct HubExtras {
     /// `coxagent.json`), so the dashboard can show why one is missing instead
     /// of silently omitting it — COX-B043.
     pub broken: Vec<BrokenProject>,
+    /// Inbox for projects the composition root recovered after boot
+    /// (CXA-B114): a failed store connect is retried in the background, and
+    /// when it succeeds the live handle arrives here to join the registry
+    /// without a restart.
+    pub recoveries: Option<tokio::sync::mpsc::Receiver<ProjectHandle>>,
 }
 
 /// Warn threshold for a space's budget, matching the dashboard's own amber one
@@ -576,14 +588,24 @@ pub async fn serve_full(
     projects: Vec<ProjectHandle>,
     port: u16,
     audit: Arc<dyn AuditPort>,
-    extras: HubExtras,
+    mut extras: HubExtras,
 ) -> std::io::Result<()> {
     let backup_dir = extras
         .hub_dir
         .clone()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("backups");
+    // Taken out before build_state (which consumes the rest of `extras`): a
+    // mpsc Receiver cannot live inside the Clone-able AppState — it is
+    // drained by exactly one background task instead.
+    let recoveries = extras.recoveries.take();
     let state = build_state(projects, audit, extras).await;
+    // CXA-B114: a project that failed to load at boot (e.g. the DB was still
+    // starting) is rebuilt by the composition root; when it recovers, the
+    // handle arrives here and joins the live registry — no restart.
+    if let Some(recoveries) = recoveries {
+        tokio::spawn(admit_recovered_projects(state.clone(), recoveries));
+    }
     tracing::info!("hub role: {:?}", hub_role());
     // Batch/watchdog loops belong to the knowledge role (and the all-in-one).
     if matches!(hub_role(), HubRole::All | HubRole::Knowledge) {
@@ -627,6 +649,14 @@ pub async fn serve_full(
         .route(
             "/assets/xterm-addon-fit.min.js",
             get(|| async { ([("content-type", "application/javascript")], XTERM_FIT_JS) }),
+        )
+        .route(
+            "/assets/tabler-icons.min.css",
+            get(|| async { ([("content-type", "text/css; charset=utf-8")], TABLER_CSS) }),
+        )
+        .route(
+            "/assets/fonts/tabler-icons.woff2",
+            get(|| async { ([("content-type", "font/woff2")], TABLER_WOFF2) }),
         )
         .route("/api/health", get(health))
         .route("/api/openapi.json", get(openapi_ep))
@@ -1064,6 +1094,7 @@ async fn index() -> impl IntoResponse {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
             APP_CSS.hash(&mut h);
+            TABLER_CSS.hash(&mut h);
             for (_, body) in APP_JS {
                 body.hash(&mut h);
             }
@@ -1072,20 +1103,26 @@ async fn index() -> impl IntoResponse {
         };
         INDEX_HTML
             .replace("/assets/app.css", &format!("/assets/app.css?v={v}"))
+            .replace(
+                "/assets/tabler-icons.min.css",
+                &format!("/assets/tabler-icons.min.css?v={v}"),
+            )
             .replace(".js\"></script>", &format!(".js?v={v}\"></script>"))
     });
     // Always revalidate so a rebuilt dashboard is picked up on reload (the SPA is
     // small; no-cache avoids stale UI after an upgrade).
     //
     // CSP + hardening headers. The dashboard uses inline <script>/<style> (a
-    // single embedded file) so 'unsafe-inline' is required there; the Inter font
-    // and Tabler icon webfont come from Google Fonts / jsDelivr, so those hosts
-    // are allow-listed for style/font. Everything else is locked to same-origin,
-    // WebSocket to self, images/fonts to data:, and framing is denied.
+    // single embedded file) so 'unsafe-inline' is required there; the Inter
+    // font still comes from Google Fonts, so that host is allow-listed for
+    // style/font. The Tabler icon webfont is vendored (served from 'self'),
+    // like Mermaid and xterm, so deploys without CDN egress still get icons.
+    // Everything else is locked to same-origin, WebSocket to self,
+    // images/fonts to data:, and framing is denied.
     const CSP: &str = "default-src 'self'; \
         script-src 'self' 'unsafe-inline'; \
-        style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; \
-        font-src 'self' data: https://fonts.gstatic.com https://cdn.jsdelivr.net; \
+        style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
+        font-src 'self' data: https://fonts.gstatic.com; \
         img-src 'self' data:; \
         connect-src 'self' ws: wss:; \
         object-src 'none'; base-uri 'self'; frame-ancestors 'none'";
@@ -1285,3 +1322,5 @@ mod store_rpc_guard_tests;
 mod store_rpc_stale_write_tests;
 #[cfg(test)]
 mod store_rpc_test_support;
+#[cfg(test)]
+mod ui_contrast_tests;

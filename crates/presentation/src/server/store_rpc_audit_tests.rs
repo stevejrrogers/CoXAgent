@@ -249,6 +249,12 @@ fn state_with_rolled_back_deploy_index() -> ProjectState {
 // that contract through the real wire shape: one healable class and two
 // unhealable ones (duplicated doc ids, a rolled-back deploy ordinal).
 
+/// A payload with dangling ticket-keyed references is no longer REFUSED at
+/// the write boundary: refusing bricked the hub on FIRST deploy (decades of
+/// legacy keys failed every save — see `gate_save` in the quarantine module),
+/// so the one safely-repairable class heals in place and the healed shape is
+/// what persists. The corruption must still never reach disk, and a healed
+/// save is not quarantined.
 #[tokio::test]
 async fn a_save_with_dangling_references_heals_at_the_write_boundary() {
     let (_dir, store) = store_seeded_with(&healthy_state());
@@ -271,18 +277,32 @@ async fn a_save_with_dangling_references_heals_at_the_write_boundary() {
         StatusCode::OK,
         "a dangling key has exactly one safe repair (drop it) — the boundary heals and saves"
     );
+    let doc: serde_json::Value = serde_json::from_str(&body_text(resp).await).expect("json body");
+    assert_eq!(doc["ok"], serde_json::json!(true));
 
-    // The persisted state is the healed one — healthy, no findings — and the
-    // ledger stays empty: healed saves are not quarantined.
+    // The persisted state is the healed shape: the orphaned key is gone.
+    let resp = post_store(router.clone(), "load", serde_json::json!({}), None, None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let state: serde_json::Value = serde_json::from_str(&body_text(resp).await).expect("state");
+    assert!(
+        state["ticket_evidence"].get("CXA-F999").is_none(),
+        "the dangling evidence entry must not survive the save"
+    );
+
+    // The audit reads clean against what actually persisted, and the ledger
+    // stays empty — healed saves are not quarantined (see `gate_save`).
     let resp = get_store_at(router, PID, Some("audit"), None, None).await;
     let doc: serde_json::Value = serde_json::from_str(&body_text(resp).await).expect("json body");
     assert_eq!(
         doc["healthy"],
         serde_json::json!(true),
-        "healed, not refused"
+        "persisted state is the healed shape"
     );
-    assert_eq!(doc["findings"], serde_json::json!([]));
-    assert_eq!(doc["quarantined"], serde_json::json!([]));
+    assert_eq!(
+        doc["quarantined"],
+        serde_json::json!([]),
+        "healed saves are not quarantined"
+    );
 }
 
 #[tokio::test]

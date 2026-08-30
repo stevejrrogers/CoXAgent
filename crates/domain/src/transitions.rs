@@ -9,6 +9,13 @@ use crate::kinds::{Role, Status, TicketType};
 /// Is `from -> to` a legal edge for this ticket type?
 #[must_use]
 pub fn transition_allowed(ticket_type: TicketType, from: Status, to: Status) -> bool {
+    // A no-op "transition" grants nothing and must be idempotent: DOCS
+    // re-marking a ticket Documented after a retried run is bookkeeping, not
+    // corruption, and rejecting it wedged the ticket (Documented -> Documented
+    // refused as "state is corrupt").
+    if from == to {
+        return true;
+    }
     use Status::{
         Documented, Done, Fixed, InProgress, OnHold, Open, Pending, Ready, Rejected, Verified,
     };
@@ -63,6 +70,10 @@ pub fn transition_allowed(ticket_type: TicketType, from: Status, to: Status) -> 
 /// and is always allowed for legal edges. `User` acts as a super-PO.
 #[must_use]
 pub fn can_transition(actor: Role, from: Status, to: Status) -> bool {
+    // Same-state writes are no-ops; any role may repeat what is already true.
+    if from == to {
+        return true;
+    }
     use Status::{
         Documented, Done, Fixed, InProgress, OnHold, Open, Pending, Ready, Rejected, Verified,
     };
@@ -126,6 +137,21 @@ pub fn field_permitted(actor: Role, field: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn same_state_transitions_are_idempotent_no_ops() {
+        // A retried DOCS run re-marking Documented (or any repeated write of
+        // the current status) is bookkeeping, not corruption.
+        for t in [TicketType::Feature, TicketType::Bug, TicketType::Chore] {
+            assert!(transition_allowed(t, Status::Documented, Status::Documented));
+            assert!(transition_allowed(t, Status::Open, Status::Open));
+        }
+        assert!(can_transition(
+            Role::Docs,
+            Status::Documented,
+            Status::Documented
+        ));
+    }
 
     #[test]
     fn ship_truth_demotion_edges_reopen_ghost_ships() {

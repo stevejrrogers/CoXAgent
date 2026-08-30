@@ -11,11 +11,10 @@ const SCAN_URL = `/api/projects/${PID}/deps/scan`;
 // A package pinned in e2e/package-lock.json, claimed to be a major behind.
 const PACKAGE = '@playwright/test';
 
-// FIXME(CXA-B111): POST /deps/scan HANGS — even with an empty body the
-// handler never responds (reproduced 20s+ with curl; suspected lock held
-// across await in the scan route). These specs were red from birth (merged
-// before the pre-merge browser gate existed) and the hang can wedge the
-// whole suite's server. Re-enable once the route answers.
+// FIXME(CXA-B111): POST /deps/scan STILL HANGS — re-verified 2026-08-30 on a
+// merged tree after CXA-B118 (#447): 30s Playwright timeout with both a real
+// registry body and `{}`. #447 did not fix the hang. Re-enable only after a
+// local `npx playwright test specs/deps-scan.spec.ts` passes.
 test.fixme('the dependency scan endpoint discovers real lockfiles and files a remediation ticket', async ({
   request,
 }) => {
