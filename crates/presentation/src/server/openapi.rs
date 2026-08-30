@@ -301,11 +301,14 @@ const SUMMARY_OVERRIDES: &[(&str, &str)] = &[
         "/api/projects/:pid/inbox",
         // Verify cards carry the optional reproduce_url (CXA-F244): the live
         // app URL for a fixed ticket awaiting a verdict, null when the
-        // project's deploy.host_port is not configured.
+        // project's deploy.host_port is not configured. repro_url (CXA-F246)
+        // is the per-ticket link recorded when that ticket's evidence was
+        // collected, null when none was.
         "The caller's waiting-for-me queue: gate approvals, verify verdicts, cost holds, \
          on-hold and exception tickets, questions. Verify items add an optional \
          reproduce_url field — the live app URL for the fixed ticket, null when no \
-         deploy host_port is configured",
+         deploy host_port is configured — and an optional repro_url field, the \
+         per-ticket link recorded at evidence-collection time",
     ),
     (
         "/api/projects/:pid/preflight",
@@ -318,11 +321,14 @@ const SUMMARY_OVERRIDES: &[(&str, &str)] = &[
         "/api/projects/:pid/ticket/:id",
         // The optional reproduce_url (CXA-F244) rides alongside the injected
         // evidence: present on a fixed ticket awaiting verification, null
-        // when the project's deploy.host_port is not configured.
+        // when the project's deploy.host_port is not configured. repro_url
+        // (CXA-F246) is the per-ticket link recorded when that ticket's
+        // evidence was collected, null when none was.
         "Full detail for one ticket: design specs, coverage matrix, DoD evidence, cost \
          hold, attachments, blockers. A fixed ticket awaiting verification adds an \
          optional reproduce_url field — the live app URL, null when no deploy \
-         host_port is configured",
+         host_port is configured — and an optional repro_url field, the per-ticket \
+         link recorded at evidence-collection time",
     ),
 ];
 
