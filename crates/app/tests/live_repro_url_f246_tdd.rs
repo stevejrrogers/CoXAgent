@@ -310,7 +310,11 @@ fn the_inbox_verify_card_exists_with_its_shipped_shape() {
          surface moved; point this guard at the code that builds it"
     );
     for field in [
-        "\"ticket\"", "\"title\"", "\"role\"", "\"can_act\"", "\"reproduce_url\"",
+        "\"ticket\"",
+        "\"title\"",
+        "\"role\"",
+        "\"can_act\"",
+        "\"reproduce_url\"",
     ] {
         assert!(
             card.contains(field),
@@ -456,7 +460,11 @@ fn ac4_inbox_verify_items_carry_repro_url() {
 #[test]
 fn ac4_the_inbox_derives_repro_url_from_state_repro_urls() {
     let inbox = read("crates/presentation/src/server/inbox.rs");
-    let handler = window_of(&inbox, "pub(super) async fn inbox_ep", "\npub(super) async fn");
+    let handler = window_of(
+        &inbox,
+        "pub(super) async fn inbox_ep",
+        "\npub(super) async fn",
+    );
     assert!(
         handler.contains("pub(super) async fn inbox_ep"),
         "inbox_ep moved out of server/inbox.rs — point this guard at the \

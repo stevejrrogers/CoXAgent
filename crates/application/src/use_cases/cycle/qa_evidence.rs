@@ -53,6 +53,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let Some(port) = self.config.deploy.host_port else {
             return; // nothing deployed to prove against — gate is off
         };
+        // INVARIANT for the collectors below: `port` IS
+        // `config.deploy.host_port`, so the link they record via
+        // `live_repro_url()` is the same base every capture here runs
+        // against. A future caller passing a different port must resolve the
+        // recorded link from that port instead.
         let key = ticket.to_string();
         let (has_ui, already) = match self.store.load().await {
             Ok(s) => (
