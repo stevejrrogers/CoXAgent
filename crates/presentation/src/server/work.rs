@@ -53,6 +53,13 @@ pub(super) async fn ticket_detail_ep(
     let Some(p) = app.project(&pid).await else {
         return not_found();
     };
+    // The live reproduction link (CXA-F244) needs the project's deploy config;
+    // read it the same way inbox_ep does — a corrupt config degrades to the
+    // default and the link degrades to null, never fails the detail payload.
+    let cfg = std::fs::read_to_string(&p.config_path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Config>(&t).ok())
+        .unwrap_or_default();
     match p.store.load().await {
         Ok(state) => state
             .tickets
@@ -77,6 +84,24 @@ pub(super) async fn ticket_detail_ep(
                         obj.insert(
                             "evidence".into(),
                             serde_json::to_value(ev).unwrap_or_default(),
+                        );
+                    }
+                    // Live reproduction link (CXA-F244): a fixed ticket
+                    // awaiting a human verdict — the same Fixed-plus-evidence
+                    // signal the inbox's verify card keys on — carries where
+                    // the fix runs right now, from the one resolvability
+                    // source the F242 design pins (deploy.host_port). Null
+                    // when no port is configured; additive to the payload.
+                    if t.status() == coxagent_domain::Status::Fixed
+                        && state.ticket_evidence.contains_key(&id)
+                    {
+                        obj.insert(
+                            "reproduce_url".into(),
+                            serde_json::json!(
+                                coxagent_application::repro_url::compute_live_repro_url(
+                                    cfg.deploy.host_port
+                                )
+                            ),
                         );
                     }
                     if state.cost_approved.contains(&id) {
