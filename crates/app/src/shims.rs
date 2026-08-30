@@ -77,7 +77,91 @@ pub(crate) fn shim_dir_for_process(temp_dir: &Path, pid: u32) -> PathBuf {
     temp_dir.join(format!("coxagent-shims-{pid}"))
 }
 
+/// The name prefix every shim directory this program ever wrote shares: the
+/// pre-CXA-B109 shared dir (`coxagent-shims`) and the per-instance
+/// `coxagent-shims-<pid>` ones alike.
+const SHIM_DIR_PREFIX: &str = "coxagent-shims";
+
+/// The pid a shim-directory name was created for, when it is one of ours.
+/// `None` for the legacy shared dir, a foreign lookalike, or a malformed
+/// suffix — the caller spares everything it cannot attribute to a process.
+#[must_use]
+fn shim_dir_pid(name: &str) -> Option<u32> {
+    name.strip_prefix(SHIM_DIR_PREFIX)?
+        .strip_prefix('-')?
+        .parse()
+        .ok()
+}
+
+/// CXA-B119: which of `names` (read from `temp_dir` by the caller) are shim
+/// directories of processes that are no longer alive. Pure — the caller does
+/// the reading and the `ps` call, so the decision is testable without
+/// touching the real temp dir. The legacy shared `coxagent-shims` dir is
+/// always stale: nothing since CXA-B109 writes it, and a hypothetical
+/// pre-CXA-B109 process whose shims vanish merely degrades to unshimmed
+/// tools — the same safe fallback its scripts never had.
+#[must_use]
+fn stale_shim_dirs(temp_dir: &Path, names: &[String], live_pids: &[u32]) -> Vec<PathBuf> {
+    names
+        .iter()
+        .filter_map(|name| {
+            if name.as_str() == SHIM_DIR_PREFIX {
+                return Some(temp_dir.join(name));
+            }
+            let pid = shim_dir_pid(name)?;
+            (!live_pids.contains(&pid)).then(|| temp_dir.join(name))
+        })
+        .collect()
+}
+
+/// Every pid on the host, from one `ps` call. `None` when `ps` fails — the
+/// caller must then spare every directory rather than guess about liveness.
+fn live_pids() -> Option<Vec<u32>> {
+    let out = std::process::Command::new("ps")
+        .args(["-A", "-o", "pid="])
+        .output()
+        .ok()?;
+    out.status.success().then(|| {
+        String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .filter_map(|token| token.parse().ok())
+            .collect()
+    })
+}
+
+/// CXA-B119: delete the shim directories of dead instances — every coxagent
+/// start used to leak one more `coxagent-shims-<pid>` dir into temp, and
+/// nothing ever removed them (179 were counted on one host). Runs once here,
+/// before this instance creates its own directory: dirs are only ever created
+/// by a coxagent start (see `enable_command_shims`), so the start that creates
+/// is also the one that cleans — no background loop needed. Best-effort: an
+/// unreadable temp dir or a failed `ps` spares everything, and a dir another
+/// concurrently starting instance already removed just errors away.
+fn prune_stale_shim_dirs() -> usize {
+    let temp_dir = std::env::temp_dir();
+    let Some(live) = live_pids() else {
+        return 0; // cannot tell live from dead — do not guess
+    };
+    let Ok(entries) = std::fs::read_dir(&temp_dir) else {
+        return 0;
+    };
+    let names: Vec<String> = entries
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(SHIM_DIR_PREFIX))
+        .collect();
+    let stale = stale_shim_dirs(&temp_dir, &names, &live);
+    for dir in &stale {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    stale.len()
+}
+
 pub(crate) fn setup_command_shims() -> Option<PathBuf> {
+    let pruned = prune_stale_shim_dirs();
+    if pruned > 0 {
+        tracing::info!("pruned {pruned} stale shim directories from temp");
+    }
     let exe = std::env::current_exe().ok()?;
     let dir = shim_dir_for_process(&std::env::temp_dir(), std::process::id());
     std::fs::create_dir_all(&dir).ok()?;
@@ -146,6 +230,65 @@ mod shim_dir_tests {
             dir,
             Path::new("/var/folders/x/T/coxagent-shims-4242"),
             "the pid-suffixed name must keep the coxagent-shims prefix"
+        );
+    }
+}
+
+#[cfg(test)]
+mod shim_prune_tests {
+    use super::{live_pids, stale_shim_dirs, SHIM_DIR_PREFIX};
+    use std::path::Path;
+
+    /// CXA-B119: the sweep must delete exactly the directories of dead
+    /// instances — a live hub's dir (another instance or this very process)
+    /// is someone's working shims, and a name we cannot attribute to a pid of
+    /// ours is never ours to remove.
+    #[test]
+    fn the_sweep_selects_only_dead_instances_directories() {
+        let temp = Path::new("/tmp"); // never touched — pure decision over names
+        let names = vec![
+            "coxagent-shims-100".to_owned(),          // dead instance
+            "coxagent-shims-200".to_owned(),          // live instance
+            SHIM_DIR_PREFIX.to_owned(),               // legacy shared dir
+            "coxagent-shims-old".to_owned(),          // malformed suffix
+            "coxagent-shims-".to_owned(),             // no pid at all
+            "coxagent-shims-999999999999".to_owned(), // not a u32
+            "unrelated".to_owned(),                   // not ours
+        ];
+        let stale = stale_shim_dirs(temp, &names, &[200]);
+        assert_eq!(
+            stale,
+            vec![
+                Path::new("/tmp/coxagent-shims-100").to_path_buf(),
+                Path::new("/tmp/coxagent-shims").to_path_buf(),
+            ],
+            "only the dead instance's dir and the abandoned legacy dir may go"
+        );
+    }
+
+    /// A recycled pid lands a new instance on a dead instance's leftovers;
+    /// the sweep must spare it (its pid is live) so `setup_command_shims`
+    /// rewrites the scripts in place instead of racing its own removal.
+    #[test]
+    fn the_sweep_spares_a_recycled_pid_s_leftovers() {
+        let temp = Path::new("/tmp");
+        let mine = format!("{}-{}", SHIM_DIR_PREFIX, std::process::id());
+        let stale = stale_shim_dirs(temp, &[mine.clone()], &[std::process::id()]);
+        assert!(
+            stale.is_empty(),
+            "this process's own pid is by definition live — got {stale:?}"
+        );
+    }
+
+    /// The adapter's liveness source must actually work where the sweep runs:
+    /// a `ps` listing that omits the asking process would make the sweep see
+    /// every dir as dead.
+    #[test]
+    fn live_pids_includes_this_process() {
+        let live = live_pids().expect("ps must work where the suite runs");
+        assert!(
+            live.contains(&std::process::id()),
+            "a live ps listing must contain the asking process"
         );
     }
 }
