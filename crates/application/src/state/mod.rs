@@ -641,11 +641,32 @@ impl ProjectState {
     /// Attach a piece of DoD evidence to a ticket (bounded: 6 per ticket,
     /// detail capped) — dashboards render these; TEST requires them.
     pub fn add_evidence(&mut self, ticket: &str, kind: &str, label: &str, detail: &str) {
+        self.add_evidence_for(ticket, kind, label, detail, &[], "");
+    }
+
+    /// Attach DoD evidence WITH its provenance (CXA-F241): which gate
+    /// decision(s) the item supports and who attached it. Every new capture
+    /// goes through here so the forensics view can attribute proof to the
+    /// exact gate transition it supported; [`Self::add_evidence`] callers
+    /// that cannot attribute (legacy/agent-internal ledgers) keep empty
+    /// provenance, which the view renders as provenance unknown — never a
+    /// guessed link.
+    pub fn add_evidence_for(
+        &mut self,
+        ticket: &str,
+        kind: &str,
+        label: &str,
+        detail: &str,
+        source_gates: &[&str],
+        actor: &str,
+    ) {
         let ev = Evidence {
             kind: kind.to_owned(),
             label: label.chars().take(120).collect(),
             detail: detail.chars().take(1200).collect(),
             at: now_rfc3339(),
+            source_gates: source_gates.iter().map(|g| (*g).to_owned()).collect(),
+            actor: actor.to_owned(),
         };
         let list = self.ticket_evidence.entry(ticket.to_owned()).or_default();
         list.push(ev);
@@ -1724,5 +1745,25 @@ mod alias_tests {
         assert_eq!(ev.len(), 6, "keeps last 6");
         assert!(ev[0].label.contains("proof 2"), "oldest dropped");
         assert!(ev.iter().all(|e| e.detail.chars().count() <= 1200));
+    }
+
+    #[test]
+    fn linked_evidence_carries_its_gate_and_actor() {
+        // CXA-F241: the attributed capture path records WHICH gate decision
+        // the item supports and WHO attached it — and the plain path keeps
+        // recording unattributed (empty) provenance, which the forensics view
+        // renders as provenance unknown, never a guessed link.
+        let mut st = super::ProjectState::default();
+        st.add_evidence_for("T-1", "test", "REGRESSION TEST", "pass", &["verify"], "rev");
+        st.add_evidence("T-1", "api", "live request/response", "HTTP 200");
+        let ev = &st.ticket_evidence["T-1"];
+        assert_eq!(ev[0].source_gates, vec!["verify".to_owned()]);
+        assert_eq!(ev[0].actor, "rev");
+        assert!(ev[1].source_gates.is_empty() && ev[1].actor.is_empty());
+        // The bound is shared by both paths: one ticket never outgrows 6.
+        for i in 0..8 {
+            st.add_evidence_for("T-1", "test", &format!("r{i}"), "d", &["verify"], "rev");
+        }
+        assert_eq!(st.ticket_evidence["T-1"].len(), 6);
     }
 }
