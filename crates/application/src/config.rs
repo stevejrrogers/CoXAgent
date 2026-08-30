@@ -384,6 +384,35 @@ pub struct HumanConfig {
     /// (the behaviour this feature must not change).
     #[serde(default)]
     pub focus_windows: std::collections::BTreeMap<String, FocusWindow>,
+    /// Minutes a human-gate hold (CXA-F236) — a designed ticket waiting at the
+    /// ready gate, or fixed work with evidence waiting at the verify gate —
+    /// may sit before the first escalation tier fires. 0 = never escalate
+    /// (the documented default: today's behaviour, no timeout).
+    #[serde(default)]
+    pub gate_sla_minutes: u64,
+    /// Ordered escalation ladder for stale human-gate holds (CXA-F236). Each
+    /// tier fires once, at its `after_minutes` since the ticket entered the
+    /// gate, widening the set of roles the hold is surfaced to. Only takes
+    /// effect when [`HumanConfig::gate_sla_minutes`] is non-zero; empty = no
+    /// ladder (the documented default: disabled).
+    #[serde(default)]
+    pub gate_escalation_tiers: Vec<GateEscalationTier>,
+}
+
+/// One rung of the stale-gate-hold escalation ladder (CXA-F236). Every field
+/// defaults, so a pre-existing `coxagent.json` loads unchanged.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GateEscalationTier {
+    /// Cumulative minutes since the ticket entered the gate hold at which
+    /// this tier fires (tiers are listed earliest first).
+    pub after_minutes: u64,
+    /// AuthRole wire labels (e.g. `["po", "sm"]`) newly added to the
+    /// escalation audience at this tier. A role whose AuthRole predicate
+    /// (`can_approve_ready` / `can_verify`) does not permit it to take the
+    /// gate's decision is dropped — the ladder never widens authority past
+    /// the policy guardrails.
+    pub roles: Vec<String>,
 }
 
 /// One person's focus-window ("quiet hours") settings (CXA-F176). Every
@@ -1016,6 +1045,34 @@ mod tests {
             .expect("window keyed by bare username");
         assert_eq!(fw.window_utc, "09:00-12:00");
         assert!(fw.defer_to_digest);
+        let rewritten = serde_json::to_string(&human).expect("serialize");
+        let back: HumanConfig = serde_json::from_str(&rewritten).expect("deserialize");
+        assert_eq!(back, human);
+    }
+
+    #[test]
+    fn gate_escalation_defaults_off_and_round_trips() {
+        // CXA-F236: a pre-existing human section (no gate-SLA knobs) must
+        // load unchanged — SLA 0 = never escalate, no ladder = disabled, the
+        // documented defaults that preserve today's behaviour exactly.
+        let old = r#"{"gate_ready":true,"question_sla_minutes":30}"#;
+        let human: HumanConfig = serde_json::from_str(old).expect("old human config loads");
+        assert_eq!(human.gate_sla_minutes, 0, "documented default: no timeout");
+        assert!(
+            human.gate_escalation_tiers.is_empty(),
+            "documented default: no escalation ladder"
+        );
+
+        // A new document round-trips its ladder verbatim, earliest first.
+        let with_ladder = r#"{"gate_sla_minutes":30,"gate_escalation_tiers":[
+            {"after_minutes":30,"roles":["sm"]},
+            {"after_minutes":120,"roles":["po","admin"]}
+        ]}"#;
+        let human: HumanConfig = serde_json::from_str(with_ladder).expect("ladder config loads");
+        assert_eq!(human.gate_sla_minutes, 30);
+        assert_eq!(human.gate_escalation_tiers.len(), 2);
+        assert_eq!(human.gate_escalation_tiers[0].after_minutes, 30);
+        assert_eq!(human.gate_escalation_tiers[1].roles, ["po", "admin"]);
         let rewritten = serde_json::to_string(&human).expect("serialize");
         let back: HumanConfig = serde_json::from_str(&rewritten).expect("deserialize");
         assert_eq!(back, human);

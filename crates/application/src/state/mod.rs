@@ -441,6 +441,14 @@ pub struct ProjectState {
     /// state persisted before this existed loads clean — no migration.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub governance_interventions: Vec<InterventionRecord>,
+    /// Stale human-gate hold tracking (CXA-F236): ticket id → when the ticket
+    /// entered its current gate wait, which gate that is, and how far up the
+    /// escalation ladder it has climbed since the last decision. Entries are
+    /// recorded by the gate-escalation pass, cleared when the ticket leaves
+    /// the gate status or changes gates (a decision resets the ladder).
+    /// serde-defaulted — additive, no migration.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub gate_holds: std::collections::BTreeMap<String, GateHold>,
 }
 
 /// One day's open/fixed/verified bug counts — the persisted burn-down point
@@ -458,6 +466,28 @@ pub struct BugSnapshot {
 /// Cap on persisted daily bug snapshots — a full leap year of days; older
 /// entries are dropped as new ones arrive so state cannot grow without bound.
 pub const MAX_BUG_SNAPSHOT_DAYS: usize = 366;
+
+/// Stale human-gate hold tracking for one ticket (CXA-F236): when the ticket
+/// entered the gate wait it is still sitting in, and how far up the configured
+/// escalation ladder it has climbed since the last human decision on it.
+/// serde-defaulted so state persisted before this existed loads clean — no
+/// migration; a missing entry reads as "not escalated".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct GateHold {
+    /// Unix seconds when the ticket entered the human-gate wait it is still
+    /// in. 0 = unknown (no entry recorded yet).
+    #[serde(default)]
+    pub entered_at_unix_s: i64,
+    /// Highest escalation tier reached since the last decision (0 = none).
+    #[serde(default)]
+    pub escalated_to_tier: u32,
+    /// Which gate this hold is waiting at (true = ready gate, false = verify
+    /// gate). A hold carried across a gate CHANGE (approved, then the work
+    /// later reached the other gate) is not the same wait — the escalation
+    /// resets tier and clock instead of inheriting them.
+    #[serde(default)]
+    pub at_ready_gate: bool,
+}
 
 /// Cap on how many incident records are kept (newest first). One per deploy
 /// revision means a storm of failures still stays bounded and readable.
@@ -548,6 +578,7 @@ impl Default for ProjectState {
             rolled_back_commits: std::collections::BTreeSet::new(),
             bug_snapshots: std::collections::BTreeMap::new(),
             governance_interventions: Vec::new(),
+            gate_holds: std::collections::BTreeMap::new(),
         }
     }
 }

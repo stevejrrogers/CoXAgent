@@ -23,6 +23,7 @@ mod backlog;
 mod ceremonies;
 mod debt_sweep;
 mod escalation;
+mod gate_escalation;
 mod preflight;
 mod scrum;
 mod ship_truth;
@@ -1033,6 +1034,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // cheap compared with a wrong implementation. Bounded per cycle.
         Box::pin(self.answer_open_questions()).await;
         self.escalate_stale_human_questions().await;
+        // Stale human-GATE holds (CXA-F236): a designed ticket waiting at the
+        // ready gate or verified-evidence waiting at the verify gate ladders
+        // up its configured escalation tiers — notifications only, the gate
+        // decisions stay human.
+        self.escalate_stale_gate_holds().await;
         // Focus windows over: held questions flush as one digest each
         // (CXA-F176), before anything else assumes the inbox is current.
         self.flush_focus_digests().await;
@@ -1769,3 +1775,9 @@ mod version_reconcile_tests {
 
 #[cfg(test)]
 mod cycle_tests;
+
+#[cfg(test)]
+mod escalation_tdd_tests;
+
+#[cfg(test)]
+mod gate_escalation_tdd_tests;
