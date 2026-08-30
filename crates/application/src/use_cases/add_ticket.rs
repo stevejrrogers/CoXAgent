@@ -127,6 +127,7 @@ impl<S: StateStorePort + ?Sized> AddTicketUseCase<S> {
             input.complexity,
             input.has_ui,
         )?;
+        ticket.stamp_created_at(crate::state::now_rfc3339());
         ticket.set_acceptance_criteria(input.acceptance_criteria);
         if let Some(gid) = input.goal {
             // The use case just validated the association; System is the

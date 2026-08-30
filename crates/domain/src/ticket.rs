@@ -93,6 +93,12 @@ pub struct Ticket {
     /// those surface as "unattributed" in the outcome ledger until backfilled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     goal_id: Option<crate::ids::GoalId>,
+    /// RFC3339 time the ticket was filed. Stamped by the application at
+    /// creation (the domain owns no clock); `None` on tickets that predate
+    /// the field — age-based views must treat those as "age unknown", never
+    /// as brand new or ancient.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    created_at: Option<String>,
 }
 
 impl Ticket {
@@ -136,6 +142,7 @@ impl Ticket {
             claimed_at: None,
             assignee: None,
             goal_id: None,
+            created_at: None,
         })
     }
 
@@ -274,6 +281,19 @@ impl Ticket {
     #[must_use]
     pub fn claimed_at(&self) -> Option<&str> {
         self.claimed_at.as_deref()
+    }
+
+    #[must_use]
+    pub fn created_at(&self) -> Option<&str> {
+        self.created_at.as_deref()
+    }
+
+    /// Stamp the filing time once; later calls are no-ops so a re-save can
+    /// never rewrite history.
+    pub fn stamp_created_at(&mut self, at: impl Into<String>) {
+        if self.created_at.is_none() {
+            self.created_at = Some(at.into());
+        }
     }
 
     // --- Guarded mutations ---
