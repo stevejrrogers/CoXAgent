@@ -73,11 +73,11 @@ pub fn can_transition(actor: Role, from: Status, to: Status) -> bool {
     use Status::{
         Documented, Done, Fixed, InProgress, OnHold, Open, Pending, Ready, Rejected, Verified,
     };
+
     // Same-state writes are no-ops; any role may repeat what is already true.
     if from == to {
         return true;
     }
-
     if actor == Role::System {
         return true;
     }
