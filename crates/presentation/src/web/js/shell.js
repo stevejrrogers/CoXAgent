@@ -1344,7 +1344,10 @@ async function openAgent(role,worker){
     `<div class="act"><div class="atx"><span>${esc(a.action)}</span> ${a.ticket?`<span class="tk">${esc(a.ticket)}</span>`:''}</div><span class="tm">${esc((a.at||'').slice(11,16))}</span></div>`).join("")
     :'<div class="empty">no recorded actions yet</div>';
   const body=document.getElementById("agent-transcript");
-  body.innerHTML='<div class="wl-empty"><i class="ti ti-loader-2"></i> loading…</div>';
+  // CXA-B128: no indefinite placeholder — open on the terminal empty state.
+  // The stream's init kick-off / first lines replace it within a tick; if the
+  // stream never delivers, showAgentLogError paints the error state instead.
+  body.innerHTML='<div class="wl-empty"><i class="ti ti-moon-stars"></i> this agent hasn\'t run yet</div>';
   AGENT_LOG_SIGS=[];   // force a fresh render for this role/operator
   document.getElementById("ov-agent").classList.add("open");
   AGENT_LOG_ROLE=role.toLowerCase().replace(/-/g,"_");  // serde key: DEV-FEATURE→dev_feature
@@ -1585,9 +1588,19 @@ function restartAgentLog(isRetry){
 }
 function showAgentLogError(on){
   const b=document.getElementById("agent-err-badge");
-  if(!b)return;
-  if(on){ b.textContent=AGENT_LOG_RETRIES>0?"● RECONNECTING…":"● STREAM LOST"; b.style.display="inline-block"; }
-  else { b.style.display="none"; }
+  if(b){
+    if(on){ b.textContent=AGENT_LOG_RETRIES>0?"● RECONNECTING…":"● STREAM LOST"; b.style.display="inline-block"; }
+    else { b.style.display="none"; }
+  }
+  // CXA-B128: the work-log BODY must carry the state too — a dead stream with
+  // nothing buffered used to leave the panel on its indefinite 'loading…'
+  // placeholder with only a tiny header badge explaining why. Buffered history
+  // stays untouched (renderAgentLog reconciles children by index, so this node
+  // is replaced the moment lines flow again).
+  const body=document.getElementById("agent-transcript");
+  if(body&&on&&!AGENT_LOG_BUF.trim()){
+    body.innerHTML='<div class="wl-empty"><i class="ti ti-wifi-off"></i> live log connection lost — retrying</div>';
+  }
 }
 function renderAgentLog(force){
   const body=document.getElementById("agent-transcript");
@@ -1596,8 +1609,10 @@ function renderAgentLog(force){
   const items=parseWorklog(AGENT_LOG_BUF);
   const atBottom=body.scrollHeight-body.scrollTop-body.clientHeight<40;
   if(items.length===0){
-    // Keep any "hasn't run yet" placeholder unless this is a fresh open.
-    if(!AGENT_LOG_INIT){ body.innerHTML='<div class="wl-empty"><i class="ti ti-moon-stars"></i> this agent hasn\'t run yet</div>'; }
+    // Repaint the empty state on a fresh open (init kick-off) — it must also
+    // overwrite a "connection lost" error state left by a dead stream, or a
+    // recovered panel would stay stuck on the error (CXA-B128).
+    if(!AGENT_LOG_INIT||force){ body.innerHTML='<div class="wl-empty"><i class="ti ti-moon-stars"></i> this agent hasn\'t run yet</div>'; }
     AGENT_LOG_INIT=AGENT_LOG_INIT||true; AGENT_LOG_SIGS=[]; updateTyping(body);
     return;
   }
