@@ -287,7 +287,10 @@ pub fn compute(state: &ProjectState) -> Metrics {
 /// endpoints inject `now_day` so tests can pin time).
 #[must_use]
 fn now_day() -> String {
-    crate::state::now_rfc3339().get(..10).unwrap_or_default().to_owned()
+    crate::state::now_rfc3339()
+        .get(..10)
+        .unwrap_or_default()
+        .to_owned()
 }
 
 /// Whether a ticket id denotes a feature or chore. Ids are `F001` / `C001` or
@@ -305,6 +308,10 @@ pub use crate::metrics_burndown::{
     bug_status_counts, compute_burndown, record_burndown_snapshot, Burndown, BurndownDay,
     BURNDOWN_WINDOW_DAYS,
 };
+// The CXA-F232 delivery gate lives in its own module (`metrics_gate`) and is
+// re-exported here for the same reason — the scorecard writer and the tests
+// use one path.
+pub use crate::metrics_gate::can_finalize_cycle;
 
 // The brake cockpit (CXA-F238): operator holds/overrides over the self-tuning
 // brakes, the audit trail helpers, and the dashboard read model — same seam.
