@@ -231,6 +231,62 @@ pub fn in_dev_scope(state: &ProjectState, id: &TicketId) -> bool {
     sprint.committed.contains(id)
 }
 
+/// Why a piece of open work cannot move (CXA-F249) — serialized kebab-case,
+/// exactly the reason strings the projection endpoint surfaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BlockedReason {
+    /// A `depends_on` ancestor has not reached Done/Documented/Verified —
+    /// the same gate the scheduler applies before handing work out.
+    DependencyUnsatisfied,
+    /// Scrum mode and the PO/SM has not committed the ticket to the sprint
+    /// (Kanban has no scope ceremony, so it never yields this reason).
+    OutOfDevScope,
+}
+
+/// One open feature/chore the projection surfaces as blocked, with one entry
+/// per distinct reason (a ticket blocked two ways appears twice, honestly).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct BlockedWork {
+    pub id: TicketId,
+    pub title: String,
+    pub reason: BlockedReason,
+}
+
+/// Open (Pending/Ready/InProgress) feature/chore work that cannot move, named
+/// through the SAME predicates the scheduler uses — `deps_satisfied` and
+/// `in_dev_scope` — so the projection can never disagree with what DEV is
+/// actually allowed to pick up. Terminal states (Done/Documented/Verified),
+/// rejected/parked tickets and bugs are not blockers on the path forward.
+#[must_use]
+pub fn work_blockers(state: &ProjectState) -> Vec<BlockedWork> {
+    state
+        .tickets
+        .iter()
+        .filter(|t| {
+            matches!(t.ticket_type(), TicketType::Feature | TicketType::Chore)
+                && matches!(
+                    t.status(),
+                    Status::Pending | Status::Ready | Status::InProgress
+                )
+        })
+        .flat_map(|t| {
+            let mut reasons = Vec::new();
+            if !deps_satisfied(state, t) {
+                reasons.push(BlockedReason::DependencyUnsatisfied);
+            }
+            if !in_dev_scope(state, t.id()) {
+                reasons.push(BlockedReason::OutOfDevScope);
+            }
+            reasons.into_iter().map(move |reason| BlockedWork {
+                id: t.id().clone(),
+                title: t.title().to_owned(),
+                reason,
+            })
+        })
+        .collect()
+}
+
 /// Whether the HUMAN burn mode (CXA-F030) currently holds DEV-FEATURE: the
 /// mode is engaged and either no numeric exit gate was set — it then holds
 /// until a person switches it off — or the open-bug count is still above the
@@ -565,6 +621,84 @@ mod tests {
             &state,
             &TicketId::new("CXA-F001").expect("id")
         ));
+    }
+
+    // --- CXA-F249: work_blockers names blocked work through both predicates ---
+
+    fn blocked_feature(id: &str, blocker: &str) -> Ticket {
+        let mut t = ready_feature(id, Priority::High);
+        t.add_dependency(Role::Sa, TicketId::new(blocker).expect("id"))
+            .expect("dep");
+        t
+    }
+
+    #[test]
+    fn work_blockers_names_the_dependency_reason_under_kanban() {
+        let state = ProjectState {
+            tickets: vec![open_bug("BUG-1"), blocked_feature("FEAT-1", "BUG-1")],
+            ..ProjectState::default()
+        };
+        let rows = work_blockers(&state);
+        let reasons: Vec<_> = rows
+            .iter()
+            .map(|b| (b.id.as_str(), b.reason))
+            .collect();
+        assert_eq!(
+            reasons,
+            vec![("FEAT-1", BlockedReason::DependencyUnsatisfied)],
+            "Kanban: in scope, so the unsatisfied dep is the only reason: {reasons:?}"
+        );
+    }
+
+    #[test]
+    fn work_blockers_yields_nothing_for_committed_work_with_met_deps() {
+        let state = ProjectState {
+            tickets: vec![ready_feature("FEAT-1", Priority::High)],
+            sprint: Some(sprint(&["FEAT-1"])),
+            ..ProjectState::default()
+        };
+        assert!(
+            work_blockers(&state).is_empty(),
+            "committed, dependency-free work is not blocked"
+        );
+    }
+
+    #[test]
+    fn work_blockers_covers_every_in_play_status_not_just_ready() {
+        // Pending needs no design to be blocked; InProgress is already
+        // claimed. Uncommitted under an open sprint, both cannot move and
+        // both must surface — the scan is over the work in play, not one
+        // queue.
+        let state = ProjectState {
+            tickets: vec![
+                Ticket::new(
+                    TicketId::new("FEAT-P").expect("id"),
+                    TicketType::Feature,
+                    "pending",
+                    "",
+                    Priority::Medium,
+                    Complexity::Small,
+                    false,
+                )
+                .expect("ticket"),
+                {
+                    let mut t = ready_feature("FEAT-I", Priority::Medium);
+                    t.transition_to(Role::DevFeature, Status::InProgress)
+                        .expect("claim");
+                    t
+                },
+            ],
+            sprint: Some(sprint(&[])),
+            ..ProjectState::default()
+        };
+        let rows = work_blockers(&state);
+        let named: Vec<_> = rows.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(
+            named,
+            vec!["FEAT-P", "FEAT-I"],
+            "pending and in-progress work both surface, declared order: {named:?}"
+        );
+        assert!(rows.iter().all(|b| b.reason == BlockedReason::OutOfDevScope));
     }
 
     // --- CXA-F030: the human burn mode and the burn-down scope ---

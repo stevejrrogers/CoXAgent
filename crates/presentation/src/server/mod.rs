@@ -798,6 +798,10 @@ pub async fn serve_full(
         .route("/api/projects/:pid/dependencies", get(dependencies_ep))
         .route("/api/projects/:pid/metrics", get(metrics_ep))
         .route(
+            "/api/projects/:pid/milestones/projection",
+            get(milestones_projection_ep),
+        )
+        .route(
             "/api/projects/:pid/metrics/summary",
             get(metrics_summary_ep),
         )
