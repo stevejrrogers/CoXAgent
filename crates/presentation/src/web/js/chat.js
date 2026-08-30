@@ -2051,6 +2051,7 @@ function fgKind(e){
          ||["var(--dim)","ti-file",(e.kind||"?").toUpperCase()];
 }
 function fgWhen(at){const ms=Date.parse(at);return Number.isFinite(ms)?new Date(ms).toLocaleString():at;}
+function fgMs(ms){const d=new Date(ms);return Number.isFinite(d.getTime())?d.toLocaleString():"?";}
 function fgItem(e){
   const[kc,ic,klabel]=fgKind(e);
   const who=e.actor?`by @${esc(e.actor)}`:"by an unattributed actor";
@@ -2084,7 +2085,7 @@ function fgItem(e){
 function fgGateSection(g,visit,of){
   const pair=of>1?` · <span class="fg-visit">visit ${visit}/${of}</span>`:"";
   return `<div class="fg-gate"><div class="fg-gate-h"><span class="fg-gate-id">${esc((g.gate.gate_id||"?").toUpperCase())}</span>`
-    +`<span class="fg-gate-sub">${esc(g.gate.status_from)} → ${esc(g.gate.status_to)} · decided ${esc(fgWhen(new Date(g.gate.decided_at_ms).toISOString()))} · by ${esc(g.gate.actor_role)} role${pair}</span></div>`
+    +`<span class="fg-gate-sub">${esc(g.gate.status_from)} → ${esc(g.gate.status_to)} · decided ${esc(fgMs(g.gate.decided_at_ms))} · by ${esc(g.gate.actor_role||"?")} role${pair}</span></div>`
     +(g.items.length?g.items.map(fgItem).join("")
       :`<div class="fg-none">no evidence attached to this decision</div>`)
     +`</div>`;
@@ -2118,7 +2119,7 @@ function fgPane(t){
   }
   if(unlinked.length){
     h+=`<div class="fg-gate"><div class="fg-gate-h"><span class="fg-gate-id">UNLINKED</span>`
-      +`<span class="fg-gate-sub">captured before gate attribution existed — no link is guessed</span></div>`
+      +`<span class="fg-gate-sub">no matching gate decision on this ticket — no link is guessed</span></div>`
       +unlinked.map(fgItem).join("")+`</div>`;
   }
   return h+`</div></div>`;

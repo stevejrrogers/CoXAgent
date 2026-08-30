@@ -57,7 +57,11 @@ pub(super) async fn ticket_detail_ep(
         Ok(state) => {
             // Artifact existence is storage IO, resolved up front so the
             // (sync) serialization closure below stays sync.
-            let artifacts = screenshot_artifacts(&app.storage, state.ticket_evidence.get(&id)).await;
+            let artifacts = screenshot_artifacts(
+                &app.storage,
+                state.ticket_evidence.get(&id).map(Vec::as_slice),
+            )
+            .await;
             state
                 .tickets
                 .iter()
@@ -168,7 +172,7 @@ pub(super) async fn ticket_detail_ep(
 /// broken image or invented content.
 async fn screenshot_artifacts(
     storage: &std::sync::Arc<dyn coxagent_application::ports::outbound::StoragePort>,
-    evidence: Option<&Vec<coxagent_application::state::Evidence>>,
+    evidence: Option<&[coxagent_application::state::Evidence]>,
 ) -> std::collections::BTreeMap<String, bool> {
     let mut out = std::collections::BTreeMap::new();
     let Some(items) = evidence else {

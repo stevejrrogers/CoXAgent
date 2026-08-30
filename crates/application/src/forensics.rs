@@ -84,8 +84,7 @@ pub enum Provenance {
 
 /// RFC3339 → epoch milliseconds. `None` for a stamp that cannot be parsed —
 /// callers skip the record rather than place it at a made-up time.
-#[must_use]
-pub fn epoch_millis(at: &str) -> Option<i64> {
+fn epoch_millis(at: &str) -> Option<i64> {
     let fmt = &time::format_description::well_known::Rfc3339;
     let t = time::OffsetDateTime::parse(at, fmt).ok()?;
     i64::try_from(t.unix_timestamp_nanos() / 1_000_000).ok()
@@ -143,42 +142,46 @@ pub fn group_by_gate(
     spine: &[GateTransition],
     evidence: &[Evidence],
 ) -> Vec<GateEvidenceGroup> {
-    spine
+    let mut groups: Vec<GateEvidenceGroup> = spine
         .iter()
         .map(|gate| GateEvidenceGroup {
             gate: gate.clone(),
-            evidence: evidence
-                .iter()
-                .filter(|e| supports(&gate.clone(), e, spine))
-                .cloned()
-                .collect(),
+            evidence: Vec::new(),
         })
-        .collect()
+        .collect();
+    for item in evidence {
+        if let Some(i) = attribution_index(spine, item) {
+            groups[i].evidence.push(item.clone());
+        }
+    }
+    groups
 }
 
-/// Whether `item` is attributed to `gate` given the full `spine`: the item
-/// names the gate, and this transition is the latest decision of that gate at
-/// or before the capture time — or the gate's earliest decision when the item
+/// Which spine decision `item` belongs to, as an index into `spine`: the item
+/// names the gate, and its decision is the latest one of that gate at or
+/// before the capture time — or that gate's earliest decision when the item
 /// predates all of them (captured to support a gate that had not yet ruled).
-fn supports(gate: &GateTransition, item: &Evidence, spine: &[GateTransition]) -> bool {
-    if !item.source_gates.iter().any(|g| g == &gate.gate_id) {
-        return false;
+/// `None` for an item with no link to any spine gate, or an unreadable
+/// capture stamp — both stay unlinked rather than attributed by guess.
+fn attribution_index(spine: &[GateTransition], item: &Evidence) -> Option<usize> {
+    if item.source_gates.is_empty() {
+        return None;
     }
-    let at = match epoch_millis(&item.at) {
-        Some(at) => at,
-        // An item whose own stamp is unreadable has no place on the
-        // timeline; it stays unlinked rather than attributed by guess.
-        None => return false,
-    };
-    let same_gate: Vec<&GateTransition> = spine
-        .iter()
-        .filter(|t| t.gate_id == gate.gate_id)
-        .collect();
-    match same_gate.iter().rev().find(|t| t.decided_at_ms <= at) {
-        Some(latest) => latest.decided_at_ms == gate.decided_at_ms,
-        // Predates every decision of this gate → the first one.
-        None => same_gate.first().is_some_and(|t| t.decided_at_ms == gate.decided_at_ms),
+    let at = epoch_millis(&item.at)?;
+    let mut first: Option<usize> = None;
+    let mut latest: Option<usize> = None;
+    for (i, t) in spine.iter().enumerate() {
+        if !item.source_gates.iter().any(|g| g == &t.gate_id) {
+            continue;
+        }
+        if first.is_none() {
+            first = Some(i);
+        }
+        if t.decided_at_ms <= at {
+            latest = Some(i);
+        }
     }
+    latest.or(first)
 }
 
 /// Evidence records the spine cannot attribute: no captured gate link (records
@@ -190,7 +193,7 @@ fn supports(gate: &GateTransition, item: &Evidence, spine: &[GateTransition]) ->
 pub fn unlinked_evidence(spine: &[GateTransition], evidence: &[Evidence]) -> Vec<Evidence> {
     evidence
         .iter()
-        .filter(|e| !spine.iter().any(|gate| supports(gate, e, spine)))
+        .filter(|e| attribution_index(spine, e).is_none())
         .cloned()
         .collect()
 }
@@ -214,7 +217,7 @@ pub fn inline_text(item: &Evidence) -> Option<&str> {
 pub fn media_key(detail: &str) -> Option<String> {
     let rest = detail.strip_prefix("/api/projects/")?;
     let (pid, file) = rest.split_once("/media/")?;
-    if pid.is_empty() || file.is_empty() || file.contains('/') {
+    if pid.is_empty() || pid.contains('/') || file.is_empty() || file.contains('/') {
         return None;
     }
     Some(format!("proj/{pid}/{file}"))
@@ -254,8 +257,7 @@ pub fn waiver(item: &Evidence) -> Option<Waiver> {
 /// explicit fallback instead of inventing a commit. When the model grows a
 /// commit field, this is the one place that gains the branch.
 #[must_use]
-pub fn provenance(item: &Evidence) -> Provenance {
-    let _ = item;
+pub fn provenance(_item: &Evidence) -> Provenance {
     Provenance::Unknown
 }
 
@@ -352,6 +354,7 @@ mod tests {
         // Traversal, relative paths and foreign shapes never resolve.
         assert_eq!(media_key("../../etc/passwd"), None);
         assert_eq!(media_key("/api/projects//media/x.png"), None);
+        assert_eq!(media_key("/api/projects/a/b/media/x.png"), None);
         assert_eq!(media_key("/api/projects/TL/media/a/b.png"), None);
         assert_eq!(media_key("shots/evidence.png"), None);
     }

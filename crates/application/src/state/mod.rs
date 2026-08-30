@@ -1739,4 +1739,24 @@ mod alias_tests {
         assert!(ev[0].label.contains("proof 2"), "oldest dropped");
         assert!(ev.iter().all(|e| e.detail.chars().count() <= 1200));
     }
+
+    #[test]
+    fn linked_evidence_carries_its_gate_and_actor() {
+        // CXA-F241: the attributed capture path records WHICH gate decision
+        // the item supports and WHO attached it — and the plain path keeps
+        // recording unattributed (empty) provenance, which the forensics view
+        // renders as provenance unknown, never a guessed link.
+        let mut st = super::ProjectState::default();
+        st.add_evidence_for("T-1", "test", "REGRESSION TEST", "pass", &["verify"], "rev");
+        st.add_evidence("T-1", "api", "live request/response", "HTTP 200");
+        let ev = &st.ticket_evidence["T-1"];
+        assert_eq!(ev[0].source_gates, vec!["verify".to_owned()]);
+        assert_eq!(ev[0].actor, "rev");
+        assert!(ev[1].source_gates.is_empty() && ev[1].actor.is_empty());
+        // The bound is shared by both paths: one ticket never outgrows 6.
+        for i in 0..8 {
+            st.add_evidence_for("T-1", "test", &format!("r{i}"), "d", &["verify"], "rev");
+        }
+        assert_eq!(st.ticket_evidence["T-1"].len(), 6);
+    }
 }
